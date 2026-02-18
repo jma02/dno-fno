@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# anything with the word outputs
+*outputs*
+
+# data but not util
+data/
+!data/util/
+!data/util/**
+
