@@ -302,7 +302,7 @@ def main():
         "loss": "sobolev",
         "batch_size": 128,
         "lr": 5e-3,
-        "epochs": 200,
+        "epochs": 600,
         "weight_decay": 1e-4,
     }
 
