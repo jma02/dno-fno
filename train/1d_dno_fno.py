@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
 from tqdm import tqdm
 
 from models.fno import FNO1d
 from models.fno import HsLoss, LpLoss, count_params
-from models.fno.util import UnitGaussianNormalizer
-
 torch.set_float32_matmul_precision("high")
 
 plt.rcParams["font.family"] = "DejaVu Serif"
@@ -41,6 +40,13 @@ def build_feature_target_tensors(dataset: Dict[str, np.ndarray]) -> Tuple[torch.
     inputs = np.concatenate([eta, xi], axis=-1)  # (N, Nx, 2)
     targets = dataset["Gxi"][..., None]  # (N, Nx, 1)
     return torch.tensor(inputs, dtype=torch.float32), torch.tensor(targets, dtype=torch.float32)
+
+
+def parse_dataset_grid_params(dataset_name: str) -> Dict[str, str] | None:
+    match = re.search(r"Nx(?P<Nx>\d+)_M(?P<M>\d+)_ichoi(?P<ichoi>\d+)", dataset_name)
+    if not match:
+        return None
+    return match.groupdict()
 
 
 def normalize_to_range(data: torch.Tensor, min_val: float = -1.0, max_val: float = 1.0) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -87,6 +93,7 @@ def plot_epoch_summary(
     fixed_random_idx: int,
     output_path: Path,
     device: torch.device,
+    run_label: str = "",
 ) -> None:
     model.eval()
     preds = []
@@ -127,6 +134,12 @@ def plot_epoch_summary(
     fig = plt.figure(figsize=(16, 10))
     gs = fig.add_gridspec(4, 4, height_ratios=[1, 1, 1, 0.8])
     order = ["best", "median", "worst", "random"]
+    selected_idx = [sample_indices[key] for key in order]
+
+    eta_sel = eta_raw[selected_idx].numpy()
+    xi_sel = xi_raw[selected_idx].numpy()
+    g_true_sel = targets[selected_idx].squeeze(-1).numpy()
+    g_pred_sel = preds[selected_idx].squeeze(-1).numpy()
 
     for col, key in enumerate(order):
         idx = sample_indices[key]
@@ -165,7 +178,11 @@ def plot_epoch_summary(
     ax_loss.grid(True, alpha=0.3)
     ax_loss.legend()
 
-    fig.tight_layout()
+    if run_label:
+        fig.suptitle(run_label, y=0.995, fontsize=12, fontweight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.98))
+    else:
+        fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
 
@@ -184,6 +201,8 @@ def train_model(
     target_stats: Dict[str, torch.Tensor],
     plot_dir: Path | None,
     fixed_random_idx: int,
+    plot_every: int,
+    run_label: str,
 ) -> Tuple[float, float, Dict[str, torch.Tensor], List[Dict[str, float]]]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -196,17 +215,18 @@ def train_model(
     )
     myloss = build_loss(loss_name)
 
-    epoch_bar = tqdm(range(epochs), desc="Epochs", leave=False)
+    use_tqdm = sys.stdout.isatty()
+    epoch_bar = tqdm(range(epochs), desc="Epochs", leave=False) if use_tqdm else None
     running_loss = 0.0
     best_val = float("inf")
     best_state: Dict[str, torch.Tensor] = {}
     history: List[Dict[str, float]] = []
-    for ep in epoch_bar:
+    for ep in (epoch_bar if epoch_bar is not None else range(epochs)):
         model.train()
         total_loss = 0.0
         n_examples = 0
-        batch_bar = tqdm(train_loader, desc=f"Epoch {ep + 1} batches", leave=False)
-        for x, y in batch_bar:
+        batch_iter = tqdm(train_loader, desc=f"Epoch {ep + 1} batches", leave=False) if use_tqdm else train_loader
+        for x, y in batch_iter:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             out = model(x)
@@ -216,15 +236,25 @@ def train_model(
             scheduler.step()
             total_loss += loss.item() * x.size(0)
             n_examples += x.size(0)
-            batch_bar.set_postfix(batch_loss=loss.item())
+            if use_tqdm:
+                batch_iter.set_postfix(batch_loss=loss.item())
         running_loss = total_loss / max(1, n_examples)
         val_loss = evaluate(model, val_loader, device, loss_name)
         if val_loss < best_val:
             best_val = val_loss
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-        epoch_bar.set_postfix(train_loss=running_loss, val_loss=val_loss)
+        if use_tqdm and epoch_bar is not None:
+            epoch_bar.set_postfix(train_loss=running_loss, val_loss=val_loss)
+        else:
+            prefix = f"[{run_label}] " if run_label else ""
+            print(
+                f"{prefix}Epoch {ep + 1:03d}/{epochs:03d} | "
+                f"Train Loss: {running_loss:.4e} | Val Loss: {val_loss:.4e}",
+                flush=True,
+            )
         history.append({"epoch": ep + 1, "train_loss": running_loss, "val_loss": val_loss})
-        if plot_loader is not None and x_plot is not None and plot_dir is not None:
+        should_plot = (ep + 1 == epochs) or (plot_every > 0 and (ep + 1) % plot_every == 0)
+        if should_plot and plot_loader is not None and x_plot is not None and plot_dir is not None:
             plot_epoch_summary(
                 model,
                 plot_loader,
@@ -235,6 +265,7 @@ def train_model(
                 fixed_random_idx,
                 plot_dir / f"epoch_{ep + 1}.png",
                 device,
+                run_label=run_label,
             )
     return running_loss, best_val, best_state, history
 
@@ -261,6 +292,14 @@ def main():
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--modes", type=int, default=128)
+    parser.add_argument("--n-blocks", type=int, default=10)
+    parser.add_argument("--mode-sampling", choices=["low", "low_high"], default="low")
+    parser.add_argument("--high-mode-frac", type=float, default=0.5)
+    parser.add_argument("--epochs", type=int, default=600)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--plot-every", type=int, default=1)
+    parser.add_argument("--campaign-tag", default="")
 
     args = parser.parse_args()
 
@@ -268,13 +307,11 @@ def main():
     data_path = repo_root / "data" / args.dataset
     outputs_dir = repo_root / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = outputs_dir / datetime.now().strftime("fno_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_np = load_processed_dataset(data_path)
     features_raw, targets_raw = build_feature_target_tensors(dataset_np)
     
-    features, feat_stats = normalize_to_range(features_raw)
+    features, _ = normalize_to_range(features_raw)
     targets, target_stats = normalize_to_range(targets_raw)
 
     base_dataset = TensorDataset(features, targets)
@@ -296,26 +333,45 @@ def main():
     x_plot = np.arange(nx)
 
     hparams = {
-        "modes": 128,
+        "modes": args.modes,
         "width": 64,
-        "n_blocks": 10,
+        "n_blocks": args.n_blocks,
+        "mode_sampling": args.mode_sampling,
+        "high_mode_frac": args.high_mode_frac,
         "loss": "sobolev",
         "batch_size": 128,
         "lr": 5e-3,
-        "epochs": 600,
-        "weight_decay": 1e-4,
+        "epochs": args.epochs,
+        "weight_decay": args.weight_decay,
     }
-
-    plots_dir = run_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
     
     model = FNO1d(
         hparams["modes"],
         hparams["width"],
         hparams["n_blocks"],
+        mode_sampling=hparams["mode_sampling"],
+        high_mode_frac=hparams["high_mode_frac"],
     ).to(device)
-    
-    config_payload = {**hparams, "param_count": count_params(model)}
+
+    param_count = count_params(model)
+    suffix = args.campaign_tag.strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
+    grid_params = parse_dataset_grid_params(args.dataset)
+    run_label = ""
+    if grid_params is not None:
+        run_label = f"Nx={grid_params['Nx']} | M={grid_params['M']} | ichoi={grid_params['ichoi']}"
+        run_dir_name = (
+            f"fno_Nx{grid_params['Nx']}_M{grid_params['M']}_ichoi{grid_params['ichoi']}"
+            f"_p{param_count}_ep{hparams['epochs']}_{suffix}"
+        )
+    else:
+        run_dir_name = f"fno_p{param_count}_ep{hparams['epochs']}_{suffix}"
+
+    run_dir = outputs_dir / run_dir_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = run_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    config_payload = {**hparams, "param_count": param_count, "plot_every": args.plot_every, "campaign_tag": args.campaign_tag}
     with open(run_dir / "config.json", "w", encoding="utf-8") as cfg:
         json.dump(config_payload, cfg, indent=2)
 
@@ -354,6 +410,8 @@ def main():
         target_stats=target_stats,
         plot_dir=plots_dir,
         fixed_random_idx=fixed_random_idx,
+        plot_every=args.plot_every,
+        run_label=run_label,
     )
 
     with open(run_dir / "train_log.json", "w", encoding="utf-8") as log_file:
@@ -368,6 +426,8 @@ def main():
     summary = {
         "dataset": args.dataset,
         "hparams": hparams,
+        "plot_every": args.plot_every,
+        "campaign_tag": args.campaign_tag,
         "train_loss": train_loss,
         "best_val_loss": best_val,
         "test_loss": test_loss,

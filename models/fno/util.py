@@ -4,15 +4,11 @@ import scipy.io
 import h5py
 import torch.nn as nn
 
-import operator
-from functools import reduce
 #################################################
 #
 # Utilities
 #
 #################################################
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 # reading data
 class MatReader(object):
     def __init__(self, file_path, to_torch=True, to_cuda=False, to_float=True):

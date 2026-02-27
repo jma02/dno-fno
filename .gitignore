@@ -17,3 +17,8 @@ data/
 !data/util/
 !data/util/**
 
+# raw MATLAB datasets
+*.mat
+
+# generated result image bundles
+zgrid_search_results/**/*.png
