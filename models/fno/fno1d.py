@@ -1,57 +1,77 @@
+from __future__ import annotations
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
+
 
 class SpectralConv1d(nn.Module):
-    def __init__(self, in_channels, out_channels, modes1):
-        super(SpectralConv1d, self).__init__()
+    """1D Fourier layer that only keeps a fixed number of low modes."""
+
+    def __init__(self, in_channels: int, out_channels: int, modes: int) -> None:
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.modes1 = modes1
-        self.scale = (1 / (in_channels*out_channels))
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, dtype=torch.cfloat))
+        self.modes = modes
 
-    def compl_mul1d(self, input, weights):
-        return torch.einsum("bix,iox->box", input, weights)
+        scale = 1.0 / (in_channels * out_channels)
+        self.weights = nn.Parameter(
+            scale * torch.rand(in_channels, out_channels, modes, dtype=torch.cfloat)
+        )
 
-    def forward(self, x):
-        batchsize = x.shape[0]
-        x_ft = torch.fft.rfft(x)
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-1)//2 + 1, device=x.device, dtype=torch.cfloat)
-        
-        # Ensure we don't try to take more modes than available from rfft
-        n_modes = min(self.modes1, x_ft.size(-1))
-        out_ft[:, :, :n_modes] = self.compl_mul1d(x_ft[:, :, :n_modes], self.weights1[:, :, :n_modes])
-        
-        x = torch.fft.irfft(out_ft, n=x.size(-1))
-        return x
+    def complex_multiply(
+        self,
+        inputs: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.einsum("bix,iox->box", inputs, weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, _, grid_size = x.shape
+        x_fft = torch.fft.rfft(x)
+        kept_modes = min(self.modes, x_fft.shape[-1])
+
+        out_fft = torch.zeros(
+            batch_size,
+            self.out_channels,
+            grid_size // 2 + 1,
+            device=x.device,
+            dtype=torch.cfloat,
+        )
+        out_fft[:, :, :kept_modes] = self.complex_multiply(
+            x_fft[:, :, :kept_modes],
+            self.weights[:, :, :kept_modes],
+        )
+        return torch.fft.irfft(out_fft, n=grid_size)
+
 
 class FNO1d(nn.Module):
-    def __init__(self, modes, width, n_blocks=4):
-        super(FNO1d, self).__init__()
-        self.modes1 = modes
-        self.width = width
-        self.n_blocks = n_blocks
-        self.fc0 = nn.Linear(2, self.width)
-        
-        self.spectral_layers = nn.ModuleList([SpectralConv1d(self.width, self.width, self.modes1) for _ in range(self.n_blocks)])
-        self.skip_layers = nn.ModuleList([nn.Conv1d(self.width, self.width, 1) for _ in range(self.n_blocks)])
-        
-        self.fc1 = nn.Linear(self.width, 128)
-        self.fc2 = nn.Linear(128, 1)
+    """Small 1D Fourier Neural Operator for DNO regression."""
 
-    def forward(self, x):
-        x = self.fc0(x)
+    def __init__(self, modes: int, width: int, n_blocks: int = 4) -> None:
+        super().__init__()
+        self.input_proj = nn.Linear(2, width)
+        self.spectral_layers = nn.ModuleList(
+            [SpectralConv1d(width, width, modes) for _ in range(n_blocks)]
+        )
+        self.residual_layers = nn.ModuleList(
+            [nn.Conv1d(width, width, kernel_size=1) for _ in range(n_blocks)]
+        )
+        self.hidden_proj = nn.Linear(width, 128)
+        self.output_proj = nn.Linear(128, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Input arrives as (batch, grid, channels).
+        x = self.input_proj(x)
         x = x.permute(0, 2, 1)
-        
-        for i in range(self.n_blocks):
-            x1 = self.spectral_layers[i](x)
-            x2 = self.skip_layers[i](x)
-            x = x1 + x2
-            if i < self.n_blocks - 1:
+
+        for block_idx, (spectral_layer, residual_layer) in enumerate(
+            zip(self.spectral_layers, self.residual_layers)
+        ):
+            x = spectral_layer(x) + residual_layer(x)
+            if block_idx < len(self.spectral_layers) - 1:
                 x = F.relu(x)
-                
+
         x = x.permute(0, 2, 1)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        x = F.relu(self.hidden_proj(x))
+        return self.output_proj(x)
