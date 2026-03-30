@@ -1,15 +1,20 @@
 # dno-fno
 
 Minimal FNO training repo for the 1D Dirichlet--Neumann operator dataset.
+This repo now assumes NVIDIA GPU execution for both the PyTorch and JAX paths.
 
 ## What is here
 
 - `data/dno_dataset.npz`: unified NumPy dataset with `soliton`, `stokes`, and `linear` samples.
-- `models/fno/fno1d.py`: the only model architecture used on this branch.
-- `train/1d_dno_fno.py`: the main training script.
-- `train/run_apple_fno.sh`: Apple Silicon shortcut.
-- `train/init_env.sh`: optional backend setup helper.
-- `train/util.py`: dataset loading, normalization, runtime setup, and plotting helpers.
+- `models/fno/fno1d.py`: PyTorch FNO model.
+- `models/fno-jax/fno1d.py`: JAX/Flax FNO model.
+- `models/fno-jax/losses.py`: JAX loss functions and parameter counting.
+- `train/1d_dno_fno.py`: PyTorch training script.
+- `train/carbs_fno.py`: CARBS runner for the PyTorch trainer.
+- `train-jax/1d_dno_fno_jax.py`: JAX training script.
+- `train-jax/carbs_fno_jax.py`: CARBS runner for the JAX trainer.
+- `train/util.py`: PyTorch data loading, normalization, and plotting helpers.
+- `train-jax/util.py`: JAX data loading, normalization, batching, and plotting helpers.
 
 ## Setup
 
@@ -17,53 +22,41 @@ Minimal FNO training repo for the 1D Dirichlet--Neumann operator dataset.
 uv sync --python 3.9
 ```
 
-Or initialize the repo for a specific backend:
+For the JAX path, use Python 3.11 or newer:
 
 ```bash
-source train/init_env.sh auto
+uv sync --python 3.11
 ```
 
-Supported backends:
+## GPU Requirement
 
-- `auto`
-- `mps`
-- `cuda`
-- `cpu`
+Both training scripts require GPU execution:
 
-## Train on Apple Silicon
+- PyTorch trainer: requires CUDA
+- JAX trainer: requires a GPU-backed JAX install and will refuse to run on CPU
 
-Default Apple/MPS run:
+There is no Apple/MPS path in this repo anymore.
 
-```bash
-zsh train/run_apple_fno.sh
-```
-
-Generic run after initializing the backend:
+## Train with PyTorch
 
 ```bash
 uv run --python 3.9 python train/1d_dno_fno.py \
-  --device auto \
   --dataset dno_dataset.npz \
   --sources all \
-  --batch_size 128 \
-  --num_workers 0
+  --batch_size 128
 ```
 
-Or choose the backend explicitly:
+## Train with JAX
 
 ```bash
-uv run --python 3.9 python train/1d_dno_fno.py --device mps
-```
-
-Faster local iteration:
-
-```bash
-zsh train/run_apple_fno.sh --modes 64 --width 48 --n_blocks 6
+uv run --python 3.11 python train-jax/1d_dno_fno_jax.py \
+  --dataset dno_dataset.npz \
+  --sources all \
+  --batch_size 128
 ```
 
 ## Useful flags
 
-- `--device auto|mps|cuda|cpu`
 - `--modes 128`
 - `--width 64`
 - `--n_blocks 10`
@@ -90,6 +83,39 @@ Each run creates `outputs/fno_YYYYMMDD_HHMMSS/` with:
 `best_val_ckpt.pt` stores the best validation model seen during training.
 `final_ckpt.pt` stores the model at the final epoch.
 `loss_curve.png` is overwritten every epoch.
+
+The JAX trainer writes the same structure under `outputs/fno_jax_YYYYMMDD_HHMMSS/`,
+but uses `best_val_ckpt.pkl` and `final_ckpt.pkl`.
+
+## CARBS
+
+Both training paths can now be driven by CARBS.
+
+The CARBS runners treat:
+
+- `best_val_loss` as the objective to minimize
+- `runtime_seconds` as the observed cost
+- failed training runs as CARBS failures
+
+PyTorch CARBS search:
+
+```bash
+uv run --python 3.11 python train/carbs_fno.py --trials 20
+```
+
+JAX CARBS search:
+
+```bash
+uv run --python 3.11 python train-jax/carbs_fno_jax.py --trials 20
+```
+
+Each CARBS runner writes:
+
+- `carbs_history.json`
+- `best_result.json`
+- one subdirectory per trial containing the normal trainer outputs
+
+The CARBS runners automatically disable plotting inside the trainer runs to keep search overhead low.
 
 ## Split
 

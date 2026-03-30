@@ -9,8 +9,6 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
 
 ALL_SOURCES = ("soliton", "stokes", "linear")
 TITLE_FONT = {"weight": "bold", "size": 12}
@@ -86,40 +84,52 @@ def load_training_arrays(
 
 
 def normalize_to_range(
-    tensor: torch.Tensor,
+    array: np.ndarray,
     lower: float = -1.0,
     upper: float = 1.0,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    tensor_min = tensor.min()
-    tensor_max = tensor.max()
-    scaled = (tensor - tensor_min) / (tensor_max - tensor_min + 1e-8)
+) -> tuple[np.ndarray, dict[str, float]]:
+    array_min = float(np.min(array))
+    array_max = float(np.max(array))
+    scaled = (array - array_min) / (array_max - array_min + 1e-8)
     normalized = scaled * (upper - lower) + lower
-    return normalized, {"min": tensor_min, "max": tensor_max}
+    return normalized.astype(np.float32), {"min": array_min, "max": array_max}
 
 
 def denormalize_from_range(
-    tensor: torch.Tensor,
-    stats: dict[str, torch.Tensor],
+    array: np.ndarray,
+    stats: dict[str, float],
     lower: float = -1.0,
     upper: float = 1.0,
-) -> torch.Tensor:
-    tensor_min = stats["min"].to(tensor.device)
-    tensor_max = stats["max"].to(tensor.device)
-    return (tensor - lower) / (upper - lower) * (tensor_max - tensor_min + 1e-8) + tensor_min
+) -> np.ndarray:
+    return (array - lower) / (upper - lower) * (stats["max"] - stats["min"] + 1e-8) + stats["min"]
 
 
-def configure_cuda_runtime() -> torch.device:
-    torch.set_float32_matmul_precision("high")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for this trainer.")
+def split_indices(num_examples: int, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    permutation = np.random.default_rng(seed).permutation(num_examples)
+    val_count = int(num_examples * 0.1)
+    test_count = int(num_examples * 0.1)
+    train_count = num_examples - val_count - test_count
 
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(True)
-    return torch.device("cuda")
+    train_indices = permutation[:train_count]
+    val_indices = permutation[train_count : train_count + val_count]
+    test_indices = permutation[train_count + val_count :]
+    return train_indices, val_indices, test_indices
+
+
+def iterate_batches(
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+    rng: np.random.Generator,
+):
+    indices = np.arange(len(inputs))
+    if shuffle:
+        rng.shuffle(indices)
+
+    for start in range(0, len(indices), batch_size):
+        batch_indices = indices[start : start + batch_size]
+        yield inputs[batch_indices], targets[batch_indices]
 
 
 def plot_loss_history(history: list[dict[str, float]], output_path: Path) -> None:
@@ -142,100 +152,104 @@ def plot_loss_history(history: list[dict[str, float]], output_path: Path) -> Non
 
 
 def collect_plot_predictions(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    feature_stats: dict[str, torch.Tensor],
-    target_stats: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    predictions: list[torch.Tensor] = []
-    targets: list[torch.Tensor] = []
-    eta_values: list[torch.Tensor] = []
-    xi_values: list[torch.Tensor] = []
+    predict_batch,
+    params,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+    feature_stats: dict[str, float],
+    target_stats: dict[str, float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    predictions: list[np.ndarray] = []
+    raw_targets: list[np.ndarray] = []
+    eta_values: list[np.ndarray] = []
+    xi_values: list[np.ndarray] = []
 
-    model.eval()
-    with torch.no_grad():
-        for normalized_inputs, normalized_targets in loader:
-            normalized_inputs = normalized_inputs.to(device)
-            normalized_targets = normalized_targets.to(device)
-            predicted_normalized = model(normalized_inputs)
+    for start in range(0, len(inputs), batch_size):
+        batch_inputs = inputs[start : start + batch_size]
+        batch_targets = targets[start : start + batch_size]
+        predicted_normalized = np.asarray(predict_batch(params, batch_inputs))
 
-            raw_inputs = denormalize_from_range(normalized_inputs, feature_stats)
-            predicted_raw = denormalize_from_range(predicted_normalized, target_stats)
-            target_raw = denormalize_from_range(normalized_targets, target_stats)
+        raw_inputs = denormalize_from_range(batch_inputs, feature_stats)
+        predicted_raw = denormalize_from_range(predicted_normalized, target_stats)
+        target_raw = denormalize_from_range(batch_targets, target_stats)
 
-            predictions.append(predicted_raw.cpu())
-            targets.append(target_raw.cpu())
-            eta_values.append(raw_inputs[..., 0].cpu())
-            xi_values.append(raw_inputs[..., 1].cpu())
+        predictions.append(predicted_raw)
+        raw_targets.append(target_raw)
+        eta_values.append(raw_inputs[..., 0])
+        xi_values.append(raw_inputs[..., 1])
 
     return (
-        torch.cat(predictions, dim=0),
-        torch.cat(targets, dim=0),
-        torch.cat(eta_values, dim=0),
-        torch.cat(xi_values, dim=0),
+        np.concatenate(predictions, axis=0),
+        np.concatenate(raw_targets, axis=0),
+        np.concatenate(eta_values, axis=0),
+        np.concatenate(xi_values, axis=0),
     )
 
 
 def plot_epoch_summary(
-    model: torch.nn.Module,
-    loader: DataLoader,
+    predict_batch,
+    params,
+    inputs: np.ndarray,
+    targets: np.ndarray,
     x: np.ndarray,
-    feature_stats: dict[str, torch.Tensor],
-    target_stats: dict[str, torch.Tensor],
+    feature_stats: dict[str, float],
+    target_stats: dict[str, float],
     fixed_random_idx: int,
     output_path: Path,
-    device: torch.device,
+    batch_size: int,
 ) -> None:
-    predictions, targets, eta_values, xi_values = collect_plot_predictions(
-        model,
-        loader,
-        device,
+    predictions, raw_targets, eta_values, xi_values = collect_plot_predictions(
+        predict_batch,
+        params,
+        inputs,
+        targets,
+        batch_size,
         feature_stats,
         target_stats,
     )
 
-    flat_predictions = predictions.view(predictions.shape[0], -1)
-    flat_targets = targets.view(targets.shape[0], -1)
-    rel_l2 = torch.norm(flat_predictions - flat_targets, dim=1) / (
-        torch.norm(flat_targets, dim=1) + 1e-12
+    flat_predictions = predictions.reshape((predictions.shape[0], -1))
+    flat_targets = raw_targets.reshape((raw_targets.shape[0], -1))
+    rel_l2 = np.linalg.norm(flat_predictions - flat_targets, axis=1) / (
+        np.linalg.norm(flat_targets, axis=1) + 1e-12
     )
-    rel_l1 = torch.sum(torch.abs(flat_predictions - flat_targets), dim=1) / (
-        torch.sum(torch.abs(flat_targets), dim=1) + 1e-12
+    rel_l1 = np.sum(np.abs(flat_predictions - flat_targets), axis=1) / (
+        np.sum(np.abs(flat_targets), axis=1) + 1e-12
     )
 
-    sorted_indices = torch.argsort(rel_l2)
+    sorted_indices = np.argsort(rel_l2)
     sample_indices = {
-        "best": sorted_indices[0].item(),
-        "median": sorted_indices[len(sorted_indices) // 2].item(),
-        "worst": sorted_indices[-1].item(),
-        "random": fixed_random_idx,
+        "best": int(sorted_indices[0]),
+        "median": int(sorted_indices[len(sorted_indices) // 2]),
+        "worst": int(sorted_indices[-1]),
+        "random": int(fixed_random_idx),
     }
 
     figure, axes = plt.subplots(3, 4, figsize=(16, 8), sharex="col")
     for column, label in enumerate(("best", "median", "worst", "random")):
         sample_idx = sample_indices[label]
-        l2_error = rel_l2[sample_idx].item()
-        l1_error = rel_l1[sample_idx].item()
+        l2_error = float(rel_l2[sample_idx])
+        l1_error = float(rel_l1[sample_idx])
 
-        axes[0, column].plot(x, eta_values[sample_idx].numpy(), color="tab:blue", linewidth=1.0)
+        axes[0, column].plot(x, eta_values[sample_idx], color="tab:blue", linewidth=1.0)
         axes[0, column].set_title(rf"{label.title()} $\eta(x)$", fontdict=TITLE_FONT)
         axes[0, column].grid(True, alpha=0.3)
 
-        axes[1, column].plot(x, xi_values[sample_idx].numpy(), color="tab:green", linewidth=1.0)
+        axes[1, column].plot(x, xi_values[sample_idx], color="tab:green", linewidth=1.0)
         axes[1, column].set_title(r"$\xi(x)$", fontdict=TITLE_FONT)
         axes[1, column].grid(True, alpha=0.3)
 
         axes[2, column].plot(
             x,
-            targets[sample_idx].squeeze().numpy(),
+            raw_targets[sample_idx].squeeze(),
             label="Ground Truth",
             color="black",
             linewidth=1.0,
         )
         axes[2, column].plot(
             x,
-            predictions[sample_idx].squeeze().numpy(),
+            predictions[sample_idx].squeeze(),
             label="Prediction",
             color="tab:red",
             linewidth=1.0,
