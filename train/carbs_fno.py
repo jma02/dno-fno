@@ -24,7 +24,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_carbs() -> CARBS:
+def build_carbs(
+    seed: int,
+    num_random_samples: int,
+    max_suggestion_cost: float | None,
+) -> CARBS:
     param_spaces = [
         Param("lr", LogSpace(min=1e-5, max=1e-2), search_center=5e-3),
         Param("weight_decay", LogSpace(min=1e-6, max=1e-2), search_center=1e-4),
@@ -56,10 +60,12 @@ def build_carbs() -> CARBS:
     ]
     carbs_params = CARBSParams(
         better_direction_sign=-1,
+        seed=seed,
         is_wandb_logging_enabled=False,
         is_saved_on_every_observation=False,
         resample_frequency=0,
-        num_random_samples=4,
+        num_random_samples=num_random_samples,
+        max_suggestion_cost=max_suggestion_cost,
     )
     return CARBS(carbs_params, param_spaces)
 
@@ -135,10 +141,11 @@ def main() -> None:
     output_root = Path(REPO_ROOT / args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    carbs = build_carbs()
-    carbs.config.seed = args.seed
-    carbs.config.num_random_samples = args.num_random_samples
-    carbs.config.max_suggestion_cost = args.max_suggestion_cost
+    carbs = build_carbs(
+        seed=args.seed,
+        num_random_samples=args.num_random_samples,
+        max_suggestion_cost=args.max_suggestion_cost,
+    )
 
     trial_records: list[dict[str, object]] = []
     for trial_idx in range(args.trials):

@@ -11,9 +11,9 @@ wheels/
 
 # anything with the word outputs
 *outputs*
+*_rollouts/
 
 # data but not util
 data/
 !data/util/
 !data/util/**
-

@@ -6,56 +6,119 @@ import subprocess
 from pathlib import Path
 from time import perf_counter
 
+import numpy as np
 from carbs.carbs import CARBS
 from carbs.utils import CARBSParams, LinearSpace, LogSpace, ObservationInParam, Param
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+V2_BEST_SEARCH_CENTER = {
+    "lr": 1.2784948703599842e-4,
+    "weight_decay": 2.976304745294121e-4,
+    "batch_size": 64,
+    "epochs": 386,
+    "rank": 256,
+    "width": 112,
+    "spectral_width": 112,
+    "spectral_floor": 1e-3,
+    "modes": 64,
+    "n_blocks": 8,
+}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run CARBS over the JAX FNO trainer")
+    parser = argparse.ArgumentParser(description="Run CARBS over the JAX DNONet trainer")
     parser.add_argument("--dataset", default="dno_dataset.npz")
     parser.add_argument("--sources", default="all")
-    parser.add_argument("--trials", type=int, default=20)
+    parser.add_argument("--trials", type=int, default=80)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output_root", default="outputs/carbs_jax")
+    parser.add_argument("--output_root", default="outputs/carbs_dnonet_jax")
     parser.add_argument("--num_random_samples", type=int, default=4)
     parser.add_argument("--max_suggestion_cost", type=float, default=None)
+    parser.add_argument("--rank_max", type=int, default=1024)
+    parser.add_argument("--width_max", type=int, default=256)
+    parser.add_argument("--epoch_max", type=int, default=600)
     return parser.parse_args()
+
+
+def resolve_dataset_path(dataset: str) -> Path:
+    dataset_path = Path(dataset)
+    if dataset_path.is_absolute():
+        return dataset_path
+    return REPO_ROOT / "data" / dataset
+
+
+def infer_grid_size(dataset_path: Path, sources: str) -> int:
+    selected_sources = [
+        source.strip().lower()
+        for source in sources.split(",")
+        if source.strip()
+    ]
+    if not selected_sources or selected_sources == ["all"]:
+        selected_sources = ["soliton", "stokes", "linear"]
+
+    with np.load(dataset_path) as npz:
+        first_source = selected_sources[0]
+        eta_key = f"{first_source}_eta"
+        if eta_key not in npz.files:
+            raise KeyError(f"Dataset missing key {eta_key}")
+        return int(npz[eta_key].shape[1])
 
 
 def build_carbs(
     seed: int,
     num_random_samples: int,
     max_suggestion_cost: float | None,
+    rank_max: int,
+    width_max: int,
+    epoch_max: int,
 ) -> CARBS:
+    rank_min = min(64, rank_max)
     param_spaces = [
-        Param("lr", LogSpace(min=1e-5, max=1e-2), search_center=5e-3),
-        Param("weight_decay", LogSpace(min=1e-6, max=1e-2), search_center=1e-4),
+        Param("lr", LogSpace(min=3e-5, max=3e-3), search_center=V2_BEST_SEARCH_CENTER["lr"]),
+        Param(
+            "weight_decay",
+            LogSpace(min=1e-6, max=1e-3),
+            search_center=V2_BEST_SEARCH_CENTER["weight_decay"],
+        ),
         Param(
             "batch_size",
-            LinearSpace(min=32, max=256, scale=32, is_integer=True, rounding_factor=32),
-            search_center=128,
+            LinearSpace(min=16, max=128, scale=16, is_integer=True, rounding_factor=16),
+            search_center=V2_BEST_SEARCH_CENTER["batch_size"],
         ),
         Param(
             "epochs",
-            LogSpace(min=5, max=400, is_integer=True),
-            search_center=100,
+            LogSpace(min=25, max=epoch_max, is_integer=True),
+            search_center=min(V2_BEST_SEARCH_CENTER["epochs"], epoch_max),
         ),
         Param(
-            "modes",
-            LinearSpace(min=16, max=128, scale=16, is_integer=True, rounding_factor=16),
-            search_center=64,
+            "rank",
+            LinearSpace(min=rank_min, max=rank_max, scale=64, is_integer=True, rounding_factor=32),
+            search_center=min(max(rank_min, V2_BEST_SEARCH_CENTER["rank"]), rank_max),
         ),
         Param(
             "width",
-            LinearSpace(min=16, max=128, scale=16, is_integer=True, rounding_factor=8),
-            search_center=64,
+            LinearSpace(min=32, max=width_max, scale=32, is_integer=True, rounding_factor=16),
+            search_center=min(V2_BEST_SEARCH_CENTER["width"], width_max),
+        ),
+        Param(
+            "spectral_width",
+            LinearSpace(min=32, max=width_max, scale=32, is_integer=True, rounding_factor=16),
+            search_center=min(V2_BEST_SEARCH_CENTER["spectral_width"], width_max),
+        ),
+        Param(
+            "spectral_floor",
+            LogSpace(min=1e-6, max=1e-2),
+            search_center=V2_BEST_SEARCH_CENTER["spectral_floor"],
+        ),
+        Param(
+            "modes",
+            LinearSpace(min=32, max=128, scale=16, is_integer=True, rounding_factor=16),
+            search_center=V2_BEST_SEARCH_CENTER["modes"],
         ),
         Param(
             "n_blocks",
-            LinearSpace(min=2, max=12, scale=4, is_integer=True),
-            search_center=6,
+            LinearSpace(min=4, max=10, scale=2, is_integer=True),
+            search_center=V2_BEST_SEARCH_CENTER["n_blocks"],
         ),
     ]
     carbs_params = CARBSParams(
@@ -77,7 +140,7 @@ def run_trial(
     output_root: str,
     trial_idx: int,
 ) -> dict[str, object]:
-    run_name = f"carbs_jax_trial_{trial_idx:03d}"
+    run_name = f"carbs_dnonet_jax_trial_{trial_idx:03d}"
     run_dir = REPO_ROOT / output_root / run_name
     command = [
         "uv",
@@ -85,7 +148,7 @@ def run_trial(
         "--python",
         "3.11",
         "python",
-        "train-jax/1d_dno_fno_jax.py",
+        "train-dnonet-jax/1d_dno_dnonet_jax.py",
         "--dataset",
         dataset,
         "--sources",
@@ -98,10 +161,16 @@ def run_trial(
         str(suggestion["batch_size"]),
         "--epochs",
         str(suggestion["epochs"]),
+        "--rank",
+        str(suggestion["rank"]),
         "--modes",
         str(suggestion["modes"]),
         "--width",
         str(suggestion["width"]),
+        "--spectral_width",
+        str(suggestion["spectral_width"]),
+        "--spectral_floor",
+        str(suggestion["spectral_floor"]),
         "--n_blocks",
         str(suggestion["n_blocks"]),
         "--output_root",
@@ -140,11 +209,19 @@ def main() -> None:
     args = parse_args()
     output_root = Path(REPO_ROOT / args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    dataset_path = resolve_dataset_path(args.dataset)
+    grid_size = infer_grid_size(dataset_path, args.sources)
+    rank_max = min(grid_size, max(64, args.rank_max))
+    width_max = max(32, args.width_max)
+    epoch_max = max(25, args.epoch_max)
 
     carbs = build_carbs(
         seed=args.seed,
         num_random_samples=args.num_random_samples,
         max_suggestion_cost=args.max_suggestion_cost,
+        rank_max=rank_max,
+        width_max=width_max,
+        epoch_max=epoch_max,
     )
 
     trial_records: list[dict[str, object]] = []
