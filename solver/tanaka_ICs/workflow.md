@@ -22,7 +22,7 @@ flowchart TD
     D2 --> D3[Batched Tanaka solves]
     D3 --> D4[Save canonical branch .npz]
 
-    E --> E1[Preset crest specs or custom specs]
+    E --> E1[Load custom crest specs]
     E1 --> E2[Batched Tanaka solves for all crests]
     E2 --> E3[Sum component eta and xi]
     E3 --> E4[Optionally zero-mean xi]
@@ -40,8 +40,7 @@ flowchart TD
     F7 --> F8[Write png, npz, json summaries]
 
     E6 --> G[time_integrator.py rollout]
-    G --> H[evals/render_multi_crest_rollouts.py]
-    G --> I[evals/plot_multi_crest_rollouts.py]
+    G --> H[evals/render_random_tanaka_multicrest_rollouts.py]
 
     D4 --> E1
 ```

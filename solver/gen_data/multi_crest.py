@@ -9,7 +9,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..solvers.dno_series_jax import build_grid, dno_series_eval
-from ..tanaka_ICs.modified_tanaka import ModifiedTanakaParams, solve_modified_tanaka_batched
+from ..tanaka_ICs.modified_tanaka import make_default_tanaka_template, solve_modified_tanaka_batched
+
+DEFAULT_RANDOM_MIN_SEPARATION = 50.0
+DEFAULT_RANDOM_MIN_CRESTS = 1
+DEFAULT_RANDOM_MAX_CRESTS = 3
 
 
 @dataclass(frozen=True)
@@ -19,57 +23,109 @@ class CrestSpec:
     direction: int
 
 
-def available_reference_amplitudes() -> list[float]:
-    amplitudes = {
-        spec.amplitude
-        for preset_name in ("head_on_2v2", "head_on_3v2", "head_on_3v3")
-        for spec in make_preset_specs(preset_name)
-    }
-    return sorted(amplitudes)
+def serialize_specs(specs: list[CrestSpec]) -> list[dict[str, float | int]]:
+    return [asdict(spec) for spec in specs]
 
 
-def _build_tanaka_template_params(
-    nx: int,
+def serialize_case_specs(case_specs: list[list[CrestSpec]]) -> list[list[dict[str, float | int]]]:
+    return [serialize_specs(specs) for specs in case_specs]
+
+
+def periodic_distance(a: float, b: float, length: float) -> float:
+    delta = abs(a - b)
+    return min(delta, length - delta)
+
+
+def sample_centers(
+    rng: np.random.Generator,
+    n_centers: int,
     length: float,
-    depth: float,
-    gravity: float,
-    dno_order: int,
-    pad_factor: int,
-    collocation_points: int,
-    quadrature_substeps: int,
-    interpolation_degree: int,
-    s_max: float,
-    alpha: float,
-    transform_power: int,
-    qc_lower: float,
-    qc_upper: float,
-    outer_iterations: int,
-    fixed_point_iterations: int,
-    f2_tolerance: float,
-) -> ModifiedTanakaParams:
-    return ModifiedTanakaParams(
-        amplitude=0.0,
-        depth=depth,
-        gravity=gravity,
-        direction=1,
-        nx=nx,
-        length=length,
-        center=0.0,
-        dno_order=dno_order,
-        pad_factor=pad_factor,
-        grid_mode="manual",
-        collocation_points=collocation_points,
-        quadrature_substeps=quadrature_substeps,
-        interpolation_degree=interpolation_degree,
-        s_max=s_max,
-        alpha=alpha,
-        transform_power=transform_power,
-        qc_lower=qc_lower,
-        qc_upper=qc_upper,
-        outer_iterations=outer_iterations,
-        fixed_point_iterations=fixed_point_iterations,
-        f2_tolerance=f2_tolerance,
-    )
+    min_separation: float,
+) -> list[float]:
+    required_length = n_centers * min_separation
+    if required_length > length:
+        raise ValueError("Requested crest count and minimum separation do not fit on the periodic domain.")
+
+    slack = length - required_length
+    if slack > 0.0:
+        extra_gaps = rng.dirichlet(np.ones(n_centers)) * slack
+    else:
+        extra_gaps = np.zeros(n_centers, dtype=np.float64)
+
+    gaps = min_separation + extra_gaps
+    start = float(rng.uniform(0.0, length))
+    offsets = np.concatenate(([0.0], np.cumsum(gaps[:-1])))
+    centers = (start + offsets) % length
+    return sorted(float(center) for center in centers)
+
+
+def sample_random_crest_specs(
+    rng: np.random.Generator,
+    *,
+    length: float,
+    amplitude_min: float,
+    amplitude_max: float,
+    min_crests: int,
+    max_crests: int,
+    min_separation: float,
+) -> list[CrestSpec]:
+    n_crests = int(rng.integers(min_crests, max_crests + 1))
+    centers = sample_centers(rng, n_crests, length, min_separation)
+    amplitudes = rng.uniform(amplitude_min, amplitude_max, size=n_crests)
+    directions = rng.choice(np.array([-1, 1], dtype=int), size=n_crests)
+    return [
+        CrestSpec(
+            amplitude=float(amplitude),
+            center=float(center),
+            direction=int(direction),
+        )
+        for amplitude, center, direction in zip(amplitudes, centers, directions)
+    ]
+
+
+def sample_random_cases(
+    rng: np.random.Generator,
+    n_cases: int,
+    *,
+    length: float,
+    amplitude_min: float,
+    amplitude_max: float,
+    min_crests: int,
+    max_crests: int,
+    min_separation: float,
+) -> list[list[CrestSpec]]:
+    return [
+        sample_random_crest_specs(
+            rng,
+            length=length,
+            amplitude_min=amplitude_min,
+            amplitude_max=amplitude_max,
+            min_crests=min_crests,
+            max_crests=max_crests,
+            min_separation=min_separation,
+        )
+        for _ in range(n_cases)
+    ]
+
+
+def flatten_case_specs(case_specs: list[list[CrestSpec]]) -> tuple[list[CrestSpec], np.ndarray]:
+    flat_specs: list[CrestSpec] = []
+    crest_case_ids: list[int] = []
+    for case_idx, specs in enumerate(case_specs):
+        flat_specs.extend(specs)
+        crest_case_ids.extend([case_idx] * len(specs))
+    return flat_specs, np.asarray(crest_case_ids, dtype=np.int32)
+
+
+def specs_to_jax_arrays(specs: list[CrestSpec]) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    amplitudes = jnp.asarray([spec.amplitude for spec in specs], dtype=jnp.float64)
+    centers = jnp.asarray([spec.center for spec in specs], dtype=jnp.float64)
+    directions = jnp.asarray([spec.direction for spec in specs], dtype=jnp.float64)
+    return amplitudes, centers, directions
+
+
+def stack_case_field(cases: list[dict[str, object]], key: str) -> np.ndarray:
+    return np.stack([np.asarray(case[key]) for case in cases], axis=0)
 
 
 def build_multi_crest_initial_condition(
@@ -98,7 +154,7 @@ def build_multi_crest_initial_condition(
     x = np.asarray(x, dtype=np.float64)
     k = np.asarray(k, dtype=np.float64)
 
-    template_params = _build_tanaka_template_params(
+    template_params = make_default_tanaka_template(
         nx=nx,
         length=length,
         depth=depth,
@@ -118,9 +174,7 @@ def build_multi_crest_initial_condition(
         f2_tolerance=f2_tolerance,
     )
 
-    amplitudes = jnp.asarray([spec.amplitude for spec in specs], dtype=jnp.float64)
-    centers = jnp.asarray([spec.center for spec in specs], dtype=jnp.float64)
-    directions = jnp.asarray([spec.direction for spec in specs], dtype=jnp.float64)
+    amplitudes, centers, directions = specs_to_jax_arrays(specs)
     batch = solve_modified_tanaka_batched(
         template_params,
         amplitudes,
@@ -173,78 +227,6 @@ def build_multi_crest_initial_condition(
     }
 
 
-def make_preset_specs(name: str) -> list[CrestSpec]:
-    presets = {
-        "head_on_2v2": [
-            CrestSpec(amplitude=0.35, center=28.0, direction=1),
-            CrestSpec(amplitude=0.15, center=52.0, direction=1),
-            CrestSpec(amplitude=0.30, center=112.0, direction=-1),
-            CrestSpec(amplitude=0.20, center=136.0, direction=-1),
-        ],
-        "head_on_3v2": [
-            CrestSpec(amplitude=0.30, center=22.0, direction=1),
-            CrestSpec(amplitude=0.20, center=42.0, direction=1),
-            CrestSpec(amplitude=0.10, center=62.0, direction=1),
-            CrestSpec(amplitude=0.25, center=112.0, direction=-1),
-            CrestSpec(amplitude=0.15, center=136.0, direction=-1),
-        ],
-        "head_on_3v3": [
-            CrestSpec(amplitude=0.30, center=20.0, direction=1),
-            CrestSpec(amplitude=0.20, center=38.0, direction=1),
-            CrestSpec(amplitude=0.10, center=56.0, direction=1),
-            CrestSpec(amplitude=0.35, center=108.0, direction=-1),
-            CrestSpec(amplitude=0.25, center=126.0, direction=-1),
-            CrestSpec(amplitude=0.15, center=144.0, direction=-1),
-        ],
-    }
-    return presets[name]
-
-
-def build_multi_crest_preset(
-    preset_name: str,
-    nx: int = 1024,
-    length: float = 164.0,
-    depth: float = 1.0,
-    gravity: float = 1.0,
-    dno_order: int = 6,
-    pad_factor: int = 8,
-    zero_mean_xi: bool = True,
-    collocation_points: int = 257,
-    quadrature_substeps: int = 4,
-    interpolation_degree: int = 3,
-    s_max: float = 2.5,
-    alpha: float = 0.01,
-    transform_power: int = 5,
-    qc_lower: float = 0.2,
-    qc_upper: float = 0.999,
-    outer_iterations: int = 24,
-    fixed_point_iterations: int = 80,
-    f2_tolerance: float = 1e-10,
-) -> dict[str, object]:
-    return build_multi_crest_initial_condition(
-        make_preset_specs(preset_name),
-        nx=nx,
-        length=length,
-        depth=depth,
-        gravity=gravity,
-        dno_order=dno_order,
-        pad_factor=pad_factor,
-        zero_mean_xi=zero_mean_xi,
-        name=preset_name,
-        collocation_points=collocation_points,
-        quadrature_substeps=quadrature_substeps,
-        interpolation_degree=interpolation_degree,
-        s_max=s_max,
-        alpha=alpha,
-        transform_power=transform_power,
-        qc_lower=qc_lower,
-        qc_upper=qc_upper,
-        outer_iterations=outer_iterations,
-        fixed_point_iterations=fixed_point_iterations,
-        f2_tolerance=f2_tolerance,
-    )
-
-
 def save_multi_crest_initial_condition(
     payload: dict[str, object],
     output_path: str | Path,
@@ -266,7 +248,7 @@ def save_multi_crest_initial_condition(
         component_qc=np.asarray(payload["component_qc"]),
         component_froude=np.asarray(payload["component_froude"]),
         component_speed=np.asarray(payload["component_speed"]),
-        spec_json=np.asarray(json.dumps([asdict(spec) for spec in payload["specs"]])),
+        spec_json=np.asarray(json.dumps(serialize_specs(payload["specs"]))),
         tanaka_params_json=np.asarray(json.dumps(asdict(payload["tanaka_params"]))),
         nx=np.asarray(payload["nx"]),
         length=np.asarray(payload["length"]),
@@ -278,10 +260,24 @@ def save_multi_crest_initial_condition(
     return output
 
 
+def _load_specs(spec_json: str | None, spec_file: str | None) -> list[CrestSpec]:
+    if spec_json is None and spec_file is None:
+        raise ValueError("Provide --spec_json or --spec_file.")
+
+    if spec_json is not None:
+        raw_specs = json.loads(spec_json)
+    else:
+        raw_specs = json.loads(Path(spec_file).expanduser().read_text(encoding="utf-8"))
+
+    return [CrestSpec(**raw_spec) for raw_spec in raw_specs]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build multi-crest solitary-wave initial conditions from batched Tanaka solves.")
-    parser.add_argument("--preset", default="head_on_2v2")
-    parser.add_argument("--output", default="outputs/gen_data/head_on_2v2.npz")
+    parser.add_argument("--spec_json")
+    parser.add_argument("--spec_file")
+    parser.add_argument("--name", default="multi_crest")
+    parser.add_argument("--output", default="outputs/gen_data/multi_crest.npz")
     parser.add_argument("--nx", type=int, default=1024)
     parser.add_argument("--length", type=float, default=164.0)
     parser.add_argument("--depth", type=float, default=1.0)
@@ -305,8 +301,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    payload = build_multi_crest_preset(
-        args.preset,
+    payload = build_multi_crest_initial_condition(
+        _load_specs(args.spec_json, args.spec_file),
         nx=args.nx,
         length=args.length,
         depth=args.depth,
@@ -314,6 +310,7 @@ def main() -> None:
         dno_order=args.dno_order,
         pad_factor=args.pad_factor,
         zero_mean_xi=not args.keep_mean_xi,
+        name=args.name,
         collocation_points=args.collocation_points,
         quadrature_substeps=args.quadrature_substeps,
         interpolation_degree=args.interpolation_degree,
@@ -327,7 +324,7 @@ def main() -> None:
         f2_tolerance=args.f2_tolerance,
     )
     output = save_multi_crest_initial_condition(payload, args.output)
-    print(output)
+    print(json.dumps({"output_path": str(output)}, indent=2))
 
 
 if __name__ == "__main__":

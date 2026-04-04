@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ..data.solitary_loader_jax import DEFAULT_SOLITON_ROOT, load_soliton_dataset
-from .modified_tanaka import REAL_DTYPE, ModifiedTanakaParams, solve_modified_tanaka_batched
+from .modified_tanaka import REAL_DTYPE, make_default_tanaka_template, solve_modified_tanaka_batched
 import jax.numpy as jnp
 
 
@@ -52,8 +52,7 @@ def main() -> None:
     amp_min, amp_max = _dataset_amplitude_range(args.soliton_root)
     amplitudes = np.linspace(amp_min, amp_max, args.num_samples, dtype=np.float64)
 
-    base_params = ModifiedTanakaParams(
-        amplitude=float(amplitudes[0]),
+    base_params = make_default_tanaka_template(
         depth=args.depth,
         gravity=args.gravity,
         direction=args.direction,

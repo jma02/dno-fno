@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from itertools import product
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .modified_tanaka import (
     ModifiedTanakaBatchSolution,
     ModifiedTanakaParams,
     ModifiedTanakaSolution,
+    make_default_tanaka_template,
     solve_modified_tanaka,
     solve_modified_tanaka_batched,
     solve_tanaka_branch,
@@ -100,28 +102,30 @@ def _objective(snapshot: dict[str, np.ndarray | float | str], pred_eta: np.ndarr
 
 
 def _build_params(snapshot: dict[str, np.ndarray | float | str], args: argparse.Namespace, amplitude: float, center: float, direction: int) -> ModifiedTanakaParams:
-    return ModifiedTanakaParams(
+    return replace(
+        make_default_tanaka_template(
+            depth=args.depth,
+            gravity=args.gravity,
+            nx=int(snapshot["nx"]),
+            length=float(snapshot["length"]),
+            dno_order=args.dno_order,
+            pad_factor=args.pad_factor,
+            grid_mode=args.grid_mode,
+            collocation_points=args.collocation_points,
+            quadrature_substeps=args.quadrature_substeps,
+            interpolation_degree=args.interpolation_degree,
+            s_max=args.s_max,
+            alpha=args.alpha,
+            transform_power=args.transform_power,
+            qc_lower=args.qc_lower,
+            qc_upper=args.qc_upper,
+            outer_iterations=args.outer_iterations,
+            fixed_point_iterations=args.fixed_point_iterations,
+            f2_tolerance=args.f2_tolerance,
+        ),
         amplitude=float(amplitude),
-        depth=args.depth,
-        gravity=args.gravity,
         direction=direction,
-        nx=int(snapshot["nx"]),
-        length=float(snapshot["length"]),
         center=float(center),
-        dno_order=args.dno_order,
-        pad_factor=args.pad_factor,
-        grid_mode=args.grid_mode,
-        collocation_points=args.collocation_points,
-        quadrature_substeps=args.quadrature_substeps,
-        interpolation_degree=args.interpolation_degree,
-        s_max=args.s_max,
-        alpha=args.alpha,
-        transform_power=args.transform_power,
-        qc_lower=args.qc_lower,
-        qc_upper=args.qc_upper,
-        outer_iterations=args.outer_iterations,
-        fixed_point_iterations=args.fixed_point_iterations,
-        f2_tolerance=args.f2_tolerance,
     )
 
 

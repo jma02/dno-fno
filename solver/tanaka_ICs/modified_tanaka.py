@@ -93,6 +93,58 @@ class ModifiedTanakaSeed:
     tau_profile: jnp.ndarray
 
 
+def make_default_tanaka_template(
+    *,
+    depth: float = 1.0,
+    gravity: float = 1.0,
+    direction: int = 1,
+    nx: int = 1024,
+    length: float = 164.0,
+    center: float = 0.0,
+    dno_order: int = 6,
+    pad_factor: int = 8,
+    grid_mode: str = "manual",
+    collocation_points: int = 257,
+    quadrature_substeps: int = 4,
+    interpolation_degree: int = 3,
+    s_max: float = 2.5,
+    alpha: float = 0.01,
+    transform_power: int = 5,
+    qc_lower: float = 0.2,
+    qc_upper: float = 0.999,
+    outer_iterations: int = 24,
+    fixed_point_iterations: int = 80,
+    f2_tolerance: float = 1e-10,
+    cg_maxiter: int = 400,
+    cg_tol: float = 1e-10,
+) -> ModifiedTanakaParams:
+    return ModifiedTanakaParams(
+        amplitude=0.0,
+        depth=depth,
+        gravity=gravity,
+        direction=direction,
+        nx=nx,
+        length=length,
+        center=center,
+        dno_order=dno_order,
+        pad_factor=pad_factor,
+        grid_mode=grid_mode,
+        collocation_points=collocation_points,
+        quadrature_substeps=quadrature_substeps,
+        interpolation_degree=interpolation_degree,
+        s_max=s_max,
+        alpha=alpha,
+        transform_power=transform_power,
+        qc_lower=qc_lower,
+        qc_upper=qc_upper,
+        outer_iterations=outer_iterations,
+        fixed_point_iterations=fixed_point_iterations,
+        f2_tolerance=f2_tolerance,
+        cg_maxiter=cg_maxiter,
+        cg_tol=cg_tol,
+    )
+
+
 def _trapz_weights(values: jnp.ndarray) -> jnp.ndarray:
     spacing = values[1:] - values[:-1]
     left = spacing[:1] / 2.0
@@ -695,30 +747,32 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    params = ModifiedTanakaParams(
+    params = replace(
+        make_default_tanaka_template(
+            depth=args.depth,
+            gravity=args.gravity,
+            direction=args.direction,
+            nx=args.nx,
+            length=args.length,
+            center=args.center,
+            dno_order=args.dno_order,
+            pad_factor=args.pad_factor,
+            grid_mode=args.grid_mode,
+            collocation_points=args.collocation_points,
+            quadrature_substeps=args.quadrature_substeps,
+            interpolation_degree=args.interpolation_degree,
+            s_max=args.s_max,
+            alpha=args.alpha,
+            transform_power=args.transform_power,
+            qc_lower=args.qc_lower,
+            qc_upper=args.qc_upper,
+            outer_iterations=args.outer_iterations,
+            fixed_point_iterations=args.fixed_point_iterations,
+            f2_tolerance=args.f2_tolerance,
+            cg_maxiter=args.cg_maxiter,
+            cg_tol=args.cg_tol,
+        ),
         amplitude=args.amplitude,
-        depth=args.depth,
-        gravity=args.gravity,
-        direction=args.direction,
-        nx=args.nx,
-        length=args.length,
-        center=args.center,
-        dno_order=args.dno_order,
-        pad_factor=args.pad_factor,
-        grid_mode=args.grid_mode,
-        collocation_points=args.collocation_points,
-        quadrature_substeps=args.quadrature_substeps,
-        interpolation_degree=args.interpolation_degree,
-        s_max=args.s_max,
-        alpha=args.alpha,
-        transform_power=args.transform_power,
-        qc_lower=args.qc_lower,
-        qc_upper=args.qc_upper,
-        outer_iterations=args.outer_iterations,
-        fixed_point_iterations=args.fixed_point_iterations,
-        f2_tolerance=args.f2_tolerance,
-        cg_maxiter=args.cg_maxiter,
-        cg_tol=args.cg_tol,
     )
     solution = solve_modified_tanaka(params)
 

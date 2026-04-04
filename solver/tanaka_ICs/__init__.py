@@ -1,5 +1,6 @@
 __all__ = [
     "build_amplitude_dataset",
+    "make_default_tanaka_template",
     "ModifiedTanakaBatchSolution",
     "ModifiedTanakaParams",
     "ModifiedTanakaSolution",
@@ -15,6 +16,7 @@ def __getattr__(name: str):
     if name in __all__:
         from .build_amplitude_dataset import main as build_amplitude_dataset
         from .modified_tanaka import (
+            make_default_tanaka_template,
             ModifiedTanakaBatchSolution,
             ModifiedTanakaParams,
             ModifiedTanakaSeed,
@@ -27,6 +29,7 @@ def __getattr__(name: str):
 
         exports = {
             "build_amplitude_dataset": build_amplitude_dataset,
+            "make_default_tanaka_template": make_default_tanaka_template,
             "ModifiedTanakaBatchSolution": ModifiedTanakaBatchSolution,
             "ModifiedTanakaParams": ModifiedTanakaParams,
             "ModifiedTanakaSeed": ModifiedTanakaSeed,

@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .modified_tanaka import ModifiedTanakaParams, solve_modified_tanaka_batched
+from .modified_tanaka import make_default_tanaka_template, solve_modified_tanaka_batched
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,8 +85,7 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    params = ModifiedTanakaParams(
-        amplitude=args.amplitude,
+    params = make_default_tanaka_template(
         depth=args.depth,
         gravity=args.gravity,
         direction=args.direction,

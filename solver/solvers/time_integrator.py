@@ -29,6 +29,30 @@ class SolverParams(NamedTuple):
     g0: jnp.ndarray
 
 
+class RolloutSettings(NamedTuple):
+    dno_order: int
+    pad_factor: int
+    filter_fraction: float
+    method: str
+    substeps_per_interval: int
+    implicit_iterations: int
+    implicit_relaxation: float
+    zero_mean_xi: bool
+
+
+def make_normalized_rollout_settings() -> RolloutSettings:
+    return RolloutSettings(
+        dno_order=6,
+        pad_factor=8,
+        filter_fraction=2.0 / 3.0,
+        method="gl2_if",
+        substeps_per_interval=8,
+        implicit_iterations=4,
+        implicit_relaxation=1.0,
+        zero_mean_xi=True,
+    )
+
+
 def make_solver_params(
     nx: int,
     length: float,

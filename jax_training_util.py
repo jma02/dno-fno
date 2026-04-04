@@ -186,7 +186,7 @@ def summarize_errors(rel_l2: np.ndarray, rel_l1: np.ndarray) -> dict[str, float 
     }
 
 
-def plot_representative_samples(
+def plot_labeled_samples(
     output_path: Path,
     title_prefix: str,
     x: np.ndarray,
@@ -196,43 +196,38 @@ def plot_representative_samples(
     predictions_raw: np.ndarray,
     rel_l2: np.ndarray,
     rel_l1: np.ndarray,
-    random_seed: int,
+    labels: Sequence[str],
 ) -> None:
-    if len(rel_l2) == 0:
-        raise ValueError("Cannot plot representative samples for an empty selection")
+    if len(labels) == 0:
+        raise ValueError("Cannot plot labeled samples for an empty selection")
 
-    sorted_indices = np.argsort(rel_l2)
-    sample_indices = {
-        "best": int(sorted_indices[0]),
-        "median": int(sorted_indices[len(sorted_indices) // 2]),
-        "worst": int(sorted_indices[-1]),
-        "random": int(np.random.default_rng(random_seed).integers(0, len(rel_l2))),
-    }
+    figure, axes = plt.subplots(3, len(labels), figsize=(4 * len(labels), 8), sharex="col")
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[:, None]
 
-    figure, axes = plt.subplots(3, 4, figsize=(16, 8), sharex="col")
-    for column, label in enumerate(("best", "median", "worst", "random")):
-        sample_idx = sample_indices[label]
-        l2_error = float(rel_l2[sample_idx])
-        l1_error = float(rel_l1[sample_idx])
+    for column, label in enumerate(labels):
+        l2_error = float(rel_l2[column])
+        l1_error = float(rel_l1[column])
 
-        axes[0, column].plot(x, eta_values[sample_idx], color="tab:blue", linewidth=1.0)
+        axes[0, column].plot(x, eta_values[column], color="tab:blue", linewidth=1.0)
         axes[0, column].set_title(f"{label.title()} eta(x)", fontdict=TITLE_FONT)
         axes[0, column].grid(True, alpha=0.3)
 
-        axes[1, column].plot(x, xi_values[sample_idx], color="tab:green", linewidth=1.0)
+        axes[1, column].plot(x, xi_values[column], color="tab:green", linewidth=1.0)
         axes[1, column].set_title("xi(x)", fontdict=TITLE_FONT)
         axes[1, column].grid(True, alpha=0.3)
 
         axes[2, column].plot(
             x,
-            targets_raw[sample_idx].squeeze(),
+            targets_raw[column].squeeze(),
             label="Ground Truth",
             color="black",
             linewidth=1.0,
         )
         axes[2, column].plot(
             x,
-            predictions_raw[sample_idx].squeeze(),
+            predictions_raw[column].squeeze(),
             label="Prediction",
             color="tab:red",
             linewidth=1.0,
@@ -249,3 +244,43 @@ def plot_representative_samples(
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
+
+
+def plot_representative_samples(
+    output_path: Path,
+    title_prefix: str,
+    x: np.ndarray,
+    eta_values: np.ndarray,
+    xi_values: np.ndarray,
+    targets_raw: np.ndarray,
+    predictions_raw: np.ndarray,
+    rel_l2: np.ndarray,
+    rel_l1: np.ndarray,
+    random_seed: int,
+) -> None:
+    if len(rel_l2) == 0:
+        raise ValueError("Cannot plot representative samples for an empty selection")
+
+    sorted_indices = np.argsort(rel_l2)
+    labels = ("best", "median", "worst", "random")
+    sample_indices = np.asarray(
+        [
+            int(sorted_indices[0]),
+            int(sorted_indices[len(sorted_indices) // 2]),
+            int(sorted_indices[-1]),
+            int(np.random.default_rng(random_seed).integers(0, len(rel_l2))),
+        ],
+        dtype=np.int32,
+    )
+    plot_labeled_samples(
+        output_path,
+        title_prefix,
+        x,
+        eta_values[sample_indices],
+        xi_values[sample_indices],
+        targets_raw[sample_indices],
+        predictions_raw[sample_indices],
+        rel_l2[sample_indices],
+        rel_l1[sample_indices],
+        labels,
+    )
