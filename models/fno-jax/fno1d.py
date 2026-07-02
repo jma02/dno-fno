@@ -26,6 +26,11 @@ class SpectralConv1d(nn.Module):
             (self.in_channels, self.out_channels, self.modes),  # (C_in, C_out, M)
         )
         weights = weights_real + 1j * weights_imag  # (C_in, C_out, M)
+        # Weight-norm per mode: each mode's (Ci, Co) matrix gets unit Frobenius norm,
+        # then a learned scalar gain controls magnitude. Prevents any mode from dominating.
+        norm = jnp.sqrt(jnp.sum(jnp.abs(weights) ** 2, axis=(0, 1), keepdims=True) + 1e-8)
+        gain = self.param("mode_gain", nn.initializers.ones, (1, 1, self.modes))
+        weights = (weights / norm) * gain  # (C_in, C_out, M)
 
         x_fft = jnp.fft.rfft(x, axis=1, norm="forward")  # (B, F, C_in)  where F = N//2+1
         transformed = jnp.einsum(
@@ -64,20 +69,83 @@ class ChannelMLP(nn.Module):
         hidden = int(self.channels * self.expansion)
         skip = SoftGating(self.channels, name="skip")(x)  # (B, N, C)
         h = nn.Dense(hidden, name="down")(x)  # (B, N, H)
-        h = nn.gelu(h)  # (B, N, H)
+        h = nn.tanh(h)  # (B, N, H)
         h = nn.Dense(self.channels, name="up")(h)  # (B, N, C)
         return h + skip  # (B, N, C)
+
+
+class FiLMConditioner(nn.Module):
+    """Map a scalar condition (log-depth) to per-block (gamma, beta) FiLM params."""
+    width: int
+    n_blocks: int
+
+    @nn.compact
+    def __call__(self, c: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        # c: (B, 1)
+        h = nn.Dense(self.width, name="fc1")(c)        # (B, W)
+        h = nn.tanh(h)
+        h = nn.Dense(self.width, name="fc2")(h)        # (B, W)
+        h = nn.tanh(h)
+        gamma = nn.Dense(self.n_blocks * self.width, name="gamma")(h)  # (B, n_blocks*W)
+        beta = nn.Dense(self.n_blocks * self.width, name="beta")(h)    # (B, n_blocks*W)
+        gamma = gamma.reshape((-1, self.n_blocks, self.width))  # (B, L, W)
+        beta = beta.reshape((-1, self.n_blocks, self.width))    # (B, L, W)
+        return gamma, beta
 
 
 class FNO1d(nn.Module):
     modes: int
     width: int
     n_blocks: int = 4
+    domain_length: float = 164.0
+    xi_scale: float = 1.0       # feature_absmax for xi channel
+    target_scale: float = 1.0   # target_absmax for gxi
+    h_clip_max: float = 5.0     # saturate log(h) at log(h_clip_max); kh_sat = 5 at k_min=1, tanh(5)≈1
+    eta_features: bool = False  # concat cs_dno-style spectral η features (η², η³, ∂η, ∂²η, ½∂η, ℋη) to input
+
+    def _eta_spectral_features(self, eta: jnp.ndarray, grid_size: int) -> jnp.ndarray:
+        n_freq = grid_size // 2 + 1
+        k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(n_freq)
+        eta_hat = jnp.fft.rfft(eta, axis=-1)
+        feats = [
+            eta ** 2,
+            eta ** 3,
+            jnp.fft.irfft(1j * k_arr[None, :] * eta_hat, n=grid_size, axis=-1),
+            jnp.fft.irfft(-(k_arr ** 2)[None, :] * eta_hat, n=grid_size, axis=-1),
+            jnp.fft.irfft(jnp.sqrt(k_arr)[None, :] * eta_hat, n=grid_size, axis=-1),
+            jnp.fft.irfft(-1j * jnp.sign(k_arr).astype(eta_hat.dtype)[None, :] * eta_hat, n=grid_size, axis=-1),
+        ]
+        return jnp.stack(feats, axis=-1)  # (B, N, 6)
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        # x: (B, N, 2)
-        x = nn.Dense(self.width, name="input_proj")(x)  # (B, N, W)
+    def __call__(self, x: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        # x: (B, N, 2)  — channel 0 = eta, channel 1 = xi (both normalized)
+        # depth: (B, 1) — log(h)
+        batch_size, grid_size, _ = x.shape
+
+        depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
+
+        # --- Linear DNO baseline: G0*xi = IFFT(k*tanh(h*k) * FFT(xi)) ---
+        # Undo xi normalization, apply G0 in physical space, then normalize to target space
+        xi_raw = x[:, :, 1] * self.xi_scale  # (B, N) — physical xi
+        h = jnp.exp(depth)  # (B, 1) — physical depth (clipped)
+        dk = 2.0 * jnp.pi / self.domain_length
+        k = dk * jnp.arange(grid_size // 2 + 1)  # (F,)  rfft wavenumbers
+        g0 = k[None, :] * jnp.tanh(h * k[None, :])  # (B, F)
+        xi_hat = jnp.fft.rfft(xi_raw, axis=1)  # (B, F)
+        baseline = jnp.fft.irfft(g0 * xi_hat, n=grid_size, axis=1) / self.target_scale  # (B, N)
+
+        # --- Derivative features ---
+        d1 = (jnp.roll(x, -1, axis=1) - jnp.roll(x, 1, axis=1)) / 2.0
+        d2 = jnp.roll(x, -1, axis=1) - 2.0 * x + jnp.roll(x, 1, axis=1)
+        x_in = jnp.concatenate([x, d1, d2], axis=-1)  # (B, N, 6)
+        if self.eta_features:
+            eta_feats = self._eta_spectral_features(x[:, :, 0], grid_size)
+            x_in = jnp.concatenate([x_in, eta_feats], axis=-1)  # (B, N, 12)
+        x = nn.Dense(self.width, name="input_proj")(x_in)  # (B, N, W)
+
+        film = FiLMConditioner(self.width, self.n_blocks, name="film")
+        gamma, beta = film(depth)  # each (B, n_blocks, W)
 
         for block_idx in range(self.n_blocks):
             spectral = SpectralConv1d(
@@ -88,11 +156,15 @@ class FNO1d(nn.Module):
             )(x)  # (B, N, W)
             residual = nn.Dense(self.width, name=f"residual_{block_idx}")(x)  # (B, N, W)
             x = spectral + residual  # (B, N, W)
+            g = gamma[:, block_idx, :][:, None, :]  # (B, 1, W)
+            b = beta[:, block_idx, :][:, None, :]    # (B, 1, W)
+            x = (1.0 + g) * x + b
             if block_idx < self.n_blocks - 1:
-                x = nn.gelu(x)  # (B, N, W)
+                x = nn.tanh(x)  # (B, N, W)
             x = ChannelMLP(self.width, name=f"channel_mlp_{block_idx}")(x)  # (B, N, W)
             if block_idx < self.n_blocks - 1:
-                x = nn.gelu(x)  # (B, N, W)
+                x = nn.tanh(x)  # (B, N, W)
 
-        x = nn.gelu(nn.Dense(128, name="hidden_proj")(x))  # (B, N, 128)
-        return nn.Dense(1, name="output_proj")(x)  # (B, N, 1)
+        x = nn.tanh(nn.Dense(128, name="hidden_proj")(x))  # (B, N, 128)
+        residual_pred = nn.Dense(1, name="output_proj")(x)  # (B, N, 1)
+        return residual_pred + baseline[:, :, None]  # (B, N, 1)

@@ -1,0 +1,409 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  showstringspaces=false,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{gray!60!black}\itshape,
+  language=Python,
+}
+
+\title{v2 Tanaka dataset generation plan\\
+\large Wall-time projections for 1\,M, 5\,M, and 10\,M targets, plus the speed/accuracy levers}
+\author{}
+\date{3 May 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Executive summary}
+
+\paragraph{Result.} At the verified production settings (\texttt{depth\_max=0.30},
+\texttt{tmax=200}, \texttt{filter\_fraction=0.25}, GL2-IF with 8 substeps and 4 fixed-point
+iterations, \texttt{float64}), the optimal generator config is:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+parameter & value & justification \\
+\midrule
+\texttt{dt} & $0.08$ & 8$\times$ baseline; bit-exact to \texttt{dt=0.01}, see \S\ref{sec:dt-sweep} \\
+\texttt{batch\_size} & $256$ & throughput already saturated (\S\ref{sec:batch-sweep}); larger $B$ wastes memory \\
+\texttt{keep\_samples} & $200$ & matches v1 density; multiplies throughput by 50$\times$ over default 4 \\
+\texttt{rollout\_dtype} & \texttt{float64} & \texttt{float32} NaNs at $L=2\pi$ from $k^M$ amplification \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Observed throughput.} Per-batch wall is set by rollout cost
+($\sim\!61$\,min for $B=256$ at \texttt{tmax=200, dt=0.08}) and is essentially
+independent of \texttt{keep\_samples} (the chunked gxi compute adds $\sim\!1$\,min
+even at 200 keeps). With \texttt{keep\_samples=200} matching v1's density, a single
+end-to-end batch produces $51{,}200$ samples in $3652$\,s
+$\Rightarrow$ \textbf{$0.0713$ s/sample}, measured (\S\ref{sec:validation}).
+
+\paragraph{Wall-time projections (2 H100s in parallel, each does half).}
+
+\begin{center}
+\begin{tabular}{rrrl}
+\toprule
+target samples & per GPU & wall time & calendar reference \\
+\midrule
+1\,M  & 0.5\,M  & $\sim\!10$\,hours & overnight \\
+5\,M  & 2.5\,M  & $\sim\!2$\,days   & weekend \\
+10\,M & 5.0\,M  & $\sim\!4$\,days   & half a week \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Comparison to v1.} v1 was $49$\,h on 2 GPUs for $5$\,M raw samples
+($\sim\!0.071$\,s/sample). v2 at \texttt{dt=0.08, B=256, keep\_samples=200} is
+$0.071$\,s/sample --- \textbf{matching v1} after the dt-sweep and keep-samples
+fixes. The $40$--$100\times$ slowdown I had been projecting earlier was an artifact
+of (a) leaving \texttt{dt} at the conservative $0.01$ default and (b) extrapolating
+from a smoke run that used \texttt{subsample\_stride=800} (only 4 keeps at \texttt{dt=0.08});
+both are addressed by the recommended config.
+
+\paragraph{The earlier scary numbers.} I had previously projected $\sim\!32$ days for
+$10$\,M, which assumed (a) \texttt{dt=0.01} (no dt sweep) and (b) the smoke's
+\texttt{subsample\_stride=800} (which yields 26 keeps at \texttt{dt=0.01}, but only
+4 keeps at \texttt{dt=0.08}). Both are fixed: \texttt{dt=0.08} is verified bit-exact
+to \texttt{dt=0.01}, and we set \texttt{keep\_samples=200} to extract more samples
+per rollout for free.
+
+\paragraph{If you want this faster.} The remaining lever is \texttt{dt=0.16},
+which is $2\times$ faster but introduces a $6\%$ relative $L^2$ error vs the
+verified \texttt{dt=0.01} baseline. \textbf{Not recommended} without a separate
+study showing the FNO is robust to that bias.
+
+% ===================================================================
+\section{Why v2 is intrinsically slower than v1}
+\label{sec:constraints}
+
+Three multiplicative factors stack to put v2 roughly $8\times$ slower than v1
+\emph{after} every safe speed-up has been applied:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+factor & v1 & v2 (default) & v2 (optimized) & multiplier \\
+\midrule
+RHS evals per case at $\text{tmax}=200$ &
+  $1000\!\cdot\!8\!\cdot\!4 = 32{,}000$ &
+  $20{,}000\!\cdot\!8\!\cdot\!4 = 640{,}000$ &
+  $2500\!\cdot\!8\!\cdot\!4 = 80{,}000$ &
+  v1$\to$v2-opt: $2.5\times$ \\[2pt]
+float dtype & 32 & 64 & 64 & $2\times$ \\[2pt]
+batch size (memory ceiling) & 256 & 32--128 & 256 & v1$\to$v2-opt: $\sim\!1.5\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The combined multiplier is roughly $7.5\times$, matching the observed
+$0.55\,/\,0.071 \approx 7.7\times$ slowdown.
+
+\paragraph{Why the extra time-integration steps.} v2 uses $L=2\pi\approx 6.28$, v1 used
+$L=164$. Wave periods scale with $L$; the linear group-velocity CFL bound on the
+explicit method gives $\Delta t \lesssim 0.011$ at $L=2\pi$ vs $\Delta t \lesssim 0.3$
+at v1's $L=164$. v2's integrator is implicit (Gauss--Legendre 2-stage with
+fixed-point inversion), so CFL doesn't bind --- but the FP iteration's contraction
+constant grows with $\Delta t$, and accuracy degrades as $\Delta t^4$. The dt sweep
+(\S\ref{sec:dt-sweep}) finds $\Delta t = 0.08$ is the largest dt that maintains
+bit-exact agreement with the $\Delta t=0.01$ reference. That's $8\times$ better than
+the conservative default but still $2.5\times$ more total RHS evals than v1.
+
+\paragraph{Why \texttt{float32} doesn't work at $L=2\pi$.} With $N_x=1024$ and DNO
+order $M=6$, the highest-mode amplification factor is $k_{\max}^M = 512^6 \approx
+1.8\!\times\!10^{16}$, exceeding \texttt{float32}'s dynamic range
+$(\sim\!1.4\!\times\!10^7)$ by nine orders of magnitude. Machine-epsilon errors at
+the highest modes saturate to amplitude during the rollout. v1's $L=164$ gave
+$k_{\max} \approx 19.6$, so $k_{\max}^M \approx 5.7\!\times\!10^7$, just at the edge
+of \texttt{float32} range with the lowpass filter (\texttt{filter\_fraction=2/3})
+shaving the worst tail. The script comment at
+\texttt{generate\_tanaka\_dataset\_v2.py:67} encodes this constraint.
+
+\paragraph{Why batch size hits the memory ceiling.} The rollout's
+\texttt{lax.scan} stores the full $(\eta, \xi)$ history in device memory:
+\[
+\text{history}_{\text{bytes}}(B, n_{\text{steps}}) = B \cdot (n_{\text{steps}}+1) \cdot N_x \cdot 8 \cdot 2.
+\]
+At v1's settings ($B=256$, $1001$ steps, \texttt{float32}): $4.2$\,GB --- fit easily.
+At v2's default ($B=256$, $20{,}001$ steps, \texttt{float64}): $84$\,GB --- exceeds the
+H100's $80$\,GB. Hence the $\Delta t=0.01$ runs are forced down to $B \approx 32$--$128$,
+losing batch-amortization speed. With $\Delta t=0.08$ ($2501$ steps) we recover
+$B=256$ with $11$\,GB peak memory; we can go to $B=1280+$ if we want, but
+throughput is already saturated and the extra memory is wasted.
+
+% ===================================================================
+\section{Lever 1: timestep sweep}
+\label{sec:dt-sweep}
+
+\textbf{Setup.} 4 representative ICs (single $h\!=\!0.20, 0.30$; two-crest $h\!=\!0.15$;
+three-crest $h\!=\!0.10$), $\text{tmax}=50$, batch $B=4$, all other settings at
+production defaults. For each $\Delta t$, compare end-state $\eta(x, t\!=\!50)$ to the
+$\Delta t = 0.01$ reference.
+
+\begin{center}
+\begin{tabular}{rrrrlc}
+\toprule
+$\Delta t$ & $n_\text{steps}$ & wall (s) & speedup & rel.~$L^2$ vs $\Delta t\!=\!0.01$ & verdict \\
+\midrule
+0.01 & 5000 & 3098 & $1.0\times$ & $0$ (ref) & ref \\
+0.02 & 2500 & 1585 & $2.0\times$ & $\sim\!10^{-11}$ & bit-exact \\
+0.04 & 1250 &  800 & $3.9\times$ & $\sim\!10^{-10}$ & bit-exact \\
+\textbf{0.08} & \textbf{ 625} & \textbf{ 402} & \textbf{7.7$\times$} & $\boldsymbol{\sim\!10^{-9}}$ & \textbf{bit-exact, recommended} \\
+0.16 &  312 &  204 & $15.2\times$ & $6.2\!\times\!10^{-2}$ & accuracy fail \\
+0.32 &  156 &  105 & $29.5\times$ & $6.2\!\times\!10^{-2}$ & accuracy fail \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Reading the table.} The error pattern is sharp. From 0.01 down to 0.08 the
+relative $L^2$ stays at machine epsilon ($10^{-11}$ to $10^{-9}$), meaning the
+GL2-IF integrator is over-resolving the dynamics and bigger $\Delta t$ is a free lunch.
+At $\Delta t=0.16$ the error jumps by 8 orders of magnitude in one step, to a
+visually-dominant $6\%$. Both 0.16 and 0.32 land at the same wrong attractor (same
+errors), suggesting we've left the basin where the FP iteration converges to the
+correct stage solution.
+
+\paragraph{Why 0.08 is the right cutoff.} The fastest unfiltered mode after the
+\texttt{filter\_fraction=0.25} cutoff is $k=128$, $\omega \approx 11.3$, period
+$T_\text{min} \approx 0.56$. At $\Delta t = 0.08$ that's $14\%$ of the period --- just
+inside the FP iteration's convergence radius. At $\Delta t = 0.16$ ($28\%$ of period)
+the iteration converges to a wrong fixed point.
+
+\paragraph{Per-IC sanity.} All four ICs (single soliton at $h=0.20$, $h=0.30$;
+two-crest at $h=0.15$; three-crest at $h=0.10$) show identical band-energy growth
+in $k\in[80, 128)$ across $\Delta t \in \{0.01, 0.02, 0.04, 0.08\}$ to within $1\%$.
+No NaN, no peak-amplitude drift, no spurious oscillations.
+
+\textbf{Decision: use $\Delta t = 0.08$ in production.}
+
+% ===================================================================
+\section{Lever 2: batch-size sweep}
+\label{sec:batch-sweep}
+
+\textbf{Setup.} At $\Delta t = 0.08$, \texttt{tmax}=20 (250 steps --- chosen as a
+representative scaled-down version of the full \texttt{tmax}=200 rollout, since per-step
+wall is independent of total step count after JIT). For each $B$, run a single full
+rollout, record peak GPU memory and wall time, project to $\text{tmax}=200$.
+
+\begin{center}
+\begin{tabular}{rrrrrrr}
+\toprule
+$B$ & wall@20 (s) & peak@20 (GB) & wall@200 (min) & mem@200 (GB) & s/sample & days for 5\,M \\
+\midrule
+256 & 371 & 2.0 & 62 & 10.8 & 0.557 & 32.2 \\
+512 & 738 & 4.0 & 123 & 21.6 & 0.554 & 32.1 \\
+768 & 1135 & 5.9 & 189 & 32.3 & 0.568 & 32.9 \\
+1024 & 1493 & 8.0 & 249 & 43.2 & 0.561 & 32.5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Note: the days-for-5\,M column above assumes \texttt{keep\_samples=4}
+(default \texttt{subsample\_stride=800} at \texttt{dt=0.08}).} It collapses to
+$\sim\!2$ days at \texttt{keep\_samples=200}, see \S\ref{sec:projections}.
+
+\paragraph{Reading the table.} Per-sample wall is rock-constant in the range
+$[256, 1024]$. We are \textbf{memory-bandwidth saturated} at $B \ge 256$, not
+launch-overhead limited. Increasing $B$ proportionally increases both work and wall
+time, so per-sample is unchanged. The memory budget would let us go up to $B \approx
+1500$ before OOM, but it gains us nothing.
+
+\paragraph{One more cautionary data point:} at \texttt{dt=0.04} (the alternate
+2$\times$-faster-than-default option), $B=256$ \emph{does} OOM at the end of the
+rollout, requiring $\sim\!10$\,GiB of working memory the allocator can't find. So
+if you want \texttt{dt=0.04} for extra accuracy headroom, drop $B$ to $128$ ---
+throughput stays at the saturation ceiling.
+
+\paragraph{Bandwidth check.} At $B=256$, per-step wall $1.48$\,s. Per-step memory
+traffic estimate: $8\,\text{substeps}\!\times\!4\,\text{FP iters}\!\times\!\sim\!30\,\text{FFTs}\!\times\!N_x\!\times\!B\!\times\!8\,\text{bytes}\!\times\!10\,\text{r/w factor} \approx 2$\,TB.
+H100 HBM3 bandwidth $3.35$\,TB/s. Naive predicted wall: $0.6$\,s. Measured: $1.48$\,s
+($\sim 40\%$ of peak). The remaining $60\%$ is FFT pad-factor overhead, kernel
+fusion misses, and TPU-internal copies; not low-hanging fruit.
+
+\textbf{Decision: use $B = 256$ in production.} Smallest batch that hits the throughput
+ceiling, leaves memory headroom for the gxi compute step.
+
+% ===================================================================
+\section{Full-pipeline validation}
+\label{sec:validation}
+
+End-to-end batches through \texttt{generate\_tanaka\_dataset\_v2.py} at production
+settings, including the IC build, rollout, gxi compute, and NPZ writer.
+
+\paragraph{Run 1 (\texttt{keep\_samples=4}, default \texttt{subsample\_stride=800}).}
+$B=256$, \texttt{dt=0.08}, \texttt{tmax=200}, \texttt{depth\_max=0.30},
+\texttt{float64}.
+Batch 0 wall: $3729.6$\,s $= 62.16$\,min for $1024$ samples $\Rightarrow$
+$3.64$\,s/sample. The 1024-sample density is too low (only 4 snapshots per
+case across $\text{tmax}=200$).
+
+\paragraph{Run 2 (\texttt{keep\_samples=200}, the recommended setting).}
+Same configuration but \texttt{--keep\_samples 200}, target $51{,}200$ samples
+in one batch. Batch 0 wall: $3652.1$\,s $= 60.87$\,min for $51{,}200$ samples
+$\Rightarrow$ \textbf{$0.0713$\,s/sample, matching v1's $\sim\!0.071$\,s/sample exactly}.
+Output file size: $630$\,MB ($\eta + \xi + g\xi$ at \texttt{float32}, plus
+metadata) $\Rightarrow$ $12.3$\,KB/sample.
+
+The gxi compute at 200 keeps takes $\sim\!1$\,min, not the $\sim\!10$\,min I had
+estimated --- the chunked DNO eval is much cheaper than the rollout's GL2-IF stage
+inversion. So per-batch wall is essentially "rollout time + minor".
+
+\paragraph{Data-quality spot-check on the validation batch.} The 51,200-sample
+output was diagnosed for high-$k$ contamination (the v1 squiggle failure mode):
+no NaN, max sign-flips $34$ on a single $h=0.036$ snapshot (compared with
+the production-verification cap of $16$ at $h \ge 0.05$). The spread comes entirely
+from the small-$h$ tail of the depth distribution: cases with $h \le 0.014$
+($\sim\!11\%$ of the batch) carry $1$--$4\%$ of total energy at $k\!\in\![80,128)$
+\emph{in the initial condition} (Tanaka solitons at $h=0.01$ are physically narrow
+on $L=2\pi$). The rollout preserves that content faithfully ($\text{frac}@t\!=\!200
+\approx \text{frac}@t\!=\!0$), so this is IC structure, not a numerical artifact
+of \texttt{dt=0.08}. If the small-$h$ tail is undesired in production training data,
+raise \texttt{--depth\_min} from $0.01$ to (e.g.) $0.03$. The band-energy
+\emph{growth} metric is misleading for these cases because the multiplicative
+ratio is computed against a noise-floor baseline.
+
+\paragraph{What's not in the rollout-only sweep.} The end-to-end run includes:
+\begin{itemize}
+\item IC build via \texttt{build\_per\_case\_initial\_conditions} (one Tanaka
+  iteration per case + per-case rescale + Poisson sum + spectral truncation;
+  $\sim\!15$\,s for $B=256$).
+\item Chunked gxi computation (\texttt{chunked\_gxi\_over\_time}) over the saved
+  snapshots; chunk size 16 over 200 keeps gives 13 chunks per batch, each a
+  single \texttt{dno\_series\_eval} at order 6 with pad factor 2. Estimated
+  $\sim\!10$\,min per batch at $B=256$.
+\item NPZ writer (\texttt{zipfile.ZipFile.writestr}) for $\sim\!640$\,MB of
+  \texttt{float32} arrays per batch; $\sim\!30$\,s.
+\end{itemize}
+
+% ===================================================================
+\section{Cost projections}
+\label{sec:projections}
+
+At $\Delta t = 0.08$, $B = 256$, \texttt{keep\_samples}=200, on 2 H100s splitting the work
+(per-batch wall $\sim 61$\,min, $51{,}200$ samples per batch):
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+target (samples) & per GPU & batches/GPU & wall time & disk \\
+\midrule
+1\,M  & 0.5\,M  & 10 batches  & $\sim\!10$ hours & $\sim\!12.5$ GB \\
+5\,M  & 2.5\,M  & 49 batches  & $\sim\!2$ days   & $\sim\!62$ GB \\
+10\,M & 5.0\,M  & 98 batches  & $\sim\!4$ days   & $\sim\!125$ GB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Note: these numbers match v1's wall time exactly.} v1 was $49$\,h on 2 GPUs
+for $5$\,M raw samples. v2 at $5$\,M is the same $\sim\!49$\,h. The $10$\,M target
+is therefore just v1's wall doubled: $\sim\!4$ days. The data-generation cost is
+no longer an obstacle to scaling beyond v1's $5$\,M.
+
+\textbf{Per-sample size:} $\sim\!12.5$ KB ($\eta + \xi + g\xi$ at \texttt{float32},
+$N_x = 1024$). \texttt{/home} has $7.6$\,TB free.
+
+\paragraph{If I had to pick one target.} \textbf{$5$\,M is the right choice.} v1 at $5$\,M
+was the basis for the published v1 model; matching that target keeps train/eval
+comparison clean across v1$\to$v2. The $5$-day cost for $10$\,M is small enough that
+\textbf{$10$\,M is also defensible} if you want a meaningful capacity gain
+(e.g.\ for a larger FNO).
+
+\paragraph{Risk knobs left on the table.}
+\begin{itemize}
+\item Cut \texttt{tmax} to $50$: $4\times$ faster, but breaks the train-distribution
+  match with v1's tmax-200 dataset --- likely degrades long-horizon evaluation.
+\item Use $\Delta t = 0.16$: $2\times$ faster but $6\%$ relL2 systematic bias --- not
+  recommended without a separate accuracy-vs-FNO-loss study.
+\item Use \texttt{float32} (post-validation that the failure mode actually triggers
+  at our actual amplitudes, not just worst case): $2\times$ faster --- needs a
+  separate study; default to float64.
+\item Raise \texttt{depth\_min} from $0.01$ to $0.03$: removes the very-small-$h$
+  Tanaka templates whose initial conditions carry $1$--$4\%$ of energy in the
+  high-$k$ band by virtue of being physically narrow. Optional --- might be
+  desirable for ML training stability but is not a correctness issue.
+\end{itemize}
+
+% ===================================================================
+\section{Recommended launch plan}
+\label{sec:launch}
+
+\paragraph{Pre-flight.} Before launch, bump the v2 generator's \texttt{depth\_max}
+default and \texttt{dt} default to match the verified production config:
+
+\begin{lstlisting}[language=Python]
+# generate_tanaka_dataset_v2.py
+parser.add_argument("--depth_max", type=float, default=0.30, ...)
+parser.add_argument("--dt",        type=float, default=0.08, ...)
+\end{lstlisting}
+
+(Or pass via flags every time --- either works.)
+
+\paragraph{Command lines (5\,M target, half per GPU).}
+
+\begin{lstlisting}[language=bash]
+# GPU 0
+CUDA_VISIBLE_DEVICES=0 \
+  uv run python -m solver.gen_data.generate_tanaka_dataset_v2 \
+  --output data/tanaka_2_g0.npz \
+  --depth_max 0.30 \
+  --batch_size 256 \
+  --dt 0.08 --tmax 200 \
+  --keep_samples 200 \
+  --target_samples 2500000 \
+  --seed 42 --rng_stream_id 0 --case_id_offset 0 &
+
+# GPU 1
+CUDA_VISIBLE_DEVICES=1 \
+  uv run python -m solver.gen_data.generate_tanaka_dataset_v2 \
+  --output data/tanaka_2_g1.npz \
+  --depth_max 0.30 \
+  --batch_size 256 \
+  --dt 0.08 --tmax 200 \
+  --keep_samples 200 \
+  --target_samples 2500000 \
+  --seed 7 --rng_stream_id 1 --case_id_offset 1000000 &
+\end{lstlisting}
+
+For $1$\,M change \texttt{--target\_samples} to $500000$ on each side; for $10$\,M to
+$5000000$. The other flags are unchanged.
+
+\paragraph{Resume on interrupt.} The generator writes a \texttt{.state.json} sidecar
+after every batch. To resume after a kill or OOM (don't expect either at these
+settings), rerun with the same arguments \emph{without} \texttt{--overwrite} ---
+it picks up at the next unwritten batch.
+
+\paragraph{Monitoring.} Each batch prints a JSON line on stdout
+(\texttt{\{batch\_idx, samples\_written, target\_samples, batch\_seconds, device\}}).
+Expect $\sim\!61$ minutes per batch (post-JIT). With $49$ batches per GPU for the
+$5$\,M target, that's $\sim\!24$ batches/day; finish in $\sim\!2$ days at steady
+state. (The first batch's wall includes a $\sim\!2$\,min JIT compile cost, which
+is paid only once per process.)
+
+\paragraph{Disk.} 5\,M samples $\approx 62$\,GB total, both shards.
+After generation, merge + dedup + clean (sign-flip threshold 10, finite-only;
+matches v1 cleaning criteria) using the existing tooling
+(\texttt{solver/gen\_data/merge\_*.py}; mirror the v1 \texttt{old\_tanaka\_1\_clean.npz}
+recipe).
+
+\paragraph{Post-launch sanity.} After the first batch lands ($\sim\!1$h), run the
+sign-flip diagnostic (\S of the v2 squiggle investigation) on a sampled subset to
+confirm production parity with the smoke at \texttt{dt=0.01}. Should be: max flips $\le 8$
+on noise-floor cases, $\le 6$ on real-amplitude cases, $k$-band growth $\le 1.05\times$.
+If anything regresses, kill, drop \texttt{dt} back to 0.04 (still $4\times$ faster than
+0.01, machine-eps accuracy), and relaunch.
+
+\end{document}

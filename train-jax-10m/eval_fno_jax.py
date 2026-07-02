@@ -16,12 +16,13 @@ from flax.training import checkpoints
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODEL_DIR = REPO_ROOT / "models" / "fno-jax"
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(MODEL_DIR) not in sys.path:
-    sys.path.insert(0, str(MODEL_DIR))
+DNO_DIR = REPO_ROOT / "models" / "dno-net"
+for _d in (REPO_ROOT, MODEL_DIR, DNO_DIR):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
 
 from fno1d import FNO1d
+from dno_net import SpectralDNO
 from losses import count_params
 from util import (
     NormStats,
@@ -31,7 +32,6 @@ from util import (
     load_or_compute_stats,
     build_split_indices,
     normalize_features,
-    normalize_targets,
     require_jax_devices,
 )
 from jax_training_util import plot_representative_samples, summarize_errors
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate a JAX FNO checkpoint on the held-out Tanaka test split."
     )
-    parser.add_argument("--dataset", default="tanaka_1_clean_shards01_half_shuffled.npz")
+    parser.add_argument("--dataset", default="tanaka_1_clean.npz")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--run_dir", default=None)
@@ -131,7 +131,12 @@ def main() -> None:
     dataset_path = REPO_ROOT / "data" / args.dataset
     dataset = load_dataset_arrays(dataset_path)
     stats = checkpoint_payload.get("stats") or load_or_compute_stats(dataset_path, dataset=dataset)
-    ns = NormStats.from_dict(stats)
+    if config.get("model", "fno") == "fno" and bool(
+        config.get("linear_baseline", config.get("linear_hotpath", config.get("predict_residual", False)))
+    ):
+        raise ValueError("Checkpoint uses removed FNO linear-baseline/residual path.")
+    norm_mode = config.get("norm", "minmax")
+    ns = NormStats.from_dict(stats, mode=norm_mode)
     x = dataset["x"]
     train_indices, val_indices, test_indices = build_split_indices(
         int(dataset["eta"].shape[0]),
@@ -142,15 +147,29 @@ def main() -> None:
         subset_rng = np.random.default_rng(args.seed)
         eval_indices = np.sort(subset_rng.choice(eval_indices, size=args.subset_size, replace=False))
 
-    model = FNO1d(
-        modes=int(config["modes"]),
-        width=int(config["width"]),
-        n_blocks=int(config.get("n_blocks", 4)),
-    )
+    if config.get("model", "fno") == "spectral_dno":
+        model = SpectralDNO(
+            modes=int(config["modes"]),
+            width=int(config["width"]),
+            n_blocks=int(config.get("n_blocks", 4)),
+            latent=int(config.get("latent", 64)),
+            domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
+            xi_scale=float(config.get("xi_scale", np.asarray(ns.feature_absmax).reshape(-1)[1])),
+            target_scale=float(config.get("target_scale", ns.target_absmax)),
+        )
+    else:
+        model = FNO1d(
+            modes=int(config["modes"]),
+            width=int(config["width"]),
+            n_blocks=int(config.get("n_blocks", 4)),
+            domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
+            xi_scale=float(config.get("xi_scale", np.asarray(ns.feature_absmax).reshape(-1)[1])),
+            target_scale=float(config.get("target_scale", ns.target_absmax)),
+        )
 
     @jax.jit
-    def predict_batch(current_params, batch_inputs):
-        return model.apply({"params": current_params}, batch_inputs)
+    def predict_batch(current_params, batch_inputs, batch_depth):
+        return model.apply({"params": current_params}, batch_inputs, batch_depth)
 
     rel_l2_all: list[np.ndarray] = []
     rel_l1_all: list[np.ndarray] = []
@@ -159,19 +178,21 @@ def main() -> None:
     time_all: list[np.ndarray] = []
     prediction_norm_cache: list[np.ndarray] = []
 
-    for batch_inputs, _, batch_indices in get_batches(
+    for eta_b, xi_b, _, depth_b, batch_indices in get_batches(
         dataset["eta"],
         dataset["xi"],
         dataset["gxi"],
+        dataset["depth"],
         eval_indices,
         args.batch_size,
-        ns,
         None,
         shuffle=False,
         drop_last=False,
     ):
+        batch_inputs = normalize_features(eta_b, xi_b, ns)
         batch_inputs_device = jax.device_put(batch_inputs, devices[0])
-        predicted_norm = np.asarray(jax.device_get(predict_batch(params, batch_inputs_device)))
+        batch_depth_device = jax.device_put(depth_b, devices[0])
+        predicted_norm = np.asarray(jax.device_get(predict_batch(params, batch_inputs_device, batch_depth_device)))
         predicted_raw = denormalize_targets(predicted_norm, ns)
         target_raw = dataset["gxi"][batch_indices, :, None]
 

@@ -15,15 +15,22 @@ import orbax.checkpoint as ocp
 from flax.training import checkpoints
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODEL_DIR = REPO_ROOT / "models" / "fno-jax"
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(MODEL_DIR) not in sys.path:
-    sys.path.insert(0, str(MODEL_DIR))
+FNO_DIR = REPO_ROOT / "models" / "fno-jax"
+DNO_DIR = REPO_ROOT / "models" / "dno-net"
+for _d in (REPO_ROOT, FNO_DIR, DNO_DIR):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
 
 from fno1d import FNO1d
+from dno_net import SpectralDNO
 from losses import count_params
-from util import NormStats, denormalize_targets, normalize_features, require_jax_devices
+from util import (
+    NormStats,
+    compute_log_depth,
+    denormalize_targets,
+    normalize_features,
+    require_jax_devices,
+)
 from jax_training_util import (
     build_source_labels,
     load_training_arrays,
@@ -40,13 +47,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--checkpoint", choices=("best", "final"), default="best")
-    parser.add_argument("--dataset", default="dno_dataset.npz")
+    parser.add_argument("--dataset", default="test_dno_rescaled.npz")
     parser.add_argument("--sources", default="all")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--allow_cpu", action="store_true")
-    parser.add_argument("--zero_mean_xi", action="store_true")
+    parser.add_argument("--keep_xi_mean", action="store_true")
     return parser.parse_args()
 
 
@@ -69,32 +76,64 @@ def load_checkpoint(run_dir: Path, checkpoint_name: str):
     return checkpoint_dir, params, metadata
 
 
-def main() -> None:
-    args = parse_args()
-    backend, devices = require_jax_devices(allow_cpu=args.allow_cpu)
+def evaluate_run_on_dno_dataset(
+    *,
+    run_dir: Path,
+    checkpoint: str = "best",
+    dataset: str = "dno_dataset.npz",
+    sources: str = "all",
+    seed: int = 0,
+    batch_size: int = 256,
+    output_dir: Path | None = None,
+    allow_cpu: bool = False,
+    keep_xi_mean: bool = False,
+) -> tuple[dict[str, object], Path]:
+    backend, devices = require_jax_devices(allow_cpu=allow_cpu)
 
-    run_dir = (REPO_ROOT / args.run_dir).resolve()
+    run_dir = run_dir.resolve()
     with open(run_dir / "config.json", "r", encoding="utf-8") as handle:
         config = json.load(handle)
-    checkpoint_dir, params, metadata = load_checkpoint(run_dir, args.checkpoint)
+    checkpoint_dir, params, metadata = load_checkpoint(run_dir, checkpoint)
 
-    dataset_path = REPO_ROOT / "data" / args.dataset
-    selected_sources = parse_sources(args.sources)
-    arrays = load_training_arrays(dataset_path, selected_sources)
+    dataset_path = REPO_ROOT / "data" / dataset
+    sidecar = dataset_path.with_suffix(".meta.json")
+    if sidecar.exists():
+        # Flat combined-style test set (e.g. test_dno_rescaled.npz)
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        legend = {int(k): v for k, v in meta.get("source_legend", {}).items()}
+        with np.load(dataset_path) as archive:
+            eta = np.asarray(archive["eta"], dtype=np.float32)
+            xi = np.asarray(archive["xi"], dtype=np.float32)
+            gxi = np.asarray(archive["gxi"], dtype=np.float32)
+            x = np.asarray(archive["x"], dtype=np.float32)
+            source_int = np.asarray(archive["source"], dtype=np.int64)
+            depth = np.asarray(archive["depth"], dtype=np.float32)
+        source_labels = np.asarray(
+            [legend.get(int(s), str(int(s))) for s in source_int],
+            dtype=object,
+        )
+        present = sorted({legend.get(int(s), str(int(s))) for s in source_int})
+        selected_sources = present if sources in (None, "all") else parse_sources(sources)
+    else:
+        selected_sources = parse_sources(sources)
+        arrays = load_training_arrays(dataset_path, selected_sources)
+        eta = np.asarray(arrays["eta"], dtype=np.float32)
+        xi = np.asarray(arrays["xi"], dtype=np.float32)
+        gxi = np.asarray(arrays["gxi"], dtype=np.float32)
+        x = np.asarray(arrays["x"], dtype=np.float32)
+        source_labels = build_source_labels(dataset_path, arrays["source_names"])
+        # Legacy per-source layout has no depth field; assume Tanaka-style h=1.
+        depth = np.ones((eta.shape[0],), dtype=np.float32)
 
-    eta = np.asarray(arrays["eta"], dtype=np.float32)
-    xi = np.asarray(arrays["xi"], dtype=np.float32)
-    gxi = np.asarray(arrays["gxi"], dtype=np.float32)
-    x = np.asarray(arrays["x"], dtype=np.float32)
-    source_labels = build_source_labels(dataset_path, arrays["source_names"])
-
-    _, _, test_indices = split_indices(int(eta.shape[0]), args.seed)
+    _, _, test_indices = split_indices(int(eta.shape[0]), seed)
     eta = eta[test_indices]
     xi = xi[test_indices]
     gxi = gxi[test_indices]
+    depth = depth[test_indices]
     source_labels = source_labels[test_indices]
 
-    if args.zero_mean_xi:
+    zero_mean_xi = not keep_xi_mean
+    if zero_mean_xi:
         xi = xi - np.mean(xi, axis=1, keepdims=True)
 
     train_stats = metadata.get("stats")
@@ -103,27 +142,48 @@ def main() -> None:
             f"Checkpoint metadata at {run_dir} has no 'stats' entry — "
             "cannot recover training-time normalization."
         )
-    ns = NormStats.from_dict(train_stats)
+    norm_mode = config.get("norm", "minmax")
+    if config.get("model", "fno") == "fno" and bool(
+        config.get("linear_baseline", config.get("linear_hotpath", config.get("predict_residual", False)))
+    ):
+        raise ValueError("Checkpoint uses removed FNO linear-baseline/residual path.")
+    ns = NormStats.from_dict(train_stats, mode=norm_mode)
 
-    model = FNO1d(
-        modes=int(config["modes"]),
-        width=int(config["width"]),
-        n_blocks=int(config.get("n_blocks", 4)),
-    )
+    if config.get("model", "fno") == "spectral_dno":
+        model = SpectralDNO(
+            modes=int(config["modes"]),
+            width=int(config["width"]),
+            n_blocks=int(config.get("n_blocks", 4)),
+            latent=int(config.get("latent", 64)),
+            domain_length=float(config.get("domain_length", train_stats.get("domain_length", 2.0 * np.pi))),
+            xi_scale=float(config.get("xi_scale", np.asarray(ns.feature_absmax).reshape(-1)[1])),
+            target_scale=float(config.get("target_scale", ns.target_absmax)),
+        )
+    else:
+        model = FNO1d(
+            modes=int(config["modes"]),
+            width=int(config["width"]),
+            n_blocks=int(config.get("n_blocks", 4)),
+            domain_length=float(train_stats.get("domain_length", 2.0 * np.pi)),
+            xi_scale=float(np.asarray(ns.feature_absmax).reshape(-1)[1]),
+            target_scale=float(ns.target_absmax),
+        )
 
     @jax.jit
-    def predict_batch(current_params, batch_inputs):
-        return model.apply({"params": current_params}, batch_inputs)
+    def predict_batch(current_params, batch_inputs, batch_depth):
+        return model.apply({"params": current_params}, batch_inputs, batch_depth)
 
     prediction_chunks: list[np.ndarray] = []
-    for start in range(0, eta.shape[0], args.batch_size):
+    for start in range(0, eta.shape[0], batch_size):
         batch_inputs = normalize_features(
-            eta[start : start + args.batch_size],
-            xi[start : start + args.batch_size],
+            eta[start : start + batch_size],
+            xi[start : start + batch_size],
             ns,
         )
+        batch_depth = compute_log_depth(depth[start : start + batch_size])
         batch_inputs_device = jax.device_put(batch_inputs, devices[0])
-        predicted_norm = np.asarray(jax.device_get(predict_batch(params, batch_inputs_device)))
+        batch_depth_device = jax.device_put(batch_depth, devices[0])
+        predicted_norm = np.asarray(jax.device_get(predict_batch(params, batch_inputs_device, batch_depth_device)))
         predicted_raw = denormalize_targets(predicted_norm, ns)
         prediction_chunks.append(predicted_raw.astype(np.float32))
 
@@ -140,9 +200,9 @@ def main() -> None:
     target_std = np.std(flat_target, axis=1)
 
     output_dir = (
-        Path(args.output_dir).resolve()
-        if args.output_dir
-        else run_dir / ("eval_on_dno_dataset_zero_mean_xi" if args.zero_mean_xi else "eval_on_dno_dataset")
+        output_dir.resolve()
+        if output_dir is not None
+        else run_dir / ("eval_on_dno_dataset_keep_xi_mean" if keep_xi_mean else "eval_on_dno_dataset")
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,10 +210,12 @@ def main() -> None:
         "checkpoint": str(checkpoint_dir),
         "checkpoint_epoch": int(metadata["epoch"]),
         "trained_on_dataset": config["dataset"],
+        "model": config.get("model", "fno"),
+        "norm": norm_mode,
         "evaluated_on_dataset": dataset_path.name,
         "split": "test",
-        "split_seed": args.seed,
-        "zero_mean_xi": args.zero_mean_xi,
+        "split_seed": seed,
+        "zero_mean_xi": zero_mean_xi,
         "num_test_examples": int(eta.shape[0]),
         "param_count": count_params(params),
         "backend": backend,
@@ -167,7 +229,7 @@ def main() -> None:
         "per_source": {},
     }
 
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
     for source in selected_sources:
         mask = source_labels == source
         source_rel_l2 = rel_l2[mask]
@@ -206,6 +268,12 @@ def main() -> None:
 
         summary["per_source"][source] = {
             "num_examples": int(mask.sum()),
+            "rel_l2_mean": float(source_rel_l2.mean()),
+            "rel_l2_median": float(np.median(source_rel_l2)),
+            "rel_l2_p95": float(np.quantile(source_rel_l2, 0.95)),
+            "rel_l2_max": float(source_rel_l2.max()),
+            "rel_l1_mean": float(source_rel_l1.mean()),
+            "rel_l1_median": float(np.median(source_rel_l1)),
             "chosen_positions_in_source_subset": chosen_positions.tolist(),
             "chosen_rel_l2": source_rel_l2[chosen_positions].tolist(),
             "chosen_rel_l1": source_rel_l1[chosen_positions].tolist(),
@@ -220,6 +288,22 @@ def main() -> None:
     with open(output_dir / "representative_samples_per_source.json", "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
+    return summary, output_dir
+
+
+def main() -> None:
+    args = parse_args()
+    summary, output_dir = evaluate_run_on_dno_dataset(
+        run_dir=(REPO_ROOT / args.run_dir),
+        checkpoint=args.checkpoint,
+        dataset=args.dataset,
+        sources=args.sources,
+        seed=args.seed,
+        batch_size=args.batch_size,
+        output_dir=Path(args.output_dir).resolve() if args.output_dir else None,
+        allow_cpu=args.allow_cpu,
+        keep_xi_mean=args.keep_xi_mean,
+    )
     print(json.dumps(summary, indent=2))
     print(f"Saved evaluation artifacts to {output_dir}")
 

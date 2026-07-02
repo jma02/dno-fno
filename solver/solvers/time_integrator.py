@@ -116,6 +116,40 @@ def apply_lowpass(field: jnp.ndarray, k: jnp.ndarray, filter_fraction: float = 1
     return myifft(mask * myfft(field, field.shape[-1]))
 
 
+def apply_houli(
+    field: jnp.ndarray,
+    k: jnp.ndarray,
+    a: float = 36.0,
+    m: float = 36.0,
+    filter_fraction: float = 1.0,
+) -> jnp.ndarray:
+    # Hou-Li exponential filter c_k = exp(-a * (|k|/k_eff)^{2m}) (JCP09 eq 29; Hou & Li, JCP 226, 2007).
+    # k_eff = filter_fraction * k_max places the half-power point near (filter_fraction * k_max).
+    # filter_fraction=1.0 → JCP09 default (cutoff near Nyquist); filter_fraction<1.0 → shifts the
+    # roll-off lower while preserving smoothness. a=m=36 gives machine-zero at k_eff.
+    k_max = jnp.max(jnp.abs(k))
+    k_eff = jnp.maximum(filter_fraction * k_max, 1e-12)
+    c_k = jnp.exp(-a * (jnp.abs(k) / k_eff) ** (2.0 * m))
+    spec = myfft(field, field.shape[-1])
+    return myifft(c_k.astype(spec.dtype) * spec)
+
+
+def apply_filter(
+    field: jnp.ndarray,
+    k: jnp.ndarray,
+    shape: str = "hard",
+    filter_fraction: float = 1.0,
+    houli_a: float = 36.0,
+    houli_m: float = 36.0,
+) -> jnp.ndarray:
+    # Dispatch hard low-pass vs Hou-Li smooth filter. "hard" reproduces apply_lowpass exactly.
+    if shape == "hard":
+        return apply_lowpass(field, k, filter_fraction)
+    if shape == "houli":
+        return apply_houli(field, k, a=houli_a, m=houli_m, filter_fraction=filter_fraction)
+    raise ValueError(f"unknown filter shape {shape!r}; expected 'hard' or 'houli'")
+
+
 def _state_to_hat(state: State, nx: int) -> SpectralState:
     return SpectralState(
         eta_hat=myfft(state.eta, nx),
@@ -190,6 +224,10 @@ def rhs_nonlinear(state: State, params: SolverParams) -> State:
     eta_t = gxi - linear_gxi
     numerator = gxi + eta_x * xi_x
     xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    # Filter inside rhs: at k_max ≳ 100 the DNO series' k^M factor amplifies high-k roundoff faster than the implicit-iteration accumulates, so post-step filtering alone is too late.
+    if params.filter_fraction < 1.0:
+        eta_t = apply_lowpass(eta_t, params.k, params.filter_fraction)
+        xi_t = apply_lowpass(xi_t, params.k, params.filter_fraction)
     return State(eta=eta_t, xi=xi_t)
 
 

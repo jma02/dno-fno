@@ -6,8 +6,6 @@ from torch import nn
 
 
 class SpectralConv1d(nn.Module):
-    """1D Fourier layer that only keeps a fixed number of low modes."""
-
     def __init__(self, in_channels: int, out_channels: int, modes: int) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -46,8 +44,6 @@ class SpectralConv1d(nn.Module):
 
 
 class FNO1d(nn.Module):
-    """Small 1D Fourier Neural Operator for DNO regression."""
-
     def __init__(self, modes: int, width: int, n_blocks: int = 4) -> None:
         super().__init__()
         self.input_proj = nn.Linear(2, width)
@@ -61,7 +57,6 @@ class FNO1d(nn.Module):
         self.output_proj = nn.Linear(128, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input arrives as (batch, grid, channels).
         x = self.input_proj(x)
         x = x.permute(0, 2, 1)
 

@@ -1,0 +1,64 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage[margin=1in]{geometry}
+
+\title{Random Sea State Profile Generation (Deep Water)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Domain}
+
+Periodic domain of length $L = 164$, discretized on $N_x = 1024$ grid points. Gravity $g = 1$ (non-dimensional). Depth $h = 1000$ (effectively infinite).
+
+\section{Surface elevation $\eta$}
+
+Each sample is a band-limited Gaussian random field in Fourier space. For each sample, three hyperparameters are drawn uniformly:
+\begin{itemize}
+    \item Significant wave height: $H_s \sim \mathcal{U}(0.1, 0.6)$
+    \item Peak wavenumber: $k_p \sim \mathcal{U}(0.06, 0.50)$
+    \item Bandwidth parameter: $b_w \sim \mathcal{U}(1.5, 5.0)$
+\end{itemize}
+
+The spectral amplitude at wavenumber $k$ is a Gaussian centered on the peak wavenumber:
+\begin{equation}
+    S(k) = \exp\!\left(-\frac{(|k| - k_p)^2}{2\sigma_k^2}\right), \qquad \sigma_k = \frac{k_p}{b_w}.
+\end{equation}
+
+Fourier coefficients are constructed as $\hat{\eta}_k = \sqrt{S(k)}\, e^{i\phi_k}$ with uniformly random phases $\phi_k \sim \mathcal{U}(0, 2\pi)$, enforcing conjugate symmetry $\hat{\eta}_{-k} = \overline{\hat{\eta}_k}$ for a real-valued field. The result is then rescaled so that
+\begin{equation}
+    \operatorname{std}(\eta) = \frac{H_s}{4},
+\end{equation}
+matching the standard relation between significant wave height and surface standard deviation.
+
+\section{Surface potential $\xi$}
+
+The surface potential is derived from $\eta$ via the linear deep-water dispersion relation. In Fourier space:
+\begin{equation}
+    \hat{\xi}_k = -i\, \operatorname{sign}(k) \sqrt{\frac{g}{|k|}}\; \hat{\eta}_k.
+\end{equation}
+This is the exact relationship for linear deep-water waves where $\omega(k) = \sqrt{g|k|}$, giving the velocity potential at the surface consistent with the surface elevation. The zero mode is excluded ($\hat{\xi}_0 = 0$).
+
+\section{DNO target $G(\eta;\, h)\,\xi$}
+
+The Dirichlet--Neumann operator is evaluated using a truncated Taylor series in $\eta$ (order $M = 6$) via \texttt{dno\_series\_eval}, with a dealiasing pad factor of 8. This gives the vertical fluid velocity at the free surface corresponding to the $(\eta, \xi)$ pair at depth $h = 1000$, exact to truncation order.
+
+Evaluation is batched (batch size 64) to exploit JAX's vectorized FFT operations.
+
+\section{Dataset statistics (100k samples)}
+
+\begin{center}
+\begin{tabular}{ll}
+    $\|\eta\|_\infty$ & 0.68 \\
+    $\|\xi\|_\infty$ & 1.52 \\
+    $\|G(\eta)\xi\|_\infty$ & 0.46
+\end{tabular}
+\end{center}
+
+\section{Motivation}
+
+Deep water does not support large-amplitude localized solitary gravity waves (a classical result). Stokes waves are the canonical nonlinear deep-water profiles but have limited spectral diversity (single-frequency with harmonics). Random sea states provide a physically realistic, spectrally diverse training distribution that covers the smooth, moderate-amplitude regime relevant to deep-water wave dynamics.
+
+\end{document}

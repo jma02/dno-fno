@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n_blocks", type=int, default=8)
     parser.add_argument("--spectral_floor", type=float, default=1e-3)
     parser.add_argument("--epsilon", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--loss", choices=("sobolev", "lp"), default="sobolev")
+    parser.add_argument("--sobolev_k", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=400)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -208,7 +208,7 @@ def main() -> None:
     )
     init_inputs = jnp.asarray(train_inputs[:1])
     params = model.init(jax.random.PRNGKey(args.seed), init_inputs)["params"]
-    loss_fn = build_loss(args.loss)
+    loss_fn = build_loss(sobolev_k=args.sobolev_k)
 
     optimizer = optax.adamw(learning_rate=args.lr, weight_decay=args.weight_decay)
     state = train_state.TrainState.create(
@@ -227,7 +227,7 @@ def main() -> None:
         "spectral_width": spectral_width,
         "n_blocks": args.n_blocks,
         "spectral_floor": spectral_floor,
-        "loss": args.loss,
+        "sobolev_k": args.sobolev_k,
         "batch_size": args.batch_size,
         "lr": args.lr,
         "epochs": args.epochs,

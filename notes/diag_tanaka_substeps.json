@@ -1,0 +1,140 @@
+{
+  "run_dir": "outputs/cs_dno_w512b8_l256_v5_2gpu_20260615_141717",
+  "outer_dt": 0.8,
+  "tmax": 200.0,
+  "gl2_iters": 4,
+  "results": [
+    {
+      "regime": "tanaka_g0",
+      "case_id": 5,
+      "depth": 0.2761293053627014,
+      "substeps": 80,
+      "inner_dt": 0.01,
+      "nan_time": 42.400000000000006,
+      "max_finite_t": 41.6,
+      "rel_l2_eta_at_last_finite": 0.3848470367002834,
+      "wall_s": 112.7103419881314
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_id": 5,
+      "depth": 0.2761293053627014,
+      "substeps": 160,
+      "inner_dt": 0.005,
+      "nan_time": 43.2,
+      "max_finite_t": 42.400000000000006,
+      "rel_l2_eta_at_last_finite": NaN,
+      "wall_s": 221.77953678695485
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_id": 5,
+      "depth": 0.2761293053627014,
+      "substeps": 320,
+      "inner_dt": 0.0025,
+      "nan_time": 42.400000000000006,
+      "max_finite_t": 41.6,
+      "rel_l2_eta_at_last_finite": 0.30163650564657934,
+      "wall_s": 441.3016839232296
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_id": 11,
+      "depth": 0.23385371267795563,
+      "substeps": 80,
+      "inner_dt": 0.01,
+      "nan_time": 91.2,
+      "max_finite_t": 90.4,
+      "rel_l2_eta_at_last_finite": 0.5688875831234476,
+      "wall_s": 111.69583458686247
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_id": 11,
+      "depth": 0.23385371267795563,
+      "substeps": 160,
+      "inner_dt": 0.005,
+      "nan_time": 109.60000000000001,
+      "max_finite_t": 108.80000000000001,
+      "rel_l2_eta_at_last_finite": 0.7876369685546325,
+      "wall_s": 221.77040704805404
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_id": 11,
+      "depth": 0.23385371267795563,
+      "substeps": 320,
+      "inner_dt": 0.0025,
+      "nan_time": 100.80000000000001,
+      "max_finite_t": 100.0,
+      "rel_l2_eta_at_last_finite": 0.3724045648909458,
+      "wall_s": 441.4262936618179
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000006,
+      "depth": 0.29276910424232483,
+      "substeps": 80,
+      "inner_dt": 0.01,
+      "nan_time": 96.0,
+      "max_finite_t": 95.2,
+      "rel_l2_eta_at_last_finite": 0.3482897049268532,
+      "wall_s": 112.0434009321034
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000006,
+      "depth": 0.29276910424232483,
+      "substeps": 160,
+      "inner_dt": 0.005,
+      "nan_time": 98.4,
+      "max_finite_t": 97.60000000000001,
+      "rel_l2_eta_at_last_finite": 0.4005957619578382,
+      "wall_s": 221.27100827731192
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000006,
+      "depth": 0.29276910424232483,
+      "substeps": 320,
+      "inner_dt": 0.0025,
+      "nan_time": 98.4,
+      "max_finite_t": 97.60000000000001,
+      "rel_l2_eta_at_last_finite": 0.2939687362799586,
+      "wall_s": 441.1573922657408
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000011,
+      "depth": 0.011286163702607155,
+      "substeps": 80,
+      "inner_dt": 0.01,
+      "nan_time": null,
+      "max_finite_t": 200.0,
+      "rel_l2_eta_at_last_finite": 1.4329611477720197,
+      "wall_s": 112.08097957493737
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000011,
+      "depth": 0.011286163702607155,
+      "substeps": 160,
+      "inner_dt": 0.005,
+      "nan_time": null,
+      "max_finite_t": 200.0,
+      "rel_l2_eta_at_last_finite": 1.4329772642016656,
+      "wall_s": 221.85615836642683
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_id": 1000011,
+      "depth": 0.011286163702607155,
+      "substeps": 320,
+      "inner_dt": 0.0025,
+      "nan_time": null,
+      "max_finite_t": 200.0,
+      "rel_l2_eta_at_last_finite": 1.4329377317235972,
+      "wall_s": 441.65903867408633
+    }
+  ]
+}

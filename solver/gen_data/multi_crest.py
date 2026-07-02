@@ -108,6 +108,72 @@ def sample_random_cases(
     ]
 
 
+def sample_sum_budgeted_crest_specs(
+    rng: np.random.Generator,
+    *,
+    length: float,
+    case_amplitude_min: float,
+    case_amplitude_max: float,
+    min_crests: int,
+    max_crests: int,
+    min_separation: float,
+    per_crest_floor: float,
+) -> list[CrestSpec]:
+    """Draw a case where the *sum* of per-crest amplitudes is budgeted.
+
+    Picks a case-level budget S ~ U(case_amplitude_min, case_amplitude_max),
+    then splits via Dirichlet(1,...,1) into N crests; clamps each crest to at
+    least `per_crest_floor` and renormalizes so the sum still equals S. The
+    sum-budget is the relevant quantity for DNO-series convergence on the
+    [0, 2π] domain because soliton tails superpose additively.
+    """
+    n_crests = int(rng.integers(min_crests, max_crests + 1))
+    if per_crest_floor * n_crests > case_amplitude_max:
+        raise ValueError(
+            f"per_crest_floor*max_crests={per_crest_floor * n_crests} exceeds "
+            f"case_amplitude_max={case_amplitude_max}; loosen the floor or the budget."
+        )
+    case_budget = float(rng.uniform(case_amplitude_min, case_amplitude_max))
+    case_budget = max(case_budget, per_crest_floor * n_crests)
+    weights = rng.dirichlet(np.ones(n_crests))
+    raw = case_budget * weights
+    clamped = np.maximum(raw, per_crest_floor)
+    amps = clamped * (case_budget / clamped.sum())
+    centers = sample_centers(rng, n_crests, length, min_separation)
+    directions = rng.choice(np.array([-1, 1], dtype=int), size=n_crests)
+    return [
+        CrestSpec(amplitude=float(a), center=float(c), direction=int(d))
+        for a, c, d in zip(amps, centers, directions)
+    ]
+
+
+def sample_sum_budgeted_cases(
+    rng: np.random.Generator,
+    n_cases: int,
+    *,
+    length: float,
+    case_amplitude_min: float,
+    case_amplitude_max: float,
+    min_crests: int,
+    max_crests: int,
+    min_separation: float,
+    per_crest_floor: float,
+) -> list[list[CrestSpec]]:
+    return [
+        sample_sum_budgeted_crest_specs(
+            rng,
+            length=length,
+            case_amplitude_min=case_amplitude_min,
+            case_amplitude_max=case_amplitude_max,
+            min_crests=min_crests,
+            max_crests=max_crests,
+            min_separation=min_separation,
+            per_crest_floor=per_crest_floor,
+        )
+        for _ in range(n_cases)
+    ]
+
+
 def flatten_case_specs(case_specs: list[list[CrestSpec]]) -> tuple[list[CrestSpec], np.ndarray]:
     flat_specs: list[CrestSpec] = []
     crest_case_ids: list[int] = []

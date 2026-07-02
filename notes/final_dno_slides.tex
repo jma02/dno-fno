@@ -1,0 +1,357 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usetheme{metropolis}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+
+% Blue color scheme (overrides metropolis defaults)
+\definecolor{mDarkTeal}{HTML}{1c3d6b}    % frame titles, structure
+\definecolor{mLightBrown}{HTML}{2f6fb3}  % alerted text / secondary
+\definecolor{mLightGreen}{HTML}{4a90d9}  % example / tertiary
+\setbeamercolor{structure}{fg=mDarkTeal}
+\setbeamercolor{title}{fg=mDarkTeal}
+\setbeamercolor{frametitle}{bg=mDarkTeal, fg=white}
+\setbeamercolor{alerted text}{fg=mLightBrown}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Gop}{\mathcal{G}}
+
+\title{Training Data for the DNO Surrogate}
+\subtitle{Wave families, depth coverage, and rescaled test sets}
+\date{\today}
+\author{Jonathan Ma}
+
+\begin{document}
+
+\begin{frame}\titlepage\end{frame}
+
+% ============================================================
+\begin{frame}{Recap}
+
+The depth-conditioned FNO was previously trained on 200k samples:
+Tanaka solitons at $h=1$ and random sea at $h=1000$. Evaluation used
+legacy Stokes, soliton, and linear test sets.
+
+\pause
+This deck describes the current training data, and how the legacy
+test sets fit into the same coordinate system.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Inputs to the DNO}
+
+\[
+  (\eta,\; \xi,\; h) \;\longmapsto\; \Gop(\eta;h)\xi
+\]
+
+\begin{itemize}
+  \item Surface elevation $\eta$
+  \item Surface velocity potential $\xi$, consistent with $\eta$ via the Laplace BVP
+  \item \emph{Depth $h$}
+\end{itemize}
+
+\pause
+The dimensionless depth $kh$ separates regimes: deep $kh \gg 1$,
+finite $kh \sim 1$, shallow $kh \ll 1$. Training data must span all three.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Five wave families}
+
+\begin{itemize}
+  \item Random sea: broadband, phase-randomized, multi-scale
+  \item Stokes wavetrains: analytic, narrowband, sharp-crested
+  \item Linear wavetrains: single trig mode
+  \item Tanaka solitons: localized, large-amplitude, shallow
+  \item Benjamin--Feir: modulated narrowband, deep
+\end{itemize}
+
+\pause
+Each family is generated at multiple depths.
+\end{frame}
+
+% ============================================================
+\begin{frame}{The combined dataset}
+
+\small
+\begin{tabular}{llll}
+\toprule
+source & samples & family & regime \\
+\midrule
+\texttt{random\_sea\_deep}        & 241k  & broadband        & deep \\
+\texttt{random\_sea\_finite}      & 220k  & broadband        & finite \\
+\texttt{linear}                   & 500k  & single mode      & shallow--deep \\
+\texttt{stokes\_deep}             & 500k  & Stokes-5         & deep \\
+\texttt{stokes\_finite}           & 500k  & Stokes-5         & finite--shallow \\
+\texttt{tanaka}                   & 2.0M  & solitary         & shallow \\
+\texttt{bf}                       & 2.0M  & Benjamin--Feir   & deep \\
+\midrule
+total                             & $\sim$6.0M & & \\
+\bottomrule
+\end{tabular}
+
+\pause
+\vspace{0.5em}
+Single shuffled file \texttt{combined\_dataset\_v3.npz} on $[0, 2\pi]$, $N_x = 1024$.
+Metadata: $(\eta, \xi, \Gop\xi, h, t, \text{data source})$.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Random parameters per family (part 1)}
+
+\scriptsize
+\renewcommand{\arraystretch}{0.95}
+\begin{tabular}{lll}
+\toprule
+family & parameter & distribution \\
+\midrule
+\textbf{linear}     & $n_0$              & $\mathrm{U}\{1, \ldots, 20\}$ \\
+                    & $a_0$              & $\mathrm{U}[10^{-4},\,1.15\cdot 10^{-2}]$, reject on $\varepsilon$ \\
+                    & $\varepsilon = k_0 a_0$ & $[5\cdot 10^{-3},\,0.15]$ \\
+                    & $h$                & $\log\mathrm{U}[0.02,\,1.5]$, $kh \in [0.02,\,20]$ \\
+                    & phase, direction   & $\mathrm{U}[0, 2\pi]$, $\{\pm 1\}$ \\
+\midrule
+\textbf{stokes\_deep}   & $n_0$               & $\mathrm{U}\{1, \ldots, 20\}$ \\
+                        & $a_0$               & $\mathrm{U}[7.66\cdot 10^{-4},\,1.15\cdot 10^{-2}]$, $\varepsilon \le 0.15$ \\
+                        & $h$                 & $\log\mathrm{U}[4,\,50]$ \\
+                        & $t$                 & $\mathrm{U}[0, 20]$ \\
+\midrule
+\textbf{stokes\_finite} & $n_0$               & $\mathrm{U}\{14, \ldots, 26\}$ \\
+                        & $a_0$               & $\mathrm{U}[7.66\cdot 10^{-4},\,1.15\cdot 10^{-2}]$, $\varepsilon \le 0.15$ \\
+                        & $h$                 & $\log\mathrm{U}[0.02,\,1.5]$, $kh \in [0.5,\,5]$ \\
+                        & $t$                 & $\mathrm{U}[0, 20]$ \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.2em}
+\scriptsize
+\end{frame}
+
+% ============================================================
+\begin{frame}{Random parameters per family (part 2)}
+
+\scriptsize
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular}{lll}
+\toprule
+family & parameter & distribution \\
+\midrule
+\textbf{random sea} & $H_s$                  & $\mathrm{U}[0.1,\,0.6]$ \\
+                    & $k_p$                  & $\mathrm{U}[0.06,\,0.50]$ \\
+                    & bandwidth $\gamma$     & $\mathrm{U}[1.5,\,5.0]$ \\
+                    & $h$                    & $\log\mathrm{U}[h_{\min},h_{\max}]$ per regime \\
+                    & Fourier phases         & i.i.d.\ $\mathrm{U}[0, 2\pi]$ \\
+\midrule
+\textbf{Tanaka}     & $n_{\text{crests}}$    & $\mathrm{U}\{n_{\min}, \ldots, n_{\max}\}$ \\
+                    & per-crest weights      & Dirichlet$(\mathbf{1})$ \\
+                    & centers, directions    & uniform / min-sep; $\{\pm 1\}$ \\
+                    & $h$                    & $\log\mathrm{U}[0.01,\,h_{\max}]$ \\
+\midrule
+\textbf{BF}         & $n_{\text{carr}}$      & $\mathrm{U}\{4, \ldots, 20\}$ \\
+                    & $\varepsilon_{\text{carrier}}$ & $\mathrm{U}[0.05,\,0.13]$ \\
+                    & offset, $\varepsilon_{\text{pert}}$ & $\mathrm{U}\{2,3,4\}$, $\mathrm{U}[0.05,\,0.20]$ \\
+                    & $h$                    & $\log\mathrm{U}[0.5,\,4.0]$ \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.2em}
+\scriptsize
+Time-evolution datasets: each draw rolls out the Euler equations in time, and saves $K$ saved snapshots.
+We use adaptive sampling for the \emph{Tanaka and BF} datasets. We use uniform sampling for the random sea dataset.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Stokes-5 wavetrains}
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+source & $h$ & $kh$ \\
+\midrule
+\texttt{stokes\_deep}     & $\log\mathrm{U}[4,\,50]$    & $\gg 1$ \\
+\texttt{stokes\_finite}   & $\log\mathrm{U}[0.02,\,1.5]$ & $[0.5,\,5]$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\pause
+Provides narrowband, sharp-crested, single-mode profiles that random sea
+data does not produce.
+
+\pause
+\small{For \texttt{stokes\_finite} the $kh \geq 0.5$ floor avoids the
+$1/\sinh(kh)^7$ singularities in the Fenton coefficients. Steepness
+$\varepsilon = k_0 a_0 \le 0.15$.}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Linear wavetrains}
+
+Single-mode $(\eta,\xi)$ at the linear dispersion relation, with the MATLAB
+$\xi$ including the $\cosh(k_0(\eta + h))/\cosh(k_0 h)$ free-surface factor:
+\[
+  \eta = a_0 \cos(k_0 x + \phi), \qquad
+  \xi  = \pm \frac{a_0 g}{\omega} \cdot \frac{\cosh(k_0(\eta+h))}{\cosh(k_0 h)} \sin(k_0 x + \phi).
+\]
+$h \sim \log\mathrm{U}[0.02,\,1.5]$ with $kh \in [0.02,\,20]$.
+
+\pause
+Linear theory has no asymptotic-validity restriction and covers the
+$kh \ll 1$ tail that Stokes cannot reach.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Benjamin--Feir wavetrains}
+
+A deep-water Stokes carrier with a small sideband perturbation, integrated
+for hundreds of carrier periods. The trajectory exhibits the full modulational
+instability cycle: sideband growth, energy concentration, recurrence.
+
+\pause
+Provides deep-water large-amplitude narrowband data. Random sea is broadband,
+Stokes has no envelope evolution, so neither covers this regime.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Adaptive temporal sampling (Tanaka, BF)}
+
+For time-evolving families we roll out the Euler equations on a dense grid
+($\Delta t = 0.08$, $t_{\max} = 200$, $T = 2501$) but only save $K = 200$
+snapshots per case. Uniform sampling of time snapshots do not well represent the
+events that
+are most important in each rollout: soliton collisions in Tanaka, recurrence in BF.
+
+\pause
+\textbf{Per-case density.} For each trajectory $b$, define the following probability distribution by the density:
+\[
+  \mathrm{density}_b(t) = (1-\alpha)\,\mathrm{uniform}(t) + \alpha \cdot
+  \mathrm{smooth}_\sigma\!\bigl(\mathrm{activity}_b(t)^p\bigr),
+\]
+and $K$ snapshot indices are drawn via deterministic inverse-CDF at the
+$K$ equispaced quantiles.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Activity signals}
+
+\small
+Use
+\emph{non-conserved} scalar values as our activity functions:
+\begin{itemize}\setlength{\itemsep}{0.2em}
+  \item \textbf{Tanaka (rate).}
+  $S(t) = \|\eta_x\|_2^2$, $\mathrm{activity} = |dS/dt|/(S+\varepsilon)$.
+  $|dS/dt|$ is large on both sides of a collision $\Rightarrow$ symmetric
+  clustering around the event.
+
+  \item \textbf{Benjamin--Feir (magnitude).}
+  $M(t) = \|\eta\|_\infty$, $\mathrm{activity} = (M - \min_t M)^p$.
+  Envelope modulates $\sim 20\%$, so $p = 4$ locks onto recurrence humps.
+\end{itemize}
+
+\scriptsize
+\renewcommand{\arraystretch}{0.9}
+\begin{tabular}{lcc}
+\toprule
+                  & Tanaka                      & BF                          \\
+\midrule
+signal            & $\|\eta_x\|^2$              & $\|\eta\|_\infty$           \\
+density mode      & rate $|dS/dt|/S$            & magnitude $M-\min M$        \\
+$\alpha$ (bias)   & 0.5                         & 0.85                        \\
+$\sigma$ (smooth, steps) & 50                  & 20                          \\
+power $p$         & 1.0                         & 4.0                         \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Random sea and Tanaka updates}
+
+Random sea is now generated at variable depth:
+\begin{itemize}
+  \item Deep: $h \sim \mathcal{U}_{\log}[5,\,25]$
+  \item Finite: $h \sim \mathcal{U}_{\log}[0.5,\,5]$
+\end{itemize}
+
+\pause
+Tanaka now uses multi-crest initial conditions, 1--3 crests, with the
+composite $\Gop$ recomputed nonlinearly. Two gauge variants
+\texttt{tanaka\_g0/g1} contribute 1\,M samples each.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Coverage in $(k_p, h)$}
+
+\begin{itemize}
+  \item Tanaka: shallow, large-amplitude, localized
+  \item Linear very-shallow: $kh \ll 1$
+  \item Stokes finite: moderate $kh$
+  \item Random sea finite, deep: broadband mid and deep
+  \item Stokes deep, BF: deep narrowband
+\end{itemize}
+
+\pause
+The training distribution is the union of these regions.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Mapping legacy test sets to the canonical domain}
+
+The reference test set is on $[0,\,164]$. Map it to $[0, 2\pi]$ via the
+Zakharov-invariant rescaling under $(x, y, t) \to (\alpha X, \alpha Y, \sqrt\alpha\,\tau)$
+with $\alpha = 164 / (2\pi) \approx 26$:
+\[
+  \eta_{\text{new}} = \tfrac{\eta_{\text{old}}}{\alpha}, \quad
+  \xi_{\text{new}}  = \tfrac{\xi_{\text{old}}}{\alpha^{3/2}}, \quad
+  \Gop\xi_{\text{new}} = \tfrac{\Gop\xi_{\text{old}}}{\alpha^{1/2}}, \quad
+  h_{\text{new}}    = \tfrac{h_{\text{old}}}{\alpha}.
+\]
+
+\pause
+Powers from $[\eta]=L$, $[\xi]=L^2/T$, $[\Gop\xi]=L/T$ with $g$ preserved.
+The static Laplace BVP closes under any common factor on $(\xi, \Gop\xi)$;
+the Zakharov powers preserve numerical magnitudes between old and new domains.
+
+\pause
+The legacy stokes set mixes deep ($h_{\text{use}} = 1000$) and
+finite-depth ($h = 1$) samples. Each subset is rescaled with its own
+$h_{\text{old}}$.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Out-of-range depth at test time}
+
+After rescaling, deep-water test cases sit at $h_{\text{new}} \approx 38$.
+Training depths span $[0.01,\,50]$ (\texttt{stokes\_deep} up to $50$).
+
+\pause
+Physically the test cases are in distribution: $kh \gg 5$, $\tanh(kh) \to 1$,
+operator unchanged. The depth feature value passed to the network is not.
+
+\pause
+\textbf{Saturating depth clip} applied inside the model:
+\[
+  h_{\text{enc}} \;=\; \min(h,\; h_{\text{sat}}), \qquad h_{\text{sat}} = 5.
+\]
+The threshold matches the slide's deep-water criterion: at $k_{\min} = 1$,
+$\tanh(1 \cdot 5) \approx 0.99991$. All $h \ge 5$ samples
+(\texttt{stokes\_deep} training, rescaled deep-water tests) share one
+depth encoding; finite-depth families ($h \le 4$) are untouched.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Summary}
+
+\begin{itemize}
+  \item Five wave families across shallow, finite, and deep regimes
+  \item One canonical domain $[0, 2\pi]$, one combined $\sim$5\,M-sample dataset
+  \item Legacy test sets ported via Zakharov-invariant rescaling, with
+        per-subset $h_{\text{old}}$
+  \item Depth feature clipped at $h_{\text{sat}} = 5$ inside the model so
+        all deep-water cases (training + test) share one encoding
+  \item Open work: getting the model converged and accurate across all sources
+\end{itemize}
+\end{frame}
+
+\end{document}

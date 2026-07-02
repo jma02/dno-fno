@@ -20,7 +20,6 @@ from .modified_tanaka import (
     ModifiedTanakaParams,
     ModifiedTanakaSolution,
     make_default_tanaka_template,
-    solve_modified_tanaka,
     solve_modified_tanaka_batched,
     solve_tanaka_branch,
 )

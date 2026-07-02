@@ -1,0 +1,343 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{hyperref}
+
+\title{Scaling Relation Between $G$ and $G_\alpha$ for the 1D Periodic Dirichlet--Neumann Operator}
+\author{}
+\date{}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+
+\section{Original problem on $[0,2\pi]$}
+
+Let $x \in [0,2\pi]$ be the horizontal variable, with periodic boundary conditions, and let the fluid domain be
+\[
+\Omega_\eta
+=
+\{(x,y): x \in [0,2\pi],\ -h < y < \eta(x)\}.
+\]
+Given a surface profile $\eta(x)$ and boundary data $\xi(x)$, let $\phi(x,y)$ solve
+\begin{equation}
+\begin{cases}
+\phi_{xx} + \phi_{yy} = 0, & (x,y) \in \Omega_\eta,\\[0.3em]
+\phi_y(x,-h)=0,\\[0.3em]
+\phi(x,\eta(x))=\xi(x),
+\end{cases}
+\label{eq:orig_bvp}
+\end{equation}
+with $2\pi$-periodicity in $x$.
+
+The Dirichlet--Neumann operator is defined by
+\begin{equation}
+G(\eta)\xi
+=
+\left( -\eta_x,\, 1 \right)\cdot \nabla \phi \Big|_{y=\eta(x)}
+=
+\phi_y(x,\eta(x))-\eta_x(x)\phi_x(x,\eta(x)).
+\label{eq:G_def}
+\end{equation}
+
+\section{Rescaled problem on $[0,2\pi\alpha]$}
+
+Now fix $\alpha>0$ and consider the new horizontal domain
+\[
+x \in [0,2\pi\alpha].
+\]
+We also scale the depth by the same factor, so the new fluid domain is
+\[
+\Omega^{(\alpha)}_\eta
+=
+\{(x,y): x \in [0,2\pi\alpha],\ -h\alpha < y < \eta(x)\}.
+\]
+Given a surface profile $\eta(x)$ and boundary data $\xi(x)$ on $[0,2\pi\alpha]$, let $\Phi(x,y)$ solve
+\begin{equation}
+\begin{cases}
+\Phi_{xx} + \Phi_{yy} = 0, & (x,y) \in \Omega^{(\alpha)}_\eta,\\[0.3em]
+\Phi_y(x,-h\alpha)=0,\\[0.3em]
+\Phi(x,\eta(x))=\xi(x),
+\end{cases}
+\label{eq:alpha_bvp}
+\end{equation}
+with $2\pi\alpha$-periodicity in $x$.
+
+We define the corresponding Dirichlet--Neumann operator by
+\begin{equation}
+G_\alpha(\eta)\xi
+=
+\left( -\eta_x,\, 1 \right)\cdot \nabla \Phi \Big|_{y=\eta(x)}
+=
+\Phi_y(x,\eta(x))-\eta_x(x)\Phi_x(x,\eta(x)).
+\label{eq:Galpha_def}
+\end{equation}
+
+\section{Change of variables}
+
+To compare $G$ and $G_\alpha$, introduce the rescaled variables
+\begin{equation}
+x = \alpha X,
+\qquad
+y = \alpha Y,
+\label{eq:change_var}
+\end{equation}
+so that
+\[
+X \in [0,2\pi].
+\]
+Given a function $\Phi(x,y)$ on the rescaled domain, define
+\begin{equation}
+\phi(X,Y) := \Phi(\alpha X,\alpha Y).
+\label{eq:phi_pullback}
+\end{equation}
+We also define the pulled-back surface and Dirichlet data by
+\begin{equation}
+\widetilde{\eta}(X) := \frac{1}{\alpha}\eta(\alpha X),
+\qquad
+\widetilde{\xi}(X) := \xi(\alpha X).
+\label{eq:eta_xi_tilde}
+\end{equation}
+
+\subsection*{Step 1: the domain becomes $[0,2\pi] \times [-h,\widetilde{\eta}(X)]$}
+
+Indeed, the bottom boundary $y=-h\alpha$ becomes
+\[
+Y=-h,
+\]
+and the free surface $y=\eta(x)$ becomes
+\[
+\alpha Y = \eta(\alpha X)
+\quad \Longleftrightarrow \quad
+Y = \frac{1}{\alpha}\eta(\alpha X)=\widetilde{\eta}(X).
+\]
+Hence the transformed domain is
+\[
+\widetilde{\Omega}
+=
+\{(X,Y): X\in[0,2\pi],\ -h<Y<\widetilde{\eta}(X)\}.
+\]
+
+\subsection*{Step 2: the Laplace equation is preserved}
+
+From \eqref{eq:phi_pullback},
+\[
+\phi_X(X,Y) = \alpha\, \Phi_x(\alpha X,\alpha Y),
+\qquad
+\phi_Y(X,Y) = \alpha\, \Phi_y(\alpha X,\alpha Y).
+\]
+Differentiating once more,
+\[
+\phi_{XX}(X,Y)=\alpha^2 \Phi_{xx}(\alpha X,\alpha Y),
+\qquad
+\phi_{YY}(X,Y)=\alpha^2 \Phi_{yy}(\alpha X,\alpha Y).
+\]
+Therefore
+\[
+\phi_{XX}+\phi_{YY}
+=
+\alpha^2(\Phi_{xx}+\Phi_{yy})=0.
+\]
+So $\phi$ is harmonic in $\widetilde{\Omega}$.
+
+\subsection*{Step 3: the bottom boundary condition is preserved}
+
+Since
+\[
+\phi_Y(X,Y)=\alpha\,\Phi_y(\alpha X,\alpha Y),
+\]
+at $Y=-h$ we get
+\[
+\phi_Y(X,-h)=\alpha\,\Phi_y(\alpha X,-h\alpha)=0.
+\]
+
+\subsection*{Step 4: the Dirichlet boundary condition becomes $\phi(X,\widetilde{\eta}(X))=\widetilde{\xi}(X)$}
+
+On the free surface,
+\[
+\phi(X,\widetilde{\eta}(X))
+=
+\Phi(\alpha X,\alpha \widetilde{\eta}(X))
+=
+\Phi(\alpha X,\eta(\alpha X))
+=
+\xi(\alpha X)
+=
+\widetilde{\xi}(X).
+\]
+
+Therefore $\phi$ solves the boundary value problem
+\begin{equation}
+\begin{cases}
+\phi_{XX}+\phi_{YY}=0, & -h<Y<\widetilde{\eta}(X),\\[0.3em]
+\phi_Y(X,-h)=0,\\[0.3em]
+\phi(X,\widetilde{\eta}(X))=\widetilde{\xi}(X),
+\end{cases}
+\label{eq:transformed_bvp}
+\end{equation}
+with $2\pi$-periodicity in $X$.
+
+By definition, this means that $\phi$ is exactly the harmonic extension associated with the operator
+\[
+G(\widetilde{\eta})\widetilde{\xi}.
+\]
+
+\section{Transformation of the Dirichlet--Neumann operator}
+
+We now compute the relation between $G_\alpha$ and $G$.
+
+From \eqref{eq:phi_pullback},
+\[
+\Phi_x(\alpha X,\alpha Y)=\frac{1}{\alpha}\phi_X(X,Y),
+\qquad
+\Phi_y(\alpha X,\alpha Y)=\frac{1}{\alpha}\phi_Y(X,Y).
+\]
+Also, from \eqref{eq:eta_xi_tilde},
+\[
+\widetilde{\eta}_X(X)
+=
+\frac{d}{dX}\left( \frac{1}{\alpha}\eta(\alpha X)\right)
+=
+\eta_x(\alpha X).
+\]
+Hence
+\[
+\eta_x(\alpha X)=\widetilde{\eta}_X(X).
+\]
+
+Evaluating \eqref{eq:Galpha_def} at the point $x=\alpha X$, we obtain
+\begin{align*}
+\bigl(G_\alpha(\eta)\xi\bigr)(\alpha X)
+&=
+\Phi_y(\alpha X,\eta(\alpha X))
+-
+\eta_x(\alpha X)\Phi_x(\alpha X,\eta(\alpha X))\\
+&=
+\frac{1}{\alpha}\phi_Y(X,\widetilde{\eta}(X))
+-
+\widetilde{\eta}_X(X)\frac{1}{\alpha}\phi_X(X,\widetilde{\eta}(X))\\
+&=
+\frac{1}{\alpha}
+\Bigl(
+\phi_Y(X,\widetilde{\eta}(X))
+-
+\widetilde{\eta}_X(X)\phi_X(X,\widetilde{\eta}(X))
+\Bigr).
+\end{align*}
+Using the definition of $G$ in \eqref{eq:G_def}, this becomes
+\begin{equation}
+\boxed{
+\bigl(G_\alpha(\eta)\xi\bigr)(\alpha X)
+=
+\frac{1}{\alpha}
+\bigl(G(\widetilde{\eta})\widetilde{\xi}\bigr)(X),
+}
+\label{eq:main_relation_pointwise}
+\end{equation}
+where
+\[
+\widetilde{\eta}(X)=\frac{1}{\alpha}\eta(\alpha X),
+\qquad
+\widetilde{\xi}(X)=\xi(\alpha X).
+\]
+
+\section{Operator form}
+
+Define the pullback operator $T_\alpha$ by
+\[
+(T_\alpha f)(X):=f(\alpha X),
+\]
+which maps $2\pi\alpha$-periodic functions to $2\pi$-periodic functions.
+
+Then
+\[
+\widetilde{\xi}=T_\alpha \xi,
+\qquad
+\widetilde{\eta}=\frac{1}{\alpha}T_\alpha \eta.
+\]
+Equation \eqref{eq:main_relation_pointwise} can be written as
+\begin{equation}
+\boxed{
+T_\alpha\bigl(G_\alpha(\eta)\xi\bigr)
+=
+\frac{1}{\alpha}
+G\!\left( \frac{1}{\alpha}T_\alpha \eta \right)(T_\alpha \xi).
+}
+\label{eq:main_relation_operator}
+\end{equation}
+Equivalently,
+\begin{equation}
+\boxed{
+G_\alpha(\eta)
+=
+T_\alpha^{-1}
+\left[
+\frac{1}{\alpha}
+G\!\left( \frac{1}{\alpha}T_\alpha \eta \right)
+\right]
+T_\alpha.
+}
+\label{eq:main_relation_conjugation}
+\end{equation}
+
+\section{Flat-surface check}
+
+As a consistency check, let $\eta\equiv 0$. Then on the $2\pi$-periodic strip,
+\[
+G(0)=|D|\tanh(h|D|),
+\qquad D=-i\partial_X.
+\]
+On the $2\pi\alpha$-periodic strip with depth $h\alpha$,
+\[
+G_\alpha(0)=|D_x|\tanh(h\alpha |D_x|),
+\qquad D_x=-i\partial_x.
+\]
+Under the change $x=\alpha X$, we have
+\[
+D_x=\frac{1}{\alpha}D.
+\]
+Therefore
+\[
+|D_x|\tanh(h\alpha |D_x|)
+=
+\frac{1}{\alpha}|D|\tanh(h|D|),
+\]
+which is exactly consistent with \eqref{eq:main_relation_operator}.
+
+\begin{proposition}
+Let $G$ be the Dirichlet--Neumann operator on the $2\pi$-periodic domain with depth $h$, and let $G_\alpha$ be the Dirichlet--Neumann operator on the $2\pi\alpha$-periodic domain with depth $h\alpha$. Then, with
+\[
+(T_\alpha f)(X)=f(\alpha X),
+\]
+one has
+\[
+T_\alpha\bigl(G_\alpha(\eta)\xi\bigr)
+=
+\frac{1}{\alpha}
+G\!\left( \frac{1}{\alpha}T_\alpha\eta \right)(T_\alpha\xi).
+\]
+Equivalently,
+\[
+G_\alpha(\eta)
+=
+T_\alpha^{-1}
+\left[
+\frac{1}{\alpha}
+G\!\left( \frac{1}{\alpha}T_\alpha\eta \right)
+\right]
+T_\alpha.
+\]
+\end{proposition}
+
+\begin{remark}
+The key point is that both the horizontal variable and the vertical variable are scaled by the same factor $\alpha$. Because of this, the transformed boundary value problem again has depth $h$ on the reference interval $[0,2\pi]$, and the Dirichlet--Neumann operator picks up exactly one prefactor $1/\alpha$.
+\end{remark}
+
+\section{What to do next}
+We will now start to investigate the case when the width and depth of the domain are scaled differently.
+
+\end{document}

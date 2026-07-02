@@ -1,0 +1,236 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usetheme{metropolis}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+
+\definecolor{mDarkTeal}{HTML}{1c3d6b}
+\definecolor{mLightBrown}{HTML}{2f6fb3}
+\definecolor{mLightGreen}{HTML}{4a90d9}
+\setbeamercolor{structure}{fg=mDarkTeal}
+\setbeamercolor{title}{fg=mDarkTeal}
+\setbeamercolor{frametitle}{bg=mDarkTeal, fg=white}
+\setbeamercolor{alerted text}{fg=mLightBrown}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Gop}{\mathcal{G}}
+\newcommand{\sgrad}{\operatorname{sg}}
+
+\title{Improving Long-Rollout Accuracy of the DNO Surrogate}
+\subtitle{Two training-time approaches we are evaluating}
+\date{\today}
+\author{Jonathan Ma}
+
+\begin{document}
+
+\begin{frame}\titlepage\end{frame}
+
+% ============================================================
+\begin{frame}{The rollout problem}
+
+The surrogate learns to predict the Dirichlet--Neumann operator
+$\Gop(\eta)\xi$ from snapshots of $(\eta,\xi,h)$, then is iterated
+forward in time with a Zakharov integrator.
+
+\medskip
+
+Pointwise (single-step) accuracy is high. \alert{Long-time rollouts
+are not.}
+
+\pause
+\medskip
+
+On evaluation regimes (Tanaka solitons, Benjamin--Feir, Stokes,
+random sea, linear), we observe error that grows
+\emph{coherently in time}, dominated by modes the model is
+\emph{supposed} to resolve --- not by aliasing, not by high-$k$
+noise.
+
+\medskip
+
+The question: how do we train the surrogate to remain accurate when
+fed its own predictions?
+\end{frame}
+
+% ============================================================
+\begin{frame}{Why one-step training is insufficient}
+
+Standard objective: given a data pair $(\eta,\xi) \mapsto \Gop(\eta)\xi$,
+minimise a Sobolev-$H^k$ loss against the analytical target.
+
+\medskip
+
+\textbf{What this misses:}
+\begin{itemize}
+  \item The model only ever sees \alert{data-distribution} inputs.
+  \item At rollout, it consumes its own prediction as input.
+  \item Small biases at one step \alert{compound coherently} into the
+        next step's input distribution.
+\end{itemize}
+
+\pause
+\medskip
+
+A loss that is locally accurate is not the same as a dynamical
+system that is globally stable. The two approaches below directly
+target this gap.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Approach 1: Pushforward training}
+
+\textbf{Idea.}
+Force the surrogate to be accurate at states \emph{it would itself
+produce} after a few rollout steps.
+
+\medskip
+
+Given a data point $(\eta,\xi)$, advance the surrogate's own
+prediction through $k$ Euler steps of the Zakharov system, then
+re-predict the DNO at the rolled-out state:
+\[
+  (\eta_k,\xi_k) \;=\; \mathrm{Step}^k\bigl(\eta,\xi;\;
+  \Gop_{\text{pred}}\bigr),
+  \qquad
+  \mathrm{pred}_k \;=\; \Gop_\theta\!\bigl(\sgrad(\eta_k),\sgrad(\xi_k)\bigr).
+\]
+
+The loss adds a term comparing $\mathrm{pred}_k$ against the analytical
+Craig--Sulem expansion at the rolled-out state:
+\[
+  \mathcal{L} \;=\; \mathcal{L}_{\text{single-step}}
+  \;+\; \lambda\,\mathcal{L}\!\bigl(\mathrm{pred}_k,\;
+       \Gop_{\text{CS}}(\eta_k,\xi_k)\bigr).
+\]
+
+Gradients flow only through the final prediction: the trajectory and
+the target are treated as fixed.
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Approach 1: Pushforward --- intuition and limits}
+
+\textbf{What it teaches.} The surrogate must be accurate not just on
+the training manifold, but on the (slightly off-manifold) states it
+itself generates. This breaks the covariate-shift compounding
+explicitly.
+
+\medskip
+
+\textbf{What it does not address.}
+\begin{itemize}
+  \item No notion of physical conservation laws.
+  \item Small $k$ ($k{=}1$) may not capture long-horizon coupling;
+        large $k$ is expensive and harder to optimize.
+  \item Stop-gradient on the rolled-out state introduces a known bias
+        scaling like $k^2$ relative to the true multi-step gradient
+        (List, Thuerey et al., 2024).
+\end{itemize}
+
+\pause
+\medskip
+
+\textbf{Status.} Currently trained at $k{=}1$, $\lambda{=}1$. A
+longer-horizon, gradient-through unroll is a planned next step.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Approach 2: Hamiltonian-conservation loss}
+
+\textbf{Idea.} The Zakharov system is Hamiltonian, with
+\[
+  H(\eta,\xi) \;=\; \tfrac12\!\int_\Omega
+    \bigl(\xi\,\Gop(\eta)\xi \,+\, g\,\eta^2\bigr)\,dx.
+\]
+An exact solution conserves $H$. A surrogate whose rollout drifts in
+$H$ is producing unphysical energy creation or destruction --- even
+if its pointwise error per step is small.
+
+\medskip
+
+Add a loss term that penalises one-step relative drift of $H$:
+\[
+  \mathcal{L}_H \;=\; \lambda_H\,
+    \mathbb{E}\!\left[\,\min\!\left(
+      \frac{|H_1 - H_0|}{|H_0| + \varepsilon},\;C
+    \right)\right],
+\]
+with $H_0$ evaluated at the data state and $H_1$ at one Euler step of
+the surrogate's own dynamics. Gradient flows through both
+$\Gop$-predictions; the integrator is treated as fixed.
+\end{frame}
+
+% ============================================================
+\begin{frame}{Approach 2: H-cons --- intuition and limits}
+
+\textbf{What it teaches.} A physically-motivated soft constraint:
+``predictions that violate energy conservation are penalised, in
+proportion to how much they violate it.''
+
+\medskip
+
+\textbf{What it does not address.}
+\begin{itemize}
+  \item Single-step horizon only --- does not directly stabilise
+        long rollouts the way pushforward does.
+  \item $H$ depends on $\Gop$, which is what we are learning ---
+        so the loss is self-consistency of the surrogate's energy
+        belief, not conservation of the true energy.
+  \item Does not enforce momentum, mass, or other invariants.
+\end{itemize}
+
+\pause
+\medskip
+
+\textbf{Status.} Currently training with linear warmup and per-sample
+clip to bound early-training transients. First evaluation pending.
+\end{frame}
+
+% ============================================================
+\begin{frame}{What we see so far}
+
+\textbf{Pushforward, vs.\ baseline at matched compute (partial).}
+\begin{itemize}
+  \item Median relative $L_2$ error at the final time horizon is
+        reduced by roughly $30$--$70\%$ on Tanaka, Benjamin--Feir,
+        and the linear regime.
+  \item Stokes regimes are essentially unchanged (error already small).
+  \item \alert{Random sea regimes regress} --- pushforward at $k{=}1$
+        appears to trade noise-robustness on broadband ICs for
+        fidelity on coherent, soliton-like ICs.
+\end{itemize}
+
+\pause
+\medskip
+
+\textbf{Caveats.}
+\begin{itemize}
+  \item Only $16$ ICs per regime --- per-regime comparisons have wide
+        confidence intervals.
+  \item Pushforward run is still training to matched epoch count.
+  \item H-cons evaluation not yet available.
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{What we are working on next}
+
+\begin{itemize}
+  \item Finish the pushforward run to matched compute against the
+        baseline.
+  \item Evaluate the H-conservation run on the same suite.
+  \item Investigate the random-sea regression: is it a
+        pushforward-horizon issue, or does it need a different IC
+        sampling distribution during training?
+  \item Larger $k$, gradient-through unrolls (list, Thuerey 2024
+        suggests $k\geq 8$ is where this becomes stable).
+  \item Tendency-target reformulation (predict $\partial_t u$, then
+        integrate with RK4 externally) --- decouples the surrogate
+        from the dispersive phase rotation.
+\end{itemize}
+\end{frame}
+
+\end{document}

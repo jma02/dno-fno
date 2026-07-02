@@ -1,0 +1,34 @@
+{
+  "dataset": "/home/johnma/dno-fno/data/combined_dataset_v5.npz",
+  "n_samples": 20000,
+  "n_data_points": 20480000,
+  "nx": 1024,
+  "L": 6.2831854820251465,
+  "seed": 20260619,
+  "ansatz": "gxi = G0\u00b7xi + a0\u00b7G0\u00b7(eta\u00b7G0\u00b7xi) + a1\u00b7G0\u00b7(|D|^0.5\u00b7eta\u00b7G0\u00b7xi) + a2\u00b7G0\u00b7(eta\u00b2\u00b7G0\u00b7xi)",
+  "a": {
+    "a0_eta": 0.3938806353187311,
+    "a1_half_eta": -0.05395447374655809,
+    "a2_eta2": 1.2691554403287573
+  },
+  "param_count": 3,
+  "rel_l2": {
+    "g0_only": {
+      "median": 0.024709862785607235,
+      "mean": 0.060346415885212445,
+      "p95": 0.20097350458321317
+    },
+    "3term": {
+      "median": 0.03081889190490536,
+      "mean": 0.05877080932975125,
+      "p95": 0.17716868158276475
+    }
+  },
+  "sobolev1": {
+    "g0_only_mean": 0.013410915437891899,
+    "3term_mean": 0.010494966836897183,
+    "v5_ckpt_val_loss_ref": 0.00101,
+    "ratio_3term_over_v5": 10.391056274155627
+  },
+  "elapsed_seconds": 210.63208742300048
+}

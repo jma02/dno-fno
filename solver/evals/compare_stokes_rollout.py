@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-import jax.numpy as jnp
 import matplotlib
 
 matplotlib.use("Agg")

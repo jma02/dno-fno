@@ -161,12 +161,12 @@ def plot_loss_history(history: list[dict[str, float]], output_path: Path) -> Non
     train_losses = [row["train_loss"] for row in history]
     val_losses = [row["val_loss"] for row in history]
 
-    axis.plot(epochs, train_losses, label="Train", linewidth=2.0)
-    axis.plot(epochs, val_losses, label="Val", linewidth=2.0)
+    axis.semilogy(epochs, train_losses, label="Train", linewidth=2.0)
+    axis.semilogy(epochs, val_losses, label="Val", linewidth=2.0)
     axis.set_title("Train/Val Loss", fontdict=TITLE_FONT)
     axis.set_xlabel("Epoch")
     axis.set_ylabel("Loss")
-    axis.grid(True, alpha=0.3)
+    axis.grid(True, alpha=0.3, which="both")
     axis.legend()
 
     figure.tight_layout()
@@ -197,6 +197,7 @@ def plot_labeled_samples(
     rel_l2: np.ndarray,
     rel_l1: np.ndarray,
     labels: Sequence[str],
+    depth_values: np.ndarray | None = None,
 ) -> None:
     if len(labels) == 0:
         raise ValueError("Cannot plot labeled samples for an empty selection")
@@ -210,8 +211,11 @@ def plot_labeled_samples(
         l2_error = float(rel_l2[column])
         l1_error = float(rel_l1[column])
 
+        eta_title = f"{label.title()} eta(x)"
+        if depth_values is not None:
+            eta_title = f"{eta_title}  h={float(depth_values[column]):.3g}"
         axes[0, column].plot(x, eta_values[column], color="tab:blue", linewidth=1.0)
-        axes[0, column].set_title(f"{label.title()} eta(x)", fontdict=TITLE_FONT)
+        axes[0, column].set_title(eta_title, fontdict=TITLE_FONT)
         axes[0, column].grid(True, alpha=0.3)
 
         axes[1, column].plot(x, xi_values[column], color="tab:green", linewidth=1.0)

@@ -9,6 +9,14 @@ wheels/
 # Virtual environments
 .venv
 
+# Tooling caches / local config
+.ruff_cache/
+.devin/
+.agents/
+.claude/
+.codex
+.netlify/
+
 # anything with the word outputs
 *outputs*
 *_rollouts/
@@ -17,3 +25,32 @@ wheels/
 data/
 !data/util/
 !data/util/**
+
+# Logs and run artifacts
+logs/
+*.log
+
+# Eval / generated output dirs at repo root
+/eval_tanaka_state_*/
+
+# LaTeX build artifacts
+*.aux
+*.toc
+*.nav
+*.snm
+*.out
+
+# Netlify site build
+site/
+
+# OS / editor cruft
+.DS_Store
+
+# Claude Code session transcript dumps
+*-local-command-caveatcaveat-*.txt
+
+# Playground generated run outputs (scripts themselves are tracked)
+playground/runs/
+playground/paper_dashboard/
+playground/rollout_dashboard/
+playground/tanaka_sensitivity/

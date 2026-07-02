@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--modes", type=int, default=128)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--n_blocks", type=int, default=10)
-    parser.add_argument("--loss", choices=("sobolev", "lp"), default="sobolev")
+    parser.add_argument("--sobolev_k", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=600)
     parser.add_argument("--lr", type=float, default=5e-3)
@@ -139,7 +139,7 @@ def main() -> None:
     model = FNO1d(args.modes, args.width, args.n_blocks)
     init_inputs = jnp.asarray(train_inputs[:1])
     params = model.init(jax.random.PRNGKey(args.seed), init_inputs)["params"]
-    loss_fn = build_loss(args.loss)
+    loss_fn = build_loss(sobolev_k=args.sobolev_k)
 
     optimizer = optax.adamw(learning_rate=args.lr, weight_decay=args.weight_decay)
     state = train_state.TrainState.create(
@@ -155,7 +155,7 @@ def main() -> None:
         "modes": args.modes,
         "width": args.width,
         "n_blocks": args.n_blocks,
-        "loss": args.loss,
+        "sobolev_k": args.sobolev_k,
         "batch_size": args.batch_size,
         "lr": args.lr,
         "epochs": args.epochs,

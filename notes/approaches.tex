@@ -1,0 +1,533 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{caption}
+
+\definecolor{mDarkTeal}{HTML}{1c3d6b}
+\definecolor{mLightBrown}{HTML}{2f6fb3}
+
+\titleformat{\section}{\large\bfseries\color{mDarkTeal}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.6em}
+\titlespacing*{\subsection}{0pt}{1.0em}{0.4em}
+
+\hypersetup{colorlinks=true, linkcolor=mDarkTeal, citecolor=mDarkTeal, urlcolor=mLightBrown}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Gop}{\mathcal{G}}
+\newcommand{\sgrad}{\operatorname{sg}}
+\newcommand{\Half}{\tfrac{1}{2}}
+
+\title{\textbf{DNO Surrogate: Diagnostics and Approaches Under Investigation}}
+\author{Jonathan Ma}
+\date{5 June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document is the single working reference for the effort to improve
+long-horizon rollout accuracy of a neural surrogate for the 1D Zakharov
+water-wave Dirichlet--Neumann operator. It covers: (i) what is wrong with
+current rollouts, established by forensic analysis on the existing FNO and
+SpectralDNO checkpoints, plus a physical/numerical sensitivity sweep that
+rules out integrator and amplitude artifacts; (ii) why the training data
+is not the bottleneck; (iii) the three approaches currently in flight ---
+a one-step pushforward training loss, a relative-Hamiltonian conservation
+loss, and a Craig--Sulem-shaped DNO architecture; and (iv) three
+candidates queued for the next iteration.
+\end{abstract}
+
+\vspace{0.6em}
+\noindent\textbf{Current state (5 June 2026).}
+The diagnostic case is closed: the rollout discrepancy is model-driven,
+not a data, integrator-resolution, or amplitude artifact. The
+training-loss approaches (pushforward, H-cons) reduce error on
+soliton-like and modal-instability regimes but regress on broadband
+random-sea ICs; the gap is qualitatively similar in both, suggesting
+the SpectralDNO architecture is the binding constraint. The
+Craig--Sulem-shaped architecture is currently training from scratch
+as the load-bearing test of that hypothesis; an H-cons SpectralDNO
+is retraining in parallel for an apples-to-apples comparison.
+
+% ===================================================================
+\section{Problem statement}
+
+The 1D Zakharov system couples surface elevation $\eta(x,t)$ and surface
+velocity potential $\xi(x,t)$ on a periodic domain of length $L$ via the
+Dirichlet--Neumann operator $\Gop(\eta;h)$:
+\begin{align}
+\partial_t \eta &= \Gop(\eta; h)\,\xi,\\
+\partial_t \xi &= -g\,\eta - \Half\xi_x^{\,2}
+   + \Half\frac{\big(\Gop(\eta)\xi + \eta_x\xi_x\big)^{2}}{1 + \eta_x^{\,2}}.
+\end{align}
+A neural surrogate $\Gop_\theta$ is trained to predict $\Gop(\eta;h)\xi$
+from snapshots of $(\eta,\xi,h)$ and then iterated by an explicit time
+integrator at evaluation time. Pointwise prediction is accurate;
+long-horizon rollouts are not. The shared baseline objective is the
+data-distribution Sobolev-$H^{k}$ loss
+\[
+  \mathcal{L}_{0} = \big\| \Gop_\theta(\eta;h)\xi - \Gop_{\mathrm{true}}(\eta;h)\xi \big\|_{H^{k}}^{2},
+\]
+with $k=1$ in the current configuration. Two surrogates have been trained
+on this baseline: a 6-block FNO1d (width 128, modes 64, FiLM depth
+conditioning, $\sim 13.1$M parameters) and a 6-block SpectralDNO
+(width 128, modes 64, latent 64, $\sim 17.0$M parameters). The SpectralDNO
+outputs a residual of the form $C(\eta,h)^{\top} F(\eta,h)\,C(\eta,h)\,\xi$
+added to a closed-form linear-DNO baseline, and is therefore linear in
+$\xi$ by construction.
+
+% ===================================================================
+\section{Diagnostic findings}
+\label{sec:diagnostics}
+
+\subsection{Failure mode: coherent in-band error}
+
+Across the worst finite-error initial conditions in the 10-regime eval
+suite (Tanaka, Benjamin--Feir, Stokes, random sea, linear), rel-$L^{2}$
+error grows linearly or with slight super-linearity in time
+($r^{2}_{\mathrm{lin}}$ between 0.53 and 0.93). The error spectrum is
+dominated by the same wavenumber band as the truth spectrum (per-IC
+cosine similarity 0.57--1.00 for FNO); the high-$k$ ``Gibbs'' fraction is
+below 0.18 in every worst case. NaN blow-ups in bf\_g1 and bf\_modal
+occur at $t = 81$--$189$ of $T_{\max}=200$ while $|\eta|_{\max}$ stays
+small (0.04--0.12). This is \emph{numerical divergence after extended
+coherent drift, not a steepening cascade or a high-$k$ artifact}.
+
+A specific smoking gun on the linear regime: FNO at $t=2$ has $99\%$ of
+its error in sideband modes $k=10$--$50$, while the truth has all its
+energy at $k=6$. The FNO is hallucinating nonlinear sidebands in a
+regime where the dynamics are strictly per-mode dispersive --- a
+structural consequence of mixing $\xi$ into the network's nonlinear
+features. SpectralDNO, which is linear in $\xi$ by construction, cannot
+produce this kind of error and dominates FNO on the linear regime by
+$-71\%$ in median rel-$L^{2}$.
+
+\subsection{Physics descriptors that predict failure}
+
+Within each regime, the strongest Spearman correlations with final-time
+rel-$L^{2}$ are:
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+  \item Tanaka g0/g1: spectral bandwidth $\rho = +0.76\,/\,+0.78$ (FNO),
+        $+0.84\,/\,+0.85$ (DNO+PF).
+  \item Random sea (deep): max steepness $\rho = +0.63\,/\,+0.84$.
+  \item Stokes (finite): max steepness $\rho = +0.70\,/\,+0.83$.
+  \item BF g0/g1: peak wavenumber $k_{\mathrm{peak}}$,
+        $\rho \in [+0.33, +0.87]$.
+\end{itemize}
+Global correlations with $kh$ or depth ($\rho \approx -0.4$) appear strong
+but are confounded --- Tanaka has both shallow water and broad spectra.
+Within-regime, the load-bearing predictors are \emph{structural}
+(bandwidth, steepness, peak wavenumber), not distributional. This is what
+high-steepness and broadband ICs need from the model's
+nonlinear-in-$\eta$ part --- exactly the part of the current architectures
+that is under-parameterised relative to the polynomial structure of the
+true DNO.
+
+\subsection{Rollout error vs.\ initial wavenumber}
+
+A per-regime diagnostic picks three ICs per regime binned by initial
+mean wavenumber $\langle k\rangle(0) = \sum_k k\,|\hat\eta(k,0)|^{2}/\sum_k
+|\hat\eta(k,0)|^{2}$ (low / mid / high) and compares two stacked panels
+over the rollout horizon: rel-$L^{2}$ $\eta$-error (log scale, top)
+and truth mean wavenumber $\langle k\rangle(t)$ (bottom). On Tanaka g0
+the wave's mean wavenumber is essentially stationary in time, and the
+rollout error grows two orders of magnitude --- more rapidly for
+higher-$k$ ICs. The same pattern holds on the linear regime, where
+$\langle k\rangle(t)$ is exactly flat by construction, so the error
+growth is not riding on any spectral drift in the underlying wave.
+The full panel grid for all 10 regimes is on the companion site.
+
+\subsection{Data audit: not the bottleneck}
+
+A 1000-snapshot sample of the 73.7\,GB training dataset found no
+NaN/inf in over $10^{6}$ sampled voxels of $\eta$, $\xi$, or $\Gop\xi$.
+Every test regime's IC distribution falls inside the training central
+90\% at the median for amplitude, steepness, and dominant wavenumber.
+Two minor tails: the maximum-amplitude Tanaka cases nip the training
+$p99$ in $\eta$ amplitude; the finite-depth Stokes regime's dominant
+wavenumber sits at the upper edge of training $k$ ($\sim 26$, within
+the spectral cutoff of $64$). One eval-side issue surfaced: one of the
+16 Benjamin--Feir g1 ICs has the \emph{truth} integrator diverge to
+NaN at $t \approx 146$ of $T_{\max} = 200$.
+
+\textbf{Conclusion.} The rollout-accuracy ceiling is not a data-coverage
+problem. Improvements have to come from the model or the training-time
+loss, not from acquiring more data.
+
+\subsection{Linear-regime truth fix}
+
+The legacy ``linear'' regime ICs are physically nonlinear shallow-water
+cases ($\eta/h$ up to $0.30$, $kh \approx 0.6$) inherited from a MATLAB
+test set. The Zakharov truth solver was diverging on some of them. The
+eval suite was updated to use analytic per-mode Fourier propagation of
+the linear Zakharov system,
+\[
+\omega^{2}(k) = g\,k\,\tanh(hk),\qquad
+\hat\eta(k,t) = \hat\eta_{0}(k)\cos\omega t + \tfrac{\Gop_{\mathrm{lin}}(k)}{\omega}\,\hat\xi_{0}(k)\sin\omega t,
+\]
+and analogously for $\hat\xi(t)$, as the linear-regime ``truth''. Amplitude
+and top-$k$ structure are preserved to better than $1\%$ over the full
+horizon. All linear-regime comparisons in this document use the analytic
+truth.
+
+\subsection{Sensitivity sweep: is the FNO discrepancy a numerical artifact?}
+\label{sec:sensitivity}
+
+To rule out the obvious physical and numerical explanations for the
+rollout discrepancy, we ran a 3-axis sweep on Tanaka g0 case~0
+(depth $h{=}0.139$, horizon $T{=}100$, output $\mathrm{d}t{=}1$,
+FNO baseline). On each axis we hold the others fixed; the rel-$L^{2}$
+$\eta$-error at $T=100$ is:
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Axis} & \multicolumn{5}{l}{\textbf{Values}} \\
+\midrule
+IC amplitude $\alpha$ & $0.50$ & $0.75$ & $1.00$ & $1.50$ & $2.00$ \\
+$\quad$ rel-$L^{2}$ $\eta$ @ $T$ & $0.0059$ & $0.0050$ & $0.0043$ & $0.0080$ & $0.0139$ \\
+\midrule
+Integrator substeps / output dt & $1$ & $2$ & $4$ & $8$ & $16$ \\
+$\quad$ rel-$L^{2}$ $\eta$ @ $T$ & NaN & NaN & $0.0044$ & $0.0043$ & $0.0042$ \\
+\midrule
+Spatial $N_x$ & $512$ & $1024$ & $2048$ & & \\
+$\quad$ rel-$L^{2}$ $\eta$ @ $T$ & $0.1435$ & $0.0043$ & NaN @ $t{=}32$ & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent
+\textbf{Read.} The error is roughly $\alpha^{2}$ on the large-amplitude
+side (consistent with nonlinear-in-$\eta$ compounding) but stays within
+a factor of three across a $4\times$ amplitude range, with a minimum at
+the training amplitude $\alpha = 1$. Refining the integrator past
+substeps${=}4$ does not change the error to four figures
+(the NaN at substeps${\in}\{1,2\}$ is the GL2 stepper itself being
+unstable at large dt, unrelated to the FNO). The FNO is, however,
+tightly resolution-locked to its training grid: at $N_x{=}512$ it is
+$33\times$ worse, and at $N_x{=}2048$ it blows up by $t{=}32$.
+
+\textbf{Conclusion.} The discrepancy is invariant to numerical dt once
+the integrator is converged, and only modestly sensitive to physical
+amplitude. It is not a numerical artifact and is not amplitude-fragile;
+it is a model error. The $N_x$ result is a separate finding ---
+SpectralDNO/FNO are nominally resolution-invariant but in practice are
+tied to the training grid; this is worth flagging for any future
+multi-resolution evaluation.
+
+% ===================================================================
+\section{Approach 1: One-step pushforward (training-loss)}
+
+\subsection{Formulation}
+Given a data pair $(\eta,\xi)$, advance the surrogate's prediction
+through $k$ Euler steps of the Zakharov system, then re-predict $\Gop$ at
+the rolled-out state and penalise against the analytical Craig--Sulem
+expansion at order four:
+\[
+  \mathcal{L}_{\mathrm{pf}}
+  \;=\; \mathcal{L}\!\Big(
+     \Gop_\theta\!\big(\sgrad(\eta_{k}), \sgrad(\xi_{k})\big),\;
+     \Gop_{\mathrm{CS}}(\eta_{k}, \xi_{k})
+  \Big),
+\]
+where $(\eta_{j},\xi_{j})$ is the surrogate's $j$-step Euler rollout. The
+total loss is $\mathcal{L}_{0} + \lambda_{\mathrm{pf}}\mathcal{L}_{\mathrm{pf}}$.
+Gradients flow only through the final prediction at the rolled-out state;
+the trajectory $(\eta_{k},\xi_{k})$ and the analytical target are both
+stop-gradient-wrapped.
+
+\subsection{Inductive bias}
+The single-step baseline only ever exposes the surrogate to
+data-distribution inputs. At rollout, the surrogate consumes its own
+predictions, where small per-step biases compound. The pushforward loss
+forces the surrogate to remain accurate at states it itself produces
+under iteration, breaking the covariate-shift compounding.
+
+\subsection{Implementation}
+One Euler step of the Zakharov system per pushforward step. The
+$\partial_{t}\eta$ term uses the surrogate's own $\Gop$-prediction; the
+$\partial_{t}\xi$ term uses the closed-form Zakharov RHS. The analytical
+target $\Gop_{\mathrm{CS}}$ is the order-4 Craig--Sulem series with
+zero-padded FFTs at pad factor 4. The depth saturation $h_{\max} = 5$
+used inside the model is mirrored when building the analytical target so
+the target matches the operator the model is approximating.
+
+\subsection{Cost and tunables}
+$(1+k)$ model forwards plus one vmapped order-4 Craig--Sulem evaluation
+per training step. Active configuration: $k=1$, $\lambda_{\mathrm{pf}}=1$,
+$\mathrm{d}t=0.01$.
+
+\subsection{Status}
+A 40-epoch run from scratch is complete (best val $0.00490$ at epoch
+$31$). Per-regime rollout from that checkpoint: substantial improvement
+on Tanaka, Benjamin--Feir, modal, and the linear regime (median rel-$L^{2}$
+reductions of 25--70\%) but \emph{regression} on random-sea regimes
+(near-zero error at FNO baseline grows to 0.09--0.12). The pushforward
+step appears to trade noise-robustness on broadband ICs for fidelity on
+coherent soliton-like ICs.
+
+A 40-epoch resume to test for convergence was contaminated by a
+checkpoint-restore bug: the saved Adam moments and cosine-LR step
+counter did not deserialise cleanly, so the resume re-warmed Adam from
+zero and restarted the LR schedule from base lr. The restore path has
+since been fixed; an apples-to-apples 80-epoch run can now be done
+cleanly when GPU time frees up.
+
+% ===================================================================
+\section{Approach 2: Hamiltonian-conservation loss (training-loss)}
+
+\subsection{Formulation}
+The Zakharov system is Hamiltonian with
+\[
+  H(\eta,\xi) = \Half\!\int_\Omega \big( \xi\,\Gop(\eta)\xi + g\,\eta^{2}\big)\,dx.
+\]
+An exact solution conserves $H$. The loss penalises relative drift of $H$
+over one Euler step of the surrogate's own dynamics:
+\[
+  \mathcal{L}_{H} \;=\; \lambda_{H}\,w(s)\,
+  \mathbb{E}\!\left[\min\!\left(\frac{|H_{1}-H_{0}|}{|H_{0}|+\varepsilon},\;C\right)\right],
+\]
+with $H_{0}$ at the data state, $H_{1}$ at one Euler step (both
+$\Gop$-values from the surrogate), linear warmup
+$w(s)=\min(s/s_{\mathrm{warm}},1)$, and per-sample clip $C$. Total loss
+is $\mathcal{L}_{0} + \mathcal{L}_{H}$.
+
+\subsection{Inductive bias}
+Even when pointwise $\Gop$-error per step is small, accumulated rollout
+can violate energy conservation, producing non-physical growing or
+decaying waves. Penalising $|\Delta H|/|H|$ biases the surrogate toward
+predictions consistent with the symplectic structure across one step.
+This is a soft physical constraint, not a structural one --- the
+architecture is unchanged.
+
+\subsection{Implementation}
+Two model forwards (at $(\eta,\xi)$ and at $(\eta_{1},\xi_{1})$), two FFT
+pairs (to compute $\xi\Gop(\eta)\xi$ via the spectral inner product),
+and one closed-form Zakharov RHS evaluation. The advanced state is
+stop-gradient-wrapped; gradients flow only through the two
+$\Gop$-predictions. The integrator and the depth saturation are treated
+as fixed.
+
+\subsection{Cost and tunables}
+Roughly $2\times$ the per-step cost of the single-step baseline. Active
+configuration: $\lambda_{H}=1$, $\mathrm{d}t=0.01$,
+$s_{\mathrm{warm}}=10\,000$, $C=10$.
+
+\subsection{Status}
+A first Modal training run reached epoch 10 (best val 0.00464, ahead
+of DNO+PF at the same epoch) before worker preemption. Partial
+evaluation on three regimes showed the rollout numbers tracking
+DNO+PF (random-sea regression of similar magnitude, slightly worse on
+Tanaka median, marginally higher divergence rate) --- no breakthrough
+at that early checkpoint. A clean 25-epoch run from scratch is now
+training locally for a fair compute-matched comparison.
+
+% ===================================================================
+\section{Approach 3: Craig--Sulem-shaped DNO architecture (model)}
+
+\subsection{Formulation}
+The true Dirichlet--Neumann operator admits a Craig--Sulem expansion
+\[
+  \Gop(\eta;h)\xi \;=\; G_{0}(h)\,\xi + G_{1}(\eta,h)\,\xi
+                   + G_{2}(\eta\otimes\eta,h)\,\xi + \cdots
+\]
+where $G_{0}(h) = |D|\tanh(h|D|)$ is the flat-surface linear DNO and each
+$G_{n}$ is multilinear in $\eta^{\otimes n}$ and linear in $\xi$, formed
+by alternating pointwise multiplications by powers of $\eta$ with
+Fourier multipliers $M(D,h)$. The proposed architecture is a sum of
+learned Craig--Sulem-shaped blocks:
+\[
+  \Gop_\theta(\eta;h)\xi \;=\; G_{0}(h)\,\xi
+   + \sum_{\ell=1}^{N_{\mathrm{blocks}}}
+      \sum_{i=1}^{n_{\mathrm{branches}}}
+        M^{\ell,i}_{\mathrm{out}}(D,h)\,\Big[
+          \Phi^{\ell,i}(\eta)(x)\;\cdot\;
+          \bigl(M^{\ell,i}_{\xi}(D,h)\,\xi\bigr)(x)
+        \Big],
+\]
+where:
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+  \item $\Phi^{\ell,i}(\eta)$ is a learned pointwise projection from a
+        shared $\eta$-feature stack (pointwise powers
+        $\eta,\eta^{2},\eta^{3}$ plus spectral derivatives
+        $\partial_{x}\eta,\partial_{x}^{2}\eta,|D|^{1/2}\eta,\mathcal{H}\eta$)
+        to one spatial channel.
+  \item $M^{\ell,i}_{\xi}$ and $M^{\ell,i}_{\mathrm{out}}$ are learned
+        depth-and-$k$-aware Fourier multipliers, each parameterised as a
+        small MLP of the physical features
+        $(k,\,h,\,\tanh(hk),\,k\tanh(hk))$ --- the natural features of
+        the linear dispersion relation, so the MLP only learns
+        perturbations on the right ansatz.
+  \item The $\Phi^{\ell,i}\to$ spatial channel projection is
+        zero-initialised so each block starts inert; the model initially
+        predicts the linear baseline exactly.
+\end{itemize}
+
+\subsection{Inductive bias}
+Two simultaneous structural priors:
+\begin{enumerate}[leftmargin=1.3em,itemsep=2pt]
+  \item \textbf{Linear in $\xi$ by construction.} The output residual is
+        a sum of terms each of the form
+        $(\text{$\eta$-only})\cdot(M(D,h)\xi)$. This prevents the
+        sideband hallucination observed in FNO on the linear regime.
+  \item \textbf{Polynomial in $\eta$ by construction.} Each block
+        expresses a learned $G_{n}$-shaped term; stacking blocks gives
+        the architecture access to higher-order Craig--Sulem
+        contributions --- the very terms that dominate when steepness
+        or bandwidth is large.
+\end{enumerate}
+These together address the two strongest within-regime correlates of
+rollout failure identified in \S\ref{sec:diagnostics}: bandwidth and
+steepness.
+
+\subsection{Implementation}
+The base SpectralDNO uses one rank-$\mathrm{latent}$ spatial $\times$
+spectral sandwich per block; the new architecture replaces it with
+$n_{\mathrm{branches}}$ parallel \emph{pointwise} CS-shaped terms per
+block. There is no tensor product between channel and branch axes ---
+each branch carries one spatial channel and one $\xi$-multiplier, so
+parameter count grows linearly in $n_{\mathrm{branches}}$. The
+$\eta$-feature stack is shared across blocks; per-block parameters
+are dominated by the two depth-aware multipliers and the
+$\Phi$-projection.
+
+\subsection{Cost and tunables}
+A first run uses $\mathrm{width}=512$, $N_{\mathrm{blocks}}=8$,
+$n_{\mathrm{branches}}=256$, $\mathrm{mult\_hidden}=128$ --- about
+$1.1\times 10^{6}$ parameters, an order of magnitude smaller than the
+FNO baseline (13.1M) and SpectralDNO (17.0M). The intent is to test
+whether the inductive bias is doing the heavy lifting; capacity can be
+scaled if the first signal is positive.
+
+\subsection{Status}
+Wired into the training and rollout-evaluation paths. Smoke checks
+confirm: $y(2\xi) = 2\,y(\xi)$ to numerical precision (linearity in
+$\xi$); $y(2\eta) - y(0) \ne 2(y(\eta) - y(0))$ after parameter
+perturbation (nonlinearity in $\eta$); $y = G_{0}\xi$ exactly at
+initialisation (zero-init blocks). 40-epoch training run in progress
+(epoch 11 at the time of writing, best val $0.00199$ --- already 46\% below
+the FNO baseline's all-time best of $0.00369$, attained in 1/7th the
+training compute;
+training is in parallel with the H-cons retrain on a separate GPU).
+
+% ===================================================================
+\section{Candidates for the next iteration}
+
+These are not currently running but are next in the queue based on the
+forensic findings and a literature scan.
+
+\subsection{Multi-step unrolled training with gradients through all steps}
+A direct extension of the one-step pushforward. Replace $k=1$
+stop-gradient pushforward with a $k$-step unroll where gradients flow
+through all steps, with a curriculum that ramps $k$ from $1$ to $8$:
+\[
+  u \leftarrow u, \quad \mathcal{L} \leftarrow 0,
+  \qquad
+  \text{for } j=1\dots k:\;
+  u \leftarrow \Gop_\theta(u),\;
+  \mathcal{L} \mathrel{+}= w_{j}\,\big\|u - u_{j}^{\mathrm{true}}\big\|^{2}.
+\]
+Stop-gradient one-step pushforward has a documented bias scaling like
+$k^{2}$ relative to the true multi-step gradient, and $k\geq 8$ is often
+needed for stable long rollouts. This is the most natural single change
+to address the pushforward regression on random-sea regimes; memory
+scales linearly in $k$, but at the current model size $k=4$ fits on a
+single H100.
+
+\subsection{Tendency-target reformulation}
+Reframe the surrogate's output as a temporal derivative and integrate
+with a real RK4 stepper at inference. For the DNO setting, the natural
+place to apply this is on the $\xi$ side: instead of using the
+closed-form Bernoulli RHS at rollout, have the surrogate also predict
+$\partial_{t}\xi$ and stitch with RK4 externally. This decouples the
+surrogate from carrying the dispersive phase rotation across one large
+step.
+
+\subsection{PDE-Refiner-style noise-conditioned refinement}
+Standard MSE training under-weights low-amplitude high-$k$ modes ---
+exactly the modes that drive modulational instability in Zakharov.
+Replace one-shot prediction with $K$ iterative noise-conditioned
+denoising passes (same model called $K$ times conditioning on a
+log-noise channel). Inference cost goes up by $K\times$. The published
+gain is reportedly smaller on FNO than U-Net, which is a concern for the
+spectral backbone here but less so given the Craig--Sulem architecture
+above.
+
+\subsection{Rejected directions}
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+  \item Strict-symplectic / hard-Hamiltonian architectures --- wrong
+        constraint level for this discretisation; the soft H-conservation
+        loss already covers it.
+  \item Global Lipschitz / spectral-norm constraints --- kills modulational
+        dynamics for dispersive PDEs (true operator's $L^{2}$-induced
+        norm is unitary).
+  \item Simple capacity scaling --- current SpectralDNO is 17M params
+        vs.\ FNO's 13M; capacity is not the bottleneck.
+\end{itemize}
+
+% ===================================================================
+\section{Comparison of approaches}
+
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Approach & Type & Constrains & Cost & Status \\
+\midrule
+Pushforward (1-step)       & loss   & rollout state dist.\          & $\sim 2\times$/step  & 40 ep done; 80 ep gated on GPU \\
+H-cons (1-step)            & loss   & energy drift                  & $\sim 2\times$/step  & 25-ep retrain running \\
+Craig--Sulem DNO           & model  & poly-$\eta$, lin-$\xi$        & $\sim 0.5\times$ base  & 40-ep run in progress (ep 11) \\
+Multi-step unroll $k{=}4..8$ & loss & rollout state dist.\          & $k\times$/step       & queued \\
+Tendency target + RK4      & model  & one-step ODE structure        & $4\times$ at rollout & queued \\
+PDE-Refiner                & loss   & high-$k$ mode coverage        & $K\times$ at rollout & queued \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The three running approaches are not mutually exclusive. The two
+loss-side terms compose in the training script. Either can be paired
+with the Craig--Sulem architecture without changes --- the model exposes
+the same $\Gop_\theta(\eta,\xi,h)$ signature that the loss terms rely on.
+
+% ===================================================================
+\section{Open questions}
+
+\begin{itemize}[leftmargin=1.3em,itemsep=3pt]
+  \item Does the Craig--Sulem architecture without any rollout loss
+        already beat pushforward-trained SpectralDNO? If so, the
+        polynomial structure is the operative inductive bias, not the
+        training loss.
+  \item Does the random-sea regression under pushforward survive the
+        Craig--Sulem architecture, or is it an artifact of the
+        SpectralDNO single-sandwich design?
+  \item Should the H-cons functional use $\Gop_{\mathrm{true}}\xi$ rather
+        than $\Gop_{\theta}\xi$ when evaluating $H_{0}$? The current
+        form rewards self-consistency of the surrogate's energy belief,
+        not conservation of the true energy.
+  \item Are the Benjamin--Feir g1 / modal NaN blow-ups (FNO baseline)
+        driven by the $\eta$ update or the $\xi$ update? A step-by-step
+        trace would say which loss term has more leverage.
+\end{itemize}
+
+% ===================================================================
+\section*{Companion artifacts}
+
+The per-regime rollout dashboard, including the error-vs-wavenumber
+plots, is hosted at
+\href{https://stunning-cocada-db3a7d.netlify.app}{stunning-cocada-db3a7d.netlify.app}.
+Forensic reports (data audit, per-IC rollout breakdown, literature
+review) and JSON statistics behind every claim in
+\S\ref{sec:diagnostics} are available on request.
+
+\end{document}

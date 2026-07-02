@@ -57,6 +57,11 @@ def build_carbs(
             LinearSpace(min=2, max=12, scale=4, is_integer=True),
             search_center=6,
         ),
+        Param(
+            "sobolev_k",
+            LinearSpace(min=1, max=4, scale=1, is_integer=True),
+            search_center=1,
+        ),
     ]
     carbs_params = CARBSParams(
         better_direction_sign=-1,
@@ -101,6 +106,8 @@ def run_trial(
         str(suggestion["width"]),
         "--n_blocks",
         str(suggestion["n_blocks"]),
+        "--sobolev_k",
+        str(suggestion["sobolev_k"]),
         "--output_root",
         output_root,
         "--run_name",

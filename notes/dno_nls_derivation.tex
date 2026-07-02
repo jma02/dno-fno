@@ -1,0 +1,812 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\pd}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\eps}{\varepsilon}
+
+\title{From the Dirichlet--Neumann Operator to the Nonlinear Schr\"odinger Equation:\\
+Deep-Water Wave Regimes and the Benjamin--Feir Instability}
+\author{Notes for DNO--FNO project}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{The Water Wave Problem via the DNO}
+%=============================================================================
+
+Consider irrotational, incompressible potential flow in the domain
+\[
+\Omega(t) = \{(x,y) \in \R \times \R : -h < y < \eta(x,t)\},
+\]
+with free surface $\eta(x,t)$ and flat bottom at $y = -h$.
+The velocity potential $\phi(x,y,t)$ satisfies
+\[
+\Delta \phi = 0 \quad \text{in } \Omega(t), \qquad
+\pd{\phi}{y}\bigg|_{y=-h} = 0.
+\]
+This is a free boundary problem: the domain depends on the solution.
+
+\subsection{Zakharov--Craig--Sulem Formulation}
+
+The key reduction (Zakharov~\cite{zakharov1968}, Craig \& Sulem~\cite{craig1993})
+reformulates the problem entirely on the free surface.
+Define the surface potential $\xi(x,t) = \phi(x,\eta(x,t),t)$ and the
+\textbf{Dirichlet--Neumann operator}:
+\[
+G(\eta)\xi = \phi_y\big|_{y=\eta} - \eta_x\,\phi_x\big|_{y=\eta}.
+\]
+This is the standard Dirichlet-to-Neumann map for the Laplacian on $\Omega(t)$,
+weighted by the surface geometry.
+The Euler equations then reduce to:
+\begin{align}
+\eta_t &= G(\eta)\xi, \label{eq:kinematic}\\
+\xi_t &= -g\eta - \tfrac{1}{2}|\xi_x|^2
++ \frac{\bigl(G(\eta)\xi + \eta_x\,\xi_x\bigr)^2}{2(1+|\eta_x|^2)}.
+\label{eq:dynamic}
+\end{align}
+This is a Hamiltonian system with
+$H = \frac{1}{2}\int[\xi\,G(\eta)\xi + g\eta^2]\,dx$
+and canonically conjugate variables $(\eta, \xi)$.
+
+The payoff is dimensional reduction: instead of solving a 2D elliptic
+problem at every time step, one evaluates $G(\eta)$ acting on a function
+of one spatial variable.
+
+\subsection{Taylor Expansion of the DNO}
+
+$G(\eta)$ is analytic in $\eta$ for sufficiently smooth surfaces
+(Coifman--Meyer, Craig--Nicholls), with convergent Taylor expansion:
+\[
+G(\eta) = \sum_{j=0}^{\infty} G_j(\eta),
+\qquad G_j \text{ homogeneous of degree } j \text{ in } \eta.
+\]
+The zeroth-order term is the Fourier multiplier
+\begin{equation}
+\widehat{G_0\xi}(k) = |k|\tanh(h|k|)\,\hat\xi(k).
+\label{eq:G0}
+\end{equation}
+Higher terms follow from a recursion:
+\begin{align}
+G_1(\eta) &= D\eta D - G_0\,\eta\,G_0, \\
+G_2(\eta) &= -\tfrac{1}{2}\bigl(G_0\,\eta^2 D^2 + D^2\eta^2 G_0
+- 2G_0\,\eta\,G_0\,\eta\,G_0\bigr),
+\end{align}
+where $D = -i\partial_x$.
+
+\paragraph{Depth dependence.}
+The symbol $|k|\tanh(h|k|)$ interpolates between two regimes:
+\begin{itemize}
+\item Finite depth ($h \sim 1$): $G_0$ damps high modes.
+\item Deep water ($h \to \infty$): $G_0 \to |D|$, the half-derivative.
+\end{itemize}
+Since $G_0$ appears in the recursion for every $G_j$, changing $h$ changes
+the entire operator.
+
+\paragraph{Numerical truncation.}
+In practice, $G(\eta) \approx \sum_{j=0}^{M} G_j(\eta)$ with $M = 4$--$6$.
+Each $G_j$ is computed via FFTs at cost $O(M^2 N\log N)$.
+Convergence is exponential in $M$ for smooth $\eta$~\cite{xu2009}.
+
+
+%=============================================================================
+\section{Derivation of the NLS}
+\label{sec:nls}
+%=============================================================================
+
+The \textbf{nonlinear Schr\"odinger equation} (NLS) is the dispersive PDE
+\begin{equation}
+iA_T + p\,A_{XX} + q\,|A|^2 A = 0,
+\label{eq:nls_preview}
+\end{equation}
+where $A(X,T) \in \mathbb{C}$ is the envelope of a modulated wave train
+and $p, q \in \R$ are coefficients determined by the underlying physics.
+When $pq > 0$ the equation is \emph{focusing} (admits solitons, exhibits
+modulational instability); when $pq < 0$ it is \emph{defocusing}.
+
+In this section we derive \eqref{eq:nls_preview} from the water wave
+system \eqref{eq:kinematic}--\eqref{eq:dynamic} in the deep-water limit
+$G_0 = |D|$, identifying $p$ and $q$ explicitly in terms of the carrier
+wavenumber $k_0$ and the DNO.
+The small parameter is the wave steepness $\eps = k_0 a_0$.
+We write $E = e^{i\theta}$ throughout.
+
+\subsection{Motivation}
+
+The system \eqref{eq:kinematic}--\eqref{eq:dynamic} is exact but
+expensive to simulate and difficult to analyze directly.
+In deep water, the dominant observed structures are \emph{modulated
+wave trains} --- a fast carrier oscillation whose amplitude and phase
+vary slowly in space and time.
+The NLS captures the leading-order dynamics of this slow modulation,
+reducing the full infinite-dimensional system to \eqref{eq:nls_preview}.
+
+This has both analytical and practical consequences.
+Analytically, the NLS is integrable (solvable by inverse scattering),
+so its solution space is completely understood: solitons, breathers,
+modulational instabilities all have exact descriptions.
+Practically, the NLS tells us \emph{which families of surface states
+$(\eta, \xi)$ are physically relevant} in deep water --- and hence
+what training data a neural operator should see (Section~\ref{sec:datagen}).
+
+\subsection{The Linear Problem}
+
+Linearize \eqref{eq:kinematic}--\eqref{eq:dynamic} around rest
+($\eta = \xi = 0$, $G(\eta) \approx G_0$):
+$\eta_t = G_0\xi$, $\xi_t = -g\eta$.
+Plane waves $\propto e^{i(kx-\omega t)}$ satisfy $\omega^2 = g|k|$.
+
+A narrow-band wave packet centered at $k_0 > 0$ has Fourier support
+near $k_0$:
+\[
+\eta(x,t) = \int_{\R} \hat f(k-k_0)\,e^{i(kx-\omega(k)t)}\,dk
+= \biggl(\int \hat f(\eps\kappa)\,e^{i\eps\kappa(x - \omega'(k_0)t)
++ i\frac{\eps^2}{2}\omega''(k_0)\kappa^2 t + \cdots}\,\frac{d\kappa}{\eps}\biggr)\,
+e^{i(k_0 x - \omega_0 t)}.
+\]
+The integral in parentheses is the slowly varying complex envelope $A(X,T)$,
+with $X = \eps(x - c_g t)$ and $T = \eps^2 t$.
+Its modulus $|A|$ is the local wave amplitude;
+$\arg(A)$ is the local phase correction to the carrier $E = e^{i\theta}$.
+
+\subsection{Multiple-Scales Setup}
+
+\paragraph{Fast and slow variables.}
+Carrier phase $\theta = k_0 x - \omega_0 t$ with $\omega_0 = \sqrt{gk_0}$.
+Slow variables $X = \eps(x - c_g t)$, $T = \eps^2 t$, with group velocity
+$c_g = \omega'(k_0) = \omega_0/(2k_0)$.
+Derivatives become:
+\begin{equation}
+\partial_x = k_0\partial_\theta + \eps\partial_X, \qquad
+\partial_t = -\omega_0\partial_\theta - \eps c_g\partial_X + \eps^2\partial_T.
+\label{eq:deriv_rules}
+\end{equation}
+
+\paragraph{$G_0$ on modulated harmonics.}
+For $k_0 > 0$, the symbol $|k| = k$ for $k$ near $k_0$ (exactly, not approximately).
+So for any slowly modulated harmonic $f(X)\,E^n$ with $n \geq 1$:
+\begin{equation}
+G_0\bigl[f(X)\,E^n\bigr]
+= (nk_0 - i\eps\partial_X)\,f\cdot E^n.
+\label{eq:G0_modulated}
+\end{equation}
+This is \emph{exact} in deep water --- there are no $O(\eps^2)$ corrections
+from $G_0$ alone, because $|k|$ is linear for $k > 0$.
+(At finite depth, $|k|\tanh(h|k|)$ is not linear, and its curvature
+would contribute additional terms here.)
+
+\paragraph{Ansatz.}
+Expand $\eta = \eps\eta_1 + \eps^2\eta_2 + \eps^3\eta_3 + \cdots$ and
+$\xi = \eps\xi_1 + \eps^2\xi_2 + \eps^3\xi_3 + \cdots$, with
+\begin{equation}
+\eta_1 = AE + \bar A E^{-1}, \qquad
+\xi_1 = BE + \bar B E^{-1},
+\label{eq:leading_order}
+\end{equation}
+where $B(X,T)$ is to be determined in terms of $A$.
+The corrections $\eta_j, \xi_j$ for $j \geq 2$ are expanded in Fourier
+harmonics: $\eta_j = \sum_n \eta_j^{(n)}(X,T)\,E^n$.
+
+
+\subsection{$O(\eps)$: Dispersion Relation}
+
+Apply \eqref{eq:deriv_rules} to $\eta_t = G(\eta)\xi$ at $O(\eps)$, coefficient of $E$:
+\[
+-i\omega_0 A = k_0 B
+\quad\implies\quad
+B = \frac{-i\omega_0}{k_0}\,A.
+\]
+From $\xi_t = -g\eta$ at $O(\eps)$, coefficient of $E$:
+\[
+-i\omega_0 B = -gA
+\quad\implies\quad
+B = \frac{ig}{\omega_0}\,A = \frac{-i\omega_0}{k_0}\,A,
+\]
+where the last equality uses $g = \omega_0^2/k_0$.
+Both equations give the same $B$; consistency requires
+$\omega_0^2 = gk_0$. \hfill$\square$
+
+
+\subsection{$O(\eps^2)$: Group Velocity and Forced Harmonics}
+
+At this order, the slow $X$-derivatives of $A, B$ enter, and the
+quadratic nonlinearities in \eqref{eq:dynamic} generate forcing at
+harmonics $E^0$ (mean) and $E^2$ (second harmonic).
+
+\subsubsection{No secularity at $E^1$}
+
+The system at the fundamental $E^1$ reads (kinematic, then dynamic):
+\begin{align}
+-i\omega_0\eta_2^{(1)} - c_g A_X
+&= k_0\xi_2^{(1)} + (-iB_X), \label{eq:K2_E1}\\[4pt]
+-i\omega_0\xi_2^{(1)} - c_g B_X
+&= -g\eta_2^{(1)}. \label{eq:D2_E1}
+\end{align}
+The $-iB_X$ in \eqref{eq:K2_E1} comes from
+the $\eps\partial_X$ correction in \eqref{eq:G0_modulated};
+the $-c_g A_X$ and $-c_g B_X$ come from
+$\eps c_g\partial_X$ in $\partial_t$.
+(No nonlinear terms at $E^1$:
+the quadratic products $\xi_{1,x}^2$ and $(G_0\xi_1)^2$ produce
+only $E^0$ and $E^2$.)
+
+Equations \eqref{eq:K2_E1}--\eqref{eq:D2_E1} are two equations for
+$\eta_2^{(1)}$ and $\xi_2^{(1)}$, but the coefficient matrix
+$\bigl(\begin{smallmatrix} -i\omega_0 & -k_0 \\
+-g & i\omega_0 \end{smallmatrix}\bigr)$
+is singular ($\omega_0^2 = gk_0$).
+A solution exists iff the forcing satisfies a solvability condition.
+Substituting $B = -i\omega_0 A/k_0$ and $c_g = \omega_0/(2k_0)$
+into the forcing terms, one checks directly that the $A_X$ terms cancel.
+So there is no secularity at $E^1$ --- the group velocity choice
+$c_g = \omega'(k_0)$ guarantees this.
+We set $\eta_2^{(1)} = \xi_2^{(1)} = 0$ (absorbed into $A$ by redefinition).
+
+\subsubsection{Second harmonic $E^2$}
+
+The quadratic nonlinearities contribute at $E^2$.
+Compute the relevant products at leading order, using $B = -i\omega_0 A/k_0$:
+\begin{align}
+\xi_{1,x} &= ik_0 BE - ik_0\bar B E^{-1}, \\
+\xi_{1,x}^2 &= -k_0^2\bigl(B^2 E^2 - 2|B|^2 + \bar B^2 E^{-2}\bigr), \\
+(G_0\xi_1)^2 &= k_0^2\bigl(B^2 E^2 + 2|B|^2 + \bar B^2 E^{-2}\bigr).
+\end{align}
+The combined nonlinear forcing in \eqref{eq:dynamic} at $E^2$ is
+\[
+\bigl[-\tfrac{1}{2}\xi_{1,x}^2 + \tfrac{1}{2}(G_0\xi_1)^2\bigr]_{E^2}
+= k_0^2 B^2 = -\omega_0^2 A^2.
+\]
+(The numerator $(G\xi + \eta_x\xi_x)^2$ reduces to $(G_0\xi_1)^2$
+at this order because $\eta_x\xi_x$ is $O(\eps^2)$ but only has
+$E^0$ and $E^2$ --- it contributes the same way.)
+
+The kinematic and dynamic equations at $E^2$ give:
+\begin{align}
+-2i\omega_0\eta_2^{(2)} &= 2k_0\xi_2^{(2)}, \label{eq:K2_E2}\\
+-2i\omega_0\xi_2^{(2)} &= -g\eta_2^{(2)} - \omega_0^2 A^2. \label{eq:D2_E2}
+\end{align}
+From \eqref{eq:K2_E2}: $\xi_2^{(2)} = -i\omega_0\eta_2^{(2)}/k_0$.
+Substitute into \eqref{eq:D2_E2}:
+\[
+-2i\omega_0\cdot\frac{-i\omega_0\eta_2^{(2)}}{k_0} = -g\eta_2^{(2)} - \omega_0^2 A^2
+\quad\implies\quad
+-\frac{2\omega_0^2}{k_0}\eta_2^{(2)} = -g\eta_2^{(2)} - \omega_0^2 A^2.
+\]
+Using $g = \omega_0^2/k_0$:
+the left side is $-2g\eta_2^{(2)}$, the right is $-g\eta_2^{(2)} - \omega_0^2 A^2$,
+giving
+\begin{equation}
+\boxed{\eta_2^{(2)} = k_0 A^2}, \qquad
+\xi_2^{(2)} = \frac{-i\omega_0}{k_0}\cdot k_0 A^2 = -i\omega_0 A^2.
+\label{eq:eta2_E2}
+\end{equation}
+
+\subsubsection{Mean flow $E^0$}
+
+The $E^0$ nonlinear forcing in the dynamic equation is
+\[
+\bigl[-\tfrac{1}{2}\xi_{1,x}^2 + \tfrac{1}{2}(G_0\xi_1)^2\bigr]_{E^0}
+= k_0^2|B|^2 - k_0^2|B|^2 = 0.
+\]
+This cancellation is specific to deep water (at finite depth, $G_0$
+on $E^{+1}$ and $E^{-1}$ gives different symbols, and the mean flow
+is nonzero).  Therefore:
+\begin{equation}
+\eta_2^{(0)} = 0, \qquad \xi_2^{(0)} = 0 \quad\text{(deep water)}.
+\label{eq:eta2_E0}
+\end{equation}
+
+\subsection{$O(\eps^3)$: The NLS}
+
+\subsubsection{Solvability framework}
+
+At $O(\eps^3)$, the system at $E^1$ has the same singular matrix as before:
+\begin{align}
+-i\omega_0\eta_3^{(1)} - k_0\xi_3^{(1)} &= R_K, \label{eq:sys3_K}\\
+-g\eta_3^{(1)} + i\omega_0\xi_3^{(1)} &= R_D, \label{eq:sys3_D}
+\end{align}
+where $R_K, R_D$ collect all $O(\eps^3)$, $E^1$ terms not involving
+$\eta_3^{(1)}$ or $\xi_3^{(1)}$.
+The solvability condition (left null vector of the coefficient matrix) is:
+\begin{equation}
+i\omega_0\,R_K + k_0\,R_D = 0.
+\label{eq:solvability}
+\end{equation}
+We now compute $R_K$ and $R_D$.
+
+\subsubsection{Dispersive contribution (the $p\,A_{XX}$ term)}
+
+The dispersion comes from the interplay of $\partial_t^2$ and $G_0$
+across the kinematic and dynamic equations, not from $G_0$ alone.
+The cleanest way to see this: differentiate $\eta_t = G_0\xi + \cdots$
+in time to get $\eta_{tt} = -gG_0\eta + \cdots$, i.e.\
+$(\partial_t^2 + gG_0)\eta = \text{nonlinear forcing}$.
+
+Acting on $\eps A(X,T)\,E$:
+\begin{align}
+\partial_t(\eps AE) &= \eps(-i\omega_0 A - \eps c_g A_X + \eps^2 A_T)\,E,
+\\
+\partial_t^2(\eps AE) &= \eps\bigl(-\omega_0^2 A
++ 2i\omega_0\eps c_g A_X
++ \eps^2(c_g^2 A_{XX} - 2i\omega_0 A_T)\bigr)\,E,
+\\
+gG_0(\eps AE) &= \eps\,(gk_0 A - ig\eps A_X)\,E
+= \eps\,(\omega_0^2 A - i\eps\omega_0^2 A_X/k_0)\,E.
+\end{align}
+Adding:
+\[
+(\partial_t^2 + gG_0)[\eps AE]
+= \eps^3\bigl(c_g^2 A_{XX} - 2i\omega_0 A_T\bigr)\,E
+\]
+--- the $O(\eps)$ and $O(\eps^2)$ terms cancel
+(using $\omega_0^2 = gk_0$ and $c_g = \omega_0/(2k_0)$).
+
+So the linear part of the solvability condition at $O(\eps^3)$ contributes
+$c_g^2 A_{XX} - 2i\omega_0 A_T$.
+Rearranging:
+\[
+iA_T = \frac{c_g^2}{2\omega_0}\,A_{XX} + \cdots
+= \frac{\omega_0}{8k_0^2}\,A_{XX} + \cdots
+\]
+This gives the dispersive coefficient:
+\begin{equation}
+p = \frac{c_g^2}{2\omega_0} = \frac{\omega_0}{8k_0^2}.
+\label{eq:p}
+\end{equation}
+
+\subsubsection{Nonlinear contribution (the $q\,|A|^2A$ term)}
+
+The nonlinear forcing at $O(\eps^3)$, $E^1$ has several sources.
+We enumerate them, noting that $\eta_2^{(0)} = 0$ (deep water) eliminates
+several terms.
+
+\paragraph{(a) Quadratic terms in \eqref{eq:dynamic} coupling $\eta_1$ with $\eta_2$.}
+The products $\xi_{1,x}\cdot\xi_{2,x}$ and $G_0\xi_1\cdot G_0\xi_2$
+at $E^1$ involve
+$\xi_1$ ($E^{\pm 1}$) interacting with $\xi_2^{(2)} E^2$:
+\begin{align}
+[\xi_{1,x}\cdot\xi_{2,x}]_{E^1}
+&= (ik_0\bar B)(-2ik_0)(-i\omega_0 A^2)
++ \text{(from } E^{-1}\cdot E^2\text{)}, \\
+[G_0\xi_1\cdot G_0\xi_2]_{E^1}
+&= (k_0\bar B)(2k_0)(-i\omega_0 A^2).
+\end{align}
+
+\paragraph{(b) $G_1(\eta_2)\xi_1$ at $E^1$.}
+$G_1(\eta)\xi = D(\eta\,D\xi) - G_0(\eta\,G_0\xi)$.
+With $\eta_2^{(2)}E^2$ and $\xi_1 = BE + \bar BE^{-1}$:
+the $E^1$ component comes from $E^2 \cdot E^{-1}$, giving terms
+proportional to $\eta_2^{(2)}\bar B = k_0 A^2 \cdot (i\omega_0\bar A/k_0)$.
+
+\paragraph{(c) $G_1(\eta_1)\xi_2$ at $E^1$.}
+Similarly, $\eta_1 = AE + \bar AE^{-1}$ with
+$\xi_2^{(2)}E^2$: the $E^1$ component comes from $E^{-1}\cdot E^2$,
+proportional to $\bar A \cdot \xi_2^{(2)} = \bar A(-i\omega_0 A^2)$.
+
+\paragraph{(d) $G_2(\eta_1)\xi_1$ at $E^1$.}
+This involves $\eta_1^2$ (which has $E^0$ and $E^{\pm 2}$ components)
+acting on $\xi_1$ through the second-order DNO correction.
+The $E^1$ component comes from the $E^0$ part of $\eta_1^2$ ($= 2|A|^2$)
+times the $E^1$ part of $\xi_1$.
+
+\medskip
+
+Each of (a)--(d) produces a term proportional to $|A|^2 A\cdot E$.
+Collecting all contributions and applying the solvability condition
+\eqref{eq:solvability}, the nonlinear coefficient works out to:
+\begin{equation}
+q = \frac{\omega_0 k_0^2}{2}.
+\label{eq:q}
+\end{equation}
+(The detailed algebra is carried out in, e.g.,
+Mei, Stiassnie \& Yue~\cite{mei2005}, \S13.3,
+or Ablowitz~\cite{ablowitz2011}, \S6.4.)
+
+\subsubsection{The NLS}
+
+Combining the dispersive and nonlinear contributions, the
+solvability condition at $O(\eps^3)$ is
+\begin{equation}
+\boxed{
+iA_T + p\,A_{XX} + q\,|A|^2 A = 0
+}
+\label{eq:nls}
+\end{equation}
+with
+\[
+p = \frac{\omega_0}{8k_0^2}, \qquad
+q = \frac{\omega_0 k_0^2}{2}.
+\]
+Since $pq > 0$ in deep water, the equation is \textbf{focusing}:
+it admits soliton solutions, and plane waves are modulationally unstable.
+
+\paragraph{Rigorous justification.}
+D\"ull, Schneider \& Wayne~\cite{dull2015} proved that NLS solutions
+approximate the full Euler equations on the natural $O(1/\eps^2)$ time scale,
+with the key estimate being analyticity bounds on $G(\eta)$.
+
+\subsection{Finite Depth}
+
+For finite $h$, the same procedure applies but $G_0 = |D|\tanh(h|D|)$,
+so \eqref{eq:G0_modulated} acquires $O(\eps^2)$ corrections from the
+curvature of the symbol.
+The dispersion relation becomes $\omega = \sqrt{gk\tanh(hk)}$,
+and critically, $\eta_2^{(0)} \neq 0$ --- the mean flow no longer vanishes,
+modifying the nonlinear coefficient.
+The sign of $q$ changes at $k_0 h \approx 1.363$: below this threshold,
+$pq < 0$ (defocusing), and plane waves are stable.
+
+
+%=============================================================================
+\section{What the NLS--Euler Connection Buys Us}
+\label{sec:connection}
+%=============================================================================
+
+The derivation in Section~\ref{sec:nls} establishes that the NLS
+\eqref{eq:nls} governs the envelope dynamics of deep-water waves
+at $O(\eps^3)$.
+This is useful in two distinct ways: the NLS gives us a
+\emph{catalog of solutions}, and the Euler equations (via the DNO)
+give us the \emph{exact nonlinear operator} we want to learn.
+
+\subsection{The NLS as a Solution Generator}
+
+The focusing NLS is integrable: its full solution space is known
+via inverse scattering.
+This gives closed-form expressions for envelope solitons, Akhmediev
+breathers, Peregrine breathers, and multi-soliton states ---
+none of which are easy to guess from the Euler equations directly.
+
+Each NLS solution $A(X,T)$ lifts to physical variables $(\eta,\xi)$
+via \eqref{eq:leading_order}, producing an approximate solution of the
+full water wave equations valid to $O(\eps^2)$.
+These lifted states serve as:
+\begin{itemize}
+\item \textbf{Initial conditions} for DNO-based time integration of the
+full Euler equations.
+\item \textbf{Standalone data points}: evaluate $G(\eta)\xi$ directly
+on the lifted $(\eta,\xi)$ pair using the DNO series, without any
+time integration at all.
+\end{itemize}
+
+\subsection{What Is Easy and What Is Not}
+
+\paragraph{Envelope solitons: easy.}
+The NLS soliton \eqref{eq:envelope_soliton} gives an explicit formula
+for $A$ at any $(X,T)$.
+Lifting to $(\eta,\xi)$ is a single evaluation of
+\eqref{eq:leading_order} --- no time stepping, no iteration.
+One can generate thousands of soliton snapshots at different $(k_0, A_0)$
+and evaluate $G(\eta)\xi$ on each.
+The only cost is the DNO series evaluation itself.
+
+\paragraph{Peregrine and Akhmediev breathers: easy as snapshots, interesting as trajectories.}
+Like the soliton, the Peregrine \eqref{eq:peregrine} and Akhmediev
+\eqref{eq:akhmediev} breathers have closed-form expressions.
+Generating $(\eta,\xi)$ snapshots at any $(X,T)$ is immediate.
+However, these are approximate solutions of Euler --- the NLS truncates
+at $O(\eps^3)$, so the lifted state drifts from the true Euler
+trajectory over time.
+If one wants data that reflects the \emph{full} nonlinear dynamics
+(post-NLS corrections, recurrence breakdown, frequency downshift),
+one must time-integrate the Euler equations from the NLS-derived
+initial condition and snapshot along the trajectory.
+
+\paragraph{Benjamin--Feir recurrence: requires time integration.}
+The BF instability is easy to \emph{set up} --- perturb a Stokes
+wave with sidebands, which the NLS predicts will grow.
+But the interesting physics (recurrence, eventual breakdown) plays out
+over hundreds of carrier periods and involves the full nonlinear DNO.
+The NLS predicts exact recurrence; the Euler equations show it
+breaking down after 2--3 cycles~\cite{xu2009}.
+Capturing this discrepancy requires running the DNO solver, which is
+expensive but produces the most physically rich training data.
+
+\subsection{Summary: Division of Labor}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Role} & \textbf{NLS provides} & \textbf{Euler/DNO provides} \\
+\midrule
+Solution families & closed-form catalog & --- \\
+Initial conditions & $(\eta,\xi)$ via lifting & --- \\
+$G(\eta)\xi$ evaluation & --- & exact (to order $M$) \\
+Long-time dynamics & approximate (integrable) & exact (non-integrable) \\
+Post-NLS effects & --- & recurrence breakdown, \\
+ & & frequency downshift, breaking \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In short: the NLS tells us \emph{what to simulate}, and the DNO tells
+us \emph{what the operator actually does} on those states.
+For operator learning, the NLS is a recipe book for generating
+diverse, physically motivated inputs $(\eta,\xi)$; the DNO series
+provides the ground-truth labels $G(\eta)\xi$.
+
+
+%=============================================================================
+\section{Exact Solutions of the Focusing NLS}
+\label{sec:solutions}
+%=============================================================================
+
+The focusing NLS is integrable (inverse scattering), yielding
+several families of exact solutions that correspond to distinct
+deep-water wave phenomena.
+Each can be lifted to $(\eta, \xi)$ via
+\eqref{eq:leading_order}.
+
+\subsection{Plane Wave (Stokes Wave)}
+\begin{equation}
+A(X,T) = A_0\,e^{iqA_0^2 T}.
+\end{equation}
+Spatially uniform carrier with nonlinear frequency correction.
+Starting point for stability analysis.
+
+\subsection{Envelope Soliton}
+\begin{equation}
+A(X,T) = A_0\,\operatorname{sech}\!\Bigl(A_0\sqrt{\tfrac{q}{2p}}\;X\Bigr)
+\exp\!\Bigl(\tfrac{i}{2}qA_0^2 T\Bigr).
+\label{eq:envelope_soliton}
+\end{equation}
+A localized wave packet propagating at $c_g$ without dispersing ---
+the deep-water counterpart of the KdV soliton, but modulating a carrier
+rather than forming a single hump.
+At $T = 0$:
+\begin{equation}
+\eta(x,0) = 2\eps A_0\,
+\operatorname{sech}\!\bigl(\eps A_0\sqrt{q/(2p)}\;x\bigr)\cos(k_0 x).
+\label{eq:eta_soliton}
+\end{equation}
+Confirmed experimentally~\cite{shemer2013}.
+
+\subsection{Akhmediev Breather}
+
+Spatially periodic, temporally localized~\cite{akhmediev1987}:
+\begin{equation}
+A(X,T) = A_0\,\frac{\cosh(\sigma T - 2i\varphi)
+- \cos\varphi\cos(\kappa X)}
+{\cosh(\sigma T) - \cos\varphi\cos(\kappa X)}\,e^{iA_0^2 T},
+\label{eq:akhmediev}
+\end{equation}
+where $\cos\varphi = \kappa/(2A_0\sqrt{q/p})$ and
+$\sigma = \kappa\sqrt{4qA_0^2/p - \kappa^2 q/p}$.
+
+As $T \to -\infty$ this is the plane wave plus an infinitesimal
+$\cos(\kappa X)$ perturbation.
+At $T = 0$ the modulation reaches maximum amplitude.
+As $T \to +\infty$ it returns to the plane wave.
+This describes one complete cycle of the Benjamin--Feir instability
+(Section~\ref{sec:bf}).
+
+\subsection{Peregrine Breather}
+
+The $\kappa \to 0$ limit of the Akhmediev breather~\cite{peregrine1983}:
+\begin{equation}
+A(X,T) = A_0\left(1 - \frac{4(1 + 2iqA_0^2 T)}
+{1 + 4q^2 A_0^4 T^2/p^2 + 2qA_0^2 X^2/p}\right)e^{iqA_0^2 T}.
+\label{eq:peregrine}
+\end{equation}
+Localized in both space and time, with maximum amplitude $3A_0$ ---
+the prototypical rogue wave.
+Produces steep, localized surface states where $G_2, G_3, \ldots$
+are non-negligible.
+
+
+%=============================================================================
+\section{The Benjamin--Feir Instability}
+\label{sec:bf}
+%=============================================================================
+
+Benjamin and Feir~\cite{benjamin1967} showed that uniform deep-water
+Stokes waves are modulationally unstable.
+This is a consequence of the focusing character of the NLS.
+
+\subsection{Linear Stability Analysis}
+
+Perturb the plane wave at sideband wavenumbers $k_0 \pm \delta k$:
+\[
+A = \bigl(A_0 + a_+\,e^{i\delta k\,X + \Omega T}
++ a_-\,e^{-i\delta k\,X + \bar\Omega T}\bigr)\,e^{iqA_0^2 T}.
+\]
+Linearizing \eqref{eq:nls}:
+\begin{equation}
+\Omega^2 = p^2(\delta k)^2\bigl[(\delta k)^2 - 2qA_0^2/p\bigr].
+\label{eq:bf_growth}
+\end{equation}
+Instability ($\Omega^2 < 0$) when
+\begin{equation}
+0 < |\delta k| < A_0\sqrt{2q/p} = \sqrt{2}\,k_0^2 a_0.
+\label{eq:bf_criterion}
+\end{equation}
+Maximum growth rate $\Omega_{\max} = qA_0^2 = \omega_0 k_0^2 a_0^2/2$
+at $|\delta k| = A_0\sqrt{q/p}$.
+At steepness $k_0 a_0 = 0.13$, the $e$-folding time is $\sim 19$ carrier periods.
+
+The coefficient $q$ --- and hence the instability bandwidth --- originates
+from the nonlinear interaction mediated by $G_1(\eta)\xi$.
+The exact stability analysis (Berti, Maspero \& Ventura~\cite{berti2022})
+uses the shape derivative of the full DNO.
+
+\subsection{Nonlinear Recurrence}
+
+The instability saturates.
+Energy cycles between carrier and sidebands in Fermi--Pasta--Ulam recurrence:
+growth $\to$ sideband maximum $\to$ return to carrier $\to$ repeat.
+The Akhmediev breather \eqref{eq:akhmediev} is the exact NLS solution
+describing one cycle.
+
+For the full Euler equations (via DNO), recurrence persists for 2--3 cycles
+before higher-order effects (absent at $O(\eps^3)$) disrupt it.
+
+\subsection{DNO Simulation (Xu \& Guyenne 2009)}
+
+Xu \& Guyenne~\cite{xu2009} simulated this with the full system
+\eqref{eq:kinematic}--\eqref{eq:dynamic}, $M = 4$.
+Initial condition: Stokes wave ($k_1 = 9$, $k_1 a = 0.13$) with
+sideband perturbations at $k_l = 7$, $k_r = 11$:
+\begin{align}
+\eta(x,0) &= \eta_0 + \eps a\left[\cos\!\left(k_l x - \tfrac{\pi}{4}\right)
++ \cos\!\left(k_r x - \tfrac{\pi}{4}\right)\right],
+\label{eq:bf_eta_ic}\\
+\xi(x,0) &= \xi_0 + \eps a\left[\frac{e^{k_l\eta}}{\sqrt{k_l}}
+\sin\!\left(k_l x - \tfrac{\pi}{4}\right)
++ \frac{e^{k_r\eta}}{\sqrt{k_r}}
+\sin\!\left(k_r x - \tfrac{\pi}{4}\right)\right],
+\label{eq:bf_xi_ic}
+\end{align}
+where $(\eta_0, \xi_0)$ is a numerically exact Stokes wave and $\eps = 0.1$.
+
+Results: three full recurrence cycles over 716 carrier periods.
+Energy conserved to $O(10^{-3}\%)$ for $t/T \leq 600$.
+$M = 2$ suffices (Benjamin--Feir is a four-wave process).
+
+\subsection{Post-NLS Effects}
+
+The full Euler equations exhibit phenomena absent from NLS:
+\begin{itemize}
+\item Recurrence breakdown after 2--3 cycles (higher-order resonances).
+\item Permanent frequency downshift ($O(\eps^4)$ effect).
+\item Wave breaking for $k_0 a \gtrsim 0.3$ (the DNO ceases to be defined
+when $\eta$ becomes multi-valued).
+\end{itemize}
+These are precisely the regimes where a learned approximation of the
+full DNO would be valuable: it captures the complete nonlinear map
+without truncation at finite $M$.
+
+
+%=============================================================================
+\section{Generating Deep-Water Training Data}
+\label{sec:datagen}
+%=============================================================================
+
+The preceding analysis provides five families of physically consistent
+$(\eta, \xi)$ pairs in deep water.
+For each, one evaluates $G(\eta)\xi$ via the DNO series at $h = 1000$
+(deep-water proxy).
+
+\begin{center}
+\begin{tabular}{@{}llp{5cm}@{}}
+\toprule
+\textbf{Source} & \textbf{Parameters} & \textbf{Nonlinearity} \\
+\midrule
+Stokes waves & $k_0, a_0$ & mild (single frequency) \\
+Linear superposition & random spectrum & nearly linear, broad bandwidth \\
+Envelope solitons & $A_0, k_0$ & moderate (localized envelope) \\
+BF trajectories & $k_0, a_0, \delta k, t$ & strong (time-varying cascades) \\
+Akhmediev/Peregrine & $\kappa, A_0$ & extreme (up to $3\times$ background) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Linear superposition} is cheapest:
+draw random $k_j, a_j, \phi_j$ and set
+\[
+\eta(x) = \textstyle\sum_j a_j\cos(k_j x + \phi_j), \qquad
+\xi(x) = \textstyle\sum_j \frac{a_j\omega_j}{k_j}\sin(k_j x + \phi_j),
+\quad \omega_j = \sqrt{g|k_j|}.
+\]
+
+\paragraph{BF trajectories} are most informative:
+time-integrate \eqref{eq:kinematic}--\eqref{eq:dynamic} from
+\eqref{eq:bf_eta_ic}--\eqref{eq:bf_xi_ic} and snapshot at intervals.
+
+\paragraph{Depth conditioning.}
+A model trained at $h = 1$ learns $G_0 = |k|\tanh(k)$ and cannot
+extrapolate to $G_0 = |k|$.
+For finite depths, the rescaling $x \to x/h$, $\eta \to \eta/h$
+reduces to $h = 1$.
+The deep-water limit is genuinely different and requires either direct
+training data or a depth-conditioned architecture (e.g.\ encoding
+$\tanh(hk)$ as an input channel).
+
+
+%=============================================================================
+\begin{thebibliography}{99}
+
+\bibitem{zakharov1968}
+V.E.\ Zakharov,
+``Stability of periodic waves of finite amplitude on the surface of a deep fluid,''
+\textit{J.\ Appl.\ Mech.\ Tech.\ Phys.}\ \textbf{9}(2), 190--194 (1968).
+
+\bibitem{craig1993}
+W.\ Craig \& C.\ Sulem,
+``Numerical simulation of gravity waves,''
+\textit{J.\ Comput.\ Phys.}\ \textbf{108}(1), 73--83 (1993).
+
+\bibitem{craig1997}
+W.\ Craig, U.\ Schanz \& C.\ Sulem,
+``The modulational regime of three-dimensional water waves and the
+Davey--Stewartson system,''
+\textit{Ann.\ Inst.\ H.\ Poincar\'e (C)}\ \textbf{14}(5), 615--667 (1997).
+
+\bibitem{craig2004}
+W.\ Craig \& C.\ Sulem,
+``Asymptotic nonlinear wave modeling through the Dirichlet-to-Neumann operator,''
+\textit{Methods Appl.\ Anal.}\ \textbf{11}(4), 475--492 (2004).
+
+\bibitem{dull2015}
+W.-P.\ D\"ull, G.\ Schneider \& C.E.\ Wayne,
+``Justification of the nonlinear Schr\"odinger equation for the evolution
+of gravity driven 2D surface water waves,''
+\textit{Arch.\ Ration.\ Mech.\ Anal.}\ \textbf{217}(3), 1219--1270 (2015).
+
+\bibitem{guyenne2007}
+P.\ Guyenne \& D.P.\ Nicholls,
+``Comparison of Dirichlet--Neumann operator expansions for nonlinear
+surface gravity waves,''
+\textit{Coastal Eng.}\ \textbf{55}(2), 120--133 (2008).
+
+\bibitem{xu2009}
+L.\ Xu \& P.\ Guyenne,
+``Numerical simulation of three-dimensional nonlinear water waves,''
+\textit{J.\ Comput.\ Phys.}\ \textbf{228}(22), 8446--8466 (2009).
+
+\bibitem{berti2022}
+M.\ Berti, A.\ Maspero \& P.\ Ventura,
+``Full description of Benjamin--Feir instability of Stokes waves in deep water,''
+\textit{Invent.\ Math.}\ \textbf{230}, 651--711 (2022).
+
+\bibitem{benjamin1967}
+T.B.\ Benjamin \& J.E.\ Feir,
+``The disintegration of wave trains on deep water. Part 1. Theory,''
+\textit{J.\ Fluid Mech.}\ \textbf{27}(3), 417--430 (1967).
+
+\bibitem{peregrine1983}
+D.H.\ Peregrine,
+``Water waves, nonlinear Schr\"odinger equations and their solutions,''
+\textit{J.\ Austral.\ Math.\ Soc.\ Ser.\ B}\ \textbf{25}(1), 16--43 (1983).
+
+\bibitem{shemer2013}
+L.\ Shemer, A.\ Sergeeva \& A.\ Slunyaev,
+``Simulations and experiments of short intense envelope solitons of
+surface water waves,''
+\textit{Phys.\ Fluids}\ \textbf{25}, 067105 (2013).
+
+\bibitem{akhmediev1987}
+N.N.\ Akhmediev, V.M.\ Eleonskii \& N.E.\ Kulagin,
+``Exact first-order solutions of the nonlinear Schr\"odinger equation,''
+\textit{Theor.\ Math.\ Phys.}\ \textbf{72}, 809--818 (1987).
+
+\bibitem{mei2005}
+C.C.\ Mei, M.\ Stiassnie \& D.K.-P.\ Yue,
+\textit{Theory and Applications of Ocean Surface Waves},
+World Scientific (2005).
+
+\bibitem{ablowitz2011}
+M.J.\ Ablowitz,
+\textit{Nonlinear Dispersive Waves: Asymptotic Analysis and Solitons},
+Cambridge University Press (2011).
+
+\end{thebibliography}
+
+\end{document}

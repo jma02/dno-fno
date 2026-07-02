@@ -1,0 +1,388 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{caption}
+
+\definecolor{mDarkTeal}{HTML}{1c3d6b}
+\definecolor{mLightBrown}{HTML}{2f6fb3}
+
+\titleformat{\section}{\large\bfseries\color{mDarkTeal}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.6em}
+\titlespacing*{\subsection}{0pt}{1.0em}{0.4em}
+
+\hypersetup{colorlinks=true, linkcolor=mDarkTeal, citecolor=mDarkTeal, urlcolor=mLightBrown}
+
+\newcommand{\Gop}{\mathcal{G}}
+\newcommand{\Hil}{\mathcal{H}}
+\newcommand{\D}{\mathrm{D}}
+
+\title{\textbf{CS-DNO: a Craig--Sulem-Structured Neural Dirichlet--Neumann Operator}\\[2pt]
+       \large Architecture reference for \texttt{models/dno-net/dno\_net\_v2.py}
+       (baseline run \texttt{cs\_dno\_w512b8\_l256\_v3\_20260605\_032608})}
+\author{}
+\date{June 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section{What the model replaces, and where it sits}
+
+The water-wave system is evolved in Zakharov form: with $\eta(x,t)$ the free
+surface and $\xi(x,t)$ the surface trace of the velocity potential,
+\begin{align}
+\eta_t &= \Gop(\eta;h)\,\xi, \\
+\xi_t  &= -g\eta \;-\; \tfrac12 \xi_x^2
+          \;+\; \frac{\bigl(\Gop(\eta;h)\xi + \eta_x \xi_x\bigr)^2}{2\,(1+\eta_x^2)},
+\end{align}
+where $\Gop(\eta;h)$ is the \emph{Dirichlet--Neumann operator} (DNO): solve
+Laplace's equation in the fluid domain $\{-h < y < \eta(x)\}$ with Dirichlet
+data $\xi$ on the surface and no-flux at the flat bottom, and return the
+(scaled) normal derivative of the potential at the surface. Every right-hand-side
+evaluation requires one application of $\Gop$; the reference implementation is
+the order-6 Craig--Sulem series with $8\times$ zero-padding in f64
+(\texttt{dno\_series\_eval}), which dominates the cost of a rollout. CS-DNO is a
+neural surrogate for the map
+\[
+(\eta,\ \xi,\ h)\ \longmapsto\ \Gop(\eta;h)\,\xi
+\]
+on the $n_x=1024$ periodic grid ($L=2\pi$), trained on snapshots harvested from
+f64 solver trajectories. At rollout time it is dropped into the same time
+integrator in place of the series evaluation (\texttt{solver/evals/model\_rollout.py}).
+One convention matters everywhere: the entire data pipeline --- solver RHS,
+post-step states, and stored labels --- lives in the dealiased subspace
+$k \le 0.25\,k_{\max}$ (cutoff $k=128$), because the order-6 series amplifies
+high-$k$ roundoff like $k^6$. The surrogate therefore only ever sees and is only
+ever scored on that subspace.
+
+\section{Mathematical structure the architecture encodes}
+
+The DNO admits the Craig--Sulem expansion
+\[
+\Gop(\eta;h) = \sum_{j\ge 0} \Gop_j(\eta;h),
+\qquad \Gop_j \ \text{homogeneous of degree } j \text{ in } \eta,
+\]
+whose first terms (finite depth, $\D = -i\partial_x$, $|\D| = $ multiplier $|k|$) are
+\begin{align}
+\Gop_0(h) &= |\D|\tanh(h|\D|), \\
+\Gop_1(\eta;h)\,\xi &= -\,\Gop_0\bigl(\eta\, \Gop_0 \xi\bigr)\;-\;\partial_x\bigl(\eta\,\partial_x \xi\bigr).
+\end{align}
+Each $\Gop_j$ is built by \emph{alternating Fourier multipliers
+$m(\D,h)$ with pointwise multiplications by powers of $\eta$}. Four structural
+properties of the true operator drive the design:
+\begin{enumerate}[leftmargin=1.6em, itemsep=2pt]
+\item[\textbf{P1}] \textbf{Linearity in $\xi$.} $\Gop(\eta;h)$ is a linear
+      operator applied to $\xi$; all nonlinearity enters through $\eta$.
+\item[\textbf{P2}] \textbf{Analyticity in $\eta$.} The expansion converges for
+      moderate slopes; the $\eta$-dependence is polynomial order by order.
+\item[\textbf{P3}] \textbf{Known dispersion.} The linear part
+      $\Gop_0 = |\D|\tanh(h|\D|)$ is exact and closed-form, with all depth
+      dependence through $\tanh(hk)$.
+\item[\textbf{P4}] \textbf{Multiplier--multiplication factorization.} Higher
+      corrections look like $m_{\mathrm{out}}(\D,h)\,[\,\phi(\eta)\cdot
+      m_{\mathrm{in}}(\D,h)\,\xi\,]$ composed and summed.
+\end{enumerate}
+CS-DNO hard-codes P1, P3 and P4 and soft-codes P2. By contrast, a generic FNO
+fed $(\eta,\xi)$ as channels respects none of them: it can (and measurably does)
+produce output nonlinear in $\xi$, which on near-linear states materializes as
+spurious sideband energy; and it must spend capacity re-learning
+$\tanh(hk)$ from data. The predecessor \texttt{SpectralDNO} already enforced P1
+via a single rank-$r$ ``spectral sandwich'' $C(\eta)^{\!\top} F(\eta)\, C(\eta)$
+added to $\Gop_0$, but its $\eta$-trunk was an FNO-style stack of spectral
+convolutions and its per-state filter $F$ was produced by a global pooled MLP
+--- depth entered only as an input channel. CS-DNO replaces that with a sum of
+explicitly Craig--Sulem-shaped blocks and analytic depth conditioning.
+
+\section{Architecture}
+
+\subsection{Interface and normalization}
+
+The module signature is \texttt{(inputs, depth) $\to$ gxi} with
+\texttt{inputs} of shape $(B, 1024, 2)$ holding normalized $(\hat\eta, \hat\xi)$
+and \texttt{depth} of shape $(B,1)$ holding $\log h$. Under \texttt{norm=scale}
+each quantity is divided by its training-corpus absolute maximum:
+\[
+\hat\eta = \eta / s_\eta, \qquad
+\hat\xi  = \xi  / s_\xi, \qquad
+\widehat{\Gop\xi} = \Gop\xi / s_g,
+\]
+with $s_\xi = 0.14096$ and $s_g = 0.76948$ for the v3 corpus (recorded in
+\texttt{config.json}; recomputed per dataset). Internally the model un-scales
+$\xi$ to physical units before every operator application and re-scales the
+output, so the learned parts operate on physically meaningful fields. Depth is
+clipped as $\log h \mapsto \min(\log h, \log 5)$: for $k \ge 1$,
+$\tanh(5k)$ is within $10^{-4}$ of 1, so all depths beyond $h=5$ are physically
+indistinguishable from infinite depth and the clip simply saturates that
+direction of input space.
+
+\subsection{Exact linear baseline}
+
+The flat-surface DNO is applied analytically in Fourier space,
+\[
+\Gop_0(h)\,\xi = \mathrm{irfft}\bigl[\,k\tanh(hk)\cdot \mathrm{rfft}(\xi)\,\bigr],
+\]
+and the network only ever learns the \emph{residual} $\Gop - \Gop_0$. Because
+every learned contribution is zero-initialized (below), the model output at
+step~0 of training is exactly $\Gop_0\xi$ --- training starts from the linear
+water-wave theory rather than from noise.
+
+\subsection{The $\eta$ feature stack}
+
+The surface shape is expanded into seven fixed analytic channels --- pointwise
+powers plus spectral derivatives:
+\[
+\bigl[\ \eta,\ \eta^2,\ \eta^3,\ \partial_x\eta,\ \partial_x^2\eta,\ |\D|^{1/2}\eta,\ \Hil\eta\ \bigr],
+\]
+where $\Hil$ is the Hilbert transform ($-i\,\mathrm{sgn}(k)$) and the
+half-derivative $|\D|^{1/2}$ is natural in deep-water $\Gop_1$ scalings. The
+powers give the polynomial orders of P2 directly; the derivatives expose slope
+and curvature (the physical small parameters of the expansion); $\Hil$ and
+$|\D|^{1/2}$ give the trunk access to odd/phase-shifted and fractional
+information about $\eta$ that pointwise powers cannot produce. These seven
+channels pass through a small pointwise trunk shared by all blocks,
+\[
+\texttt{Dense}(7 \to 256) \to \mathrm{gelu} \to \texttt{Dense}(256 \to 256) \to \mathrm{gelu},
+\]
+producing $\eta$-features $E(\eta) \in \mathbb{R}^{B \times 1024 \times 256}$
+(width$/2$ channels). Note the trunk is \emph{pointwise in $x$} apart from the
+fixed spectral derivatives --- there are no learned convolutions over $x$
+anywhere in the model; all learned spatial coupling happens through Fourier
+multipliers.
+
+\subsection{Depth-aware Fourier multipliers}
+
+Every learned multiplier is produced by \texttt{DepthAwareMultiplier}: a 2-layer
+MLP evaluated \emph{per mode} on physical dispersion features,
+\[
+m(k,h) \;=\; W_2\,\tanh\!\bigl(W_1\,[\,k,\ h,\ \tanh(hk),\ k\tanh(hk)\,] + b_1\bigr) + b_2
+\;\in\; \mathbb{R}^{B \times 513 \times r},
+\]
+with hidden width 128 and $r$ output channels (one per branch). Because the MLP
+sees $\tanh(hk)$ and $k\tanh(hk)$ as inputs, the exact dispersion scaling --- and
+in particular the correct shallow/deep crossover in $kh$ --- is available as a
+\emph{linear readout} rather than something to be discovered; the network learns
+perturbations on physics, not the physics itself. This is the entire mechanism
+of depth conditioning: $h$ never enters as a spatial channel, only through these
+multipliers (and the $\Gop_0$ baseline). The multipliers are real-valued, i.e.
+zero-phase filters (a representational choice discussed in \S\ref{sec:expressivity}).
+
+\subsection{The Craig--Sulem block}
+
+Each of the $n_{\mathrm{blocks}}=8$ blocks computes a sum of $r=256$ branches
+shaped exactly like a Craig--Sulem term (P4):
+\[
+\mathrm{Block}(\eta,\xi,h)
+\;=\; \sum_{i=1}^{r}\;
+m^{(i)}_{\mathrm{out}}(\D,h)\,\Bigl[\;\underbrace{\Phi_i(\eta)}_{\text{pointwise in }x}\;\cdot\;
+\bigl(\,m^{(i)}_{\xi}(\D,h)\,\xi\,\bigr)\Bigr],
+\]
+implemented as:
+\begin{enumerate}[leftmargin=1.6em, itemsep=1pt]
+\item $\Phi(\eta) = \texttt{Dense}(256 \to r)\,E(\eta)$ --- a \textbf{zero-initialized}
+      linear projection of the shared trunk features to one spatial gain field
+      per branch (this is what makes the whole block inert at init);
+\item $\xi$-branching in $k$-space: $\widehat{\xi}_i = m^{(i)}_{\xi}(k,h)\,\hat\xi(k)$,
+      one filtered copy of the \emph{physical} $\xi$ per branch;
+\item a \emph{pointwise} product $\Phi_i(\eta)(x)\cdot \xi_i(x)$ --- deliberately
+      diagonal over branches (no outer product between $\eta$-channels and
+      $\xi$-branches), so cost and memory are linear in $r$;
+\item per-branch output multipliers $m^{(i)}_{\mathrm{out}}$, then a sum over branches.
+\end{enumerate}
+The full model is the baseline plus the block sum, rescaled to normalized units:
+\[
+\boxed{\;
+\Gop_\theta(\eta;h)\,\xi
+\;=\; \Gop_0(h)\,\xi
+\;+\; \sum_{b=1}^{8} \mathrm{Block}_b\bigl(E(\eta),\ \xi,\ h\bigr)\;}
+\]
+Linearity in $\xi$ (P1) holds \emph{by construction}: $\xi$ enters every branch
+exactly once, through a linear filter, a multiplication by an $\eta$-dependent
+field, and another linear filter. For fixed $(\eta,h)$ the model \emph{is} a
+linear operator in $\xi$ --- a sum of $8 \times 256 = 2048$
+multiplier--gain--multiplier sandwiches. Each block can represent
+$\Gop_1$-shaped terms exactly when $\Phi$ recovers an affine function of $\eta$,
+and higher-order $\Gop_j$ effectively, since the trunk makes $\Phi_i(\eta)$ an
+arbitrary (learned, pointwise) nonlinear functional of the seven $\eta$-channels.
+
+\subsection{Expressivity notes and deliberate trade-offs}
+\label{sec:expressivity}
+
+\begin{itemize}[leftmargin=1.6em, itemsep=2pt]
+\item \textbf{Zero-phase multipliers.} Real $m(k,h)$ on rfft modes are
+      even, zero-phase convolution kernels. Odd differential action on $\xi$ is
+      therefore not exactly representable: of the analytic
+      $\Gop_1 = -\Gop_0\,\eta\,\Gop_0 - \partial_x\,\eta\,\partial_x$, the first
+      term and the $\eta\,\partial_x^2$ part of the second are exactly reachable
+      ($\Gop_0$ and $k^2$ are real multipliers, with $\eta,\partial_x^2\eta$
+      available to $\Phi$), while the $\eta_x\,\partial_x$ part can only be
+      approximated through combinations (the $\eta$-side does have odd operators
+      via $\partial_x\eta$ and $\Hil\eta$). This is a deliberate economy ---
+      complex multipliers double the parameter count of the dominant tensors ---
+      and at the achieved single-step error ($\sim 10^{-3}$ relative $H^1$) it
+      has not been the binding constraint.
+\item \textbf{No enforced self-adjointness.} The true $\Gop$ is self-adjoint and
+      positive semi-definite; the baseline run learns $m_\xi \ne m_{\mathrm{out}}$
+      independently, so symmetry is only approximate. A
+      \texttt{tie\_xi\_out\_mult} flag exists that sets
+      $m_\xi = m_{\mathrm{out}}$ per branch, making each branch manifestly
+      self-adjoint (see \S\ref{sec:parked}).
+\item \textbf{Exact flat-surface limit only at init.} With biases present,
+      $\Phi(0) \ne 0$ after training, so $\Gop_\theta(0;h) \ne \Gop_0(h)$
+      exactly (it is close in practice). A \texttt{phi\_bias\_free} flag removes
+      all trunk/projection biases so the residual vanishes identically at
+      $\eta=0$ for \emph{all} weights (\S\ref{sec:parked}).
+\item \textbf{Global support in $x$.} Although $\Phi$ is pointwise, the
+      multipliers are dense in $k$, so the learned operator has full nonlocal
+      reach --- consistent with the true DNO, which is nonlocal.
+\end{itemize}
+
+\section{Hyperparameters and parameter budget}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llll}
+\toprule
+field & value & meaning \\
+\midrule
+\texttt{width}      & 512 & trunk feature width is \texttt{width}/2 = 256 \\
+\texttt{n\_blocks}  & 8   & Craig--Sulem blocks summed \\
+\texttt{latent}     & 256 & branches $r$ per block \\
+\texttt{cs\_n\_polys} & 3 & $\eta, \eta^2, \eta^3$ features \\
+\texttt{cs\_use\_*\_deriv / hilbert} & all true & $\partial_x, \partial_x^2, |\D|^{1/2}, \Hil$ features \\
+\texttt{cs\_mult\_hidden} & 128 & multiplier MLP hidden width \\
+\texttt{h\_clip\_max} & 5.0 & depth saturation \\
+\texttt{modes} & 64 & \emph{unused} (CLI compatibility with FNO/SpectralDNO) \\
+\bottomrule
+\end{tabular}
+\caption{Baseline architecture hyperparameters
+(\texttt{cs\_dno\_w512b8\_l256\_v3\_20260605\_032608}).}
+\end{table}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+component & params & share \\
+\midrule
+$\eta$ trunk (\texttt{eta\_feat\_proj} $7{\to}256$ + \texttt{eta\_feat\_mix} $256{\to}256$) & 67{,}840 & 6.0\% \\
+$\Phi$ projections ($8 \times$ \texttt{Dense} $256{\to}256$, zero-init) & 526{,}336 & 46.5\% \\
+multiplier MLPs ($8$ blocks $\times$ $\{m_\xi, m_{\mathrm{out}}\}$ $\times$ ($4{\to}128{\to}256$)) & 538{,}624 & 47.6\% \\
+\midrule
+total & 1{,}132{,}800 & \\
+\bottomrule
+\end{tabular}
+\caption{Exact parameter budget (matches \texttt{param\_count} in the run
+config). For comparison, the FNO baseline \texttt{fno\_w128b6\_v3\_hclip5} has
+13.1M parameters.}
+\end{table}
+
+The model is small because it learns only scalar gain fields and 1-D multiplier
+curves on top of hard-coded structure --- there are no $512\times512\times64$
+complex spectral weight tensors anywhere.
+
+\section{Training protocol}
+
+\textbf{Data.} \texttt{combined\_dataset\_v3.npz}: 5{,}993{,}989 snapshots
+$(\eta, \xi, \Gop\xi, h)$ at $n_x = 1024$, harvested from f64 solver rollouts
+across ten families --- Tanaka solitons g0/g1 (2.0M), Benjamin--Feir g0/g1/modal
+(2.03M), Stokes deep/finite (1.0M), linear shallow sweeps (0.5M), random seas
+deep/finite (0.46M). Labels are the order-6/pad-8 operator \emph{lowpassed to
+the $k\le128$ subspace} (the pipeline's invariant subspace). Split 80/10/10 by a
+seeded global permutation: 4{,}795{,}193 train / 599{,}398 val. The v4 corpus in
+the current retrain appends a shallow--steep wavetrain family ($+480$k, source
+11) and changes nothing else; see \texttt{v4\_dataset\_report.pdf}.
+
+\textbf{Loss.} Relative Sobolev $H^1$ in the spectral domain, on normalized
+targets:
+\[
+\mathcal{L} \;=\; \operatorname{mean}_{\text{batch}}
+\frac{\bigl\|\,w \odot (\widehat{\mathrm{pred}} - \widehat{\mathrm{tgt}})\,\bigr\|_2}
+     {\bigl\|\,w \odot \widehat{\mathrm{tgt}}\,\bigr\|_2},
+\qquad w(k) = \sqrt{1 + k^2},
+\]
+i.e.\ an $L^2$-plus-gradient norm that up-weights exactly the high-$k$ content a
+rollout differentiates; relative (per-sample) so soliton rows and near-flat rows
+contribute comparably.
+
+\textbf{Optimization.} AdamW, base lr $2\times10^{-4}$ with single cosine decay
+over the full run, weight decay $10^{-4}$, global batch 256, 40 epochs, f32
+training throughout. The baseline trained on one GPU; the trainer shards the
+global batch across devices via \texttt{shard\_map} with per-step gradient
+all-reduce (the v4 retrain uses both GPUs this way --- optimization-identical to
+single-device). Best-val checkpoint is kept: \textbf{val $= 9.28\times10^{-4}$}
+relative $H^1$, vs $3.69\times10^{-3}$ for the 13.1M-parameter FNO baseline on
+the same data and loss (80 epochs) --- $4\times$ lower error with $11.6\times$
+fewer parameters at half the epochs.
+
+\section{Deployment in rollouts}
+
+\texttt{model\_rollout.py} reconstructs the module from \texttt{config.json}
+and substitutes it for the series evaluation inside the same time integrator
+used to generate truth, with the same $0.25$ dealias filter applied to the RHS
+and post-step states --- the surrogate rollout lives in the same invariant
+subspace it was trained on. The network always evaluates in f32; with
+\texttt{--f64\_harness} (the honest configuration --- see
+\texttt{v4\_dataset\_report.pdf}) all surrounding integrator state and spectral
+algebra run in f64. Depth enters the surrogate as $\log h$ exactly as in
+training.
+
+\section{Empirical status (baseline, f64 harness, truth-gated)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+regime & divergence & median rel-$L^2(\eta)$ at $t{=}200$ \\
+\midrule
+bf\_g0      & 0\%    & 0.0044 \\
+bf\_g1      & 0\%    & 0.0067 \\
+bf\_modal   & 6.7\%  & 0.0055 \\
+tanaka\_g0  & 6.2\%  & 0.0420 \\
+tanaka\_g1  & 18.8\% & 0.0443 \\
+linear (shallow-steep sweep) & 27\% & 0.084 \\
+\bottomrule
+\end{tabular}
+\caption{Long-rollout accuracy of the v3 baseline. The single systematic
+weakness is shallow water ($h \lesssim 0.1$) at moderate steepness
+($a/h \gtrsim 0.15$) on non-soliton states --- a training-coverage gap, not an
+architecture failure (single-step error on exact solitons is
+$\sim 2\times10^{-4}$ even where rollouts die). The v4 retrain targets exactly
+this with the shallow--steep family.}
+\end{table}
+
+\section{Parked architectural variants}
+\label{sec:parked}
+
+Three flags exist in the module, are plumbed through training and rollout, and
+are \textbf{off} in the baseline; the program that motivated them was closed
+when the f32 FFT noise floor was identified as the real obstacle:
+
+\begin{itemize}[leftmargin=1.6em, itemsep=2pt]
+\item \texttt{use\_g1\_baseline} --- add the closed-form
+      $\Gop_1(\eta;h)\xi = -\Gop_0(\eta\,\Gop_0\xi) - \partial_x(\eta\,\partial_x\xi)$
+      to the analytic baseline so learned blocks model only $\Gop_{2+}$.
+      Requires \texttt{g1\_k\_cut} (default 128): the doubly $k$-amplified f32
+      FFT chain produces rounding noise above $k\approx128$ that exceeds the
+      genuine $\Gop_1$ signal there, which the $H^1$ loss then up-weights into
+      an unlearnable $\sim3\times10^{-3}$ floor --- the masked variant zeroes
+      the term's output modes at $k \ge$ cut.
+\item \texttt{tie\_xi\_out\_mult} --- share one multiplier as both $m_\xi$ and
+      $m_{\mathrm{out}}$ per branch, making every branch (hence every block)
+      self-adjoint in $\xi$, matching the true operator's symmetry.
+\item \texttt{phi\_bias\_free} --- remove all biases from the $\eta$ trunk and
+      $\Phi$ projections so every learned term vanishes identically at
+      $\eta = 0$: the flat-surface limit $\Gop_\theta(0;h) = \Gop_0(h)$ becomes
+      exact for all trained weights, not just at init.
+\end{itemize}
+
+\end{document}

@@ -1,3 +1,13 @@
+"""Spectrally factorized neural Dirichlet-to-Neumann operator.
+
+The model keeps the physically important linearity in ``xi`` by constructing an
+eta-conditioned linear operator and applying it to ``xi``.  The learned part is a
+positive spectral sandwich,
+
+    C(eta)^T F(eta) C(eta),
+
+added to the flat-surface linear DNO baseline G0.
+"""
 from __future__ import annotations
 
 import jax.numpy as jnp
@@ -5,8 +15,6 @@ from flax import linen as nn
 
 
 class SpectralConv1d(nn.Module):
-    """1D Fourier layer that keeps a fixed number of low modes."""
-
     in_channels: int
     out_channels: int
     modes: int
@@ -15,194 +23,103 @@ class SpectralConv1d(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         batch_size, grid_size, _ = x.shape
         kept_modes = min(self.modes, grid_size // 2 + 1)
-        scale = 1.0 / (self.in_channels * self.out_channels)
-
         weights_real = self.param(
             "weights_real",
-            nn.initializers.normal(stddev=scale),
+            nn.initializers.glorot_normal(),
             (self.in_channels, self.out_channels, self.modes),
         )
         weights_imag = self.param(
             "weights_imag",
-            nn.initializers.normal(stddev=scale),
+            nn.initializers.glorot_normal(),
             (self.in_channels, self.out_channels, self.modes),
         )
         weights = weights_real + 1j * weights_imag
 
-        x_fft = jnp.fft.rfft(x, axis=1)
+        x_fft = jnp.fft.rfft(x, axis=1, norm="forward")
         transformed = jnp.einsum(
-            "bmi,iom->bmo",
+            "bki,iok->bko",
             x_fft[:, :kept_modes, :],
             weights[:, :, :kept_modes],
         )
-
         out_fft = jnp.zeros(
             (batch_size, grid_size // 2 + 1, self.out_channels),
             dtype=jnp.complex64,
         )
         out_fft = out_fft.at[:, :kept_modes, :].set(transformed)
-        return jnp.fft.irfft(out_fft, n=grid_size, axis=1)
+        return jnp.fft.irfft(out_fft, n=grid_size, axis=1, norm="forward")
 
 
-class EtaBackbone(nn.Module):
-    """FNO-style backbone that extracts eta-dependent spatial features."""
-
+class SpectralDNO(nn.Module):
     modes: int
     width: int
-    n_blocks: int
+    n_blocks: int = 4
+    latent: int = 64
+    domain_length: float = 6.283185307179586
+    xi_scale: float = 1.0
+    target_scale: float = 1.0
+    h_clip_max: float = 5.0
+
+    def _linear_baseline(self, xi_norm: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        grid_size = xi_norm.shape[1]
+        xi_raw = xi_norm * self.xi_scale
+        h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max)))
+        k = (2.0 * jnp.pi / self.domain_length) * jnp.arange(grid_size // 2 + 1)
+        g0 = k[None, :] * jnp.tanh(h * k[None, :])
+        xi_fft = jnp.fft.rfft(xi_raw, axis=1)
+        return jnp.fft.irfft(g0 * xi_fft, n=grid_size, axis=1) / self.target_scale
 
     @nn.compact
-    def __call__(self, eta: jnp.ndarray) -> jnp.ndarray:
-        if eta.ndim == 2:
-            eta = eta[..., None]
-        if eta.ndim != 3 or eta.shape[-1] != 1:
-            raise ValueError("eta must have shape (batch, grid) or (batch, grid, 1)")
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        # inputs: (B, N, 2), normalized eta/xi. depth: (B, 1), log physical depth.
+        eta = inputs[..., :1]
+        xi = inputs[..., 1]
+        batch_size, grid_size = xi.shape
+        n_freq = grid_size // 2 + 1
 
-        x = nn.Dense(self.width, name="input_proj")(eta)
+        depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
+        depth_channel = jnp.broadcast_to(depth[:, None, :], (batch_size, grid_size, 1))
+        eta_features = jnp.concatenate(
+            [
+                eta,
+                (jnp.roll(eta, -1, axis=1) - jnp.roll(eta, 1, axis=1)) / 2.0,
+                jnp.roll(eta, -1, axis=1) - 2.0 * eta + jnp.roll(eta, 1, axis=1),
+                depth_channel,
+            ],
+            axis=-1,
+        )
+
+        h = nn.Dense(self.width, name="input_proj")(eta_features)
+        h = nn.gelu(h)
         for block_idx in range(self.n_blocks):
             spectral = SpectralConv1d(
                 in_channels=self.width,
                 out_channels=self.width,
                 modes=self.modes,
                 name=f"spectral_{block_idx}",
-            )(x)
-            residual = nn.Dense(self.width, name=f"residual_{block_idx}")(x)
-            x = spectral + residual
-            if block_idx < self.n_blocks - 1:
-                x = nn.relu(x)
+            )(h)
+            residual = nn.Dense(self.width, name=f"residual_{block_idx}")(h)
+            h = nn.gelu(spectral + residual)
+            h = nn.gelu(nn.Dense(self.width, name=f"channel_mlp_{block_idx}")(h))
 
-        return x
+        c = nn.Dense(self.latent, name="spatial_modulation")(h)
+        pooled = jnp.mean(h, axis=1)
+        filter_logits = nn.Dense(
+            n_freq * self.latent,
+            name="spectral_filter",
+            kernel_init=nn.initializers.zeros,
+            bias_init=nn.initializers.constant(-6.0),
+        )(pooled)
+        spectral_filter = nn.softplus(filter_logits).reshape((batch_size, n_freq, self.latent)) + 1e-6
 
-
-class FactorFieldHead(nn.Module):
-    """Maps backbone features to the low-rank factor field L_theta(eta)."""
-
-    width: int
-    rank: int
-
-    @nn.compact
-    def __call__(self, features: jnp.ndarray) -> jnp.ndarray:
-        hidden = nn.relu(nn.Dense(self.width, name="hidden_proj")(features))
-        return nn.Dense(self.rank, name="output_proj")(hidden)
-
-
-class SpectralCorrectionHead(nn.Module):
-    """Maps backbone features to a positive Fourier multiplier."""
-
-    width: int
-    spectral_floor: float
-
-    @nn.compact
-    def __call__(self, features: jnp.ndarray, num_modes: int) -> jnp.ndarray:
-        pooled_mean = jnp.mean(features, axis=1)
-        pooled_max = jnp.max(features, axis=1)
-        pooled = jnp.concatenate((pooled_mean, pooled_max), axis=-1)
-
-        hidden = nn.relu(nn.Dense(self.width, name="hidden_proj")(pooled))
-        raw_multiplier = nn.Dense(num_modes, name="output_proj")(hidden)
-        return nn.softplus(raw_multiplier) + self.spectral_floor
-
-
-def apply_positive_spectral_multiplier(
-    xi: jnp.ndarray,
-    multiplier: jnp.ndarray,
-) -> jnp.ndarray:
-    """Apply F^{-1} diag(multiplier) F to a real signal xi."""
-    xi_fft = jnp.fft.rfft(xi, axis=1)
-    corrected_fft = xi_fft * multiplier
-    return jnp.fft.irfft(corrected_fft, n=xi.shape[1], axis=1)
-
-
-class DNONet(nn.Module):
-    """Structure-preserving DNO model.
-
-    The learned operator has the form
-        T(eta, xi) = (L_theta(eta) L_theta(eta)^T + D_theta(eta)) xi
-    where D_theta(eta) is a positive spectral multiplier.
-
-    The architecture enforces:
-    - linearity in xi
-    - self-adjointness
-    - positive definiteness for eps > 0
-    """
-
-    rank: int
-    modes: int
-    width: int
-    n_blocks: int = 4
-    spectral_width: int | None = None
-    spectral_floor: float = 1e-3
-    x: jnp.ndarray | None = None
-
-    def _split_inputs(
-        self,
-        eta_or_inputs: jnp.ndarray,
-        xi: jnp.ndarray | None,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        if xi is None:
-            if eta_or_inputs.ndim != 3 or eta_or_inputs.shape[-1] != 2:
-                raise ValueError(
-                    "Expected concatenated inputs with shape (batch, grid, 2) when xi is omitted"
-                )
-            eta = eta_or_inputs[..., :1]
-            xi = eta_or_inputs[..., 1:]
-        else:
-            eta = eta_or_inputs
-            if eta.ndim == 2:
-                eta = eta[..., None]
-            if xi.ndim == 2:
-                xi = xi[..., None]
-
-        if eta.ndim != 3 or eta.shape[-1] != 1:
-            raise ValueError("eta must have shape (batch, grid, 1)")
-        if xi.ndim != 3 or xi.shape[-1] != 1:
-            raise ValueError("xi must have shape (batch, grid, 1)")
-        if eta.shape[:2] != xi.shape[:2]:
-            raise ValueError("eta and xi must share the same batch and grid dimensions")
-        return eta, xi
-
-    @nn.compact
-    def __call__(
-        self,
-        eta_or_inputs: jnp.ndarray,
-        xi: jnp.ndarray | None = None,
-    ) -> jnp.ndarray:
-        eta, xi = self._split_inputs(eta_or_inputs, xi)
-        eta_values = eta[..., 0]
-        xi_values = xi[..., 0]
-        grid_size = eta_values.shape[1]
-
-        if self.rank < 1:
-            raise ValueError("rank must be at least 1")
-        if self.rank > grid_size:
-            raise ValueError("rank must not exceed the spatial grid size")
-        if self.spectral_width is not None and self.spectral_width < 1:
-            raise ValueError("spectral_width must be positive when provided")
-
-        backbone_features = EtaBackbone(
-            modes=self.modes,
-            width=self.width,
-            n_blocks=self.n_blocks,
-            name="eta_backbone",
-        )(eta_values)
-
-        low_rank_factor = FactorFieldHead(
-            width=self.width,
-            rank=self.rank,
-            name="factor_field_head",
-        )(backbone_features)
-        # Keep the operator scale stable as rank changes across CARBS trials.
-        low_rank_factor = low_rank_factor / jnp.sqrt(jnp.asarray(self.rank, dtype=eta_values.dtype))
-        projected_xi = jnp.einsum("bnk,bn->bk", low_rank_factor, xi_values)
-        low_rank_output = jnp.einsum("bnk,bk->bn", low_rank_factor, projected_xi)
-
-        num_fourier_modes = grid_size // 2 + 1
-        spectral_width = self.spectral_width or self.width
-        spectral_multiplier = SpectralCorrectionHead(
-            width=spectral_width,
-            spectral_floor=self.spectral_floor,
-            name="spectral_correction_head",
-        )(backbone_features, num_modes=num_fourier_modes)
-        spectral_output = apply_positive_spectral_multiplier(xi_values, spectral_multiplier)
-
-        return (low_rank_output + spectral_output)[..., None]
+        xi_raw = xi * self.xi_scale
+        modulated_xi = c * xi_raw[..., None]
+        modulated_fft = jnp.fft.rfft(modulated_xi, axis=1, norm="forward")
+        filtered = jnp.fft.irfft(
+            spectral_filter * modulated_fft,
+            n=grid_size,
+            axis=1,
+            norm="forward",
+        )
+        residual = jnp.sum(c * filtered, axis=-1) / self.target_scale
+        baseline = self._linear_baseline(xi, depth)
+        return (baseline + residual)[..., None]

@@ -1,0 +1,212 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{caption}
+
+\definecolor{mDarkTeal}{HTML}{1c3d6b}
+\definecolor{mLightBrown}{HTML}{2f6fb3}
+
+\titleformat{\section}{\large\bfseries\color{mDarkTeal}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.4em}{0.6em}
+\titlespacing*{\subsection}{0pt}{1.0em}{0.4em}
+
+\hypersetup{colorlinks=true, linkcolor=mDarkTeal, citecolor=mDarkTeal, urlcolor=mLightBrown}
+
+\newcommand{\Gop}{\mathcal{G}}
+\newcommand{\relmed}{\mathrm{med}}
+
+\title{\textbf{The v4 Dataset: Honest Evaluation Findings and the Shallow--Steep Coverage Gap}\\[2pt]
+       \large Audit results (June 9--11, 2026) and the design of \texttt{combined\_dataset\_v4}}
+\author{}
+\date{June 11, 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Executive summary}
+
+A week of diagnostics established that most of the CS-DNO surrogate's apparent
+long-rollout failures were artifacts of the measurement, not the model. After
+fixing the evaluation (f64 harness, truth-validity gating), the model has
+exactly \emph{one} systematic weakness: \textbf{shallow water ($h \lesssim 0.1$)
+at moderate steepness ($a/h \gtrsim 0.15$) on non-soliton states}, a region
+where the training set has essentially no coverage. The v4 dataset adds a
+purpose-built \emph{shallow--steep wavetrain} family ($\sim$480k samples) to the
+otherwise-unchanged v3 corpus, followed by a from-scratch retrain.
+
+\section{Findings that reshaped the evaluation}
+
+\subsection{The f32 harness floor}
+
+All architectures (FNO, SpectralDNO, CS-DNO) plateaued at
+$\relmed \approx 0.11$ rel-$L^2(\eta)$ at $t=200$ on Tanaka soliton rollouts.
+An oracle test --- running the \emph{analytic} order-6 operator through the same
+f32 surrogate rollout harness --- hit the same plateau ($0.112$ vs.\ the model's
+$0.1145$), proving the plateau was float32 harness precision, not model error.
+The fix is \texttt{eval\_suite --f64\_harness} (integrator state and spectral
+ops in f64; the network still evaluates in f32). Truth self-convergence under
+substep doubling is $\sim 3\times 10^{-9}$ at $t=200$, so the f64 reference is
+converged.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Regime & f32 harness med & f64 harness med & ratio \\
+\midrule
+tanaka\_g0 & 0.1145 & 0.0420 & $2.7\times$ \\
+tanaka\_g1 & $\sim$0.11 & 0.0443 & $2.5\times$ \\
+bf\_g0 / bf\_g1 / bf\_modal & 0.09--0.14 & 0.0044 / 0.0067 / 0.0055 & 20--26$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Baseline CS-DNO ($t=200$ median rel-$L^2(\eta)$). The Benjamin--Feir
+``problem'' was almost entirely a harness artifact.}
+\end{table}
+
+\subsection{Truth-validity gating}
+
+Auditing every IC flagged as divergent (final rel $>1$ or NaN) against the
+truth's own health showed one regime's entire divergence rate was a truth
+failure: on \texttt{bf\_g1} IC15 the \emph{truth integrator itself} goes
+non-finite at $t\approx 146$ with Hamiltonian drift $3.2\times10^{-2}$ (healthy
+trajectories conserve to $\sim 10^{-7}$), while the surrogate stays finite.
+\texttt{eval\_suite} now excludes ICs whose truth is non-finite or whose energy
+drift exceeds $10^{-3}$ from every aggregate (recorded as
+\texttt{truth\_invalid\_ics} in summaries).
+
+Two caveats established alongside: (i) the saved-MATLAB cross-check
+(\texttt{saved\_truth\_reproduction}) is \emph{not} a per-IC validity signal ---
+two legitimate integrators decorrelate to $O(1)$ by late times on every bf IC,
+including ones the surrogate tracks to $0.4\%$; late-time pointwise error on
+chaotic regimes is shadowing-limited, and divergence-rate differences of
+$\pm 1$ IC are noise. (ii) After gating, the only unambiguous tail failures are
+two isolated model NaNs in 80 coherent-regime ICs (tanaka\_g1 IC6 at
+$t\approx45$; bf\_modal IC4 at $t\approx150$).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Regime & div.\ (raw) & div.\ (gated) & med (gated) & excluded ICs \\
+\midrule
+tanaka\_g0 & 6.2\% & 6.2\% & 0.0420 & --- \\
+tanaka\_g1 & 18.8\% & 18.8\% & 0.0443 & --- \\
+bf\_g0     & 0\%   & 0\%   & 0.0044 & --- \\
+bf\_g1     & 6.2\% & \textbf{0\%} & 0.0067 & IC15 (truth NaN) \\
+bf\_modal  & 6.2\% & 6.7\% & 0.0055 & IC6 (truth drift $3.5\times10^{-3}$) \\
+linear     & 50\%  & \textbf{27\%} & 0.084 & 5 ICs (truth drift $>10^{-3}$) \\
+\bottomrule
+\end{tabular}
+\caption{Baseline CS-DNO, f64 harness, before/after truth-validity gating.}
+\end{table}
+
+\subsection{The ``linear'' regime is a shallow-steepness sweep}
+
+The eval regime named \emph{linear} places all 16 ICs at a single shallow depth
+$h=0.038$ (dominant mode $kh\approx0.7$) with initial amplitude swept up to
+$a_0/h=0.30$. Outcomes sort \emph{monotonically by steepness}: every IC with
+$a_0/h \le 0.12$ is clean (rel $0.003$--$0.105$); the transition band
+$0.14$--$0.16$ fails intermittently (one model NaN); everything at
+$a_0/h \ge 0.20$ fails --- and at $a_0/h \ge 0.2$ the truth itself violates
+energy conservation on 5 of 16 ICs (drift $1.5\times10^{-3}$ to $1.6$),
+consistent with physical steepening/breaking beyond the solver's validity. The
+surrogate's failure signature on the surviving steep ICs is an over-amplified
+harmonic cascade: $1.9$--$3.3\times$ the truth's spectral power at harmonics
+$2k$--$4k$ of the fundamental. This is real shallow-water steepening physics
+that the model overdrives --- the worst gated median on the board (0.084).
+
+\section{The one real gap, and why more solitons don't fix it}
+
+After the corrections above, the surviving failure cluster is shallow water at
+moderate steepness. Three measurements pin the mechanism:
+
+\begin{enumerate}[leftmargin=1.4em, itemsep=2pt]
+\item On exact soliton states --- including the steepest whose rollouts die ---
+      the model's single-step error is $\sim 2\times10^{-4}$: solitons are
+      \emph{well} learned (2M training rows, half below $h=0.05$).
+\item Below $h=0.1$, v3 contains \emph{only} soliton states. The \texttt{linear}
+      training family stops at $h=0.1$; the failing eval regime sits at
+      $h=0.038$.
+\item A rollout's own error continually creates near-soliton (but
+      non-soliton) states; single-step accuracy there is the binding constraint,
+      and at $h \lesssim 0.02$ on-manifold single-step error is already
+      10--70$\times$ elevated.
+\end{enumerate}
+
+Hence v4 adds generic shallow steep \emph{wavetrains} (which also directly
+cover the failing ``linear'' regime), not more solitons.
+
+\section{The v4 dataset}
+
+\subsection{New family: shallow--steep wavetrains (source 11)}
+
+Generator: \texttt{solver/gen\_data/generate\_shallow\_steep\_dataset.py},
+mirroring the bf/tanaka production pipeline (f64 rollout, GL2 integrator,
+\texttt{filter\_fraction}=0.25, order-6/pad-8 labels \emph{with} the 0.25
+lowpass).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+ICs & 1--5 cosine modes near a dominant mode; per-mode finite-depth\\
+    & linear $\xi$ transfer with random $\pm$ direction signs \\
+Depth & $h \sim \log\mathcal{U}[0.02, 0.12]$ \\
+Dominant mode & target $kh \sim \mathcal{U}[0.2, 1.5]$ \\
+Amplitude & $a/h \sim \mathcal{U}[0.03, 0.25]$, total steepness capped at $ka \le 0.15$ \\
+Evolution & $t \in [0, 120]$, dt $=0.08$, 120 snapshots/case (uniform) \\
+Truth-health gate & reject case if Hamiltonian drift $> 10^{-5}$, any non-finite\\
+                  & value, or $\min\eta \le -0.9h$ \\
+Volume & 480{,}000 samples (two 240k shards, one per GPU) \\
+\bottomrule
+\end{tabular}
+\caption{Shallow--steep family specification.}
+\end{table}
+
+Validation on the smoke batch: stored labels match a filtered f64 recompute to
+median $9\times10^{-8}$; kept-case energy drift median $\sim10^{-8}$ (three
+orders inside tolerance); rejection rate 5--9\%, concentrated at nominal
+$a/h \gtrsim 0.18$ --- precisely where the truth is known to fail; evolution
+naturally steepens states up to $\max|\eta|/h \approx 0.5$ with energy still
+conserved, providing the off-manifold coverage the rollouts need. All
+amplitudes sit well inside v3's normalization envelope.
+
+\subsection{Assembly and retrain}
+
+\texttt{combined\_dataset\_v4.npz} = v3 byte-identical (5{,}993{,}989 rows; no
+relabeling, no resampling) $+$ the new family appended as source 11
+($\sim$7.4\% of the corpus). No global reshuffle is needed: the trainer's
+\texttt{build\_split\_indices} applies a seeded random permutation, scattering
+new rows uniformly over train/val/test. Normalization statistics are recomputed
+from v4 (no sidecar pinning --- this is a from-scratch train, not a resume).
+
+Retrain: CS-DNO, identical hyperparameters to the v3 baseline (modes 64, width
+512, 8 blocks, latent 256, \texttt{cs\_mult\_hidden} 128, Sobolev-1 loss, batch
+256, lr $2\times10^{-4}$, wd $10^{-4}$, 40 epochs), 2 GPUs.
+
+\subsection{Success criteria (f64 harness, truth-gated)}
+
+\begin{itemize}[leftmargin=1.4em, itemsep=1pt]
+\item \texttt{linear} regime: gated divergence $<27\%$ and median $<0.084$
+      (primary target --- this is the covered gap);
+\item tanaka medians hold: $\le 0.042$ / $0.044$;
+\item bf medians within $\sim20\%$ of 0.0044/0.0067/0.0055; random\_sea/stokes
+      unchanged;
+\item stretch: the two isolated model NaNs disappear.
+\end{itemize}
+
+Out of scope by design: chaotic-IC pointwise tails (shadowing-limited;
+report invariants instead) and the truth-invalid ICs (excluded by the gate).
+
+\end{document}

@@ -25,6 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_sign_changes", type=int, default=40)
     parser.add_argument("--examples_per_bucket", type=int, default=5)
     parser.add_argument("--relative_derivative_threshold", type=float, default=0.05)
+    parser.add_argument("--exact_peaks", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--specs_source_dataset", default=None)
     return parser.parse_args()
 
 
@@ -73,19 +76,45 @@ def dedup_key(case_id: int, time_value: float) -> tuple[int, float]:
     return int(case_id) % 1_000_000, round(float(time_value), 6)
 
 
+def load_peak_counts_for_tag(
+    specs_archive: np.lib.npyio.NpzFile,
+    case_id_archive: np.lib.npyio.NpzFile,
+    tag: str,
+) -> dict[int, int]:
+    case_ids = np.asarray(load_batch_field(case_id_archive, "case_id", tag), dtype=np.int64)
+    unique_case_ids = np.unique(case_ids)
+    raw_specs = specs_archive[f"specs_batch_{tag}.json"]
+    if isinstance(raw_specs, bytes):
+        specs_text = raw_specs.decode("utf-8")
+    else:
+        specs_text = raw_specs.tobytes().decode("utf-8")
+    specs = json.loads(specs_text)
+    if len(specs) != len(unique_case_ids):
+        raise ValueError(
+            f"specs_batch_{tag}.json length {len(specs)} does not match unique case ids {len(unique_case_ids)}"
+        )
+    return {
+        int(case_id): len(spec)
+        for case_id, spec in zip(unique_case_ids.tolist(), specs, strict=True)
+    }
+
+
 def collect_examples(
     archive: np.lib.npyio.NpzFile,
+    specs_archive: np.lib.npyio.NpzFile,
     tags: list[str],
     min_sign_changes: int,
     max_sign_changes: int,
     examples_per_bucket: int,
     relative_threshold: float,
+    exact_peaks: int | None,
+    seed: int,
 ) -> dict[int, list[dict[str, int | float]]]:
     x = np.asarray(archive["x"], dtype=np.float64)
     dx = float(x[1] - x[0])
 
     targets = range(min_sign_changes, max_sign_changes + 1)
-    buckets: dict[int, list[dict[str, int | float]]] = {k: [] for k in targets}
+    candidates: dict[int, list[dict[str, int | float]]] = {k: [] for k in targets}
     seen: dict[int, set[tuple[int, float]]] = {k: set() for k in targets}
 
     for tag in tags:
@@ -95,6 +124,7 @@ def collect_examples(
         if finite_idx.size == 0:
             continue
 
+        peak_counts_by_case = load_peak_counts_for_tag(specs_archive, specs_archive, tag)
         gxi_rows = np.asarray(gxi[finite_idx], dtype=np.float32)
         diff = periodic_forward_diff(gxi_rows, dx)
         sign_changes = count_thresholded_sign_changes_vectorized(diff, relative_threshold)
@@ -107,30 +137,52 @@ def collect_examples(
         relevant_indices = np.flatnonzero(relevant)
         for ridx in relevant_indices:
             sc = int(sign_changes[ridx])
-            if len(buckets[sc]) >= examples_per_bucket:
+            case_id = int(case_ids[ridx])
+            peak_count = int(peak_counts_by_case[case_id])
+            if exact_peaks is not None and peak_count != exact_peaks:
                 continue
-            key = dedup_key(int(case_ids[ridx]), float(times[ridx]))
+            key = dedup_key(case_id, float(times[ridx]))
             if key in seen[sc]:
                 continue
             seen[sc].add(key)
-            buckets[sc].append(
+            candidates[sc].append(
                 {
                     "shard_id": int(tag),
                     "local_idx": int(finite_idx[ridx]),
                     "sign_changes": sc,
                     "time": float(times[ridx]),
-                    "case_id": int(case_ids[ridx]),
+                    "case_id": case_id,
+                    "peak_count": peak_count,
                 }
             )
-        if all(len(buckets[k]) >= examples_per_bucket for k in targets if len(seen[k]) >= 0):
-            done = True
-            for k in targets:
-                if len(buckets[k]) < examples_per_bucket:
-                    done = False
-                    break
-            if done:
-                break
 
+    rng = np.random.default_rng(seed)
+    buckets: dict[int, list[dict[str, int | float]]] = {k: [] for k in targets}
+    for sc in targets:
+        items = candidates[sc]
+        if not items:
+            continue
+        order = np.arange(len(items))
+        rng.shuffle(order)
+        chosen: list[dict[str, int | float]] = []
+        seen_cases: set[int] = set()
+        leftovers: list[dict[str, int | float]] = []
+        for idx in order.tolist():
+            item = items[idx]
+            case_id = int(item["case_id"])
+            if case_id in seen_cases:
+                leftovers.append(item)
+                continue
+            seen_cases.add(case_id)
+            chosen.append(item)
+            if len(chosen) >= examples_per_bucket:
+                break
+        if len(chosen) < examples_per_bucket:
+            for item in leftovers:
+                chosen.append(item)
+                if len(chosen) >= examples_per_bucket:
+                    break
+        buckets[sc] = chosen
     return buckets
 
 
@@ -148,6 +200,7 @@ def fetch_rows(
                 "xi": load_batch_field(archive, "xi", tag)[idx].astype(np.float64),
                 "gxi": load_batch_field(archive, "gxi", tag)[idx].astype(np.float64),
                 "sign_changes": int(item["sign_changes"]),
+                "peak_count": int(item["peak_count"]),
                 "time": float(item["time"]),
                 "case_id": int(item["case_id"]),
                 "shard_id": int(item["shard_id"]),
@@ -163,7 +216,10 @@ def plot_bucket(output_path: Path, x: np.ndarray, rows: list[dict[str, np.ndarra
         axes = np.asarray([axes])
     labels = [("eta", r"$\eta$"), ("xi", r"$\xi$"), ("gxi", r"$G(\eta)\xi$")]
     for row_idx, row in enumerate(rows):
-        meta = f"sc={sign_changes}  t={float(row['time']):.3f}  case={int(row['case_id']) % 1_000_000}"
+        meta = (
+            f"sc={sign_changes}  peaks={int(row['peak_count'])}  "
+            f"t={float(row['time']):.3f}  case={int(row['case_id']) % 1_000_000}"
+        )
         for col_idx, (field, ylabel) in enumerate(labels):
             ax = axes[row_idx, col_idx]
             ax.plot(x, np.asarray(row[field], dtype=np.float64), color="tab:blue", linewidth=1.6)
@@ -183,23 +239,31 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with np.load(args.dataset, allow_pickle=False) as archive:
+        specs_source = args.specs_source_dataset or args.dataset
+        specs_archive = archive if specs_source == args.dataset else np.load(specs_source, allow_pickle=False)
         x = np.asarray(archive["x"], dtype=np.float64)
         tags = list_shard_tags(archive)
         buckets = collect_examples(
             archive,
+            specs_archive,
             tags,
             min_sign_changes=args.min_sign_changes,
             max_sign_changes=args.max_sign_changes,
             examples_per_bucket=args.examples_per_bucket,
             relative_threshold=args.relative_derivative_threshold,
+            exact_peaks=args.exact_peaks,
+            seed=args.seed,
         )
 
         summary: dict[str, object] = {
             "dataset": str(Path(args.dataset).resolve()),
             "relative_derivative_threshold": args.relative_derivative_threshold,
+            "specs_source_dataset": str(Path(specs_source).resolve()),
             "examples_per_bucket": args.examples_per_bucket,
             "min_sign_changes": args.min_sign_changes,
             "max_sign_changes": args.max_sign_changes,
+            "exact_peaks": args.exact_peaks,
+            "seed": args.seed,
             "buckets": {},
         }
 
@@ -210,6 +274,9 @@ def main() -> None:
                 continue
             rows = fetch_rows(archive, examples)
             plot_bucket(output_dir / f"sign_changes_{sc:02d}.png", x, rows, sc)
+
+        if specs_archive is not archive:
+            specs_archive.close()
 
     (output_dir / "selected_examples.json").write_text(json.dumps(summary, indent=2))
 
