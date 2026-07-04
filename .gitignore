@@ -26,6 +26,9 @@ data/
 !data/util/
 !data/util/**
 
+# solver.data is a tracked Python package, not a data dump
+!solver/data/
+
 # Logs and run artifacts
 logs/
 *.log
