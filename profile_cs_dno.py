@@ -40,9 +40,12 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 REPO_ROOT = Path(__file__).resolve().parent
 DNO_DIR = REPO_ROOT / "models" / "dno-net"
 FNO_DIR = REPO_ROOT / "models" / "fno-jax"
-for _d in (REPO_ROOT, DNO_DIR, FNO_DIR):
+TRAIN_DIR = REPO_ROOT / "train-jax-10m"
+for _d in (REPO_ROOT, DNO_DIR, FNO_DIR, TRAIN_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
+
+from util import replicate_pytree_from_host
 
 from dno_net_v2 import CraigSulemDNO, CraigSulemBlock
 from losses import build_loss, count_params
@@ -153,7 +156,7 @@ def main() -> None:
     lr_sched = optax.cosine_decay_schedule(init_value=LR, decay_steps=100_000)
     opt = optax.adamw(learning_rate=lr_sched, weight_decay=WEIGHT_DECAY)
     ts = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=opt)
-    ts = jax.device_put(ts, replicated)
+    ts = replicate_pytree_from_host(ts, replicated)
 
     loss_fn = build_loss(sobolev_k=SOBOLEV_K)
 

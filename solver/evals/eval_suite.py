@@ -39,6 +39,7 @@ from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # noqa: E402
 from solver.evals.model_rollout import (  # noqa: E402
     LoadedRun,
+    build_predict_gxi_batched,
     build_predict_gxi_with_depth,
     load_run,
     rollout_surrogate,
@@ -220,6 +221,37 @@ def build_ics_and_truth_targets(
     raise SystemExit(f"unknown source kind '{kind}' for regime {cfg.name}")
 
 
+def _try_load_cached_truth(
+    regime: str, cache_dir: Path | None, expected_n_ics: int,
+    expected_n_t: int, expected_nx: int, expected_case_ids: list[int],
+) -> dict[str, np.ndarray] | None:
+    """Load a truth dict from `{cache_dir}/{regime}_trajs.npz` if shape+case_ids match; else None."""
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{regime}_trajs.npz"
+    if not path.exists():
+        print(f"[{regime}] truth cache miss: {path} not found", flush=True)
+        return None
+    try:
+        with np.load(path) as arch:
+            eta = arch["truth_eta"]
+            xi = arch["truth_xi"]
+            gxi = arch["truth_gxi"]
+            case_ids = arch["case_ids"].tolist()
+    except (KeyError, ValueError) as e:
+        print(f"[{regime}] truth cache miss: {e}", flush=True)
+        return None
+    if eta.shape != (expected_n_t, expected_n_ics, expected_nx):
+        print(f"[{regime}] truth cache shape mismatch: got {eta.shape}, "
+              f"expected ({expected_n_t}, {expected_n_ics}, {expected_nx})", flush=True)
+        return None
+    if list(case_ids) != list(expected_case_ids):
+        print(f"[{regime}] truth cache case_ids mismatch", flush=True)
+        return None
+    print(f"[{regime}] truth cache HIT: {path}", flush=True)
+    return {"eta": eta, "xi": xi, "gxi": gxi, "wall_s": 0.0}
+
+
 def truth_rollout_batched(
     ics: list[IC],
     times_f64: jnp.ndarray,
@@ -310,6 +342,105 @@ def truth_rollout_linear_analytic(
     return {"eta": eta_out, "xi": xi_out, "gxi": gxi_out, "wall_s": float(wall)}
 
 
+def _apply_gxi_cascade_gate(
+    gxi: jnp.ndarray,
+    k_arr: jnp.ndarray,
+    *,
+    k_cut: float,
+    r_threshold: float,
+    high_abs_threshold: float,
+    sharpness: float,
+    houli_a: float,
+    houli_m: float,
+    k_eff: float,
+) -> jnp.ndarray:
+    """Conditionally damp model Gxi when its mid/high-k energy surges.
+
+    Uses r = Σ|Gxi_hat(k>=k_cut)|² / Σ|Gxi_hat(k<k_cut)|² as the trigger and
+    smoothly blends from identity to a Hou-Li multiplier. Supports both single
+    trajectories ``(nx,)`` and batched ``(NB, nx)`` fields.
+    """
+    gxi_hat = jnp.fft.fft(gxi, axis=-1)
+    k_abs = jnp.abs(k_arr)
+    mask_hi = k_abs >= k_cut
+    e_hi = jnp.sum(jnp.where(mask_hi, jnp.abs(gxi_hat) ** 2, 0.0), axis=-1)
+    e_lo = jnp.sum(jnp.where(~mask_hi, jnp.abs(gxi_hat) ** 2, 0.0), axis=-1)
+    ratio = e_hi / (e_lo + 1e-30)
+    log_ratio = jnp.log(ratio + 1e-30)
+    log_threshold = jnp.log(jnp.asarray(r_threshold, dtype=ratio.dtype) + 1e-30)
+    ratio_weight = jax.nn.sigmoid(sharpness * (log_ratio - log_threshold))
+    high_amp = jnp.sqrt(e_hi)
+    high_abs = jnp.asarray(high_abs_threshold, dtype=high_amp.dtype)
+    high_weight = jnp.where(
+        high_abs > 0.0,
+        jax.nn.sigmoid(sharpness * (jnp.log(high_amp + 1e-30) - jnp.log(high_abs))),
+        jnp.ones_like(ratio_weight),
+    )
+    weight = ratio_weight * high_weight
+    weight = weight[..., None] if weight.ndim else weight
+    k_eff_arr = jnp.asarray(k_eff, dtype=k_abs.dtype)
+    houli = jnp.exp(-houli_a * (k_abs / jnp.maximum(k_eff_arr, 1e-12)) ** (2.0 * houli_m))
+    blend = (1.0 - weight) + weight * houli
+    return jnp.real(jnp.fft.ifft(gxi_hat * blend, axis=-1)).astype(gxi.dtype)
+
+
+def _apply_gxi_highband_limiter(
+    gxi: jnp.ndarray,
+    k_arr: jnp.ndarray,
+    *,
+    k_cut: float,
+    r_max: float,
+    high_abs_floor: float,
+) -> jnp.ndarray:
+    """Cap only the high-band part of model Gxi.
+
+    The cap is ``sqrt(E_hi) <= max(high_abs_floor, sqrt(r_max) * sqrt(E_lo))``.
+    This preserves all low modes exactly and rescales the high-band Fourier
+    coefficients uniformly only when the model output exceeds the envelope.
+    Supports both single ``(nx,)`` and batched ``(NB, nx)`` fields.
+    """
+    gxi_hat = jnp.fft.fft(gxi, axis=-1)
+    k_abs = jnp.abs(k_arr)
+    mask_hi = k_abs >= k_cut
+    e_hi = jnp.sum(jnp.where(mask_hi, jnp.abs(gxi_hat) ** 2, 0.0), axis=-1)
+    e_lo = jnp.sum(jnp.where(~mask_hi, jnp.abs(gxi_hat) ** 2, 0.0), axis=-1)
+    hi_amp = jnp.sqrt(e_hi)
+    lo_amp = jnp.sqrt(e_lo)
+    allowed = jnp.maximum(
+        jnp.asarray(high_abs_floor, dtype=hi_amp.dtype),
+        jnp.sqrt(jnp.asarray(r_max, dtype=hi_amp.dtype)) * lo_amp,
+    )
+    scale = jnp.minimum(1.0, allowed / (hi_amp + 1e-30))
+    scale = scale[..., None] if scale.ndim else scale
+    limited_hat = jnp.where(mask_hi, gxi_hat * scale, gxi_hat)
+    return jnp.real(jnp.fft.ifft(limited_hat, axis=-1)).astype(gxi.dtype)
+
+
+def _eta_growth_weight(
+    eta: jnp.ndarray,
+    k_arr: jnp.ndarray,
+    eta_amp0: jnp.ndarray,
+    *,
+    k_lo: float,
+    k_hi: float,
+    abs_floor: float,
+    growth_factor: float,
+    sharpness: float,
+    nx: int,
+) -> jnp.ndarray:
+    eta_hat = jnp.fft.fft(eta, axis=-1)
+    k_abs = jnp.abs(k_arr)
+    mask = (k_abs >= k_lo) & (k_abs < k_hi)
+    amp = jnp.sqrt(jnp.mean(jnp.where(mask, jnp.abs(eta_hat) ** 2, 0.0), axis=-1))
+    amp = amp / jnp.asarray(nx, dtype=amp.dtype)
+    trigger = jnp.maximum(
+        jnp.asarray(abs_floor, dtype=amp.dtype),
+        jnp.asarray(growth_factor, dtype=amp.dtype) * eta_amp0,
+    )
+    log_ratio = jnp.log(amp + 1e-30) - jnp.log(trigger + 1e-30)
+    return jax.nn.sigmoid(jnp.asarray(sharpness, dtype=amp.dtype) * log_ratio)
+
+
 def surrogate_rollout_per_ic(
     ics: list[IC],
     times_f32: jnp.ndarray,
@@ -331,6 +462,36 @@ def surrogate_rollout_per_ic(
     cascade_houli_m: float = 4.0,
     cascade_k_eff: float = 128.0,
     cascade_filter_xi: bool = True,
+    eta_growth_guard_enabled: bool = False,
+    eta_growth_guard_k_lo: float = 64.0,
+    eta_growth_guard_k_hi: float = 128.0,
+    eta_growth_guard_abs_floor: float = 1e-4,
+    eta_growth_guard_growth_factor: float = 100.0,
+    eta_growth_guard_sharpness: float = 10.0,
+    eta_growth_guard_houli_a: float = 0.69,
+    eta_growth_guard_houli_m: float = 4.0,
+    eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_filter_xi: bool = True,
+    eta_growth_gxi_limiter_enabled: bool = False,
+    eta_growth_gxi_limiter_k_lo: float = 64.0,
+    eta_growth_gxi_limiter_k_hi: float = 128.0,
+    eta_growth_gxi_limiter_abs_floor: float = 1e-4,
+    eta_growth_gxi_limiter_growth_factor: float = 100.0,
+    eta_growth_gxi_limiter_sharpness: float = 10.0,
+    gxi_cascade_gate_enabled: bool = False,
+    gxi_cascade_k_cut: float = 32.0,
+    gxi_cascade_r_threshold: float = 1e-3,
+    gxi_cascade_high_abs_threshold: float = 0.0,
+    gxi_cascade_sharpness: float = 10.0,
+    gxi_cascade_houli_a: float = 0.69,
+    gxi_cascade_houli_m: float = 4.0,
+    gxi_cascade_k_eff: float = 128.0,
+    gxi_highband_limiter_enabled: bool = False,
+    gxi_highband_k_cut: float = 32.0,
+    gxi_highband_r_max: float = 1e-2,
+    gxi_highband_abs_floor: float = 5.0,
+    gl2_residual_check: bool = False,
+    gl2_residual_tol: float = 1e-2,
 ) -> dict[str, np.ndarray]:
     """Per-IC surrogate rollout. One JIT covers all ICs (log_h is a jit arg).
 
@@ -354,6 +515,23 @@ def surrogate_rollout_per_ic(
 
     @jax.jit
     def jitted(eta0: jnp.ndarray, xi0: jnp.ndarray, depth: jnp.ndarray, log_h: jnp.ndarray):
+        eta_amp0 = _eta_growth_weight(
+            eta0, k_grid, jnp.asarray(0.0, dtype=eta0.dtype),
+            k_lo=eta_growth_gxi_limiter_k_lo,
+            k_hi=eta_growth_gxi_limiter_k_hi,
+            abs_floor=0.0,
+            growth_factor=0.0,
+            sharpness=0.0,
+            nx=nx,
+        )
+        # With zero trigger and sharpness=0, the helper returns 0.5 rather than
+        # an amplitude. Compute the actual initial amplitude directly.
+        eta0_hat = jnp.fft.fft(eta0, axis=-1)
+        mask0 = (jnp.abs(k_grid) >= eta_growth_gxi_limiter_k_lo) & (
+            jnp.abs(k_grid) < eta_growth_gxi_limiter_k_hi
+        )
+        eta_amp0 = jnp.sqrt(jnp.mean(jnp.where(mask0, jnp.abs(eta0_hat) ** 2, 0.0), axis=-1))
+        eta_amp0 = eta_amp0 / jnp.asarray(nx, dtype=eta_amp0.dtype)
         g0 = make_linear_dno_symbol(k_grid, depth)
         sp = ti.SolverParams(
             nx=nx, length=length, depth=depth, gravity=1.0,
@@ -365,6 +543,41 @@ def surrogate_rollout_per_ic(
             gxi = predict_gxi_with_depth(
                 eta.astype(jnp.float32), xi.astype(jnp.float32), log_h
             ).astype(dtype)
+            if gxi_cascade_gate_enabled:
+                gxi = _apply_gxi_cascade_gate(
+                    gxi, k_grid,
+                    k_cut=gxi_cascade_k_cut,
+                    r_threshold=gxi_cascade_r_threshold,
+                    high_abs_threshold=gxi_cascade_high_abs_threshold,
+                    sharpness=gxi_cascade_sharpness,
+                    houli_a=gxi_cascade_houli_a,
+                    houli_m=gxi_cascade_houli_m,
+                    k_eff=gxi_cascade_k_eff,
+                )
+            if gxi_highband_limiter_enabled:
+                gxi = _apply_gxi_highband_limiter(
+                    gxi, k_grid,
+                    k_cut=gxi_highband_k_cut,
+                    r_max=gxi_highband_r_max,
+                    high_abs_floor=gxi_highband_abs_floor,
+                )
+            if eta_growth_gxi_limiter_enabled:
+                limited = _apply_gxi_highband_limiter(
+                    gxi, k_grid,
+                    k_cut=gxi_highband_k_cut,
+                    r_max=gxi_highband_r_max,
+                    high_abs_floor=gxi_highband_abs_floor,
+                )
+                w = _eta_growth_weight(
+                    eta, k_grid, eta_amp0,
+                    k_lo=eta_growth_gxi_limiter_k_lo,
+                    k_hi=eta_growth_gxi_limiter_k_hi,
+                    abs_floor=eta_growth_gxi_limiter_abs_floor,
+                    growth_factor=eta_growth_gxi_limiter_growth_factor,
+                    sharpness=eta_growth_gxi_limiter_sharpness,
+                    nx=nx,
+                )
+                gxi = (1.0 - w) * gxi + w * limited
             if filter_gxi and filt < 1.0:
                 gxi = ti.apply_filter(
                     gxi, k_grid, shape=filter_shape, filter_fraction=filt,
@@ -384,6 +597,18 @@ def surrogate_rollout_per_ic(
             cascade_houli_m=cascade_houli_m,
             cascade_k_eff=cascade_k_eff,
             cascade_filter_xi=cascade_filter_xi,
+            eta_growth_guard_enabled=eta_growth_guard_enabled,
+            eta_growth_guard_k_lo=eta_growth_guard_k_lo,
+            eta_growth_guard_k_hi=eta_growth_guard_k_hi,
+            eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
+            eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
+            eta_growth_guard_sharpness=eta_growth_guard_sharpness,
+            eta_growth_guard_houli_a=eta_growth_guard_houli_a,
+            eta_growth_guard_houli_m=eta_growth_guard_houli_m,
+            eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
+            gl2_residual_check=gl2_residual_check,
+            gl2_residual_tol=gl2_residual_tol,
         )
         gxi_traj = jax.vmap(predict)(out["eta"], out["xi"])
         return out["eta"], out["xi"], gxi_traj
@@ -402,6 +627,182 @@ def surrogate_rollout_per_ic(
         pred_xi[:, j, :] = np.asarray(xi_t)
         pred_gxi[:, j, :] = np.asarray(gxi_t)
     return {"eta": pred_eta, "xi": pred_xi, "gxi": pred_gxi, "wall_s": float(total_wall)}
+
+
+def surrogate_rollout_batched(
+    ics: list[IC],
+    times_f32: jnp.ndarray,
+    nx: int,
+    length: float,
+    cfg: RegimeConfig,
+    loaded: LoadedRun,
+    predict_gxi_batched: Callable,
+    filter_gxi: bool = False,
+    f64_harness: bool = False,
+    filter_shape: str = "hard",
+    houli_a: float = 36.0,
+    houli_m: float = 36.0,
+    cascade_gate_enabled: bool = False,
+    cascade_k_cut: float = 32.0,
+    cascade_r_threshold: float = 1e-3,
+    cascade_sharpness: float = 10.0,
+    cascade_houli_a: float = 0.69,
+    cascade_houli_m: float = 4.0,
+    cascade_k_eff: float = 128.0,
+    cascade_filter_xi: bool = True,
+    eta_growth_guard_enabled: bool = False,
+    eta_growth_guard_k_lo: float = 64.0,
+    eta_growth_guard_k_hi: float = 128.0,
+    eta_growth_guard_abs_floor: float = 1e-4,
+    eta_growth_guard_growth_factor: float = 100.0,
+    eta_growth_guard_sharpness: float = 10.0,
+    eta_growth_guard_houli_a: float = 0.69,
+    eta_growth_guard_houli_m: float = 4.0,
+    eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_filter_xi: bool = True,
+    eta_growth_gxi_limiter_enabled: bool = False,
+    eta_growth_gxi_limiter_k_lo: float = 64.0,
+    eta_growth_gxi_limiter_k_hi: float = 128.0,
+    eta_growth_gxi_limiter_abs_floor: float = 1e-4,
+    eta_growth_gxi_limiter_growth_factor: float = 100.0,
+    eta_growth_gxi_limiter_sharpness: float = 10.0,
+    gxi_cascade_gate_enabled: bool = False,
+    gxi_cascade_k_cut: float = 32.0,
+    gxi_cascade_r_threshold: float = 1e-3,
+    gxi_cascade_high_abs_threshold: float = 0.0,
+    gxi_cascade_sharpness: float = 10.0,
+    gxi_cascade_houli_a: float = 0.69,
+    gxi_cascade_houli_m: float = 4.0,
+    gxi_cascade_k_eff: float = 128.0,
+    gxi_highband_limiter_enabled: bool = False,
+    gxi_highband_k_cut: float = 32.0,
+    gxi_highband_r_max: float = 1e-2,
+    gxi_highband_abs_floor: float = 5.0,
+    gl2_residual_check: bool = False,
+    gl2_residual_tol: float = 1e-2,
+) -> dict[str, np.ndarray]:
+    """One-JIT surrogate rollout across all ICs.
+
+    Same math as ``surrogate_rollout_per_ic`` but state carries a leading
+    batch axis so kernels get NB× more work per launch. Fixes the GPU
+    under-utilization (~150W of 300W) seen with the per-IC loop.
+    """
+    dtype = jnp.float64 if f64_harness else jnp.float32
+    _, k_grid_np = build_grid(nx, length)
+    k_grid = jnp.asarray(k_grid_np, dtype=dtype)
+    times = times_f32.astype(dtype)
+    filt = cfg.filter_fraction
+    substeps = cfg.substeps
+    impl = cfg.implicit_iters
+
+    eta0_np = np.stack([ic.eta for ic in ics], axis=0).astype(np.float64)
+    xi0_np = np.stack([ic.xi for ic in ics], axis=0).astype(np.float64)
+    depths_np = np.asarray([ic.depth for ic in ics], dtype=np.float64)
+    log_depth = jnp.asarray(np.log(np.maximum(depths_np, 1e-12)), dtype=jnp.float32)
+    depth_2d = jnp.asarray(depths_np, dtype=dtype)[:, None]
+    g0 = make_linear_dno_symbol(k_grid, depth_2d)  # (NB, nx)
+    sp = ti.SolverParams(
+        nx=nx, length=length, depth=depth_2d, gravity=1.0,
+        dno_order=6, pad_factor=8, filter_fraction=filt, k=k_grid, g0=g0,
+    )
+
+    def predict(eta: jnp.ndarray, xi: jnp.ndarray) -> jnp.ndarray:
+        gxi = predict_gxi_batched(
+            eta.astype(jnp.float32), xi.astype(jnp.float32), log_depth,
+        ).astype(dtype)
+        if gxi_cascade_gate_enabled:
+            gxi = _apply_gxi_cascade_gate(
+                gxi, k_grid,
+                k_cut=gxi_cascade_k_cut,
+                r_threshold=gxi_cascade_r_threshold,
+                high_abs_threshold=gxi_cascade_high_abs_threshold,
+                sharpness=gxi_cascade_sharpness,
+                houli_a=gxi_cascade_houli_a,
+                houli_m=gxi_cascade_houli_m,
+                k_eff=gxi_cascade_k_eff,
+            )
+        if gxi_highband_limiter_enabled:
+            gxi = _apply_gxi_highband_limiter(
+                gxi, k_grid,
+                k_cut=gxi_highband_k_cut,
+                r_max=gxi_highband_r_max,
+                high_abs_floor=gxi_highband_abs_floor,
+            )
+        if eta_growth_gxi_limiter_enabled:
+            limited = _apply_gxi_highband_limiter(
+                gxi, k_grid,
+                k_cut=gxi_highband_k_cut,
+                r_max=gxi_highband_r_max,
+                high_abs_floor=gxi_highband_abs_floor,
+            )
+            w = _eta_growth_weight(
+                eta, k_grid, eta_amp0,
+                k_lo=eta_growth_gxi_limiter_k_lo,
+                k_hi=eta_growth_gxi_limiter_k_hi,
+                abs_floor=eta_growth_gxi_limiter_abs_floor,
+                growth_factor=eta_growth_gxi_limiter_growth_factor,
+                sharpness=eta_growth_gxi_limiter_sharpness,
+                nx=nx,
+            )
+            w = w[..., None] if w.ndim else w
+            gxi = (1.0 - w) * gxi + w * limited
+        if filter_gxi and filt < 1.0:
+            gxi = ti.apply_filter(
+                gxi, k_grid, shape=filter_shape, filter_fraction=filt,
+                houli_a=houli_a, houli_m=houli_m,
+            )
+        return gxi
+
+    state0 = ti.State(
+        eta=jnp.asarray(eta0_np, dtype=dtype),
+        xi=jnp.asarray(xi0_np, dtype=dtype),
+    )
+    eta0_hat = jnp.fft.fft(state0.eta, axis=-1)
+    mask0 = (jnp.abs(k_grid) >= eta_growth_gxi_limiter_k_lo) & (
+        jnp.abs(k_grid) < eta_growth_gxi_limiter_k_hi
+    )
+    eta_amp0 = jnp.sqrt(jnp.mean(jnp.where(mask0, jnp.abs(eta0_hat) ** 2, 0.0), axis=-1))
+    eta_amp0 = eta_amp0 / jnp.asarray(nx, dtype=eta_amp0.dtype)
+
+    @jax.jit
+    def jitted():
+        return rollout_surrogate(
+            state0, times, sp, predict,
+            substeps=substeps, zero_mean_xi=True, gl2_iterations=impl,
+            filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+            cascade_gate_enabled=cascade_gate_enabled,
+            cascade_k_cut=cascade_k_cut,
+            cascade_r_threshold=cascade_r_threshold,
+            cascade_sharpness=cascade_sharpness,
+            cascade_houli_a=cascade_houli_a,
+            cascade_houli_m=cascade_houli_m,
+            cascade_k_eff=cascade_k_eff,
+            cascade_filter_xi=cascade_filter_xi,
+            eta_growth_guard_enabled=eta_growth_guard_enabled,
+            eta_growth_guard_k_lo=eta_growth_guard_k_lo,
+            eta_growth_guard_k_hi=eta_growth_guard_k_hi,
+            eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
+            eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
+            eta_growth_guard_sharpness=eta_growth_guard_sharpness,
+            eta_growth_guard_houli_a=eta_growth_guard_houli_a,
+            eta_growth_guard_houli_m=eta_growth_guard_houli_m,
+            eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
+            gl2_residual_check=gl2_residual_check,
+            gl2_residual_tol=gl2_residual_tol,
+        )
+
+    t0 = time.perf_counter()
+    out = jitted()
+    jax.block_until_ready(out["eta"])
+    total_wall = time.perf_counter() - t0
+    # rollout_surrogate returns (n_t, NB, nx) when state has leading NB axis
+    return {
+        "eta": np.asarray(out["eta"]).astype(np.float32),
+        "xi": np.asarray(out["xi"]).astype(np.float32),
+        "gxi": np.asarray(out["gxi"]).astype(np.float32),
+        "wall_s": float(total_wall),
+    }
 
 
 def _rel_l2(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
@@ -494,6 +895,39 @@ def run_regime(
     cascade_houli_m: float = 4.0,
     cascade_k_eff: float = 128.0,
     cascade_filter_xi: bool = True,
+    eta_growth_guard_enabled: bool = False,
+    eta_growth_guard_k_lo: float = 64.0,
+    eta_growth_guard_k_hi: float = 128.0,
+    eta_growth_guard_abs_floor: float = 1e-4,
+    eta_growth_guard_growth_factor: float = 100.0,
+    eta_growth_guard_sharpness: float = 10.0,
+    eta_growth_guard_houli_a: float = 0.69,
+    eta_growth_guard_houli_m: float = 4.0,
+    eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_filter_xi: bool = True,
+    eta_growth_gxi_limiter_enabled: bool = False,
+    eta_growth_gxi_limiter_k_lo: float = 64.0,
+    eta_growth_gxi_limiter_k_hi: float = 128.0,
+    eta_growth_gxi_limiter_abs_floor: float = 1e-4,
+    eta_growth_gxi_limiter_growth_factor: float = 100.0,
+    eta_growth_gxi_limiter_sharpness: float = 10.0,
+    gxi_cascade_gate_enabled: bool = False,
+    gxi_cascade_k_cut: float = 32.0,
+    gxi_cascade_r_threshold: float = 1e-3,
+    gxi_cascade_high_abs_threshold: float = 0.0,
+    gxi_cascade_sharpness: float = 10.0,
+    gxi_cascade_houli_a: float = 0.69,
+    gxi_cascade_houli_m: float = 4.0,
+    gxi_cascade_k_eff: float = 128.0,
+    gxi_highband_limiter_enabled: bool = False,
+    gxi_highband_k_cut: float = 32.0,
+    gxi_highband_r_max: float = 1e-2,
+    gxi_highband_abs_floor: float = 5.0,
+    truth_cache_dir: Path | None = None,
+    batched_surrogate: bool = False,
+    predict_gxi_batched: Callable | None = None,
+    gl2_residual_check: bool = False,
+    gl2_residual_tol: float = 1e-2,
 ) -> dict:
     ics, dt, tmax, saved_t, saved_eta = build_ics_and_truth_targets(cfg)
     times_np = np.arange(0.0, tmax + 0.5 * dt, dt, dtype=np.float64)
@@ -504,7 +938,14 @@ def run_regime(
         flush=True,
     )
 
-    if cfg.truth_kind == "linear_analytic":
+    cached = _try_load_cached_truth(
+        regime, truth_cache_dir, expected_n_ics=len(ics),
+        expected_n_t=n_t, expected_nx=nx,
+        expected_case_ids=[ic.case_id for ic in ics],
+    )
+    if cached is not None:
+        truth = cached
+    elif cfg.truth_kind == "linear_analytic":
         print(f"[{regime}] truth rollout (analytic linear Fourier propagation)...", flush=True)
         truth = truth_rollout_linear_analytic(ics, times_np, nx, length)
     else:
@@ -513,21 +954,100 @@ def run_regime(
     print(f"[{regime}]   truth wall = {truth['wall_s']:.1f}s", flush=True)
 
     harness = "f64 harness / f32 model" if f64_harness else "f32"
-    print(f"[{regime}] surrogate rollout (per-IC {harness})...", flush=True)
+    mode = "batched" if batched_surrogate else "per-IC"
+    print(f"[{regime}] surrogate rollout ({mode} {harness})...", flush=True)
     times_in = jnp.asarray(times_np, dtype=jnp.float64 if f64_harness else jnp.float32)
-    pred = surrogate_rollout_per_ic(
-        ics, times_in, nx, length, cfg, loaded, predict_gxi,
-        filter_gxi=filter_gxi, f64_harness=f64_harness,
-        filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
-        cascade_gate_enabled=cascade_gate_enabled,
-        cascade_k_cut=cascade_k_cut,
-        cascade_r_threshold=cascade_r_threshold,
-        cascade_sharpness=cascade_sharpness,
-        cascade_houli_a=cascade_houli_a,
-        cascade_houli_m=cascade_houli_m,
-        cascade_k_eff=cascade_k_eff,
-        cascade_filter_xi=cascade_filter_xi,
-    )
+    if batched_surrogate:
+        if predict_gxi_batched is None:
+            raise ValueError("batched_surrogate=True requires predict_gxi_batched")
+        pred = surrogate_rollout_batched(
+            ics, times_in, nx, length, cfg, loaded, predict_gxi_batched,
+            filter_gxi=filter_gxi, f64_harness=f64_harness,
+            filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+            cascade_gate_enabled=cascade_gate_enabled,
+            cascade_k_cut=cascade_k_cut,
+            cascade_r_threshold=cascade_r_threshold,
+            cascade_sharpness=cascade_sharpness,
+            cascade_houli_a=cascade_houli_a,
+            cascade_houli_m=cascade_houli_m,
+            cascade_k_eff=cascade_k_eff,
+            cascade_filter_xi=cascade_filter_xi,
+            eta_growth_guard_enabled=eta_growth_guard_enabled,
+            eta_growth_guard_k_lo=eta_growth_guard_k_lo,
+            eta_growth_guard_k_hi=eta_growth_guard_k_hi,
+            eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
+            eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
+            eta_growth_guard_sharpness=eta_growth_guard_sharpness,
+            eta_growth_guard_houli_a=eta_growth_guard_houli_a,
+            eta_growth_guard_houli_m=eta_growth_guard_houli_m,
+            eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
+            eta_growth_gxi_limiter_enabled=eta_growth_gxi_limiter_enabled,
+            eta_growth_gxi_limiter_k_lo=eta_growth_gxi_limiter_k_lo,
+            eta_growth_gxi_limiter_k_hi=eta_growth_gxi_limiter_k_hi,
+            eta_growth_gxi_limiter_abs_floor=eta_growth_gxi_limiter_abs_floor,
+            eta_growth_gxi_limiter_growth_factor=eta_growth_gxi_limiter_growth_factor,
+            eta_growth_gxi_limiter_sharpness=eta_growth_gxi_limiter_sharpness,
+            gxi_cascade_gate_enabled=gxi_cascade_gate_enabled,
+            gxi_cascade_k_cut=gxi_cascade_k_cut,
+            gxi_cascade_r_threshold=gxi_cascade_r_threshold,
+            gxi_cascade_high_abs_threshold=gxi_cascade_high_abs_threshold,
+            gxi_cascade_sharpness=gxi_cascade_sharpness,
+            gxi_cascade_houli_a=gxi_cascade_houli_a,
+            gxi_cascade_houli_m=gxi_cascade_houli_m,
+            gxi_cascade_k_eff=gxi_cascade_k_eff,
+            gxi_highband_limiter_enabled=gxi_highband_limiter_enabled,
+            gxi_highband_k_cut=gxi_highband_k_cut,
+            gxi_highband_r_max=gxi_highband_r_max,
+            gxi_highband_abs_floor=gxi_highband_abs_floor,
+            gl2_residual_check=gl2_residual_check,
+            gl2_residual_tol=gl2_residual_tol,
+        )
+        # batched returns (n_t, NB, nx) already; per-IC returns the same shape too.
+    else:
+        pred = surrogate_rollout_per_ic(
+            ics, times_in, nx, length, cfg, loaded, predict_gxi,
+            filter_gxi=filter_gxi, f64_harness=f64_harness,
+            filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+            cascade_gate_enabled=cascade_gate_enabled,
+            cascade_k_cut=cascade_k_cut,
+            cascade_r_threshold=cascade_r_threshold,
+            cascade_sharpness=cascade_sharpness,
+            cascade_houli_a=cascade_houli_a,
+            cascade_houli_m=cascade_houli_m,
+            cascade_k_eff=cascade_k_eff,
+            cascade_filter_xi=cascade_filter_xi,
+            eta_growth_guard_enabled=eta_growth_guard_enabled,
+            eta_growth_guard_k_lo=eta_growth_guard_k_lo,
+            eta_growth_guard_k_hi=eta_growth_guard_k_hi,
+            eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
+            eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
+            eta_growth_guard_sharpness=eta_growth_guard_sharpness,
+            eta_growth_guard_houli_a=eta_growth_guard_houli_a,
+            eta_growth_guard_houli_m=eta_growth_guard_houli_m,
+            eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
+            eta_growth_gxi_limiter_enabled=eta_growth_gxi_limiter_enabled,
+            eta_growth_gxi_limiter_k_lo=eta_growth_gxi_limiter_k_lo,
+            eta_growth_gxi_limiter_k_hi=eta_growth_gxi_limiter_k_hi,
+            eta_growth_gxi_limiter_abs_floor=eta_growth_gxi_limiter_abs_floor,
+            eta_growth_gxi_limiter_growth_factor=eta_growth_gxi_limiter_growth_factor,
+            eta_growth_gxi_limiter_sharpness=eta_growth_gxi_limiter_sharpness,
+            gxi_cascade_gate_enabled=gxi_cascade_gate_enabled,
+            gxi_cascade_k_cut=gxi_cascade_k_cut,
+            gxi_cascade_r_threshold=gxi_cascade_r_threshold,
+            gxi_cascade_high_abs_threshold=gxi_cascade_high_abs_threshold,
+            gxi_cascade_sharpness=gxi_cascade_sharpness,
+            gxi_cascade_houli_a=gxi_cascade_houli_a,
+            gxi_cascade_houli_m=gxi_cascade_houli_m,
+            gxi_cascade_k_eff=gxi_cascade_k_eff,
+            gxi_highband_limiter_enabled=gxi_highband_limiter_enabled,
+            gxi_highband_k_cut=gxi_highband_k_cut,
+            gxi_highband_r_max=gxi_highband_r_max,
+            gxi_highband_abs_floor=gxi_highband_abs_floor,
+            gl2_residual_check=gl2_residual_check,
+            gl2_residual_tol=gl2_residual_tol,
+        )
     print(f"[{regime}]   surrogate wall = {pred['wall_s']:.1f}s", flush=True)
 
     # Optional: sanity-check truth against saved adaptive samples (only batched_npz regimes)
@@ -582,6 +1102,42 @@ def run_regime(
         "cascade_houli_m": cascade_houli_m,
         "cascade_k_eff": cascade_k_eff,
         "cascade_filter_xi": cascade_filter_xi,
+        "eta_growth_guard_enabled": eta_growth_guard_enabled,
+        "eta_growth_guard_k_lo": eta_growth_guard_k_lo,
+        "eta_growth_guard_k_hi": eta_growth_guard_k_hi,
+        "eta_growth_guard_abs_floor": eta_growth_guard_abs_floor,
+        "eta_growth_guard_growth_factor": eta_growth_guard_growth_factor,
+        "eta_growth_guard_sharpness": eta_growth_guard_sharpness,
+        "eta_growth_guard_houli_a": eta_growth_guard_houli_a,
+        "eta_growth_guard_houli_m": eta_growth_guard_houli_m,
+        "eta_growth_guard_k_eff": eta_growth_guard_k_eff,
+        "eta_growth_guard_filter_xi": eta_growth_guard_filter_xi,
+        "eta_growth_gxi_limiter_enabled": eta_growth_gxi_limiter_enabled,
+        "eta_growth_gxi_limiter_k_lo": eta_growth_gxi_limiter_k_lo,
+        "eta_growth_gxi_limiter_k_hi": eta_growth_gxi_limiter_k_hi,
+        "eta_growth_gxi_limiter_abs_floor": eta_growth_gxi_limiter_abs_floor,
+        "eta_growth_gxi_limiter_growth_factor": eta_growth_gxi_limiter_growth_factor,
+        "eta_growth_gxi_limiter_sharpness": eta_growth_gxi_limiter_sharpness,
+        "gxi_cascade_gate_enabled": gxi_cascade_gate_enabled,
+        "gxi_cascade_k_cut": gxi_cascade_k_cut,
+        "gxi_cascade_r_threshold": gxi_cascade_r_threshold,
+        "gxi_cascade_high_abs_threshold": gxi_cascade_high_abs_threshold,
+        "gxi_cascade_sharpness": gxi_cascade_sharpness,
+        "gxi_cascade_houli_a": gxi_cascade_houli_a,
+        "gxi_cascade_houli_m": gxi_cascade_houli_m,
+        "gxi_cascade_k_eff": gxi_cascade_k_eff,
+        "gxi_highband_limiter_enabled": gxi_highband_limiter_enabled,
+        "gxi_highband_k_cut": gxi_highband_k_cut,
+        "gxi_highband_r_max": gxi_highband_r_max,
+        "gxi_highband_abs_floor": gxi_highband_abs_floor,
+        "cs_residual_highband_cap": bool(loaded.config.get("cs_residual_highband_cap", False)),
+        "cs_block_k_cut": int(loaded.config.get("cs_block_k_cut", 0)),
+        "cs_residual_highband_cap_k_cut": float(loaded.config.get("cs_residual_highband_cap_k_cut", 32.0)),
+        "cs_residual_highband_cap_beta": float(loaded.config.get("cs_residual_highband_cap_beta", 0.10)),
+        "cs_residual_highband_cap_floor": float(loaded.config.get("cs_residual_highband_cap_floor", 0.0)),
+        "batched_surrogate": batched_surrogate,
+        "gl2_residual_check": gl2_residual_check,
+        "gl2_residual_tol": gl2_residual_tol,
         "saved_truth_reproduction": saved_err,
     })
     (out_dir / f"{regime}_summary.json").write_text(json.dumps(summary, indent=2))
@@ -649,8 +1205,121 @@ def main() -> None:
                         help="Hou-Li m for the cascade gate's smoothing (default 4).")
     parser.add_argument("--cascade_k_eff", type=float, default=128.0,
                         help="Hou-Li k_eff for the cascade gate (default 128 ~ 1/4 of Nyquist).")
+    parser.add_argument(
+        "--gxi_cascade_gate", action="store_true",
+        help="Conditionally damp the surrogate's Gxi prediction when its own "
+             "mid/high-k energy ratio crosses a threshold. This acts before "
+             "Gxi enters the nonlinear RHS and is independent of --cascade_gate, "
+             "which filters eta/xi state after a substep.",
+    )
+    parser.add_argument(
+        "--eta_growth_guard", action="store_true",
+        help="Conditionally damp eta/xi state high modes when eta k-band amplitude "
+             "grows abnormally relative to that IC's initial amplitude. This is a "
+             "temporal cascade detector, unlike static high-band ratio gates.",
+    )
+    parser.add_argument("--eta_growth_guard_k_lo", type=float, default=64.0,
+                        help="Lower |k| edge of the eta growth detector band.")
+    parser.add_argument("--eta_growth_guard_k_hi", type=float, default=128.0,
+                        help="Upper |k| edge of the eta growth detector band.")
+    parser.add_argument("--eta_growth_guard_abs_floor", type=float, default=1e-4,
+                        help="Absolute eta band-amplitude floor before the guard can activate.")
+    parser.add_argument("--eta_growth_guard_growth_factor", type=float, default=100.0,
+                        help="Required growth over initial eta band amplitude before activation.")
+    parser.add_argument("--eta_growth_guard_sharpness", type=float, default=10.0,
+                        help="Sigmoid sharpness in log(current/trigger) space.")
+    parser.add_argument("--eta_growth_guard_houli_a", type=float, default=0.69,
+                        help="Hou-Li a for the eta-growth guard's state damping.")
+    parser.add_argument("--eta_growth_guard_houli_m", type=float, default=4.0,
+                        help="Hou-Li m for the eta-growth guard's state damping.")
+    parser.add_argument("--eta_growth_guard_k_eff", type=float, default=64.0,
+                        help="Hou-Li k_eff for eta-growth guard damping.")
+    parser.add_argument("--eta_growth_guard_no_filter_xi", action="store_true",
+                        help="Apply eta-growth guard damping to eta only; leave xi untouched.")
+    parser.add_argument(
+        "--eta_growth_gxi_limiter", action="store_true",
+        help="Use the temporal eta-growth detector to smoothly enable the Gxi "
+             "high-band limiter. This preserves clean/broadband trajectories "
+             "unless their eta high band grows abnormally relative to t=0.",
+    )
+    parser.add_argument("--eta_growth_gxi_limiter_k_lo", type=float, default=64.0,
+                        help="Lower |k| edge of the eta detector band for conditional Gxi limiting.")
+    parser.add_argument("--eta_growth_gxi_limiter_k_hi", type=float, default=128.0,
+                        help="Upper |k| edge of the eta detector band for conditional Gxi limiting.")
+    parser.add_argument("--eta_growth_gxi_limiter_abs_floor", type=float, default=1e-4,
+                        help="Absolute eta band-amplitude floor before conditional Gxi limiting.")
+    parser.add_argument("--eta_growth_gxi_limiter_growth_factor", type=float, default=100.0,
+                        help="Required growth over initial eta band amplitude before conditional Gxi limiting.")
+    parser.add_argument("--eta_growth_gxi_limiter_sharpness", type=float, default=10.0,
+                        help="Sigmoid sharpness for conditional Gxi limiting.")
+    parser.add_argument("--gxi_cascade_k_cut", type=float, default=32.0,
+                        help="|k| boundary for Gxi high-band energy ratio (default 32).")
+    parser.add_argument("--gxi_cascade_r_threshold", type=float, default=1e-3,
+                        help="Gxi E_hi/E_lo threshold where the gate is at 50%% (default 1e-3).")
+    parser.add_argument("--gxi_cascade_high_abs_threshold", type=float, default=0.0,
+                        help="Optional absolute sqrt(sum |Gxi_hat(k>=k_cut)|^2) threshold. "
+                             "If >0, the Gxi gate activates only when both ratio and absolute "
+                             "high-band amplitude are large. Default 0 disables this extra guard.")
+    parser.add_argument("--gxi_cascade_sharpness", type=float, default=10.0,
+                        help="Sigmoid sharpness in log(r) space for the Gxi gate (default 10).")
+    parser.add_argument("--gxi_cascade_houli_a", type=float, default=0.69,
+                        help="Hou-Li a for conditional Gxi smoothing (default 0.69 ~ ln 2).")
+    parser.add_argument("--gxi_cascade_houli_m", type=float, default=4.0,
+                        help="Hou-Li m for conditional Gxi smoothing (default 4).")
+    parser.add_argument("--gxi_cascade_k_eff", type=float, default=128.0,
+                        help="Hou-Li k_eff for conditional Gxi smoothing (default 128).")
+    parser.add_argument(
+        "--gxi_highband_limiter", action="store_true",
+        help="Cap only the high-band Fourier coefficients of surrogate Gxi before "
+             "the nonlinear RHS. Preserves low modes exactly and rescales "
+             "k>=cut only when sqrt(E_hi) exceeds max(abs_floor, sqrt(r_max)*sqrt(E_lo)).",
+    )
+    parser.add_argument("--gxi_highband_k_cut", type=float, default=32.0,
+                        help="|k| boundary for the Gxi high-band limiter (default 32).")
+    parser.add_argument("--gxi_highband_r_max", type=float, default=1e-2,
+                        help="Maximum allowed high/low Gxi energy ratio above the abs floor.")
+    parser.add_argument("--gxi_highband_abs_floor", type=float, default=5.0,
+                        help="Absolute sqrt(sum |Gxi_hat(k>=k_cut)|^2) floor for the high-band cap.")
+    parser.add_argument(
+        "--cs_residual_highband_cap", action="store_true",
+        help="Enable the model's parameter-free structural cap on only the learned "
+             "CS-DNO residual high band. This preserves G_0 xi and changes no "
+             "checkpoint tensor shapes.",
+    )
+    parser.add_argument("--cs_residual_highband_cap_k_cut", type=float, default=32.0,
+                        help="|k| boundary for the learned-residual high-band cap.")
+    parser.add_argument("--cs_residual_highband_cap_beta", type=float, default=0.10,
+                        help="Residual high-band cap as beta*||G_0 xi||.")
+    parser.add_argument("--cs_residual_highband_cap_floor", type=float, default=0.0,
+                        help="Additive normalized-output floor for the residual high-band cap.")
+    parser.add_argument("--cs_block_k_cut", type=int, default=None,
+                        help="Eval-only override for the CS-DNO learned block transfer cutoff. "
+                             "0 leaves all transfer kernels active; positive values block "
+                             "learned transfer-kernel corrections for |k| >= cut.")
+    parser.add_argument("--truth_cache", default=None,
+                        help="Directory containing prior `{regime}_trajs.npz` files. If present and "
+                             "shape+case_ids match, truth is loaded instead of recomputed. "
+                             "Cheap way to avoid re-running the batched f64 truth rollout across "
+                             "multiple checkpoints/eval configs on the same regime+n_ics.")
     parser.add_argument("--cascade_no_filter_xi", action="store_true",
                         help="Apply the cascade gate to eta only; leave xi untouched.")
+    parser.add_argument(
+        "--batched_surrogate", action="store_true",
+        help="Run the surrogate rollout with all ICs stacked on a leading batch axis "
+             "so kernels get NB× more work per launch (nx=1024 batch=1 is kernel-latency "
+             "bound; batched draws full TDP). Math identical to the per-IC path.",
+    )
+    parser.add_argument(
+        "--gl2_residual_check", action="store_true",
+        help="Track GL2 Picard final-iter stage-update relative residual and mask "
+             "only samples whose r_final >= tol with NaNs. This is diagnostic "
+             "per-sample containment, not dt-halving recovery.",
+    )
+    parser.add_argument("--gl2_residual_tol", type=float, default=1e-2,
+                        help="Divergence threshold. Sample is masked if Picard's "
+                             "final-iter relative stage residual >= this. Default 1e-2 "
+                             "sits ~6 orders above healthy (~1e-8) and ~1-2 orders "
+                             "below non-contractive (~0.19).")
     args = parser.parse_args()
 
     if not args.gpu:
@@ -671,13 +1340,50 @@ def main() -> None:
         default_name += "_f64m"
     if args.cascade_gate:
         default_name += f"_cg_kc{args.cascade_k_cut:g}_rt{args.cascade_r_threshold:g}"
+    if args.gxi_cascade_gate:
+        default_name += f"_gxicg_kc{args.gxi_cascade_k_cut:g}_rt{args.gxi_cascade_r_threshold:g}"
+    if args.gxi_highband_limiter:
+        default_name += f"_gxihbl_kc{args.gxi_highband_k_cut:g}_r{args.gxi_highband_r_max:g}"
+    if args.eta_growth_guard:
+        default_name += (
+            f"_etagg_k{args.eta_growth_guard_k_lo:g}-{args.eta_growth_guard_k_hi:g}"
+            f"_g{args.eta_growth_guard_growth_factor:g}"
+        ).replace(".", "p")
+    if args.eta_growth_gxi_limiter:
+        default_name += (
+            f"_etagxihl_k{args.eta_growth_gxi_limiter_k_lo:g}-{args.eta_growth_gxi_limiter_k_hi:g}"
+            f"_g{args.eta_growth_gxi_limiter_growth_factor:g}"
+        ).replace(".", "p")
+    if args.cs_residual_highband_cap:
+        default_name += (
+            f"_csrcap_kc{args.cs_residual_highband_cap_k_cut:g}"
+            f"_b{args.cs_residual_highband_cap_beta:g}"
+        )
+    if args.cs_block_k_cut is not None:
+        default_name += f"_csbkc{args.cs_block_k_cut}"
+    if args.gl2_residual_check:
+        default_name += f"_gl2rc_tol{args.gl2_residual_tol:g}"
     out_dir = Path(args.output_dir).resolve() if args.output_dir else run_dir / default_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    loaded = load_run(run_dir, checkpoint=args.checkpoint)
+    model_config_overrides = {}
+    if args.cs_residual_highband_cap:
+        model_config_overrides.update({
+            "cs_residual_highband_cap": True,
+            "cs_residual_highband_cap_k_cut": float(args.cs_residual_highband_cap_k_cut),
+            "cs_residual_highband_cap_beta": float(args.cs_residual_highband_cap_beta),
+            "cs_residual_highband_cap_floor": float(args.cs_residual_highband_cap_floor),
+        })
+    if args.cs_block_k_cut is not None:
+        model_config_overrides["cs_block_k_cut"] = int(args.cs_block_k_cut)
+    loaded = load_run(
+        run_dir, checkpoint=args.checkpoint,
+        config_overrides=model_config_overrides or None,
+    )
     if args.f64_model:
         loaded.config["precision"] = "fp64"
     predict_gxi = build_predict_gxi_with_depth(loaded)
+    predict_gxi_batched = build_predict_gxi_batched(loaded) if args.batched_surrogate else None
 
     summaries: dict[str, dict] = {}
     for regime in args.regimes:
@@ -703,6 +1409,39 @@ def main() -> None:
             cascade_houli_m=args.cascade_houli_m,
             cascade_k_eff=args.cascade_k_eff,
             cascade_filter_xi=not args.cascade_no_filter_xi,
+            eta_growth_guard_enabled=args.eta_growth_guard,
+            eta_growth_guard_k_lo=args.eta_growth_guard_k_lo,
+            eta_growth_guard_k_hi=args.eta_growth_guard_k_hi,
+            eta_growth_guard_abs_floor=args.eta_growth_guard_abs_floor,
+            eta_growth_guard_growth_factor=args.eta_growth_guard_growth_factor,
+            eta_growth_guard_sharpness=args.eta_growth_guard_sharpness,
+            eta_growth_guard_houli_a=args.eta_growth_guard_houli_a,
+            eta_growth_guard_houli_m=args.eta_growth_guard_houli_m,
+            eta_growth_guard_k_eff=args.eta_growth_guard_k_eff,
+            eta_growth_guard_filter_xi=not args.eta_growth_guard_no_filter_xi,
+            eta_growth_gxi_limiter_enabled=args.eta_growth_gxi_limiter,
+            eta_growth_gxi_limiter_k_lo=args.eta_growth_gxi_limiter_k_lo,
+            eta_growth_gxi_limiter_k_hi=args.eta_growth_gxi_limiter_k_hi,
+            eta_growth_gxi_limiter_abs_floor=args.eta_growth_gxi_limiter_abs_floor,
+            eta_growth_gxi_limiter_growth_factor=args.eta_growth_gxi_limiter_growth_factor,
+            eta_growth_gxi_limiter_sharpness=args.eta_growth_gxi_limiter_sharpness,
+            gxi_cascade_gate_enabled=args.gxi_cascade_gate,
+            gxi_cascade_k_cut=args.gxi_cascade_k_cut,
+            gxi_cascade_r_threshold=args.gxi_cascade_r_threshold,
+            gxi_cascade_high_abs_threshold=args.gxi_cascade_high_abs_threshold,
+            gxi_cascade_sharpness=args.gxi_cascade_sharpness,
+            gxi_cascade_houli_a=args.gxi_cascade_houli_a,
+            gxi_cascade_houli_m=args.gxi_cascade_houli_m,
+            gxi_cascade_k_eff=args.gxi_cascade_k_eff,
+            gxi_highband_limiter_enabled=args.gxi_highband_limiter,
+            gxi_highband_k_cut=args.gxi_highband_k_cut,
+            gxi_highband_r_max=args.gxi_highband_r_max,
+            gxi_highband_abs_floor=args.gxi_highband_abs_floor,
+            truth_cache_dir=Path(args.truth_cache).resolve() if args.truth_cache else None,
+            batched_surrogate=args.batched_surrogate,
+            predict_gxi_batched=predict_gxi_batched,
+            gl2_residual_check=args.gl2_residual_check,
+            gl2_residual_tol=args.gl2_residual_tol,
         )
 
     (out_dir / "all_summaries.json").write_text(json.dumps(summaries, indent=2))

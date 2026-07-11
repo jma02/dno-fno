@@ -113,6 +113,11 @@ class CraigSulemBlock(nn.Module):
     tie_xi_out_mult: bool = False
     phi_bias_free: bool = False
     fft_fp64: bool = False
+    # Hard low-pass k-cutoff applied to both m_xi and the block output. 0 disables.
+    # Enforces that the block acts only on and produces only k < block_k_cut
+    # modes, which (a) makes phi·xi_branched aliasing-free when block_k_cut <=
+    # nx/4 and (b) kills the mid-k noise floor that seeds the tanaka NaN cascade.
+    block_k_cut: int = 0
 
     @nn.compact
     def __call__(
@@ -165,7 +170,18 @@ class CraigSulemBlock(nn.Module):
                 name="m_out",
             )(depth, n_freq)                                          # (B, K, n_branches)
 
+        # Optional hard low-pass mask on m_xi (input side) and out_hat (output
+        # side). Applied to the multipliers, not to raw xi/eta — this ensures
+        # the block is analytically bandlimited without touching the outer
+        # G_0 baseline path.
+        if self.block_k_cut > 0:
+            k_mask = (jnp.arange(n_freq) < self.block_k_cut).astype(xi_phys.dtype)
+        else:
+            k_mask = None
+
         xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")        # (B, K)
+        if k_mask is not None:
+            m_xi = m_xi * k_mask[None, :, None]
         xi_branched_hat = m_xi * xi_hat[..., None]                    # (B, K, n_branches)
         xi_branched = jnp.fft.irfft(
             xi_branched_hat, n=grid_size, axis=1, norm="forward",
@@ -177,6 +193,8 @@ class CraigSulemBlock(nn.Module):
         # 4. Per-branch output multiplier, then sum over branches.
         prods_hat = jnp.fft.rfft(prods, axis=1, norm="forward")        # (B, K, n_branches)
         out_hat = jnp.sum(m_out * prods_hat, axis=-1)                  # (B, K)
+        if k_mask is not None:
+            out_hat = out_hat * k_mask[None, :]
         out_phys = jnp.fft.irfft(out_hat, n=grid_size, axis=-1, norm="forward")
         return out_phys.astype(out_dtype)
 
@@ -227,6 +245,11 @@ class CraigSulemDNO(nn.Module):
     # Requires jax_enable_x64; otherwise the cast silently downgrades to fp32.
     fft_fp64: bool = False
 
+    # Run only the closed-form G_1 baseline in fp64 / complex128. This preserves
+    # the cancellation between its two k-amplified terms without widening G_0,
+    # the learned blocks, or the η-feature FFTs. Requires jax_enable_x64.
+    g1_fft_fp64: bool = False
+
     # Tie M_xi = M_out inside every CraigSulemBlock so each block is
     # self-adjoint in ξ ↔ ψ (matching the true G(η)'s symmetry).
     tie_xi_out_mult: bool = False
@@ -238,6 +261,42 @@ class CraigSulemDNO(nn.Module):
     # flat-surface limit is exact by construction, not just at init. Directly
     # targets the linear-regime sideband hallucination.
     phi_bias_free: bool = False
+
+    # Leading order in η of the learned residual. Order 1 preserves the
+    # original architecture exactly. Order 2 makes the η trunk and block
+    # projections bias-free and squares the learned η features before the
+    # multiplier sandwiches. Hence R(0, ξ) = D_ηR(0, ξ) = 0 for every
+    # parameter value, leaving the closed-form G_0 + G_1 terms untouched.
+    residual_eta_order: int = 1
+
+    # Hard low-pass k-cutoff applied inside every CraigSulemBlock (on both
+    # m_xi and out_hat). 0 disables. Attacks the tanaka mid-k cascade at
+    # source by making the learned correction structurally bandlimited.
+    block_k_cut: int = 0
+
+    # Parameter-free structural cap on the learned residual high band. This is
+    # deliberately applied only to the residual from the learned CS blocks, not
+    # to the exact G_0 baseline. It preserves the residual low modes exactly and
+    # bounds residual high modes relative to residual low-mode energy, matching
+    # the eval-time high-band limiter mechanism without touching physical G_0ξ.
+    residual_highband_cap: bool = False
+    residual_highband_cap_k_cut: float = 32.0
+    residual_highband_cap_beta: float = 0.10
+    residual_highband_cap_floor: float = 0.0
+
+    # Structural projection on the *full* predicted G(eta)xi after adding the
+    # exact G_0 baseline and learned residual. This is the checkpoint-carrying
+    # version of the rollout high-band limiter: preserve low modes exactly and
+    # uniformly rescale only |k| >= k_cut if the output violates
+    #
+    #     ||P_hi gxi|| <= max(abs_floor, sqrt(r_max) ||P_lo gxi||).
+    #
+    # The floor is specified in physical output units and converted to the
+    # model's normalized output units with target_scale.
+    output_highband_cap: bool = False
+    output_highband_cap_k_cut: float = 32.0
+    output_highband_cap_r_max: float = 1e-2
+    output_highband_cap_abs_floor: float = 5.0
 
     # Carried over from SpectralDNO.
     domain_length: float = 6.283185307179586
@@ -286,14 +345,15 @@ class CraigSulemDNO(nn.Module):
         Assumes norm=scale so that η_phys = eta_norm * eta_scale and
         ξ_phys = xi_norm * xi_scale.
 
-        When fft_fp64 is set, the entire chain (G_0∘mult∘G_0 and ∂x∘mult∘∂x)
-        runs in fp64/complex128 to defeat the f32 FFT noise floor. The cast
-        back to the caller's dtype happens at the return so the rest of the
-        model stays in its native precision.
+        When fft_fp64 or g1_fft_fp64 is set, the entire chain
+        (G_0∘mult∘G_0 and ∂x∘mult∘∂x) runs in fp64/complex128 to
+        defeat the f32 FFT noise floor. The cast back to the caller's dtype
+        happens at the return so the rest of the model stays in its native
+        precision.
         """
         grid_size = xi_norm.shape[1]
         out_dtype = xi_norm.dtype
-        if self.fft_fp64:
+        if self.fft_fp64 or self.g1_fft_fp64:
             eta_phys = (eta_norm * self.eta_scale).astype(jnp.float64)
             xi_phys = (xi_norm * self.xi_scale).astype(jnp.float64)
             h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max))).astype(jnp.float64)
@@ -378,9 +438,79 @@ class CraigSulemDNO(nn.Module):
                                            n=grid_size, axis=-1))
         return jnp.stack(feats, axis=-1).astype(out_dtype)            # (B, N, C_eta_raw)
 
+    def _cap_residual_highband(self, residual_norm: jnp.ndarray) -> jnp.ndarray:
+        """Cap only the learned residual modes above k_cut.
+
+        All quantities are in normalized output units. The cap is per sample:
+
+            ||P_hi R|| <= max(floor, beta * ||P_lo R||)
+
+        implemented as a selective envelope: below the cap the high band is
+        unchanged; above the cap it is rescaled onto the boundary.
+        """
+        grid_size = residual_norm.shape[-1]
+        n_freq = grid_size // 2 + 1
+        k = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
+            n_freq, dtype=residual_norm.dtype,
+        )
+        hi_mask = k >= jnp.asarray(self.residual_highband_cap_k_cut, dtype=k.dtype)
+        residual_hat = jnp.fft.rfft(residual_norm, axis=-1, norm="forward")
+
+        hi_energy = jnp.sum(jnp.where(hi_mask[None, :], jnp.abs(residual_hat) ** 2, 0.0), axis=-1)
+        lo_energy = jnp.sum(jnp.where(~hi_mask[None, :], jnp.abs(residual_hat) ** 2, 0.0), axis=-1)
+        hi_norm = jnp.sqrt(hi_energy + jnp.asarray(1e-30, dtype=residual_norm.dtype))
+        lo_norm = jnp.sqrt(lo_energy)
+        cap = jnp.maximum(
+            jnp.asarray(self.residual_highband_cap_floor, dtype=residual_norm.dtype),
+            jnp.asarray(self.residual_highband_cap_beta, dtype=residual_norm.dtype) * lo_norm,
+        )
+        scale = jnp.minimum(
+            jnp.asarray(1.0, dtype=residual_norm.dtype),
+            cap / hi_norm,
+        )
+        residual_hat = jnp.where(hi_mask[None, :], residual_hat * scale[:, None], residual_hat)
+        return jnp.fft.irfft(residual_hat, n=grid_size, axis=-1, norm="forward")
+
+    def _cap_output_highband(self, output_norm: jnp.ndarray) -> jnp.ndarray:
+        """Cap high-band energy of the full predicted Gxi output.
+
+        Uses the same unnormalized FFT amplitude convention as the existing
+        rollout/training high-band limiter, but in normalized target units.
+        """
+        grid_size = output_norm.shape[-1]
+        dx = self.domain_length / float(grid_size)
+        k = (2.0 * jnp.pi) * jnp.fft.fftfreq(grid_size, d=dx)
+        k = k.astype(output_norm.dtype)
+        hi_mask = jnp.abs(k) >= jnp.asarray(self.output_highband_cap_k_cut, dtype=k.dtype)
+        output_hat = jnp.fft.fft(output_norm, axis=-1)
+
+        hi_energy = jnp.sum(jnp.where(hi_mask[None, :], jnp.abs(output_hat) ** 2, 0.0), axis=-1)
+        lo_energy = jnp.sum(jnp.where(~hi_mask[None, :], jnp.abs(output_hat) ** 2, 0.0), axis=-1)
+        hi_norm = jnp.sqrt(hi_energy)
+        lo_norm = jnp.sqrt(lo_energy)
+        floor_norm = (
+            jnp.asarray(self.output_highband_cap_abs_floor, dtype=output_norm.dtype)
+            / jnp.asarray(self.target_scale, dtype=output_norm.dtype)
+        )
+        cap = jnp.maximum(
+            floor_norm,
+            jnp.sqrt(jnp.asarray(self.output_highband_cap_r_max, dtype=output_norm.dtype)) * lo_norm,
+        )
+        scale = jnp.minimum(
+            jnp.asarray(1.0, dtype=output_norm.dtype),
+            cap / (hi_norm + jnp.asarray(1e-30, dtype=output_norm.dtype)),
+        )
+        output_hat = jnp.where(hi_mask[None, :], output_hat * scale[:, None], output_hat)
+        return jnp.real(jnp.fft.ifft(output_hat, axis=-1)).astype(output_norm.dtype)
+
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # inputs: (B, N, 2) — normalized [η, ξ].  depth: (B, 1) — log h.
+        if self.residual_eta_order not in (1, 2):
+            raise ValueError(
+                "residual_eta_order must be 1 or 2, "
+                f"got {self.residual_eta_order}"
+            )
         batch_size, grid_size, _ = inputs.shape
         n_freq = grid_size // 2 + 1
         depth_clip = jnp.minimum(depth, jnp.log(self.h_clip_max))
@@ -389,7 +519,8 @@ class CraigSulemDNO(nn.Module):
         xi_norm = inputs[..., 1]                                      # (B, N)
         xi_phys = xi_norm * self.xi_scale                             # (B, N)
 
-        baseline = self._linear_baseline(xi_norm, depth)              # (B, N)
+        linear_baseline = self._linear_baseline(xi_norm, depth)       # (B, N)
+        baseline = linear_baseline
         if self.use_g1_baseline:
             baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
 
@@ -399,11 +530,22 @@ class CraigSulemDNO(nn.Module):
         # Project to a richer pointwise feature space. With phi_bias_free, both
         # layers carry no bias so features (and hence all blocks) vanish
         # identically at η = 0.
-        use_bias = not self.phi_bias_free
+        # A bias would contribute an O(1) term before the quadratic lift, so
+        # order 2 structurally disables these biases regardless of the legacy
+        # phi_bias_free setting.
+        residual_bias_free = self.phi_bias_free or self.residual_eta_order == 2
+        use_bias = not residual_bias_free
         eta_features = nn.Dense(self.width // 2, name="eta_feat_proj", use_bias=use_bias)(raw_eta_feats)
         eta_features = nn.gelu(eta_features)
         eta_features = nn.Dense(self.width // 2, name="eta_feat_mix", use_bias=use_bias)(eta_features)
         eta_features = nn.gelu(eta_features)                          # (B, N, width/2)
+        if self.residual_eta_order == 2:
+            # If η -> εη, the bias-free trunk is O(ε); its elementwise
+            # f*tanh(f) lift is therefore O(ε²). It is even in the leading
+            # linear feature, retains general quadratic cross-terms through
+            # the preceding learned mixing, and grows only linearly for large
+            # derivative features instead of making raw eta_xx values stiff.
+            eta_features = eta_features * jnp.tanh(eta_features)
 
         # Sum of n_blocks Craig--Sulem blocks. Explicit dtype: jnp.zeros without
         # one defaults to fp64 when x64 is enabled, which would silently widen
@@ -415,12 +557,24 @@ class CraigSulemDNO(nn.Module):
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 mult_hidden=self.mult_hidden,
+                block_k_cut=self.block_k_cut,
                 tie_xi_out_mult=self.tie_xi_out_mult,
-                phi_bias_free=self.phi_bias_free,
+                phi_bias_free=residual_bias_free,
                 fft_fp64=self.fft_fp64,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, depth_clip)
             residual = residual + block_out                           # (B, N)
 
+        if self.residual_eta_order == 2:
+            # Each learned correction is a sum of n_blocks * latent parallel
+            # multiplier sandwiches. Fan-in normalization keeps a fresh Adam
+            # update's function-space size independent of that chosen rank;
+            # downstream weights retain the same representational capacity.
+            residual = residual / float(self.n_blocks * self.latent) ** 0.5
         residual = residual / self.target_scale
-        return (baseline + residual)[..., None]                       # (B, N, 1)
+        if self.residual_highband_cap:
+            residual = self._cap_residual_highband(residual)
+        output = baseline + residual
+        if self.output_highband_cap:
+            output = self._cap_output_highband(output)
+        return output[..., None]                                      # (B, N, 1)

@@ -102,6 +102,54 @@ def spectral_dx(field: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
     return myifft(1j * k * myfft(field, field.shape[-1]))
 
 
+def _spectral_upsample_real(field: jnp.ndarray, output_nx: int) -> jnp.ndarray:
+    """Interpolate a real periodic field onto a larger Fourier grid."""
+    input_nx = field.shape[-1]
+    spectrum = jnp.fft.rfft(field, axis=-1)
+    spectrum = spectrum.at[..., input_nx // 2].set(0)
+    return (
+        jnp.fft.irfft(spectrum, n=output_nx, axis=-1)
+        * (output_nx / input_nx)
+    )
+
+
+def _spectral_truncate_real(field: jnp.ndarray, output_nx: int) -> jnp.ndarray:
+    """Project a real periodic field from a larger grid onto ``output_nx``."""
+    input_nx = field.shape[-1]
+    spectrum = jnp.fft.rfft(field, axis=-1)[..., : output_nx // 2 + 1]
+    spectrum = spectrum.at[..., output_nx // 2].set(0)
+    return (
+        jnp.fft.irfft(spectrum, n=output_nx, axis=-1)
+        * (output_nx / input_nx)
+    )
+
+
+def dealiased_zakharov_xi_rhs(
+    eta_x: jnp.ndarray,
+    xi_x: jnp.ndarray,
+    gxi: jnp.ndarray,
+) -> jnp.ndarray:
+    """Evaluate the nonlinear Zakharov ``xi_t`` on a two-times Fourier grid.
+
+    JCP09 evaluates the nonlinear equations-of-motion terms on spectra extended
+    by a factor of two.  The final truncation removes product modes that would
+    otherwise alias into the retained base-grid spectrum.  Leading batch
+    dimensions are preserved.
+    """
+    nx = eta_x.shape[-1]
+    padded_nx = 2 * nx
+    eta_x_padded = _spectral_upsample_real(eta_x, padded_nx)
+    xi_x_padded = _spectral_upsample_real(xi_x, padded_nx)
+    gxi_padded = _spectral_upsample_real(gxi, padded_nx)
+
+    numerator = gxi_padded + eta_x_padded * xi_x_padded
+    xi_t_padded = (
+        -0.5 * xi_x_padded**2
+        + 0.5 * numerator**2 / (1.0 + eta_x_padded**2)
+    )
+    return _spectral_truncate_real(xi_t_padded, nx)
+
+
 def linear_dno_action(xi: jnp.ndarray, g0: jnp.ndarray) -> jnp.ndarray:
     return myifft(g0 * myfft(xi, xi.shape[-1]))
 
@@ -222,8 +270,7 @@ def rhs_nonlinear(state: State, params: SolverParams) -> State:
     linear_gxi = linear_dno_action(state.xi, params.g0)
 
     eta_t = gxi - linear_gxi
-    numerator = gxi + eta_x * xi_x
-    xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    xi_t = dealiased_zakharov_xi_rhs(eta_x, xi_x, gxi)
     # Filter inside rhs: at k_max ≳ 100 the DNO series' k^M factor amplifies high-k roundoff faster than the implicit-iteration accumulates, so post-step filtering alone is too late.
     if params.filter_fraction < 1.0:
         eta_t = apply_lowpass(eta_t, params.k, params.filter_fraction)

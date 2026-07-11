@@ -17,6 +17,36 @@ FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]
 
 
+def replicate_pytree_from_host(tree: Any, sharding: jax.sharding.Sharding) -> Any:
+    """Broadcast every array leaf through host memory before replication.
+
+    Passing an already device-backed pytree directly to ``jax.device_put`` with
+    replicated sharding can preserve only the primary device's local buffer and
+    leave secondary replicas zero-filled.  A host round trip gives JAX a complete
+    value to broadcast to every addressable device.
+    """
+    host_tree = jax.tree.map(
+        lambda value: np.asarray(jax.device_get(value)),
+        tree,
+    )
+    return jax.device_put(host_tree, sharding)
+
+
+def assert_pytree_replicated(tree: Any, *, name: str) -> None:
+    """Raise when any addressable replica differs from its primary copy."""
+    path_leaves, _ = jax.tree_util.tree_flatten_with_path(tree)
+    for path, leaf in path_leaves:
+        if not isinstance(leaf, jax.Array) or len(leaf.addressable_shards) < 2:
+            continue
+        payloads = [np.asarray(shard.data) for shard in leaf.addressable_shards]
+        reference = payloads[0]
+        if not all(
+            np.array_equal(payload, reference, equal_nan=True)
+            for payload in payloads[1:]
+        ):
+            raise RuntimeError(f"{name} leaf {path} has divergent device replicas")
+
+
 def require_jax_devices(*, allow_cpu: bool = False, min_device_count: int = 1) -> tuple[str, list[jax.Device]]:
     backend = jax.default_backend()
     if backend != "gpu" and not allow_cpu:

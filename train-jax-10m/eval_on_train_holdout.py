@@ -86,6 +86,12 @@ def main() -> None:
     run_dir = Path(args.run_dir).resolve()
 
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    if (
+        bool(config.get("cs_fft_fp64", False))
+        or bool(config.get("cs_g1_fft_fp64", False))
+        or config.get("precision") == "fp64"
+    ):
+        jax.config.update("jax_enable_x64", True)
     ckpt_dir, params, metadata = _load_checkpoint(run_dir, args.checkpoint)
     stats = metadata["stats"]
     norm_mode = config.get("norm", "minmax")
@@ -136,8 +142,20 @@ def main() -> None:
             mult_hidden=int(config.get("cs_mult_hidden", 32)),
             use_g1_baseline=bool(config.get("cs_use_g1_baseline", False)),
             g1_k_cut=int(config.get("cs_g1_k_cut", 128)),
+            fft_fp64=bool(config.get("cs_fft_fp64", False)),
+            g1_fft_fp64=bool(config.get("cs_g1_fft_fp64", False)),
             tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
             phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
+            residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+            block_k_cut=int(config.get("cs_block_k_cut", 0)),
+            residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
+            residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),
+            residual_highband_cap_beta=float(config.get("cs_residual_highband_cap_beta", 0.10)),
+            residual_highband_cap_floor=float(config.get("cs_residual_highband_cap_floor", 0.0)),
+            output_highband_cap=bool(config.get("cs_output_highband_cap", False)),
+            output_highband_cap_k_cut=float(config.get("cs_output_highband_cap_k_cut", 32.0)),
+            output_highband_cap_r_max=float(config.get("cs_output_highband_cap_r_max", 1e-2)),
+            output_highband_cap_abs_floor=float(config.get("cs_output_highband_cap_abs_floor", 5.0)),
             domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
             xi_scale=float(config.get("xi_scale", feature_absmax[1])),
             eta_scale=float(config.get("eta_scale", feature_absmax[0])),

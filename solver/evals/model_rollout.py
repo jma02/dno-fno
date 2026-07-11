@@ -46,19 +46,28 @@ class LoadedRun(NamedTuple):
     epoch: int
 
 
-def load_run(run_dir: str | Path, *, checkpoint: str = "best") -> LoadedRun:
+def load_run(
+    run_dir: str | Path,
+    *,
+    checkpoint: str = "best",
+    config_overrides: dict[str, object] | None = None,
+) -> LoadedRun:
     run_dir = Path(run_dir).resolve()
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    if config_overrides:
+        config.update(config_overrides)
     ckpt_dir = run_dir / ("best_val_ckpt" if checkpoint == "best" else "final_ckpt")
     metadata = json.loads((ckpt_dir / "metadata.json").read_text(encoding="utf-8"))
     stats = metadata["stats"]
     norm_mode = config.get("norm", "minmax")
 
-    # Checkpoints trained with mixed-precision (cs_fft_fp64=True) require x64
-    # to be enabled at inference time too; otherwise the .astype(jnp.float64)
-    # casts at the FFT boundaries silently downgrade to fp32 and rollout
-    # diverges from training behavior.
-    if bool(config.get("cs_fft_fp64", False)) or config.get("precision") == "fp64":
+    # Checkpoints with any fp64 spectral path require x64 at inference too;
+    # otherwise explicit float64 casts silently downgrade and change rollout.
+    if (
+        bool(config.get("cs_fft_fp64", False))
+        or bool(config.get("cs_g1_fft_fp64", False))
+        or config.get("precision") == "fp64"
+    ):
         jax.config.update("jax_enable_x64", True)
 
     restored = checkpoints.restore_checkpoint(
@@ -96,8 +105,19 @@ def load_run(run_dir: str | Path, *, checkpoint: str = "best") -> LoadedRun:
             use_g1_baseline=bool(config.get("cs_use_g1_baseline", False)),
             g1_k_cut=int(config.get("cs_g1_k_cut", 0)),
             fft_fp64=bool(config.get("cs_fft_fp64", False)),
+            g1_fft_fp64=bool(config.get("cs_g1_fft_fp64", False)),
             tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
             phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
+            residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+            block_k_cut=int(config.get("cs_block_k_cut", 0)),
+            residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
+            residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),
+            residual_highband_cap_beta=float(config.get("cs_residual_highband_cap_beta", 0.10)),
+            residual_highband_cap_floor=float(config.get("cs_residual_highband_cap_floor", 0.0)),
+            output_highband_cap=bool(config.get("cs_output_highband_cap", False)),
+            output_highband_cap_k_cut=float(config.get("cs_output_highband_cap_k_cut", 32.0)),
+            output_highband_cap_r_max=float(config.get("cs_output_highband_cap_r_max", 1e-2)),
+            output_highband_cap_abs_floor=float(config.get("cs_output_highband_cap_abs_floor", 5.0)),
             domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
             xi_scale=float(config.get("xi_scale", np.asarray(stats["feature_absmax"]).reshape(-1)[1])),
             eta_scale=float(config.get("eta_scale", np.asarray(stats["feature_absmax"]).reshape(-1)[0])),
@@ -161,6 +181,49 @@ def build_predict_gxi_with_depth(loaded: LoadedRun) -> Callable[[jnp.ndarray, jn
     return predict
 
 
+def build_predict_gxi_batched(loaded: LoadedRun) -> Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    """Batched (eta, xi, log_depth) → gxi predictor.
+
+    ``eta``/``xi`` have shape ``(NB, N)``; ``log_depth`` is ``(NB,)`` or ``(NB, 1)``.
+    Returns ``gxi`` of shape ``(NB, N)`` with per-sample zero mean.
+    """
+    model_dtype = jnp.float64 if loaded.config.get("precision") == "fp64" else jnp.float32
+
+    if loaded.norm_mode == "scale":
+        feat_absmax = jnp.asarray(loaded.stats["feature_absmax"], dtype=model_dtype).reshape(1, 1, 2)
+        feat_absmax = jnp.where(feat_absmax > 0, feat_absmax, 1.0)
+        target_scale = float(loaded.stats["target_absmax"]) or 1.0
+
+        @jax.jit
+        def predict(eta: jnp.ndarray, xi: jnp.ndarray, log_depth: jnp.ndarray) -> jnp.ndarray:
+            stacked = jnp.stack((eta.astype(model_dtype), xi.astype(model_dtype)), axis=-1)
+            inp = stacked / feat_absmax
+            depth_arg = jnp.asarray(log_depth, dtype=model_dtype).reshape(-1, 1)
+            out = loaded.model.apply({"params": loaded.params}, inp, depth_arg)
+            gxi = (out[..., 0] * target_scale).astype(eta.dtype)
+            return gxi - gxi.mean(axis=-1, keepdims=True)
+
+    else:
+        feat_min = jnp.asarray(loaded.stats["feature_min"], dtype=model_dtype).reshape(1, 1, 2)
+        feat_max = jnp.asarray(loaded.stats["feature_max"], dtype=model_dtype).reshape(1, 1, 2)
+        feat_range = feat_max - feat_min + 1e-8
+        tgt_min = float(loaded.stats["target_min"])
+        tgt_max = float(loaded.stats["target_max"])
+        tgt_range = tgt_max - tgt_min + 1e-8
+
+        @jax.jit
+        def predict(eta: jnp.ndarray, xi: jnp.ndarray, log_depth: jnp.ndarray) -> jnp.ndarray:
+            stacked = jnp.stack((eta.astype(model_dtype), xi.astype(model_dtype)), axis=-1)
+            inp = ((stacked - feat_min) / feat_range) * 2.0 - 1.0
+            depth_arg = jnp.asarray(log_depth, dtype=model_dtype).reshape(-1, 1)
+            out = loaded.model.apply({"params": loaded.params}, inp, depth_arg)
+            denorm = ((out[..., 0] + 1.0) * 0.5) * tgt_range + tgt_min
+            gxi = denorm.astype(eta.dtype)
+            return gxi - gxi.mean(axis=-1, keepdims=True)
+
+    return predict
+
+
 def build_predict_gxi(loaded: LoadedRun, depth: float) -> Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Return a jit'd ``(eta, xi) -> gxi`` callable for a single sample (1, N).
 
@@ -219,8 +282,7 @@ def _rhs_nonlinear_surrogate(
     gxi = predict_gxi(state.eta, state.xi)
     linear_gxi = ti.linear_dno_action(state.xi, params.g0)
     eta_t = gxi - linear_gxi
-    numerator = gxi + eta_x * xi_x
-    xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    xi_t = ti.dealiased_zakharov_xi_rhs(eta_x, xi_x, gxi)
     if params.filter_fraction < 1.0:
         eta_t = ti.apply_filter(eta_t, params.k, shape=filter_shape,
                                 filter_fraction=params.filter_fraction,
@@ -272,12 +334,15 @@ def _apply_cascade_gate(
     eta_hat = myfft(state.eta, nx)
     k_abs = jnp.abs(k_arr)
     mask_hi = k_abs >= k_cut
-    e_hi = jnp.sum(jnp.where(mask_hi, jnp.abs(eta_hat) ** 2, 0.0))
-    e_lo = jnp.sum(jnp.where(~mask_hi, jnp.abs(eta_hat) ** 2, 0.0))
+    # Reduce on the spectral axis so the gate is per-sample under a leading batch dim.
+    e_hi = jnp.sum(jnp.where(mask_hi, jnp.abs(eta_hat) ** 2, 0.0), axis=-1)
+    e_lo = jnp.sum(jnp.where(~mask_hi, jnp.abs(eta_hat) ** 2, 0.0), axis=-1)
     r = e_hi / (e_lo + 1e-30)
     log_r = jnp.log(r + 1e-30)
     log_thresh = jnp.log(jnp.asarray(r_threshold, dtype=r.dtype) + 1e-30)
-    f = jax.nn.sigmoid(sharpness * (log_r - log_thresh))
+    # f shape matches leading batch: scalar for 1D input, (NB,) for batched.
+    # Expand a trailing 1 so it broadcasts with (nx,)-shape c_houli into (NB, nx).
+    f = jax.nn.sigmoid(sharpness * (log_r - log_thresh))[..., None]
     c_houli = jnp.exp(-houli_a * (k_abs / k_eff) ** (2 * houli_m))
     blend = (1.0 - f) + f * c_houli
     new_eta = myifft(eta_hat * blend)
@@ -287,6 +352,230 @@ def _apply_cascade_gate(
     else:
         new_xi = state.xi
     return ti.State(eta=new_eta, xi=new_xi)
+
+
+def _eta_band_amp(
+    eta: jnp.ndarray,
+    k_arr: jnp.ndarray,
+    nx: int,
+    *,
+    k_lo: float,
+    k_hi: float,
+) -> jnp.ndarray:
+    eta_hat = myfft(eta, nx)
+    k_abs = jnp.abs(k_arr)
+    mask = (k_abs >= k_lo) & (k_abs < k_hi)
+    band_mean = jnp.mean(jnp.where(mask, jnp.abs(eta_hat) ** 2, 0.0), axis=-1)
+    return jnp.sqrt(band_mean) / jnp.asarray(nx, dtype=eta.dtype)
+
+
+def _apply_eta_growth_guard(
+    state: ti.State,
+    k_arr: jnp.ndarray,
+    nx: int,
+    eta_amp0: jnp.ndarray,
+    *,
+    k_lo: float,
+    k_hi: float,
+    abs_floor: float,
+    growth_factor: float,
+    sharpness: float,
+    houli_a: float,
+    houli_m: float,
+    k_eff: float,
+    filter_xi: bool,
+) -> ti.State:
+    """Damp state high modes only after abnormal per-IC eta high-band growth.
+
+    Static high-band energy is not enough: some valid Tanaka/BF states are
+    broadband from t=0. This guard uses each trajectory's initial
+    ``eta[k_lo:k_hi]`` amplitude as a baseline and activates only once the
+    current amplitude exceeds both an absolute floor and ``growth_factor`` times
+    that baseline.
+    """
+    eta_amp = _eta_band_amp(state.eta, k_arr, nx, k_lo=k_lo, k_hi=k_hi)
+    trigger = jnp.maximum(
+        jnp.asarray(abs_floor, dtype=eta_amp.dtype),
+        jnp.asarray(growth_factor, dtype=eta_amp.dtype) * eta_amp0,
+    )
+    log_ratio = jnp.log(eta_amp + 1e-30) - jnp.log(trigger + 1e-30)
+    weight = jax.nn.sigmoid(jnp.asarray(sharpness, dtype=eta_amp.dtype) * log_ratio)
+    weight = weight[..., None] if weight.ndim else weight
+
+    k_abs = jnp.abs(k_arr)
+    c_houli = jnp.exp(-houli_a * (k_abs / jnp.maximum(jnp.asarray(k_eff, dtype=k_abs.dtype), 1e-12)) ** (2 * houli_m))
+    blend = (1.0 - weight) + weight * c_houli
+    new_eta = myifft(myfft(state.eta, nx) * blend)
+    if filter_xi:
+        new_xi = myifft(myfft(state.xi, nx) * blend)
+    else:
+        new_xi = state.xi
+    return ti.State(eta=new_eta, xi=new_xi)
+
+
+def _stage_relative_residual(
+    s_new: ti.SpectralState, s_old: ti.SpectralState
+) -> jnp.ndarray:
+    """Per-sample relative L² of a Picard stage update.
+
+    Returns a scalar for 1D input and shape ``(NB,)`` for batched input.
+    Uses spectral (Parseval) norm; the ``+1e-30`` regularizer floors the
+    denominator so ``r`` is finite on a zero state.
+    """
+    de = s_new.eta_hat - s_old.eta_hat
+    dx = s_new.xi_hat - s_old.xi_hat
+    num_sq = jnp.sum(jnp.abs(de) ** 2, axis=-1) + jnp.sum(jnp.abs(dx) ** 2, axis=-1)
+    ref_sq = jnp.sum(jnp.abs(s_new.eta_hat) ** 2, axis=-1) + jnp.sum(jnp.abs(s_new.xi_hat) ** 2, axis=-1)
+    return jnp.sqrt(num_sq) / (jnp.sqrt(ref_sq) + 1e-30)
+
+
+def _gl2_if_step_with_residual(
+    state: ti.State,
+    t: float,
+    dt: float,
+    params: ti.SolverParams,
+    predict_gxi: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    iterations: int,
+    filter_shape: str,
+    houli_a: float,
+    houli_m: float,
+    cascade_gate_enabled: bool,
+    cascade_k_cut: float,
+    cascade_r_threshold: float,
+    cascade_sharpness: float,
+    cascade_houli_a: float,
+    cascade_houli_m: float,
+    cascade_k_eff: float,
+    cascade_filter_xi: bool,
+) -> tuple[ti.State, jnp.ndarray, jnp.ndarray]:
+    """Same math as ``_gl2_if_step_surrogate`` but also returns (r_final, r_prev)
+    — the last two per-Picard-iter relative stage residuals. Shapes match the
+    leading batch dim of ``state`` (scalar for 1D, ``(NB,)`` for batched).
+    """
+    sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
+    c1 = 0.5 - sqrt3 / 6.0
+    c2 = 0.5 + sqrt3 / 6.0
+    a11 = 0.25
+    a12 = 0.25 - sqrt3 / 6.0
+    a21 = 0.25 + sqrt3 / 6.0
+    a22 = 0.25
+
+    state_hat = ti.SpectralState(eta_hat=myfft(state.eta, params.nx), xi_hat=myfft(state.xi, params.nx))
+    v0 = ti.apply_linear_flow_hat(state_hat, -t, params)
+
+    _add = lambda a, b: jax.tree_util.tree_map(lambda x, y: x + y, a, b)
+    _scale = lambda a, s: jax.tree_util.tree_map(lambda x: s * x, a)
+
+    # Track the last two stage residuals across iterations. Initial values are
+    # set to +inf so the "monotone-decreasing" check is trivially satisfied on
+    # the first iteration (any finite residual is < inf).
+    leading = state.eta.shape[:-1]
+    dtype = state.eta.dtype
+    inf_arr = jnp.full(leading, jnp.inf, dtype=dtype) if leading else jnp.asarray(jnp.inf, dtype=dtype)
+
+    def body_fn(_, carry):
+        s1, s2, r_final, r_prev = carry
+        f1 = _rhs_nonlinear_if_surrogate(s1, t + c1 * dt, params, predict_gxi,
+                                         filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m)
+        f2 = _rhs_nonlinear_if_surrogate(s2, t + c2 * dt, params, predict_gxi,
+                                         filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m)
+        cand1 = _add(v0, _scale(_add(_scale(f1, a11), _scale(f2, a12)), dt))
+        cand2 = _add(v0, _scale(_add(_scale(f1, a21), _scale(f2, a22)), dt))
+        r1 = _stage_relative_residual(cand1, s1)
+        r2 = _stage_relative_residual(cand2, s2)
+        r_new = jnp.maximum(r1, r2)
+        return cand1, cand2, r_new, r_final  # push r_final → r_prev, r_new → r_final
+
+    s1, s2, r_final, r_prev = jax.lax.fori_loop(
+        0, iterations, body_fn, (v0, v0, inf_arr, inf_arr)
+    )
+    f1 = _rhs_nonlinear_if_surrogate(s1, t + c1 * dt, params, predict_gxi,
+                                     filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m)
+    f2 = _rhs_nonlinear_if_surrogate(s2, t + c2 * dt, params, predict_gxi,
+                                     filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m)
+    v1 = _add(v0, _scale(_add(f1, f2), 0.5 * dt))
+
+    next_hat = ti.apply_linear_flow_hat(v1, t + dt, params)
+    next_state = ti.State(eta=myifft(next_hat.eta_hat), xi=myifft(next_hat.xi_hat))
+    if params.filter_fraction < 1.0:
+        next_state = ti.State(
+            eta=ti.apply_filter(next_state.eta, params.k, shape=filter_shape,
+                                filter_fraction=params.filter_fraction,
+                                houli_a=houli_a, houli_m=houli_m),
+            xi=ti.apply_filter(next_state.xi, params.k, shape=filter_shape,
+                               filter_fraction=params.filter_fraction,
+                               houli_a=houli_a, houli_m=houli_m),
+        )
+    if cascade_gate_enabled:
+        next_state = _apply_cascade_gate(
+            next_state, params.k, params.nx,
+            k_cut=cascade_k_cut, r_threshold=cascade_r_threshold,
+            sharpness=cascade_sharpness, houli_a=cascade_houli_a,
+            houli_m=cascade_houli_m, k_eff=cascade_k_eff,
+            filter_xi=cascade_filter_xi,
+        )
+    return next_state, r_final, r_prev
+
+
+def _safe_gl2_substep(
+    state: ti.State,
+    t: jnp.ndarray,
+    dt_target: jnp.ndarray,
+    params: ti.SolverParams,
+    predict_gxi: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    *,
+    iterations: int,
+    residual_tol: float,
+    zero_mean_xi: bool,
+    filter_shape: str,
+    houli_a: float,
+    houli_m: float,
+    cascade_gate_enabled: bool,
+    cascade_k_cut: float,
+    cascade_r_threshold: float,
+    cascade_sharpness: float,
+    cascade_houli_a: float,
+    cascade_houli_m: float,
+    cascade_k_eff: float,
+    cascade_filter_xi: bool,
+) -> ti.State:
+    """GL2 Picard residual guard (per-sample detection, no dt-halving).
+
+    Run one GL2 step over ``[t, t+dt_target]`` and mask samples whose final
+    Picard stage-update residual is above ``residual_tol``. NaN'd samples don't
+    poison their neighbours in the fleet — this is the core requirement.
+
+    Earlier fleet-wide retry experiments made one failing sample NaN an entire
+    batched rollout; this guard is therefore diagnostic masking, not a curative
+    time-step refinement.
+    """
+    dtype = state.eta.dtype
+    new_state, r_final, _ = _gl2_if_step_with_residual(
+        state, jnp.asarray(t, dtype=dtype), jnp.asarray(dt_target, dtype=dtype),
+        params, predict_gxi,
+        iterations=iterations,
+        filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+        cascade_gate_enabled=cascade_gate_enabled,
+        cascade_k_cut=cascade_k_cut,
+        cascade_r_threshold=cascade_r_threshold,
+        cascade_sharpness=cascade_sharpness,
+        cascade_houli_a=cascade_houli_a,
+        cascade_houli_m=cascade_houli_m,
+        cascade_k_eff=cascade_k_eff,
+        cascade_filter_xi=cascade_filter_xi,
+    )
+    projected = ti.project_zero_mean_xi(new_state) if zero_mean_xi else new_state
+
+    tol = jnp.asarray(residual_tol, dtype=r_final.dtype)
+    # r_final shape: () for 1D input, (NB,) for batched. Broadcast to (nx,) or
+    # (NB, nx) so the mask lines up with per-sample eta/xi.
+    bad = (r_final >= tol) | ~jnp.isfinite(r_final)  # shape matches leading batch dims
+    bad_broadcast = bad[..., None] if bad.ndim else bad
+    nan_val = jnp.asarray(jnp.nan, dtype=projected.eta.dtype)
+    return ti.State(
+        eta=jnp.where(bad_broadcast, nan_val, projected.eta),
+        xi=jnp.where(bad_broadcast, nan_val, projected.xi),
+    )
 
 
 def _gl2_if_step_surrogate(
@@ -381,11 +670,28 @@ def rollout_surrogate(
     cascade_houli_m: float = 4.0,
     cascade_k_eff: float = 128.0,
     cascade_filter_xi: bool = True,
+    eta_growth_guard_enabled: bool = False,
+    eta_growth_guard_k_lo: float = 64.0,
+    eta_growth_guard_k_hi: float = 128.0,
+    eta_growth_guard_abs_floor: float = 1e-4,
+    eta_growth_guard_growth_factor: float = 100.0,
+    eta_growth_guard_sharpness: float = 10.0,
+    eta_growth_guard_houli_a: float = 0.69,
+    eta_growth_guard_houli_m: float = 4.0,
+    eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_filter_xi: bool = True,
+    gl2_residual_check: bool = False,
+    gl2_residual_tol: float = 1e-2,
 ) -> dict[str, jnp.ndarray]:
     state = ti.State(eta=jnp.asarray(initial.eta), xi=jnp.asarray(initial.xi))
     if zero_mean_xi:
         state = ti.project_zero_mean_xi(state)
 
+    eta_growth_amp0 = _eta_band_amp(
+        state.eta, params.k, params.nx,
+        k_lo=eta_growth_guard_k_lo,
+        k_hi=eta_growth_guard_k_hi,
+    )
     gxi0 = predict_gxi(state.eta, state.xi)
     if times.shape[0] == 1:
         return {"times": times, "eta": state.eta[None, :], "xi": state.xi[None, :], "gxi": gxi0[None, :]}
@@ -398,20 +704,50 @@ def rollout_surrogate(
 
         def body_fn(sub_idx: int, sub: ti.State) -> ti.State:
             sub_t = cur_t + dt_sub * sub_idx
-            nxt = _gl2_if_step_surrogate(sub, sub_t, dt_sub, params, predict_gxi,
-                                         iterations=gl2_iterations,
-                                         filter_shape=filter_shape,
-                                         houli_a=houli_a, houli_m=houli_m,
-                                         cascade_gate_enabled=cascade_gate_enabled,
-                                         cascade_k_cut=cascade_k_cut,
-                                         cascade_r_threshold=cascade_r_threshold,
-                                         cascade_sharpness=cascade_sharpness,
-                                         cascade_houli_a=cascade_houli_a,
-                                         cascade_houli_m=cascade_houli_m,
-                                         cascade_k_eff=cascade_k_eff,
-                                         cascade_filter_xi=cascade_filter_xi)
-            if zero_mean_xi:
-                nxt = ti.project_zero_mean_xi(nxt)
+            if gl2_residual_check:
+                nxt = _safe_gl2_substep(
+                    sub, sub_t, dt_sub, params, predict_gxi,
+                    iterations=gl2_iterations,
+                    residual_tol=gl2_residual_tol,
+                    zero_mean_xi=zero_mean_xi,
+                    filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+                    cascade_gate_enabled=cascade_gate_enabled,
+                    cascade_k_cut=cascade_k_cut,
+                    cascade_r_threshold=cascade_r_threshold,
+                    cascade_sharpness=cascade_sharpness,
+                    cascade_houli_a=cascade_houli_a,
+                    cascade_houli_m=cascade_houli_m,
+                    cascade_k_eff=cascade_k_eff,
+                    cascade_filter_xi=cascade_filter_xi,
+                )
+            else:
+                nxt = _gl2_if_step_surrogate(sub, sub_t, dt_sub, params, predict_gxi,
+                                             iterations=gl2_iterations,
+                                             filter_shape=filter_shape,
+                                             houli_a=houli_a, houli_m=houli_m,
+                                             cascade_gate_enabled=cascade_gate_enabled,
+                                             cascade_k_cut=cascade_k_cut,
+                                             cascade_r_threshold=cascade_r_threshold,
+                                             cascade_sharpness=cascade_sharpness,
+                                             cascade_houli_a=cascade_houli_a,
+                                             cascade_houli_m=cascade_houli_m,
+                                             cascade_k_eff=cascade_k_eff,
+                                             cascade_filter_xi=cascade_filter_xi)
+                if zero_mean_xi:
+                    nxt = ti.project_zero_mean_xi(nxt)
+            if eta_growth_guard_enabled:
+                nxt = _apply_eta_growth_guard(
+                    nxt, params.k, params.nx, eta_growth_amp0,
+                    k_lo=eta_growth_guard_k_lo,
+                    k_hi=eta_growth_guard_k_hi,
+                    abs_floor=eta_growth_guard_abs_floor,
+                    growth_factor=eta_growth_guard_growth_factor,
+                    sharpness=eta_growth_guard_sharpness,
+                    houli_a=eta_growth_guard_houli_a,
+                    houli_m=eta_growth_guard_houli_m,
+                    k_eff=eta_growth_guard_k_eff,
+                    filter_xi=eta_growth_guard_filter_xi,
+                )
             return nxt
 
         next_state = jax.lax.fori_loop(0, substeps, body_fn, carry)

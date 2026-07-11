@@ -1,0 +1,1217 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{booktabs}
+\usepackage{longtable,array}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!60!black}
+
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\Gt}{\mathcal{G}_{\theta}}
+\newcommand{\R}{\mathcal{R}_{\theta}}
+\newcommand{\dd}{\mathop{}\!\mathrm{d}}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\inner}[2]{\left\langle #1,#2\right\rangle}
+\newcommand{\Deta}{D_{\eta}}
+\allowdisplaybreaks
+
+\title{Diagnosing and Correcting NaN Cascades in Learned\\
+Dirichlet--Neumann Operator Rollouts}
+\author{Internal technical report}
+\date{9 July 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\begin{abstract}
+Accurate one-step approximation of a water-wave Dirichlet--Neumann operator
+(DNO) did not prevent rare catastrophic failures in long symplectic rollouts.
+Frame-aligned trajectory analysis shows why: the learned operator is accurate
+on exact solution states but has an incorrect derivative transverse to the
+solution manifold.  It consequently violates the Hadamard shape-derivative
+identity, so the two equations advanced by the Gauss--Legendre integrator are
+not the canonical derivatives of one learned Hamiltonian.  Small state errors
+then excite spurious same-sign spectral sidebands, quadratic aliasing amplifies
+the already established cascade, and the implicit stage iteration eventually
+loses contractivity.  This report summarizes the experimental path that ruled
+out data corruption, time-step refinement, spectral caps, hard cutoffs, and
+targeted fine-tuning as primary cures.  It motivates a clean retraining of
+\(G_0+G_1+\R\), where the analytic first-order Craig--Sulem term is exact,
+\(\R=O(\eta^2)\) is self-adjoint, and a randomized Hadamard loss directly
+constrains the missing shape derivative.  Particular care is taken to separate
+what has been directly measured, what follows mathematically from the measured
+facts, and what remains a hypothesis to be tested by the new model.
+\end{abstract}
+
+\section{Reader's guide and executive conclusions}
+
+The project accumulated many experiments because the terminal symptom---a NaN
+inside an implicit time step---admits several superficially plausible
+explanations.  A reader should not be expected to remember the experiment
+labels.  The labels C1--C16 are therefore treated here only as reproducibility
+handles.  The scientific argument is organized around five questions:
+\begin{enumerate}[label=\arabic*.]
+  \item Is the reference data corrupt or missing the failing regime?
+  \item Does the learned DNO first make an error on an exact physical state, or
+        does it react incorrectly to the small off-manifold state error created
+        by its own rollout?
+  \item Is the cascade initiated by the DNO, by pseudospectral aliasing, or by
+        nonconvergence of the implicit Gauss--Legendre stages?
+  \item Which exact property of a physical DNO is absent from the learned map?
+  \item What is the smallest architectural and loss-level correction that
+        restores that property without suppressing legitimate high-frequency
+        dynamics?
+\end{enumerate}
+
+The present answers, with their evidentiary status, are:
+\begin{description}[style=nextline,leftmargin=0pt]
+\item[Directly measured:]
+The failing models can have relative DNO value error of only
+\(2\times10^{-4}\) on the exact state while their response to the difference
+between the exact and surrogate states grows to a secant gain of 7--8.  The
+induced response first grows in \(k=32,\ldots,64\), then contaminates
+\(k=64,\ldots,128\), and only afterward makes the quadratic right-hand side
+strongly aliased and the fixed-point stage solve noncontractive.
+
+\item[Directly measured structural defect:]
+At the same exact states, the learned operator violates the DNO Hadamard
+shape-derivative identity by relative \(O(1)\), whereas the order-six reference
+implementation satisfies the identical discrete test to approximately
+\(10^{-5}\) or better.  This discrepancy is far larger than the DNO value
+error and is already present before visible blow-up.
+
+\item[Mathematical consequence:]
+If a learned DNO is self-adjoint in \(\xi\) but fails the shape identity, then
+the implemented formulas for \(\eta_t\) and \(\xi_t\) are not the two
+variational derivatives of one learned Hamiltonian.  A symplectic integrator
+cannot restore a Hamiltonian structure absent from the vector field it is
+given.
+
+\item[Strong mechanistic evidence:]
+The first Craig--Sulem term has a same-sign Fourier null form that cancels the
+specific high-mode sidebands observed in the failures.  The learned operator
+does not preserve this cancellation.  Exact \(G_0+G_1\) gives 0/32 Tanaka
+NaNs but is not accurate enough at final time, strongly motivating it as a
+stable backbone rather than a complete surrogate.
+
+\item[Hypothesis under test:]
+A full-capacity model of the form
+\(G_0+G_1+O(\eta^2)\), trained with a direct Hadamard-consistency loss, should
+retain the stable null form while learning the small higher-order correction.
+This is C16.  Its structural invariants and short training smoke have passed;
+the decisive long-rollout evaluation has not yet been performed.
+\end{description}
+
+This hierarchy matters.  We have compelling evidence for the diagnosis, but
+we do not yet have evidence that C16 reaches the operational target of zero
+NaNs.  A negative C16 result would not erase the measured shape defect; it
+would mean that the particular parameterization, loss estimator, training
+budget, or some additional missing identity remains inadequate.
+
+\section{Problem and numerical setting}
+
+We consider a periodic one-dimensional horizontal domain of length \(2\pi\),
+with free surface \(y=\eta(x,t)\), constant depth \(h\), and an irrotational
+velocity potential \(\phi\) in the fluid.  Its trace at the free surface is
+\(\xi(x,t)=\phi(x,\eta(x,t),t)\).  The Dirichlet--Neumann operator is the map
+from this trace to the non-unit normal derivative,
+\begin{equation}
+ G(\eta;h)\xi
+ =\left.\bigl(\phi_y-\eta_x\phi_x\bigr)\right|_{y=\eta}.
+ \label{eq:dno-definition}
+\end{equation}
+The definition incorporates the solution of Laplace's equation in the entire
+fluid domain.  It is therefore the expensive nonlocal component that the
+surrogate is intended to replace.
+
+For surface elevation \(\eta\) and surface potential \(\xi\), Zakharov's
+canonical water-wave equations without surface tension may be written
+\begin{align}
+  \eta_t &= G(\eta)\xi, \\
+  \xi_t &= -g\eta
+  -\frac{1}{2}\xi_x^2
+  +\frac{1}{2}\frac{\left(G(\eta)\xi+\eta_x\xi_x\right)^2}
+                         {1+\eta_x^2}.
+ \label{eq:zakharov-geometric}
+\end{align}
+They are Hamilton's equations for
+\begin{equation}
+ H(\eta,\xi)
+ =\frac12\int_0^{2\pi}\xi G(\eta)\xi\,\dd x
+  +\frac{g}{2}\int_0^{2\pi}\eta^2\,\dd x,
+ \qquad
+ \eta_t=\frac{\delta H}{\delta\xi},\quad
+ \xi_t=-\frac{\delta H}{\delta\eta}.
+ \label{eq:hamiltonian}
+\end{equation}
+This equivalence uses both self-adjointness of \(G(\eta)\) in its potential
+argument and its precise derivative with respect to the surface.  Preserving
+only the former does not suffice.
+
+The production surrogate replaces the expensive DNO \(G\) by a learned
+operator \(\Gt\), while retaining the geometric formula for \(\xi_t\).  Time
+integration uses a two-stage Gauss--Legendre method with an integrating factor
+and four fixed-point iterations per step.  The DNO model is linear in \(\xi\)
+and built from Craig--Sulem-shaped multiplier sandwiches.
+
+\subsection{Reference and surrogate operators}
+
+The reference DNO is a truncated Craig--Sulem series evaluated through order
+six with substantial Fourier zero padding.  It is not an exact continuum
+oracle, but its convergence, self-adjointness, shape-identity residual, and
+long-rollout conservation are all sufficiently accurate to distinguish the
+effects discussed below.  In particular, the reference shape defect is
+\(10^{-5}\) or smaller at the failing states, versus \(O(1)\) for the learned
+operator.
+
+The principal baseline is an eight-block Craig--Sulem DNO network.  Each block
+is linear in \(\xi\): a depth-conditioned Fourier multiplier is applied to
+\(\xi\), multiplied pointwise by learned features of \(\eta\), and passed
+through another Fourier multiplier.  This is a much stronger inductive bias
+than a generic FNO and produced excellent one-step validation error.  Later
+checkpoints tied the input and output multipliers so that the learned residual
+is self-adjoint in \(\xi\).  Nothing in the original architecture, however,
+forces the correct derivative with respect to \(\eta\).
+
+\subsection{The integrating-factor GL2 scheme}
+
+Following Xu and Guyenne's spectral Hamiltonian method~\cite{xu2009}, split the
+semi-discrete vector field as
+\begin{equation}
+ u_t=A u+N(u),\qquad u=(\eta,\xi)^\mathsf{T},qquad
+ A=\begin{pmatrix}0&G_0\\-g&0\end{pmatrix},
+ \label{eq:split}
+\end{equation}
+where \(G_0=|D|\tanh(h|D|)\).  With \(v(t)=e^{-tA}u(t)\), the stiff linear
+dispersion is treated exactly and the transformed equation is advanced with
+the two-stage, fourth-order Gauss--Legendre Runge--Kutta method.  Its Butcher
+coefficients are
+\begin{equation}
+ a_{11}=a_{22}=\frac14,\quad
+ a_{12}=\frac14-\frac{\sqrt3}{6},\quad
+ a_{21}=\frac14+\frac{\sqrt3}{6},\quad
+ b_1=b_2=\frac12,
+ \label{eq:gl2-coefficients}
+\end{equation}
+up to interchange of the two stage labels.  The coupled stage equations are
+solved here with four fixed-point iterations.
+
+Three logically distinct statements must not be conflated:
+\begin{enumerate}
+  \item GL2 is a symplectic Runge--Kutta method for a canonical Hamiltonian
+        vector field.
+  \item A finite number of Picard iterations only approximately solves the
+        implicit stage equations; loss of contractivity can expose a bad state.
+  \item If the supplied surrogate vector field is not Hamiltonian, exact
+        solution of the GL2 stages still cannot confer the missing Hamiltonian
+        geometry on that field.
+\end{enumerate}
+The investigation below identifies item 3 as the initiating issue and item 2
+as a terminal failure mechanism.
+
+\subsection{What counts as success}
+
+The practical target is stricter than small one-step validation loss: across
+the 32-case Tanaka test and the 31 truth-valid Benjamin--Feir cases, the rollout
+must produce no nonfinite trajectories while retaining competitive median and
+tail error at final time.
+
+We distinguish four metrics:
+\begin{description}[style=nextline,leftmargin=0pt]
+\item[One-step DNO error]
+The relative error in \(G(\eta)\xi\) when the model is evaluated on an exact
+reference state.  This measures interpolation on the sampled truth manifold.
+\item[NaN rate]
+The fraction of truth-valid initial conditions for which any surrogate state
+becomes nonfinite.  This is the primary hard stability endpoint.
+\item[Divergence rate]
+The fraction whose final relative state error exceeds the evaluation threshold,
+including but not limited to nonfinite cases.  A finite but physically useless
+trajectory is not counted as a success.
+\item[Final-time error distribution]
+The median and 95th percentile relative \(L^2\) error in \(\eta\).  Reporting
+only the median can hide a cap or filter that protects easy cases while
+producing a catastrophic tail.
+\end{description}
+
+The rollout harness stores the integrator state and spectral operations in
+double precision while leaving the neural network in its trained precision.
+This matters: an earlier single-precision harness imposed an artificial
+long-time error floor.  Truth-invalid initial conditions are excluded using
+the reference solver's own nonfiniteness or excessive Hamiltonian drift, so a
+surrogate is not penalized for a failed reference trajectory.
+
+\section{What the experimental sequence established}
+
+Table~\ref{tab:history} condenses the main branches recorded in
+\texttt{EXPERIMENTS.md}.  The sequence is informative because several
+apparently plausible interventions improved an intermediate diagnostic without
+eliminating the failure population.
+
+\subsection{Baseline numbers and checkpoint conventions}
+
+The principal comparison points are listed in
+Table~\ref{tab:checkpoint-baselines}.  ``v10'' denotes a fresh full-capacity v9
+baseline.  C1 is a light stage-tangent fine-tune.  The first attempted C2 was
+invalid because a tied-multiplier checkpoint was silently loaded into an
+untied template; an architecture guard was added, and only the corrected C2
+should be interpreted scientifically.  C10 is the strongest stage-gain variant
+and the best pre-C16 NaN count.  These distinctions explain why an isolated
+statement such as ``C2 failed'' can be misleading without a run path and
+checkpoint choice.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & Tanaka NaN & Tanaka div. & Tanaka med. & BF NaN & BF div. & BF med. \\
+\midrule
+v10 baseline & 4/32 & 5/32 & 0.0123 & 2/31 & 2/31 & 0.00902 \\
+C1 stage match & 3/32 & 3/32 & 0.0151 & 0/31 & 0/31 & 0.00661 \\
+Corrected C2 final & 3/32 & 4/32 & 0.00907 & 0/31 & 0/31 & 0.00735 \\
+C10 final & 2/32 & 3/32 & 0.0138 & 0/31 & 0/31 & 0.00971 \\
+\bottomrule
+\end{tabular}
+\caption{Primary pre-C16 comparisons under the double-precision harness.  The
+Benjamin--Feir denominator excludes one truth-invalid case.}
+\label{tab:checkpoint-baselines}
+\end{table}
+
+For a fine-tune driven by an auxiliary rollout or tangent loss, ``best
+validation'' and ``best physical checkpoint'' need not coincide.  The ordinary
+validation score measures the pointwise supervised objective and can select an
+early epoch before the auxiliary constraint has acted.  This was demonstrated
+by the corrected C2 run: the final checkpoint had the meaningful regularized
+behavior, whereas the initially evaluated best-validation checkpoint from the
+misconfigured run was unusable.  For C16, final/latest is therefore the primary
+rollout checkpoint and best-validation is a secondary control.
+
+\subsection{Phase I: establish a trustworthy evaluation}
+
+Before asking why a model fails, we removed two ways the evaluation itself
+could lie.
+\begin{enumerate}
+  \item A double-precision rollout harness reduced a spurious long-time error
+        floor by factors of roughly 2.5 on Tanaka and 20 or more on several
+        Benjamin--Feir regimes.  An order-six oracle displayed the same
+        single-precision floor, proving it was not neural-model error.
+  \item Reference trajectories with nonfinite states or Hamiltonian drift
+        above the validity threshold were gated out.  For example, one
+        Benjamin--Feir initial condition failed in the truth solver while the
+        surrogate remained finite.  Counting it against the surrogate would
+        invert the conclusion.
+\end{enumerate}
+The residual Tanaka NaNs survive both corrections and are therefore genuine
+surrogate failures.
+
+\subsection{Phase II: test the data-coverage explanation}
+
+Additional steep-Tanaka data in v9 improved regimes that genuinely had a
+coverage gap, including the Tanaka \(g_1\) family, but left 4/32 deep-water
+Tanaka \(g_0\) NaNs.  Random and source-stratified scans found no nonfinite base
+rows.  Earlier sign-flip heuristics were not treated as proofs of corruption;
+the more decisive test came later: the learned DNO remained highly accurate
+when evaluated directly on the exact trajectories that would eventually fail
+under rollout.
+
+Two forms of hard-negative training were then explored.  Model-harvested
+pre-cascade states are circular: the inputs already contain the old model's
+spectral contamination, and their approximate targets can inherit it.  These
+packs worsened performance.  Clean truth-generated perturbations avoid that
+specific flaw and are valid as local learnability probes, but they constrain a
+finite list of neighborhoods rather than the universal derivative identity.
+The clean C13 pack trained successfully, but its evaluation was intentionally
+deprioritized once the structural diagnosis became available.  Thus the
+conclusion is not ``additional data can never help''; it is that ordinary
+pointwise labels are an inefficient and non-general remedy for an operator
+derivative defect.
+
+\subsection{Phase III: test the integrator explanation}
+
+The GL2 stage residual becomes large immediately before nonfiniteness, making
+time-step failure an attractive primary hypothesis.  Substep refinements and
+halving trials, however, moved the failure time only modestly.  A matched
+2-by-2 comparison---baseline versus C1, with and without Picard-residual
+containment---left the NaN counts unchanged in every arm.  The containment
+logic was useful operationally because it isolated bad members of a batch, but
+it did not rescue the affected trajectories.
+
+This phase did reveal a real training signal.  C1's stage-tangent loss cured
+one of four baseline Tanaka NaNs and both Benjamin--Feir NaNs.  Later C10,
+targeting the production-filtered \(k=64,\ldots,128\) stage gain, reduced
+Tanaka NaNs to 2/32.  Hence sensitivity control is relevant.  The failure to
+reach zero suggested that the indirect stage proxy was not enforcing the
+defining differential relation strongly or accurately enough.
+
+\subsection{Phase IV: suppress the observed spectrum}
+
+Hard learned-block cutoffs, soft high-band penalties, run-time high-band
+limiters, and a checkpoint-carrying output cap all attacked the visible
+spectral symptom.  None reached zero NaNs with acceptable tails.  The strongest
+soft penalty left its own high-band diagnostic essentially unchanged.  The
+C10 run-time limiter retained both Tanaka NaNs and worsened the Benjamin--Feir
+p95.  The C14 hard output projection retained 3/32 Tanaka NaNs, produced six
+divergent Tanaka cases, and raised Tanaka p95 to 1.25.
+
+The cap's algebra explains its failure.  It imposed
+\begin{equation}
+ \norm{g_{\mathrm{hi}}}
+ \leq \max\!\left(5,0.1\norm{g_{\mathrm{lo}}}\right).
+ \label{eq:old-cap}
+\end{equation}
+The dangerous \(k=16,\ldots,32\) content belonged to the unconstrained
+``low'' group, growth of that group increased the permitted high-band norm,
+and the absolute floor was inactive on some failing states.  This is a moving
+relative envelope, not an absolute stability bound.
+
+Finally, ablations showed why editing a trained checkpoint is hazardous.
+Block 7 appeared individually amplifying, yet zeroing it changed the Tanaka NaN
+count from 4/32 to 28/32 and the median error by a factor of 62.  Its
+anti-\(|k|\) response was compensating the other blocks.  Likewise, removing a
+large derivative feature from an already trained model breaks learned
+cancellations and does not tell us whether a clean architecture should expose
+that feature differently.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{p{0.18\linewidth}p{0.50\linewidth}p{0.23\linewidth}}
+\toprule
+Experiment family & Main evidence & Conclusion \\
+\midrule
+Clean v9 retraining & Excellent one-step error, yet the baseline retained
+4/32 Tanaka NaNs.  Additional steep-Tanaka data cured a separate \(g_1\)
+coverage failure but not the deep-water \(g_0\) failures. & Pointwise coverage
+is not the principal remaining defect. \\
+
+GL2 stage regularization & The best corrected fine-tune reduced Tanaka NaNs
+from 4/32 to 3/32 and Benjamin--Feir NaNs to zero, but did not reach the
+zero-NaN target and traded easy-case accuracy. & Directionally useful, but an
+indirect and incompletely matched constraint. \\
+
+Step residual checks and halving & Picard residual checks detected terminal
+noncontractivity.  Step refinement and attempted halving moved failure times
+only slightly; per-sample containment did not change the NaN count. & The
+integrator exposes the failure after the model state is already contaminated. \\
+
+Hard block cutoffs and output caps & Hard \(k\)-cuts and high-band envelopes
+reduced selected spectral symptoms but produced poor error tails or retained
+NaNs.  The one-block capped model reached 3/32 Tanaka NaNs and severe p95
+regression. & Static culling removes physical response and leaves loopholes in
+the growing mid-band. \\
+
+Targeted hard negatives & Model-harvested pre-cascade fine-tunes were harmful;
+clean truth-targeted packs did not provide a general or journal-explainable
+mechanism. & Do not substitute case selection for an operator identity. \\
+
+Exact \(G_0+G_1\) & A full 32-case CPU rollout gave 0/32 NaNs and 0/32
+divergences, but final \(\eta\) error remained too large (median 0.207, p95
+0.410). & The analytic null structure is stable, but needs an accurate
+higher-order residual. \\
+\bottomrule
+\end{tabular}
+\caption{Distilled experimental chronology.}
+\label{tab:history}
+\end{table}
+
+Two broader lessons emerged.  First, deleting an apparently dangerous learned
+block made the model dramatically worse (28/32 rather than 4/32 Tanaka NaNs),
+showing that the trained eight-block representation relies on fragile
+inter-block cancellation.  Second, increasing or decreasing parameter count
+did not track rollout stability.  The missing ingredient is a structural
+identity, not capacity alone.
+
+\section{Frame-by-frame failure anatomy}
+
+Let \(z_n^*=(\eta_n^*,\xi_n^*)\) be an exact truth state and \(z_n\) the
+corresponding surrogate-rollout state.  Separate the model error into the
+truth-manifold bias and the response induced by rollout displacement:
+\begin{align}
+ b_n &= \Gt(z_n^*)-G(z_n^*), \\
+ i_n &= \Gt(z_n)-\Gt(z_n^*), \\
+ q_n &= \frac{\norm{i_n}_2}{\norm{z_n-z_n^*}_2}.
+\end{align}
+The eventual failures remain accurate on truth states: median one-step
+relative \(G\xi\) errors are \(1.87\times10^{-4}\) and
+\(1.72\times10^{-4}\) for representative failing cases 5 and 11.  The
+transverse response, however, grows by four orders of magnitude relative to
+that bias.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{rrrrrr}
+\toprule
+Case & Time & State RMS error & Bias RMS & Induced RMS & Secant gain \\
+\midrule
+5  & 0.8   & $1.62\times10^{-6}$ & $5.12\times10^{-6}$ & $5.56\times10^{-6}$ & 3.43 \\
+5  & 58.4  & $2.08\times10^{-3}$ & $5.13\times10^{-6}$ & $1.24\times10^{-2}$ & 5.95 \\
+5  & 66.4  & $1.67\times10^{-2}$ & $5.12\times10^{-6}$ & $1.35\times10^{-1}$ & 8.11 \\
+11 & 142.4 & $3.84\times10^{-3}$ & $3.15\times10^{-6}$ & $2.71\times10^{-2}$ & 7.04 \\
+11 & 150.4 & $9.02\times10^{-3}$ & $3.15\times10^{-6}$ & $7.59\times10^{-2}$ & 8.42 \\
+Healthy 0 & 200.0 & $5.91\times10^{-5}$ & $1.88\times10^{-7}$ & $1.96\times10^{-5}$ & 0.33 \\
+Healthy 6 & 200.0 & $3.76\times10^{-4}$ & $1.56\times10^{-6}$ & $6.71\times10^{-4}$ & 1.78 \\
+\bottomrule
+\end{tabular}
+\caption{Growth of the model response to its own state error.}
+\label{tab:secant}
+\end{table}
+
+Spectrally, the induced response first appears in \(k=32,\ldots,64\), then
+spreads through \(k=64,\ldots,128\).  This precedes the abrupt terminal event.
+Thus the NaN is not born in one exceptional arithmetic operation; it is the
+endpoint of a resolved spectral cascade.
+
+The ratio \(q_n\) is a secant quantity, not an eigenvalue and not a proof that
+the full Fr\'echet derivative has norm 8.  It is nevertheless the relevant
+finite-amplitude response along the error direction actually selected by the
+rollout.  The contrast with healthy cases matters more than its absolute
+value.  In failing case 5 the induced response becomes
+\(2.6\times10^4\) times the truth-state bias, while a healthy case remains at a
+gain below one at final time.
+
+The frame order provides a causal discriminator:
+\begin{enumerate}
+  \item The pointwise truth-state bias is small and nearly stationary.
+  \item A small state discrepancy develops through ordinary accumulated error.
+  \item The learned operator maps that discrepancy into a disproportionately
+        large mid-band response.
+  \item The response broadens spectrally and steepens the state.
+  \item Only then do base-grid nonlinear products differ materially from their
+        padded counterparts.
+  \item Finally, the GL2 fixed-point residual ceases to contract and a
+        nonfinite stage is produced.
+\end{enumerate}
+This ordering rules out ``one bad target row directly produces a NaN'' and
+``the first cause is a single aliased product'' as descriptions of the observed
+cases.  It does not claim that all possible future NaNs must follow the same
+path; the conclusion is scoped to the remaining Tanaka population in the
+audited checkpoints.
+
+\section{Hamiltonian inconsistency is the root defect}
+
+For a genuine DNO define
+\begin{equation}
+ B=\frac{G(\eta)\xi+\eta_x\xi_x}{1+\eta_x^2},
+ \qquad V=\xi_x-B\eta_x.
+\end{equation}
+The Hadamard shape derivative satisfies, for every perturbation \(\zeta\),
+\begin{equation}
+ D_\eta G(\eta)[\zeta]\xi
+ +G(\eta)(\zeta B)
+ +\partial_x(\zeta V)=0.
+ \label{eq:hadamard}
+\end{equation}
+This is an identity of operators applied to \(\xi\), not merely an energy
+conservation statement along one trajectory.  Its importance can be seen by a
+short variational calculation.  Let
+\begin{equation}
+ K_\theta(\eta,\xi)=\frac{1}{2}\langle\xi,\Gt(\eta)\xi\rangle,
+\end{equation}
+where \(\langle f,g\rangle=\int_0^{2\pi}fg\,\dd x\).  Assuming
+self-adjointness of \(\Gt(\eta)\) and Eq.~\eqref{eq:hadamard}, periodic
+integration by parts gives
+\begin{align}
+ \Deta K_\theta[\zeta]
+ &=\frac12\inner{\xi}{\Deta\Gt(\eta)[\zeta]\xi} \\
+ &=-\frac12\inner{\xi}{\Gt(\eta)(\zeta B_\theta)}
+   -\frac12\inner{\xi}{\partial_x(\zeta V_\theta)} \\
+ &=-\frac12\inner{\Gt(\eta)\xi}{\zeta B_\theta}
+   +\frac12\inner{\xi_x}{\zeta V_\theta} \\
+ &=\frac12\int_0^{2\pi}\zeta
+       \left(V_\theta\xi_x-B_\theta\Gt(\eta)\xi\right)\dd x.
+ \label{eq:kinetic-variation}
+\end{align}
+Therefore
+\begin{equation}
+ -\frac{\delta K_\theta}{\delta\eta}
+ =\frac12\left(B_\theta\Gt(\eta)\xi-V_\theta\xi_x\right).
+ \label{eq:kinetic-gradient}
+\end{equation}
+Using \(V_\theta=\xi_x-B_\theta\eta_x\) and
+\(B_\theta=(\Gt\xi+\eta_x\xi_x)/(1+\eta_x^2)\), the right-hand side becomes
+\begin{equation}
+ -\frac12\xi_x^2
+ +\frac12\frac{(\Gt(\eta)\xi+\eta_x\xi_x)^2}{1+\eta_x^2},
+\end{equation}
+which is exactly the nonlinear kinetic contribution used in
+Eq.~\eqref{eq:zakharov-geometric}.  This proves the claimed equivalence.
+
+Conversely, tying the learned Fourier multipliers makes \(\Gt\) self-adjoint
+and guarantees \(\delta K_\theta/\delta\xi=\Gt\xi\), but it says nothing about
+\(\delta K_\theta/\delta\eta\).  The surface derivative must separately obey
+Eq.~\eqref{eq:hadamard}.  This is the precise sense in which self-adjointness is
+necessary but not sufficient.
+
+\subsection{The measured defect}
+
+For diagnosis, the continuum derivative is evaluated by automatic
+differentiation of the model energy and compared with the geometric expression
+on the same discrete grid.  Both sides undergo the production
+\(|k|\leq128\) projection.  Schematically, the reported relative defect is
+\begin{equation}
+ d_{\mathrm{shape}}
+ =\frac{\norm{P_{\leq128}(
+      \xi_{t,\mathrm{geom}}+\delta_\eta K_\theta
+   )}_{H^1}}
+ {\norm{P_{\leq128}\xi_{t,\mathrm{geom}}}_{H^1}+\varepsilon}.
+ \label{eq:shape-defect}
+\end{equation}
+The same normalization, projection, and differentiation pipeline is used for
+the order-six reference control.
+
+The measured discrepancy, after the production projection to \(|k|\leq128\),
+is summarized below.  The exact order-six DNO passes the same discrete test,
+ruling out a diagnostic normalization error.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Case/time & Value error & Defect at truth & Defect at rollout & Order-six defect \\
+\midrule
+Healthy 0 / 200.0 & $6.47\times10^{-5}$ & 0.0896 & 0.2966 & $2.0\times10^{-9}$ \\
+5 / 33.6          & $2.34\times10^{-4}$ & 1.394  & 4.975  & $1.43\times10^{-5}$ \\
+11 / 189.6        & $2.15\times10^{-4}$ & 0.502  & 1.117  & $3.43\times10^{-6}$ \\
+22 / 45.6         & $5.54\times10^{-4}$ & 2.724  & 7.481  & $3.82\times10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\caption{Small pointwise error coexisting with a large shape-derivative defect.}
+\label{tab:shape}
+\end{table}
+
+This resolves an apparent contradiction.  Gauss--Legendre methods are
+symplectic for the Hamiltonian vector field supplied to them.  The surrogate
+field is not, in general, the gradient of one Hamiltonian because its
+\(\eta_t\) and \(\xi_t\) components use incompatible derivatives of \(\Gt\).
+The time integrator therefore cannot protect the rollout from the learned
+geometric inconsistency.
+
+One can also phrase the problem through the error equation.  Write the truth
+and surrogate vector fields as \(F\) and \(F_\theta\), and let
+\(e=z_\theta-z\).  Before the error is large,
+\begin{equation}
+ e_t
+ =\underbrace{F_\theta(z)-F(z)}_{\text{truth-manifold bias}}
+ +\underbrace{DF_\theta(z)e}_{\text{propagation by learned tangent map}}
+ +O(\norm{e}^2).
+ \label{eq:error-linearization}
+\end{equation}
+Supervised one-step fitting directly attacks the first term.  The aligned NPZ
+analysis shows that this term stays small while the second becomes dominant.
+The Hadamard defect identifies a specific incorrect component of
+\(DF_\theta\), rather than appealing vaguely to ``error compounding.''  The
+spectral cascade is error compounding, but it is error compounding through a
+geometrically wrong tangent operator.
+
+\section{The missing spectral null form}
+
+The exact first Craig--Sulem correction is
+\begin{equation}
+ G_1(\eta)\xi
+ =-G_0\!\left(\eta G_0\xi\right)
+  -\partial_x\!\left(\eta\partial_x\xi\right).
+ \label{eq:g1}
+\end{equation}
+Its Fourier interaction kernel is
+\begin{equation}
+ \widehat{G_1(\eta)\xi}_k
+ =\sum_{k'}
+ \underbrace{\left(kk'-g_0(k)g_0(k')\right)}_{\mathcal K_1(k,k';h)}
+ \widehat{\eta}_{k-k'}\widehat{\xi}_{k'},
+ \qquad g_0(k)=|k|\tanh(h|k|).
+ \label{eq:g1-kernel}
+\end{equation}
+The sign is worth checking.  The first term in Eq.~\eqref{eq:g1} contributes
+\(-g_0(k)g_0(k')\), while
+\(-\partial_x(\eta\partial_x\xi)\) contributes \(+kk'\).  In deep water,
+\(g_0(k)=|k|\), so \(\mathcal K_1=0\) whenever \(k\) and \(k'\) have the same
+sign.  This is not a learned small coefficient: it is exact cancellation
+between two individually large derivative terms.  At finite depth the
+cancellation is exponentially accurate when \(h|k|\) and \(h|k'|\) are large,
+as they are near the observed modes.
+
+The null form is physically important in the failing Tanaka regime.  A transfer-kernel probe
+at a truth surface found that the learned model maps \(k_{\mathrm{in}}=117\)
+to \(k_{\mathrm{out}}=115\) with amplitude 985.67, whereas the order-six
+reference amplitude is \(1.47\times10^{-5}\), a ratio of approximately
+\(6.7\times10^7\).  The flat diagonal response at this mode is about
+\(5.9\times10^4\), so 985.67 is only about 1.7\% of the diagonal amplitude.
+That explains why an aggregate pointwise error metric can appear excellent
+while a repeatedly injected off-diagonal sideband matters dynamically.  The
+learned model can represent the cancellation but does not enforce it.
+
+Across all sampled Tanaka truth states, replacing \(G_0\) by exact \(G_0+G_1\)
+reduces median relative \(G\xi\) error from 0.1496 to 0.00555 and p95 from
+0.2089 to 0.01373.  More importantly, it makes the high-frequency null form
+exact rather than dependent on cancellation among learned blocks.
+
+The analytic-only rollout is a particularly discriminating experiment.  Exact
+\(G_0+G_1\), with no cap and no learned residual, yields 0/32 NaNs and 0/32
+divergences.  It nevertheless gives final \(\eta\) median 0.2071 and p95
+0.4096.  Hence two statements are simultaneously true:
+\begin{enumerate}
+  \item the first-order null structure removes the catastrophic mechanism in
+        this test; and
+  \item neglected \(G_2,G_3,\ldots\) terms are essential for useful long-time
+        phase and amplitude accuracy.
+\end{enumerate}
+This is why the proposed solution is not to abandon learning, but to prevent
+the learned residual from overwriting the analytically known first-order term.
+
+\section{Aliasing and the role of the integrator}
+
+For truncated spectra, a physical-space product computes a circular
+convolution.  If \(f\) and \(g\) contain modes near the retained cutoff, terms
+with true wavenumber outside the grid wrap into lower modes.  The nonlinear
+Zakharov right-hand side contains products and a rational expression in
+\(\eta_x\), \(\xi_x\), and \(G\xi\), so this mechanism becomes severe once the
+surrogate has populated its upper retained bands.
+
+Xu and Guyenne explicitly identify aliasing in both the DNO expansion and the
+equations of motion, and extend the spectra by a factor of two for nonlinear
+terms in the equations of motion~\cite[Sec.~3.3]{xu2009}.  Our order-six
+reference DNO already uses padding, but the original surrogate and truth
+rollout paths evaluated the quadratic Zakharov products at base resolution.
+The correction now implemented is:
+\begin{enumerate}
+  \item Fourier-interpolate \(\eta_x\), \(\xi_x\), and \(G\xi\) onto a grid
+        with twice as many points;
+  \item evaluate the nonlinear expression pointwise on that padded grid; and
+  \item truncate the result back to the production spectrum before applying
+        the usual retained-mode projection.
+\end{enumerate}
+
+Two-times Fourier padding is therefore a necessary discretization correction.
+On healthy trajectories, base-grid and padded right-hand sides agree to about
+\(10^{-11}\).  Near the last finite frames, the discrepancy becomes large:
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Case & Last finite time & Relative RHS difference & First $>10^{-3}$ & First $>0.1$ \\
+\midrule
+Healthy 0 & 200.0 & $2.71\times10^{-11}$ & never & never \\
+Healthy 6 & 200.0 & $1.78\times10^{-11}$ & never & never \\
+5 & 33.6 & 0.753 & 32.0 & 33.6 \\
+11 & 189.6 & 0.819 & 187.2 & 188.8 \\
+22 & 45.6 & 0.0829 & 45.6 & never \\
+\bottomrule
+\end{tabular}
+\caption{Difference between base-grid and two-times-padded Zakharov right-hand
+sides.}
+\label{tab:rhs-alias}
+\end{table}
+
+The large terminal discrepancy alone does not establish that aliasing started
+the cascade.  A causal replay does: restarting each failing state with padded
+products delays the first nonfinite value by only 0.05, 0.08, and 0.05 time
+units for cases 5, 11, and 22.  A healthy replay agrees to
+\(3.5\times10^{-15}\).  Aliasing is therefore a selective terminal amplifier,
+not the initiator in these cases.  The padding fix should be retained
+regardless of C16's outcome because it restores the intended pseudospectral
+discretization without perturbing resolved healthy trajectories.
+
+Likewise, more Picard work or smaller steps cannot undo the preceding
+operator-induced drift.  A residual check remains valuable as a reported
+fail-safe, and adaptive halving may rescue milder future failures, but it is not
+a substitute for restoring Hamiltonian compatibility.
+
+There is no conflict with the well-known long-time advantages of symplectic
+integration.  Those advantages concern the discretization of a Hamiltonian
+vector field and usually imply bounded, structured energy error over long
+times, rather than exact conservation at each step.  Here the learned vector
+field fails the compatibility calculation in
+Eq.~\eqref{eq:kinetic-variation}.  Moreover, the practical scheme uses a fixed
+number of nonlinear iterations, so once the state enters a high-gain region it
+may not even realize the exact implicit GL2 map.  The integrator is important,
+but it is downstream of the operator geometry.
+
+\section{C16: the resulting model and objective}
+
+The proposed clean retraining uses
+\begin{equation}
+ \Gt(\eta)=G_0+G_1(\eta)+\R(\eta),
+ \qquad \R(\eta)=O(\eta^2).
+ \label{eq:c16}
+\end{equation}
+The analytic \(G_1\) path is uncut and evaluated with double-precision spectral
+arithmetic.  The learned residual uses eight tied, self-adjoint blocks with 256
+branches each.  A bias-free feature trunk followed by
+\(f\mapsto f\tanh(f)\) ensures
+\begin{equation}
+ \R(0)\xi=0,
+ \qquad D_\eta\R(0)[\zeta]\xi=0
+\end{equation}
+for every parameter value.  The residual sum is scaled by
+\(1/\sqrt{8\cdot256}\), making the size of a fresh Adam update independent of
+the chosen parallel rank without changing the function class.
+
+\subsection{Residual parameterization and its invariants}
+
+Suppressing depth and normalization factors, the residual has the schematic
+form
+\begin{equation}
+ \R(\eta)\xi
+ =\frac{1}{\sqrt{N_bN_r}}
+  \sum_{b=1}^{N_b}\sum_{r=1}^{N_r}
+  M_{b,r}(D,h)
+  \left[\Phi_{b,r}(\eta)\,
+        M_{b,r}(D,h)\xi\right],
+ \quad N_b=8,\quad N_r=256.
+ \label{eq:residual-block}
+\end{equation}
+The same real Fourier multiplier appears on both sides of the pointwise
+multiplication.  For fixed \(\eta\), each term is self-adjoint:
+\begin{align}
+ \inner{\psi}{M[\Phi M\xi]}
+ &=\inner{M\psi}{\Phi M\xi}
+  =\inner{\Phi M\psi}{M\xi}
+  =\inner{M[\Phi M\psi]}{\xi}.
+\end{align}
+The proof uses self-adjointness of the real multiplier and of multiplication by
+the real function \(\Phi\).  Summation and positive scalar normalization
+preserve the property.
+
+For the order statement, let the bias-free eta trunk produce
+\(f(\eta)=L\eta+O(\norm{\eta}^2)\) near the flat surface.  Since
+\(\tanh f=f+O(f^3)\),
+\begin{equation}
+ f(\eta)\tanh f(\eta)
+ =(L\eta)^2+O(\norm{\eta}^3).
+\end{equation}
+All subsequent eta projections are bias-free.  Consequently every
+\(\Phi_{b,r}(0)=0\) and \(D_\eta\Phi_{b,r}(0)=0\), proving the two structural
+zeros.  The bounded-growth lift was chosen instead of raw \(f^2\): it retains
+quadratic behavior near zero but grows only linearly in \(|f|\) when derivative
+features are large.  Learned mixing before the lift still permits general
+quadratic cross-interactions; this is not a restriction to literal squares of
+the physical input channels.
+
+The architecture contains 860,928 trainable parameters.  It retains the full
+eight-block capacity because the one-block and block-deletion experiments did
+not support a capacity reduction.  There is no hard spectral cutoff, no output
+cap, no PSD hinge, and no Tanaka-specific data pack in C16.  Thus a successful
+result can be attributed to the null-structured backbone and direct shape
+constraint rather than to spectral culling.
+
+\subsection{Finite-secant Hadamard loss}
+
+The randomized finite-secant residual is
+\begin{align}
+ S_\theta={}&
+ \frac{\Gt(\eta+\epsilon\zeta)\xi-\Gt(\eta)\xi}{\epsilon}
+ +\Gt(\eta)(\zeta B_\theta)
+ +\partial_x(\zeta V_\theta),
+\end{align}
+and the training objective is
+\begin{equation}
+ \mathcal{L}
+ =\mathcal{L}_{\mathrm{data}}
+ +\lambda_{\mathrm{shape}}
+ \mathbb{E}_{\zeta}
+ \frac{\norm{W P_{\leq128}S_\theta}_2^2}
+ {\norm{W P_{\leq128}\bigl(
+     \Gt(\eta)(\zeta B_\theta)+\partial_x(\zeta V_\theta)
+   \bigr)}_2^2+\delta}.
+ \label{eq:loss}
+\end{equation}
+Here \(W\) is the supervised Sobolev weight.  Relative, zero-mean,
+inverse-Sobolev probes cover low and mid/high modes without selecting specific
+Tanaka cases.  The regularizer is evaluated in double precision on a global
+microbatch of eight every 16 optimizer steps, with
+\(\lambda_{\mathrm{shape}}=10^{-2}\) introduced through a warmup.
+
+More explicitly, a random Fourier probe is projected to zero mean and scaled
+by an inverse Sobolev symbol so its high modes do not dominate merely because
+derivatives multiply by \(|k|\).  Its physical RMS is chosen relative to the
+RMS of the current \(\eta\), subject to a small floor, and
+\(\epsilon\in[10^{-3},3\times10^{-3}]\) is sampled as a relative secant size.
+The two model evaluations use exactly the production input normalization,
+output de-normalization, filtering, and output-mean subtraction.  Both the
+secant residual and its normalizing forcing are measured after projection to
+\(|k|\leq128\) in the same Sobolev metric used by supervised training.
+
+The denominator in Eq.~\eqref{eq:loss} is essential.  An absolute residual
+would overweight large-amplitude samples and permit the loss scale to change
+with probe amplitude.  The relative form asks whether the identity error is
+small compared with the physical terms that should cancel.  The floor
+\(\delta\) only regularizes nearly trivial forcing.  A finite secant, rather
+than an exact Jacobian norm, avoids differentiating through a full Jacobian and
+keeps the cost compatible with sparse microbatch evaluation.
+
+This loss is related to, but cleaner than, the earlier GL2 stage regularizer.
+The stage loss asks whether one particular discretized short-time map behaves
+well under selected perturbations; it mixes DNO error, time-discretization
+details, filters, and stage construction.  The Hadamard loss asks directly for
+the continuum operator identity that makes the Zakharov vector field
+Hamiltonian.  It is therefore cheaper to interpret and easier to defend in a
+mathematical presentation.
+
+\subsection{Optimizer calibration}
+
+The first implementation exposed a separate optimizer parameterization issue:
+hundreds of thousands of zero-initialized projection weights received aligned
+Adam sign updates and were summed without rank normalization.  Before the
+normalization, a single real-state step at learning rate \(2\times10^{-5}\)
+changed loss from 0.02463 to 0.3201.  After normalization, the same step reduced
+it to 0.02174.  A 1\% v9 GPU smoke then completed with train loss 0.01361 and
+validation loss 0.01311, with no surge or nonfinite metric.
+
+The mechanism of the initial optimizer instability deserves emphasis because
+it is independent of the NaN-rollout diagnosis.  At initialization, the
+analytic baseline already has small loss and the per-block eta-to-branch
+projection kernels are zero.  Adam normalizes each nonzero coordinate by its
+own second moment, so the first update is approximately a sign step in each of
+524,288 projection coordinates.  All coordinates are trained against the same
+residual and their function-space effects add coherently across eight blocks
+and 256 branches.  A parameter-space learning rate that was harmless in a
+warm-started model therefore produced an enormous first function-space step in
+the fresh model.
+
+The factor \(1/\sqrt{N_bN_r}=1/\sqrt{2048}\) is a fan-in normalization for the
+parallel residual paths.  It preserves exact \(G_0+G_1\) at initialization,
+the order-two zero, self-adjointness, parameter count, and the set of functions
+representable after rescaling downstream weights.  CPU calibration gave
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Parameterization & Loss before step & Loss after AdamW step at $2\times10^{-5}$ \\
+\midrule
+Unnormalized order-two residual & 0.024634 & 0.320115 \\
+Fan-in-normalized residual & 0.024634 & 0.021744 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The data-gradient to Hadamard-gradient norm ratio was 0.0662, and the chosen
+Hadamard weight 0.01 makes the auxiliary gradient influential but not dominant
+at initialization.  Both the learning rate and Hadamard weight are warmed up
+over 500 steps.
+
+\subsection{What C16 guarantees, and what it does not}
+
+For every value of its trained parameters, C16 guarantees:
+\begin{itemize}
+  \item exact \(G_0+G_1\) behavior through first order at \(\eta=0\);
+  \item linearity and self-adjointness in \(\xi\) for the learned residual;
+  \item no learned \(O(1)\) or \(O(\eta)\) term that can overwrite the analytic
+        first-order null form; and
+  \item a consistently two-times-dealiased Zakharov nonlinear right-hand side.
+\end{itemize}
+It does \emph{not} guarantee the full nonlinear Hadamard identity for finite
+\(\eta\); that is encouraged statistically by Eq.~\eqref{eq:loss}.  Nor does it
+prove bounded rollouts, exact energy conservation, or uniform operator error
+outside the sampled distribution.  Calling it an ``explicit bounded residual
+architecture'' would therefore be inaccurate.  Its principle is geometric
+compatibility and asymptotic null structure, not a hard global norm bound.
+
+\section{Current experiment and acceptance criteria}
+
+At the time of writing, a budget-capped C16 retraining is running on two H100
+GPUs in the personal Modal workspace.  It uses clean v9 data, batch size 1024,
+learning rate \(2\times10^{-5}\), 500-step learning-rate and Hadamard warmups,
+and 16 epochs.  The abbreviated run is intended to obtain the strongest
+checkpoint possible within approximately 30 dollars of workspace credit; it is
+not assumed that epoch 16 is fully converged.
+
+The first two complete epochs are healthy:
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Epoch & Train loss & Validation loss & Hadamard loss & Defect RMS \\
+\midrule
+1 & 0.009919 & 0.008740 & 0.04381 & 0.1700 \\
+2 & 0.008472 & 0.008376 & 0.03104 & 0.1482 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The regularizer was active on 373 of 5964 batches in each epoch, matching the
+intended frequency \(1/16\).  Its mean effective weight reached
+\(9.57\times10^{-3}\) in epoch 1 and the full \(10^{-2}\) in epoch 2.  These
+are encouraging training diagnostics, not rollout evidence.  In particular,
+the random-probe defect RMS cannot yet be compared directly with the
+case-specific defect table without running the same held-state diagnostic.
+
+An earlier Modal attempt stopped one third of the way through epoch 1 because
+the local monitoring client was explicitly interrupted; Modal logs show a
+cancellation signal rather than a Python, JAX, or model exception.  No
+checkpoint was produced by that attempt.  The current 16-epoch run is a fresh
+relaunch and should be judged independently.
+
+The structural hypothesis should be accepted only if rollout evaluation shows
+all of the following:
+\begin{enumerate}
+  \item zero Tanaka NaNs and divergences among 32 truth-valid cases;
+  \item zero scored Benjamin--Feir NaNs and divergences among 31 cases;
+  \item no material median or p95 regression relative to the strongest prior
+        checkpoints;
+  \item at least a two-order-of-magnitude reduction in the failing-state shape
+        defect;
+  \item no pre-cascade secant-gain growth toward 7--8; and
+  \item healthy GL2 fixed-point residuals without relying on output caps,
+        hard spectral cutoffs, or case-specific damping.
+\end{enumerate}
+
+The main scientific conclusion does not depend on the outcome of one training
+run: long-rollout stability requires approximating the geometry of the DNO in
+addition to its values.  C16 is the first experiment in this sequence that
+directly enforces the missing first-order null form and shape derivative while
+retaining the capacity needed for higher-order accuracy.
+
+\subsection{Planned post-training decision sequence}
+
+To avoid another ambiguous experiment, evaluation should proceed in the
+following order:
+\begin{enumerate}
+  \item Verify checkpoint/config integrity and run the held-state Hadamard
+        defect table on the final checkpoint.  This is cheap and directly tests
+        whether the intended loss changed the diagnosed quantity.
+  \item Evaluate the final checkpoint on Tanaka \(g_0\) and Benjamin--Feir
+        \(g_1\) with cached truth, the double-precision harness, batched
+        surrogate execution, and no run-time limiter or damping.
+  \item If final is negative, evaluate best-validation only as a checkpoint
+        selection control; do not reinterpret it as a separate architecture.
+  \item For every remaining failure, regenerate the frame-aligned secant,
+        spectral-band, RHS-alias, and GL2-residual traces.  The question is not
+        merely whether the failure count moved, but whether the causal signature
+        changed.
+  \item Only after the two decisive regimes pass should the full multi-regime
+        suite be run to rule out regressions in shallow water, random seas,
+        Stokes waves, and modal instability.
+\end{enumerate}
+
+\section{Alternative explanations, objections, and falsifiers}
+
+This section states the questions most likely to arise in a rigorous oral
+discussion and the limits of the current answers.
+
+\subsection{Could the data still contain subtle corruption?}
+
+Yes, in the weak logical sense that no finite audit proves every stored number
+correct.  What has been ruled out is the form of corruption needed to explain
+the observed failure mechanism.  Random and source-stratified scans found no
+nonfinite base rows; sign and spectral heuristics did not reveal a population
+aligned with the failing cases; and, most importantly, the learned DNO has
+small value error when evaluated on the exact failing truth states.  A corrupted
+label population severe enough to seed the reported sideband directly should
+normally appear as increased error on those states.  Instead, the large error
+appears when the input is moved in the rollout's transverse direction.
+
+A useful remaining audit would compare independently regenerated order-six
+labels against stored v9 labels on a stratified sample, including source,
+depth, steepness, and high-band-energy tails.  Such an audit would strengthen
+dataset provenance but would not replace the already measured shape identity.
+
+\subsection{Does small value error plus large derivative error necessarily
+cause a NaN?}
+
+No.  A large local derivative defect is a mechanism and risk factor, not by
+itself a theorem of finite-time blow-up.  The causal case is empirical: the
+defect is present at the failing states, the realized secant direction grows,
+its spectrum matches the subsequent cascade, and analytic restoration of the
+first-order null form removes all NaNs in the 32-case test.  A formal theorem
+would require stability bounds for the coupled semi-discrete system and a
+uniform neighborhood estimate for \(D\Gt\), neither of which is currently
+available.
+
+\subsection{Could GL2 still be the primary issue?}
+
+The fixed number of Picard iterations is certainly where nonfiniteness is
+finally emitted, and a more robust nonlinear solver could extend some
+trajectories.  It is unlikely to be the primary issue in the audited cases
+because the model-induced mid-band response is already orders of magnitude
+above its truth-state bias before the stage residual fails; substep refinement
+and padded-RHS replay delay failure only slightly; and healthy cases use the
+same integrator without trouble.  A definitive follow-up could solve selected
+near-terminal stages with Newton--Krylov to high tolerance.  If the converged
+implicit map returned to a healthy spectral state, the present conclusion
+would need revision.  If it advanced the already contaminated state, it would
+confirm the current ordering.
+
+\subsection{Why not learn the whole Hamiltonian and differentiate it?}
+
+That is a principled alternative.  A scalar Hamiltonian network with
+\(\eta_t=\delta_\xi H_\theta\) and
+\(\xi_t=-\delta_\eta H_\theta\) would be Hamiltonian by construction.  The
+tradeoff is computational: rollout requires derivatives of a nonlocal learned
+energy, training DNO values can involve mixed derivatives, and encoding the
+known linear dispersion and Craig--Sulem structure is less direct.  C16 keeps
+the efficient DNO interface while enforcing the identity that makes that
+interface Hamiltonian.  If C16 fails despite a substantially reduced measured
+shape defect, a direct energy architecture becomes the most principled next
+architectural family.
+
+\subsection{Why not impose a global Lipschitz or spectral norm bound?}
+
+A uniform bound could control amplification but would not distinguish physical
+from unphysical high-frequency response.  The DNO is an order-one nonlocal
+operator; its norm naturally scales with wavenumber, and nonlinear wave
+dynamics legitimately transfer energy across modes.  A naive global Lipschitz
+constant or hard cutoff risks destroying exactly the dynamics we are trying to
+approximate.  The Hadamard identity is selective: it constrains how the large
+terms must cancel, rather than requiring every term to be small.
+
+\subsection{What result would falsify the C16 mechanism?}
+
+The strongest falsifier would be: the final C16 checkpoint reduces the held
+shape defect by two orders of magnitude and preserves the same-sign \(G_1\)
+null form, yet the same cases still develop the same pre-cascade secant gain
+and spectral signature.  That would show that the diagnosed identity is not
+the controlling mechanism.  Other negative outcomes are less decisive:
+\begin{itemize}
+  \item If the shape defect does not improve, the loss estimator, weight, or
+        16-epoch budget failed to enforce the hypothesis; the hypothesis itself
+        was not tested strongly.
+  \item If the defect improves but one-step accuracy is poor, the structural
+        constraint may be correct but the residual architecture or optimization
+        is inadequate.
+  \item If NaNs disappear but p95 error becomes unacceptable, C16 is a stability
+        result but not a useful surrogate.
+\end{itemize}
+
+\appendix
+\section{Chronological experiment map}
+
+This appendix is deliberately redundant with \texttt{EXPERIMENTS.md}.  Its
+purpose is to make the logic reconstructible without memorizing labels.
+
+\begin{longtable}{@{}p{0.10\linewidth}p{0.22\linewidth}p{0.29\linewidth}p{0.30\linewidth}@{}}
+\toprule
+Handle & Intervention & Outcome & What it taught us \\
+\midrule
+\endfirsthead
+\toprule
+Handle & Intervention & Outcome & What it taught us \\
+\midrule
+\endhead
+v3--v10 & Full-feature CS-DNO baselines; progressively broader clean data and a
+double-precision rollout harness. & Much better one-step and median rollout
+accuracy than generic FNOs, but persistent rare Tanaka NaNs (v10: 4/32). & The
+Craig--Sulem inductive bias is valuable, but pointwise accuracy and broad data
+coverage do not ensure rollout stability. \\
+
+C1 & Light GL2 stage-tangent matching fine-tune. & Tanaka 4/32 to 3/32 NaNs;
+Benjamin--Feir 2/31 to 0/31. & Off-manifold sensitivity is a real lever, though
+the indirect proxy is incomplete. \\
+
+C2, first launch & Stage match plus gain, but resumed a tied checkpoint into an
+untied architecture. & 32/32 NaNs in both decisive regimes. & Invalid
+experiment; motivated strict resume architecture and parameter-count guards. \\
+
+C2, corrected & Same intended loss with tied architecture preserved; final
+checkpoint evaluated after the auxiliary loss acted. & Tanaka 3/32 NaNs,
+median 0.00907; BF 0/31, median 0.00735. & Final versus best checkpoint matters
+for auxiliary-loss fine-tunes; still short of zero NaNs. \\
+
+GL2 guard & Picard residual detection, attempted halving, then per-sample
+masking. & Detected but did not reduce NaN counts; early fleet-wide logic could
+couple one bad sample to the whole batch. & GL2 noncontractivity is downstream;
+batch-local safety logic must remain per sample. \\
+
+Block-7 ablation & Zero an apparently amplifying learned block. & Tanaka NaNs
+rose from 4/32 to 28/32; median error rose 62-fold. & Trained blocks form a
+fragile compensating sum; post hoc deletion is not an architectural study. \\
+
+v11-D & 80-fold smaller model plus cutoff, stage regularizer, and PSD hinge. &
+Same Tanaka NaN count as baseline and 12--20-fold median regressions. & A
+kitchen-sink run is hard to interpret and reduced capacity was not a cure. \\
+
+v11-E & Full capacity with hard learned-block \(k\)-cut isolated. & Did not
+establish a useful zero-NaN/accuracy tradeoff. & Brute-force band removal is
+not the preferred mechanism. \\
+
+C6/C7 & Model-harvested pre-cascade hard negatives. & Harmful or non-general
+fine-tunes. & Contaminated off-manifold packs can feed the model's own failure
+back into training. \\
+
+C8/C10 & Increasingly matched stage-gain regularization, with C10 using the
+production filter and \(k=64,\ldots,128\) target band. & C10 reached the best
+pre-C16 count, 2/32 Tanaka and 0/31 BF NaNs, but regressed some medians/tails. &
+The diagnosed spectral band matters; indirect regularization still does not
+restore the defining operator identity. \\
+
+C9 & Stronger soft full-output high-band envelope penalty. & Penalty diagnostic
+barely moved; Tanaka remained 3/32 NaNs and accuracy regressed. & Simply
+increasing this penalty weight is not an effective axis. \\
+
+C10 + runtime limiter & Cap learned \(G\xi\) high-band output during rollout. &
+Tanaka stayed 2/32 NaNs; BF p95 worsened. & The operational guard does not reach
+zero and can damage tails. \\
+
+C11/C13 & Clean truth-generated hard-negative packs near selected remaining
+failures. & Training was feasible; C13 evaluation was superseded before a final
+claim. & Useful as a local learnability probe, not a universal or satisfying
+paper-level mechanism. \\
+
+C12 & One-step pushforward/filtering fallback prepared from C2. & Not promoted
+after the stronger structural diagnosis. & Rollout-state training remains an
+option, but it mixes integrator and operator effects. \\
+
+C14 & One-block, checkpoint-carrying full-output cap. & Best finite checkpoint:
+3/32 Tanaka NaNs, 6/32 divergences, median 0.162, p95 1.253; training later
+became nonfinite. & The cap has a mid-band/floor loophole and severe accuracy
+cost; one-block capacity was also a confounder. \\
+
+C15 & Eight-block capacity control for the C14 cap. & Interrupted before epoch
+1 and before any checkpoint. & Inconclusive as a capacity ablation, but not
+worth relaunching because the cap mechanism itself was analytically rejected. \\
+
+Root-cause audit & Frame alignment, realized secants, automatic-differentiation
+shape check, transfer kernel, analytic \(G_0+G_1\), and padded-RHS replay. &
+Small truth-state value error coexists with \(O(1)\) shape defect; exact
+\(G_0+G_1\) is stable; RHS padding delays rather than cures failure. & The DNO
+shape derivative/Hamiltonian compatibility is the primary missing constraint. \\
+
+C16 & Fresh exact \(G_0+G_1\), full self-adjoint \(O(\eta^2)\) residual,
+randomized Hadamard loss, and padded RHS. & Structural tests and 1\% smoke pass;
+16-epoch budget-capped training is in progress. & First clean direct test of the
+diagnosis. \\
+\bottomrule
+\end{longtable}
+
+\section{Implementation and correctness checks}
+
+The implementation was not accepted on training loss alone.  The following
+independent checks passed before the full launch:
+\begin{itemize}
+  \item five architecture tests: legacy order-one identity, zero order-two
+        value and first variation, quadratic near-zero scaling,
+        self-adjointness, and isolation of double precision to analytic \(G_1\);
+  \item seven Hadamard-loss tests: projected Sobolev energy, probe scaling and
+        bandwidth, exact flat-surface identity, detection of missing \(G_1\),
+        production normalization/mean behavior, JIT and mixed-precision
+        gradients, and invalid-configuration handling;
+  \item two dedicated padded-RHS tests: equality on bandlimited products and
+        removal of high-frequency quadratic aliasing;
+  \item fourteen existing stage-regularizer tests after routing all nonlinear
+        right-hand sides through the same padded helper; and
+  \item a 59-step two-GPU smoke with finite checkpoints and validation.
+\end{itemize}
+
+\section*{Reproducibility record}
+
+The detailed chronological record is \texttt{EXPERIMENTS.md}.  Frame-level
+statistics and paths to the aligned NPZ archives are recorded in
+\texttt{notes/nan\_root\_cause\_investigation\_20260709.md}.  The C16 launcher
+is \texttt{scripts/launch\_c16\_modal\_h100x2.sh}; model, Hadamard-loss, and
+dealiased-RHS invariant tests are stored alongside their implementations.
+
+\begin{thebibliography}{9}
+\bibitem{xu2009}
+L. Xu and P. Guyenne,
+``Numerical simulation of three-dimensional nonlinear water waves,''
+\emph{Journal of Computational Physics}, vol.~228, pp.~8446--8466, 2009,
+doi:10.1016/j.jcp.2009.08.015.
+\end{thebibliography}
+
+\end{document}

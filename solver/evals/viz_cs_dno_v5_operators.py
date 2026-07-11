@@ -57,6 +57,10 @@ def load_config(run_dir: Path) -> dict:
 
 
 def build_model_from_config(config: dict) -> CraigSulemDNO:
+    if bool(config.get("cs_fft_fp64", False)) or bool(
+        config.get("cs_g1_fft_fp64", False)
+    ):
+        jax.config.update("jax_enable_x64", True)
     return CraigSulemDNO(
         modes=int(config["modes"]),
         width=int(config["width"]),
@@ -70,8 +74,20 @@ def build_model_from_config(config: dict) -> CraigSulemDNO:
         mult_hidden=int(config["cs_mult_hidden"]),
         use_g1_baseline=bool(config.get("cs_use_g1_baseline", False)),
         g1_k_cut=int(config.get("cs_g1_k_cut", 128)),
+        fft_fp64=bool(config.get("cs_fft_fp64", False)),
+        g1_fft_fp64=bool(config.get("cs_g1_fft_fp64", False)),
         tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
         phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
+        residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+        block_k_cut=int(config.get("cs_block_k_cut", 0)),
+        residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
+        residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),
+        residual_highband_cap_beta=float(config.get("cs_residual_highband_cap_beta", 0.10)),
+        residual_highband_cap_floor=float(config.get("cs_residual_highband_cap_floor", 0.0)),
+        output_highband_cap=bool(config.get("cs_output_highband_cap", False)),
+        output_highband_cap_k_cut=float(config.get("cs_output_highband_cap_k_cut", 32.0)),
+        output_highband_cap_r_max=float(config.get("cs_output_highband_cap_r_max", 1e-2)),
+        output_highband_cap_abs_floor=float(config.get("cs_output_highband_cap_abs_floor", 5.0)),
         domain_length=float(config["domain_length"]),
         xi_scale=float(config["xi_scale"]),
         eta_scale=float(config["eta_scale"]),
@@ -413,9 +429,10 @@ def main() -> None:
 
     # Plots.
     refs = reference_symbols(k_grid, h_values)
+    version_tag = "v10" if "v9_h100x2" in str(run_dir) else "v5"
     plot_multipliers_by_block(
         out_dir / "m_xi_by_block.png",
-        title="cs_dno v5 — M_xi(k, h) magnitude per block (branch-averaged)",
+        title=f"cs_dno {version_tag} — M_xi(k, h) magnitude per block (branch-averaged)",
         mult_curves_per_block=m_xi_curves,
         k_grid=k_grid,
         h_values=h_values,
@@ -423,7 +440,7 @@ def main() -> None:
     )
     plot_multipliers_by_block(
         out_dir / "m_out_by_block.png",
-        title="cs_dno v5 — M_out(k, h) magnitude per block (branch-averaged)",
+        title=f"cs_dno {version_tag} — M_out(k, h) magnitude per block (branch-averaged)",
         mult_curves_per_block=m_out_curves,
         k_grid=k_grid,
         h_values=h_values,

@@ -123,9 +123,10 @@ def upload_data(
         if not npz.exists():
             raise FileNotFoundError(f"missing local file: {npz}")
         targets.append((npz, f"/{name}"))
-        sidecar = npz.with_suffix(".meta.json")
-        if sidecar.exists():
-            targets.append((sidecar, f"/{sidecar.name}"))
+        for suffix in (".meta.json", ".stats.json"):
+            sidecar = npz.with_suffix(suffix)
+            if sidecar.exists():
+                targets.append((sidecar, f"/{sidecar.name}"))
 
     total = sum(p.stat().st_size for p, _ in targets) / 1e9
     print(f"Uploading {len(targets)} files ({total:.2f} GB) -> volume {VOLUME_NAME!r}")
@@ -182,9 +183,11 @@ def run_training(
     total_epochs: int,
     reset_opt_state: bool,
     keep_schedule_step: bool,
+    trainer_args: str,
 ) -> dict:
     import json
     import os
+    import shlex
     import subprocess
     import sys
     import time
@@ -237,6 +240,7 @@ def run_training(
         cmd.append("--reset_opt_state")
     if keep_schedule_step:
         cmd.append("--keep_schedule_step")
+    cmd.extend(shlex.split(trainer_args))
 
     print("$", " ".join(cmd))
     started = perf_counter()
@@ -333,6 +337,7 @@ def train(
     total_epochs: int = 0,
     reset_opt_state: bool = False,
     keep_schedule_step: bool = False,
+    trainer_args: str = "",
 ) -> None:
     """Local entrypoint: dispatch a training run on a Modal GPU worker.
 
@@ -384,6 +389,7 @@ def train(
         total_epochs=total_epochs,
         reset_opt_state=reset_opt_state,
         keep_schedule_step=keep_schedule_step,
+        trainer_args=trainer_args,
     )
     import json
     print(json.dumps(result, indent=2, default=str))
