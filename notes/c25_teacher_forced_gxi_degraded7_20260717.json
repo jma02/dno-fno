@@ -1,0 +1,2663 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "run_dir": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603",
+    "checkpoint_selection": "best",
+    "checkpoint_epoch": 39,
+    "checkpoint_path": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/best_val_ckpt",
+    "checkpoint_sha256": "a9d5dbbdd65f04983646ac969db0099c036e2151eac8a1933a58eaf496420140",
+    "eval_dir": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536",
+    "series_output": "/home/johnma/dno-fno/notes/c25_teacher_forced_gxi_degraded7_20260717.npz",
+    "argv": [
+      "scripts/audit_teacher_forced_gxi.py",
+      "--run-dir",
+      "outputs/c25_capacity125_full_20260716_022603",
+      "--checkpoint",
+      "best",
+      "--eval-dir",
+      "outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536",
+      "--case",
+      "tanaka_g0:4,21,27",
+      "--case",
+      "tanaka_g1:11,16,24,29",
+      "--batch-size",
+      "32",
+      "--low-band-k-max",
+      "8",
+      "--modal-k-max",
+      "8",
+      "--output",
+      "notes/c25_teacher_forced_gxi_degraded7_20260717.json",
+      "--save-predictions"
+    ],
+    "execution_environment": {
+      "CUDA_VISIBLE_DEVICES": "1",
+      "JAX_PLATFORMS": "cuda",
+      "XLA_PYTHON_CLIENT_PREALLOCATE": "false"
+    },
+    "jax_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "batch_size": 32,
+    "n_cases": 7,
+    "n_saved_states": 1757,
+    "definitions": {
+      "q_defect": "q_theta(eta_truth, xi_truth; h) - truth_gxi",
+      "relative_l2": "||q_defect||_2 / ||truth_gxi||_2",
+      "low_band": "nonzero Fourier modes with |k| <= 8.0",
+      "translation_speed_defect": "-<q_defect, d_x eta_truth> / ||d_x eta_truth||_2^2",
+      "modal_physical_scale_squared": "|truth_gxi_hat_k|^2 + |k| tanh(|k|h) |eta_truth_hat_k|^2",
+      "modal_phase_rate_error": "Im(q_defect_hat_k / eta_truth_hat_k) on eta-active frames",
+      "sign_coherence": "|integral a(t)dt| / integral |a(t)|dt; 1 means no cancellation"
+    },
+    "metric_config": {
+      "length": 6.283185307179586,
+      "low_band_k_max": 8.0,
+      "modal_k_max": 8.0,
+      "modal_denominator_floor_relative": 1e-06,
+      "modal_activity_floor_relative": 0.0001,
+      "eta_activity_floor_relative": 0.0001,
+      "sign_activity_floor_relative": 0.001
+    }
+  },
+  "cases": [
+    {
+      "regime": "tanaka_g0",
+      "case_index": 4,
+      "case_id": 4,
+      "depth": 0.013775626197457314,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g0/tanaka_g0_trajs.npz",
+      "truth_protocol_sha256": "27697dd07f881db871ab6d3c8abdf3e7ddf79a83f0989147ad0f8e44c1668aa2",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 9.313225746154785e-10,
+        "relative_l2": 1.378689359968236e-07
+      },
+      "q_relative_l2": {
+        "initial": 0.004005679678570597,
+        "final": 0.003924216814706486,
+        "median": 0.003923250686329846,
+        "p95": 0.0039400535223770876,
+        "maximum": 0.004005679678570597,
+        "time_of_maximum": 0.0
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.0012174208365577717,
+        "final": 0.0012677083336937347,
+        "median": 0.0012683768514969791,
+        "p95": 0.0012837703175181746,
+        "maximum": 0.0013081036648193115,
+        "time_of_maximum": 0.800000011920929
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": -2.081439016691422e-06,
+          "final": -1.651908277881019e-05,
+          "median": -1.5456496144075597e-05,
+          "p95": -5.3766894105920015e-06,
+          "maximum": -2.081439016691422e-06,
+          "time_of_maximum": 0.0
+        },
+        "energy_fraction": {
+          "initial": 1.653272880488231e-05,
+          "final": 0.0010844963727045455,
+          "median": 0.0009498091256214175,
+          "p95": 0.0015930665986158572,
+          "maximum": 0.001971898568258098,
+          "time_of_maximum": 3.200000047683716
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": -0.002757778130395685,
+          "absolute_time_integral": 0.002757778130395685,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": -0.0001548219060174224,
+          "final": -0.0001616719891221156,
+          "median": -0.0001613889585625132,
+          "p95": -0.00015899388869558448,
+          "maximum": -0.0001548219060174224,
+          "time_of_maximum": 0.0
+        },
+        "energy_fraction": {
+          "initial": 0.989773464685799,
+          "final": 0.9954385416885557,
+          "median": 0.9921787097484007,
+          "p95": 0.995857818025387,
+          "maximum": 0.9961086903166539,
+          "time_of_maximum": 145.60000610351562
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": -0.03224297894683598,
+          "absolute_time_integral": 0.03224297894683598,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0008119693610463585,
+            "final": 0.0007164976028821226,
+            "median": 0.0007639733169275354,
+            "p95": 0.0008332028493370869,
+            "maximum": 0.0008415660812846795,
+            "time_of_maximum": 81.5999984741211
+          },
+          "phase_rate_error": {
+            "initial": 0.00012276885916945603,
+            "final": 0.00011989228930211869,
+            "median": 0.00011948028607691747,
+            "p95": 0.00012318727860275515,
+            "maximum": 0.00012554014381661334,
+            "time_of_maximum": 17.600000381469727
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.023863192590416256,
+            "absolute_time_integral": 0.023863192590416256,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.023863192590416256,
+          "implied_translation_displacement": -0.023863192590416256
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0009239159018508064,
+            "final": 0.000935761562272192,
+            "median": 0.0009359573129546369,
+            "p95": 0.000951773111046133,
+            "maximum": 0.0009663043472852359,
+            "time_of_maximum": 15.199999809265137
+          },
+          "phase_rate_error": {
+            "initial": 0.0003188771446754776,
+            "final": 0.0003236752012541854,
+            "median": 0.00032327344378219817,
+            "p95": 0.00032816957677575987,
+            "maximum": 0.0003320150815355737,
+            "time_of_maximum": 15.199999809265137
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.06465157090944956,
+            "absolute_time_integral": 0.06465157090944956,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.06465157090944956,
+          "implied_translation_displacement": -0.03232578545472478
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.000848058791983921,
+            "final": 0.00088914319050969,
+            "median": 0.0008855724602708029,
+            "p95": 0.0008983549683354098,
+            "maximum": 0.0009107909062700211,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0004409359340261498,
+            "final": 0.0004600058260474386,
+            "median": 0.00045991612045071705,
+            "p95": 0.0004661771702753364,
+            "maximum": 0.0004736205150112484,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.09197606064942312,
+            "absolute_time_integral": 0.09197606064942312,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.09197606064942312,
+          "implied_translation_displacement": -0.03065868688314104
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0007936230323663161,
+            "final": 0.0008375325024730747,
+            "median": 0.0008371052470250566,
+            "p95": 0.0008496220236675473,
+            "maximum": 0.0008688136966503842,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0005496362889536152,
+            "final": 0.0005798783086059962,
+            "median": 0.000579835552538006,
+            "p95": 0.000586913697978709,
+            "maximum": 0.0006020634720390229,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.11589111482859801,
+            "absolute_time_integral": 0.11589111482859801,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.11589111482859801,
+          "implied_translation_displacement": -0.028972778707149503
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0008172067383136489,
+            "final": 0.0008587972707739947,
+            "median": 0.0008601468672591241,
+            "p95": 0.0008735025437241629,
+            "maximum": 0.0008934386981798052,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0007065549414359917,
+            "final": 0.0007447023871065629,
+            "median": 0.0007441905831537173,
+            "p95": 0.0007532740972901813,
+            "maximum": 0.0007730773855627085,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.14872122138861732,
+            "absolute_time_integral": 0.14872122138861732,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.14872122138861732,
+          "implied_translation_displacement": -0.029744244277723465
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0008901907252183942,
+            "final": 0.000929883242232505,
+            "median": 0.0009308620099761988,
+            "p95": 0.0009430338151903632,
+            "maximum": 0.0009628818229156069,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0009233431807410469,
+            "final": 0.0009677018661036402,
+            "median": 0.0009658271233112278,
+            "p95": 0.0009763866304106097,
+            "maximum": 0.0009993050121457445,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.19300001966716085,
+            "absolute_time_integral": 0.19300001966716085,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.19300001966716085,
+          "implied_translation_displacement": -0.032166669944526806
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0009405913196255463,
+            "final": 0.0009775426840891324,
+            "median": 0.00097846516926638,
+            "p95": 0.0009897777419273744,
+            "maximum": 0.0010086311087682506,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0011383389924641664,
+            "final": 0.0011863917297382852,
+            "median": 0.0011847188160342254,
+            "p95": 0.0011960562289111635,
+            "maximum": 0.0012210292970225279,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.23662730852908342,
+            "absolute_time_integral": 0.23662730852908342,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.23662730852908342,
+          "implied_translation_displacement": -0.033803901218440485
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0009303810094370687,
+            "final": 0.0009659087220407422,
+            "median": 0.0009652049702182242,
+            "p95": 0.0009758159887311964,
+            "maximum": 0.0009930498422897323,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.001286874706757822,
+            "final": 0.0013392940514408746,
+            "median": 0.0013354971839340578,
+            "p95": 0.0013484280184978843,
+            "maximum": 0.0013735870751526934,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.26670238357093057,
+            "absolute_time_integral": 0.26670238357093057,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.26670238357093057,
+          "implied_translation_displacement": -0.03333779794636632
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 21,
+      "case_id": 21,
+      "depth": 0.03339472413063049,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g0/tanaka_g0_trajs.npz",
+      "truth_protocol_sha256": "27697dd07f881db871ab6d3c8abdf3e7ddf79a83f0989147ad0f8e44c1668aa2",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.0003604972204856615,
+        "final": 0.0003945303438010281,
+        "median": 0.00032741354399543884,
+        "p95": 0.0017704909261976316,
+        "maximum": 0.0025452375582247534,
+        "time_of_maximum": 36.79999923706055
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.0004196022178233793,
+        "final": 0.00036577196569099834,
+        "median": 0.0003813199379208551,
+        "p95": 0.0006405558638992527,
+        "maximum": 0.0008074357531617228,
+        "time_of_maximum": 36.79999923706055
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": 3.3360538621413874e-05,
+          "final": -5.469777208639215e-06,
+          "median": -1.7726731351782106e-05,
+          "p95": 0.0001951647565490702,
+          "maximum": 0.00027558883652434736,
+          "time_of_maximum": 36.79999923706055
+        },
+        "energy_fraction": {
+          "initial": 0.2092239226763763,
+          "final": 0.004515985484364293,
+          "median": 0.17005424273150763,
+          "p95": 0.3380916192410154,
+          "maximum": 0.4938883251533717,
+          "time_of_maximum": 4.0
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 0.3426294820717131,
+          "sign_changes_across_active_frames": 25,
+          "signed_time_integral": 0.0019737531398839065,
+          "absolute_time_integral": 0.007885934468299285,
+          "sign_coherence": 0.2502877937698073
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": -5.2199925838743425e-05,
+          "final": -7.828367756504081e-05,
+          "median": -5.242248494223227e-05,
+          "p95": 5.51001311348859e-06,
+          "maximum": 1.5425070146183264e-05,
+          "time_of_maximum": 12.0
+        },
+        "energy_fraction": {
+          "initial": 0.3587826483137216,
+          "final": 0.6805134328190704,
+          "median": 0.4927357266912586,
+          "p95": 0.7740179878212354,
+          "maximum": 0.8816198511698077,
+          "time_of_maximum": 166.39999389648438
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 0.9322709163346613,
+          "sign_changes_across_active_frames": 2,
+          "signed_time_integral": -0.010016017836926187,
+          "absolute_time_integral": 0.010260000521568474,
+          "sign_coherence": 0.9762200124523006
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0007319870827729179,
+            "final": 0.0003073404844303393,
+            "median": 0.0006587559585864366,
+            "p95": 0.0014310938260435366,
+            "maximum": 0.0017001655724572526,
+            "time_of_maximum": 148.0
+          },
+          "phase_rate_error": {
+            "initial": -0.00016765157164013467,
+            "final": -3.898496410363022e-05,
+            "median": -8.076296603957292e-05,
+            "p95": 1.8998987791441812e-05,
+            "maximum": 5.58931999454377e-05,
+            "time_of_maximum": 117.5999984741211
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 250,
+            "active_fraction": 0.9960159362549801,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 0.9,
+            "sign_changes_across_active_frames": 22,
+            "signed_time_integral": -0.018988640706354254,
+            "absolute_time_integral": 0.0199544866554095,
+            "sign_coherence": 0.9515975546886136
+          },
+          "integrated_phase_rate_error": -0.018988640706354254,
+          "implied_translation_displacement": 0.018988640706354254
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0004641921638337495,
+            "final": 5.431121312559222e-05,
+            "median": 0.00024006773626319966,
+            "p95": 0.0004487312144282515,
+            "maximum": 0.0005811112743854076,
+            "time_of_maximum": 117.5999984741211
+          },
+          "phase_rate_error": {
+            "initial": -0.00014293270613308413,
+            "final": -2.1635863187977627e-05,
+            "median": -8.110967966980023e-05,
+            "p95": 3.467344652597841e-05,
+            "maximum": 0.00012209245049210136,
+            "time_of_maximum": 52.79999923706055
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 249,
+            "active_fraction": 0.9920318725099602,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 0.8273092369477911,
+            "sign_changes_across_active_frames": 30,
+            "signed_time_integral": -0.018691077850927898,
+            "absolute_time_integral": 0.021020142069068583,
+            "sign_coherence": 0.8891984549634451
+          },
+          "integrated_phase_rate_error": -0.018691077850927898,
+          "implied_translation_displacement": 0.009345538925463949
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0002650955175686862,
+            "final": 0.0003262748684558361,
+            "median": 0.0002052951307326842,
+            "p95": 0.00044553165910226494,
+            "maximum": 0.0006401778537439607,
+            "time_of_maximum": 197.60000610351562
+          },
+          "phase_rate_error": {
+            "initial": 6.420800591040607e-05,
+            "final": 0.00025546505834970107,
+            "median": 6.670480093718476e-05,
+            "p95": 0.00027140483052178616,
+            "maximum": 0.0004680413122778293,
+            "time_of_maximum": 196.8000030517578
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 250,
+            "active_fraction": 0.9960159362549801,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.812,
+            "sign_changes_across_active_frames": 24,
+            "signed_time_integral": 0.015107162096530413,
+            "absolute_time_integral": 0.022858308258888897,
+            "sign_coherence": 0.6609046446232826
+          },
+          "integrated_phase_rate_error": 0.015107162096530413,
+          "implied_translation_displacement": -0.0050357206988434705
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0003702625338455112,
+            "final": 0.00036099826951875303,
+            "median": 0.0003501873461094334,
+            "p95": 0.0005890245268612758,
+            "maximum": 0.00084114258326676,
+            "time_of_maximum": 52.0
+          },
+          "phase_rate_error": {
+            "initial": 0.00020118280577477714,
+            "final": 0.00037459156073411053,
+            "median": 0.0002857865547146756,
+            "p95": 0.0006212635280392122,
+            "maximum": 0.0011091170380176946,
+            "time_of_maximum": 148.8000030517578
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.9322709163346613,
+            "sign_changes_across_active_frames": 4,
+            "signed_time_integral": 0.05808406777187543,
+            "absolute_time_integral": 0.06127605424221046,
+            "sign_coherence": 0.9479080937927591
+          },
+          "integrated_phase_rate_error": 0.05808406777187543,
+          "implied_translation_displacement": -0.014521016942968857
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00039426880178528316,
+            "final": 0.000505568394666207,
+            "median": 0.0003953487786374411,
+            "p95": 0.0006242907702732304,
+            "maximum": 0.0008433485340265288,
+            "time_of_maximum": 36.0
+          },
+          "phase_rate_error": {
+            "initial": 0.000614022741784475,
+            "final": 0.0008387086979809768,
+            "median": 0.00041199406920849196,
+            "p95": 0.0008182987928535062,
+            "maximum": 0.0012772672500656528,
+            "time_of_maximum": 116.80000305175781
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.952191235059761,
+            "sign_changes_across_active_frames": 8,
+            "signed_time_integral": 0.08415914590011497,
+            "absolute_time_integral": 0.0856683816811617,
+            "sign_coherence": 0.9823828143892835
+          },
+          "integrated_phase_rate_error": 0.08415914590011497,
+          "implied_translation_displacement": -0.016831829180022996
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00033760297068454457,
+            "final": 0.0003283975552497863,
+            "median": 0.0003292756567698041,
+            "p95": 0.0005318345692952055,
+            "maximum": 0.0007497512122198529,
+            "time_of_maximum": 36.0
+          },
+          "phase_rate_error": {
+            "initial": 0.000509320008919607,
+            "final": 0.0006250852898061122,
+            "median": 0.0004226704079372315,
+            "p95": 0.0007870188980679445,
+            "maximum": 0.0011324571403779618,
+            "time_of_maximum": 100.80000305175781
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.9681274900398407,
+            "sign_changes_across_active_frames": 12,
+            "signed_time_integral": 0.08565833841618303,
+            "absolute_time_integral": 0.08670360931919768,
+            "sign_coherence": 0.9879443207587068
+          },
+          "integrated_phase_rate_error": 0.08565833841618303,
+          "implied_translation_displacement": -0.014276389736030506
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00024818478945436937,
+            "final": 0.0002627215564003674,
+            "median": 0.00025401858229919834,
+            "p95": 0.0003941211210001181,
+            "maximum": 0.0005173574784384774,
+            "time_of_maximum": 85.5999984741211
+          },
+          "phase_rate_error": {
+            "initial": 0.000350193347910781,
+            "final": 0.0005125856121267784,
+            "median": 0.000392671494312777,
+            "p95": 0.0006842739162448484,
+            "maximum": 0.0008579270640495088,
+            "time_of_maximum": 84.80000305175781
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.9840637450199203,
+            "sign_changes_across_active_frames": 8,
+            "signed_time_integral": 0.08003726374325626,
+            "absolute_time_integral": 0.08070686846400099,
+            "sign_coherence": 0.9917032498783742
+          },
+          "integrated_phase_rate_error": 0.08003726374325626,
+          "implied_translation_displacement": -0.011433894820465178
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00013743193601204124,
+            "final": 0.00014242653686415802,
+            "median": 0.00016026557725650883,
+            "p95": 0.00030924100467167296,
+            "maximum": 0.00043850316880174995,
+            "time_of_maximum": 118.4000015258789
+          },
+          "phase_rate_error": {
+            "initial": 0.0003878902023043085,
+            "final": 0.00038116085494438483,
+            "median": 0.00031877000060107915,
+            "p95": 0.0005667075429227544,
+            "maximum": 0.0006974466090035237,
+            "time_of_maximum": 117.5999984741211
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.9880478087649402,
+            "sign_changes_across_active_frames": 6,
+            "signed_time_integral": 0.0661954917292249,
+            "absolute_time_integral": 0.06650839647900073,
+            "sign_coherence": 0.995295259450818
+          },
+          "integrated_phase_rate_error": 0.0661954917292249,
+          "implied_translation_displacement": -0.008274436466153112
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 27,
+      "case_id": 27,
+      "depth": 0.011606559157371521,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g0/tanaka_g0_trajs.npz",
+      "truth_protocol_sha256": "27697dd07f881db871ab6d3c8abdf3e7ddf79a83f0989147ad0f8e44c1668aa2",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.023605764870817753,
+        "final": 0.019973885131990072,
+        "median": 0.020239151148560185,
+        "p95": 0.020552123262933476,
+        "maximum": 0.023605764870817753,
+        "time_of_maximum": 0.0
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.003575578401945346,
+        "final": 0.0038239321151583095,
+        "median": 0.003657996739881854,
+        "p95": 0.0038650908083271195,
+        "maximum": 0.003976085080021926,
+        "time_of_maximum": 2.4000000953674316
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": -0.00014127025754367482,
+          "final": -8.785145011353045e-06,
+          "median": -2.5088830274079656e-05,
+          "p95": -1.7606029894593078e-05,
+          "maximum": -3.938248003242022e-06,
+          "time_of_maximum": 195.1999969482422
+        },
+        "energy_fraction": {
+          "initial": 0.0023688855142927983,
+          "final": 1.2587754996844127e-05,
+          "median": 9.924773605024168e-05,
+          "p95": 0.0005284255992943367,
+          "maximum": 0.0023688855142927983,
+          "time_of_maximum": 0.0
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": -0.005861047245865846,
+          "absolute_time_integral": 0.005861047245865846,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": 0.00043037314721756193,
+          "final": 0.0004580489720395153,
+          "median": 0.0004370640912726221,
+          "p95": 0.0004623516836947656,
+          "maximum": 0.00048538884994299165,
+          "time_of_maximum": 2.4000000953674316
+        },
+        "energy_fraction": {
+          "initial": 0.9396214938595401,
+          "final": 0.9349501373286722,
+          "median": 0.9358166452025936,
+          "p95": 0.9570344270437641,
+          "maximum": 0.969777832038976,
+          "time_of_maximum": 7.199999809265137
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.08739654247380833,
+          "absolute_time_integral": 0.08739654247380833,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.009303084766048063,
+            "final": 0.007868722700690329,
+            "median": 0.008200122869612069,
+            "p95": 0.009336251014805005,
+            "maximum": 0.009729996398007203,
+            "time_of_maximum": 16.0
+          },
+          "phase_rate_error": {
+            "initial": -0.0015278076515284592,
+            "final": -0.0012907006382284736,
+            "median": -0.001337368302153872,
+            "p95": -0.00104344663817387,
+            "maximum": -0.0006830946706966157,
+            "time_of_maximum": 3.200000047683716
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.26155963529818615,
+            "absolute_time_integral": 0.26155963529818615,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.26155963529818615,
+          "implied_translation_displacement": 0.26155963529818615
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.004401807395187147,
+            "final": 0.003768651815052698,
+            "median": 0.003174251248526618,
+            "p95": 0.00446003992015623,
+            "maximum": 0.005158333947980271,
+            "time_of_maximum": 16.0
+          },
+          "phase_rate_error": {
+            "initial": -0.0014461710847588221,
+            "final": -0.0012307433404173047,
+            "median": -0.0010099323841719072,
+            "p95": -0.000682013042624506,
+            "maximum": -0.000574547128512086,
+            "time_of_maximum": 64.80000305175781
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.20432832821682734,
+            "absolute_time_integral": 0.20432832821682734,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.20432832821682734,
+          "implied_translation_displacement": 0.10216416410841367
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.002141652562182174,
+            "final": 0.002305049114042974,
+            "median": 0.001938603537881144,
+            "p95": 0.0024081800364275582,
+            "maximum": 0.0028820490900512887,
+            "time_of_maximum": 11.199999809265137
+          },
+          "phase_rate_error": {
+            "initial": -0.0010548216454448046,
+            "final": -0.0010692417747976354,
+            "median": -0.0009143796293753051,
+            "p95": -0.0006389757187946809,
+            "maximum": -0.0004524730853779617,
+            "time_of_maximum": 24.799999237060547
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.18157365330296832,
+            "absolute_time_integral": 0.18157365330296832,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.18157365330296832,
+          "implied_translation_displacement": 0.06052455110098944
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0017762343373712729,
+            "final": 0.002149731270267608,
+            "median": 0.0018972646565467376,
+            "p95": 0.002143993041591209,
+            "maximum": 0.0022706816644909827,
+            "time_of_maximum": 11.199999809265137
+          },
+          "phase_rate_error": {
+            "initial": -0.0011660055421793371,
+            "final": -0.0013328041917779862,
+            "median": -0.0011984249316485437,
+            "p95": -0.0010261711482590355,
+            "maximum": -0.000817977466440656,
+            "time_of_maximum": 20.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.23939428012404618,
+            "absolute_time_integral": 0.23939428012404618,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.23939428012404618,
+          "implied_translation_displacement": 0.059848570031011544
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0020210216408454236,
+            "final": 0.002382366158791724,
+            "median": 0.0021973904657499026,
+            "p95": 0.0023515591397078365,
+            "maximum": 0.002431545041961566,
+            "time_of_maximum": 2.4000000953674316
+          },
+          "phase_rate_error": {
+            "initial": -0.0016594021944021163,
+            "final": -0.0019121149611015065,
+            "median": -0.0017523436900117562,
+            "p95": -0.0015980992919379221,
+            "maximum": -0.0015082002764566374,
+            "time_of_maximum": 34.400001525878906
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.3498869011397229,
+            "absolute_time_integral": 0.3498869011397229,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.3498869011397229,
+          "implied_translation_displacement": 0.06997738022794457
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0024412999307796084,
+            "final": 0.0028003030372688886,
+            "median": 0.0025881929266185363,
+            "p95": 0.002736061215689431,
+            "maximum": 0.002834465397171754,
+            "time_of_maximum": 2.4000000953674316
+          },
+          "phase_rate_error": {
+            "initial": -0.0024062998277165504,
+            "final": -0.0027014058358623833,
+            "median": -0.0025041588956619437,
+            "p95": -0.0023500438626805715,
+            "maximum": -0.0022315856955424534,
+            "time_of_maximum": 29.600000381469727
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.5005586253549519,
+            "absolute_time_integral": 0.5005586253549519,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.5005586253549519,
+          "implied_translation_displacement": 0.08342643755915864
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0027723600707518087,
+            "final": 0.0030079949547162626,
+            "median": 0.0028988676526835217,
+            "p95": 0.003017567420379767,
+            "maximum": 0.0031587194260577563,
+            "time_of_maximum": 2.4000000953674316
+          },
+          "phase_rate_error": {
+            "initial": -0.0031883921890448743,
+            "final": -0.0034171753912777864,
+            "median": -0.0032865316178857912,
+            "p95": -0.0031075632177755812,
+            "maximum": -0.003038119335698744,
+            "time_of_maximum": 24.799999237060547
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.6569367357114508,
+            "absolute_time_integral": 0.6569367357114508,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.6569367357114508,
+          "implied_translation_displacement": 0.09384810510163583
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0029062553909735334,
+            "final": 0.0030407689285904607,
+            "median": 0.00304626727853841,
+            "p95": 0.003164981418714968,
+            "maximum": 0.0032992944680146703,
+            "time_of_maximum": 2.4000000953674316
+          },
+          "phase_rate_error": {
+            "initial": -0.0038196537760001033,
+            "final": -0.003938523867292182,
+            "median": -0.003957055218946196,
+            "p95": -0.003773661370713822,
+            "maximum": -0.0037058030400911085,
+            "time_of_maximum": 114.4000015258789
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.7914318173962839,
+            "absolute_time_integral": 0.7914318173962839,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.7914318173962839,
+          "implied_translation_displacement": 0.09892897717453548
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 11,
+      "case_id": 1000011,
+      "depth": 0.011286163702607155,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g1/tanaka_g1_trajs.npz",
+      "truth_protocol_sha256": "d6bfebad3eae873905bf65d0df38189ab5d2ad4decad2b727a2dd611a0b2bad6",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.009816555657952336,
+        "final": 0.009099594558983055,
+        "median": 0.009076012758444085,
+        "p95": 0.009137988233685786,
+        "maximum": 0.009816555657952336,
+        "time_of_maximum": 0.0
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.0015402458824644552,
+        "final": 0.001657757624412203,
+        "median": 0.001677094326697736,
+        "p95": 0.0017190699740663867,
+        "maximum": 0.0017806205449166367,
+        "time_of_maximum": 0.800000011920929
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": 5.1250767166359606e-05,
+          "final": 4.2615018492990265e-05,
+          "median": 3.1890581595220166e-05,
+          "p95": 4.1859711962255434e-05,
+          "maximum": 5.1250767166359606e-05,
+          "time_of_maximum": 0.0
+        },
+        "energy_fraction": {
+          "initial": 0.0020351888015835698,
+          "final": 0.0016332677350340877,
+          "median": 0.0009177973944884995,
+          "p95": 0.0015786918358582894,
+          "maximum": 0.0020351888015835698,
+          "time_of_maximum": 0.0
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.006774659198744447,
+          "absolute_time_integral": 0.006774659198744447,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": -0.00017691237672698217,
+          "final": -0.000191049068547775,
+          "median": -0.0001926852933378095,
+          "p95": -0.0001884535815018536,
+          "maximum": -0.00017691237672698217,
+          "time_of_maximum": 0.0
+        },
+        "energy_fraction": {
+          "initial": 0.982034308469068,
+          "final": 0.9893801578278586,
+          "median": 0.9842057186921734,
+          "p95": 0.9898990717923872,
+          "maximum": 0.9910064893987505,
+          "time_of_maximum": 118.4000015258789
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": -0.038507634768345664,
+          "absolute_time_integral": 0.038507634768345664,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0014789279001562994,
+            "final": 0.0015003616675538542,
+            "median": 0.0014061390470800884,
+            "p95": 0.001549753072152581,
+            "maximum": 0.001629606243447368,
+            "time_of_maximum": 93.5999984741211
+          },
+          "phase_rate_error": {
+            "initial": 0.0002325050931382838,
+            "final": 0.00023242579347069073,
+            "median": 0.00021354419583825108,
+            "p95": 0.00023807556116138158,
+            "maximum": 0.00024501369416403087,
+            "time_of_maximum": 24.799999237060547
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.04273806762181144,
+            "absolute_time_integral": 0.04273806762181144,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.04273806762181144,
+          "implied_translation_displacement": -0.04273806762181144
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0011252535799119072,
+            "final": 0.0011545930298594023,
+            "median": 0.0011231609602964127,
+            "p95": 0.001232567314863934,
+            "maximum": 0.0012979737289841348,
+            "time_of_maximum": 16.799999237060547
+          },
+          "phase_rate_error": {
+            "initial": 0.00035013756756346415,
+            "final": 0.0003627772071820936,
+            "median": 0.00035025738541091497,
+            "p95": 0.0003856235726334487,
+            "maximum": 0.0004062345463701893,
+            "time_of_maximum": 16.799999237060547
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.07069949749882419,
+            "absolute_time_integral": 0.07069949749882419,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.07069949749882419,
+          "implied_translation_displacement": -0.035349748749412095
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0008831322614839071,
+            "final": 0.0010018561136156457,
+            "median": 0.0010041707268644063,
+            "p95": 0.0010391483282749586,
+            "maximum": 0.001095700413339861,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0004113913107366081,
+            "final": 0.00047248138648035474,
+            "median": 0.00047127505073318404,
+            "p95": 0.00048698275742156737,
+            "maximum": 0.0005071248106127173,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.09414026802806598,
+            "absolute_time_integral": 0.09414026802806598,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.09414026802806598,
+          "implied_translation_displacement": -0.03138008934268866
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0008497030123199662,
+            "final": 0.0009883290872376097,
+            "median": 0.0009998921036082848,
+            "p95": 0.001029232416909918,
+            "maximum": 0.0010969210886255945,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0005319014590448306,
+            "final": 0.0006210128408775283,
+            "median": 0.0006258495504495868,
+            "p95": 0.0006423868852402866,
+            "maximum": 0.0006823048995796179,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.12495656606446756,
+            "absolute_time_integral": 0.12495656606446756,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.12495656606446756,
+          "implied_translation_displacement": -0.03123914151611689
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0009570563317076386,
+            "final": 0.001083459657012095,
+            "median": 0.001095901165401436,
+            "p95": 0.0011295500644454889,
+            "maximum": 0.0011880554472059087,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0007515855567067871,
+            "final": 0.0008504253575481386,
+            "median": 0.0008574924684746894,
+            "p95": 0.000879118778625606,
+            "maximum": 0.00093000716953154,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.1714263231732947,
+            "absolute_time_integral": 0.1714263231732947,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.1714263231732947,
+          "implied_translation_displacement": -0.03428526463465894
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0010816467700784016,
+            "final": 0.0011960211739919107,
+            "median": 0.0012016702998843358,
+            "p95": 0.0012339052182211733,
+            "maximum": 0.0012868520958228304,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0010199132154932638,
+            "final": 0.0011267498957164153,
+            "median": 0.001128144030567398,
+            "p95": 0.001155602511390172,
+            "maximum": 0.0012118819414209299,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.22564181920513737,
+            "absolute_time_integral": 0.22564181920513737,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.22564181920513737,
+          "implied_translation_displacement": -0.0376069698675229
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0012051791735435092,
+            "final": 0.0012897326429426377,
+            "median": 0.0013045065346484125,
+            "p95": 0.0013362385674885765,
+            "maximum": 0.0013827666538841663,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0013257626772351582,
+            "final": 0.0014171354278538007,
+            "median": 0.001430766224473936,
+            "p95": 0.0014615976659774236,
+            "maximum": 0.0015204005706693552,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.2859074177043115,
+            "absolute_time_integral": 0.2859074177043115,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.2859074177043115,
+          "implied_translation_displacement": -0.04084391681490164
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0012629669433207743,
+            "final": 0.001316353267811858,
+            "median": 0.0013417580660857686,
+            "p95": 0.0013699305345795235,
+            "maximum": 0.0014127428423661855,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0015875919069781336,
+            "final": 0.0016532869744554316,
+            "median": 0.001680528272747233,
+            "p95": 0.0017136689573496776,
+            "maximum": 0.0017755251375576229,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.3360058661254085,
+            "absolute_time_integral": 0.3360058661254085,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.3360058661254085,
+          "implied_translation_displacement": -0.04200073326567606
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 16,
+      "case_id": 1000016,
+      "depth": 0.03433812037110329,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g1/tanaka_g1_trajs.npz",
+      "truth_protocol_sha256": "d6bfebad3eae873905bf65d0df38189ab5d2ad4decad2b727a2dd611a0b2bad6",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.00033465483278658376,
+        "final": 0.0003776438157805287,
+        "median": 0.0003645077429835939,
+        "p95": 0.00038109341092404207,
+        "maximum": 0.00038464899611159655,
+        "time_of_maximum": 66.4000015258789
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.0004964777131578464,
+        "final": 0.0005135874827623051,
+        "median": 0.0005063230974467968,
+        "p95": 0.0005135290183450168,
+        "maximum": 0.0005162740309202566,
+        "time_of_maximum": 199.1999969482422
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": 4.513896051031815e-05,
+          "final": 5.6863469888152254e-05,
+          "median": 5.299656053225063e-05,
+          "p95": 5.762818217052924e-05,
+          "maximum": 5.83990254277166e-05,
+          "time_of_maximum": 147.1999969482422
+        },
+        "energy_fraction": {
+          "initial": 0.425054038898621,
+          "final": 0.5298433440213819,
+          "median": 0.49739045085121913,
+          "p95": 0.5378462376721238,
+          "maximum": 0.5460716399350822,
+          "time_of_maximum": 176.8000030517578
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.010519545928281299,
+          "absolute_time_integral": 0.010519545928281299,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": 9.316787395730645e-05,
+          "final": 9.633590881093011e-05,
+          "median": 9.530130160945136e-05,
+          "p95": 9.631914925964379e-05,
+          "maximum": 9.660953125748281e-05,
+          "time_of_maximum": 199.1999969482422
+        },
+        "energy_fraction": {
+          "initial": 0.8229642713500178,
+          "final": 0.8221941754001348,
+          "median": 0.825763609433051,
+          "p95": 0.8354710951571771,
+          "maximum": 0.8377061520430645,
+          "time_of_maximum": 128.8000030517578
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.019030610898354,
+          "absolute_time_integral": 0.019030610898354,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.000412745903477041,
+            "final": 0.000373865159196068,
+            "median": 0.0003906146662960372,
+            "p95": 0.0004146414866343832,
+            "maximum": 0.0004177417813009826,
+            "time_of_maximum": 189.60000610351562
+          },
+          "phase_rate_error": {
+            "initial": 3.630427597229102e-05,
+            "final": 3.528693036419124e-05,
+            "median": 3.552791440729273e-05,
+            "p95": 3.621339666508007e-05,
+            "maximum": 3.648077262041908e-05,
+            "time_of_maximum": 4.800000190734863
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.007115251456070311,
+            "absolute_time_integral": 0.007115251456070311,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.007115251456070311,
+          "implied_translation_displacement": -0.007115251456070311
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00019380418583963695,
+            "final": 0.00018550834446027237,
+            "median": 0.00018755734277039378,
+            "p95": 0.0001925242551011053,
+            "maximum": 0.00019380418583963695,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_error": {
+            "initial": 0.0001059945221903766,
+            "final": 0.00010300733122305328,
+            "median": 0.00010365057308779614,
+            "p95": 0.0001055694863676148,
+            "maximum": 0.00010620138010049651,
+            "time_of_maximum": 4.800000190734863
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.020740092310550406,
+            "absolute_time_integral": 0.020740092310550406,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.020740092310550406,
+          "implied_translation_displacement": -0.010370046155275203
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0001940846340642877,
+            "final": 0.00021414874927303047,
+            "median": 0.0002040190335827297,
+            "p95": 0.0002144435410852754,
+            "maximum": 0.00021755327891527203,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.00014027758516071498,
+            "final": -0.00014671053691209262,
+            "median": -0.00014516986869115257,
+            "p95": -0.00014167767829856542,
+            "maximum": -0.00014027758516071498,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.02897425074086324,
+            "absolute_time_integral": 0.02897425074086324,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.02897425074086324,
+          "implied_translation_displacement": 0.009658083580287746
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00044555535429536305,
+            "final": 0.00045971999695269665,
+            "median": 0.00045391126421948303,
+            "p95": 0.0004596009727151889,
+            "maximum": 0.00046180463823888824,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.00047524236051696113,
+            "final": -0.0004852613863575357,
+            "median": -0.0004827031695466075,
+            "p95": -0.0004777952086105601,
+            "maximum": -0.00047524236051696113,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.09647356093399445,
+            "absolute_time_integral": 0.09647356093399445,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.09647356093399445,
+          "implied_translation_displacement": 0.024118390233498613
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0004939080704305165,
+            "final": 0.0005072280361571038,
+            "median": 0.0005017222803165873,
+            "p95": 0.0005070127430725986,
+            "maximum": 0.0005091707426268933,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.0006671260664809501,
+            "final": -0.000681341263937819,
+            "median": -0.0006773469535176002,
+            "p95": -0.0006703638718396457,
+            "maximum": -0.0006671260664809501,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.13534717346036546,
+            "absolute_time_integral": 0.13534717346036546,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.13534717346036546,
+          "implied_translation_displacement": 0.02706943469207309
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0004317932738222364,
+            "final": 0.00044505540557122615,
+            "median": 0.00043947861773271685,
+            "p95": 0.00044477988868588385,
+            "maximum": 0.0004470501221093631,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.0007014736760579994,
+            "final": -0.000720258092089404,
+            "median": -0.0007144219518355217,
+            "p95": -0.000705279791224018,
+            "maximum": -0.0007014736760579994,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.14267738507094768,
+            "absolute_time_integral": 0.14267738507094768,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.14267738507094768,
+          "implied_translation_displacement": 0.02377956417849128
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.00035163783897620895,
+            "final": 0.0003651864654204128,
+            "median": 0.00035934873368403524,
+            "p95": 0.0003650406216367397,
+            "maximum": 0.00036732192164796404,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.0006662374326696673,
+            "final": -0.0006902649692689048,
+            "median": -0.0006813658336789853,
+            "p95": -0.0006703753716207259,
+            "maximum": -0.0006662374326696673,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.1361666823601067,
+            "absolute_time_integral": 0.1361666823601067,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.1361666823601067,
+          "implied_translation_displacement": 0.019452383194300954
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0002694055761098248,
+            "final": 0.00028339571787381506,
+            "median": 0.0002772683579818482,
+            "p95": 0.0002834422573028086,
+            "maximum": 0.0002857639147726294,
+            "time_of_maximum": 199.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.0005804920405125213,
+            "final": -0.0006101649774526873,
+            "median": -0.0005984199542168782,
+            "p95": -0.0005848720438599129,
+            "maximum": -0.0005804920405125213,
+            "time_of_maximum": 0.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.11960576236268959,
+            "absolute_time_integral": 0.11960576236268959,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.11960576236268959,
+          "implied_translation_displacement": 0.014950720295336199
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 24,
+      "case_id": 1000024,
+      "depth": 0.01549047976732254,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g1/tanaka_g1_trajs.npz",
+      "truth_protocol_sha256": "d6bfebad3eae873905bf65d0df38189ab5d2ad4decad2b727a2dd611a0b2bad6",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.003152681878743549,
+        "final": 0.003030893558271648,
+        "median": 0.003044406974644226,
+        "p95": 0.0031879309231439123,
+        "maximum": 0.0032611590597798647,
+        "time_of_maximum": 33.599998474121094
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.0009697972080669352,
+        "final": 0.0013048896211943007,
+        "median": 0.0013542304328596842,
+        "p95": 0.0018806976088955206,
+        "maximum": 0.0019567300704354347,
+        "time_of_maximum": 70.4000015258789
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": 0.00010701862392451151,
+          "final": 5.036885638274822e-05,
+          "median": 5.018181663751035e-05,
+          "p95": 0.0001045662957306832,
+          "maximum": 0.00011588656342711503,
+          "time_of_maximum": 4.800000190734863
+        },
+        "energy_fraction": {
+          "initial": 0.06238596149688115,
+          "final": 0.014924081233090351,
+          "median": 0.014819878654336243,
+          "p95": 0.08427304818060888,
+          "maximum": 0.11328536267567868,
+          "time_of_maximum": 4.800000190734863
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.011495748473470393,
+          "absolute_time_integral": 0.011495748473470393,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": 0.00011778514561518716,
+          "final": 0.0001244212351991627,
+          "median": 0.0001282566535521713,
+          "p95": 0.00020298154186213462,
+          "maximum": 0.00021743934090031694,
+          "time_of_maximum": 60.79999923706055
+        },
+        "energy_fraction": {
+          "initial": 0.8144733565364063,
+          "final": 0.4998904766271672,
+          "median": 0.5546626240965714,
+          "p95": 0.8776881294632122,
+          "maximum": 0.960189443047207,
+          "time_of_maximum": 12.0
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.026819531153963398,
+          "absolute_time_integral": 0.026819531153963398,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.001808767473173824,
+            "final": 0.003328940230691052,
+            "median": 0.0028090586721419056,
+            "p95": 0.0033084635888589306,
+            "maximum": 0.0034721813610202232,
+            "time_of_maximum": 198.39999389648438
+          },
+          "phase_rate_error": {
+            "initial": -0.00013860626896456372,
+            "final": 0.00038195937167661995,
+            "median": 0.0001469282039910687,
+            "p95": 0.00036625081640810034,
+            "maximum": 0.00039273145574578785,
+            "time_of_maximum": 198.39999389648438
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.6653386454183267,
+            "sign_changes_across_active_frames": 1,
+            "signed_time_integral": 0.024791157200366613,
+            "absolute_time_integral": 0.038169915786369024,
+            "sign_coherence": 0.649494678980137
+          },
+          "integrated_phase_rate_error": 0.024791157200366613,
+          "implied_translation_displacement": -0.024791157200366613
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0012095562201692826,
+            "final": 0.004421593673915751,
+            "median": 0.0013079664307478526,
+            "p95": 0.0037968909958432636,
+            "maximum": 0.0044695168564909404,
+            "time_of_maximum": 198.39999389648438
+          },
+          "phase_rate_error": {
+            "initial": -0.00029914558271506794,
+            "final": 8.53498105308746e-05,
+            "median": 8.3433540254652e-05,
+            "p95": 0.0004202590126300578,
+            "maximum": 0.0004729900134655039,
+            "time_of_maximum": 169.60000610351562
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 0.5537848605577689,
+            "sign_changes_across_active_frames": 3,
+            "signed_time_integral": 0.010890449531176339,
+            "absolute_time_integral": 0.050007549753837276,
+            "sign_coherence": 0.21777610750346096
+          },
+          "integrated_phase_rate_error": 0.010890449531176339,
+          "implied_translation_displacement": -0.0054452247655881695
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0007319994465498289,
+            "final": 0.0010616170923757361,
+            "median": 0.0010078267958037348,
+            "p95": 0.0021955652907252187,
+            "maximum": 0.0024085644579228587,
+            "time_of_maximum": 145.60000610351562
+          },
+          "phase_rate_error": {
+            "initial": -0.00037403085509468654,
+            "final": -0.0005800573593244662,
+            "median": -0.00040876658021049035,
+            "p95": -0.00022267374539061403,
+            "maximum": -0.00014935830657037248,
+            "time_of_maximum": 112.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.10724059432909128,
+            "absolute_time_integral": 0.10724059432909128,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.10724059432909128,
+          "implied_translation_displacement": 0.03574686477636376
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0006150469429782232,
+            "final": 0.0006138028105364585,
+            "median": 0.0009173855756003628,
+            "p95": 0.0018411323688231388,
+            "maximum": 0.0019235236326488,
+            "time_of_maximum": 108.80000305175781
+          },
+          "phase_rate_error": {
+            "initial": -0.0004494842053436898,
+            "final": -0.00043211340747792144,
+            "median": -0.0005655775911466149,
+            "p95": -0.00038679542475022604,
+            "maximum": -0.0003070190669133799,
+            "time_of_maximum": 12.800000190734863
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.134211621567609,
+            "absolute_time_integral": 0.134211621567609,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.134211621567609,
+          "implied_translation_displacement": 0.03355290539190225
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0006251573098903294,
+            "final": 0.0007699929348547893,
+            "median": 0.0008501742939051829,
+            "p95": 0.0023682265295927466,
+            "maximum": 0.002581665802257811,
+            "time_of_maximum": 89.5999984741211
+          },
+          "phase_rate_error": {
+            "initial": -0.0005697850738777897,
+            "final": -0.0006989354007742416,
+            "median": -0.0005807609382287671,
+            "p95": -0.0004091640172493205,
+            "maximum": -0.00036364431971713985,
+            "time_of_maximum": 12.800000190734863
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.15538016974146898,
+            "absolute_time_integral": 0.15538016974146898,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.15538016974146898,
+          "implied_translation_displacement": 0.031076033948293797
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.000662014799341372,
+            "final": 0.0014490242984763198,
+            "median": 0.000929277094160759,
+            "p95": 0.002319506537845989,
+            "maximum": 0.0026207212663170508,
+            "time_of_maximum": 75.19999694824219
+          },
+          "phase_rate_error": {
+            "initial": -0.0007103337860595169,
+            "final": -0.0016124241379075694,
+            "median": -0.0007697643071081131,
+            "p95": -0.0005161417025382312,
+            "maximum": -0.0004450578966303649,
+            "time_of_maximum": 12.800000190734863
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.19038400465751093,
+            "absolute_time_integral": 0.19038400465751093,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.19038400465751093,
+          "implied_translation_displacement": 0.03173066744291849
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0006997625988682541,
+            "final": 0.0014885891177834377,
+            "median": 0.0009930981774135608,
+            "p95": 0.002234607842238984,
+            "maximum": 0.002428524767274388,
+            "time_of_maximum": 186.39999389648438
+          },
+          "phase_rate_error": {
+            "initial": -0.0008433319479352644,
+            "final": -0.000894588264134245,
+            "median": -0.001000664425816828,
+            "p95": -0.0006266329151192433,
+            "maximum": -0.0005373310247785063,
+            "time_of_maximum": 12.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.2524949899501706,
+            "absolute_time_integral": 0.2524949899501706,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.2524949899501706,
+          "implied_translation_displacement": 0.03607071285002437
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0007086868544757337,
+            "final": 0.0007521153995146833,
+            "median": 0.000919198751186032,
+            "p95": 0.002071213745397045,
+            "maximum": 0.002284612698665631,
+            "time_of_maximum": 163.1999969482422
+          },
+          "phase_rate_error": {
+            "initial": -0.0009083707014132446,
+            "final": -0.0008309307049150272,
+            "median": -0.0010111830671935833,
+            "p95": -0.0006601501246128542,
+            "maximum": -0.0005829361054172631,
+            "time_of_maximum": 22.399999618530273
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": -1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": -0.26579553428438774,
+            "absolute_time_integral": 0.26579553428438774,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": -0.26579553428438774,
+          "implied_translation_displacement": 0.03322444178554847
+        }
+      ]
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 29,
+      "case_id": 1000029,
+      "depth": 0.01194613054394722,
+      "archive": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536/tanaka_g1/tanaka_g1_trajs.npz",
+      "truth_protocol_sha256": "d6bfebad3eae873905bf65d0df38189ab5d2ad4decad2b727a2dd611a0b2bad6",
+      "n_frames": 251,
+      "time_start": 0.0,
+      "time_final": 200.0,
+      "initial_archived_prediction_parity": {
+        "max_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "q_relative_l2": {
+        "initial": 0.012369965171827108,
+        "final": 0.011379124527818082,
+        "median": 0.011314081620286784,
+        "p95": 0.011408777818017597,
+        "maximum": 0.012369965171827108,
+        "time_of_maximum": 0.0
+      },
+      "q_low_band_relative_l2": {
+        "initial": 0.002020820426393074,
+        "final": 0.002098101483881122,
+        "median": 0.0020356053860204194,
+        "p95": 0.0021106998805440437,
+        "maximum": 0.0021883484124796447,
+        "time_of_maximum": 0.800000011920929
+      },
+      "translation_tangent": {
+        "speed_defect": {
+          "initial": 5.471280195167065e-05,
+          "final": 1.531519271514749e-05,
+          "median": 2.873151796353485e-05,
+          "p95": 3.671594056194461e-05,
+          "maximum": 5.471280195167065e-05,
+          "time_of_maximum": 0.0
+        },
+        "energy_fraction": {
+          "initial": 0.001335007593342138,
+          "final": 0.0001230899057096165,
+          "median": 0.0004316883559659748,
+          "p95": 0.0007150775853313365,
+          "maximum": 0.001335007593342138,
+          "time_of_maximum": 0.0
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": 1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": 0.0051031421875790215,
+          "absolute_time_integral": 0.0051031421875790215,
+          "sign_coherence": 1.0
+        }
+      },
+      "low_band_translation_tangent": {
+        "speed_defect": {
+          "initial": -0.00023899539808075094,
+          "final": -0.0002485994685442938,
+          "median": -0.00024271698838232227,
+          "p95": -0.00023702363777938204,
+          "maximum": -0.00022804759449201423,
+          "time_of_maximum": 98.4000015258789
+        },
+        "energy_fraction": {
+          "initial": 0.9496645221195495,
+          "final": 0.9540775692153277,
+          "median": 0.9723433641650496,
+          "p95": 0.9776095095653874,
+          "maximum": 0.9821455235866047,
+          "time_of_maximum": 0.800000011920929
+        },
+        "sign_persistence": {
+          "activity_floor_relative_to_max_abs": 0.001,
+          "active_frames": 251,
+          "active_fraction": 1.0,
+          "dominant_sign": -1,
+          "fraction_active_frames_with_dominant_sign": 1.0,
+          "sign_changes_across_active_frames": 0,
+          "signed_time_integral": -0.04861079964705432,
+          "absolute_time_integral": 0.04861079964705432,
+          "sign_coherence": 1.0
+        }
+      },
+      "modal": [
+        {
+          "rfft_index": 1,
+          "wave_number": 1.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0025739547868197567,
+            "final": 0.0023800527721558992,
+            "median": 0.002238861021867164,
+            "p95": 0.002576151729865539,
+            "maximum": 0.002784517532824635,
+            "time_of_maximum": 91.19999694824219
+          },
+          "phase_rate_error": {
+            "initial": 0.0004048748087184851,
+            "final": 0.00037523163283729007,
+            "median": 0.0003573396939769606,
+            "p95": 0.00040550655561855364,
+            "maximum": 0.00041575934218836366,
+            "time_of_maximum": 24.0
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.0711475269072098,
+            "absolute_time_integral": 0.0711475269072098,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.0711475269072098,
+          "implied_translation_displacement": -0.0711475269072098
+        },
+        {
+          "rfft_index": 2,
+          "wave_number": 2.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0014861329726005108,
+            "final": 0.0014613623278095294,
+            "median": 0.0013300639377717479,
+            "p95": 0.0015542424258522941,
+            "maximum": 0.0017008997508357463,
+            "time_of_maximum": 21.600000381469727
+          },
+          "phase_rate_error": {
+            "initial": 0.00047674756376171555,
+            "final": 0.00046765149102844883,
+            "median": 0.0004259582496369167,
+            "p95": 0.0004956273797417591,
+            "maximum": 0.0005413413103399656,
+            "time_of_maximum": 13.600000381469727
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.08596853866654211,
+            "absolute_time_integral": 0.08596853866654211,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.08596853866654211,
+          "implied_translation_displacement": -0.042984269333271055
+        },
+        {
+          "rfft_index": 3,
+          "wave_number": 3.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.001024604508348647,
+            "final": 0.0011309876042358677,
+            "median": 0.0010870119460861048,
+            "p95": 0.0011543187782882061,
+            "maximum": 0.001232144291029329,
+            "time_of_maximum": 13.600000381469727
+          },
+          "phase_rate_error": {
+            "initial": 0.0004914093488297053,
+            "final": 0.0005376168385083075,
+            "median": 0.0005235242255265109,
+            "p95": 0.0005527226003853908,
+            "maximum": 0.0005833059654082228,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.1043435103505167,
+            "absolute_time_integral": 0.1043435103505167,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.1043435103505167,
+          "implied_translation_displacement": -0.0347811701168389
+        },
+        {
+          "rfft_index": 4,
+          "wave_number": 4.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0009940864260658297,
+            "final": 0.0011259103134059966,
+            "median": 0.001084825389218603,
+            "p95": 0.0011472578372580902,
+            "maximum": 0.0012349752426064977,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0006339581933948344,
+            "final": 0.0007167462193874905,
+            "median": 0.0007008067546085856,
+            "p95": 0.00073440446115491,
+            "maximum": 0.0008036658576300505,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.14029649332649374,
+            "absolute_time_integral": 0.14029649332649374,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.14029649332649374,
+          "implied_translation_displacement": -0.035074123331623436
+        },
+        {
+          "rfft_index": 5,
+          "wave_number": 5.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0011811326833923923,
+            "final": 0.0013183702473195445,
+            "median": 0.0012517828340031334,
+            "p95": 0.0013226982367362159,
+            "maximum": 0.0014007288298042994,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0009472062933432788,
+            "final": 0.0010562551545938122,
+            "median": 0.001014658790891183,
+            "p95": 0.0010622757250618746,
+            "maximum": 0.0011424879941192639,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.20329731495407566,
+            "absolute_time_integral": 0.20329731495407566,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.20329731495407566,
+          "implied_translation_displacement": -0.04065946299081513
+        },
+        {
+          "rfft_index": 6,
+          "wave_number": 6.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0014082228836731045,
+            "final": 0.0014990026616794982,
+            "median": 0.0014476506419298495,
+            "p95": 0.0015102770360885722,
+            "maximum": 0.0015859762967396717,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0013632148712504019,
+            "final": 0.0014456970366808963,
+            "median": 0.0014103425252542962,
+            "p95": 0.0014727326396781378,
+            "maximum": 0.001553374905258071,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.28271096871931245,
+            "absolute_time_integral": 0.28271096871931245,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.28271096871931245,
+          "implied_translation_displacement": -0.04711849478655208
+        },
+        {
+          "rfft_index": 7,
+          "wave_number": 7.000000000000001,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0016014890168040065,
+            "final": 0.0016574415136225906,
+            "median": 0.0016089342535027227,
+            "p95": 0.001664240486589709,
+            "maximum": 0.0017313704286523312,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0018153470131198374,
+            "final": 0.0018738480421873858,
+            "median": 0.001830542338365008,
+            "p95": 0.0018889578374674295,
+            "maximum": 0.001978394902347431,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.36636537443220546,
+            "absolute_time_integral": 0.36636537443220546,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.36636537443220546,
+          "implied_translation_displacement": -0.052337910633172204
+        },
+        {
+          "rfft_index": 8,
+          "wave_number": 8.0,
+          "physical_scale_active_fraction": 1.0,
+          "eta_phase_rate_active_fraction": 1.0,
+          "q_error_over_physical_scale": {
+            "initial": 0.0017209337660246092,
+            "final": 0.0017361617246205601,
+            "median": 0.001700598322121462,
+            "p95": 0.0017476695572562705,
+            "maximum": 0.0018058339131305863,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_error": {
+            "initial": 0.0022338625639063913,
+            "final": 0.0022440780942566403,
+            "median": 0.0022123848466985155,
+            "p95": 0.0022755308955657986,
+            "maximum": 0.0023578701781555773,
+            "time_of_maximum": 0.800000011920929
+          },
+          "phase_rate_sign_persistence": {
+            "activity_floor_relative_to_max_abs": 0.001,
+            "active_frames": 251,
+            "active_fraction": 1.0,
+            "dominant_sign": 1,
+            "fraction_active_frames_with_dominant_sign": 1.0,
+            "sign_changes_across_active_frames": 0,
+            "signed_time_integral": 0.44271211174300784,
+            "absolute_time_integral": 0.44271211174300784,
+            "sign_coherence": 1.0
+          },
+          "integrated_phase_rate_error": 0.44271211174300784,
+          "implied_translation_displacement": -0.05533901396787598
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,860 @@
+{
+  "definition": {
+    "q": "stored G(eta)xi",
+    "legacy_relative_derivative_deadzone": 0.03,
+    "legacy_reject_if_sign_changes_greater_than": 10,
+    "spectral_metric": "Parseval energy fraction of q or q_x strictly above the listed Fourier-mode cutoff",
+    "batch_tag": "0000",
+    "sources": [
+      {
+        "label": "tanaka_g0",
+        "path": "/home/johnma/dno-fno/data/tanaka_2_adaptive_g0.npz"
+      },
+      {
+        "label": "tanaka_g1",
+        "path": "/home/johnma/dno-fno/data/tanaka_2_adaptive_g1.npz"
+      }
+    ]
+  },
+  "sources": {
+    "tanaka_g0": {
+      "rows": 51200,
+      "legacy_rejected_rows": 1031,
+      "legacy_rejected_fraction": 0.02013671875,
+      "sign_changes": {
+        "min": 2.0,
+        "p01": 2.0,
+        "median": 4.0,
+        "p95": 8.0,
+        "p99": 14.0,
+        "max": 162.0
+      },
+      "q_tail_energy": {
+        "5": {
+          "legacy_rejected": {
+            "min": 6.489762648975694e-07,
+            "p01": 9.242035009114185e-07,
+            "median": 0.346478857187687,
+            "p95": 0.9989195031940165,
+            "p99": 0.9989686700534111,
+            "max": 0.999504313047575
+          },
+          "legacy_retained": {
+            "min": 7.718495651100788e-07,
+            "p01": 2.5828985354470744e-05,
+            "median": 0.8144805149272406,
+            "p95": 0.99658360336153,
+            "p99": 0.9983974193140737,
+            "max": 0.9999038526183432
+          },
+          "recall_1": {
+            "threshold": 6.489762648975694e-07,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 1.0
+          },
+          "recall_0.99": {
+            "threshold": 9.233356834053529e-07,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9999003368614084
+          }
+        },
+        "16": {
+          "legacy_rejected": {
+            "min": 1.5566180316034088e-07,
+            "p01": 6.17818173260556e-07,
+            "median": 0.001110662708580027,
+            "p95": 0.9726161382114304,
+            "p99": 0.9736395665952027,
+            "max": 0.9802418210511595
+          },
+          "legacy_retained": {
+            "min": 1.983768923663874e-09,
+            "p01": 4.752791036139048e-08,
+            "median": 0.09851594604816481,
+            "p95": 0.9155454722879866,
+            "p99": 0.9599092707662967,
+            "max": 0.9850892138420078
+          },
+          "recall_1": {
+            "threshold": 1.5566180316034088e-07,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9326476509398234
+          },
+          "recall_0.99": {
+            "threshold": 6.170074330125939e-07,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.8687835117303514
+          }
+        },
+        "32": {
+          "legacy_rejected": {
+            "min": 3.1136632430912877e-10,
+            "p01": 1.5261874869540305e-09,
+            "median": 3.4724514112474846e-06,
+            "p95": 0.8332261393411925,
+            "p99": 0.8346173940580075,
+            "max": 0.8531113693845328
+          },
+          "legacy_retained": {
+            "min": 2.2529741202599894e-11,
+            "p01": 3.3698534838230775e-10,
+            "median": 0.0009565836476667756,
+            "p95": 0.602841762260764,
+            "p99": 0.7723061092580923,
+            "max": 0.8408534066930512
+          },
+          "recall_1": {
+            "threshold": 3.1136632430912877e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.990611732344675
+          },
+          "recall_0.99": {
+            "threshold": 1.5042195759955196e-09,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9444676991767825
+          }
+        },
+        "64": {
+          "legacy_rejected": {
+            "min": 1.7674308535290889e-12,
+            "p01": 2.3570012919347286e-12,
+            "median": 1.5885263015070866e-06,
+            "p95": 0.37084331241722274,
+            "p99": 0.37812462823806603,
+            "max": 0.4201901279924372
+          },
+          "legacy_retained": {
+            "min": 1.3990401874606901e-12,
+            "p01": 2.306487615179381e-12,
+            "median": 3.313059876300212e-07,
+            "p95": 0.11124326404595612,
+            "p99": 0.27038020072524,
+            "max": 0.36543597802460315
+          },
+          "recall_1": {
+            "threshold": 1.7674308535290889e-12,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9994418864238873
+          },
+          "recall_0.99": {
+            "threshold": 2.3539933362535584e-12,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9892363810321114
+          }
+        },
+        "80": {
+          "legacy_rejected": {
+            "min": 1.0790398176370484e-12,
+            "p01": 1.3586764965748572e-12,
+            "median": 1.2438220192957881e-06,
+            "p95": 0.1949237626674733,
+            "p99": 0.20095318798148704,
+            "max": 0.23963566615207807
+          },
+          "legacy_retained": {
+            "min": 5.223352461685415e-13,
+            "p01": 1.2606705291326247e-12,
+            "median": 6.506860788046087e-08,
+            "p95": 0.03635202233032245,
+            "p99": 0.12319664804944547,
+            "max": 0.1867306619203939
+          },
+          "recall_1": {
+            "threshold": 1.0790398176370484e-12,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.995216169347605
+          },
+          "recall_0.99": {
+            "threshold": 1.3550354122344803e-12,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.986206621618928
+          }
+        },
+        "96": {
+          "legacy_rejected": {
+            "min": 4.1595208756878544e-13,
+            "p01": 6.192578166597664e-13,
+            "median": 7.476275634031075e-07,
+            "p95": 0.08568502187256186,
+            "p99": 0.08858132741310458,
+            "max": 0.11635616241669318
+          },
+          "legacy_retained": {
+            "min": 9.975846935795672e-14,
+            "p01": 4.686651450660649e-13,
+            "median": 3.153804632161405e-08,
+            "p95": 0.010233408254790495,
+            "p99": 0.04718468155849582,
+            "max": 0.0784728366197183
+          },
+          "recall_1": {
+            "threshold": 4.1595208756878544e-13,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9930634455540274
+          },
+          "recall_0.99": {
+            "threshold": 6.136120761801662e-13,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9832167274611812
+          }
+        }
+      },
+      "derivative_tail_energy": {
+        "5": {
+          "legacy_rejected": {
+            "min": 0.003575935526404097,
+            "p01": 0.004217270855943838,
+            "median": 0.7259904373050847,
+            "p95": 0.999995225242704,
+            "p99": 0.9999953832591782,
+            "max": 0.9999968427790698
+          },
+          "legacy_retained": {
+            "min": 0.0003024814494836897,
+            "p01": 0.005006807931637204,
+            "median": 0.9755008787271582,
+            "p95": 0.9999687365946442,
+            "p99": 0.999991038486811,
+            "max": 0.9999993050453658
+          },
+          "recall_1": {
+            "threshold": 0.003575935526404097,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9957144850405629
+          },
+          "recall_0.99": {
+            "threshold": 0.004215611615341923,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.993362434969802
+          }
+        },
+        "16": {
+          "legacy_rejected": {
+            "min": 3.188876481769228e-05,
+            "p01": 0.00011828654375736358,
+            "median": 0.018581588766699773,
+            "p95": 0.998904984377924,
+            "p99": 0.9989324576663012,
+            "max": 0.9991418087436535
+          },
+          "legacy_retained": {
+            "min": 1.3736286291338065e-06,
+            "p01": 2.5472474230700837e-05,
+            "median": 0.33650579228315947,
+            "p95": 0.9932978865157637,
+            "p99": 0.9980103931436751,
+            "max": 0.9991134754263841
+          },
+          "recall_1": {
+            "threshold": 3.188876481769228e-05,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9843728198688433
+          },
+          "recall_0.99": {
+            "threshold": 0.0001108387224124568,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9006159181964959
+          }
+        },
+        "32": {
+          "legacy_rejected": {
+            "min": 8.305707072327428e-08,
+            "p01": 5.930585496193636e-07,
+            "median": 0.006696633366570328,
+            "p95": 0.9752560135891923,
+            "p99": 0.9756478680045785,
+            "max": 0.98032009546701
+          },
+          "legacy_retained": {
+            "min": 5.418892602628182e-09,
+            "p01": 4.65738018256412e-08,
+            "median": 0.010630577898604386,
+            "p95": 0.8902626171233502,
+            "p99": 0.958741894464543,
+            "max": 0.9743117750239343
+          },
+          "recall_1": {
+            "threshold": 8.305707072327428e-08,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9874823097929
+          },
+          "recall_0.99": {
+            "threshold": 5.879933931112242e-07,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9317506826924994
+          }
+        },
+        "64": {
+          "legacy_rejected": {
+            "min": 4.414203926548445e-10,
+            "p01": 5.650475438530414e-10,
+            "median": 0.006294535151786924,
+            "p95": 0.693976224167572,
+            "p99": 0.7008082949090049,
+            "max": 0.768648957589669
+          },
+          "legacy_retained": {
+            "min": 2.4149013636342753e-10,
+            "p01": 5.245929158573837e-10,
+            "median": 0.000106834933820366,
+            "p95": 0.3531252453524556,
+            "p99": 0.5901991863372366,
+            "max": 0.6841144216051723
+          },
+          "recall_1": {
+            "threshold": 4.414203926548445e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9957344176682812
+          },
+          "recall_0.99": {
+            "threshold": 5.624653950695202e-10,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9866052741732942
+          }
+        },
+        "80": {
+          "legacy_rejected": {
+            "min": 1.6847828614342878e-10,
+            "p01": 2.386905913636841e-10,
+            "median": 0.00546552791740131,
+            "p95": 0.46507117361360006,
+            "p99": 0.4745326200838867,
+            "max": 0.7018654512549273
+          },
+          "legacy_retained": {
+            "min": 9.180240048178415e-11,
+            "p01": 2.4395060808121105e-10,
+            "median": 4.4658505327588454e-05,
+            "p95": 0.16022052813341506,
+            "p99": 0.3537647004347808,
+            "max": 0.44641621166376777
+          },
+          "recall_1": {
+            "threshold": 1.6847828614342878e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.997827343578704
+          },
+          "recall_0.99": {
+            "threshold": 2.3754117961588687e-10,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9912097111762244
+          }
+        },
+        "96": {
+          "legacy_rejected": {
+            "min": 7.91747606257213e-11,
+            "p01": 1.266934125429727e-10,
+            "median": 0.004064133162880268,
+            "p95": 0.25405132766721095,
+            "p99": 0.2665752158958247,
+            "max": 0.527820667146002
+          },
+          "legacy_retained": {
+            "min": 1.8544789366786608e-11,
+            "p01": 1.0699824695646862e-10,
+            "median": 1.3468662648297088e-05,
+            "p95": 0.0590210064625211,
+            "p99": 0.17185672360354798,
+            "max": 0.2445874640686671
+          },
+          "recall_1": {
+            "threshold": 7.91747606257213e-11,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.994957045187267
+          },
+          "recall_0.99": {
+            "threshold": 1.246605881838273e-10,
+            "realized_recall": 0.9903006789524733,
+            "legacy_retained_flag_rate": 0.9828778727899699
+          }
+        }
+      },
+      "smallest_derivative_tail_80_legacy_rejects": [
+        {
+          "row": 3329,
+          "case_id": 16,
+          "time": 129.36000061035156,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 8,
+          "derivative_tail_energy": 1.6847828614342878e-10
+        },
+        {
+          "row": 3385,
+          "case_id": 16,
+          "time": 184.55999755859375,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 9,
+          "derivative_tail_energy": 1.8067405828965566e-10
+        },
+        {
+          "row": 3361,
+          "case_id": 16,
+          "time": 160.87998962402344,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 9,
+          "derivative_tail_energy": 1.8083850269312872e-10
+        },
+        {
+          "row": 3362,
+          "case_id": 16,
+          "time": 161.9199981689453,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 8,
+          "derivative_tail_energy": 1.9753577556649663e-10
+        },
+        {
+          "row": 3352,
+          "case_id": 16,
+          "time": 152.16000366210938,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 9,
+          "derivative_tail_energy": 1.9866367393550543e-10
+        },
+        {
+          "row": 3353,
+          "case_id": 16,
+          "time": 153.1199951171875,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 8,
+          "derivative_tail_energy": 2.0705801883322494e-10
+        },
+        {
+          "row": 3384,
+          "case_id": 16,
+          "time": 183.51998901367188,
+          "sign_changes": 14,
+          "dominant_derivative_mode": 8,
+          "derivative_tail_energy": 2.1496383429795217e-10
+        },
+        {
+          "row": 3381,
+          "case_id": 16,
+          "time": 180.63999938964844,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 8,
+          "derivative_tail_energy": 2.2192335978132348e-10
+        }
+      ]
+    },
+    "tanaka_g1": {
+      "rows": 51200,
+      "legacy_rejected_rows": 803,
+      "legacy_rejected_fraction": 0.01568359375,
+      "sign_changes": {
+        "min": 2.0,
+        "p01": 2.0,
+        "median": 4.0,
+        "p95": 8.0,
+        "p99": 12.0,
+        "max": 48.0
+      },
+      "q_tail_energy": {
+        "5": {
+          "legacy_rejected": {
+            "min": 1.5188617165262317e-06,
+            "p01": 2.60644831538175e-06,
+            "median": 0.538505929317267,
+            "p95": 0.9398288189718734,
+            "p99": 0.9654544718916874,
+            "max": 0.998460408393549
+          },
+          "legacy_retained": {
+            "min": 1.190192766371905e-06,
+            "p01": 0.0001417133187938497,
+            "median": 0.7726223421633527,
+            "p95": 0.9972497924639492,
+            "p99": 0.9983801391191219,
+            "max": 0.9997450202033731
+          },
+          "recall_1": {
+            "threshold": 1.5188617165262317e-06,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9998809452943628
+          },
+          "recall_0.99": {
+            "threshold": 2.601920080052843e-06,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9993650415699347
+          }
+        },
+        "16": {
+          "legacy_rejected": {
+            "min": 7.278347172256902e-07,
+            "p01": 1.3889346466899162e-06,
+            "median": 0.00742332441212524,
+            "p95": 0.3622544709343021,
+            "p99": 0.46487733859990016,
+            "max": 0.9618822820954223
+          },
+          "legacy_retained": {
+            "min": 4.973790037793748e-10,
+            "p01": 7.237757938683788e-08,
+            "median": 0.0583721859010907,
+            "p95": 0.9350218982379753,
+            "p99": 0.9590438700168971,
+            "max": 0.9858736209640201
+          },
+          "recall_1": {
+            "threshold": 7.278347172256902e-07,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.8680873861539378
+          },
+          "recall_0.99": {
+            "threshold": 1.387278391511839e-06,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.8401690576820049
+          }
+        },
+        "32": {
+          "legacy_rejected": {
+            "min": 4.664508191813156e-10,
+            "p01": 1.1223476899117828e-09,
+            "median": 4.826424065959763e-06,
+            "p95": 0.03147273274851289,
+            "p99": 0.08363722549870098,
+            "max": 0.7819336592448878
+          },
+          "legacy_retained": {
+            "min": 1.753531838391037e-11,
+            "p01": 1.099041926911523e-10,
+            "median": 0.0002732813049847075,
+            "p95": 0.6597957648755485,
+            "p99": 0.7683654634883308,
+            "max": 0.8570584329499995
+          },
+          "recall_1": {
+            "threshold": 4.664508191813156e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9778558247514733
+          },
+          "recall_0.99": {
+            "threshold": 1.1215037241576452e-09,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.964799492033256
+          }
+        },
+        "64": {
+          "legacy_rejected": {
+            "min": 8.874480950316855e-13,
+            "p01": 1.1104622367472753e-12,
+            "median": 1.5099367723992189e-10,
+            "p95": 5.3356465320341675e-05,
+            "p99": 0.0003834023759854815,
+            "max": 0.2871101810683865
+          },
+          "legacy_retained": {
+            "min": 5.874709458973232e-13,
+            "p01": 2.7171060442923876e-12,
+            "median": 1.8570105065684319e-07,
+            "p95": 0.1630226808175901,
+            "p99": 0.2658969701133929,
+            "max": 0.3428785333861566
+          },
+          "recall_1": {
+            "threshold": 8.874480950316855e-13,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9997817330396651
+          },
+          "recall_0.99": {
+            "threshold": 1.1102205712585704e-12,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9979562275532273
+          }
+        },
+        "80": {
+          "legacy_rejected": {
+            "min": 5.559560706849651e-13,
+            "p01": 6.493062027191264e-13,
+            "median": 8.042181339418471e-12,
+            "p95": 3.1902116518556862e-06,
+            "p99": 2.9099149474693382e-05,
+            "max": 0.13593739859852416
+          },
+          "legacy_retained": {
+            "min": 2.8432384117775384e-13,
+            "p01": 1.2361013508263798e-12,
+            "median": 5.2223249778502305e-08,
+            "p95": 0.06258925084002069,
+            "p99": 0.12116484451229856,
+            "max": 0.1626986132196659
+          },
+          "recall_1": {
+            "threshold": 5.559560706849651e-13,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9960910371649107
+          },
+          "recall_0.99": {
+            "threshold": 6.492720062658567e-13,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9948806476575986
+          }
+        },
+        "96": {
+          "legacy_rejected": {
+            "min": 2.927309053412192e-13,
+            "p01": 3.4589570776922727e-13,
+            "median": 2.5490617746824663e-12,
+            "p95": 7.913979435927821e-07,
+            "p99": 3.7216731231435004e-06,
+            "max": 0.054509448801936984
+          },
+          "legacy_retained": {
+            "min": 8.702006589716174e-14,
+            "p01": 3.888210957140373e-13,
+            "median": 2.0892067004564946e-08,
+            "p95": 0.02032639874837042,
+            "p99": 0.04625713063252859,
+            "max": 0.06954728037957036
+          },
+          "recall_1": {
+            "threshold": 2.927309053412192e-13,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9931741968767982
+          },
+          "recall_0.99": {
+            "threshold": 3.456959098427883e-13,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9913090064884814
+          }
+        }
+      },
+      "derivative_tail_energy": {
+        "5": {
+          "legacy_rejected": {
+            "min": 0.004034901838057358,
+            "p01": 0.007416878469212858,
+            "median": 0.8754711419201112,
+            "p95": 0.9963656525637948,
+            "p99": 0.998426884807755,
+            "max": 0.999991865319525
+          },
+          "legacy_retained": {
+            "min": 0.0006318867800558476,
+            "p01": 0.005328377164051855,
+            "median": 0.9646280636091087,
+            "p95": 0.9999798761267634,
+            "p99": 0.9999909984840571,
+            "max": 0.9999982489752588
+          },
+          "recall_1": {
+            "threshold": 0.004034901838057358,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9955354485386035
+          },
+          "recall_0.99": {
+            "threshold": 0.0073990687191598965,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9824791158203862
+          }
+        },
+        "16": {
+          "legacy_rejected": {
+            "min": 6.587602065146293e-05,
+            "p01": 0.0002528438204829413,
+            "median": 0.05890928726976036,
+            "p95": 0.7437100579543109,
+            "p99": 0.8541414893052679,
+            "max": 0.9981897458937323
+          },
+          "legacy_retained": {
+            "min": 9.206953612739631e-07,
+            "p01": 1.703269232901747e-05,
+            "median": 0.23845343342034855,
+            "p95": 0.9957089354010191,
+            "p99": 0.9979492365913956,
+            "max": 0.9993063092213075
+          },
+          "recall_1": {
+            "threshold": 6.587602065146293e-05,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9324166120999265
+          },
+          "recall_0.99": {
+            "threshold": 0.00025197850279888676,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.8594956048971168
+          }
+        },
+        "32": {
+          "legacy_rejected": {
+            "min": 3.9396621549018275e-08,
+            "p01": 1.519421134883468e-07,
+            "median": 0.0002589500808190148,
+            "p95": 0.15181213201877153,
+            "p99": 0.27547145285507457,
+            "max": 0.9621140516714806
+          },
+          "legacy_retained": {
+            "min": 7.731414054969935e-09,
+            "p01": 6.13196100594045e-08,
+            "median": 0.004241722719039222,
+            "p95": 0.9206165337961356,
+            "p99": 0.957694922184028,
+            "max": 0.9755035484125366
+          },
+          "recall_1": {
+            "threshold": 3.9396621549018275e-08,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9956148183423617
+          },
+          "recall_0.99": {
+            "threshold": 1.5175255591469155e-07,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9759112645593984
+          }
+        },
+        "64": {
+          "legacy_rejected": {
+            "min": 2.2056916466415528e-10,
+            "p01": 2.692752151934121e-10,
+            "median": 1.2048837497957425e-08,
+            "p95": 0.006867310728845762,
+            "p99": 0.017616812939898075,
+            "max": 0.6127338382129293
+          },
+          "legacy_retained": {
+            "min": 1.238467917186343e-10,
+            "p01": 5.082036182530184e-10,
+            "median": 8.027600616745588e-05,
+            "p95": 0.4505364057942537,
+            "p99": 0.5861028676004757,
+            "max": 0.649452528896826
+          },
+          "recall_1": {
+            "threshold": 2.2056916466415528e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9973411115741017
+          },
+          "recall_0.99": {
+            "threshold": 2.691301319407738e-10,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.996765680496855
+          }
+        },
+        "80": {
+          "legacy_rejected": {
+            "min": 1.7168626231571176e-10,
+            "p01": 1.9244404312545e-10,
+            "median": 1.5699068002077262e-09,
+            "p95": 0.0035955725445105512,
+            "p99": 0.013501757377531952,
+            "max": 0.3793297777039358
+          },
+          "legacy_retained": {
+            "min": 7.536702453298982e-11,
+            "p01": 2.284489949790063e-10,
+            "median": 2.3802627063194328e-05,
+            "p95": 0.23275197379811957,
+            "p99": 0.3508178213385055,
+            "max": 0.4241072323271207
+          },
+          "recall_1": {
+            "threshold": 1.7168626231571176e-10,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9939282100125008
+          },
+          "recall_0.99": {
+            "threshold": 1.9241223394323126e-10,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9933726213861936
+          }
+        },
+        "96": {
+          "legacy_rejected": {
+            "min": 6.891656352458062e-11,
+            "p01": 9.238117204716215e-11,
+            "median": 4.819412443810915e-10,
+            "p95": 0.0029546901641130247,
+            "p99": 0.010949507778707148,
+            "max": 0.1924482150701038
+          },
+          "legacy_retained": {
+            "min": 1.4109742366000347e-11,
+            "p01": 7.327206708945492e-11,
+            "median": 5.91047081391138e-06,
+            "p95": 0.09754530045111416,
+            "p99": 0.16995705441213207,
+            "max": 0.22962145645566215
+          },
+          "recall_1": {
+            "threshold": 6.891656352458062e-11,
+            "realized_recall": 1.0,
+            "legacy_retained_flag_rate": 0.9929757723674029
+          },
+          "recall_0.99": {
+            "threshold": 9.234138700281529e-11,
+            "realized_recall": 0.9900373599003736,
+            "legacy_retained_flag_rate": 0.9827965950354188
+          }
+        }
+      },
+      "smallest_derivative_tail_80_legacy_rejects": [
+        {
+          "row": 29320,
+          "case_id": 1000146,
+          "time": 122.7199935913086,
+          "sign_changes": 16,
+          "dominant_derivative_mode": 10,
+          "derivative_tail_energy": 1.7168626231571176e-10
+        },
+        {
+          "row": 29348,
+          "case_id": 1000146,
+          "time": 149.83999633789062,
+          "sign_changes": 16,
+          "dominant_derivative_mode": 6,
+          "derivative_tail_energy": 1.8134446339567054e-10
+        },
+        {
+          "row": 34352,
+          "case_id": 1000171,
+          "time": 154.0,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 10,
+          "derivative_tail_energy": 1.8423367891404092e-10
+        },
+        {
+          "row": 29319,
+          "case_id": 1000146,
+          "time": 121.75999450683594,
+          "sign_changes": 14,
+          "dominant_derivative_mode": 10,
+          "derivative_tail_energy": 1.865480243954928e-10
+        },
+        {
+          "row": 29387,
+          "case_id": 1000146,
+          "time": 187.83999633789062,
+          "sign_changes": 14,
+          "dominant_derivative_mode": 7,
+          "derivative_tail_energy": 1.8682813021391685e-10
+        },
+        {
+          "row": 34350,
+          "case_id": 1000171,
+          "time": 151.9199981689453,
+          "sign_changes": 12,
+          "dominant_derivative_mode": 12,
+          "derivative_tail_energy": 1.8745586362788875e-10
+        },
+        {
+          "row": 29346,
+          "case_id": 1000146,
+          "time": 147.9199981689453,
+          "sign_changes": 14,
+          "dominant_derivative_mode": 5,
+          "derivative_tail_energy": 1.9067817714881386e-10
+        },
+        {
+          "row": 29398,
+          "case_id": 1000146,
+          "time": 198.63999938964844,
+          "sign_changes": 16,
+          "dominant_derivative_mode": 10,
+          "derivative_tail_energy": 1.9188906743889113e-10
+        }
+      ]
+    }
+  },
+  "limitation": "The unavailable pre-cleaning tanaka_1 archive prevents a full rowwise audit of all 548360 historical rejections. This scan measures overlap and false positives on corrected periodic data."
+}

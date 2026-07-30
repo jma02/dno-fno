@@ -1,0 +1,5 @@
+threshold,n_truth_valid,n_raw_crossings,n_shape_crossings,n_translation_crossings,n_raw_crossings_without_shape_crossing,n_translation_dominated_at_raw_onset,median_raw_onset_time,median_shape_onset_time,median_translation_onset_time,median_one_grid_lead_to_raw_onset
+0.25,32,4,1,4,3,3,128.4000015258789,108.80000305175781,128.4000015258789,28.800003051757812
+0.5,32,2,1,2,1,1,133.20000076293945,168.8000030517578,136.4000015258789,58.000003814697266
+0.75,32,1,0,1,1,0,132.0,,144.8000030517578,60.80000305175781
+1.0,32,1,0,0,1,0,166.39999389648438,,,95.19999694824219
