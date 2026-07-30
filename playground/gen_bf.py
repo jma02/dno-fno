@@ -1,15 +1,14 @@
-"""Generate Benjamin-Feir initial conditions per Xu & Guyenne (JCP 2009), eq. (33).
+"""Reconstruct the historical empirical Benjamin--Feir initial conditions.
 
-A Stokes carrier wave (k_carr, steepness eps_c = k_carr * a) is modulated by two
-Airy sideband waves at (k_l, k_r) = (k_carr - dk, k_carr + dk) with perturbation
-amplitude eps_p:
+This file matches the collaborator archive by adding fitted bound-mode terms
+and using the carrier coefficient in both sideband potentials.  It is retained
+for archive comparison and is not the paper-ready JCP09 equation-(33)
+constructor; that implementation is in
+``solver.gen_data.benjamin_feir_jcp09``.
 
   eta(x,0) = eta_0(x) + eps_p * a * [cos(k_l x - π/4) + cos(k_r x - π/4)]
   xi(x,0)  = xi_0(x)  + eps_p * a * [exp(k_l*eta)/sqrt(k_l) * sin(k_l x - π/4)
                                     + exp(k_r*eta)/sqrt(k_r) * sin(k_r x - π/4)]
-
-Default parameters reproduce JCP09 §4.2.3: k_carr=9, eps_c=0.13, (k_l,k_r)=(7,11),
-eps_p=0.1 on a 2π domain.
 
 Note: We do all computations on our standard L=164, Nx=1024 grid (deep water,
 h=1000) so the IC is directly compatible with our FNO and surrogate solver. The
@@ -53,7 +52,7 @@ def benjamin_feir_ic(
     phase_r_extra: float = 0.0,
     bf_2nd_order: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Build a Benjamin-Feir initial condition (carrier + 2 sideband Airy waves).
+    """Build one historical empirical carrier-plus-sideband condition.
 
     n_carr, n_l, n_r are mode indices on [0, length]. eps_carrier = k_carr * a is
     the carrier steepness, where `a` is the *fundamental* amplitude in the eta

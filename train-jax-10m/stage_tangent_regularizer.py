@@ -226,7 +226,11 @@ def _rhs_nonlinear_from_gxi(
     return State(eta=eta_t, xi=xi_t)
 
 
-def make_reference_F(rp: ReferenceIFParams) -> Callable[[SpectralState, jnp.ndarray], SpectralState]:
+def make_reference_F(
+    rp: ReferenceIFParams,
+    *,
+    zero_mean_gxi: bool = False,
+) -> Callable[[SpectralState, jnp.ndarray], SpectralState]:
     """Build F_ref(v_hat, t_local) using the order-N Craig-Sulem series as the DNO.
 
     Vmap over the batch axis so `depth` (batched) is honored per-sample.
@@ -239,6 +243,8 @@ def make_reference_F(rp: ReferenceIFParams) -> Callable[[SpectralState, jnp.ndar
         phys_hat = _apply_linear_flow_batched(v_hat, t_local, rp.k, rp.g0, rp.gravity)
         phys_state = _hat_to_state(phys_hat)
         gxi = dno_batched(phys_state.eta, phys_state.xi, rp.depth)
+        if zero_mean_gxi:
+            gxi = gxi - jnp.mean(gxi, axis=-1, keepdims=True)
         nl_state = _rhs_nonlinear_from_gxi(phys_state, gxi, rp.k, rp.g0, rp.filter_fraction)
         nl_hat = _state_to_hat(nl_state, rp.nx)
         return _apply_linear_flow_batched(nl_hat, -t_local, rp.k, rp.g0, rp.gravity)
@@ -253,6 +259,9 @@ def make_model_F(
     denorm_targets_fn: Callable[[jnp.ndarray], jnp.ndarray],
     filter_predictions_fn: Callable[[jnp.ndarray], jnp.ndarray],
     rp: ReferenceIFParams,
+    *,
+    model_dtype: jnp.dtype | None = None,
+    zero_mean_gxi: bool = False,
 ) -> Callable[[SpectralState, jnp.ndarray], SpectralState]:
     """Build F_model(v_hat, t_local) using the learned surrogate for gxi.
 
@@ -262,10 +271,27 @@ def make_model_F(
     def F(v_hat: SpectralState, t_local: jnp.ndarray) -> SpectralState:
         phys_hat = _apply_linear_flow_batched(v_hat, t_local, rp.k, rp.g0, rp.gravity)
         phys_state = _hat_to_state(phys_hat)
-        inputs = norm_inputs_fn(phys_state.eta, phys_state.xi)
-        preds = apply_fn({"params": model_params}, inputs, batch_depth)
+        eta_model = (
+            phys_state.eta.astype(model_dtype)
+            if model_dtype is not None
+            else phys_state.eta
+        )
+        xi_model = (
+            phys_state.xi.astype(model_dtype)
+            if model_dtype is not None
+            else phys_state.xi
+        )
+        depth_model = (
+            batch_depth.astype(model_dtype)
+            if model_dtype is not None
+            else batch_depth
+        )
+        inputs = norm_inputs_fn(eta_model, xi_model)
+        preds = apply_fn({"params": model_params}, inputs, depth_model)
         preds = filter_predictions_fn(preds)
-        gxi = denorm_targets_fn(preds)[..., 0]
+        gxi = denorm_targets_fn(preds)[..., 0].astype(phys_state.eta.dtype)
+        if zero_mean_gxi:
+            gxi = gxi - jnp.mean(gxi, axis=-1, keepdims=True)
         nl_state = _rhs_nonlinear_from_gxi(phys_state, gxi, rp.k, rp.g0, rp.filter_fraction)
         nl_hat = _state_to_hat(nl_state, rp.nx)
         return _apply_linear_flow_batched(nl_hat, -t_local, rp.k, rp.g0, rp.gravity)

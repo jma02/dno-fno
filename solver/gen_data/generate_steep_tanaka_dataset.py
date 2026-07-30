@@ -56,7 +56,11 @@ from .generate_bf_dataset import (  # noqa: E402
     select_time_indices,
     write_npy_entry,
 )
-from .generate_tanaka_dataset_v2 import build_per_case_initial_conditions  # noqa: E402
+from .generate_tanaka_dataset_v2 import (  # noqa: E402
+    TANAKA_FINE_FACTOR,
+    TANAKA_PROFILE_RECONSTRUCTION,
+    build_per_case_initial_conditions,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,6 +175,9 @@ def main() -> None:
                 "min_crests": args.min_crests, "max_crests": args.max_crests,
                 "per_crest_steepness_floor": args.per_crest_steepness_floor,
                 "separation_widths": args.separation_widths,
+                "profile_reconstruction": TANAKA_PROFILE_RECONSTRUCTION,
+                "profile_fine_factor": TANAKA_FINE_FACTOR,
+                "profile_periodization": "all_intersecting_compact_support_images",
                 "drift_tol": args.drift_tol,
                 "bottom_frac": args.bottom_frac,
                 "seed": args.seed,
@@ -190,6 +197,7 @@ def main() -> None:
             "cases_rejected": 0,
             "next_batch": 0,
             "n_batches_planned": n_batches,
+            "profile_reconstruction": TANAKA_PROFILE_RECONSTRUCTION,
             "complete": False,
         })
     else:
@@ -199,6 +207,15 @@ def main() -> None:
         if bool(existing_state.get("complete", False)) or samples_written >= args.target_samples:
             print(json.dumps(existing_state, indent=2))
             return
+        if (
+            existing_state.get("profile_reconstruction")
+            != TANAKA_PROFILE_RECONSTRUCTION
+        ):
+            raise RuntimeError(
+                "Refusing to append tangent-Hermite samples to an incomplete "
+                "archive created with a different profile reconstruction. "
+                "Choose a new output or pass --overwrite."
+            )
 
     template_params = make_default_tanaka_template(
         depth=1.0, gravity=args.gravity, direction=1,
@@ -335,6 +352,7 @@ def main() -> None:
             "cases_rejected": cases_rejected,
             "next_batch": batch_idx + 1,
             "n_batches_planned": n_batches,
+            "profile_reconstruction": TANAKA_PROFILE_RECONSTRUCTION,
             "complete": samples_written >= args.target_samples,
             "last_batch_seconds": batch_seconds,
             "elapsed_seconds": perf_counter() - total_start,

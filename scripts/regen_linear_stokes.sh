@@ -14,6 +14,12 @@
 set -euo pipefail
 cd /home/johnma/dno-fno
 
+echo "REFUSING historical v3 regeneration: generate_stokes_dataset now implements"
+echo "the frozen paper target and paper steepness/Ursell sampler, not this script's"
+echo "MATLAB-style raw-label recipe. Existing v3 artifacts are immutable."
+echo "Use the paper-corpus generator and manifest instead."
+exit 2
+
 export JAX_ENABLE_X64=1        # generators compute and store fp64
 
 # Per-regime a0 mins matching MATLAB after Zakharov rescaling (alpha = 164/(2pi)):

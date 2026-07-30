@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 from flax.core import freeze, unfreeze
 
-from dno_net_v2 import CraigSulemDNO
+from dno_net_v2 import CraigSulemDNO, DepthAwareMultiplier
 
 jax.config.update("jax_enable_x64", True)
 
@@ -159,6 +159,38 @@ def test_g1_only_fp64_is_isolated() -> None:
     )
 
 
+def test_dimensionless_multiplier_depends_only_on_kh() -> None:
+    """Equal kh pairs receive exactly equal multiplier features and outputs."""
+    depth = jnp.log(jnp.asarray([[0.5], [1.0]], dtype=jnp.float64))
+    multiplier = DepthAwareMultiplier(
+        out_channels=4,
+        domain_length=2.0 * jnp.pi,
+        h_clip_max=5.0,
+        hidden=8,
+        dimensionless_depth=True,
+    )
+    variables = multiplier.init(jax.random.PRNGKey(4), depth, 5)
+    output = multiplier.apply(variables, depth, 5)
+    # h=0.5,k=2 and h=1,k=1 both have kh=1.
+    assert jnp.array_equal(output[0, 2], output[1, 1])
+
+
+def test_depth_scaled_residual_remains_self_adjoint() -> None:
+    """Zakharov input/output scaling preserves the tied block symmetry."""
+    eta, xi, depth = _state()
+    psi = jnp.roll(xi, 7, axis=-1)
+    model = _model(residual_eta_order=2, depth_scaled_residual=True)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = _activate_residual(model.init(jax.random.PRNGKey(5), inputs, depth))
+
+    residual_xi = _learned_residual(model, variables, eta, xi, depth)
+    residual_psi = _learned_residual(model, variables, eta, psi, depth)
+    lhs = jnp.vdot(psi, residual_xi)
+    rhs = jnp.vdot(residual_psi, xi)
+    scale = jnp.maximum(jnp.maximum(jnp.abs(lhs), jnp.abs(rhs)), 1e-14)
+    assert float(jnp.abs(lhs - rhs) / scale) < 1e-11
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_one_is_unchanged,
@@ -166,6 +198,8 @@ def main() -> int:
         test_order_two_is_quadratic_near_zero,
         test_order_two_residual_is_self_adjoint,
         test_g1_only_fp64_is_isolated,
+        test_dimensionless_multiplier_depends_only_on_kh,
+        test_depth_scaled_residual_remains_self_adjoint,
     )
     for test in tests:
         test()

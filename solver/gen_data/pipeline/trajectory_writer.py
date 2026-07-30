@@ -1,0 +1,280 @@
+"""Convert accepted trajectory executions into complete writer outcomes."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+from typing import Literal, TypeAlias
+
+import numpy as np
+from numpy.typing import NDArray
+
+from solver.gen_data.pipeline.acceptance import RefinementTrajectory
+from solver.gen_data.pipeline.quality import QualityReason
+from solver.gen_data.pipeline.refinement import (
+    CaseRefinementResult,
+    ProductionCaseResult,
+    ProductionExecution,
+    RefinementExecution,
+)
+from solver.gen_data.pipeline.time_selection import (
+    select_benjamin_feir_times,
+    select_tanaka_times,
+    select_uniform_times,
+)
+from solver.gen_data.pipeline.writer import (
+    AcceptedCaseRows,
+    CaseOutcome,
+)
+
+
+FloatArray: TypeAlias = NDArray[np.float64]
+TrajectoryFamily: TypeAlias = Literal[
+    "tanaka",
+    "benjamin_feir",
+    "jonswap_tma",
+]
+
+
+@dataclass(frozen=True)
+class StoredTimePolicy:
+    """Number and weighting parameters for retained trajectory frames."""
+
+    tanaka_count: int = 200
+    tanaka_alpha: float = 0.5
+    tanaka_sigma_steps: float = 50.0
+    benjamin_feir_count: int = 200
+    benjamin_feir_alpha: float = 0.85
+    benjamin_feir_sigma_steps: float = 20.0
+    random_sea_count: int = 16
+
+    def __post_init__(self) -> None:
+        for count, name in (
+            (self.tanaka_count, "tanaka_count"),
+            (self.benjamin_feir_count, "benjamin_feir_count"),
+            (self.random_sea_count, "random_sea_count"),
+        ):
+            if count < 2:
+                raise ValueError(f"{name} must be at least two")
+        for alpha, name in (
+            (self.tanaka_alpha, "tanaka_alpha"),
+            (self.benjamin_feir_alpha, "benjamin_feir_alpha"),
+        ):
+            if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+                raise ValueError(f"{name} must lie in [0, 1]")
+        for sigma, name in (
+            (self.tanaka_sigma_steps, "tanaka_sigma_steps"),
+            (self.benjamin_feir_sigma_steps, "benjamin_feir_sigma_steps"),
+        ):
+            if not math.isfinite(sigma) or sigma < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+
+
+PAPER_STORED_TIME_POLICY = StoredTimePolicy()
+
+
+def _finite_or_none(value: float) -> float | None:
+    return float(value) if math.isfinite(float(value)) else None
+
+
+def _selected_indices(
+    trajectory: RefinementTrajectory,
+    *,
+    family: TrajectoryFamily,
+    length: float,
+    policy: StoredTimePolicy,
+) -> NDArray[np.int32]:
+    if family == "tanaka":
+        return select_tanaka_times(
+            trajectory.eta,
+            length=length,
+            keep_samples=policy.tanaka_count,
+            alpha=policy.tanaka_alpha,
+            sigma_steps=policy.tanaka_sigma_steps,
+        ).indices
+    if family == "benjamin_feir":
+        return select_benjamin_feir_times(
+            trajectory.eta,
+            length=length,
+            keep_samples=policy.benjamin_feir_count,
+            alpha=policy.benjamin_feir_alpha,
+            sigma_steps=policy.benjamin_feir_sigma_steps,
+        ).indices
+    if family == "jonswap_tma":
+        return select_uniform_times(
+            trajectory.times.size,
+            keep_samples=policy.random_sea_count,
+        )
+    raise ValueError(f"unknown trajectory family: {family}")
+
+
+def _production_case_metrics(
+    case: ProductionCaseResult,
+) -> dict[str, float | int | bool | None]:
+    failed = case.decision.failed
+    clearance_evaluated = bool(
+        case.decision.evaluated & QualityReason.BOTTOM_CLEARANCE
+    )
+    return {
+        "accepted": case.accepted,
+        "complete_admissible_trajectory": not bool(
+            failed & QualityReason.INCOMPLETE_TRAJECTORY
+        ),
+        "state_finite": not bool(failed & QualityReason.NONFINITE_STATE),
+        "target_finite": not bool(failed & QualityReason.NONFINITE_TARGET),
+        "positive_water_column": (
+            not bool(failed & QualityReason.BOTTOM_CLEARANCE)
+            if clearance_evaluated
+            else None
+        ),
+        "all_stages_solved": case.telemetry.all_stages_solved,
+        "maximum_stage_residual": _finite_or_none(
+            case.telemetry.maximum_stage_residual
+        ),
+        "production_dt": case.dt,
+    }
+
+
+def _case_metrics(case: CaseRefinementResult) -> dict[
+    str, float | int | bool | None
+]:
+    effective = case.retry or case.primary
+    retry_residual = (
+        case.retry.fine_telemetry.maximum_stage_residual
+        if case.retry is not None
+        else None
+    )
+    return {
+        "accepted": case.accepted,
+        "primary_maximum_error": _finite_or_none(
+            case.primary.metrics.maximum_error
+        ),
+        "effective_eta_error": _finite_or_none(effective.metrics.eta_error),
+        "effective_xi_error": _finite_or_none(effective.metrics.xi_error),
+        "effective_gxi_error": _finite_or_none(effective.metrics.gxi_error),
+        "effective_maximum_error": _finite_or_none(
+            effective.metrics.maximum_error
+        ),
+        "primary_coarse_maximum_stage_residual": _finite_or_none(
+            case.primary.coarse_telemetry.maximum_stage_residual
+        ),
+        "primary_fine_maximum_stage_residual": _finite_or_none(
+            case.primary.fine_telemetry.maximum_stage_residual
+        ),
+        "retry_eligible": case.retry_eligible,
+        "retry_run": case.retry is not None,
+        "retry_fine_maximum_stage_residual": (
+            _finite_or_none(retry_residual)
+            if retry_residual is not None
+            else None
+        ),
+        "retained_dt": case.retained_dt,
+    }
+
+
+def outcomes_from_production(
+    execution: ProductionExecution,
+    depths: FloatArray,
+    *,
+    family: TrajectoryFamily,
+    length: float,
+    policy: StoredTimePolicy = PAPER_STORED_TIME_POLICY,
+) -> tuple[CaseOutcome, ...]:
+    """Select frames from complete single-arm production trajectories."""
+
+    depth_values = np.asarray(depths, dtype=np.float64)
+    if depth_values.shape != (len(execution.cases),):
+        raise ValueError("depths must contain one value per production case")
+    if not np.isfinite(depth_values).all() or np.any(depth_values <= 0.0):
+        raise ValueError("depths must be finite and positive")
+    if not math.isfinite(length) or length <= 0.0:
+        raise ValueError("length must be finite and positive")
+    if tuple(case.case_index for case in execution.cases) != tuple(
+        range(len(execution.cases))
+    ):
+        raise ValueError("production cases must be in input order")
+
+    outcomes: list[CaseOutcome] = []
+    for case, depth in zip(execution.cases, depth_values):
+        rows = None
+        trajectory = case.retained_trajectory
+        if case.accepted:
+            if trajectory is None:
+                raise RuntimeError("accepted production case has no trajectory")
+            indices = _selected_indices(
+                trajectory,
+                family=family,
+                length=length,
+                policy=policy,
+            )
+            rows = AcceptedCaseRows(
+                eta=np.take(trajectory.eta, indices, axis=0),
+                xi=np.take(trajectory.xi, indices, axis=0),
+                gxi=np.take(trajectory.gxi, indices, axis=0),
+                depth=float(depth),
+                time=np.take(trajectory.times, indices),
+                selected_dense_index=indices,
+            )
+        elif trajectory is not None:
+            raise RuntimeError("rejected production case retained a trajectory")
+        outcomes.append(
+            CaseOutcome(
+                decision=case.decision,
+                rows=rows,
+                metrics=_production_case_metrics(case),
+            )
+        )
+    return tuple(outcomes)
+
+
+def outcomes_from_refinement(
+    execution: RefinementExecution,
+    depths: FloatArray,
+    *,
+    family: TrajectoryFamily,
+    length: float,
+    policy: StoredTimePolicy = PAPER_STORED_TIME_POLICY,
+) -> tuple[CaseOutcome, ...]:
+    """Select accepted frames and produce one outcome per attempted case."""
+
+    depth_values = np.asarray(depths, dtype=np.float64)
+    if depth_values.shape != (len(execution.cases),):
+        raise ValueError("depths must contain one value per refinement case")
+    if not np.isfinite(depth_values).all() or np.any(depth_values <= 0.0):
+        raise ValueError("depths must be finite and positive")
+    if not math.isfinite(length) or length <= 0.0:
+        raise ValueError("length must be finite and positive")
+    if tuple(case.case_index for case in execution.cases) != tuple(
+        range(len(execution.cases))
+    ):
+        raise ValueError("refinement cases must be in input order")
+
+    outcomes: list[CaseOutcome] = []
+    for case, depth in zip(execution.cases, depth_values):
+        rows = None
+        if case.accepted:
+            trajectory = case.retained_trajectory
+            if trajectory is None:
+                raise RuntimeError("accepted refinement case has no trajectory")
+            indices = _selected_indices(
+                trajectory,
+                family=family,
+                length=length,
+                policy=policy,
+            )
+            rows = AcceptedCaseRows(
+                eta=np.take(trajectory.eta, indices, axis=0),
+                xi=np.take(trajectory.xi, indices, axis=0),
+                gxi=np.take(trajectory.gxi, indices, axis=0),
+                depth=float(depth),
+                time=np.take(trajectory.times, indices),
+                selected_dense_index=indices,
+            )
+        outcomes.append(
+            CaseOutcome(
+                decision=case.effective_decision,
+                rows=rows,
+                metrics=_case_metrics(case),
+            )
+        )
+    return tuple(outcomes)

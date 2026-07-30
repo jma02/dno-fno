@@ -44,7 +44,7 @@ from dno_net import SpectralDNO
 from losses import build_loss, count_params
 from util import (
     NormStats,
-    build_split_indices,
+    build_dataset_split_indices,
     compute_log_depth,
     load_dataset_arrays,
     make_normalizers,
@@ -165,8 +165,7 @@ def main() -> None:
     if not dataset_path.exists():
         raise FileNotFoundError(dataset_path)
     dataset = load_dataset_arrays(dataset_path)
-    n_total = int(dataset["eta"].shape[0])
-    train_idx, val_idx, _ = build_split_indices(n_total, seed)
+    train_idx, val_idx, _ = build_dataset_split_indices(dataset, seed)
     print(f"backend={backend} device={device.platform}:{device.id} "
           f"data_dtype={data_dtype.__name__} train={train_idx.size} val={val_idx.size}")
 

@@ -65,12 +65,17 @@ class DepthAwareMultiplier(nn.Module):
     h_clip_max: float
     hidden: int = 32
     zero_init_output: bool = False
+    dimensionless_depth: bool = False
 
     @nn.compact
     def __call__(self, depth: jnp.ndarray, n_freq: int) -> jnp.ndarray:
         # depth: (B, 1)  log h (already clipped externally is fine; we clip again)
-        depth_clip = jnp.minimum(depth, jnp.log(self.h_clip_max))
-        h_phys = jnp.exp(depth_clip)                                # (B, 1)
+        depth_for_h = (
+            depth
+            if self.dimensionless_depth
+            else jnp.minimum(depth, jnp.log(self.h_clip_max))
+        )
+        h_phys = jnp.exp(depth_for_h)                               # (B, 1)
 
         k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(n_freq)
         batch_size = depth.shape[0]
@@ -78,9 +83,24 @@ class DepthAwareMultiplier(nn.Module):
         h_b = jnp.broadcast_to(h_phys, (batch_size, n_freq))           # (B, K)
         kh = h_b * k_b                                                  # (B, K)
 
-        feats = jnp.stack(
-            [k_b, h_b, jnp.tanh(kh), k_b * jnp.tanh(kh)], axis=-1
-        )                                                               # (B, K, 4)
+        if self.dimensionless_depth:
+            # The residual is expressed at canonical depth. Its Fourier
+            # coordinate is kh, not k and h separately. Compress the
+            # unbounded coordinate without destroying the kh << 1 crossover.
+            kh_ratio = kh / (1.0 + kh)
+            feats = jnp.stack(
+                [
+                    jnp.log1p(kh),
+                    kh_ratio,
+                    jnp.tanh(kh),
+                    kh_ratio * jnp.tanh(kh),
+                ],
+                axis=-1,
+            )
+        else:
+            feats = jnp.stack(
+                [k_b, h_b, jnp.tanh(kh), k_b * jnp.tanh(kh)], axis=-1
+            )                                                           # (B, K, 4)
 
         hidden_layer = nn.Dense(self.hidden, name="hidden")(feats)
         hidden_layer = nn.tanh(hidden_layer)
@@ -113,6 +133,7 @@ class CraigSulemBlock(nn.Module):
     tie_xi_out_mult: bool = False
     phi_bias_free: bool = False
     fft_fp64: bool = False
+    dimensionless_depth: bool = False
     # Hard low-pass k-cutoff applied to both m_xi and the block output. 0 disables.
     # Enforces that the block acts only on and produces only k < block_k_cut
     # modes, which (a) makes phi·xi_branched aliasing-free when block_k_cut <=
@@ -150,6 +171,7 @@ class CraigSulemBlock(nn.Module):
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 hidden=self.mult_hidden,
+                dimensionless_depth=self.dimensionless_depth,
                 name="m_shared",
             )(depth, n_freq)                                          # (B, K, n_branches)
             m_xi = m_shared
@@ -160,6 +182,7 @@ class CraigSulemBlock(nn.Module):
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 hidden=self.mult_hidden,
+                dimensionless_depth=self.dimensionless_depth,
                 name="m_xi",
             )(depth, n_freq)                                          # (B, K, n_branches)
             m_out = DepthAwareMultiplier(
@@ -167,6 +190,7 @@ class CraigSulemBlock(nn.Module):
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 hidden=self.mult_hidden,
+                dimensionless_depth=self.dimensionless_depth,
                 name="m_out",
             )(depth, n_freq)                                          # (B, K, n_branches)
 
@@ -268,6 +292,13 @@ class CraigSulemDNO(nn.Module):
     # multiplier sandwiches. Hence R(0, ξ) = D_ηR(0, ξ) = 0 for every
     # parameter value, leaving the closed-form G_0 + G_1 terms untouched.
     residual_eta_order: int = 1
+
+    # Express only the learned residual in Zakharov's depth-normalized
+    # variables x_bar=x/h, eta_bar=eta/h, xi_bar=xi/h^(3/2), and
+    # q_bar=q/sqrt(h). The exact physical G_0+G_1 backbone is unchanged.
+    # Multiplier networks then see kh rather than having to learn singular
+    # shallow-depth scalings from k and h independently.
+    depth_scaled_residual: bool = False
 
     # Hard low-pass k-cutoff applied inside every CraigSulemBlock (on both
     # m_xi and out_hat). 0 disables. Attacks the tanaka mid-k cascade at
@@ -407,18 +438,25 @@ class CraigSulemDNO(nn.Module):
             k_dtype = eta.dtype
         k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(n_freq, dtype=k_dtype)
         eta_hat = jnp.fft.rfft(eta_fft_input, axis=-1)
+        if self.depth_scaled_residual:
+            if depth is None:
+                raise ValueError("depth is required for depth-scaled residual features")
+            h_feature = jnp.exp(depth).astype(k_dtype)
+            k_op = h_feature * k_arr[None, :]
+        else:
+            k_op = k_arr[None, :]
 
         if self.use_first_deriv:
             feats.append(jnp.fft.irfft(
-                1j * k_arr[None, :] * eta_hat, n=grid_size, axis=-1,
+                1j * k_op * eta_hat, n=grid_size, axis=-1,
             ))
         if self.use_second_deriv:
             feats.append(jnp.fft.irfft(
-                -(k_arr ** 2)[None, :] * eta_hat, n=grid_size, axis=-1,
+                -(k_op ** 2) * eta_hat, n=grid_size, axis=-1,
             ))
         if self.use_half_deriv:
             feats.append(jnp.fft.irfft(
-                jnp.sqrt(k_arr)[None, :] * eta_hat, n=grid_size, axis=-1,
+                jnp.sqrt(k_op) * eta_hat, n=grid_size, axis=-1,
             ))
         if self.use_hilbert:
             sgn = jnp.sign(k_arr).astype(eta_hat.dtype)
@@ -428,13 +466,16 @@ class CraigSulemDNO(nn.Module):
         if self.use_g0_eta or self.use_g0_eta_dx:
             # G_0(h) = |k| tanh(h|k|); broadcast h over batch. Depth arrives as log(h),
             # clipped to h_clip_max so the symbol matches the linear baseline.
-            h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max)))   # (B, 1)
-            g0_sym = k_arr[None, :] * jnp.tanh(h * k_arr[None, :])      # (B, n_freq)
+            if self.depth_scaled_residual:
+                g0_sym = k_op * jnp.tanh(k_op)
+            else:
+                h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max)))   # (B, 1)
+                g0_sym = k_arr[None, :] * jnp.tanh(h * k_arr[None, :])      # (B, n_freq)
             g0_eta_hat = g0_sym * eta_hat                                # (B, n_freq)
             if self.use_g0_eta:
                 feats.append(jnp.fft.irfft(g0_eta_hat, n=grid_size, axis=-1))
             if self.use_g0_eta_dx:
-                feats.append(jnp.fft.irfft(1j * k_arr[None, :] * g0_eta_hat,
+                feats.append(jnp.fft.irfft(1j * k_op * g0_eta_hat,
                                            n=grid_size, axis=-1))
         return jnp.stack(feats, axis=-1).astype(out_dtype)            # (B, N, C_eta_raw)
 
@@ -518,6 +559,7 @@ class CraigSulemDNO(nn.Module):
         eta_norm = inputs[..., 0]                                     # (B, N)
         xi_norm = inputs[..., 1]                                      # (B, N)
         xi_phys = xi_norm * self.xi_scale                             # (B, N)
+        h_residual = jnp.exp(depth)
 
         linear_baseline = self._linear_baseline(xi_norm, depth)       # (B, N)
         baseline = linear_baseline
@@ -525,8 +567,23 @@ class CraigSulemDNO(nn.Module):
             baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
 
         # η spatial features (pointwise polynomials + spectral derivatives).
-        raw_eta_feats = self._eta_spatial_features(eta_norm, n_freq, grid_size,
-                                                   depth=depth_clip)
+        eta_for_residual = (
+            eta_norm * self.eta_scale / h_residual
+            if self.depth_scaled_residual
+            else eta_norm
+        )
+        xi_for_residual = (
+            xi_phys / h_residual ** 1.5
+            if self.depth_scaled_residual
+            else xi_phys
+        )
+        residual_depth = depth if self.depth_scaled_residual else depth_clip
+        raw_eta_feats = self._eta_spatial_features(
+            eta_for_residual,
+            n_freq,
+            grid_size,
+            depth=residual_depth,
+        )
         # Project to a richer pointwise feature space. With phi_bias_free, both
         # layers carry no bias so features (and hence all blocks) vanish
         # identically at η = 0.
@@ -561,8 +618,13 @@ class CraigSulemDNO(nn.Module):
                 tie_xi_out_mult=self.tie_xi_out_mult,
                 phi_bias_free=residual_bias_free,
                 fft_fp64=self.fft_fp64,
+                dimensionless_depth=self.depth_scaled_residual,
                 name=f"cs_block_{block_idx}",
-            )(eta_features, xi_phys, depth_clip)
+            )(eta_features, xi_for_residual, residual_depth)
+            if self.depth_scaled_residual:
+                # Block output is q_bar; return to physical q before applying
+                # the corpus target normalization.
+                block_out = jnp.sqrt(h_residual) * block_out
             residual = residual + block_out                           # (B, N)
 
         if self.residual_eta_order == 2:

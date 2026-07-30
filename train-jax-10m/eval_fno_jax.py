@@ -26,11 +26,11 @@ from dno_net import SpectralDNO
 from losses import count_params
 from util import (
     NormStats,
+    build_dataset_split_indices,
     denormalize_targets,
     get_batches,
     load_dataset_arrays,
     load_or_compute_stats,
-    build_split_indices,
     normalize_features,
     require_jax_devices,
 )
@@ -130,7 +130,12 @@ def main() -> None:
 
     dataset_path = REPO_ROOT / "data" / args.dataset
     dataset = load_dataset_arrays(dataset_path)
-    stats = checkpoint_payload.get("stats") or load_or_compute_stats(dataset_path, dataset=dataset)
+    train_indices, val_indices, test_indices = build_dataset_split_indices(dataset, args.seed)
+    stats = checkpoint_payload.get("stats") or load_or_compute_stats(
+        dataset_path,
+        dataset=dataset,
+        indices=train_indices if "trajectory_index" in dataset else None,
+    )
     if config.get("model", "fno") == "fno" and bool(
         config.get("linear_baseline", config.get("linear_hotpath", config.get("predict_residual", False)))
     ):
@@ -138,10 +143,6 @@ def main() -> None:
     norm_mode = config.get("norm", "minmax")
     ns = NormStats.from_dict(stats, mode=norm_mode)
     x = dataset["x"]
-    train_indices, val_indices, test_indices = build_split_indices(
-        int(dataset["eta"].shape[0]),
-        args.seed,
-    )
     eval_indices = val_indices if args.split == "val" else test_indices
     if args.subset_size is not None and args.subset_size < eval_indices.shape[0]:
         subset_rng = np.random.default_rng(args.seed)

@@ -106,14 +106,14 @@ def generate_stokes(regime: str, n: int, seed: int) -> dict[str, np.ndarray]:
         n0 = SF_N0; depth = SF_DEPTH; kh = SF_KH
         ichoi = 1
     params = sample_stokes_case_params(
-        rng, batch_size=n, length=LENGTH,
+        rng, batch_size=n, length=LENGTH, gravity=GRAVITY,
         n0_min=n0[0], n0_max=n0[1],
         a0_min=A0_MIN_STOKES, a0_max=A0_MAX,
         steepness_max=STEEP_MAX,
         depth_min=depth[0], depth_max=depth[1],
-        time_max=0.0,
         kh_min=kh[0], kh_max=kh[1],
         rejection_attempts=1000,
+        finite_depth=ichoi == 1,
     )
     x_np, k_np = build_grid(NX, LENGTH)
     x = jnp.asarray(x_np, dtype=jnp.float64)
@@ -123,7 +123,7 @@ def generate_stokes(regime: str, n: int, seed: int) -> dict[str, np.ndarray]:
         n0=jnp.asarray(params["n0"], dtype=jnp.float64),
         a0=jnp.asarray(params["a0"], dtype=jnp.float64),
         depth=jnp.asarray(params["depth"], dtype=jnp.float64),
-        time=jnp.asarray(params["time"], dtype=jnp.float64),
+        phase=jnp.asarray(params["phase"], dtype=jnp.float64),
         ichoi=ichoi, dno_order=DNO_ORDER, pad_factor=PAD_FACTOR,
     )
     return {

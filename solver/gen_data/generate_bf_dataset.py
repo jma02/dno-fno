@@ -1,13 +1,11 @@
-"""Generate a Benjamin–Feir rollout dataset on the L=2pi reference domain.
+"""Generate a deep-water Benjamin--Feir dataset on the ``L=2 pi`` domain.
 
 Mirrors generate_tanaka_dataset_v2.py: same rollout settings, same NPZ/state.json
 sidecar machinery, same flatten layout (eta, xi, gxi, time, case_id, depth per
-sample). Differs only in the IC builder: a vectorized 5th-order Stokes carrier +
-two Airy sidebands (Xu & Guyenne JCP09 eq. 33), randomized per case in
-n_carr, eps_carrier, sideband offset, sideband amplitudes, sideband phases, depth.
-
-Default depth range is logUniform[0.5, 4.0] so the smallest sampled n_carr=4 still
-gives kh ≈ 2 — comfortably in the BF-unstable deep-water regime (kh > 1.363).
+sample).  The initial condition has the form of Xu--Guyenne JCP09 equation
+(33): the project's fifth-order deep-water Stokes carrier plus two symmetric
+Airy sidebands.  Integer carrier/sideband pairs are sampled only inside the
+leading deep-water modulational-instability band.
 
 Defaults match the v2 Tanaka production config: dt=0.08, tmax=200, B=256,
 keep_samples=200, filter_fraction=1/4, float64. Throughput ~0.07 s/sample on an
@@ -27,8 +25,18 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.lib import format as npy_format
 
-jax.config.update("jax_enable_x64", True)
-
+from .benjamin_feir_jcp09 import (
+    CARRIER_MODE_MAX,
+    CARRIER_MODE_MIN,
+    CARRIER_STEEPNESS_MAX,
+    CARRIER_STEEPNESS_MIN,
+    DEEP_WATER_MINIMUM_KH,
+    PERTURBATION_RATIO_MAX,
+    PERTURBATION_RATIO_MIN,
+    build_initial_conditions,
+    sample_parameters,
+    serialize_parameters,
+)
 from ..solvers.dno_series_jax import build_grid, dno_series_eval, make_linear_dno_symbol
 from .adaptive_sampling import adaptive_indices_from_energy
 from ..solvers.time_integrator import (
@@ -41,12 +49,14 @@ from ..solvers.time_integrator import (
     make_normalized_rollout_settings,
 )
 
+jax.config.update("jax_enable_x64", True)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a Benjamin-Feir rollout dataset on the [0, 2pi] reference domain."
     )
-    parser.add_argument("--output", default="data/bf_2.npz")
+    parser.add_argument("--output", default="data/bf_jcp09_deep.npz")
     parser.add_argument("--target_samples", type=int, default=10_000_000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
@@ -58,38 +68,33 @@ def parse_args() -> argparse.Namespace:
         "--rollout_dtype", choices=("float32", "float64"), default="float64",
         help="float64 needed at L=2pi: k_max=512 with M=6 amplifies float32 eps to amplitude order, NaN'ing the rollout.",
     )
-    parser.add_argument("--n_carr_min", type=int, default=4)
-    parser.add_argument("--n_carr_max", type=int, default=20)
-    # Reference dataset (data/stokes_bf_dataset.npz) concentrates ~98% of samples
-    # at carrier modes {5, 10, 20}. Pass --n_carr_set "5,10,20" to mirror that
-    # structured sweep instead of uniform sampling over [n_carr_min, n_carr_max].
-    parser.add_argument("--n_carr_set", type=str, default="",
-                        help="Comma-separated discrete carrier modes (e.g. '5,10,20'). Empty -> uniform [min,max].")
-    parser.add_argument("--eps_carrier_min", type=float, default=0.05)
-    # Empirically capped at 0.13 (canonical JCP09 value): ε >= 0.15 causes ~30% of
-    # rollouts to break (NaN) at tmax=200 due to BF-instability growth saturating
-    # past wave-breaking. ε <= 0.12 verified 0% NaN in multi-batch smoke.
-    parser.add_argument("--eps_carrier_max", type=float, default=0.13)
-    # side_offset=1 sits at the BF-instability sweet spot (Δk ≈ ε·k_carr·sqrt(2));
-    # at moderate ε ~ 0.11 with n_carr in [12, 14] it consistently NaN'd by tmax=200.
-    # side_offset_min=2 matches the canonical JCP09 §4.2.3 setup (n_carr=9, k_l=7).
-    parser.add_argument("--side_offset_min", type=int, default=2)
-    parser.add_argument("--side_offset_max", type=int, default=4)
-    parser.add_argument("--eps_pert_min", type=float, default=0.05)
-    parser.add_argument("--eps_pert_max", type=float, default=0.20)
+    parser.add_argument("--n_carr_min", type=int, default=CARRIER_MODE_MIN)
+    parser.add_argument("--n_carr_max", type=int, default=CARRIER_MODE_MAX)
     parser.add_argument(
-        "--depth_min", type=float, default=0.5,
-        help="logUniform lower bound. At default n_carr_min=4 and depth_min=0.5, kh=2 — still BF-unstable.",
+        "--eps_carrier_min",
+        type=float,
+        default=CARRIER_STEEPNESS_MIN,
     )
-    parser.add_argument("--depth_max", type=float, default=4.0)
+    parser.add_argument(
+        "--eps_carrier_max",
+        type=float,
+        default=CARRIER_STEEPNESS_MAX,
+    )
+    parser.add_argument(
+        "--eps_pert_min",
+        type=float,
+        default=PERTURBATION_RATIO_MIN,
+    )
+    parser.add_argument(
+        "--eps_pert_max",
+        type=float,
+        default=PERTURBATION_RATIO_MAX,
+    )
     parser.add_argument("--nx", type=int, default=1024)
     parser.add_argument("--length", type=float, default=2.0 * math.pi)
     parser.add_argument("--gravity", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=0.08)
     parser.add_argument("--tmax", type=float, default=200.0)
-    parser.add_argument("--bf_2nd_order", action="store_true", default=True,
-                        help="Include 2nd/3rd-order BF cross-mode bound corrections (default on, matches Philippe).")
-    parser.add_argument("--no_bf_2nd_order", dest="bf_2nd_order", action="store_false")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--adaptive", action="store_true",
@@ -255,6 +260,12 @@ def sample_bf_case_params(
     depth_min: float,
     depth_max: float,
 ) -> dict[str, np.ndarray]:
+    """Sample the historical finite-depth/empirical BF generator.
+
+    Kept only so archived-data audits can reconstruct the old corpus.  New
+    generation uses :func:`sample_parameters`.
+    """
+
     if n_carr_set:
         n_carr = np.asarray(rng.choice(np.asarray(n_carr_set, dtype=np.int32), size=batch_size), dtype=np.int32)
     else:
@@ -285,6 +296,8 @@ def sample_bf_case_params(
 
 
 def serialize_bf_specs(params: dict[str, np.ndarray]) -> list[dict[str, float | int]]:
+    """Serialize historical empirical-constructor parameters."""
+
     n = int(params["n_carr"].shape[0])
     return [
         {
@@ -311,9 +324,7 @@ def _bf_ic_single(
     phase_l_extra: jnp.ndarray, phase_r_extra: jnp.ndarray,
     length: float, gravity: float, bf_2nd_order: bool,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Vectorized-friendly BF IC builder. All scalar inputs are 0-d arrays so
-    jax.vmap can broadcast over them. Mirrors playground/gen_bf.py exactly.
-    """
+    """Build one historical empirical BF state for archive reconstruction."""
     k_carr = n_carr.astype(x.dtype) * (2.0 * jnp.pi / length)
     k_l = n_l.astype(x.dtype) * (2.0 * jnp.pi / length)
     k_r = n_r.astype(x.dtype) * (2.0 * jnp.pi / length)
@@ -389,7 +400,7 @@ def build_bf_initial_conditions_batched(
     bf_2nd_order: bool,
     dtype: jnp.dtype,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """vmap _bf_ic_single over the batch axis."""
+    """Vectorize the historical empirical constructor for archive audits."""
     n_carr = jnp.asarray(params["n_carr"], dtype=dtype)
     n_l = jnp.asarray(params["n_l"], dtype=dtype)
     n_r = jnp.asarray(params["n_r"], dtype=dtype)
@@ -416,9 +427,6 @@ def main() -> None:
     args = parse_args()
     rollout_defaults = make_normalized_rollout_settings()._replace(filter_fraction=0.25)
     rng_stream_id = args.rng_stream_id if args.rng_stream_id is not None else args.case_id_offset
-    n_carr_set: tuple[int, ...] | None = (
-        tuple(int(s) for s in args.n_carr_set.split(",") if s.strip()) if args.n_carr_set else None
-    )
 
     output_path = Path(args.output).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,7 +458,11 @@ def main() -> None:
         with zipfile.ZipFile(output_path, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
             x_grid, _ = build_grid(args.nx, args.length)
             meta = {
-                "dataset_kind": "bf_rollout_v2",
+                "dataset_kind": "bf_jcp09_deep_rollout_v1",
+                "initial_condition": (
+                    "Xu--Guyenne JCP09 equation (33) with the project "
+                    "fifth-order deep-water Stokes carrier"
+                ),
                 "target_samples": args.target_samples,
                 "batch_size": args.batch_size,
                 "keep_samples": args.keep_samples,
@@ -473,13 +485,14 @@ def main() -> None:
                 "filter_fraction": rollout_defaults.filter_fraction,
                 "zero_mean_xi": rollout_defaults.zero_mean_xi,
                 "n_carr_min": args.n_carr_min, "n_carr_max": args.n_carr_max,
-                "n_carr_set": list(n_carr_set) if n_carr_set is not None else None,
                 "eps_carrier_min": args.eps_carrier_min, "eps_carrier_max": args.eps_carrier_max,
-                "side_offset_min": args.side_offset_min, "side_offset_max": args.side_offset_max,
                 "eps_pert_min": args.eps_pert_min, "eps_pert_max": args.eps_pert_max,
-                "depth_min": args.depth_min, "depth_max": args.depth_max,
-                "depth_distribution": "log_uniform",
-                "bf_2nd_order": args.bf_2nd_order,
+                "mode_pair_distribution": "uniform_over_feasible_pairs",
+                "instability_support": "0 < (Delta n/n_c)/(2 sqrt(2) epsilon_c) < 1",
+                "sideband_symmetry": "equal amplitude and common phase",
+                "minimum_resolved_kh": DEEP_WATER_MINIMUM_KH,
+                "depth_rule": "h = minimum_resolved_kh * L / (2 pi)",
+                "empirical_cross_terms": False,
                 "seed": args.seed,
                 "case_id_offset": args.case_id_offset,
                 "rng_stream_id": rng_stream_id,
@@ -520,20 +533,24 @@ def main() -> None:
         batch_start = perf_counter()
         batch_rng = make_batch_rng(args.seed, batch_idx, rng_stream_id)
 
-        params = sample_bf_case_params(
-            batch_rng, batch_size=args.batch_size,
-            n_carr_min=args.n_carr_min, n_carr_max=args.n_carr_max,
-            n_carr_set=n_carr_set,
-            eps_carrier_min=args.eps_carrier_min, eps_carrier_max=args.eps_carrier_max,
-            side_offset_min=args.side_offset_min, side_offset_max=args.side_offset_max,
-            eps_pert_min=args.eps_pert_min, eps_pert_max=args.eps_pert_max,
-            depth_min=args.depth_min, depth_max=args.depth_max,
+        params = sample_parameters(
+            batch_rng,
+            batch_size=args.batch_size,
+            length=args.length,
+            carrier_mode_min=args.n_carr_min,
+            carrier_mode_max=args.n_carr_max,
+            carrier_steepness_min=args.eps_carrier_min,
+            carrier_steepness_max=args.eps_carrier_max,
+            perturbation_ratio_min=args.eps_pert_min,
+            perturbation_ratio_max=args.eps_pert_max,
         )
 
-        initial_eta, initial_xi = build_bf_initial_conditions_batched(
-            x=x_grid, params=params,
-            length=args.length, gravity=args.gravity,
-            bf_2nd_order=args.bf_2nd_order, dtype=rollout_dtype,
+        initial_eta, initial_xi = build_initial_conditions(
+            x=x_grid,
+            parameters=params,
+            length=args.length,
+            gravity=args.gravity,
+            dtype=rollout_dtype,
         )
         if rollout_defaults.zero_mean_xi:
             initial_xi = initial_xi - jnp.mean(initial_xi, axis=-1, keepdims=True)
@@ -640,7 +657,10 @@ def main() -> None:
             if args.adaptive:
                 write_npy_entry(zf, f"subsample_indices_{batch_tag}.npy",
                                  idx_BK[:global_case_ids.shape[0]].astype(np.int32))
-            zf.writestr(f"specs_{batch_tag}.json", json.dumps(serialize_bf_specs(params), indent=2))
+            zf.writestr(
+                f"specs_{batch_tag}.json",
+                json.dumps(serialize_parameters(params), indent=2),
+            )
 
         samples_written += keep
         batch_seconds = perf_counter() - batch_start
