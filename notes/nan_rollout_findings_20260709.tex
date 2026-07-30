@@ -23,7 +23,7 @@
 \title{Diagnosing and Correcting NaN Cascades in Learned\\
 Dirichlet--Neumann Operator Rollouts}
 \author{Internal technical report}
-\date{9 July 2026}
+\date{15 July 2026}
 
 \begin{document}
 \maketitle
@@ -42,12 +42,25 @@ then excite spurious same-sign spectral sidebands, quadratic aliasing amplifies
 the already established cascade, and the implicit stage iteration eventually
 loses contractivity.  This report summarizes the experimental path that ruled
 out data corruption, time-step refinement, spectral caps, hard cutoffs, and
-targeted fine-tuning as primary cures.  It motivates a clean retraining of
-\(G_0+G_1+\R\), where the analytic first-order Craig--Sulem term is exact,
-\(\R=O(\eta^2)\) is self-adjoint, and a randomized Hadamard loss directly
-constrains the missing shape derivative.  Particular care is taken to separate
-what has been directly measured, what follows mathematically from the measured
-facts, and what remains a hypothesis to be tested by the new model.
+targeted fine-tuning as primary cures.  It motivates and evaluates a clean
+retraining of \(G_0+G_1+\R\), where the analytic first-order Craig--Sulem term
+is exact, \(\R=O(\eta^2)\) is self-adjoint, and a randomized Hadamard loss
+directly constrains the missing shape derivative.  That structural retraining
+removed nonfinite predictions on the fixed 320-rollout suite.  Subsequent
+mode-balanced training and a one-epoch stronger tangent continuation produced
+C21, which remains the best aggregate checkpoint to date: all 320 predictions are finite and
+the median, 95th percentile, and mean final-elevation errors over 305
+truth-valid cases are 0.006866, 0.15369, and 0.03205.  The residual tail is no
+longer a NaN cascade; it is predominantly secular translation error.  We
+derive the phase-sensitive quantity
+\(\gamma^2=\int B_h\delta c_h^2\,\dd x/\int\eta^2\,\dd x\), show why the existing
+relative-speed normalization underweights narrow shallow waves, and evaluate a
+controlled C20-to-\(\gamma^2\) continuation.  This C22 test strongly improves
+the most phase-sensitive rigid case but fails the pre-registered multi-crest
+and aggregate-median gates, so it is accepted as partial mechanism evidence and
+rejected as a replacement checkpoint.  Particular care is taken to separate
+direct measurements, mathematical consequences, and hypotheses still
+requiring an intervention test.
 \end{abstract}
 
 \section{Reader's guide and executive conclusions}
@@ -55,7 +68,7 @@ facts, and what remains a hypothesis to be tested by the new model.
 The project accumulated many experiments because the terminal symptom---a NaN
 inside an implicit time step---admits several superficially plausible
 explanations.  A reader should not be expected to remember the experiment
-labels.  The labels C1--C16 are therefore treated here only as reproducibility
+labels.  The labels C1--C22 are therefore treated here only as reproducibility
 handles.  The scientific argument is organized around five questions:
 \begin{enumerate}[label=\arabic*.]
   \item Is the reference data corrupt or missing the failing regime?
@@ -101,19 +114,41 @@ does not preserve this cancellation.  Exact \(G_0+G_1\) gives 0/32 Tanaka
 NaNs but is not accurate enough at final time, strongly motivating it as a
 stable backbone rather than a complete surrogate.
 
-\item[Hypothesis under test:]
-A full-capacity model of the form
-\(G_0+G_1+O(\eta^2)\), trained with a direct Hadamard-consistency loss, should
-retain the stable null form while learning the small higher-order correction.
-This is C16.  Its structural invariants and short training smoke have passed;
-the decisive long-rollout evaluation has not yet been performed.
+\item[Completed structural test:]
+The full-capacity \(G_0+G_1+O(\eta^2)\) model with direct
+Hadamard-consistency training removed the nonfinite mechanism: the clean C16
+epoch-39 checkpoint produced 0/320 nonfinite trajectories on the fixed
+ten-family suite.  Its remaining Tanaka errors were finite phase errors, not
+renewed spectral cascades.
+
+\item[Current best aggregate checkpoint:]
+C21, a one-epoch low-learning-rate continuation of the mode-balanced C20
+checkpoint with a tenfold larger localized-tangent coefficient, also produces
+0/320 nonfinite trajectories and zero counted final divergences.  Relative to
+C20, its full-suite median, 95th percentile, and mean errors improve by
+4.66\%, 4.43\%, and 7.47\%, respectively.  It repairs the former sole error
+above one, but worsens a two-crest differential-phase case.  Thus a larger
+mean tangent coefficient is useful but not a complete phase treatment.
+
+\item[Completed phase-normalization ablation:]
+The current tangent loss measures fractional local speed error, whereas a
+finite-horizon elevation metric weights the same error by the translation
+sensitivity \(\kappa=\|\eta_x\|_2/\|\eta\|_2\).  Replacing the old per-state
+normalization by the corresponding instantaneous relative-error growth
+\(\gamma^2\) is therefore mathematically justified.  C22 tests this change in
+isolation.  It reduces case 27 to raw/aligned error 0.18047/0.02688 and preserves
+0/64 nonfinite Tanaka predictions, but case 24 remains at 0.63952/0.23662 and
+the combined raw and aligned medians regress relative to both C20 and C21.
 \end{description}
 
-This hierarchy matters.  We have compelling evidence for the diagnosis, but
-we do not yet have evidence that C16 reaches the operational target of zero
-NaNs.  A negative C16 result would not erase the measured shape defect; it
-would mean that the particular parameterization, loss estimator, training
-budget, or some additional missing identity remains inadequate.
+This hierarchy matters.  The original operational target of zero nonfinite
+rollouts has been met on the registered suite, but zero nonfinite values is not
+the same as uniformly accurate dynamics.  C21's remaining errors distinguish
+the solved transverse-instability problem from a neutral-direction accuracy
+problem.  C22 further shows that a correct metric conversion can target one
+part of that mechanism without uniformly controlling its tail.  This negative
+replacement decision is important evidence: the derivation of \(\gamma^2\) is
+valid, but mean \(\gamma^2\) training alone is not sufficient.
 
 \section{Problem and numerical setting}
 
@@ -915,16 +950,19 @@ outside the sampled distribution.  Calling it an ``explicit bounded residual
 architecture'' would therefore be inaccurate.  Its principle is geometric
 compatibility and asymptotic null structure, not a hard global norm bound.
 
-\section{Current experiment and acceptance criteria}
+\section{C16 launch-time acceptance criteria (historical)}
 
-At the time of writing, a budget-capped C16 retraining is running on two H100
-GPUs in the personal Modal workspace.  It uses clean v9 data, batch size 1024,
+At the time of the original 9 July report, a budget-capped C16 retraining was
+running on two H100 GPUs in the personal Modal workspace.  This section retains
+the pre-specified diagnostics and gates against which that structural test was
+judged; the completed C16--C22 results are reported in
+Section~\ref{sec:c21-results}.  The launch used clean v9 data, batch size 1024,
 learning rate \(2\times10^{-5}\), 500-step learning-rate and Hadamard warmups,
-and 16 epochs.  The abbreviated run is intended to obtain the strongest
-checkpoint possible within approximately 30 dollars of workspace credit; it is
-not assumed that epoch 16 is fully converged.
+and 16 epochs.  The abbreviated run was intended to obtain the strongest
+checkpoint possible within approximately 30 dollars of workspace credit; epoch
+16 was not assumed to be fully converged.
 
-The first two complete epochs are healthy:
+The first two completed epochs were healthy:
 \begin{center}
 \begin{tabular}{lrrrr}
 \toprule
@@ -938,17 +976,17 @@ Epoch & Train loss & Validation loss & Hadamard loss & Defect RMS \\
 The regularizer was active on 373 of 5964 batches in each epoch, matching the
 intended frequency \(1/16\).  Its mean effective weight reached
 \(9.57\times10^{-3}\) in epoch 1 and the full \(10^{-2}\) in epoch 2.  These
-are encouraging training diagnostics, not rollout evidence.  In particular,
-the random-probe defect RMS cannot yet be compared directly with the
+were encouraging training diagnostics, not rollout evidence.  In particular,
+the random-probe defect RMS could not yet be compared directly with the
 case-specific defect table without running the same held-state diagnostic.
 
-An earlier Modal attempt stopped one third of the way through epoch 1 because
+An earlier Modal attempt had stopped one third of the way through epoch 1 because
 the local monitoring client was explicitly interrupted; Modal logs show a
 cancellation signal rather than a Python, JAX, or model exception.  No
-checkpoint was produced by that attempt.  The current 16-epoch run is a fresh
-relaunch and should be judged independently.
+checkpoint was produced by that attempt.  The subsequent 16-epoch run was a
+fresh relaunch and was judged independently.
 
-The structural hypothesis should be accepted only if rollout evaluation shows
+The structural hypothesis was to be accepted only if rollout evaluation showed
 all of the following:
 \begin{enumerate}
   \item zero Tanaka NaNs and divergences among 32 truth-valid cases;
@@ -968,9 +1006,9 @@ addition to its values.  C16 is the first experiment in this sequence that
 directly enforces the missing first-order null form and shape derivative while
 retaining the capacity needed for higher-order accuracy.
 
-\subsection{Planned post-training decision sequence}
+\subsection{Pre-registered post-training decision sequence}
 
-To avoid another ambiguous experiment, evaluation should proceed in the
+To avoid another ambiguous experiment, evaluation was to proceed in the
 following order:
 \begin{enumerate}
   \item Verify checkpoint/config integrity and run the held-state Hadamard
@@ -989,6 +1027,636 @@ following order:
         suite be run to rule out regressions in shallow water, random seas,
         Stokes waves, and modal instability.
 \end{enumerate}
+
+\section{Completed C16--C22 results and the remaining phase tail}
+\label{sec:c21-results}
+
+The completed sequence separates two questions that were conflated when NaNs
+were still present.  The first is whether the learned vector field excites the
+transverse mid/high-frequency instability described above.  The second is
+whether a stable learned vector field advances coherent waves at sufficiently
+accurate phase speeds over \(T=200\).  C16 and its descendants resolve the
+first question on the registered suite; C21 gives the best aggregate answer to
+the second so far, but leaves a measurable differential-phase tail.  C22 tests
+the derived phase-sensitivity normalization directly and improves the targeted
+rigid tail without satisfying the broader replacement criteria.
+
+\subsection{From the structural C16 result to the C20 control}
+
+The clean C16 epoch-39 checkpoint was evaluated on 32 initial conditions from
+each of ten families.  Every one of the 320 predicted trajectories remained
+finite.  The only counted final divergences were one finite phase-error case in
+each Tanaka family; all eight other families had zero.  The Tanaka
+\(g_0/g_1\) median and 95th-percentile final-elevation errors were
+\(0.08643/0.51111\) and \(0.11541/0.66002\), respectively.  Thus the
+\(G_0+G_1+O(\eta^2)\), self-adjoint, Hadamard-trained construction passed the
+primary stability test but did not yet provide the desired phase accuracy.
+
+C20 retained this structural architecture and clean v9 training distribution,
+and added the accepted mode-balanced objective, the corrected localized
+translation-tangent term at coefficient 10, and Hadamard coefficient 0.01 in
+a fresh 40-epoch run.  It also produced 0/320 nonfinite trajectories.  On the
+305 cases whose reference trajectories passed the pre-existing truth-drift
+test, C20's median, 95th percentile, and mean errors were
+\(0.007201\), \(0.16082\), and \(0.03464\).  It is therefore the clean
+control for asking whether a change in the phase loss itself, rather than a
+new architecture or data distribution, improves the remaining tail.
+
+\subsection{C21 intervention and optimization evidence}
+
+C21 is a deliberately narrow diagnostic continuation from C20, not a new
+architecture or a fresh full training run.  Adam was reset and one full v9
+epoch was run at learning rate \(2\times10^{-6}\), with the localized-tangent
+coefficient increased from 10 to 100.  Batch size 1024, mode-balanced
+coefficient 6, Hadamard coefficient 0.01, model parameters, data, and all other
+losses were unchanged.  The resulting train/composite-validation/H1-validation/
+modal-validation losses were
+\(0.00694792/0.00684961/0.00664756/3.36764\times10^{-5}\).
+The expected and observed Hadamard evaluations agreed exactly at 373/373.
+
+The larger coefficient acted in the intended direction without dominating the
+fit:
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Diagnostic & C20 & C21 & Relative change \\
+\midrule
+H1 validation loss & $6.65323\times10^{-3}$ & $6.64756\times10^{-3}$ & $-0.085\%$ \\
+Modal validation loss & $3.24949\times10^{-5}$ & $3.36764\times10^{-5}$ & $+3.64\%$ \\
+Raw localized-tangent loss & $5.7188\times10^{-7}$ & $4.7457\times10^{-7}$ & $-17.0\%$ \\
+Mean relative local-speed error & $2.4925\times10^{-4}$ & $2.2980\times10^{-4}$ & $-7.8\%$ \\
+Weighted tangent fraction of train loss & $0.0829\%$ & $0.683\%$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+These numbers establish that the intervention changed its target while
+remaining subdominant.  They do not by themselves establish a rollout
+improvement; that conclusion comes from the fixed-suite evaluation below.
+
+\subsection{Full-suite performance}
+
+Table~\ref{tab:c20-c21-suite} reports final relative elevation error under the
+same cached-truth, double-precision-harness protocol.  The number in the second
+column is the count retained after applying the reference-only Hamiltonian
+drift validity mask.  That mask excludes 15 reference trajectories; it is not
+a surrogate-finiteness filter.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Family & Valid & C20 median & C20 p95 & C21 median & C21 p95 \\
+\midrule
+Tanaka $g_0$       & 32 & 0.022810 & 0.298468 & 0.021041 & 0.260258 \\
+Tanaka $g_1$       & 32 & 0.052117 & 0.403609 & 0.034384 & 0.382378 \\
+Benjamin--Feir $g_0$ & 32 & 0.007292 & 0.149715 & 0.007240 & 0.128859 \\
+Benjamin--Feir $g_1$ & 31 & 0.016128 & 0.072102 & 0.016341 & 0.070135 \\
+Benjamin--Feir modal & 31 & 0.011504 & 0.108985 & 0.012146 & 0.114576 \\
+Shallow nonlinear & 20 & 0.016757 & 0.164532 & 0.016610 & 0.163205 \\
+Random sea, deep & 32 & 0.001449 & 0.013537 & 0.001495 & 0.013467 \\
+Random sea, finite depth & 32 & 0.002513 & 0.024598 & 0.002554 & 0.023935 \\
+Stokes, deep & 32 & 0.000462 & 0.001323 & 0.000459 & 0.001314 \\
+Stokes, finite depth & 31 & 0.003858 & 0.033379 & 0.003297 & 0.036508 \\
+\bottomrule
+\end{tabular}
+\caption{Matched C20 and C21 final-elevation errors on the fixed ten-family
+suite.  Medians and p95 values use only truth-valid cases, while the separate
+finiteness audit scans every predicted array.}
+\label{tab:c20-c21-suite}
+\end{table}
+
+Across the eight non-Tanaka families, comprising 241 truth-valid cases, the
+C20-to-C21 median/p95/mean change is
+\[
+  0.005366/0.07840/0.01803
+  \quad\longrightarrow\quad
+  0.005424/0.07490/0.01785,
+\]
+or \(+1.08\%/-4.47\%/-0.98\%\).  The corresponding counts above final-error
+thresholds improve as follows:
+\[
+ (N_{>0.25},N_{>0.50},N_{>0.75},N_{>1.00}):
+ \qquad 3/0/0/0\longrightarrow2/0/0/0.
+\]
+The Benjamin--Feir \(g_0\) case 23 tail changes only from
+0.36379 to 0.37364 and remains below its pre-specified 0.40 gate.
+
+Combining those cases with the 64 Tanaka trajectories yields 305 truth-valid
+cases.  The full-suite median/p95/mean improves
+\[
+  0.007201/0.16082/0.03464
+  \quad\longrightarrow\quad
+  0.006866/0.15369/0.03205,
+\]
+or \(-4.66\%/-4.43\%/-7.47\%\).  Counts above the same four thresholds
+improve from \(10/1/1/1\) to \(8/1/0/0\).  An explicit array scan found every
+C21 \(\eta\), \(\xi\), and \(G\xi\) value finite in all 320 trajectories,
+including the 15 with truth-invalid references, and every family has zero
+counted final divergences.  These results promote C21 as the best aggregate
+accuracy/stability checkpoint.  C20 is nevertheless retained as the clean
+phase-loss control because C21 changes the old loss weight and exhibits the
+tradeoff below.
+
+\subsection{The decisive tradeoff: rigid versus differential phase}
+
+The strongest C20 outlier, Tanaka \(g_0\) case 27, is a narrow shallow solitary
+wave whose error was almost a rigid translation.  C21 reduces its raw/aligned
+final error from \(1.12696/0.05061\) to \(0.33642/0.03050\), reduces the
+best-fit shift from 7.45 to 1.69 grid points, and changes final learned-
+Hamiltonian drift from \(-5.43\%\) to \(-2.84\%\).  This is direct evidence
+that stronger tangent supervision can correct a coherent speed bias.
+
+The cost is Tanaka \(g_1\) case 24, a two-crest state.  Its raw/aligned error
+changes as
+\[
+ 0.45866/0.14579\quad\longrightarrow\quad0.65909/0.24546,
+\]
+and the \(g_1\) aligned p95 correspondingly rises from 0.09723 to 0.14165.  At final time its
+two crests are displaced by \(+6.21\) and \(-0.24\) grid points, yet after
+aligning the crests separately their local shape errors are only 3.1\% and
+0.2\%.  The displacement split grows smoothly over the rollout.  It is
+therefore a differential local-speed allocation error, not a sudden shape
+failure.
+
+More generally, C21's six Tanaka cases above raw error 0.25 comprise four
+nearly rigid translations and two differential multi-crest translations.
+Across these cases the final high-band energy is 0.83--1.07 times the truth,
+the maximum-slope ratio is 0.93--1.02, learned-Hamiltonian drift remains within
+approximately \(\pm4.4\%\), and every saved field is finite.  These facts rule
+out recurrence of the former mid/high-band cascade and provide no signature of
+an abrupt GL2 failure.  Moreover, translation invariance of the Hamiltonian
+means that accurate energy alone cannot determine the point occupied on a
+translation group orbit.  The remaining tail is a secular phase-accuracy
+problem.
+
+\subsection{From local speed error to rollout error}
+
+Let \(T_s\eta(x)=\eta(x-s)\).  For a small displacement \(s\),
+\begin{equation}
+ \frac{\norm{T_s\eta-\eta}_2}{\norm{\eta}_2}
+ =|s|\,\kappa(\eta)+O(s^2),
+ \qquad
+ \kappa(\eta)=\frac{\norm{\eta_x}_2}{\norm{\eta}_2}.
+ \label{eq:translation-sensitivity}
+\end{equation}
+If \(\delta c(t)\) is a coherent speed defect, then
+\begin{equation}
+ e_\eta(T)
+ \simeq \kappa(\eta(T))
+ \left|\int_0^T\delta c(t)\,\dd t\right|.
+ \label{eq:secular-phase-growth}
+\end{equation}
+Thus a small one-step DNO error can produce an order-one final error without
+exponential growth, and a narrow profile is less tolerant of the same speed
+error than a broad one.
+
+The implemented tangent regularizer already estimates a local speed defect.
+Let \(e_q=q_\theta-q_*\), where \(q=G(\eta;h)\xi\), and let \(K_h\) be the
+periodic Gaussian with multiplier \(\exp[-(hk)^2/2]\).  Define
+\begin{align}
+ A_h &=K_h*(\eta_xe_q),
+ &B_h&=\max\{K_h*(\eta_x^2),0\},\nonumber\\
+ \delta c_h&=-\frac{A_h}{B_h+10^{-3}\max_x B_h+10^{-30}},
+ &\dd\mu_h&=\frac{B_h\,\dd x}{\int B_h\,\dd x}.
+ \label{eq:local-speed-defect}
+\end{align}
+The current per-state loss is
+\begin{equation}
+ \ell_{\mathrm{tan}}
+ =\int\left(\frac{\delta c_h}{\sqrt{gh}}\right)^2\dd\mu_h.
+ \label{eq:old-tangent-loss}
+\end{equation}
+This is a meaningful dimensionless fractional-speed error, but it is not the
+instantaneous growth of the reported relative-elevation error.  A normalized
+Gaussian preserves the integral, so
+\(\int B_h\,\dd x=\int\eta_x^2\,\dd x\), up to the inactive roundoff clamp in
+Eq.~\eqref{eq:local-speed-defect}.  Consequently
+\begin{equation}
+ \boxed{
+ \gamma^2
+ :=\frac{\int B_h(x)\,\delta c_h(x)^2\,\dd x}
+        {\int\eta(x)^2\,\dd x}
+ =gh\,\kappa(\eta)^2\ell_{\mathrm{tan}} .}
+ \label{eq:phase-growth-loss}
+\end{equation}
+When the tangent component of the DNO defect is
+\(e_{\eta,t}\simeq-\delta c_h\eta_x\), Eq.~\eqref{eq:phase-growth-loss} is the
+Gaussian-local estimate of
+\(\norm{e_{\eta,t}}_2^2/\norm{\eta}_2^2\), the squared instantaneous growth
+rate of the actual relative-error metric.  The equality in
+Eq.~\eqref{eq:phase-growth-loss} is exact for the stated continuous normalized
+Gaussian; the implementation should replace the elevation denominator by
+\(\int\eta^2\,\dd x+\varepsilon_\eta\) only for numerical safety and record the
+resulting regularization factor.  A common horizon factor \(T^2\) can be
+absorbed into the loss coefficient.  The essential correction is the
+sample-dependent sensitivity \(gh\kappa^2\), not another universal increase
+of the coefficient multiplying Eq.~\eqref{eq:old-tangent-loss}.
+
+The fixed 64-state Tanaka audit supports this conversion, but the frame-zero
+and final-profile quantities must be distinguished.  On the C20 initial truth
+states, the minimum, median, 90th percentile, and maximum \(\kappa\) values are
+\(0.4819860400,6.3151146892,19.3302364980,35.2952751152\), with Pearson
+\(\operatorname{corr}(\log h,\log\kappa)=-0.9706889755\).  The corresponding
+minimum, median, and maximum \(gh\kappa^2\) factors are
+\(0.06240194586,2.028865511,14.45894588\).  The final truth profiles instead
+have \(\kappa\) statistics
+\(0.4075981345,6.318302638,20.50914397,33.33393313\) and Pearson log--log
+correlation \(-0.9620172732\).  Case 27's final-profile
+\(\kappa=33.33393313\) is the value relevant to its shift tolerance:
+\(0.25/\kappa=0.00750\), while exact periodic Fourier translation and
+bisection give 0.007566.
+
+At C20 frame zero, the Pearson correlation of log score with log final raw
+elevation error is 0.7369574728 for \(\gamma^2\), compared with 0.6502210258 for
+\(\ell_{\mathrm{tan}}\).  This improvement is specific to logarithmic tail
+ordering: the raw-scale Pearson correlations are 0.794757 and 0.796616,
+respectively, so the raw linear correlation does not improve.  Case 27 ranks
+first and case 24 seventh under the derived factor.  These are diagnostic
+correlations rather than a training result, but they show that the omitted
+factor has the correct scale and logarithmic case ordering.
+
+For multi-crest states, no discrete crest identities are required.  With
+\(\overline{\delta c}=\int\delta c_h\,\dd\mu_h\), write
+\begin{align}
+ \gamma_{\mathrm{rigid}}^2
+ &=\kappa^2\overline{\delta c}^{\,2},\nonumber\\
+ \gamma_{\mathrm{diff}}^2
+ &=\kappa^2\int(\delta c_h-\overline{\delta c})^2\dd\mu_h,
+ &\gamma^2&=\gamma_{\mathrm{rigid}}^2+\gamma_{\mathrm{diff}}^2.
+ \label{eq:phase-risk-decomposition}
+\end{align}
+The first term is the squared energy-weighted spatial-mean contribution of the
+local speed defect; the second is its spatial variance contribution.  The latter can detect different local
+speeds such as case 24 and remains well-defined when crests approach or
+exchange order.  It is not, however, mathematically equivalent to inter-crest
+variance: nonuniformity within one narrow crest also enters the second term.
+The frame-zero discriminator below shows that this distinction is operationally
+important.
+
+\subsection{C22: controlled mean phase-growth ablation}
+
+C22 executed the pre-registered first ablation.  It began from the same C20
+epoch-40 best checkpoint used to initialize C21, thereby isolating the loss
+normalization from C21's tenfold increase of the old coefficient.  Adam was
+reset; one full v9 epoch used batch size 1024, learning rate
+\(2\times10^{-6}\) with a 200-step warmup, mode-balanced coefficient 6, and
+Hadamard coefficient 0.01.  The old tangent coefficient was set to zero and
+the full-v9-calibrated phase-growth coefficient was 10.  The architecture,
+data, and remaining objective terms were unchanged.  Unlike the old tangent
+term in C20, the phase-growth term was included in validation and checkpoint
+selection.
+
+Training completed without a numerical or accounting anomaly.  The exact
+epoch metrics are:
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Metric & C22 value \\
+\midrule
+Train loss & 0.0069397871 \\
+Composite validation loss & 0.0068893890 \\
+H1 validation loss & 0.0066473825 \\
+Modal validation loss & $3.3678880\times10^{-5}$ \\
+Phase-growth validation loss & $3.9933183\times10^{-6}$ \\
+Phase-growth train loss & $4.0587997\times10^{-6}$ \\
+Rigid phase-growth component & $2.4040945\times10^{-7}$ \\
+Differential phase-growth component & $3.8183903\times10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The two phase components sum to the reported train phase loss within logging
+precision.  After multiplication by coefficient 10, the phase term contributes
+0.585\% of the train objective, inside the intended 0.5--1.0\% range.  The
+Hadamard schedule fired on exactly 373/373 expected batches, and modal clipping
+was zero.  Thus a negative rollout decision cannot be attributed to an absent
+auxiliary, coefficient-scale error, missed Hadamard schedule, or clipping.
+
+The matched 32+32 Tanaka evaluation used the same cached truth and continuous
+periodic alignment as C20 and C21.  Table~\ref{tab:c20-c22-tanaka} gives the
+family-level raw and aligned statistics.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{llrrr}
+\toprule
+Family & Statistic & C20 & C21 & C22 \\
+\midrule
+Tanaka $g_0$ & Raw median     & 0.02280974 & 0.02104052 & 0.03370219 \\
+             & Raw p95        & 0.29846847 & 0.26025790 & 0.20827000 \\
+             & Aligned median & 0.00517506 & 0.00477889 & 0.00536654 \\
+             & Aligned p95    & 0.04630348 & 0.03501889 & 0.03285937 \\
+\addlinespace
+Tanaka $g_1$ & Raw median     & 0.05211732 & 0.03438386 & 0.04461333 \\
+             & Raw p95        & 0.40360892 & 0.38237807 & 0.40356176 \\
+             & Aligned median & 0.00909044 & 0.00903635 & 0.01061485 \\
+             & Aligned p95    & 0.09723028 & 0.14164622 & 0.13773014 \\
+\bottomrule
+\end{tabular}
+\caption{Matched Tanaka final-elevation errors for the C20 control, promoted
+C21 checkpoint, and C22 mean-\(\gamma^2\) ablation.}
+\label{tab:c20-c22-tanaka}
+\end{table}
+
+The combined distributions make the body--tail tradeoff explicit:
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Run & Raw median & Raw p95 & Aligned median & Aligned p95 \\
+\midrule
+C20 & 0.03303033 & 0.35831433 & 0.00668897 & 0.05714684 \\
+C21 & 0.02788697 & 0.34413996 & 0.00583046 & 0.05621389 \\
+C22 & 0.03444904 & 0.37679914 & 0.00834420 & 0.05643572 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Strict raw counts above \(0.25/0.50/0.75/1.00\) are, respectively,
+\(7/1/1/1\), \(6/1/0/0\), and \(6/1/0/0\) for C20, C21, and C22.  The aligned
+counts are \(1/0/0/0\) for all three.  Every C22 predicted field is finite in
+both families, giving 0/64 nonfinite trajectories.
+
+The named cases show why the intervention is a partial mechanistic success but
+not a replacement:
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Run & Case 27 raw & Case 27 aligned & Case 24 raw & Case 24 aligned \\
+\midrule
+C20 & 1.12695932 & 0.05061293 & 0.45866336 & 0.14579412 \\
+C21 & 0.33642204 & 0.03049814 & 0.65908811 & 0.24545740 \\
+C22 & 0.18046794 & 0.02688441 & 0.63952219 & 0.23661902 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The frame audit resolves the remaining differential tail more sharply.
+Table~\ref{tab:c22-differential-frames} shows smooth, secular growth rather
+than a terminal jump.
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Case & $t=50$ & $t=100$ & $t=150$ & $t=200$ \\
+\midrule
+Tanaka $g_1$ case 24 & 0.0250/0.0140 & 0.1671/0.0656 & 0.3810/0.1413 & 0.6395/0.2366 \\
+Tanaka $g_1$ case 22 & 0.0201/0.0200 & 0.0903/0.0798 & 0.2243/0.1933 & 0.4158/0.3617 \\
+\bottomrule
+\end{tabular}
+\caption{C22 raw/aligned relative elevation error at four saved times.}
+\label{tab:c22-differential-frames}
+\end{table}
+At final time, case 24's two crest shifts are
+\([5.984,-0.224]\) grid points and its independently aligned local errors are
+\([2.93\%,0.19\%]\).  Case 22's three crest shifts are
+\([4.255,-2.001,0.435]\), with local errors
+\([4.05\%,1.69\%,1.18\%]\).  Thus both predictions retain accurate local crest
+shapes while allocating different speed errors to different crests.  Case 27
+is complementary: its C22 framewise repair is bounded and nonmonotone, and its
+small aligned residual remains consistent with a predominantly rigid phase
+error.  Every saved \(\eta\), \(\xi\), and \(G\xi\) value in these trajectories
+is finite; slope and spectral-band diagnostics remain bounded without an
+accelerating mid/high-band surge.  The evidence therefore supports secular
+phase allocation, not a revived cascade or abrupt integrator failure.
+
+This outcome does not mean that \(\gamma^2\) is blind to differential error.
+The differential component is \(3.8183903\times10^{-6}\), or 94.08\% of C22's
+mean train phase loss; only \(2.4040945\times10^{-7}\) is rigid.  Rather, a
+corpus mean permits improvement of the aggregate differential statistic while
+redistributing rare tail risk.  Consistently, the \(g_1\) aligned p95 improves
+modestly from C21's 0.14165 to C22's 0.13773, while case 22 worsens from
+raw/aligned 0.39240/0.34147 to 0.41584/0.36167 and case 24 remains outside its
+gate.
+
+The completed common-initial-state discriminator gives a sharper warning.
+Using the exact implemented Gaussian projection and energy floor, the C20
+frame-zero differential scores are:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrl}
+\toprule
+Case & Differential rank & $\gamma_{\mathrm{diff}}^2$ & Final geometry \\
+\midrule
+Tanaka $g_0$ case 27 & 1 & $2.24346294649\times10^{-3}$ & Predominantly rigid \\
+Tanaka $g_1$ case 24 & 7 & $8.62902609365\times10^{-6}$ & Two-crest differential \\
+Tanaka $g_1$ case 22 & 9 & $2.58167939588\times10^{-6}$ & Three-crest differential \\
+\bottomrule
+\end{tabular}
+\caption{C20 frame-zero ranking under the implemented soft spatial-variance
+component.}
+\label{tab:frame-zero-differential-ranks}
+\end{table}
+The statistic does detect cases 24 and 22 in the upper truth-state tail, but
+case 27 is about 260 times larger than case 24.  Moreover, 97.47\% of case
+27's implemented \(\gamma^2\) is classified as differential even though a
+single rigid shift removes 97.78\% of its C22 final squared elevation error.
+C22 preserves ranks 1/7/9 for cases 27/24/22, and all three frame-zero scores
+increase slightly despite the large rollout improvement of case 27.  The soft
+spatial variance is therefore responding primarily to within-crest variation
+on the narrow single pulse; it is not a clean classifier of inter-crest phase.
+
+Consequently, a naive fourth moment or unnormalized CVaR applied to the current
+\(\gamma_{\mathrm{diff}}^2\) should be rejected: it would further overweight
+the already-repaired single-crest case.  Before another training run, formulate
+and validate either a coherent packet/crest-speed statistic or a capped,
+sample-balanced tail statistic over held-out truth trajectories.  The new
+observable must rank the growing aligned errors of cases 22 and 24 without
+being dominated by case 27.  If no truth-state statistic predicts that growth,
+then sparse signed one-substep tubular labels are justified as a response to
+off-trajectory covariate shift.  This ordered test separates target design from
+data support before spending another optimization run.
+
+C22 gives the best case-27 result and the best \(g_0\) p95, exactly the
+direction predicted by the missing phase-sensitivity factor.  It also slightly
+improves case 24 and the \(g_1\) aligned p95 relative to C21.  However, case 24
+still fails its pre-registered raw/aligned gates of 0.50/0.15, and the
+\(g_1\) aligned p95 of 0.13773 fails the approximately 0.107 gate.  The
+combined raw and aligned medians regress relative to both controls; raw p95
+also regresses.  C22 therefore passes the stability, coefficient, H1/modal,
+case-27, and raw-threshold gates, but fails the multi-crest and distributional
+acceptance criteria.
+
+The correct decision is \emph{partial mechanism acceptance and checkpoint
+rejection}.  C21 remains the promoted best aggregate accuracy/stability
+checkpoint, and C20 remains the clean loss-ablation control.  Because C22
+failed the decisive Tanaka gate, an eight-family non-Tanaka evaluation is not
+warranted: it cannot reverse the failed replacement decision and would spend
+substantial compute without resolving the mechanism.  The result does not
+invalidate Eq.~\eqref{eq:phase-growth-loss}; rather, it shows that minimizing
+its corpus mean can improve the most phase-sensitive rigid tail while moving
+typical and differential errors.  If this direction is continued, the next
+step is offline formulation and validation of either a coherent
+packet/crest-speed statistic or a capped, sample-balanced tail statistic over
+held-out truth trajectories.  A naive fourth moment or unnormalized CVaR of the
+current spatial-variance component is specifically contraindicated by
+Table~\ref{tab:frame-zero-differential-ranks}.  Sparse signed one-substep tubular
+training remains the fallback only if no truth-state observable predicts the
+subsequent differential growth and the risk instead blooms on learned states.
+
+A full Zakharov-vector projection onto the translation generator is useful as
+an offline diagnostic, but it is not the first training loss.  The only learned
+quantity is \(q\); the \(\xi_t\) error is a deterministic nonlinear reuse of
+that same \(q\), so a full-vector term supplies no independent label and
+requires a less canonical state-space metric.  Equation~\eqref{eq:phase-growth-loss}
+has the more direct first-order relation to the reported elevation error and
+adds neither a network evaluation nor inference-time work.
+
+\subsection{Stagewise modal-phase sufficiency oracle}
+\label{sec:modal-phase-oracle}
+
+Correlation of a truth-state loss with terminal error does not establish that
+the selected defect component is causally sufficient.  We therefore performed
+a privileged stagewise oracle experiment on C21.  At a current oracle state
+$z=(\eta,\xi)$, let
+\[
+  d(z)=q_6(z)-q_\theta(z),
+  \qquad
+  q(\eta,\xi)=G(\eta)\xi,
+\]
+where $q_6$ is the order-six, pad-eight reference evaluation and $q_\theta$ is
+the C21 evaluation at the \emph{same} state.  For every active mode
+$0<|k|\leq128$, define the real modal phase projection
+\begin{equation}
+  \widehat{\Pi_\phi d}_k
+  =
+  i\widehat{\eta}_k
+  \frac{
+    \operatorname{Im}\!\left(
+      \widehat d_k\overline{\widehat{\eta}_k}
+    \right)
+  }{
+    |\widehat{\eta}_k|^2
+  } ,
+  \qquad
+  q_{\mathrm{or}}=q_\theta+\Pi_\phi d .
+  \label{eq:modal-phase-oracle}
+\end{equation}
+Modes whose elevation energy is below $10^{-12}$ of the retained maximum are
+excluded.  Equation~\eqref{eq:modal-phase-oracle} supplies exactly the
+same-state DNO-defect component tangent to the phase circle
+$\operatorname{span}_{\mathbb R}\{i\widehat{\eta}_k\}$; it leaves the radial
+modal component of the learned defect untouched.  The correction is recomputed
+at every production GL2 stage using inner step $0.01$, four Picard iterations,
+and the standard $0.25$ filter.
+
+This is a causal diagnostic, not a proposed inference method.  In particular,
+the deployed analytic Craig--Sulem backbone remains exactly $G_0+G_1$; the
+order-six evaluation appears only in the oracle reference and is neither added
+to the architecture nor used in ordinary rollout.
+
+The complete fixed six-tail panel gives:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Case & C21 raw & C21 aligned & Oracle raw & Oracle aligned \\
+\midrule
+4 & 0.276834 & 0.008247 & 0.149740 & 0.005570 \\
+27 & 0.336422 & 0.030498 & 1.024735 & 0.042920 \\
+2 & 0.374177 & 0.008365 & 0.243942 & 0.007618 \\
+11 & 0.345502 & 0.013085 & 0.113941 & 0.005149 \\
+22 & 0.392402 & 0.341471 & 0.244145 & 0.087457 \\
+24 & 0.659088 & 0.245457 & 0.625278 & 0.119105 \\
+\bottomrule
+\end{tabular}
+\caption{Final relative elevation errors for the fixed-six stagewise
+modal-phase oracle at $T=200$.  Case labels are local to their Tanaka family.}
+\label{tab:modal-phase-oracle-six}
+\end{table}
+
+All six oracle trajectories remain finite.  Four cross below the raw-error
+threshold $0.25$, and the maximum aligned error falls from $0.341471$ to
+$0.119105$.  The raw median improves from $0.359839$ to $0.244043$.
+Nevertheless, the raw counts above $0.25/0.50/0.75/1.00$ change from
+$6/1/0/0$ to $2/2/1/1$: the intervention redistributes rather than eliminates
+tail risk.
+
+The two counterexamples are complementary.  For case 24, the aligned error
+falls by $51.5\%$, but the raw error falls by only $5.1\%$; the best-fit
+displacement changes only from $5.59$ to $5.37$ grid points.  Its terminal
+modal phase component is $76.1\%$ of the same-state DNO defect, so this failure
+cannot be dismissed as an inactive projection.  Case 27 is more decisive: raw
+error increases from $0.336422$ to $1.024735$ and displacement from $1.69$ to
+$6.22$ grid points.  At times $20,40,80,120,160,200$, its oracle raw errors are
+$0.0105,0.0437,0.2038,0.4513,0.7498,1.0247$, respectively.  Thus the reversal
+is a smooth secular drift, not a late discontinuity.  Throughout both cases,
+Hamiltonian drift remains bounded and the terminal $k=64,\ldots,128$ spectrum
+stays close to truth.
+
+The oracle therefore distinguishes causal contribution from causal
+sufficiency.  The same-state modal phase component contributes materially to
+the aligned and aggregate error, but correcting it alone leaves the radial
+defect free to alter the state.  The exact DNO response to that altered state
+can then regenerate or reverse the phase drift.  For a multi-packet profile,
+a local tangent defect $a_1\eta_{1x}+a_2\eta_{2x}$ is also not generally
+parallel to $i\widehat\eta_k$ when $a_1\ne a_2$; genuine differential packet
+translation is therefore split between the global modal phase and radial
+subspaces.  A modal phase-rate loss remains mathematically meaningful, but the
+complete oracle rejects it as a sufficient replacement for a localized
+packet-translation or coupled finite-horizon sensitivity.
+
+\paragraph{Cross-case transfer falsifies a universal reduced projection.}
+
+The same five-arm experiment on the predominantly rigid Tanaka-$g_0$
+case 27 reverses the case-24 ordering:
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{Case 24} & \multicolumn{2}{c}{Case 27} \\
+Correction & Raw & Aligned & Raw & Aligned \\
+\midrule
+None, C21                         & 0.659088 & 0.245457 & 0.336422 & 0.030498 \\
+Modal phase $\Pi_\phi d$         & 0.625276 & 0.119104 & 1.024433 & 0.042911 \\
+Localized translation, width $h$ & 0.508067 & 0.225268 & 1.079470 & 0.043482 \\
+Localized translation, width $4h$
+                                  & 0.474397 & 0.151743 & 0.134637 & 0.024499 \\
+Complement $d-\Pi_\phi d$        & 0.137739 & 0.136753 & 0.535542 & 0.027532 \\
+Full defect $d$                   &
+$2.254{\times}10^{-8}$ & $2.254{\times}10^{-8}$ &
+$1.937{\times}10^{-8}$ & $1.844{\times}10^{-8}$ \\
+\bottomrule
+\end{tabular}
+\caption{Terminal relative elevation errors for two C21 Tanaka tails under
+stagewise components of the same-state order-six defect
+$d=q_6-q_\theta$.}
+\label{tab:neutral-oracle-cross-case}
+\end{table}
+
+The complement of the modal phase projection is the best reduced arm for
+case 24, whereas the width-$4h$ localized projection is the best reduced arm
+for case 27.  Neither transfers: the case-24 winner leaves case 27 at raw error
+$0.5355$, while the case-27 winner leaves case 24 at $0.4744$.
+Moreover, modal-phase and width-$h$ correction make case 27 worse than one,
+despite supplying an exact component of the reference defect.  The width-$4h$
+case-27 trajectory is not uniformly repaired either: its raw error reaches
+$0.2819$ at $t=120$ before decreasing to $0.1346$.
+
+This nonmonotonicity is expected once the defect components are propagated by
+the coupled nonlinear Zakharov dynamics.  Orthogonality of instantaneous
+Fourier components does not imply orthogonality of their finite-time effects;
+the learned phase and amplitude defects can partially cancel after feedback
+through both $\eta$ and $\xi$.  Removing only one exact component may therefore
+expose the secular effect of the component left behind.
+
+By contrast, full-defect correction shadows the reference to approximately
+$2\times10^{-8}$ in both cases.  This validates the GL2 implementation for
+these trajectories and identifies the common missing ingredient as uniformly
+better approximation of the full complex DNO response, not a universal scalar
+phase coordinate.  Since the existing operator objective already supervises
+that full defect, the clean next test is a modest increase in learned-residual
+capacity followed by a full structural retraining with the established value,
+mode-balanced, and Hadamard objectives.  This changes neither the analytic
+ceiling nor the inference principle: the deployed analytic backbone remains
+exactly $G_0+G_1$, with all higher-order behavior represented by the learned
+$O(\eta^2)$ residual.  The oracle motivates this experiment but does not itself
+establish that capacity, rather than optimization, is the limiting factor.
 
 \section{Alternative explanations, objections, and falsifiers}
 
@@ -1010,7 +1678,8 @@ appears when the input is moved in the rollout's transverse direction.
 A useful remaining audit would compare independently regenerated order-six
 labels against stored v9 labels on a stratified sample, including source,
 depth, steepness, and high-band-energy tails.  Such an audit would strengthen
-dataset provenance but would not replace the already measured shape identity.
+the evidence for the stored labels but would not replace the already measured
+shape identity.
 
 \subsection{Does small value error plus large derivative error necessarily
 cause a NaN?}
@@ -1173,9 +1842,41 @@ Small truth-state value error coexists with \(O(1)\) shape defect; exact
 shape derivative/Hamiltonian compatibility is the primary missing constraint. \\
 
 C16 & Fresh exact \(G_0+G_1\), full self-adjoint \(O(\eta^2)\) residual,
-randomized Hadamard loss, and padded RHS. & Structural tests and 1\% smoke pass;
-16-epoch budget-capped training is in progress. & First clean direct test of the
-diagnosis. \\
+randomized Hadamard loss, and padded RHS. & Clean 40-epoch replay and fixed
+ten-family evaluation give 0/320 nonfinite trajectories; only two finite
+Tanaka phase divergences remain. & Direct structural treatment removes the NaN
+mechanism, but stability does not by itself give adequate phase accuracy. \\
+
+C20 & Fresh C16 architecture with mode-balanced supervision, corrected local
+translation-tangent loss at weight 10, and Hadamard loss retained. & 0/320
+nonfinite predictions; full-suite median/p95/mean
+\(0.007201/0.16082/0.03464\), but one rigid Tanaka error remains above one. &
+Weak-mode accuracy improves substantially; the remaining extreme error is a
+neutral translation, not a spectral cascade. \\
+
+C21 & One low-learning-rate epoch from C20 with only the old localized-tangent
+coefficient increased from 10 to 100. & 0/320 nonfinite and zero final
+divergences; full-suite median/p95/mean
+\(0.006866/0.15369/0.03205\).  Case 27 improves strongly, while two-crest case
+24 worsens. & Best aggregate checkpoint, but a larger mean phase coefficient
+redistributes rigid and differential speed error rather than eliminating both.
+\\
+
+Phase audit & Continuous alignment, local crest alignment, spectral and
+Hamiltonian checks, and conversion from local speed error to relative state
+error. & Derives \(\gamma^2=gh\kappa^2\ell_{\mathrm{tan}}\); its frame-zero
+Pearson log-score/log-final-error correlation is 0.737 versus 0.650 for the old
+loss, while raw-scale correlation does not improve. &
+Motivates an isolated phase-sensitivity normalization test before any new data,
+architecture, or full retraining. \\
+
+C22 & One full-v9 epoch from C20 with the old tangent loss off and the derived
+mean \(\gamma^2\) loss at calibrated weight 10; phase validation included. &
+0/64 Tanaka nonfinite predictions; case 27 improves to 0.18047/0.02688 and the
+raw threshold counts match C21, but case 24 remains 0.63952/0.23662 and
+aggregate medians regress. & Partial confirmation of the sensitivity mechanism,
+but reject as a replacement for C21; a mean phase loss does not control the
+rare differential tail. \\
 \bottomrule
 \end{longtable}
 
@@ -1200,11 +1901,20 @@ independent checks passed before the full launch:
 
 \section*{Reproducibility record}
 
-The detailed chronological record is \texttt{EXPERIMENTS.md}.  Frame-level
+The detailed chronological record is \path{EXPERIMENTS.md}.  Frame-level
 statistics and paths to the aligned NPZ archives are recorded in
-\texttt{notes/nan\_root\_cause\_investigation\_20260709.md}.  The C16 launcher
-is \texttt{scripts/launch\_c16\_modal\_h100x2.sh}; model, Hadamard-loss, and
-dealiased-RHS invariant tests are stored alongside their implementations.
+\path{notes/nan_root_cause_investigation_20260709.md}.  The C16 launcher
+is \path{scripts/launch_c16_modal_h100x2.sh}; model, Hadamard-loss, and
+dealiased-RHS invariant tests are stored alongside their implementations.  The
+C21 checkpoint and Tanaka evaluation are under
+\path{outputs/c21_tangent_w100_from_c20_20260714_171442}; its eight-family
+acceptance evaluation is the subdirectory beginning
+\path{eval_final_guarded_non_tanaka_suite}.  The frame-by-frame phase
+audit and complete derivation of Eq.~\eqref{eq:phase-growth-loss} are in
+\path{notes/principled_translation_error_solution_20260714.md}.  The C22 run is
+\path{outputs/c22_phase_growth_w10_from_c20_20260715_012811}; its matched Tanaka
+evaluation is the subdirectory
+\path{eval_final_soliton_spectral_guard_20260715_023013}.
 
 \begin{thebibliography}{9}
 \bibitem{xu2009}

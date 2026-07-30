@@ -109,6 +109,7 @@ def load_run(
             tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
             phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
             residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+            depth_scaled_residual=bool(config.get("cs_depth_scaled_residual", False)),
             block_k_cut=int(config.get("cs_block_k_cut", 0)),
             residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
             residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),
@@ -374,6 +375,8 @@ def _apply_eta_growth_guard(
     k_arr: jnp.ndarray,
     nx: int,
     eta_amp0: jnp.ndarray,
+    depth: jnp.ndarray,
+    activation_mask: jnp.ndarray,
     *,
     k_lo: float,
     k_hi: float,
@@ -383,6 +386,7 @@ def _apply_eta_growth_guard(
     houli_a: float,
     houli_m: float,
     k_eff: float,
+    kh_eff: float,
     filter_xi: bool,
 ) -> ti.State:
     """Damp state high modes only after abnormal per-IC eta high-band growth.
@@ -400,10 +404,26 @@ def _apply_eta_growth_guard(
     )
     log_ratio = jnp.log(eta_amp + 1e-30) - jnp.log(trigger + 1e-30)
     weight = jax.nn.sigmoid(jnp.asarray(sharpness, dtype=eta_amp.dtype) * log_ratio)
+    weight = weight * activation_mask.astype(weight.dtype)
     weight = weight[..., None] if weight.ndim else weight
 
     k_abs = jnp.abs(k_arr)
-    c_houli = jnp.exp(-houli_a * (k_abs / jnp.maximum(jnp.asarray(k_eff, dtype=k_abs.dtype), 1e-12)) ** (2 * houli_m))
+    k_eff_local = jnp.asarray(k_eff, dtype=k_abs.dtype)
+    if kh_eff > 0.0:
+        depth_local = jnp.asarray(depth, dtype=k_abs.dtype)
+        if depth_local.ndim > 0 and depth_local.shape[-1] == 1:
+            depth_local = depth_local[..., 0]
+        depth_k_eff = jnp.asarray(kh_eff, dtype=k_abs.dtype) / jnp.maximum(
+            depth_local, jnp.asarray(1e-12, dtype=k_abs.dtype)
+        )
+        k_eff_local = jnp.minimum(k_eff_local, depth_k_eff)
+    if jnp.ndim(k_eff_local) > 0:
+        k_eff_local = k_eff_local[..., None]
+    c_houli = jnp.exp(
+        -houli_a
+        * (k_abs / jnp.maximum(k_eff_local, jnp.asarray(1e-12, dtype=k_abs.dtype)))
+        ** (2 * houli_m)
+    )
     blend = (1.0 - weight) + weight * c_houli
     new_eta = myifft(myfft(state.eta, nx) * blend)
     if filter_xi:
@@ -411,6 +431,26 @@ def _apply_eta_growth_guard(
     else:
         new_xi = state.xi
     return ti.State(eta=new_eta, xi=new_xi)
+
+
+def _positive_elevation_soliton_mask(
+    eta: jnp.ndarray,
+    negative_energy_threshold: float,
+) -> jnp.ndarray:
+    """Identify positive-elevation initial states eligible for the guard.
+
+    Tanaka elevation solitons have negligible negative-elevation energy, while
+    periodic wave trains and random seas oscillate about zero.  The predicate
+    is evaluated once at t=0 and is independent of the learned trajectory.  It
+    does not test localization or oscillation count.
+    """
+    eta_sq = jnp.sum(eta**2, axis=-1)
+    eta_negative_sq = jnp.sum(jnp.minimum(eta, 0.0) ** 2, axis=-1)
+    negative_fraction = eta_negative_sq / (eta_sq + 1e-30)
+    return jnp.logical_and(
+        negative_fraction < negative_energy_threshold,
+        jnp.mean(eta, axis=-1) > 0.0,
+    )
 
 
 def _stage_relative_residual(
@@ -679,6 +719,9 @@ def rollout_surrogate(
     eta_growth_guard_houli_a: float = 0.69,
     eta_growth_guard_houli_m: float = 4.0,
     eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_kh_eff: float = 0.0,
+    eta_growth_guard_soliton_only: bool = False,
+    eta_growth_guard_negative_energy_threshold: float = 1e-3,
     eta_growth_guard_filter_xi: bool = True,
     gl2_residual_check: bool = False,
     gl2_residual_tol: float = 1e-2,
@@ -691,6 +734,14 @@ def rollout_surrogate(
         state.eta, params.k, params.nx,
         k_lo=eta_growth_guard_k_lo,
         k_hi=eta_growth_guard_k_hi,
+    )
+    eta_growth_activation_mask = (
+        _positive_elevation_soliton_mask(
+            state.eta,
+            eta_growth_guard_negative_energy_threshold,
+        )
+        if eta_growth_guard_soliton_only
+        else jnp.ones_like(eta_growth_amp0, dtype=jnp.bool_)
     )
     gxi0 = predict_gxi(state.eta, state.xi)
     if times.shape[0] == 1:
@@ -738,6 +789,7 @@ def rollout_surrogate(
             if eta_growth_guard_enabled:
                 nxt = _apply_eta_growth_guard(
                     nxt, params.k, params.nx, eta_growth_amp0,
+                    params.depth, eta_growth_activation_mask,
                     k_lo=eta_growth_guard_k_lo,
                     k_hi=eta_growth_guard_k_hi,
                     abs_floor=eta_growth_guard_abs_floor,
@@ -746,6 +798,7 @@ def rollout_surrogate(
                     houli_a=eta_growth_guard_houli_a,
                     houli_m=eta_growth_guard_houli_m,
                     k_eff=eta_growth_guard_k_eff,
+                    kh_eff=eta_growth_guard_kh_eff,
                     filter_xi=eta_growth_guard_filter_xi,
                 )
             return nxt

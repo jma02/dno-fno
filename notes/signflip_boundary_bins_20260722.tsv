@@ -1,0 +1,6 @@
+clearance_bin	cases	t0_sign_rejected	trajectory_rows_removed	trajectory_rows_total	removed_fraction	refinement_flagged
+[0,5)	27	10	5377	5400	0.99574074	27
+[5,10)	30	2	3890	6000	0.64833333	12
+[10,20)	61	0	2489	12200	0.20401639	2
+[20,40)	88	0	1041	17600	0.05914773	0
+[40,82]	48	0	25	9600	0.00260417	0

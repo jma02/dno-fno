@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import jax.numpy as jnp
 import numpy as np
 
 from playground.gen_bf import benjamin_feir_ic

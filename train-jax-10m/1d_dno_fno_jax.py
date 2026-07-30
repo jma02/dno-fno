@@ -36,7 +36,9 @@ from util import (
     FlatParams,
     NormStats,
     assert_pytree_replicated,
-    build_split_indices,
+    build_case_balanced_validation_indices,
+    build_dataset_split_indices,
+    build_epoch_sample_indices,
     device_prefetch,
     evaluate,
     get_batches,
@@ -53,6 +55,24 @@ from solver.solvers.dno_series_jax import build_grid, dno_series_eval
 from solver.solvers.time_integrator import apply_filter, dealiased_zakharov_xi_rhs
 from hadamard_shape_regularizer import HadamardRegConfig, compute_hadamard_reg
 from stage_tangent_regularizer import StageRegConfig, compute_stage_reg, sample_microbatch
+from translation_tangent_regularizer import (
+    TranslationTangentConfig,
+    compute_translation_tangent_loss,
+)
+from mode_balanced_regularizer import (
+    ModeBalancedConfig,
+    compute_mode_balanced_loss,
+)
+from modal_phase_rate_regularizer import (
+    ModalPhaseRateConfig,
+    compute_modal_phase_rate_loss,
+)
+from finite_time_phase_regularizer import (
+    FiniteTimePhaseConfig,
+    compute_finite_time_phase_regularizer,
+    sample_source_microbatch,
+)
+from source_conditioning import parse_source_ids, source_conditioning_for_dataset
 
 
 def save_checkpoint(
@@ -84,6 +104,7 @@ def save_checkpoint(
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
         "stats": stats,
+        "dataset_identity": stats.get("dataset_identity"),
     }
     checkpoints.save_checkpoint(
         ckpt_dir=output_dir,
@@ -229,6 +250,10 @@ def parse_args() -> argparse.Namespace:
                         help="Lowest homogeneous eta order allowed in the learned residual. "
                              "Use 2 with an exact G_1 baseline so the residual cannot overwrite "
                              "the first-order Craig-Sulem null form.")
+    parser.add_argument("--cs_depth_scaled_residual", action="store_true", default=False,
+                        help="Express the learned residual in Zakharov depth-normalized "
+                             "variables (eta/h, xi/h^(3/2), q/sqrt(h), kh). Leaves the "
+                             "exact physical G_0+G_1 backbone unchanged.")
     parser.add_argument("--cs_block_k_cut", type=int, default=0,
                         help="Hard low-pass k-cutoff applied inside every CraigSulemBlock, "
                              "on both m_xi (input side) and out_hat (output side). 0 disables. "
@@ -386,6 +411,73 @@ def parse_args() -> argparse.Namespace:
                         help="Per-sample upper bound on the relative H drift before it enters "
                              "the loss. Floor against H_0 ~ 0 outliers; effectively a no-op "
                              "for trained models (drift is far below this).")
+    parser.add_argument("--translation_tangent_weight", type=float, default=0.0,
+                        help="Weight of the localized translation-tangent error on Tanaka "
+                             "sources. Projects the DNO error onto eta_x in periodic windows "
+                             "and normalizes by sqrt(g*h). 0 disables.")
+    parser.add_argument("--phase_growth_weight", type=float, default=0.0,
+                        help="Weight of the localized phase-growth loss gamma^2 on Tanaka "
+                             "sources. Converts the fitted speed defect to the instantaneous "
+                             "growth rate of relative eta error. 0 disables.")
+    parser.add_argument("--translation_tangent_window_depths", type=float, default=1.0,
+                        help="Gaussian localization width as a multiple of physical depth h.")
+    parser.add_argument("--translation_tangent_energy_floor_relative", type=float, default=1e-3,
+                        help="Local eta_x-energy denominator floor relative to its sample maximum.")
+    parser.add_argument("--modal_phase_rate_weight", type=float, default=0.0,
+                        help="Weight of the centered, elevation-energy-weighted modal phase-rate "
+                             "loss on Tanaka sources. 0 disables it.")
+    parser.add_argument("--modal_phase_rate_k_min", type=float, default=1.0,
+                        help="Smallest positive physical wavenumber scored by the modal "
+                             "phase-rate loss.")
+    parser.add_argument("--modal_phase_rate_k_max", type=float, default=128.0,
+                        help="Largest positive physical wavenumber scored by the modal "
+                             "phase-rate loss.")
+    parser.add_argument("--modal_phase_rate_active_scale_relative", type=float, default=1e-4,
+                        help="Reference-elevation activity threshold relative to each sample's "
+                             "strongest in-band modal energy.")
+    parser.add_argument("--modal_phase_rate_denominator_floor_relative", type=float, default=1e-6,
+                        help="Relative floor used in the modal phase-rate denominator.")
+    parser.add_argument("--finite_time_phase_weight", type=float, default=0.0,
+                        help="Weight of the sparse paired GL2 full-state finite-time phase/action "
+                             "loss. 0 disables it.")
+    parser.add_argument("--finite_time_phase_interval", type=int, default=64,
+                        help="Evaluate the finite-time loss every this-many optimizer steps.")
+    parser.add_argument("--finite_time_phase_microbatch", type=int, default=4,
+                        help="Global finite-time microbatch, split evenly across devices.")
+    parser.add_argument("--finite_time_phase_warmup_steps", type=int, default=200,
+                        help="Linear warmup for the finite-time loss weight.")
+    parser.add_argument("--finite_time_phase_dt", type=float, default=0.01,
+                        help="GL2-IF substep size in the paired short rollouts.")
+    parser.add_argument("--finite_time_phase_substeps", type=int, default=8,
+                        help="Number of GL2-IF substeps in each paired short rollout.")
+    parser.add_argument("--finite_time_phase_picard", type=int, default=4,
+                        help="Fixed Picard iterations per GL2 stage solve.")
+    parser.add_argument("--finite_time_phase_filter_fraction", type=float, default=0.25,
+                        help="Hard spectral filter fraction used inside and after each substep.")
+    parser.add_argument("--finite_time_phase_reference_order", type=int, default=6,
+                        help="Craig-Sulem order for the online reference path.")
+    parser.add_argument("--finite_time_phase_reference_pad", type=int, default=8,
+                        help="Craig-Sulem padding factor for the online reference path.")
+    parser.add_argument("--finite_time_phase_k_max", type=float, default=128.0,
+                        help="Largest positive mode scored by the path loss.")
+    parser.add_argument("--finite_time_phase_source_ids", default=None,
+                        help="Optional comma-separated source IDs cycled across regularizer "
+                             "fires. By default, use the dataset-aware Tanaka and "
+                             "Benjamin--Feir IDs.")
+    parser.add_argument("--mode_balanced_weight", type=float, default=0.0,
+                        help="Weight of the universal mode-balanced complex spectral loss. "
+                             "0 disables.")
+    parser.add_argument("--mode_balanced_warmup_steps", type=int, default=500,
+                        help="Linear ramp of mode_balanced_weight over this many optimizer steps.")
+    parser.add_argument("--mode_balanced_k_max", type=float, default=128.0,
+                        help="Largest positive physical wavenumber included in the mode-balanced loss.")
+    parser.add_argument("--mode_balanced_active_scale_relative", type=float, default=1e-4,
+                        help="Soft activity threshold relative to each sample's strongest modal energy.")
+    parser.add_argument("--mode_balanced_denominator_floor_relative", type=float, default=1e-6,
+                        help="Relative floor in the physical modal-error denominator.")
+    parser.add_argument("--mode_balanced_dispersion_weighting", action="store_true",
+                        help="Weight each sample's complex mode-balanced loss by its "
+                             "elevation-energy-averaged linear frequency squared.")
     parser.add_argument("--psd_hinge_weight", type=float, default=0.0,
                         help="Weight of the PSD hinge penalty mean[ReLU(-<xi, G_pred(eta) xi>)]. "
                              "Pushes the surrogate toward a positive-semi-definite operator (the "
@@ -485,6 +577,7 @@ def main() -> None:
         or args.cs_fft_fp64
         or args.cs_g1_fft_fp64
         or args.hadamard_weight > 0.0
+        or args.finite_time_phase_weight > 0.0
     ):
         jax.config.update("jax_enable_x64", True)
     compute_dtype = jnp.float64 if args.precision == "fp64" else jnp.float32
@@ -505,6 +598,15 @@ def main() -> None:
             f"hadamard_microbatch {args.hadamard_microbatch} must be divisible by "
             f"device count {n_devices}"
         )
+    if (
+        args.finite_time_phase_weight > 0.0
+        and args.finite_time_phase_microbatch % n_devices != 0
+    ):
+        raise ValueError(
+            "finite_time_phase_microbatch "
+            f"{args.finite_time_phase_microbatch} must be divisible by device count "
+            f"{n_devices}"
+        )
     if args.hadamard_weight > 0.0 and args.hadamard_interval < 1:
         raise ValueError(
             f"hadamard_interval must be positive, got {args.hadamard_interval}"
@@ -522,20 +624,49 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset_arrays(dataset_path)
-    nx = int(dataset["x"].shape[0])
-    stats = dict(load_or_compute_stats(dataset_path, dataset=dataset))
-    stats["target_kind"] = "gxi"
-    ns = NormStats.from_dict(stats, mode=args.norm)
-    train_indices, val_indices, _ = build_split_indices(
-        int(dataset["eta"].shape[0]),
-        args.seed,
+    dataset_source = np.asarray(
+        dataset.get("source", np.zeros(dataset["eta"].shape[0], dtype=np.int8)),
+        dtype=np.int8,
     )
+    nx = int(dataset["x"].shape[0])
+    train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
+    hierarchical_training = "split_id" in dataset
+    source_conditioning = source_conditioning_for_dataset(dataset)
+    finite_time_phase_source_ids = parse_source_ids(
+        args.finite_time_phase_source_ids,
+        automatic=source_conditioning.finite_time_source_ids,
+    )
+    stats_indices = train_indices if "trajectory_index" in dataset else None
+    if hierarchical_training and args.data_fraction < 1.0:
+        raise ValueError(
+            "schema-v2 hierarchical training does not support row-level "
+            "--data_fraction; generate a smaller whole-case pilot instead"
+        )
     if args.data_fraction < 1.0:
         n_train_keep = int(train_indices.shape[0] * args.data_fraction)
         n_val_keep = int(val_indices.shape[0] * args.data_fraction)
         train_indices = train_indices[:n_train_keep]
         val_indices = val_indices[:n_val_keep]
-    train_steps_per_epoch = train_indices.shape[0] // args.batch_size
+    stats = dict(load_or_compute_stats(
+        dataset_path,
+        dataset=dataset,
+        indices=stats_indices,
+    ))
+    stats["target_kind"] = "gxi"
+    ns = NormStats.from_dict(stats, mode=args.norm)
+    epoch_train_examples = build_epoch_sample_indices(
+        dataset,
+        train_indices,
+        split_id=0,
+        seed=args.seed,
+        epoch=0,
+    ).shape[0]
+    checkpoint_val_indices = build_case_balanced_validation_indices(
+        dataset,
+        val_indices,
+        seed=args.seed,
+    )
+    train_steps_per_epoch = epoch_train_examples // args.batch_size
 
     domain_length = float(stats.get("domain_length", dataset.get("domain_length", 2.0 * np.pi)))
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
@@ -575,6 +706,7 @@ def main() -> None:
             tie_xi_out_mult=args.cs_tie_xi_out_mult,
             phi_bias_free=args.cs_phi_bias_free,
             residual_eta_order=args.cs_residual_eta_order,
+            depth_scaled_residual=args.cs_depth_scaled_residual,
             block_k_cut=args.cs_block_k_cut,
             residual_highband_cap=args.cs_residual_highband_cap,
             residual_highband_cap_k_cut=args.cs_residual_highband_cap_k_cut,
@@ -668,6 +800,7 @@ def main() -> None:
                     "cs_tie_xi_out_mult": bool(args.cs_tie_xi_out_mult),
                     "cs_phi_bias_free": bool(args.cs_phi_bias_free),
                     "cs_residual_eta_order": int(args.cs_residual_eta_order),
+                    "cs_depth_scaled_residual": bool(args.cs_depth_scaled_residual),
                     "cs_block_k_cut": int(args.cs_block_k_cut),
                     "cs_output_highband_cap": bool(args.cs_output_highband_cap),
                     "cs_output_highband_cap_k_cut": float(args.cs_output_highband_cap_k_cut),
@@ -683,6 +816,7 @@ def main() -> None:
             }
             legacy_arch_defaults: dict[str, object] = {
                 "cs_residual_eta_order": 1,
+                "cs_depth_scaled_residual": False,
             }
             for key, current_value in current_arch_config.items():
                 if key in nonparam_resume_overrides:
@@ -762,9 +896,20 @@ def main() -> None:
         "weight_decay": args.weight_decay,
         "early_stopping_patience": args.early_stopping_patience,
         "param_count": count_params(params),
-        "train_examples": int(train_indices.shape[0]),
-        "val_examples": int(val_indices.shape[0]),
+        "train_examples": int(epoch_train_examples),
+        "train_stored_rows": int(train_indices.shape[0]),
+        "hierarchical_case_time_sampling": hierarchical_training,
+        "source_id_schema": source_conditioning.dataset_schema,
+        "val_examples": int(checkpoint_val_indices.shape[0]),
+        "val_stored_rows": int(val_indices.shape[0]),
+        "hierarchical_case_time_validation": hierarchical_training,
+        "validation_sampling_policy": (
+            "fixed_one_time_per_case"
+            if hierarchical_training
+            else "all_stored_rows"
+        ),
         "data_fraction": float(args.data_fraction),
+        "dataset_identity": stats.get("dataset_identity"),
     }
     config_payload["domain_length"] = domain_length
     config_payload["xi_scale"] = xi_scale
@@ -793,6 +938,77 @@ def main() -> None:
     config_payload["hamiltonian_dt"] = float(args.hamiltonian_dt)
     config_payload["hamiltonian_warmup_steps"] = int(args.hamiltonian_warmup_steps)
     config_payload["hamiltonian_clip"] = float(args.hamiltonian_clip)
+    config_payload["translation_tangent_weight"] = float(args.translation_tangent_weight)
+    config_payload["phase_growth_weight"] = float(args.phase_growth_weight)
+    config_payload["translation_tangent_window_depths"] = float(
+        args.translation_tangent_window_depths
+    )
+    config_payload["translation_tangent_energy_floor_relative"] = float(
+        args.translation_tangent_energy_floor_relative
+    )
+    config_payload["modal_phase_rate_weight"] = float(args.modal_phase_rate_weight)
+    config_payload["modal_phase_rate_k_min"] = float(args.modal_phase_rate_k_min)
+    config_payload["modal_phase_rate_k_max"] = float(args.modal_phase_rate_k_max)
+    config_payload["modal_phase_rate_active_scale_relative"] = float(
+        args.modal_phase_rate_active_scale_relative
+    )
+    config_payload["modal_phase_rate_denominator_floor_relative"] = float(
+        args.modal_phase_rate_denominator_floor_relative
+    )
+    config_payload["translation_tangent_source_ids"] = list(
+        source_conditioning.tanaka_source_ids
+    )
+    config_payload["modal_phase_rate_source_ids"] = list(
+        source_conditioning.tanaka_source_ids
+    )
+    config_payload["finite_time_phase_weight"] = float(
+        args.finite_time_phase_weight
+    )
+    config_payload["finite_time_phase_interval"] = int(
+        args.finite_time_phase_interval
+    )
+    config_payload["finite_time_phase_microbatch"] = int(
+        args.finite_time_phase_microbatch
+    )
+    config_payload["finite_time_phase_warmup_steps"] = int(
+        args.finite_time_phase_warmup_steps
+    )
+    config_payload["finite_time_phase_dt"] = float(args.finite_time_phase_dt)
+    config_payload["finite_time_phase_substeps"] = int(
+        args.finite_time_phase_substeps
+    )
+    config_payload["finite_time_phase_picard"] = int(
+        args.finite_time_phase_picard
+    )
+    config_payload["finite_time_phase_filter_fraction"] = float(
+        args.finite_time_phase_filter_fraction
+    )
+    config_payload["finite_time_phase_reference_order"] = int(
+        args.finite_time_phase_reference_order
+    )
+    config_payload["finite_time_phase_reference_pad"] = int(
+        args.finite_time_phase_reference_pad
+    )
+    config_payload["finite_time_phase_k_max"] = float(
+        args.finite_time_phase_k_max
+    )
+    config_payload["finite_time_phase_source_ids"] = list(
+        finite_time_phase_source_ids
+    )
+    config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
+    config_payload["mode_balanced_warmup_steps"] = int(
+        args.mode_balanced_warmup_steps
+    )
+    config_payload["mode_balanced_k_max"] = float(args.mode_balanced_k_max)
+    config_payload["mode_balanced_active_scale_relative"] = float(
+        args.mode_balanced_active_scale_relative
+    )
+    config_payload["mode_balanced_denominator_floor_relative"] = float(
+        args.mode_balanced_denominator_floor_relative
+    )
+    config_payload["mode_balanced_dispersion_weighting"] = bool(
+        args.mode_balanced_dispersion_weighting
+    )
     config_payload["psd_hinge_weight"] = float(args.psd_hinge_weight)
     config_payload["psd_hinge_warmup_steps"] = int(args.psd_hinge_warmup_steps)
     config_payload["jac_reg_lambda"] = float(args.jac_reg_lambda)
@@ -854,6 +1070,7 @@ def main() -> None:
         config_payload["cs_tie_xi_out_mult"] = bool(args.cs_tie_xi_out_mult)
         config_payload["cs_phi_bias_free"] = bool(args.cs_phi_bias_free)
         config_payload["cs_residual_eta_order"] = int(args.cs_residual_eta_order)
+        config_payload["cs_depth_scaled_residual"] = bool(args.cs_depth_scaled_residual)
         config_payload["cs_block_k_cut"] = int(args.cs_block_k_cut)
         config_payload["cs_residual_highband_cap"] = bool(args.cs_residual_highband_cap)
         config_payload["cs_residual_highband_cap_k_cut"] = float(args.cs_residual_highband_cap_k_cut)
@@ -883,6 +1100,68 @@ def main() -> None:
     hamiltonian_dt = float(args.hamiltonian_dt)
     hamiltonian_warmup_steps = int(args.hamiltonian_warmup_steps)
     hamiltonian_clip = float(args.hamiltonian_clip)
+    translation_tangent_weight = float(args.translation_tangent_weight)
+    phase_growth_weight = float(args.phase_growth_weight)
+    translation_tangent_cfg = TranslationTangentConfig(
+        window_depths=float(args.translation_tangent_window_depths),
+        energy_floor_relative=float(args.translation_tangent_energy_floor_relative),
+        gravity=pushforward_gravity,
+        source_ids=source_conditioning.tanaka_source_ids,
+    )
+    modal_phase_rate_weight = float(args.modal_phase_rate_weight)
+    modal_phase_rate_cfg = ModalPhaseRateConfig(
+        k_min=float(args.modal_phase_rate_k_min),
+        k_max=float(args.modal_phase_rate_k_max),
+        active_scale_relative=float(
+            args.modal_phase_rate_active_scale_relative
+        ),
+        denominator_floor_relative=float(
+            args.modal_phase_rate_denominator_floor_relative
+        ),
+        source_ids=source_conditioning.tanaka_source_ids,
+    )
+    finite_time_phase_weight = float(args.finite_time_phase_weight)
+    finite_time_phase_interval = int(args.finite_time_phase_interval)
+    finite_time_phase_microbatch_local = (
+        int(args.finite_time_phase_microbatch) // n_devices
+    )
+    finite_time_phase_warmup_steps = int(
+        args.finite_time_phase_warmup_steps
+    )
+    if finite_time_phase_weight > 0.0:
+        if not finite_time_phase_source_ids:
+            raise ValueError("finite_time_phase_source_ids must not be empty")
+        if finite_time_phase_interval < 1:
+            raise ValueError(
+                "finite_time_phase_interval must be at least one, got "
+                f"{finite_time_phase_interval}"
+            )
+        if finite_time_phase_microbatch_local < 1:
+            raise ValueError(
+                "finite_time_phase_microbatch must provide at least one sample "
+                "per device"
+            )
+    finite_time_phase_cfg = FiniteTimePhaseConfig(
+        dt=float(args.finite_time_phase_dt),
+        substeps=int(args.finite_time_phase_substeps),
+        picard_iterations=int(args.finite_time_phase_picard),
+        filter_fraction=float(args.finite_time_phase_filter_fraction),
+        gravity=pushforward_gravity,
+        reference_order=int(args.finite_time_phase_reference_order),
+        reference_pad=int(args.finite_time_phase_reference_pad),
+        k_max=float(args.finite_time_phase_k_max),
+    )
+    mode_balanced_weight = float(args.mode_balanced_weight)
+    mode_balanced_warmup_steps = int(args.mode_balanced_warmup_steps)
+    mode_balanced_cfg = ModeBalancedConfig(
+        k_max=float(args.mode_balanced_k_max),
+        gravity=pushforward_gravity,
+        active_scale_relative=float(args.mode_balanced_active_scale_relative),
+        denominator_floor_relative=float(
+            args.mode_balanced_denominator_floor_relative
+        ),
+        dispersion_weighting=bool(args.mode_balanced_dispersion_weighting),
+    )
     psd_hinge_weight = float(args.psd_hinge_weight)
     psd_hinge_warmup_steps = int(args.psd_hinge_warmup_steps)
     jac_reg_lambda = float(args.jac_reg_lambda)
@@ -948,6 +1227,7 @@ def main() -> None:
     # Wavenumbers k_n for the Zakharov RHS and the analytical pushforward target.
     _x_grid, _k_grid = build_grid(nx, domain_length)
     k_grid_jax = jnp.asarray(_k_grid, dtype=compute_dtype)
+    k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
     def _apply_gxi_highband_limiter(gxi_phys: jax.Array) -> jax.Array:
         gxi_hat = jnp.fft.fft(gxi_phys, axis=-1)
@@ -1076,6 +1356,59 @@ def main() -> None:
         "gxi_highband_penalty_excess",
         "gxi_highband_penalty_weight_eff",
     )
+    translation_tangent_metric_names = (
+        "translation_tangent_active",
+        "translation_tangent_loss",
+        "translation_tangent_extra",
+        "phase_growth_loss",
+        "phase_growth_extra",
+        "phase_growth_rate",
+        "phase_growth_rms_wave_number",
+        "phase_growth_multiplier",
+        "phase_growth_rigid_loss",
+        "phase_growth_differential_loss",
+        "translation_tangent_speed_abs_error",
+        "translation_tangent_speed_rel_error",
+        "translation_tangent_selected_samples",
+    )
+    mode_balanced_metric_names = (
+        "mode_balanced_active",
+        "mode_balanced_loss",
+        "mode_balanced_extra",
+        "mode_balanced_weight_eff",
+        "mode_balanced_unweighted_loss",
+        "mode_balanced_effective_frequency_squared_mean",
+        "mode_balanced_relative_error_rms",
+        "mode_balanced_active_modes",
+        "mode_balanced_clipped_mode_fraction",
+    )
+    modal_phase_rate_metric_names = (
+        "modal_phase_rate_active",
+        "modal_phase_rate_loss",
+        "modal_phase_rate_extra",
+        "modal_phase_rate_rms",
+        "modal_phase_rate_amplitude_loss",
+        "modal_phase_rate_amplitude_rms",
+        "modal_phase_rate_kinematic_growth_loss",
+        "modal_phase_rate_kinematic_growth_rms",
+        "modal_phase_rate_active_modes",
+        "modal_phase_rate_active_elevation_energy",
+        "modal_phase_rate_selected_samples",
+    )
+    finite_time_phase_metric_names = (
+        "finite_time_phase_active",
+        "finite_time_phase_loss",
+        "finite_time_phase_extra",
+        "finite_time_phase_weight_eff",
+        "finite_time_phase_raw_growth_rate_rms",
+        "finite_time_phase_action_growth_rate_rms",
+        "finite_time_phase_phase_growth_rate_rms",
+        "finite_time_phase_polarization_growth_rate_rms",
+        "finite_time_phase_active_modes",
+        "finite_time_phase_selected_samples",
+        "finite_time_phase_clipped_mode_fraction",
+        "finite_time_phase_source_id",
+    )
 
     def _train_step_body(
         current_state: train_state.TrainState,
@@ -1084,11 +1417,13 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
+        source: jax.Array,
     ):
         eta = eta.astype(compute_dtype)
         xi = xi.astype(compute_dtype)
         gxi = gxi.astype(compute_dtype)
         batch_depth = batch_depth.astype(compute_dtype)
+        source = source.astype(jnp.int32)
         batch_inputs = norm_inputs_jax(eta, xi)
         batch_targets = _filter_predictions(norm_targets_jax(gxi))
         if input_noise_sigma > 0.0:
@@ -1130,6 +1465,319 @@ def main() -> None:
             gxi_highband_penalty_metrics = jnp.zeros(
                 (len(gxi_highband_penalty_metric_names),), dtype=compute_dtype,
             )
+            translation_tangent_metrics = jnp.zeros(
+                (len(translation_tangent_metric_names),), dtype=compute_dtype,
+            )
+            mode_balanced_metrics = jnp.zeros(
+                (len(mode_balanced_metric_names),), dtype=compute_dtype,
+            )
+            modal_phase_rate_metrics = jnp.zeros(
+                (len(modal_phase_rate_metric_names),), dtype=compute_dtype,
+            )
+            finite_time_phase_metrics = jnp.zeros(
+                (len(finite_time_phase_metric_names),), dtype=compute_dtype,
+            )
+
+            if mode_balanced_weight > 0.0:
+                gxi_pred_phys_mode = denorm_targets_jax(predictions_0)[..., 0]
+                gxi_target_phys_mode = denorm_targets_jax(batch_targets)[..., 0]
+                loss_mode, mode_diagnostics = compute_mode_balanced_loss(
+                    eta=eta,
+                    gxi_prediction=gxi_pred_phys_mode,
+                    gxi_target=gxi_target_phys_mode,
+                    depth=h_phys,
+                    k_rfft=k_rfft_jax,
+                    config=mode_balanced_cfg,
+                )
+                step_f = jnp.asarray(current_state.step, dtype=compute_dtype)
+                mode_warmup = jnp.minimum(
+                    step_f
+                    / jnp.asarray(
+                        max(mode_balanced_warmup_steps, 1), dtype=compute_dtype
+                    ),
+                    1.0,
+                )
+                mode_weight_eff = (
+                    jnp.asarray(mode_balanced_weight, dtype=compute_dtype)
+                    * mode_warmup
+                )
+                mode_extra = mode_weight_eff * loss_mode
+                extra = extra + mode_extra
+                mode_balanced_metrics = jnp.stack(
+                    (
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                        loss_mode,
+                        mode_extra,
+                        mode_weight_eff,
+                        mode_diagnostics["unweighted_loss"],
+                        mode_diagnostics[
+                            "effective_frequency_squared_mean"
+                        ],
+                        mode_diagnostics["relative_error_rms"],
+                        mode_diagnostics["active_modes"],
+                        mode_diagnostics["clipped_mode_fraction"],
+                    )
+                )
+
+            if modal_phase_rate_weight > 0.0:
+                gxi_pred_phys_phase = denorm_targets_jax(predictions_0)[..., 0]
+                loss_modal_phase, phase_diagnostics = (
+                    compute_modal_phase_rate_loss(
+                        eta=eta,
+                        gxi_prediction=gxi_pred_phys_phase,
+                        gxi_target=gxi,
+                        source=source,
+                        k_rfft=k_rfft_jax,
+                        config=modal_phase_rate_cfg,
+                    )
+                )
+                local_selected = phase_diagnostics["selected_samples"]
+                global_selected = jax.lax.psum(
+                    local_selected, axis_name="batch"
+                )
+                device_count = jax.lax.psum(
+                    jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+                )
+                shard_weight = (
+                    device_count
+                    * local_selected
+                    / jnp.maximum(
+                        global_selected,
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                    )
+                )
+                local_phase_statistics = jnp.stack(
+                    (
+                        phase_diagnostics["phase_rate_loss"],
+                        phase_diagnostics["amplitude_rate_loss"],
+                        phase_diagnostics["kinematic_growth_loss"],
+                        phase_diagnostics["active_modes"],
+                        phase_diagnostics["active_elevation_energy"],
+                    )
+                )
+                global_phase_statistics = jax.lax.psum(
+                    local_selected * local_phase_statistics,
+                    axis_name="batch",
+                ) / jnp.maximum(
+                    global_selected,
+                    jnp.asarray(1.0, dtype=compute_dtype),
+                )
+                global_phase_statistics = jax.lax.stop_gradient(
+                    global_phase_statistics
+                )
+                loss_modal_phase = loss_modal_phase * shard_weight
+                modal_phase_extra = modal_phase_rate_weight * loss_modal_phase
+                extra = extra + modal_phase_extra
+                modal_phase_rate_metrics = jnp.stack(
+                    (
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                        global_phase_statistics[0],
+                        modal_phase_rate_weight * global_phase_statistics[0],
+                        jnp.sqrt(global_phase_statistics[0]),
+                        global_phase_statistics[1],
+                        jnp.sqrt(global_phase_statistics[1]),
+                        global_phase_statistics[2],
+                        jnp.sqrt(global_phase_statistics[2]),
+                        global_phase_statistics[3],
+                        global_phase_statistics[4],
+                        global_selected / device_count,
+                    )
+                )
+
+            if translation_tangent_weight > 0.0 or phase_growth_weight > 0.0:
+                gxi_pred_phys_tan = denorm_targets_jax(predictions_0)[..., 0]
+                loss_tangent, tangent_diagnostics = compute_translation_tangent_loss(
+                    eta=eta,
+                    gxi_prediction=gxi_pred_phys_tan,
+                    gxi_target=gxi,
+                    depth=h_phys,
+                    source=source,
+                    k=k_grid_jax,
+                    config=translation_tangent_cfg,
+                )
+                local_selected = tangent_diagnostics["selected_samples"]
+                global_selected = jax.lax.psum(local_selected, axis_name="batch")
+                device_count = jax.lax.psum(
+                    jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+                )
+                shard_weight = (
+                    device_count
+                    * local_selected
+                    / jnp.maximum(global_selected, jnp.asarray(1.0, dtype=compute_dtype))
+                )
+                loss_tangent = loss_tangent * shard_weight
+                loss_phase_growth = (
+                    tangent_diagnostics["phase_growth_loss"] * shard_weight
+                )
+                tangent_extra = translation_tangent_weight * loss_tangent
+                phase_growth_extra = phase_growth_weight * loss_phase_growth
+                extra = extra + tangent_extra + phase_growth_extra
+                translation_tangent_metrics = jnp.stack(
+                    (
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                        loss_tangent,
+                        tangent_extra,
+                        loss_phase_growth,
+                        phase_growth_extra,
+                        tangent_diagnostics["phase_growth_rate"] * shard_weight,
+                        tangent_diagnostics["rms_wave_number"] * shard_weight,
+                        tangent_diagnostics["phase_growth_multiplier"] * shard_weight,
+                        tangent_diagnostics["rigid_phase_growth_loss"] * shard_weight,
+                        (
+                            tangent_diagnostics["differential_phase_growth_loss"]
+                            * shard_weight
+                        ),
+                        tangent_diagnostics["speed_abs_error"] * shard_weight,
+                        tangent_diagnostics["speed_relative_error"] * shard_weight,
+                        global_selected / device_count,
+                    )
+                )
+
+            if finite_time_phase_weight > 0.0:
+                step_active = jnp.equal(
+                    current_state.step
+                    % jnp.asarray(
+                        finite_time_phase_interval,
+                        dtype=current_state.step.dtype,
+                    ),
+                    jnp.asarray(0, dtype=current_state.step.dtype),
+                )
+
+                def _finite_time_phase_active_branch(_):
+                    source_ids_array = jnp.asarray(
+                        finite_time_phase_source_ids,
+                        dtype=jnp.int32,
+                    )
+                    fire_index = current_state.step // jnp.asarray(
+                        finite_time_phase_interval,
+                        dtype=current_state.step.dtype,
+                    )
+                    source_index = jnp.mod(
+                        fire_index,
+                        jnp.asarray(
+                            len(finite_time_phase_source_ids),
+                            dtype=current_state.step.dtype,
+                        ),
+                    )
+                    source_id = source_ids_array[source_index]
+                    rng_base = jax.random.fold_in(
+                        rng_key,
+                        jax.lax.axis_index("batch") * 67 + 193,
+                    )
+                    rng_phase = jax.random.fold_in(rng_base, current_state.step)
+                    eta_sub, xi_sub, depth_sub, sample_weight = (
+                        sample_source_microbatch(
+                            rng_phase,
+                            eta,
+                            xi,
+                            h_phys,
+                            source,
+                            source_id,
+                            finite_time_phase_microbatch_local,
+                        )
+                    )
+                    batch_depth_sub = jnp.log(depth_sub)[:, None].astype(
+                        compute_dtype
+                    )
+                    loss_phase, diagnostics = (
+                        compute_finite_time_phase_regularizer(
+                            apply_fn=current_state.apply_fn,
+                            model_params=current_params,
+                            eta_phys=eta_sub,
+                            xi_phys=xi_sub,
+                            depth_phys=depth_sub,
+                            sample_weight=sample_weight,
+                            batch_depth_local=batch_depth_sub,
+                            norm_inputs_fn=norm_inputs_jax,
+                            denorm_targets_fn=denorm_targets_jax,
+                            filter_predictions_fn=_filter_predictions,
+                            k=k_grid_jax,
+                            config=finite_time_phase_cfg,
+                            model_dtype=compute_dtype,
+                            reference_dtype=jnp.float64,
+                        )
+                    )
+                    local_selected = diagnostics["selected_samples"].astype(
+                        compute_dtype
+                    )
+                    global_selected = jax.lax.psum(
+                        local_selected,
+                        axis_name="batch",
+                    )
+                    device_count = jax.lax.psum(
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                        axis_name="batch",
+                    )
+                    shard_weight = (
+                        device_count
+                        * local_selected
+                        / jnp.maximum(
+                            global_selected,
+                            jnp.asarray(1.0, dtype=compute_dtype),
+                        )
+                    )
+                    step_f = jnp.asarray(current_state.step, dtype=compute_dtype)
+                    warmup = jnp.minimum(
+                        step_f
+                        / jnp.asarray(
+                            max(finite_time_phase_warmup_steps, 1),
+                            dtype=compute_dtype,
+                        ),
+                        jnp.asarray(1.0, dtype=compute_dtype),
+                    )
+                    weight_eff = (
+                        jnp.asarray(finite_time_phase_weight, dtype=compute_dtype)
+                        * warmup
+                    )
+                    loss_phase = loss_phase.astype(compute_dtype) * shard_weight
+                    phase_extra = weight_eff * loss_phase
+                    metrics = jnp.stack(
+                        (
+                            jnp.asarray(1.0, dtype=compute_dtype),
+                            loss_phase,
+                            phase_extra,
+                            weight_eff,
+                            diagnostics["raw_growth_rate_rms"].astype(
+                                compute_dtype
+                            )
+                            * shard_weight,
+                            diagnostics["action_growth_rate_rms"].astype(
+                                compute_dtype
+                            )
+                            * shard_weight,
+                            diagnostics["phase_growth_rate_rms"].astype(
+                                compute_dtype
+                            )
+                            * shard_weight,
+                            diagnostics[
+                                "polarization_growth_rate_rms"
+                            ].astype(compute_dtype)
+                            * shard_weight,
+                            diagnostics["active_modes"].astype(compute_dtype)
+                            * shard_weight,
+                            global_selected / device_count,
+                            diagnostics["clipped_mode_fraction"].astype(
+                                compute_dtype
+                            )
+                            * shard_weight,
+                            source_id.astype(compute_dtype),
+                        )
+                    )
+                    return phase_extra, metrics
+
+                def _finite_time_phase_skip_branch(_):
+                    return zero, jnp.zeros(
+                        (len(finite_time_phase_metric_names),),
+                        dtype=compute_dtype,
+                    )
+
+                finite_phase_extra, finite_time_phase_metrics = jax.lax.cond(
+                    step_active,
+                    _finite_time_phase_active_branch,
+                    _finite_time_phase_skip_branch,
+                    operand=None,
+                )
+                extra = extra + finite_phase_extra
 
             if gxi_highband_penalty_weight > 0.0:
                 gxi_pred_0_phys_hi = denorm_targets_jax(predictions_0)[..., 0]
@@ -1364,6 +2012,10 @@ def main() -> None:
                     stage_metrics,
                     hadamard_metrics,
                     gxi_highband_penalty_metrics,
+                    translation_tangent_metrics,
+                    mode_balanced_metrics,
+                    modal_phase_rate_metrics,
+                    finite_time_phase_metrics,
                 )
 
             eta_k = eta
@@ -1388,12 +2040,28 @@ def main() -> None:
                 loss_pf = loss_pf + loss_fn(predictions_k, targets_k)
             return (
                 loss_0 + pushforward_weight * loss_pf + extra,
-                (stage_metrics, hadamard_metrics, gxi_highband_penalty_metrics),
+                (
+                    stage_metrics,
+                    hadamard_metrics,
+                    gxi_highband_penalty_metrics,
+                    translation_tangent_metrics,
+                    mode_balanced_metrics,
+                    modal_phase_rate_metrics,
+                    finite_time_phase_metrics,
+                ),
             )
 
         (
             loss_value,
-            (stage_metrics, hadamard_metrics, gxi_highband_penalty_metrics),
+            (
+                stage_metrics,
+                hadamard_metrics,
+                gxi_highband_penalty_metrics,
+                translation_tangent_metrics,
+                mode_balanced_metrics,
+                modal_phase_rate_metrics,
+                finite_time_phase_metrics,
+            ),
         ), grads = jax.value_and_grad(loss_for_params, has_aux=True)(current_state.params)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
@@ -1401,6 +2069,19 @@ def main() -> None:
         hadamard_metrics = jax.lax.pmean(hadamard_metrics, axis_name="batch")
         gxi_highband_penalty_metrics = jax.lax.pmean(
             gxi_highband_penalty_metrics, axis_name="batch",
+        )
+        translation_tangent_metrics = jax.lax.pmean(
+            translation_tangent_metrics, axis_name="batch",
+        )
+        mode_balanced_metrics = jax.lax.pmean(
+            mode_balanced_metrics, axis_name="batch",
+        )
+        modal_phase_rate_metrics = jax.lax.pmean(
+            modal_phase_rate_metrics, axis_name="batch",
+        )
+        finite_time_phase_metrics = jax.lax.pmean(
+            finite_time_phase_metrics,
+            axis_name="batch",
         )
         next_state = current_state.apply_gradients(grads=grads)
         next_state = next_state.replace(
@@ -1415,13 +2096,17 @@ def main() -> None:
             stage_metrics,
             hadamard_metrics,
             gxi_highband_penalty_metrics,
+            translation_tangent_metrics,
+            mode_balanced_metrics,
+            modal_phase_rate_metrics,
+            finite_time_phase_metrics,
         )
 
     train_step = jax.jit(shard_map(
         _train_step_body,
         mesh=mesh,
-        in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch")),
-        out_specs=(P(), P(), P(), P(), P()),
+        in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch"), P("batch")),
+        out_specs=(P(), P(), P(), P(), P(), P(), P(), P(), P()),
         check_rep=False,
     ))
 
@@ -1464,22 +2149,104 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
+        source: jax.Array,
     ):
         eta = eta.astype(compute_dtype)
         xi = xi.astype(compute_dtype)
         gxi = gxi.astype(compute_dtype)
         batch_depth = batch_depth.astype(compute_dtype)
+        source = source.astype(jnp.int32)
         batch_inputs = norm_inputs_jax(eta, xi)
         batch_targets = _filter_predictions(norm_targets_jax(gxi))
         predictions = _filter_predictions(model.apply({"params": current_params}, batch_inputs, batch_depth))
-        loss_value = loss_fn(predictions, batch_targets)
-        return jax.lax.pmean(loss_value, axis_name="batch")
+        h1_loss = loss_fn(predictions, batch_targets)
+        log_h = jnp.minimum(batch_depth[:, 0], pushforward_log_h_max)
+        h_phys = jnp.exp(log_h)
+        mode_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        if mode_balanced_weight > 0.0:
+            mode_loss, _ = compute_mode_balanced_loss(
+                eta=eta,
+                gxi_prediction=denorm_targets_jax(predictions)[..., 0],
+                gxi_target=denorm_targets_jax(batch_targets)[..., 0],
+                depth=h_phys,
+                k_rfft=k_rfft_jax,
+                config=mode_balanced_cfg,
+            )
+        modal_phase_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        if modal_phase_rate_weight > 0.0:
+            modal_phase_loss, modal_phase_diagnostics = (
+                compute_modal_phase_rate_loss(
+                    eta=eta,
+                    gxi_prediction=denorm_targets_jax(predictions)[..., 0],
+                    gxi_target=gxi,
+                    source=source,
+                    k_rfft=k_rfft_jax,
+                    config=modal_phase_rate_cfg,
+                )
+            )
+            local_selected = modal_phase_diagnostics["selected_samples"]
+            global_selected = jax.lax.psum(
+                local_selected, axis_name="batch"
+            )
+            device_count = jax.lax.psum(
+                jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+            )
+            shard_weight = (
+                device_count
+                * local_selected
+                / jnp.maximum(
+                    global_selected,
+                    jnp.asarray(1.0, dtype=compute_dtype),
+                )
+            )
+            modal_phase_loss = modal_phase_loss * shard_weight
+        tangent_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        phase_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        if translation_tangent_weight > 0.0 or phase_growth_weight > 0.0:
+            tangent_loss, tangent_diagnostics = compute_translation_tangent_loss(
+                eta=eta,
+                gxi_prediction=denorm_targets_jax(predictions)[..., 0],
+                gxi_target=gxi,
+                depth=h_phys,
+                source=source,
+                k=k_grid_jax,
+                config=translation_tangent_cfg,
+            )
+            local_selected = tangent_diagnostics["selected_samples"]
+            global_selected = jax.lax.psum(local_selected, axis_name="batch")
+            device_count = jax.lax.psum(
+                jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+            )
+            shard_weight = (
+                device_count
+                * local_selected
+                / jnp.maximum(
+                    global_selected,
+                    jnp.asarray(1.0, dtype=compute_dtype),
+                )
+            )
+            tangent_loss = tangent_loss * shard_weight
+            phase_loss = tangent_diagnostics["phase_growth_loss"] * shard_weight
+        return (
+            jax.lax.pmean(h1_loss, axis_name="batch"),
+            jax.lax.pmean(mode_loss, axis_name="batch"),
+            jax.lax.pmean(modal_phase_loss, axis_name="batch"),
+            jax.lax.pmean(tangent_loss, axis_name="batch"),
+            jax.lax.pmean(phase_loss, axis_name="batch"),
+        )
 
     eval_loss_step = jax.jit(shard_map(
         _eval_loss_body,
         mesh=mesh,
-        in_specs=(P(), P("batch"), P("batch"), P("batch"), P("batch")),
-        out_specs=P(),
+        in_specs=(
+            P(),
+            P("batch"),
+            P("batch"),
+            P("batch"),
+            P("batch"),
+            P("batch"),
+        ),
+        out_specs=(P(), P(), P(), P(), P()),
         check_rep=False,
     ))
 
@@ -1539,13 +2306,30 @@ def main() -> None:
             context=f"epoch {epoch} start",
         )
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
+        epoch_train_indices = build_epoch_sample_indices(
+            dataset,
+            train_indices,
+            split_id=0,
+            seed=args.seed,
+            epoch=epoch - 1,
+        )
         batch_iter = get_batches(
             dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            train_indices, args.batch_size, epoch_rng,
-            shuffle=True,
+            epoch_train_indices, args.batch_size, epoch_rng,
+            shuffle=not hierarchical_training,
             drop_last=True,
         )
-        train_destinations = (data_sharding, data_sharding, data_sharding, data_sharding, None)
+        batch_iter = (
+            (eta_b, xi_b, gxi_b, depth_b, dataset_source[indices_b])
+            for eta_b, xi_b, gxi_b, depth_b, indices_b in batch_iter
+        )
+        train_destinations = (
+            data_sharding,
+            data_sharding,
+            data_sharding,
+            data_sharding,
+            data_sharding,
+        )
         batch_iter = device_prefetch(batch_iter, destinations=train_destinations, depth=2)
         batch_losses: list[float] = []
         train_bar = tqdm(
@@ -1554,7 +2338,7 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for eta_b, xi_b, gxi_b, depth_b, _ in train_bar:
+        for eta_b, xi_b, gxi_b, depth_b, source_b in train_bar:
             train_rng, step_key = jax.random.split(train_rng)
             if len(batch_losses) == 0:
                 stage_metric_sums = np.zeros((len(stage_metric_names),), dtype=np.float64)
@@ -1564,13 +2348,31 @@ def main() -> None:
                 gxi_highband_penalty_metric_sums = np.zeros(
                     (len(gxi_highband_penalty_metric_names),), dtype=np.float64,
                 )
+                translation_tangent_metric_sums = np.zeros(
+                    (len(translation_tangent_metric_names),), dtype=np.float64,
+                )
+                mode_balanced_metric_sums = np.zeros(
+                    (len(mode_balanced_metric_names),), dtype=np.float64,
+                )
+                modal_phase_rate_metric_sums = np.zeros(
+                    (len(modal_phase_rate_metric_names),), dtype=np.float64,
+                )
+                finite_time_phase_metric_sums = np.zeros(
+                    (len(finite_time_phase_metric_names),), dtype=np.float64,
+                )
             (
                 training_state,
                 batch_loss,
                 batch_stage_metrics,
                 batch_hadamard_metrics,
                 batch_hi_metrics,
-            ) = train_step(training_state, step_key, eta_b, xi_b, gxi_b, depth_b)
+                batch_translation_tangent_metrics,
+                batch_mode_balanced_metrics,
+                batch_modal_phase_rate_metrics,
+                batch_finite_time_phase_metrics,
+            ) = train_step(
+                training_state, step_key, eta_b, xi_b, gxi_b, depth_b, source_b
+            )
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             stage_metrics_np = np.asarray(jax.device_get(batch_stage_metrics), dtype=np.float64)
@@ -1578,11 +2380,34 @@ def main() -> None:
                 jax.device_get(batch_hadamard_metrics), dtype=np.float64,
             )
             hi_metrics_np = np.asarray(jax.device_get(batch_hi_metrics), dtype=np.float64)
+            tangent_metrics_np = np.asarray(
+                jax.device_get(batch_translation_tangent_metrics), dtype=np.float64,
+            )
+            mode_metrics_np = np.asarray(
+                jax.device_get(batch_mode_balanced_metrics), dtype=np.float64,
+            )
+            modal_phase_metrics_np = np.asarray(
+                jax.device_get(batch_modal_phase_rate_metrics), dtype=np.float64,
+            )
+            finite_phase_metrics_np = np.asarray(
+                jax.device_get(batch_finite_time_phase_metrics),
+                dtype=np.float64,
+            )
+            if translation_tangent_weight > 0.0 or phase_growth_weight > 0.0:
+                translation_tangent_metric_sums += tangent_metrics_np
+            if mode_balanced_weight > 0.0:
+                mode_balanced_metric_sums += mode_metrics_np
+            if modal_phase_rate_weight > 0.0:
+                modal_phase_rate_metric_sums += modal_phase_metrics_np
             active_stage = bool(stage_reg_weight > 0.0 and stage_metrics_np[0] > 0.5)
             active_hadamard = bool(
                 hadamard_weight > 0.0 and hadamard_metrics_np[0] > 0.5
             )
             active_hi_penalty = bool(gxi_highband_penalty_weight > 0.0 and hi_metrics_np[0] > 0.5)
+            active_finite_phase = bool(
+                finite_time_phase_weight > 0.0
+                and finite_phase_metrics_np[0] > 0.5
+            )
             batch_index = len(batch_losses) - 1
             current_step = epoch_start_step + batch_index
             if stage_reg_weight > 0.0:
@@ -1601,13 +2426,33 @@ def main() -> None:
                         f"epoch={epoch}, batch={batch_index}, step={current_step}: "
                         f"expected={expected_hadamard}, observed={active_hadamard}"
                     )
+            if finite_time_phase_weight > 0.0:
+                expected_finite_phase = (
+                    current_step % finite_time_phase_interval == 0
+                )
+                if active_finite_phase != expected_finite_phase:
+                    raise RuntimeError(
+                        "finite-time phase regularizer firing mismatch at "
+                        f"epoch={epoch}, batch={batch_index}, step={current_step}: "
+                        f"expected={expected_finite_phase}, "
+                        f"observed={active_finite_phase}"
+                    )
             if active_stage:
                 stage_metric_sums += stage_metrics_np
             if active_hadamard:
                 hadamard_metric_sums += hadamard_metrics_np
             if active_hi_penalty:
                 gxi_highband_penalty_metric_sums += hi_metrics_np
-            if active_hadamard:
+            if active_finite_phase:
+                finite_time_phase_metric_sums += finite_phase_metrics_np
+            if active_finite_phase:
+                train_bar.set_postfix(
+                    loss=batch_loss_value,
+                    ft_loss=float(finite_phase_metrics_np[1]),
+                    ft_rate=float(finite_phase_metrics_np[4]),
+                    ft_source=int(round(finite_phase_metrics_np[-1])),
+                )
+            elif active_hadamard:
                 train_bar.set_postfix(
                     loss=batch_loss_value,
                     shape=float(hadamard_metrics_np[1]),
@@ -1633,6 +2478,12 @@ def main() -> None:
                     hi_loss=float(hi_metrics_np[1]),
                     hi_ratio=float(hi_metrics_np[2]),
                 )
+            elif modal_phase_rate_weight > 0.0:
+                train_bar.set_postfix(
+                    loss=batch_loss_value,
+                    phase_rate=float(modal_phase_metrics_np[3]),
+                    phase_modes=float(modal_phase_metrics_np[8]),
+                )
             else:
                 train_bar.set_postfix(loss=batch_loss_value)
 
@@ -1654,20 +2505,93 @@ def main() -> None:
             )
         train_loss = float(np.mean(batch_losses)) if batch_losses else float("inf")
 
+        if hierarchical_training and checkpoint_val_indices.size % n_devices != 0:
+            raise ValueError(
+                "schema-v2 validation case count must be divisible by device "
+                f"count; got {checkpoint_val_indices.size} cases and "
+                f"{n_devices} devices"
+            )
         val_batches = get_batches(
             dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            val_indices, args.batch_size, None,
+            checkpoint_val_indices, args.batch_size, None,
             shuffle=False,
-            drop_last=True,
+            drop_last=not hierarchical_training,
         )
-        val_destinations = (data_sharding, data_sharding, data_sharding, data_sharding, None)
+        val_batches = (
+            (eta_b, xi_b, gxi_b, depth_b, dataset_source[indices_b])
+            for eta_b, xi_b, gxi_b, depth_b, indices_b in val_batches
+        )
+        val_destinations = (
+            data_sharding,
+            data_sharding,
+            data_sharding,
+            data_sharding,
+            data_sharding,
+        )
         val_batches = device_prefetch(val_batches, destinations=val_destinations, depth=2)
-        val_losses: list[float] = []
-        for eta_b, xi_b, gxi_b, depth_b, _ in val_batches:
-            bl = eval_loss_step(training_state.params, eta_b, xi_b, gxi_b, depth_b)
-            val_losses.append(float(jax.device_get(bl)))
-        val_loss = float(np.mean(val_losses)) if val_losses else float("inf")
-        epoch_record = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
+        val_h1_losses: list[float] = []
+        val_mode_losses: list[float] = []
+        val_modal_phase_rate_losses: list[float] = []
+        val_tangent_losses: list[float] = []
+        val_phase_growth_losses: list[float] = []
+        val_batch_sizes: list[int] = []
+        for eta_b, xi_b, gxi_b, depth_b, source_b in val_batches:
+            val_batch_sizes.append(int(eta_b.shape[0]))
+            (
+                h1_bl,
+                mode_bl,
+                modal_phase_rate_bl,
+                tangent_bl,
+                phase_growth_bl,
+            ) = eval_loss_step(
+                training_state.params,
+                eta_b,
+                xi_b,
+                gxi_b,
+                depth_b,
+                source_b,
+            )
+            val_h1_losses.append(float(jax.device_get(h1_bl)))
+            val_mode_losses.append(float(jax.device_get(mode_bl)))
+            val_modal_phase_rate_losses.append(
+                float(jax.device_get(modal_phase_rate_bl))
+            )
+            val_tangent_losses.append(float(jax.device_get(tangent_bl)))
+            val_phase_growth_losses.append(float(jax.device_get(phase_growth_bl)))
+
+        def mean_validation_batches(losses: list[float]) -> float:
+            if not losses:
+                return float("inf")
+            if hierarchical_training:
+                return float(np.average(losses, weights=val_batch_sizes))
+            return float(np.mean(losses))
+
+        val_h1_loss = mean_validation_batches(val_h1_losses)
+        val_mode_loss = mean_validation_batches(val_mode_losses)
+        val_modal_phase_rate_loss = mean_validation_batches(
+            val_modal_phase_rate_losses
+        )
+        val_tangent_loss = mean_validation_batches(val_tangent_losses)
+        val_phase_growth_loss = mean_validation_batches(
+            val_phase_growth_losses
+        )
+        val_loss = (
+            val_h1_loss
+            + mode_balanced_weight * val_mode_loss
+            + modal_phase_rate_weight * val_modal_phase_rate_loss
+            + translation_tangent_weight * val_tangent_loss
+            + phase_growth_weight * val_phase_growth_loss
+        )
+        epoch_record = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_h1_loss": val_h1_loss,
+            "val_mode_balanced_loss": val_mode_loss,
+            "val_modal_phase_rate_loss": val_modal_phase_rate_loss,
+            "val_translation_tangent_loss": val_tangent_loss,
+            "val_phase_growth_loss": val_phase_growth_loss,
+        }
         if stage_reg_weight > 0.0:
             active_batches = float(stage_metric_sums[0]) if batch_losses else 0.0
             expected_stage_batches = expected_periodic_fires(
@@ -1717,6 +2641,63 @@ def main() -> None:
             if active_hi_batches > 0.0:
                 hi_means = gxi_highband_penalty_metric_sums / active_hi_batches
                 for name, value in zip(gxi_highband_penalty_metric_names[1:], hi_means[1:]):
+                    epoch_record[name] = float(value)
+        if translation_tangent_weight > 0.0 or phase_growth_weight > 0.0:
+            n_batches = float(len(batch_losses)) if batch_losses else 1.0
+            tangent_means = translation_tangent_metric_sums / n_batches
+            for name, value in zip(
+                translation_tangent_metric_names[1:-1], tangent_means[1:-1]
+            ):
+                epoch_record[name] = float(value)
+            epoch_record["translation_tangent_selected_samples"] = float(
+                translation_tangent_metric_sums[-1] * n_devices
+            )
+        if mode_balanced_weight > 0.0:
+            n_batches = float(len(batch_losses)) if batch_losses else 1.0
+            mode_means = mode_balanced_metric_sums / n_batches
+            for name, value in zip(
+                mode_balanced_metric_names[1:], mode_means[1:]
+            ):
+                epoch_record[name] = float(value)
+        if modal_phase_rate_weight > 0.0:
+            n_batches = float(len(batch_losses)) if batch_losses else 1.0
+            modal_phase_means = modal_phase_rate_metric_sums / n_batches
+            for name, value in zip(
+                modal_phase_rate_metric_names[1:-1],
+                modal_phase_means[1:-1],
+            ):
+                epoch_record[name] = float(value)
+            epoch_record["modal_phase_rate_selected_samples"] = float(
+                modal_phase_rate_metric_sums[-1] * n_devices
+            )
+        if finite_time_phase_weight > 0.0:
+            active_finite_phase_batches = (
+                float(finite_time_phase_metric_sums[0]) if batch_losses else 0.0
+            )
+            expected_finite_phase_batches = expected_periodic_fires(
+                epoch_start_step,
+                completed_steps,
+                finite_time_phase_interval,
+            )
+            epoch_record["finite_time_phase_expected_batches"] = float(
+                expected_finite_phase_batches
+            )
+            epoch_record["finite_time_phase_active_batches"] = (
+                active_finite_phase_batches
+            )
+            epoch_record["finite_time_phase_active_fraction"] = (
+                active_finite_phase_batches / float(len(batch_losses))
+                if batch_losses
+                else 0.0
+            )
+            if active_finite_phase_batches > 0.0:
+                finite_phase_means = (
+                    finite_time_phase_metric_sums / active_finite_phase_batches
+                )
+                for name, value in zip(
+                    finite_time_phase_metric_names[1:],
+                    finite_phase_means[1:],
+                ):
                     epoch_record[name] = float(value)
         history.append(epoch_record)
         epoch_bar.set_postfix(train_loss=train_loss, val_loss=val_loss)
@@ -1785,7 +2766,7 @@ def main() -> None:
         eval_params = jax.device_put(training_state.params, eval_device)
         final_batches = get_batches(
             dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            val_indices, args.batch_size, None,
+            checkpoint_val_indices, args.batch_size, None,
             shuffle=False,
             drop_last=False,
         )

@@ -26,11 +26,13 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from solver.gen_data.adaptive_sampling import (
-    _gaussian_smooth_1d,
     adaptive_indices_from_signal,
 )
+from solver.gen_data.benjamin_feir_jcp09 import (
+    build_initial_conditions,
+    deep_water_proxy_depth,
+)
 from solver.gen_data.generate_bf_dataset import (
-    build_bf_initial_conditions_batched,
     _grad_energy_traj,
     _envelope_peak_traj,
 )
@@ -51,19 +53,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--keep_samples", type=int, default=24)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--smooth_sigma_steps", type=float, default=10.0)
-    p.add_argument("--depth", type=float, default=1.5)
     p.add_argument("--n_carr", type=int, default=10)
     p.add_argument("--side_offset", type=int, default=3)
     p.add_argument("--eps_carrier", type=float, default=0.11)
     p.add_argument("--eps_pert", type=float, default=0.1)
-    p.add_argument("--phase_l", type=float, default=0.0)
-    p.add_argument("--phase_r", type=float, default=0.0)
+    p.add_argument("--phase", type=float, default=-math.pi / 4.0)
     p.add_argument("--length", type=float, default=2.0 * math.pi)
     p.add_argument("--nx", type=int, default=1024)
     p.add_argument("--dt", type=float, default=0.08)
     p.add_argument("--tmax", type=float, default=80.0)
     p.add_argument("--gravity", type=float, default=1.0)
-    p.add_argument("--bf_2nd_order", action="store_true", default=True)
     p.add_argument("--out", default="outputs/adaptive_demo_bf.png")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--signal", choices=("envelope", "grad_energy"), default="envelope")
@@ -84,23 +83,23 @@ def main() -> None:
     x_grid_np, k_grid_np = build_grid(args.nx, args.length)
     x_grid = jnp.asarray(x_grid_np, dtype=jnp.float64)
     k_grid = jnp.asarray(k_grid_np, dtype=jnp.float64)
+    depth = deep_water_proxy_depth(args.length)
 
     params = {
         "n_carr": np.array([args.n_carr], dtype=np.int32),
-        "n_l": np.array([args.n_carr - args.side_offset], dtype=np.int32),
-        "n_r": np.array([args.n_carr + args.side_offset], dtype=np.int32),
         "side_offset": np.array([args.side_offset], dtype=np.int32),
         "eps_carrier": np.array([args.eps_carrier], dtype=np.float64),
-        "eps_pert_l": np.array([args.eps_pert], dtype=np.float64),
-        "eps_pert_r": np.array([args.eps_pert], dtype=np.float64),
-        "phase_l": np.array([args.phase_l], dtype=np.float64),
-        "phase_r": np.array([args.phase_r], dtype=np.float64),
-        "depth": np.array([args.depth], dtype=np.float64),
+        "eps_pert": np.array([args.eps_pert], dtype=np.float64),
+        "phase": np.array([args.phase], dtype=np.float64),
+        "depth": np.array([depth], dtype=np.float64),
     }
 
-    initial_eta, initial_xi = build_bf_initial_conditions_batched(
-        x=x_grid, params=params, length=args.length, gravity=args.gravity,
-        bf_2nd_order=args.bf_2nd_order, dtype=jnp.float64,
+    initial_eta, initial_xi = build_initial_conditions(
+        x=x_grid,
+        parameters=params,
+        length=args.length,
+        gravity=args.gravity,
+        dtype=jnp.float64,
     )
     initial_eta = apply_lowpass(initial_eta, k_grid, rollout_defaults.filter_fraction)
     initial_xi = apply_lowpass(initial_xi, k_grid, rollout_defaults.filter_fraction)
@@ -135,7 +134,6 @@ def main() -> None:
         signal_BT = np.asarray(jax.device_get(_grad_energy_traj(eta_BTN, float(args.length))))
         signal_label = r"$\|\eta_x\|^2$"
     s = signal_BT[0]
-    activity = np.abs(np.gradient(s)) / (s + 1e-12)
 
     idx_adaptive = adaptive_indices_from_signal(
         signal_BT, keep_samples=int(args.keep_samples),
@@ -163,12 +161,11 @@ def main() -> None:
     ax_hm.set_ylabel("x")
     ax_hm.set_title(
         f"BF η(x, t) — grey = uniform K={args.keep_samples}, red = adaptive (α={args.alpha}); "
-        f"h={args.depth}, n_carr={args.n_carr}, ε={args.eps_carrier}"
+        f"h={depth:g}, n_carr={args.n_carr}, ε={args.eps_carrier}"
     )
 
     ax_s = fig.add_subplot(gs[1, :])
     ax_s.plot(times, s, color="#1f77b4", lw=1.1)
-    smoothed = _gaussian_smooth_1d(activity, args.smooth_sigma_steps)
     ax_s.scatter(times[idx_uniform], s[idx_uniform], color="#444444", s=20, marker="o", label="uniform")
     ax_s.scatter(times[idx_adaptive], s[idx_adaptive], color="#d62728", s=30, marker="x",
                  label=f"adaptive (α={args.alpha}, σ={args.smooth_sigma_steps:g})")
@@ -185,8 +182,10 @@ def main() -> None:
         ax_x.plot(x_grid_np, xi_traj[t_idx], color="#1f77b4", lw=0.8)
         ax_e.set_ylim(-eta_max, eta_max)
         ax_x.set_ylim(-xi_max, xi_max)
-        ax_e.set_xticks([]); ax_x.set_xticks([])
-        ax_e.set_yticks([]); ax_x.set_yticks([])
+        ax_e.set_xticks([])
+        ax_x.set_xticks([])
+        ax_e.set_yticks([])
+        ax_x.set_yticks([])
         ax_e.set_title(f"t={times[t_idx]:.1f}", fontsize=7, pad=1)
         if col == 0:
             ax_e.set_ylabel("η", rotation=0, labelpad=8, fontsize=9)

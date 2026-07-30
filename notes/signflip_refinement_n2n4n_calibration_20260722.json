@@ -1,0 +1,795 @@
+{
+  "definition": {
+    "grid_sizes": [
+      1024,
+      2048,
+      4096
+    ],
+    "fixed_mode_cutoff": 341,
+    "relative_defect": "||P_K G6(P_K eta_N,P_K xi_N) - R P_K G6(P_K eta_M,P_K xi_M)||_2 / ||R q_M||_2",
+    "primary_audit_statistic": "max(defect_N_2N, defect_2N_4N, defect_N_4N)",
+    "tested_tolerances": [
+      0.0003,
+      0.001,
+      0.003
+    ],
+    "primary_tolerance": 0.001,
+    "decision_rule": "reject when max_l2_defect > tolerance",
+    "contraction_diagnostic": "rho = defect_2N_4N / defect_N_2N is reported diagnostically; it is not an acceptance gate"
+  },
+  "selection": {
+    "sign_rejected_ids": [
+      11,
+      28,
+      100,
+      106,
+      124,
+      148,
+      150,
+      186,
+      187,
+      211,
+      214,
+      254
+    ],
+    "clean_control_ids": [
+      26,
+      43,
+      76,
+      225
+    ],
+    "periodic_counterfactual_ids": [
+      11,
+      28,
+      100,
+      106,
+      124,
+      148,
+      150,
+      186,
+      187,
+      211,
+      214,
+      254
+    ],
+    "selection_note": "This is a regime-spanning calibration panel, not a random sample for estimating population rejection rates."
+  },
+  "by_stratum": {
+    "corrected_matched_counterfactual": {
+      "count": 12,
+      "max_l2_defect": {
+        "q00": 5.864996448574969e-06,
+        "q25": 6.440229654223068e-06,
+        "q50": 7.586878461411748e-06,
+        "q75": 8.47364096353291e-06,
+        "q100": 1.0950982208796667e-05
+      },
+      "l2_defect_n_2n": {
+        "q00": 5.792564162708489e-06,
+        "q25": 6.100878555740878e-06,
+        "q50": 7.026934994758448e-06,
+        "q75": 8.134222510684342e-06,
+        "q100": 1.0950982208796667e-05
+      },
+      "l2_defect_2n_4n": {
+        "q00": 1.4809214883403163e-06,
+        "q25": 1.756289358767543e-06,
+        "q50": 2.1804413649709276e-06,
+        "q75": 2.684089717999727e-06,
+        "q100": 3.131260105965473e-06
+      },
+      "l2_defect_n_4n": {
+        "q00": 5.864996448574969e-06,
+        "q25": 6.302246582887516e-06,
+        "q50": 7.544965901177883e-06,
+        "q75": 8.037310162394467e-06,
+        "q100": 1.0681790564856404e-05
+      },
+      "l2_contraction_ratio": {
+        "q00": 0.2249998844465415,
+        "q25": 0.26706293709741147,
+        "q50": 0.2964299134259498,
+        "q75": 0.3135077601448192,
+        "q100": 0.44207958567337763
+      },
+      "h1_defect_n_2n": {
+        "q00": 3.731650962331088e-05,
+        "q25": 4.6793291729829534e-05,
+        "q50": 5.197775147660892e-05,
+        "q75": 6.500654359243237e-05,
+        "q100": 7.913182008086251e-05
+      },
+      "h1_defect_2n_4n": {
+        "q00": 1.0372113495152004e-05,
+        "q25": 1.208500329148596e-05,
+        "q50": 1.3589008685509463e-05,
+        "q75": 1.7080133408396027e-05,
+        "q100": 2.3092858024068745e-05
+      },
+      "h1_defect_n_4n": {
+        "q00": 3.671711539787249e-05,
+        "q25": 4.779930678059049e-05,
+        "q50": 5.6050779059740066e-05,
+        "q75": 6.292803468498056e-05,
+        "q100": 7.405151893608756e-05
+      },
+      "h1_contraction_ratio": {
+        "q00": 0.1983515070288235,
+        "q25": 0.216496980269141,
+        "q50": 0.24615970585380165,
+        "q75": 0.2947177240359918,
+        "q100": 0.47847731871576465
+      },
+      "decision_sensitivity": {
+        "tau_3e-04": {
+          "tolerance": 0.0003,
+          "rejected": 0,
+          "retained": 12,
+          "rejection_fraction": 0.0
+        },
+        "tau_1e-03": {
+          "tolerance": 0.001,
+          "rejected": 0,
+          "retained": 12,
+          "rejection_fraction": 0.0
+        },
+        "tau_3e-03": {
+          "tolerance": 0.003,
+          "rejected": 0,
+          "retained": 12,
+          "rejection_fraction": 0.0
+        }
+      }
+    },
+    "historical_clean_control": {
+      "count": 4,
+      "max_l2_defect": {
+        "q00": 0.00014571462361562878,
+        "q25": 0.00015066651616982125,
+        "q50": 0.00015453811407964207,
+        "q75": 0.00015853657135109532,
+        "q100": 0.000163869041990185
+      },
+      "l2_defect_n_2n": {
+        "q00": 0.0001077229200899963,
+        "q25": 0.00011247318174419395,
+        "q50": 0.00011528996840113627,
+        "q75": 0.00011684696742650231,
+        "q100": 0.00011781786618597111
+      },
+      "l2_defect_2n_4n": {
+        "q00": 9.20027482069728e-05,
+        "q25": 9.800094325441877e-05,
+        "q50": 0.00010039363331013225,
+        "q75": 0.0001022244702000564,
+        "q100": 0.00010653710575013425
+      },
+      "l2_defect_n_4n": {
+        "q00": 0.00014571462361562878,
+        "q25": 0.00015066651616982125,
+        "q50": 0.00015453811407964207,
+        "q75": 0.00015853657135109532,
+        "q100": 0.000163869041990185
+      },
+      "l2_contraction_ratio": {
+        "q00": 0.8540684575771785,
+        "q25": 0.862230044577303,
+        "q50": 0.8708556154626887,
+        "q75": 0.8836336301204029,
+        "q100": 0.9042525484375129
+      },
+      "h1_defect_n_2n": {
+        "q00": 0.000736752878863912,
+        "q25": 0.0007582703664532641,
+        "q50": 0.0007762237203846518,
+        "q75": 0.0007873386202776053,
+        "q100": 0.0007883407457516546
+      },
+      "h1_defect_2n_4n": {
+        "q00": 0.000671615829705405,
+        "q25": 0.0006745433491826378,
+        "q50": 0.000749674366513815,
+        "q75": 0.0008344805873843192,
+        "q100": 0.0008664337174795327
+      },
+      "h1_defect_n_4n": {
+        "q00": 0.001027763035599568,
+        "q25": 0.0010381843478179677,
+        "q50": 0.0011150294703330924,
+        "q75": 0.0012060155910748915,
+        "q100": 0.0012588598979733144
+      },
+      "h1_contraction_ratio": {
+        "q00": 0.8568873201705421,
+        "q25": 0.8979135898302427,
+        "q50": 0.9939336574514888,
+        "q75": 1.0824401993699835,
+        "q100": 1.1009258919214304
+      },
+      "decision_sensitivity": {
+        "tau_3e-04": {
+          "tolerance": 0.0003,
+          "rejected": 0,
+          "retained": 4,
+          "rejection_fraction": 0.0
+        },
+        "tau_1e-03": {
+          "tolerance": 0.001,
+          "rejected": 0,
+          "retained": 4,
+          "rejection_fraction": 0.0
+        },
+        "tau_3e-03": {
+          "tolerance": 0.003,
+          "rejected": 0,
+          "retained": 4,
+          "rejection_fraction": 0.0
+        }
+      }
+    },
+    "historical_sign_rejected": {
+      "count": 12,
+      "max_l2_defect": {
+        "q00": 0.023292923492746365,
+        "q25": 0.07635285676629906,
+        "q50": 0.22588844328376567,
+        "q75": 0.6286359429223094,
+        "q100": 0.707903201983401
+      },
+      "l2_defect_n_2n": {
+        "q00": 0.010121733877183015,
+        "q25": 0.01956769807855153,
+        "q50": 0.08269790935839513,
+        "q75": 0.3620309406612,
+        "q100": 0.4653480722772057
+      },
+      "l2_defect_2n_4n": {
+        "q00": 0.013289641302833603,
+        "q25": 0.05705334854162717,
+        "q50": 0.14720299234194753,
+        "q75": 0.3642150021744509,
+        "q100": 0.4166227856042296
+      },
+      "l2_defect_n_4n": {
+        "q00": 0.023292923492746365,
+        "q25": 0.07635285676629906,
+        "q50": 0.22588844328376567,
+        "q75": 0.6286359429223094,
+        "q100": 0.707903201983401
+      },
+      "l2_contraction_ratio": {
+        "q00": 0.8952928150437235,
+        "q25": 1.0060497858205668,
+        "q50": 1.382334900447058,
+        "q75": 1.7105745458231791,
+        "q100": 3.0334963179729666
+      },
+      "h1_defect_n_2n": {
+        "q00": 0.0688391697328713,
+        "q25": 0.1102796783224049,
+        "q50": 0.39438119257098053,
+        "q75": 0.5824225497956987,
+        "q100": 0.7874330434928904
+      },
+      "h1_defect_2n_4n": {
+        "q00": 0.08949213615956869,
+        "q25": 0.29977428899962283,
+        "q50": 0.4594125174737646,
+        "q75": 0.4834286122636936,
+        "q100": 0.5513932288648186
+      },
+      "h1_defect_n_4n": {
+        "q00": 0.1565685056963934,
+        "q25": 0.39330114841258945,
+        "q50": 0.7202730487913671,
+        "q75": 0.78369871470997,
+        "q100": 0.9563099298788609
+      },
+      "h1_contraction_ratio": {
+        "q00": 0.6924137359959919,
+        "q25": 0.8192336532277751,
+        "q50": 1.2320354459714187,
+        "q75": 1.4201272051497658,
+        "q100": 2.806027469517672
+      },
+      "decision_sensitivity": {
+        "tau_3e-04": {
+          "tolerance": 0.0003,
+          "rejected": 12,
+          "retained": 0,
+          "rejection_fraction": 1.0
+        },
+        "tau_1e-03": {
+          "tolerance": 0.001,
+          "rejected": 12,
+          "retained": 0,
+          "rejection_fraction": 1.0
+        },
+        "tau_3e-03": {
+          "tolerance": 0.003,
+          "rejected": 12,
+          "retained": 0,
+          "rejection_fraction": 1.0
+        }
+      }
+    }
+  },
+  "metrics": [
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 11,
+      "l2_defect_n_2n": 0.07535324815620682,
+      "l2_defect_2n_4n": 0.11672894594749415,
+      "l2_defect_n_4n": 0.19002448584060086,
+      "max_l2_defect": 0.19002448584060086,
+      "l2_contraction_ratio": 1.5490897712267926,
+      "l2_observed_order": -0.6314207521009799,
+      "h1_defect_n_2n": 0.41831985648901004,
+      "h1_defect_2n_4n": 0.486946582104114,
+      "h1_defect_n_4n": 0.7900126551603482,
+      "h1_contraction_ratio": 1.1640532347450423,
+      "h1_observed_order": -0.21915703740985396,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 28,
+      "l2_defect_n_2n": 0.02046171788728387,
+      "l2_defect_2n_4n": 0.06207054587047721,
+      "l2_defect_n_4n": 0.08224677953052868,
+      "max_l2_defect": 0.08224677953052868,
+      "l2_contraction_ratio": 3.0334963179729666,
+      "l2_observed_order": -1.6009815602432984,
+      "h1_defect_n_2n": 0.11451444846552881,
+      "h1_defect_2n_4n": 0.3213306880509397,
+      "h1_defect_n_4n": 0.41664854653554984,
+      "h1_contraction_ratio": 2.806027469517672,
+      "h1_observed_order": -1.4885291322446765,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 100,
+      "l2_defect_n_2n": 0.4653480722772057,
+      "l2_defect_2n_4n": 0.4166227856042296,
+      "l2_defect_n_4n": 0.707903201983401,
+      "max_l2_defect": 0.707903201983401,
+      "l2_contraction_ratio": 0.8952928150437235,
+      "l2_observed_order": 0.1595684865643943,
+      "h1_defect_n_2n": 0.5825980033904693,
+      "h1_defect_2n_4n": 0.46729757034919917,
+      "h1_defect_n_4n": 0.7741135685136921,
+      "h1_contraction_ratio": 0.802092639572619,
+      "h1_observed_order": 0.3181592211328994,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 106,
+      "l2_defect_n_2n": 0.010121733877183015,
+      "l2_defect_2n_4n": 0.013289641302833603,
+      "l2_defect_n_4n": 0.023292923492746365,
+      "max_l2_defect": 0.023292923492746365,
+      "l2_contraction_ratio": 1.3129807070695532,
+      "l2_observed_order": -0.39284571743447555,
+      "h1_defect_n_2n": 0.0688391697328713,
+      "h1_defect_2n_4n": 0.08949213615956869,
+      "h1_defect_n_4n": 0.1565685056963934,
+      "h1_contraction_ratio": 1.3000176571977948,
+      "h1_observed_order": -0.3785312184681119,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 124,
+      "l2_defect_n_2n": 0.3601055241789509,
+      "l2_defect_2n_4n": 0.3626673754500374,
+      "l2_defect_n_4n": 0.6413273925974551,
+      "max_l2_defect": 0.6413273925974551,
+      "l2_contraction_ratio": 1.0071141682064655,
+      "l2_observed_order": -0.010227239023984695,
+      "h1_defect_n_2n": 0.7874330434928904,
+      "h1_defect_2n_4n": 0.5452294554916066,
+      "h1_defect_n_4n": 0.9563099298788609,
+      "h1_contraction_ratio": 0.6924137359959919,
+      "h1_observed_order": 0.5302937499391134,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 148,
+      "l2_defect_n_2n": 0.016885638652354516,
+      "l2_defect_2n_4n": 0.04200175655507706,
+      "l2_defect_n_4n": 0.0586710884736102,
+      "max_l2_defect": 0.0586710884736102,
+      "l2_contraction_ratio": 2.4874248122809606,
+      "l2_observed_order": -1.314652917781396,
+      "h1_defect_n_2n": 0.09757536789303316,
+      "h1_defect_2n_4n": 0.23510509184567238,
+      "h1_defect_n_4n": 0.32325895404370825,
+      "h1_contraction_ratio": 2.409471743969297,
+      "h1_observed_order": -1.2687168825992157,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 150,
+      "l2_defect_n_2n": 0.3678071901079472,
+      "l2_defect_2n_4n": 0.3688578823476914,
+      "l2_defect_n_4n": 0.6244054596972609,
+      "max_l2_defect": 0.6244054596972609,
+      "l2_contraction_ratio": 1.0028566386628708,
+      "l2_observed_order": -0.004115383145834216,
+      "h1_defect_n_2n": 0.5345389138383833,
+      "h1_defect_2n_4n": 0.45152746459833004,
+      "h1_defect_n_4n": 0.7433540449072962,
+      "h1_contraction_ratio": 0.8447045723126688,
+      "h1_observed_order": 0.24348123465543808,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 186,
+      "l2_defect_n_2n": 0.41495314580635695,
+      "l2_defect_2n_4n": 0.41002925611471147,
+      "l2_defect_n_4n": 0.6821479713943162,
+      "max_l2_defect": 0.6821479713943162,
+      "l2_contraction_ratio": 0.9881338658559218,
+      "l2_observed_order": 0.01722159303280915,
+      "h1_defect_n_2n": 0.5823640652641086,
+      "h1_defect_2n_4n": 0.4804196774932155,
+      "h1_defect_n_4n": 0.7815940678931772,
+      "h1_contraction_ratio": 0.8249473244461605,
+      "h1_observed_order": 0.2776260933307323,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 187,
+      "l2_defect_n_2n": 0.09004257056058343,
+      "l2_defect_2n_4n": 0.1776770387364009,
+      "l2_defect_n_4n": 0.26175240072693046,
+      "max_l2_defect": 0.26175240072693046,
+      "l2_contraction_ratio": 1.9732559569348842,
+      "l2_observed_order": -0.9805781044903552,
+      "h1_defect_n_2n": 0.370442528652951,
+      "h1_defect_2n_4n": 0.4822559556502201,
+      "h1_defect_n_4n": 0.6971920526754382,
+      "h1_contraction_ratio": 1.3018374466988414,
+      "h1_observed_order": -0.3805493183329315,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 211,
+      "l2_defect_n_2n": 0.014144320909242373,
+      "l2_defect_2n_4n": 0.02053315640350187,
+      "l2_defect_n_4n": 0.034505804897739835,
+      "max_l2_defect": 0.034505804897739835,
+      "l2_contraction_ratio": 1.4516890938245626,
+      "l2_observed_order": -0.5377325064838419,
+      "h1_defect_n_2n": 0.08760945078026965,
+      "h1_defect_2n_4n": 0.12417442441739364,
+      "h1_defect_n_4n": 0.20896954674061896,
+      "h1_contraction_ratio": 1.4173633473497214,
+      "h1_observed_order": -0.5032096469104153,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 214,
+      "l2_defect_n_2n": 0.19507577754346522,
+      "l2_defect_2n_4n": 0.2492553361539317,
+      "l2_defect_n_4n": 0.422997693517533,
+      "max_l2_defect": 0.422997693517533,
+      "l2_contraction_ratio": 1.2777359613414567,
+      "l2_observed_order": -0.35358974033884677,
+      "h1_defect_n_2n": 0.6928089997703938,
+      "h1_defect_2n_4n": 0.5513932288648186,
+      "h1_defect_n_4n": 0.9291432203759641,
+      "h1_contraction_ratio": 0.7958805804306204,
+      "h1_observed_order": 0.32937612007998485,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_sign_rejected",
+      "case_id": 254,
+      "l2_defect_n_2n": 0.04077580037942706,
+      "l2_defect_2n_4n": 0.06617969795365602,
+      "l2_defect_n_4n": 0.10619109464906017,
+      "max_l2_defect": 0.10619109464906017,
+      "l2_contraction_ratio": 1.6230140754526108,
+      "l2_observed_order": -0.6986755115911376,
+      "h1_defect_n_2n": 0.24841555711821817,
+      "h1_defect_2n_4n": 0.35484144667159784,
+      "h1_defect_n_4n": 0.566402689713838,
+      "h1_contraction_ratio": 1.428418778549899,
+      "h1_observed_order": -0.514419005392493,
+      "primary_reject": true
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_clean_control",
+      "case_id": 26,
+      "l2_defect_n_2n": 0.0001077229200899963,
+      "l2_defect_2n_4n": 9.20027482069728e-05,
+      "l2_defect_n_4n": 0.00014571462361562878,
+      "max_l2_defect": 0.00014571462361562878,
+      "l2_contraction_ratio": 0.8540684575771785,
+      "l2_observed_order": 0.22757638165889557,
+      "h1_defect_n_2n": 0.000736752878863912,
+      "h1_defect_2n_4n": 0.000671615829705405,
+      "h1_defect_n_4n": 0.0010416581185574345,
+      "h1_contraction_ratio": 0.911589013050143,
+      "h1_observed_order": 0.133544558298187,
+      "primary_reject": false
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_clean_control",
+      "case_id": 43,
+      "l2_defect_n_2n": 0.00011405660229559317,
+      "l2_defect_2n_4n": 0.00010000034160356742,
+      "l2_defect_n_4n": 0.00015231714702121875,
+      "max_l2_defect": 0.00015231714702121875,
+      "l2_contraction_ratio": 0.8767606573480329,
+      "l2_observed_order": 0.18974503281422525,
+      "h1_defect_n_2n": 0.0007883407457516546,
+      "h1_defect_2n_4n": 0.0006755191890083819,
+      "h1_defect_n_4n": 0.001027763035599568,
+      "h1_contraction_ratio": 0.8568873201705421,
+      "h1_observed_order": 0.22282259103863114,
+      "primary_reject": false
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_clean_control",
+      "case_id": 76,
+      "l2_defect_n_2n": 0.00011781786618597111,
+      "l2_defect_2n_4n": 0.00010653710575013425,
+      "l2_defect_n_4n": 0.000163869041990185,
+      "max_l2_defect": 0.000163869041990185,
+      "l2_contraction_ratio": 0.9042525484375129,
+      "l2_observed_order": 0.14520233608098132,
+      "h1_defect_n_2n": 0.0007870045784529222,
+      "h1_defect_2n_4n": 0.0008664337174795327,
+      "h1_defect_n_4n": 0.0012588598979733144,
+      "h1_contraction_ratio": 1.1009258919214304,
+      "h1_observed_order": -0.1387173581340451,
+      "primary_reject": false
+    },
+    {
+      "population": "historical_zero_extension",
+      "stratum": "historical_clean_control",
+      "case_id": 225,
+      "l2_defect_n_2n": 0.00011652333450667938,
+      "l2_defect_2n_4n": 0.0001007869250166971,
+      "l2_defect_n_4n": 0.00015675908113806542,
+      "max_l2_defect": 0.00015675908113806542,
+      "l2_contraction_ratio": 0.8649505735773445,
+      "l2_observed_order": 0.2093104006260846,
+      "h1_defect_n_2n": 0.0007654428623163815,
+      "h1_defect_2n_4n": 0.000823829544019248,
+      "h1_defect_n_4n": 0.0011884008221087505,
+      "h1_contraction_ratio": 1.0762783018528346,
+      "h1_observed_order": -0.10605117528147513,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 11,
+      "l2_defect_n_2n": 6.970846462891201e-06,
+      "l2_defect_2n_4n": 2.085723969927031e-06,
+      "l2_defect_n_4n": 7.2731880551806345e-06,
+      "max_l2_defect": 7.2731880551806345e-06,
+      "l2_contraction_ratio": 0.29920670051050935,
+      "l2_observed_order": 1.7407856112225006,
+      "h1_defect_n_2n": 5.263247540601948e-05,
+      "h1_defect_2n_4n": 1.280127278885735e-05,
+      "h1_defect_n_4n": 5.679883892983099e-05,
+      "h1_contraction_ratio": 0.24322004029081426,
+      "h1_observed_order": 2.0396659893088684,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 28,
+      "l2_defect_n_2n": 6.133158019081531e-06,
+      "l2_defect_2n_4n": 1.8010210266490596e-06,
+      "l2_defect_n_4n": 6.30619101127288e-06,
+      "max_l2_defect": 6.30619101127288e-06,
+      "l2_contraction_ratio": 0.2936531263413903,
+      "l2_observed_order": 1.7678150974974152,
+      "h1_defect_n_2n": 3.753214476435159e-05,
+      "h1_defect_2n_4n": 1.2571941680815514e-05,
+      "h1_defect_n_4n": 3.915004099464384e-05,
+      "h1_contraction_ratio": 0.33496464856323566,
+      "h1_observed_order": 1.577919250163814,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 100,
+      "l2_defect_n_2n": 6.004040165718921e-06,
+      "l2_defect_2n_4n": 1.6220943551229935e-06,
+      "l2_defect_n_4n": 6.48490920187313e-06,
+      "max_l2_defect": 6.48490920187313e-06,
+      "l2_contraction_ratio": 0.27016713918481333,
+      "l2_observed_order": 1.8880758866121885,
+      "h1_defect_n_2n": 4.817425524793086e-05,
+      "h1_defect_2n_4n": 1.0486520686775843e-05,
+      "h1_defect_n_4n": 5.136687919964721e-05,
+      "h1_contraction_ratio": 0.21767893728313012,
+      "h1_observed_order": 2.1997262764621266,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 106,
+      "l2_defect_n_2n": 6.581876661773013e-06,
+      "l2_defect_2n_4n": 1.4809214883403163e-06,
+      "l2_defect_n_4n": 6.290413297731424e-06,
+      "max_l2_defect": 6.581876661773013e-06,
+      "l2_contraction_ratio": 0.2249998844465415,
+      "l2_observed_order": 2.1520038343714694,
+      "h1_defect_n_2n": 5.132302754719836e-05,
+      "h1_defect_2n_4n": 1.0372113495152004e-05,
+      "h1_defect_n_4n": 4.971443542973244e-05,
+      "h1_contraction_ratio": 0.2020947319526983,
+      "h1_observed_order": 2.3068963797247575,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 124,
+      "l2_defect_n_2n": 8.551961714183794e-06,
+      "l2_defect_2n_4n": 2.6379131949037045e-06,
+      "l2_defect_n_4n": 7.870679173256139e-06,
+      "max_l2_defect": 8.551961714183794e-06,
+      "l2_contraction_ratio": 0.30845708658033544,
+      "l2_observed_order": 1.6968583033543316,
+      "h1_defect_n_2n": 6.693307190333716e-05,
+      "h1_defect_2n_4n": 1.826920692046947e-05,
+      "h1_defect_n_4n": 5.778050033388386e-05,
+      "h1_contraction_ratio": 0.27294738461807555,
+      "h1_observed_order": 1.8733052216411332,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 148,
+      "l2_defect_n_2n": 7.0830235266256945e-06,
+      "l2_defect_2n_4n": 3.131260105965473e-06,
+      "l2_defect_n_4n": 7.90056886764286e-06,
+      "max_l2_defect": 7.90056886764286e-06,
+      "l2_contraction_ratio": 0.44207958567337763,
+      "l2_observed_order": 1.1776219797489207,
+      "h1_defect_n_2n": 4.82632240250177e-05,
+      "h1_defect_2n_4n": 2.3092858024068745e-05,
+      "h1_defect_n_4n": 5.530271918964914e-05,
+      "h1_contraction_ratio": 0.47847731871576465,
+      "h1_observed_order": 1.063477556700284,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 150,
+      "l2_defect_n_2n": 8.254383552509587e-06,
+      "l2_defect_2n_4n": 2.2751587600148237e-06,
+      "l2_defect_n_4n": 8.447534046649282e-06,
+      "max_l2_defect": 8.447534046649282e-06,
+      "l2_contraction_ratio": 0.27563036604024843,
+      "l2_observed_order": 1.8591932571993435,
+      "h1_defect_n_2n": 7.176066653449489e-05,
+      "h1_defect_2n_4n": 1.4233836352509925e-05,
+      "h1_defect_n_4n": 7.168938302939615e-05,
+      "h1_contraction_ratio": 0.1983515070288235,
+      "h1_observed_order": 2.333868736099653,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 186,
+      "l2_defect_n_2n": 5.9684994220553175e-06,
+      "l2_defect_2n_4n": 1.5037026577255325e-06,
+      "l2_defect_n_4n": 5.9714465431067694e-06,
+      "max_l2_defect": 5.9714465431067694e-06,
+      "l2_contraction_ratio": 0.25193981793294973,
+      "l2_observed_order": 1.988848943459528,
+      "h1_defect_n_2n": 4.2650401175525545e-05,
+      "h1_defect_2n_4n": 1.0624188123497295e-05,
+      "h1_defect_n_4n": 4.205392083316464e-05,
+      "h1_contraction_ratio": 0.24909937141678906,
+      "h1_observed_order": 2.005206713834608,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 187,
+      "l2_defect_n_2n": 5.792564162708489e-06,
+      "l2_defect_2n_4n": 1.9037828682073907e-06,
+      "l2_defect_n_4n": 5.864996448574969e-06,
+      "max_l2_defect": 5.864996448574969e-06,
+      "l2_contraction_ratio": 0.3286597808382703,
+      "l2_observed_order": 1.6053331749319406,
+      "h1_defect_n_2n": 3.731650962331088e-05,
+      "h1_defect_2n_4n": 1.2944181018509e-05,
+      "h1_defect_n_4n": 3.671711539787249e-05,
+      "h1_contraction_ratio": 0.3468754486733408,
+      "h1_observed_order": 1.5275103624518218,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 211,
+      "l2_defect_n_2n": 8.094168830075927e-06,
+      "l2_defect_2n_4n": 3.041759818142076e-06,
+      "l2_defect_n_4n": 9.132456125735396e-06,
+      "max_l2_defect": 9.132456125735396e-06,
+      "l2_contraction_ratio": 0.37579643839891874,
+      "l2_observed_order": 1.411976701169752,
+      "h1_defect_n_2n": 6.31595290366542e-05,
+      "h1_defect_2n_4n": 1.77669070494297e-05,
+      "h1_defect_n_4n": 6.724036982112389e-05,
+      "h1_contraction_ratio": 0.28130208252691047,
+      "h1_observed_order": 1.829807861679737,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 214,
+      "l2_defect_n_2n": 1.0950982208796667e-05,
+      "l2_defect_2n_4n": 2.822619287287793e-06,
+      "l2_defect_n_4n": 1.0681790564856404e-05,
+      "max_l2_defect": 1.0950982208796667e-05,
+      "l2_contraction_ratio": 0.25775033083520577,
+      "l2_observed_order": 1.9559538155228655,
+      "h1_defect_n_2n": 7.913182008086251e-05,
+      "h1_defect_2n_4n": 1.6851208861384803e-05,
+      "h1_defect_n_4n": 7.405151893608756e-05,
+      "h1_contraction_ratio": 0.2129511092271736,
+      "h1_observed_order": 2.231405850219235,
+      "primary_reject": false
+    },
+    {
+      "population": "corrected_periodic_counterfactual",
+      "stratum": "corrected_matched_counterfactual",
+      "case_id": 254,
+      "l2_defect_n_2n": 7.962176702723835e-06,
+      "l2_defect_2n_4n": 2.455233638447742e-06,
+      "l2_defect_n_4n": 7.816743747175132e-06,
+      "max_l2_defect": 7.962176702723835e-06,
+      "l2_contraction_ratio": 0.30836211379330664,
+      "l2_observed_order": 1.6973025721769157,
+      "h1_defect_n_2n": 6.436436748879744e-05,
+      "h1_defect_2n_4n": 1.5502633021305528e-05,
+      "h1_defect_n_4n": 6.149058963959944e-05,
+      "h1_contraction_ratio": 0.2408573815939968,
+      "h1_observed_order": 2.053748955783462,
+      "primary_reject": false
+    }
+  ]
+}

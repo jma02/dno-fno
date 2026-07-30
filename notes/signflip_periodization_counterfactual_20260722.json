@@ -1,0 +1,133 @@
+{
+  "intervention": "Same 12 historical t=0 crest specifications; change plain native-grid interpolation with left=right=0 to a three-copy periodic interpolation. Sign-count intervention uses native grid in both branches. Resolution-defect periodized branch additionally uses the corrected fine-grid construction independently at N=1024 and 2048.",
+  "summary": {
+    "old_sign_count_range": [
+      12,
+      38
+    ],
+    "periodized_sign_count_range": [
+      2,
+      8
+    ],
+    "old_rows_above_10": 12,
+    "periodized_rows_above_10": 0,
+    "old_defect_range": [
+      0.010121733877183759,
+      0.4653480722772057
+    ],
+    "periodized_defect_range": [
+      5.792564166313032e-06,
+      1.0950982208868113e-05
+    ]
+  },
+  "cases": [
+    {
+      "case_id": 11,
+      "old_zero_extended_sign_changes": 12,
+      "periodized_native_grid_sign_changes": 2,
+      "old_discrete_eta_seam": 0.14556375705134023,
+      "periodized_discrete_eta_seam": 0.007548177547602684,
+      "old_fixed_band_q_defect": 0.07535324815620736,
+      "periodized_fixed_band_q_defect": 6.970846463955818e-06
+    },
+    {
+      "case_id": 28,
+      "old_zero_extended_sign_changes": 18,
+      "periodized_native_grid_sign_changes": 6,
+      "old_discrete_eta_seam": 0.13329636370404405,
+      "periodized_discrete_eta_seam": 0.005979030785563521,
+      "old_fixed_band_q_defect": 0.020461717887284004,
+      "periodized_fixed_band_q_defect": 6.133158019980527e-06
+    },
+    {
+      "case_id": 100,
+      "old_zero_extended_sign_changes": 32,
+      "periodized_native_grid_sign_changes": 6,
+      "old_discrete_eta_seam": 0.9978798800042861,
+      "periodized_discrete_eta_seam": 0.008465380645517129,
+      "old_fixed_band_q_defect": 0.4653480722772057,
+      "periodized_fixed_band_q_defect": 6.004040166230901e-06
+    },
+    {
+      "case_id": 106,
+      "old_zero_extended_sign_changes": 12,
+      "periodized_native_grid_sign_changes": 8,
+      "old_discrete_eta_seam": 0.05150346503618587,
+      "periodized_discrete_eta_seam": 0.0043394827794631,
+      "old_fixed_band_q_defect": 0.010121733877183759,
+      "periodized_fixed_band_q_defect": 6.581876660298326e-06
+    },
+    {
+      "case_id": 124,
+      "old_zero_extended_sign_changes": 34,
+      "periodized_native_grid_sign_changes": 8,
+      "old_discrete_eta_seam": 0.4904869158356782,
+      "periodized_discrete_eta_seam": 0.04538563142389091,
+      "old_fixed_band_q_defect": 0.3601055241789516,
+      "periodized_fixed_band_q_defect": 8.551961710221462e-06
+    },
+    {
+      "case_id": 148,
+      "old_zero_extended_sign_changes": 24,
+      "periodized_native_grid_sign_changes": 8,
+      "old_discrete_eta_seam": 0.10066238227298029,
+      "periodized_discrete_eta_seam": 0.01213357761188308,
+      "old_fixed_band_q_defect": 0.016885638652354876,
+      "periodized_fixed_band_q_defect": 7.083023530348684e-06
+    },
+    {
+      "case_id": 150,
+      "old_zero_extended_sign_changes": 38,
+      "periodized_native_grid_sign_changes": 4,
+      "old_discrete_eta_seam": 0.7935438517481131,
+      "periodized_discrete_eta_seam": 0.0479604713032556,
+      "old_fixed_band_q_defect": 0.3678071901079497,
+      "periodized_fixed_band_q_defect": 8.25438355334835e-06
+    },
+    {
+      "case_id": 186,
+      "old_zero_extended_sign_changes": 18,
+      "periodized_native_grid_sign_changes": 8,
+      "old_discrete_eta_seam": 0.8510121366775818,
+      "periodized_discrete_eta_seam": 0.013074720979353416,
+      "old_fixed_band_q_defect": 0.41495314580635745,
+      "periodized_fixed_band_q_defect": 5.968499421768259e-06
+    },
+    {
+      "case_id": 187,
+      "old_zero_extended_sign_changes": 12,
+      "periodized_native_grid_sign_changes": 6,
+      "old_discrete_eta_seam": 0.2957846183341491,
+      "periodized_discrete_eta_seam": 0.02671615454924839,
+      "old_fixed_band_q_defect": 0.09004257056058376,
+      "periodized_fixed_band_q_defect": 5.792564166313032e-06
+    },
+    {
+      "case_id": 211,
+      "old_zero_extended_sign_changes": 12,
+      "periodized_native_grid_sign_changes": 4,
+      "old_discrete_eta_seam": 0.05103765345259464,
+      "periodized_discrete_eta_seam": 0.003663669060838716,
+      "old_fixed_band_q_defect": 0.014144320909243644,
+      "periodized_fixed_band_q_defect": 8.094168832505375e-06
+    },
+    {
+      "case_id": 214,
+      "old_zero_extended_sign_changes": 32,
+      "periodized_native_grid_sign_changes": 6,
+      "old_discrete_eta_seam": 0.2920370494998276,
+      "periodized_discrete_eta_seam": 0.031100300649603774,
+      "old_fixed_band_q_defect": 0.195075777543466,
+      "periodized_fixed_band_q_defect": 1.0950982208868113e-05
+    },
+    {
+      "case_id": 254,
+      "old_zero_extended_sign_changes": 12,
+      "periodized_native_grid_sign_changes": 8,
+      "old_discrete_eta_seam": 0.11050887746504831,
+      "periodized_discrete_eta_seam": 0.010952934870519177,
+      "old_fixed_band_q_defect": 0.040775800379427754,
+      "periodized_fixed_band_q_defect": 7.962176702723835e-06
+    }
+  ]
+}

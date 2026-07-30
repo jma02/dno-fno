@@ -20,6 +20,7 @@ Typical use:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -48,6 +49,7 @@ from solver.evals.model_rollout import (  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = REPO_ROOT / "data"
+RolloutPayload = dict[str, np.ndarray | float]
 
 
 @dataclass
@@ -197,8 +199,158 @@ def _load_test_npz_ics(path: Path, source_id: int, n_ics: int) -> list[IC]:
     ]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _directory_sha256(path: Path) -> str:
+    """Hash relative paths and contents of every regular file in a directory."""
+    digest = hashlib.sha256()
+    files = sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+    if not files:
+        raise ValueError(f"cannot hash empty checkpoint directory: {path}")
+    for candidate in files:
+        relative = candidate.relative_to(path).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "little"))
+        digest.update(relative)
+        with candidate.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _positive_panel_float(meta: dict, key: str, path: Path) -> float:
+    try:
+        value = float(meta[key])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"IC panel {path} must define numeric meta['{key}']") from exc
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"IC panel {path} meta['{key}'] must be finite and positive; got {value}")
+    return value
+
+
+def _load_ic_panel(
+    path: Path,
+    regime: str,
+    n_ics: int,
+    nx: int,
+    length: float,
+) -> tuple[list[IC], dict]:
+    """Load and validate one compact, trajectory-disjoint IC panel."""
+    if not path.is_file():
+        raise ValueError(f"IC panel for regime '{regime}' does not exist: {path}")
+
+    required_arrays = {"eta", "xi", "depth", "case_ids", "meta.json"}
+    with np.load(path, mmap_mode="r") as archive:
+        missing = sorted(required_arrays.difference(archive.files))
+        if missing:
+            raise ValueError(f"IC panel {path} is missing required entries: {missing}")
+
+        raw_meta = np.asarray(archive["meta.json"])
+        if raw_meta.shape != ():
+            raise ValueError(f"IC panel {path} meta.json must be a scalar UTF-8 JSON value")
+        raw_meta_item = raw_meta.item()
+        if isinstance(raw_meta_item, bytes):
+            meta_text = raw_meta_item.decode("utf-8")
+        elif isinstance(raw_meta_item, str):
+            meta_text = raw_meta_item
+        else:
+            raise ValueError(f"IC panel {path} meta.json must contain UTF-8 text")
+        try:
+            meta = json.loads(meta_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"IC panel {path} contains invalid meta.json") from exc
+        if not isinstance(meta, dict):
+            raise ValueError(f"IC panel {path} meta.json must decode to an object")
+
+        eta = np.asarray(archive["eta"])
+        xi = np.asarray(archive["xi"])
+        depth = np.asarray(archive["depth"])
+        case_ids = np.asarray(archive["case_ids"])
+
+    panel_regime = meta.get("regime")
+    if panel_regime != regime:
+        raise ValueError(
+            f"IC panel {path} declares regime={panel_regime!r}, expected {regime!r}"
+        )
+    if "family" in meta and meta["family"] != regime:
+        raise ValueError(
+            f"IC panel {path} declares family={meta['family']!r}, expected {regime!r}"
+        )
+    if meta.get("nx") != nx:
+        raise ValueError(f"IC panel {path} declares nx={meta.get('nx')!r}, expected {nx}")
+    try:
+        panel_length = float(meta["length"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"IC panel {path} must define numeric meta['length']") from exc
+    if not np.isfinite(panel_length) or not np.isclose(panel_length, length, rtol=1e-12, atol=1e-12):
+        raise ValueError(
+            f"IC panel {path} declares length={panel_length!r}, expected {length!r}"
+        )
+    provenance = meta.get("provenance")
+    if not isinstance(provenance, dict) or not provenance:
+        raise ValueError(f"IC panel {path} must contain nonempty generation metadata")
+    for key in ("dt", "tmax"):
+        if key in meta:
+            _positive_panel_float(meta, key, path)
+
+    expected_shape = (n_ics, nx)
+    if eta.shape != expected_shape or xi.shape != expected_shape:
+        raise ValueError(
+            f"IC panel {path} eta/xi shapes must both be exactly {expected_shape}; "
+            f"got eta={eta.shape}, xi={xi.shape}"
+        )
+    if depth.shape != (n_ics,) or case_ids.shape != (n_ics,):
+        raise ValueError(
+            f"IC panel {path} depth/case_ids shapes must both be exactly ({n_ics},); "
+            f"got depth={depth.shape}, case_ids={case_ids.shape}"
+        )
+    if "n_ics" in meta and meta["n_ics"] != n_ics:
+        raise ValueError(
+            f"IC panel {path} declares n_ics={meta['n_ics']!r}, expected exactly {n_ics}"
+        )
+    if not np.issubdtype(case_ids.dtype, np.integer):
+        raise ValueError(f"IC panel {path} case_ids must have an integer dtype")
+    if np.unique(case_ids).size != n_ics:
+        raise ValueError(f"IC panel {path} case_ids must be unique")
+    if not (np.isfinite(eta).all() and np.isfinite(xi).all() and np.isfinite(depth).all()):
+        raise ValueError(f"IC panel {path} contains non-finite initial conditions or depths")
+    if np.any(depth <= 0.0):
+        raise ValueError(f"IC panel {path} depths must be positive")
+
+    panel_source = {
+        "path": str(path.resolve()),
+        "sha256": _file_sha256(path),
+        "replicate_group": meta.get("replicate_group", regime),
+        "provenance": provenance,
+    }
+    ics = [
+        IC(
+            eta=eta[j].astype(np.float64),
+            xi=xi[j].astype(np.float64),
+            depth=float(depth[j]),
+            case_id=int(case_ids[j]),
+            meta={
+                "source_kind": "heldout_ic_panel",
+                "source_file": path.name,
+                "panel_source": panel_source,
+            },
+        )
+        for j in range(n_ics)
+    ]
+    return ics, meta
+
+
 def build_ics_and_truth_targets(
     cfg: RegimeConfig,
+    *,
+    ic_panel_dir: Path | None = None,
+    nx: int | None = None,
+    length: float | None = None,
 ) -> tuple[list[IC], float, float, dict[int, np.ndarray] | None, dict[int, np.ndarray] | None]:
     """Returns (ics, dt, tmax, saved_times, saved_eta_truth).
 
@@ -206,6 +358,19 @@ def build_ics_and_truth_targets(
     trajectories (used as ground-truth reference). For test_npz: we override dt/tmax
     from RegimeConfig and there's no saved truth.
     """
+    if ic_panel_dir is not None:
+        if nx is None or length is None:
+            raise ValueError("nx and length are required when loading an IC panel")
+        panel_path = ic_panel_dir / f"{cfg.name}_ics.npz"
+        ics, meta = _load_ic_panel(panel_path, cfg.name, cfg.n_ics, nx, length)
+        dt = float(cfg.dt) if cfg.dt is not None else _positive_panel_float(meta, "dt", panel_path)
+        tmax = (
+            float(cfg.tmax)
+            if cfg.tmax is not None
+            else _positive_panel_float(meta, "tmax", panel_path)
+        )
+        return ics, dt, tmax, None, None
+
     kind = cfg.source[0]
     if kind == "batched_npz":
         ics, meta, saved_t, saved_eta = _load_batched_ics(cfg.source[1], cfg.n_ics)
@@ -224,32 +389,136 @@ def build_ics_and_truth_targets(
 def _try_load_cached_truth(
     regime: str, cache_dir: Path | None, expected_n_ics: int,
     expected_n_t: int, expected_nx: int, expected_case_ids: list[int],
+    expected_ic_panel_sha256: str | None = None,
+    expected_truth_protocol_sha256: str | None = None,
 ) -> dict[str, np.ndarray] | None:
-    """Load a truth dict from `{cache_dir}/{regime}_trajs.npz` if shape+case_ids match; else None."""
+    """Load cached truth only when its identity and numerical protocol match."""
     if cache_dir is None:
         return None
-    path = cache_dir / f"{regime}_trajs.npz"
-    if not path.exists():
-        print(f"[{regime}] truth cache miss: {path} not found", flush=True)
+    candidates = (
+        cache_dir / f"{regime}_truth_cache.npz",
+        cache_dir / f"{regime}_trajs.npz",
+    )
+    existing = tuple(path for path in candidates if path.exists())
+    if not existing:
+        print(f"[{regime}] truth cache miss: no cache in {cache_dir}", flush=True)
         return None
-    try:
-        with np.load(path) as arch:
-            eta = arch["truth_eta"]
-            xi = arch["truth_xi"]
-            gxi = arch["truth_gxi"]
-            case_ids = arch["case_ids"].tolist()
-    except (KeyError, ValueError) as e:
-        print(f"[{regime}] truth cache miss: {e}", flush=True)
-        return None
-    if eta.shape != (expected_n_t, expected_n_ics, expected_nx):
-        print(f"[{regime}] truth cache shape mismatch: got {eta.shape}, "
-              f"expected ({expected_n_t}, {expected_n_ics}, {expected_nx})", flush=True)
-        return None
-    if list(case_ids) != list(expected_case_ids):
-        print(f"[{regime}] truth cache case_ids mismatch", flush=True)
-        return None
-    print(f"[{regime}] truth cache HIT: {path}", flush=True)
-    return {"eta": eta, "xi": xi, "gxi": gxi, "wall_s": 0.0}
+
+    expected_shape = (expected_n_t, expected_n_ics, expected_nx)
+    for path in existing:
+        try:
+            with np.load(path) as arch:
+                eta = np.asarray(arch["truth_eta"])
+                xi = np.asarray(arch["truth_xi"])
+                gxi = np.asarray(arch["truth_gxi"])
+                case_ids = arch["case_ids"].tolist()
+                cached_ic_panel_sha256 = (
+                    str(arch["ic_panel_sha256"].item())
+                    if "ic_panel_sha256" in arch.files
+                    else None
+                )
+                cached_truth_protocol_sha256 = (
+                    str(arch["truth_protocol_sha256"].item())
+                    if "truth_protocol_sha256" in arch.files
+                    else None
+                )
+        except (KeyError, OSError, ValueError) as exc:
+            print(f"[{regime}] truth cache miss ({path}): {exc}", flush=True)
+            continue
+        if any(field.shape != expected_shape for field in (eta, xi, gxi)):
+            print(
+                f"[{regime}] truth cache shape mismatch ({path}): "
+                f"eta={eta.shape}, xi={xi.shape}, gxi={gxi.shape}, "
+                f"expected={expected_shape}",
+                flush=True,
+            )
+            continue
+        if list(case_ids) != list(expected_case_ids):
+            print(f"[{regime}] truth cache case_ids mismatch ({path})", flush=True)
+            continue
+        if (
+            expected_ic_panel_sha256 is not None
+            and cached_ic_panel_sha256 != expected_ic_panel_sha256
+        ):
+            print(f"[{regime}] truth cache IC panel mismatch ({path})", flush=True)
+            continue
+        if (
+            expected_truth_protocol_sha256 is not None
+            and cached_truth_protocol_sha256 != expected_truth_protocol_sha256
+        ):
+            print(f"[{regime}] truth cache protocol mismatch ({path})", flush=True)
+            continue
+        print(f"[{regime}] truth cache HIT: {path}", flush=True)
+        return {"eta": eta, "xi": xi, "gxi": gxi, "wall_s": 0.0}
+    return None
+
+
+def _truth_protocol(
+    regime: str,
+    cfg: RegimeConfig,
+    *,
+    dt: float,
+    tmax: float,
+    nx: int,
+    length: float,
+    ic_panel_sha256: str | None,
+) -> tuple[str, str]:
+    """Canonicalize the reference-integrator settings used to key truth caches."""
+    solver_root = Path(__file__).resolve().parents[1]
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "regime": regime,
+        "truth_kind": cfg.truth_kind,
+        "nx": nx,
+        "length": length,
+        "dt": dt,
+        "tmax": tmax,
+        "substeps": cfg.substeps,
+        "implicit_iterations": cfg.implicit_iters,
+        "filter_fraction": cfg.filter_fraction,
+        "dno_order": 6,
+        "pad_factor": 8,
+        "ic_panel_sha256": ic_panel_sha256,
+        "time_integrator_sha256": _file_sha256(
+            solver_root / "solvers" / "time_integrator.py"
+        ),
+        "dno_series_sha256": _file_sha256(
+            solver_root / "solvers" / "dno_series_jax.py"
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _write_truth_cache(
+    out_dir: Path,
+    regime: str,
+    truth: dict[str, np.ndarray],
+    *,
+    times: np.ndarray,
+    depths: np.ndarray,
+    case_ids: np.ndarray,
+    ic_panel_sha256: str | None,
+    truth_protocol_json: str,
+    truth_protocol_sha256: str,
+) -> Path:
+    """Atomically persist newly computed truth before starting the surrogate."""
+    path = out_dir / f"{regime}_truth_cache.npz"
+    temporary = out_dir / f".{regime}_truth_cache.tmp.npz"
+    np.savez(
+        temporary,
+        times=np.asarray(times, dtype=np.float64),
+        depths=np.asarray(depths, dtype=np.float64),
+        case_ids=np.asarray(case_ids, dtype=np.int64),
+        truth_eta=truth["eta"],
+        truth_xi=truth["xi"],
+        truth_gxi=truth["gxi"],
+        ic_panel_sha256=np.asarray(ic_panel_sha256 or ""),
+        truth_protocol_json=np.asarray(truth_protocol_json),
+        truth_protocol_sha256=np.asarray(truth_protocol_sha256),
+    )
+    temporary.replace(path)
+    return path
 
 
 def truth_rollout_batched(
@@ -288,6 +557,55 @@ def truth_rollout_batched(
         "xi": np.asarray(out["xi"]).astype(np.float32),
         "gxi": np.asarray(out["gxi"]).astype(np.float32),
         "wall_s": float(wall),
+    }
+
+
+def _rollout_ic_chunks(
+    ics: list[IC],
+    batch_size: int | None,
+    rollout: Callable[[list[IC]], RolloutPayload],
+    *,
+    label: str,
+) -> RolloutPayload:
+    """Run an IC-batched rollout in bounded device-memory chunks."""
+    if not ics:
+        raise ValueError("cannot roll out an empty IC list")
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError(f"rollout batch size must be positive; got {batch_size}")
+
+    effective_batch_size = min(batch_size or len(ics), len(ics))
+    if effective_batch_size == len(ics):
+        return rollout(ics)
+
+    field_chunks: dict[str, list[np.ndarray]] = {
+        "eta": [],
+        "xi": [],
+        "gxi": [],
+    }
+    total_wall = 0.0
+    for start in range(0, len(ics), effective_batch_size):
+        stop = min(start + effective_batch_size, len(ics))
+        print(
+            f"    {label} IC chunk {start}:{stop} of {len(ics)}",
+            flush=True,
+        )
+        result = rollout(ics[start:stop])
+        for field_name in field_chunks:
+            values = np.asarray(result[field_name])
+            if values.ndim != 3 or values.shape[1] != stop - start:
+                raise ValueError(
+                    f"{label} chunk field {field_name} has shape {values.shape}; "
+                    f"expected (n_t, {stop - start}, nx)"
+                )
+            field_chunks[field_name].append(values)
+        total_wall += float(result["wall_s"])
+
+    return {
+        **{
+            field: np.concatenate(chunks, axis=1)
+            for field, chunks in field_chunks.items()
+        },
+        "wall_s": float(total_wall),
     }
 
 
@@ -471,6 +789,9 @@ def surrogate_rollout_per_ic(
     eta_growth_guard_houli_a: float = 0.69,
     eta_growth_guard_houli_m: float = 4.0,
     eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_kh_eff: float = 0.0,
+    eta_growth_guard_soliton_only: bool = False,
+    eta_growth_guard_negative_energy_threshold: float = 1e-3,
     eta_growth_guard_filter_xi: bool = True,
     eta_growth_gxi_limiter_enabled: bool = False,
     eta_growth_gxi_limiter_k_lo: float = 64.0,
@@ -606,6 +927,11 @@ def surrogate_rollout_per_ic(
             eta_growth_guard_houli_a=eta_growth_guard_houli_a,
             eta_growth_guard_houli_m=eta_growth_guard_houli_m,
             eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_kh_eff=eta_growth_guard_kh_eff,
+            eta_growth_guard_soliton_only=eta_growth_guard_soliton_only,
+            eta_growth_guard_negative_energy_threshold=(
+                eta_growth_guard_negative_energy_threshold
+            ),
             eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
             gl2_residual_check=gl2_residual_check,
             gl2_residual_tol=gl2_residual_tol,
@@ -659,6 +985,9 @@ def surrogate_rollout_batched(
     eta_growth_guard_houli_a: float = 0.69,
     eta_growth_guard_houli_m: float = 4.0,
     eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_kh_eff: float = 0.0,
+    eta_growth_guard_soliton_only: bool = False,
+    eta_growth_guard_negative_energy_threshold: float = 1e-3,
     eta_growth_guard_filter_xi: bool = True,
     eta_growth_gxi_limiter_enabled: bool = False,
     eta_growth_gxi_limiter_k_lo: float = 64.0,
@@ -787,6 +1116,11 @@ def surrogate_rollout_batched(
             eta_growth_guard_houli_a=eta_growth_guard_houli_a,
             eta_growth_guard_houli_m=eta_growth_guard_houli_m,
             eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_kh_eff=eta_growth_guard_kh_eff,
+            eta_growth_guard_soliton_only=eta_growth_guard_soliton_only,
+            eta_growth_guard_negative_energy_threshold=(
+                eta_growth_guard_negative_energy_threshold
+            ),
             eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
             gl2_residual_check=gl2_residual_check,
             gl2_residual_tol=gl2_residual_tol,
@@ -811,6 +1145,75 @@ def _rel_l2(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
 
 
 TRUTH_DRIFT_TOL = 1e-3  # healthy GL2 truth conserves energy to ~1e-7; >1e-3 means the truth itself blew up
+TERMINAL_FAILURE_THRESHOLDS = (0.25, 0.5, 0.75, 1.0)
+
+
+def _rate(mask: np.ndarray, cohort: np.ndarray) -> float:
+    """Fraction of ``cohort`` selected by ``mask``, or NaN for an empty cohort."""
+    denominator = int(np.count_nonzero(cohort))
+    if denominator == 0:
+        return float("nan")
+    return float(np.count_nonzero(mask & cohort) / denominator)
+
+
+def _conditional_finite_stats(values: np.ndarray) -> tuple[int, float, float, float]:
+    """Return count, mean, median, and p95 after explicitly requiring finiteness."""
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        missing = float("nan")
+        return 0, missing, missing, missing
+    return (
+        int(finite_values.size),
+        float(np.mean(finite_values)),
+        float(np.median(finite_values)),
+        float(np.percentile(finite_values, 95)),
+    )
+
+
+def _legacy_nan_stats(values: np.ndarray) -> tuple[float, float, float]:
+    """Reproduce the historical nan-omitting mean, median, and p95 aliases."""
+    if values.size == 0 or np.isnan(values).all():
+        missing = float("nan")
+        return missing, missing, missing
+    return (
+        float(np.nanmean(values)),
+        float(np.nanmedian(values)),
+        float(np.nanpercentile(values, 95)),
+    )
+
+
+def _tau_label(tau: float) -> str:
+    """Stable JSON-key label for a terminal relative-error threshold."""
+    return f"{tau:g}".replace(".", "p")
+
+
+def _json_ready(value: object) -> object:
+    """Convert non-finite summary scalars to JSON null recursively."""
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        return numeric if np.isfinite(numeric) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(_json_ready(payload), indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
+def _summary_float(value: object) -> float:
+    """Read a possibly-null serialized summary scalar as a float/NaN."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def compute_metrics(
@@ -819,59 +1222,353 @@ def compute_metrics(
     times: np.ndarray,
     length: float,
 ) -> dict:
-    """All rel-L2 arrays have shape (n_t, NB). Aggregates are over truth-valid ICs only."""
+    """Compute manuscript metrics without dropping non-finite model rollouts.
+
+    Error quantiles are conditional on a truth-valid, all-field finite model
+    rollout and say so in their names. Failure rates instead use every
+    truth-valid attempted IC, with any non-finite value in eta, xi, or Gxi at
+    any saved frame counted as a failure.
+    """
     # shape (n_t, NB)
-    re = _rel_l2(pred["eta"], truth["eta"])
-    rx = _rel_l2(pred["xi"], truth["xi"])
-    rg = _rel_l2(pred["gxi"], truth["gxi"])
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        re = _rel_l2(pred["eta"], truth["eta"])
+        rx = _rel_l2(pred["xi"], truth["xi"])
+        rg = _rel_l2(pred["gxi"], truth["gxi"])
     n_t, NB = re.shape
+    if np.asarray(times).shape != (n_t,):
+        raise ValueError(f"times must have shape ({n_t},), got {np.asarray(times).shape}")
 
     nx = truth["eta"].shape[-1]
     dx = length / nx
-    H_truth = 0.5 * np.sum(truth["xi"] * truth["gxi"] + truth["eta"] ** 2, axis=-1) * dx  # (n_t, NB)
-    H_pred = 0.5 * np.sum(pred["xi"] * pred["gxi"] + pred["eta"] ** 2, axis=-1) * dx
-    H0 = H_truth[:1, :]
-    drift_pred = (H_pred - H0) / (np.abs(H0) + 1e-12)
-    drift_truth = (H_truth - H0) / (np.abs(H0) + 1e-12)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        H_truth = 0.5 * np.sum(
+            truth["xi"] * truth["gxi"] + truth["eta"] ** 2, axis=-1
+        ) * dx  # (n_t, NB)
+        H_pred = 0.5 * np.sum(
+            pred["xi"] * pred["gxi"] + pred["eta"] ** 2, axis=-1
+        ) * dx
+        H0_truth = H_truth[:1, :]
+        H0_pred = H_pred[:1, :]
+        drift_pred = (H_pred - H0_pred) / (np.abs(H0_pred) + 1e-12)
+        drift_pred_truth_h0_legacy = (H_pred - H0_truth) / (np.abs(H0_truth) + 1e-12)
+        drift_truth = (H_truth - H0_truth) / (np.abs(H0_truth) + 1e-12)
+        energy_error_pred_vs_truth = (H_pred - H_truth) / (np.abs(H_truth) + 1e-12)
 
     # An IC whose truth goes non-finite or violates its own energy conservation
-    # cannot score the model; exclude it from every aggregate.
+    # cannot score the model. Keep each exclusion reason explicit.
+    truth_nonfinite_by_field = {
+        field: ~np.isfinite(truth[field]).all(axis=(0, 2))
+        for field in ("eta", "xi", "gxi")
+        if field in truth
+    }
     truth_nonfinite = (
-        ~np.isfinite(truth["eta"]).all(axis=(0, 2))
-        | ~np.isfinite(truth["xi"]).all(axis=(0, 2))
-        | ~np.isfinite(truth["gxi"]).all(axis=(0, 2))
+        np.logical_or.reduce(tuple(truth_nonfinite_by_field.values()))
+        if truth_nonfinite_by_field
+        else np.zeros(NB, dtype=bool)
     )
     drift_abs = np.abs(drift_truth)
     drift_abs[~np.isfinite(drift_abs)] = np.inf
-    truth_invalid = truth_nonfinite | (drift_abs.max(axis=0) > TRUTH_DRIFT_TOL)
+    truth_drift_invalid = ~truth_nonfinite & (drift_abs.max(axis=0) > TRUTH_DRIFT_TOL)
+    truth_invalid = truth_nonfinite | truth_drift_invalid
     valid = ~truth_invalid
 
-    nan_per_ic = (np.isnan(re).any(axis=0) | np.isnan(rx).any(axis=0) | np.isnan(rg).any(axis=0))
-    nan_rate = float(np.mean(nan_per_ic[valid]))
-    diverged = (re[-1] > 1.0) | np.isnan(re[-1])
-    div_rate = float(np.mean(diverged[valid]))
+    truth_invalid_reasons = []
+    for ic_index in np.flatnonzero(truth_invalid):
+        reasons = [
+            f"nonfinite_{field}"
+            for field, field_mask in truth_nonfinite_by_field.items()
+            if field_mask[ic_index]
+        ]
+        if truth_drift_invalid[ic_index]:
+            reasons.append("energy_drift_gt_tol")
+        truth_invalid_reasons.append({"ic_index": int(ic_index), "reasons": reasons})
+    truth_invalid_reason_counts = {
+        f"nonfinite_{field}": int(np.count_nonzero(field_mask))
+        for field, field_mask in truth_nonfinite_by_field.items()
+    }
+    truth_invalid_reason_counts["energy_drift_gt_tol"] = int(
+        np.count_nonzero(truth_drift_invalid)
+    )
+
+    pred_nonfinite_by_field = {
+        field: ~np.isfinite(pred[field]).all(axis=(0, 2))
+        for field in ("eta", "xi", "gxi")
+        if field in pred
+    }
+    pred_nonfinite_any = (
+        np.logical_or.reduce(tuple(pred_nonfinite_by_field.values()))
+        if pred_nonfinite_by_field
+        else np.zeros(NB, dtype=bool)
+    )
+    model_finite_truth_valid = valid & ~pred_nonfinite_any
+    model_nonfinite_rate = _rate(pred_nonfinite_any, valid)
+    legacy_nan_per_ic = (
+        np.isnan(re).any(axis=0)
+        | np.isnan(rx).any(axis=0)
+        | np.isnan(rg).any(axis=0)
+    )
+    legacy_diverged = (re[-1] > 1.0) | np.isnan(re[-1])
 
     out = {
         "n_t": int(n_t), "NB": int(NB),
+        "n_ics_attempted": int(NB),
         "n_truth_valid": int(valid.sum()),
+        "n_truth_invalid": int(truth_invalid.sum()),
+        "truth_valid_rate_attempted": _rate(valid, np.ones(NB, dtype=bool)),
+        "truth_invalid_rate_attempted": _rate(truth_invalid, np.ones(NB, dtype=bool)),
+        "n_model_finite_truth_valid": int(model_finite_truth_valid.sum()),
+        "truth_valid_ics": [int(j) for j in np.where(valid)[0]],
         "truth_invalid_ics": [int(j) for j in np.where(truth_invalid)[0]],
+        "truth_invalid_reasons": truth_invalid_reasons,
+        "truth_invalid_reason_counts": truth_invalid_reason_counts,
         "truth_drift_tol": TRUTH_DRIFT_TOL,
-        "nan_rate": nan_rate, "divergence_rate_final": div_rate,
+        "model_nonfinite_any_ics": [int(j) for j in np.flatnonzero(pred_nonfinite_any)],
+        "model_nonfinite_any_ics_truth_valid": [
+            int(j) for j in np.flatnonzero(pred_nonfinite_any & valid)
+        ],
+        "model_nonfinite_any_count_attempted": int(np.count_nonzero(pred_nonfinite_any)),
+        "model_nonfinite_any_rate_attempted": _rate(
+            pred_nonfinite_any, np.ones(NB, dtype=bool)
+        ),
+        "model_nonfinite_any_count_truth_valid": int(
+            np.count_nonzero(pred_nonfinite_any & valid)
+        ),
+        "model_nonfinite_any_rate_truth_valid": model_nonfinite_rate,
+        "model_nonfinite_reason_counts_truth_valid": {
+            f"nonfinite_{field}": int(np.count_nonzero(field_mask & valid))
+            for field, field_mask in pred_nonfinite_by_field.items()
+        },
+        # Exact historical aliases, retained so old and new summaries can be
+        # compared without silently changing their definitions.
+        "nan_rate": _rate(legacy_nan_per_ic, valid),
+        "divergence_rate_final": _rate(legacy_diverged, valid),
     }
+
+    terminal_metric_nonfinite = ~np.isfinite(re[-1])
+    for tau in TERMINAL_FAILURE_THRESHOLDS:
+        label = _tau_label(tau)
+        terminal_failure = pred_nonfinite_any | terminal_metric_nonfinite | (re[-1] > tau)
+        out[f"terminal_eta_failure_count_tau_{label}"] = int(
+            np.count_nonzero(terminal_failure & valid)
+        )
+        out[f"terminal_eta_failure_rate_tau_{label}"] = _rate(terminal_failure, valid)
+    out["terminal_eta_failure_definition"] = (
+        "truth-valid IC; final eta relative L2 > tau, or any nonfinite value in "
+        "predicted eta/xi/gxi at any saved frame"
+    )
+    rel_errors = {"eta": re, "xi": rx, "gxi": rg}
     for frac, lbl in ((0.1, "t10p"), (0.5, "t50p"), (1.0, "tfinal")):
-        hi = int(min(n_t - 1, max(0, int(n_t * frac) - 1)))
-        out[f"rel_l2_eta_mean_{lbl}"] = float(np.nanmean(re[hi, valid]))
-        out[f"rel_l2_eta_median_{lbl}"] = float(np.nanmedian(re[hi, valid]))
-        out[f"rel_l2_eta_p95_{lbl}"] = float(np.nanpercentile(re[hi, valid], 95))
-        out[f"rel_l2_xi_mean_{lbl}"] = float(np.nanmean(rx[hi, valid]))
-        out[f"rel_l2_gxi_mean_{lbl}"] = float(np.nanmean(rg[hi, valid]))
-    out["energy_drift_pred_p95_at_tfinal"] = float(np.nanpercentile(np.abs(drift_pred[-1, valid]), 95))
-    out["energy_drift_pred_median_at_tfinal"] = float(np.nanmedian(np.abs(drift_pred[-1, valid])))
+        # Saved frames include both endpoints, so the nearest frame to a horizon
+        # fraction is frac*(n_t-1), not n_t*frac-1.
+        hi = int(min(n_t - 1, max(0, np.floor((n_t - 1) * frac + 0.5))))
+        out[f"metric_frame_index_{lbl}"] = hi
+        out[f"metric_time_{lbl}"] = float(times[hi])
+        for field_name, errors in rel_errors.items():
+            cohort_values = errors[hi, model_finite_truth_valid]
+            count, mean, median, p95 = _conditional_finite_stats(cohort_values)
+            out[f"rel_l2_{field_name}_n_conditional_finite_{lbl}"] = count
+            out[f"rel_l2_{field_name}_mean_conditional_finite_{lbl}"] = mean
+            out[f"rel_l2_{field_name}_median_conditional_finite_{lbl}"] = median
+            out[f"rel_l2_{field_name}_p95_conditional_finite_{lbl}"] = p95
+
+        legacy_hi = int(min(n_t - 1, max(0, int(n_t * frac) - 1)))
+        out[f"metric_frame_index_legacy_{lbl}"] = legacy_hi
+        for field_name, errors in rel_errors.items():
+            legacy_mean, legacy_median, legacy_p95 = _legacy_nan_stats(
+                errors[legacy_hi, valid]
+            )
+            out[f"rel_l2_{field_name}_mean_{lbl}"] = legacy_mean
+            if field_name == "eta":
+                out[f"rel_l2_eta_median_{lbl}"] = legacy_median
+                out[f"rel_l2_eta_p95_{lbl}"] = legacy_p95
+
+    hamiltonian_count, _, hamiltonian_median, hamiltonian_p95 = _conditional_finite_stats(
+        np.abs(drift_pred[-1, model_finite_truth_valid])
+    )
+    out["hamiltonian_drift_pred_n_conditional_finite_tfinal"] = hamiltonian_count
+    out["hamiltonian_drift_pred_median_abs_conditional_finite_tfinal"] = (
+        hamiltonian_median
+    )
+    out["hamiltonian_drift_pred_p95_abs_conditional_finite_tfinal"] = hamiltonian_p95
+    out["hamiltonian_drift_pred_reference"] = "predicted Hamiltonian at t=0"
+    _, legacy_energy_median, legacy_energy_p95 = _legacy_nan_stats(
+        np.abs(drift_pred_truth_h0_legacy[-1, valid])
+    )
+    out["energy_drift_pred_p95_at_tfinal"] = legacy_energy_p95
+    out["energy_drift_pred_median_at_tfinal"] = legacy_energy_median
+    out["energy_drift_pred_reference"] = "truth Hamiltonian at t=0 (historical definition)"
+    energy_error_count, _, energy_error_median, energy_error_p95 = _conditional_finite_stats(
+        np.abs(energy_error_pred_vs_truth[-1, model_finite_truth_valid])
+    )
+    out["energy_error_pred_vs_truth_n_conditional_finite_tfinal"] = energy_error_count
+    out["energy_error_pred_vs_truth_median_abs_conditional_finite_tfinal"] = (
+        energy_error_median
+    )
+    out["energy_error_pred_vs_truth_p95_abs_conditional_finite_tfinal"] = energy_error_p95
     out["_arrays"] = {
         "rel_l2_eta": re, "rel_l2_xi": rx, "rel_l2_gxi": rg,
-        "energy_drift_pred": drift_pred, "energy_drift_truth": drift_truth,
+        "energy_drift_pred": drift_pred_truth_h0_legacy,
+        "hamiltonian_drift_pred": drift_pred,
+        "energy_drift_truth": drift_truth,
+        "energy_drift_pred_truth_h0_legacy": drift_pred_truth_h0_legacy,
+        "energy_error_pred_vs_truth": energy_error_pred_vs_truth,
+        "truth_valid": valid,
+        "model_nonfinite_any": pred_nonfinite_any,
     }
     return out
+
+
+def compute_macro_summary(summaries: dict[str, dict]) -> dict:
+    """Panel-, distribution-group-, and pooled aggregates for a completed suite."""
+    regime_items = [
+        (name, summary)
+        for name, summary in summaries.items()
+        if "n_ics_attempted" in summary
+    ]
+    macro: dict[str, object] = {
+        "n_regimes": len(regime_items),
+        "regimes": [name for name, _ in regime_items],
+        "panel_macro_definition": "equal weight for every named evaluation panel",
+        "n_ics_attempted_total": int(
+            sum(int(summary["n_ics_attempted"]) for _, summary in regime_items)
+        ),
+        "n_truth_valid_total": int(
+            sum(int(summary["n_truth_valid"]) for _, summary in regime_items)
+        ),
+        "n_truth_invalid_total": int(
+            sum(int(summary["n_truth_invalid"]) for _, summary in regime_items)
+        ),
+    }
+    distribution_groups: dict[str, list[dict]] = {}
+    for name, summary in regime_items:
+        panel_source = summary.get("ic_panel_source", {})
+        group = (
+            panel_source.get("replicate_group", name)
+            if isinstance(panel_source, dict)
+            else name
+        )
+        distribution_groups.setdefault(str(group), []).append(summary)
+    macro["n_distribution_groups"] = len(distribution_groups)
+    macro["distribution_groups"] = {
+        group: [
+            str(summary.get("regime", "unknown"))
+            for summary in group_summaries
+        ]
+        for group, group_summaries in distribution_groups.items()
+    }
+    macro["distribution_group_macro_definition"] = (
+        "for rates, pool replicate-panel counts within each physical IC distribution "
+        "and then weight distributions equally; distribution-group quantile fields are "
+        "explicitly means of panel quantiles, not pooled-case quantiles"
+    )
+    truth_invalid_family_rates = np.asarray(
+        [
+            _summary_float(summary["truth_invalid_rate_attempted"])
+            for _, summary in regime_items
+            if int(summary["n_ics_attempted"]) > 0
+        ],
+        dtype=np.float64,
+    )
+    macro["truth_invalid_rate_attempted_macro"] = (
+        float(np.mean(truth_invalid_family_rates))
+        if truth_invalid_family_rates.size
+        else float("nan")
+    )
+    total_attempted = int(macro["n_ics_attempted_total"])
+    macro["truth_invalid_rate_attempted_micro"] = (
+        float(int(macro["n_truth_invalid_total"]) / total_attempted)
+        if total_attempted
+        else float("nan")
+    )
+    truth_invalid_group_rates = np.asarray(
+        [
+            sum(int(summary["n_truth_invalid"]) for summary in group_summaries)
+            / sum(int(summary["n_ics_attempted"]) for summary in group_summaries)
+            for group_summaries in distribution_groups.values()
+            if sum(int(summary["n_ics_attempted"]) for summary in group_summaries) > 0
+        ],
+        dtype=np.float64,
+    )
+    macro["truth_invalid_rate_attempted_distribution_group_macro"] = (
+        float(np.mean(truth_invalid_group_rates))
+        if truth_invalid_group_rates.size
+        else float("nan")
+    )
+
+    rate_and_count_keys = [
+        ("model_nonfinite_any_rate_truth_valid", "model_nonfinite_any_count_truth_valid"),
+        *[
+            (
+                f"terminal_eta_failure_rate_tau_{_tau_label(tau)}",
+                f"terminal_eta_failure_count_tau_{_tau_label(tau)}",
+            )
+            for tau in TERMINAL_FAILURE_THRESHOLDS
+        ],
+    ]
+    total_valid = int(macro["n_truth_valid_total"])
+    for rate_key, count_key in rate_and_count_keys:
+        family_rates = np.asarray(
+            [
+                _summary_float(summary[rate_key])
+                for _, summary in regime_items
+                if int(summary["n_truth_valid"]) > 0
+                and np.isfinite(_summary_float(summary[rate_key]))
+            ],
+            dtype=np.float64,
+        )
+        macro[f"{rate_key}_macro"] = (
+            float(np.mean(family_rates)) if family_rates.size else float("nan")
+        )
+        total_failures = sum(int(summary[count_key]) for _, summary in regime_items)
+        macro[f"{rate_key}_micro"] = (
+            float(total_failures / total_valid) if total_valid else float("nan")
+        )
+        group_rates = np.asarray(
+            [
+                sum(int(summary[count_key]) for summary in group_summaries)
+                / sum(int(summary["n_truth_valid"]) for summary in group_summaries)
+                for group_summaries in distribution_groups.values()
+                if sum(int(summary["n_truth_valid"]) for summary in group_summaries) > 0
+            ],
+            dtype=np.float64,
+        )
+        macro[f"{rate_key}_distribution_group_macro"] = (
+            float(np.mean(group_rates)) if group_rates.size else float("nan")
+        )
+
+    for metric_key in (
+        "rel_l2_eta_median_conditional_finite_tfinal",
+        "rel_l2_eta_p95_conditional_finite_tfinal",
+    ):
+        family_values = np.asarray(
+            [
+                _summary_float(summary[metric_key])
+                for _, summary in regime_items
+                if np.isfinite(_summary_float(summary[metric_key]))
+            ],
+            dtype=np.float64,
+        )
+        macro[f"{metric_key}_macro_mean"] = (
+            float(np.mean(family_values)) if family_values.size else float("nan")
+        )
+        group_metric_values = []
+        for group_summaries in distribution_groups.values():
+            values = np.asarray(
+                [
+                    _summary_float(summary[metric_key])
+                    for summary in group_summaries
+                    if np.isfinite(_summary_float(summary[metric_key]))
+                ],
+                dtype=np.float64,
+            )
+            if values.size:
+                group_metric_values.append(float(np.mean(values)))
+        macro[f"{metric_key}_distribution_group_macro_mean"] = (
+            float(np.mean(group_metric_values))
+            if group_metric_values
+            else float("nan")
+        )
+    return macro
 
 
 def run_regime(
@@ -904,6 +1601,9 @@ def run_regime(
     eta_growth_guard_houli_a: float = 0.69,
     eta_growth_guard_houli_m: float = 4.0,
     eta_growth_guard_k_eff: float = 64.0,
+    eta_growth_guard_kh_eff: float = 0.0,
+    eta_growth_guard_soliton_only: bool = False,
+    eta_growth_guard_negative_energy_threshold: float = 1e-3,
     eta_growth_guard_filter_xi: bool = True,
     eta_growth_gxi_limiter_enabled: bool = False,
     eta_growth_gxi_limiter_k_lo: float = 64.0,
@@ -924,17 +1624,37 @@ def run_regime(
     gxi_highband_r_max: float = 1e-2,
     gxi_highband_abs_floor: float = 5.0,
     truth_cache_dir: Path | None = None,
+    ic_panel_dir: Path | None = None,
+    checkpoint_source: dict[str, object] | None = None,
     batched_surrogate: bool = False,
     predict_gxi_batched: Callable | None = None,
+    rollout_batch_size: int | None = None,
     gl2_residual_check: bool = False,
     gl2_residual_tol: float = 1e-2,
 ) -> dict:
-    ics, dt, tmax, saved_t, saved_eta = build_ics_and_truth_targets(cfg)
+    ics, dt, tmax, saved_t, saved_eta = build_ics_and_truth_targets(
+        cfg,
+        ic_panel_dir=ic_panel_dir,
+        nx=nx,
+        length=length,
+    )
+    panel_source = ics[0].meta.get("panel_source") if ics else None
+    panel_sha256 = panel_source.get("sha256") if isinstance(panel_source, dict) else None
     times_np = np.arange(0.0, tmax + 0.5 * dt, dt, dtype=np.float64)
     n_t = int(times_np.shape[0])
+    truth_protocol_json, truth_protocol_sha256 = _truth_protocol(
+        regime,
+        cfg,
+        dt=dt,
+        tmax=tmax,
+        nx=nx,
+        length=length,
+        ic_panel_sha256=panel_sha256,
+    )
     print(
         f"[{regime}] NB={len(ics)} dt={dt} tmax={tmax} n_t={n_t} "
-        f"filter={cfg.filter_fraction} substeps={cfg.substeps} impl={cfg.implicit_iters}",
+        f"filter={cfg.filter_fraction} substeps={cfg.substeps} impl={cfg.implicit_iters} "
+        f"rollout_batch={rollout_batch_size or len(ics)}",
         flush=True,
     )
 
@@ -942,6 +1662,8 @@ def run_regime(
         regime, truth_cache_dir, expected_n_ics=len(ics),
         expected_n_t=n_t, expected_nx=nx,
         expected_case_ids=[ic.case_id for ic in ics],
+        expected_ic_panel_sha256=panel_sha256,
+        expected_truth_protocol_sha256=truth_protocol_sha256,
     )
     if cached is not None:
         truth = cached
@@ -950,8 +1672,33 @@ def run_regime(
         truth = truth_rollout_linear_analytic(ics, times_np, nx, length)
     else:
         print(f"[{regime}] truth rollout (batched f64)...", flush=True)
-        truth = truth_rollout_batched(ics, jnp.asarray(times_np, dtype=jnp.float64), nx, length, cfg)
+        truth = _rollout_ic_chunks(
+            ics,
+            rollout_batch_size,
+            lambda chunk: truth_rollout_batched(
+                chunk,
+                jnp.asarray(times_np, dtype=jnp.float64),
+                nx,
+                length,
+                cfg,
+            ),
+            label=f"{regime} truth",
+        )
     print(f"[{regime}]   truth wall = {truth['wall_s']:.1f}s", flush=True)
+    truth_cache_path: Path | None = None
+    if cached is None:
+        truth_cache_path = _write_truth_cache(
+            out_dir,
+            regime,
+            truth,
+            times=times_np,
+            depths=np.asarray([ic.depth for ic in ics]),
+            case_ids=np.asarray([ic.case_id for ic in ics]),
+            ic_panel_sha256=panel_sha256,
+            truth_protocol_json=truth_protocol_json,
+            truth_protocol_sha256=truth_protocol_sha256,
+        )
+        print(f"[{regime}]   truth cache saved: {truth_cache_path}", flush=True)
 
     harness = "f64 harness / f32 model" if f64_harness else "f32"
     mode = "batched" if batched_surrogate else "per-IC"
@@ -960,48 +1707,58 @@ def run_regime(
     if batched_surrogate:
         if predict_gxi_batched is None:
             raise ValueError("batched_surrogate=True requires predict_gxi_batched")
-        pred = surrogate_rollout_batched(
-            ics, times_in, nx, length, cfg, loaded, predict_gxi_batched,
-            filter_gxi=filter_gxi, f64_harness=f64_harness,
-            filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
-            cascade_gate_enabled=cascade_gate_enabled,
-            cascade_k_cut=cascade_k_cut,
-            cascade_r_threshold=cascade_r_threshold,
-            cascade_sharpness=cascade_sharpness,
-            cascade_houli_a=cascade_houli_a,
-            cascade_houli_m=cascade_houli_m,
-            cascade_k_eff=cascade_k_eff,
-            cascade_filter_xi=cascade_filter_xi,
-            eta_growth_guard_enabled=eta_growth_guard_enabled,
-            eta_growth_guard_k_lo=eta_growth_guard_k_lo,
-            eta_growth_guard_k_hi=eta_growth_guard_k_hi,
-            eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
-            eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
-            eta_growth_guard_sharpness=eta_growth_guard_sharpness,
-            eta_growth_guard_houli_a=eta_growth_guard_houli_a,
-            eta_growth_guard_houli_m=eta_growth_guard_houli_m,
-            eta_growth_guard_k_eff=eta_growth_guard_k_eff,
-            eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
-            eta_growth_gxi_limiter_enabled=eta_growth_gxi_limiter_enabled,
-            eta_growth_gxi_limiter_k_lo=eta_growth_gxi_limiter_k_lo,
-            eta_growth_gxi_limiter_k_hi=eta_growth_gxi_limiter_k_hi,
-            eta_growth_gxi_limiter_abs_floor=eta_growth_gxi_limiter_abs_floor,
-            eta_growth_gxi_limiter_growth_factor=eta_growth_gxi_limiter_growth_factor,
-            eta_growth_gxi_limiter_sharpness=eta_growth_gxi_limiter_sharpness,
-            gxi_cascade_gate_enabled=gxi_cascade_gate_enabled,
-            gxi_cascade_k_cut=gxi_cascade_k_cut,
-            gxi_cascade_r_threshold=gxi_cascade_r_threshold,
-            gxi_cascade_high_abs_threshold=gxi_cascade_high_abs_threshold,
-            gxi_cascade_sharpness=gxi_cascade_sharpness,
-            gxi_cascade_houli_a=gxi_cascade_houli_a,
-            gxi_cascade_houli_m=gxi_cascade_houli_m,
-            gxi_cascade_k_eff=gxi_cascade_k_eff,
-            gxi_highband_limiter_enabled=gxi_highband_limiter_enabled,
-            gxi_highband_k_cut=gxi_highband_k_cut,
-            gxi_highband_r_max=gxi_highband_r_max,
-            gxi_highband_abs_floor=gxi_highband_abs_floor,
-            gl2_residual_check=gl2_residual_check,
-            gl2_residual_tol=gl2_residual_tol,
+        pred = _rollout_ic_chunks(
+            ics,
+            rollout_batch_size,
+            lambda chunk: surrogate_rollout_batched(
+                chunk, times_in, nx, length, cfg, loaded, predict_gxi_batched,
+                filter_gxi=filter_gxi, f64_harness=f64_harness,
+                filter_shape=filter_shape, houli_a=houli_a, houli_m=houli_m,
+                cascade_gate_enabled=cascade_gate_enabled,
+                cascade_k_cut=cascade_k_cut,
+                cascade_r_threshold=cascade_r_threshold,
+                cascade_sharpness=cascade_sharpness,
+                cascade_houli_a=cascade_houli_a,
+                cascade_houli_m=cascade_houli_m,
+                cascade_k_eff=cascade_k_eff,
+                cascade_filter_xi=cascade_filter_xi,
+                eta_growth_guard_enabled=eta_growth_guard_enabled,
+                eta_growth_guard_k_lo=eta_growth_guard_k_lo,
+                eta_growth_guard_k_hi=eta_growth_guard_k_hi,
+                eta_growth_guard_abs_floor=eta_growth_guard_abs_floor,
+                eta_growth_guard_growth_factor=eta_growth_guard_growth_factor,
+                eta_growth_guard_sharpness=eta_growth_guard_sharpness,
+                eta_growth_guard_houli_a=eta_growth_guard_houli_a,
+                eta_growth_guard_houli_m=eta_growth_guard_houli_m,
+                eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+                eta_growth_guard_kh_eff=eta_growth_guard_kh_eff,
+                eta_growth_guard_soliton_only=eta_growth_guard_soliton_only,
+                eta_growth_guard_negative_energy_threshold=(
+                    eta_growth_guard_negative_energy_threshold
+                ),
+                eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
+                eta_growth_gxi_limiter_enabled=eta_growth_gxi_limiter_enabled,
+                eta_growth_gxi_limiter_k_lo=eta_growth_gxi_limiter_k_lo,
+                eta_growth_gxi_limiter_k_hi=eta_growth_gxi_limiter_k_hi,
+                eta_growth_gxi_limiter_abs_floor=eta_growth_gxi_limiter_abs_floor,
+                eta_growth_gxi_limiter_growth_factor=eta_growth_gxi_limiter_growth_factor,
+                eta_growth_gxi_limiter_sharpness=eta_growth_gxi_limiter_sharpness,
+                gxi_cascade_gate_enabled=gxi_cascade_gate_enabled,
+                gxi_cascade_k_cut=gxi_cascade_k_cut,
+                gxi_cascade_r_threshold=gxi_cascade_r_threshold,
+                gxi_cascade_high_abs_threshold=gxi_cascade_high_abs_threshold,
+                gxi_cascade_sharpness=gxi_cascade_sharpness,
+                gxi_cascade_houli_a=gxi_cascade_houli_a,
+                gxi_cascade_houli_m=gxi_cascade_houli_m,
+                gxi_cascade_k_eff=gxi_cascade_k_eff,
+                gxi_highband_limiter_enabled=gxi_highband_limiter_enabled,
+                gxi_highband_k_cut=gxi_highband_k_cut,
+                gxi_highband_r_max=gxi_highband_r_max,
+                gxi_highband_abs_floor=gxi_highband_abs_floor,
+                gl2_residual_check=gl2_residual_check,
+                gl2_residual_tol=gl2_residual_tol,
+            ),
+            label=f"{regime} surrogate",
         )
         # batched returns (n_t, NB, nx) already; per-IC returns the same shape too.
     else:
@@ -1026,6 +1783,11 @@ def run_regime(
             eta_growth_guard_houli_a=eta_growth_guard_houli_a,
             eta_growth_guard_houli_m=eta_growth_guard_houli_m,
             eta_growth_guard_k_eff=eta_growth_guard_k_eff,
+            eta_growth_guard_kh_eff=eta_growth_guard_kh_eff,
+            eta_growth_guard_soliton_only=eta_growth_guard_soliton_only,
+            eta_growth_guard_negative_energy_threshold=(
+                eta_growth_guard_negative_energy_threshold
+            ),
             eta_growth_guard_filter_xi=eta_growth_guard_filter_xi,
             eta_growth_gxi_limiter_enabled=eta_growth_gxi_limiter_enabled,
             eta_growth_gxi_limiter_k_lo=eta_growth_gxi_limiter_k_lo,
@@ -1077,18 +1839,46 @@ def run_regime(
         rel_l2_xi=metrics["_arrays"]["rel_l2_xi"],
         rel_l2_gxi=metrics["_arrays"]["rel_l2_gxi"],
         energy_drift_pred=metrics["_arrays"]["energy_drift_pred"],
+        hamiltonian_drift_pred=metrics["_arrays"]["hamiltonian_drift_pred"],
         energy_drift_truth=metrics["_arrays"]["energy_drift_truth"],
+        energy_drift_pred_truth_h0_legacy=metrics["_arrays"][
+            "energy_drift_pred_truth_h0_legacy"
+        ],
+        energy_error_pred_vs_truth=metrics["_arrays"]["energy_error_pred_vs_truth"],
+        truth_valid=metrics["_arrays"]["truth_valid"],
+        model_nonfinite_any=metrics["_arrays"]["model_nonfinite_any"],
+        ic_panel_sha256=np.asarray(panel_sha256 or ""),
+        truth_protocol_json=np.asarray(truth_protocol_json),
+        truth_protocol_sha256=np.asarray(truth_protocol_sha256),
     )
 
     summary = {k: v for k, v in metrics.items() if k != "_arrays"}
+    summary["truth_valid_case_ids"] = [
+        int(ics[ic_index].case_id) for ic_index in metrics["truth_valid_ics"]
+    ]
+    summary["truth_invalid_cases"] = [
+        {
+            "ic_index": item["ic_index"],
+            "case_id": int(ics[item["ic_index"]].case_id),
+            "reasons": item["reasons"],
+        }
+        for item in metrics["truth_invalid_reasons"]
+    ]
+    summary["model_nonfinite_any_case_ids_truth_valid"] = [
+        int(ics[ic_index].case_id)
+        for ic_index in metrics["model_nonfinite_any_ics_truth_valid"]
+    ]
     summary.update({
         "regime": regime, "dt": dt, "tmax": tmax, "n_t": n_t, "length": length, "nx": nx,
         "n_ics": len(ics),
         "depths": [float(ic.depth) for ic in ics],
         "case_ids": [int(ic.case_id) for ic in ics],
         "epoch": loaded.epoch,
+        "checkpoint_source": checkpoint_source,
         "truth_wall_s": truth["wall_s"],
         "surrogate_wall_s": pred["wall_s"],
+        "truth_protocol": json.loads(truth_protocol_json),
+        "truth_protocol_sha256": truth_protocol_sha256,
         "filter_fraction": cfg.filter_fraction,
         "filter_gxi": filter_gxi,
         "f64_harness": f64_harness,
@@ -1111,6 +1901,11 @@ def run_regime(
         "eta_growth_guard_houli_a": eta_growth_guard_houli_a,
         "eta_growth_guard_houli_m": eta_growth_guard_houli_m,
         "eta_growth_guard_k_eff": eta_growth_guard_k_eff,
+        "eta_growth_guard_kh_eff": eta_growth_guard_kh_eff,
+        "eta_growth_guard_soliton_only": eta_growth_guard_soliton_only,
+        "eta_growth_guard_negative_energy_threshold": (
+            eta_growth_guard_negative_energy_threshold
+        ),
         "eta_growth_guard_filter_xi": eta_growth_guard_filter_xi,
         "eta_growth_gxi_limiter_enabled": eta_growth_gxi_limiter_enabled,
         "eta_growth_gxi_limiter_k_lo": eta_growth_gxi_limiter_k_lo,
@@ -1136,11 +1931,16 @@ def run_regime(
         "cs_residual_highband_cap_beta": float(loaded.config.get("cs_residual_highband_cap_beta", 0.10)),
         "cs_residual_highband_cap_floor": float(loaded.config.get("cs_residual_highband_cap_floor", 0.0)),
         "batched_surrogate": batched_surrogate,
+        "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         "gl2_residual_check": gl2_residual_check,
         "gl2_residual_tol": gl2_residual_tol,
         "saved_truth_reproduction": saved_err,
     })
-    (out_dir / f"{regime}_summary.json").write_text(json.dumps(summary, indent=2))
+    if isinstance(panel_source, dict):
+        summary["ic_panel_source"] = panel_source
+    _write_json(out_dir / f"{regime}_summary.json", summary)
+    if truth_cache_path is not None:
+        truth_cache_path.unlink(missing_ok=True)
     print(
         f"[{regime}] done. NaN={summary['nan_rate']:.2f} div={summary['divergence_rate_final']:.2f} "
         f"η_med_tf={summary['rel_l2_eta_median_tfinal']:.4g} η_p95_tf={summary['rel_l2_eta_p95_tfinal']:.4g}",
@@ -1155,6 +1955,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", choices=("best", "final"), default="best")
     parser.add_argument("--regimes", nargs="+", default=list(REGISTRY.keys()))
     parser.add_argument("--n_ics", type=int, default=16)
+    parser.add_argument(
+        "--ic_panel_dir",
+        default=None,
+        help="Directory of compact held-out `<regime>_ics.npz` panels. Each panel "
+             "must contain exactly --n_ics cases and an auditable generation record.",
+    )
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--length", type=float, default=2.0 * float(np.pi))
@@ -1234,6 +2040,19 @@ def main() -> None:
                         help="Hou-Li m for the eta-growth guard's state damping.")
     parser.add_argument("--eta_growth_guard_k_eff", type=float, default=64.0,
                         help="Hou-Li k_eff for eta-growth guard damping.")
+    parser.add_argument("--eta_growth_guard_kh_eff", type=float, default=0.0,
+                        help="If positive, use per-IC k_eff=min(k_eff, kh_eff/h). "
+                             "0 disables depth adaptation.")
+    parser.add_argument("--eta_growth_guard_soliton_only", action="store_true",
+                        help="Activate the growth guard only for positive-elevation "
+                             "solitary-wave ICs identified at t=0.")
+    parser.add_argument(
+        "--eta_growth_guard_negative_energy_threshold",
+        type=float,
+        default=1e-3,
+        help="Maximum initial negative-elevation energy fraction for the "
+             "positive-elevation soliton selector.",
+    )
     parser.add_argument("--eta_growth_guard_no_filter_xi", action="store_true",
                         help="Apply eta-growth guard damping to eta only; leave xi untouched.")
     parser.add_argument(
@@ -1310,6 +2129,13 @@ def main() -> None:
              "bound; batched draws full TDP). Math identical to the per-IC path.",
     )
     parser.add_argument(
+        "--rollout_batch_size",
+        type=int,
+        default=None,
+        help="Maximum number of ICs in each batched truth/surrogate GPU rollout. "
+             "All --n_ics cases are still evaluated and concatenated in panel order.",
+    )
+    parser.add_argument(
         "--gl2_residual_check", action="store_true",
         help="Track GL2 Picard final-iter stage-update relative residual and mask "
              "only samples whose r_final >= tol with NaNs. This is diagnostic "
@@ -1321,6 +2147,10 @@ def main() -> None:
                              "sits ~6 orders above healthy (~1e-8) and ~1-2 orders "
                              "below non-contractive (~0.19).")
     args = parser.parse_args()
+    if args.n_ics <= 0:
+        parser.error("--n_ics must be positive")
+    if args.rollout_batch_size is not None and args.rollout_batch_size <= 0:
+        parser.error("--rollout_batch_size must be positive")
 
     if not args.gpu:
         os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -1363,6 +2193,8 @@ def main() -> None:
         default_name += f"_csbkc{args.cs_block_k_cut}"
     if args.gl2_residual_check:
         default_name += f"_gl2rc_tol{args.gl2_residual_tol:g}"
+    if args.ic_panel_dir:
+        default_name += "_icpanel"
     out_dir = Path(args.output_dir).resolve() if args.output_dir else run_dir / default_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1380,6 +2212,16 @@ def main() -> None:
         run_dir, checkpoint=args.checkpoint,
         config_overrides=model_config_overrides or None,
     )
+    checkpoint_dir = run_dir / (
+        "best_val_ckpt" if args.checkpoint == "best" else "final_ckpt"
+    )
+    checkpoint_source: dict[str, object] = {
+        "run_dir": str(run_dir),
+        "selection": args.checkpoint,
+        "path": str(checkpoint_dir),
+        "sha256": _directory_sha256(checkpoint_dir),
+        "epoch": loaded.epoch,
+    }
     if args.f64_model:
         loaded.config["precision"] = "fp64"
     predict_gxi = build_predict_gxi_with_depth(loaded)
@@ -1418,6 +2260,11 @@ def main() -> None:
             eta_growth_guard_houli_a=args.eta_growth_guard_houli_a,
             eta_growth_guard_houli_m=args.eta_growth_guard_houli_m,
             eta_growth_guard_k_eff=args.eta_growth_guard_k_eff,
+            eta_growth_guard_kh_eff=args.eta_growth_guard_kh_eff,
+            eta_growth_guard_soliton_only=args.eta_growth_guard_soliton_only,
+            eta_growth_guard_negative_energy_threshold=(
+                args.eta_growth_guard_negative_energy_threshold
+            ),
             eta_growth_guard_filter_xi=not args.eta_growth_guard_no_filter_xi,
             eta_growth_gxi_limiter_enabled=args.eta_growth_gxi_limiter,
             eta_growth_gxi_limiter_k_lo=args.eta_growth_gxi_limiter_k_lo,
@@ -1438,14 +2285,23 @@ def main() -> None:
             gxi_highband_r_max=args.gxi_highband_r_max,
             gxi_highband_abs_floor=args.gxi_highband_abs_floor,
             truth_cache_dir=Path(args.truth_cache).resolve() if args.truth_cache else None,
+            ic_panel_dir=Path(args.ic_panel_dir).resolve() if args.ic_panel_dir else None,
+            checkpoint_source=checkpoint_source,
             batched_surrogate=args.batched_surrogate,
             predict_gxi_batched=predict_gxi_batched,
+            rollout_batch_size=args.rollout_batch_size,
             gl2_residual_check=args.gl2_residual_check,
             gl2_residual_tol=args.gl2_residual_tol,
         )
 
-    (out_dir / "all_summaries.json").write_text(json.dumps(summaries, indent=2))
-    print(f"\nDone. Aggregate -> {out_dir / 'all_summaries.json'}", flush=True)
+    all_summaries_path = out_dir / "all_summaries.json"
+    macro_summary_path = out_dir / "macro_summary.json"
+    _write_json(all_summaries_path, summaries)
+    _write_json(macro_summary_path, compute_macro_summary(summaries))
+    print(
+        f"\nDone. Per-regime -> {all_summaries_path}; macro -> {macro_summary_path}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

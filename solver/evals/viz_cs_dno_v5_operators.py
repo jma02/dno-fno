@@ -79,6 +79,7 @@ def build_model_from_config(config: dict) -> CraigSulemDNO:
         tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
         phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
         residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+        depth_scaled_residual=bool(config.get("cs_depth_scaled_residual", False)),
         block_k_cut=int(config.get("cs_block_k_cut", 0)),
         residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
         residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),

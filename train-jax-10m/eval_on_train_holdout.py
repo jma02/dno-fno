@@ -36,10 +36,11 @@ from dno_net_v2 import CraigSulemDNO
 from losses import count_params
 from util import (
     NormStats,
-    build_split_indices,
+    build_dataset_split_indices,
     compute_log_depth,
     denormalize_targets,
     load_dataset_arrays,
+    load_dataset_meta,
     normalize_features,
     require_jax_devices,
 )
@@ -104,8 +105,7 @@ def main() -> None:
     dataset = load_dataset_arrays(dataset_path)
 
     # Recover test split using the same seed (and 80/10/10 split) the trainer used.
-    n_total = int(dataset["eta"].shape[0])
-    _, _, test_indices = build_split_indices(n_total, seed)
+    _, _, test_indices = build_dataset_split_indices(dataset, seed)
     if args.max_examples is not None and args.max_examples < test_indices.shape[0]:
         test_indices = np.sort(np.random.default_rng(seed).choice(
             test_indices, size=int(args.max_examples), replace=False,
@@ -116,9 +116,10 @@ def main() -> None:
     depth = dataset["depth"][test_indices]
     sources = dataset["source"][test_indices]
     x = dataset["x"]
-    legend = {int(k): v for k, v in json.loads(
-        dataset_path.with_suffix(".meta.json").read_text(encoding="utf-8")
-    ).get("source_legend", {}).items()}
+    legend = {
+        int(k): v
+        for k, v in load_dataset_meta(dataset_path).get("source_legend", {}).items()
+    }
     source_labels = np.asarray([legend.get(int(s), str(int(s))) for s in sources], dtype=object)
 
     if not args.keep_xi_mean:
@@ -147,6 +148,7 @@ def main() -> None:
             tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
             phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
             residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
+            depth_scaled_residual=bool(config.get("cs_depth_scaled_residual", False)),
             block_k_cut=int(config.get("cs_block_k_cut", 0)),
             residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
             residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),

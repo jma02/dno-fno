@@ -1,0 +1,205 @@
+#!/bin/bash
+# One-variable C25 ablation: replace relative H1 supervision by relative L2
+# while preserving the architecture and every auxiliary loss.
+
+set -euo pipefail
+cd /home/johnma/dno-fno
+
+MODE="${1:-full}"
+DATASET="${DATASET:-combined_dataset_v9.npz}"
+BATCH_SIZE="${BATCH_SIZE:-1024}"
+LR="${LR:-2e-5}"
+HADAMARD_WEIGHT="${HADAMARD_WEIGHT:-1e-2}"
+HADAMARD_INTERVAL="${HADAMARD_INTERVAL:-16}"
+TRANSLATION_TANGENT_WEIGHT="${TRANSLATION_TANGENT_WEIGHT:-10}"
+MODE_BALANCED_WEIGHT="${MODE_BALANCED_WEIGHT:-6}"
+LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-}"
+MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-}"
+CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+
+case "$MODE" in
+  full)
+    DATA_FRACTION="${DATA_FRACTION:-1.0}"
+    EPOCHS="${EPOCHS:-40}"
+    LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-500}"
+    MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-500}"
+    RUN_PREFIX="c27_h1_to_l2_full"
+    ;;
+  smoke)
+    DATA_FRACTION="${DATA_FRACTION:-0.01}"
+    EPOCHS="${EPOCHS:-1}"
+    LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-50}"
+    MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-50}"
+    RUN_PREFIX="c27_h1_to_l2_smoke"
+    ;;
+  *)
+    echo "usage: $0 [full|smoke]" >&2
+    exit 2
+    ;;
+esac
+
+RUN_NAME="${RUN_NAME:-${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-$EPOCHS}"
+
+CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run python train-jax-10m/1d_dno_fno_jax.py \
+  --model cs_dno \
+  --norm scale \
+  --dataset "$DATASET" \
+  --data_fraction "$DATA_FRACTION" \
+  --modes 64 \
+  --width 640 \
+  --n_blocks 8 \
+  --latent 320 \
+  --sobolev_k 0 \
+  --cs_n_polys 3 \
+  --cs_mult_hidden 160 \
+  --cs_use_g1_baseline \
+  --cs_g1_k_cut 0 \
+  --cs_g1_fft_fp64 \
+  --cs_tie_xi_out_mult \
+  --cs_phi_bias_free \
+  --cs_residual_eta_order 2 \
+  --translation_tangent_weight "$TRANSLATION_TANGENT_WEIGHT" \
+  --translation_tangent_window_depths 1 \
+  --translation_tangent_energy_floor_relative 1e-3 \
+  --mode_balanced_weight "$MODE_BALANCED_WEIGHT" \
+  --mode_balanced_warmup_steps "$MODE_BALANCED_WARMUP_STEPS" \
+  --mode_balanced_k_max 128 \
+  --mode_balanced_active_scale_relative 1e-4 \
+  --mode_balanced_denominator_floor_relative 1e-6 \
+  --hadamard_weight "$HADAMARD_WEIGHT" \
+  --hadamard_interval "$HADAMARD_INTERVAL" \
+  --hadamard_microbatch 8 \
+  --hadamard_warmup_steps 500 \
+  --hadamard_k_max 128 \
+  --hadamard_sobolev_order 1 \
+  --hadamard_relative_eps_min 1e-3 \
+  --hadamard_relative_eps_max 3e-3 \
+  --hadamard_eta_scale_floor 1e-3 \
+  --hadamard_denominator_floor 1e-12 \
+  --batch_size "$BATCH_SIZE" \
+  --lr "$LR" \
+  --lr_warmup_steps "$LR_WARMUP_STEPS" \
+  --weight_decay 1e-4 \
+  --epochs "$EPOCHS" \
+  --total_epochs "$TOTAL_EPOCHS" \
+  --skip_dno_eval \
+  --skip_plots \
+  --run_name "$RUN_NAME" 2>&1 | tee "/tmp/${RUN_NAME}.log"
+
+uv run python - \
+  "$RUN_NAME" "$BATCH_SIZE" "$HADAMARD_WEIGHT" "$HADAMARD_INTERVAL" \
+  "$TRANSLATION_TANGENT_WEIGHT" "$MODE_BALANCED_WEIGHT" \
+  "$MODE_BALANCED_WARMUP_STEPS" "$CUDA_DEVICES" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+(
+    run_name,
+    batch_size,
+    hadamard_weight,
+    hadamard_interval,
+    tangent_weight,
+    mode_weight,
+    mode_warmup_steps,
+    cuda_devices,
+) = sys.argv[1:]
+run_dir = Path("outputs") / run_name
+config = json.loads((run_dir / "config.json").read_text())
+expected = {
+    "model": "cs_dno",
+    "modes": 64,
+    "width": 640,
+    "n_blocks": 8,
+    "latent": 320,
+    "sobolev_k": 0,
+    "batch_size": int(batch_size),
+    "device_count": len(cuda_devices.split(",")),
+    "cs_n_polys": 3,
+    "cs_use_first_deriv": True,
+    "cs_use_second_deriv": True,
+    "cs_use_half_deriv": True,
+    "cs_use_hilbert": True,
+    "cs_use_g0_eta": False,
+    "cs_use_g0_eta_dx": False,
+    "cs_mult_hidden": 160,
+    "cs_use_g1_baseline": True,
+    "cs_g1_k_cut": 0,
+    "cs_fft_fp64": False,
+    "cs_g1_fft_fp64": True,
+    "cs_tie_xi_out_mult": True,
+    "cs_phi_bias_free": True,
+    "cs_residual_eta_order": 2,
+    "cs_depth_scaled_residual": False,
+    "cs_block_k_cut": 0,
+    "cs_residual_highband_cap": False,
+    "cs_output_highband_cap": False,
+    "translation_tangent_weight": float(tangent_weight),
+    "translation_tangent_window_depths": 1.0,
+    "translation_tangent_energy_floor_relative": 1e-3,
+    "phase_growth_weight": 0.0,
+    "mode_balanced_weight": float(mode_weight),
+    "mode_balanced_warmup_steps": int(mode_warmup_steps),
+    "mode_balanced_k_max": 128.0,
+    "mode_balanced_active_scale_relative": 1e-4,
+    "mode_balanced_denominator_floor_relative": 1e-6,
+    "modal_phase_rate_weight": 0.0,
+    "finite_time_phase_weight": 0.0,
+    "hamiltonian_weight": 0.0,
+    "pushforward_steps": 0,
+    "stage_reg_weight": 0.0,
+    "stage_reg_gain_weight": 0.0,
+    "jac_reg_lambda": 0.0,
+    "psd_hinge_weight": 0.0,
+    "input_noise_sigma": 0.0,
+    "gxi_highband_limiter": False,
+    "gxi_highband_penalty_weight": 0.0,
+    "filter_gxi_fraction": 1.0,
+    "hadamard_weight": float(hadamard_weight),
+    "hadamard_interval": int(hadamard_interval),
+    "hadamard_microbatch": 8,
+    "hadamard_warmup_steps": 500,
+    "hadamard_k_max": 128.0,
+    "hadamard_sobolev_order": 1,
+    "hadamard_relative_eps_min": 1e-3,
+    "hadamard_relative_eps_max": 3e-3,
+    "hadamard_eta_scale_floor": 1e-3,
+    "hadamard_denominator_floor": 1e-12,
+    "param_count": 1_342_400,
+}
+mismatches = {
+    key: (config.get(key), value)
+    for key, value in expected.items()
+    if config.get(key) != value
+}
+if mismatches:
+    raise SystemExit(f"C27 configuration guard failed: {mismatches}")
+
+records = [json.loads(line) for line in (run_dir / "train_log.jsonl").read_text().splitlines()]
+if not records:
+    raise SystemExit("C27 configuration guard failed: empty training log")
+nonfinite = {
+    f"epoch_{record.get('epoch', index + 1)}.{key}": value
+    for index, record in enumerate(records)
+    for key, value in record.items()
+    if isinstance(value, (int, float)) and not math.isfinite(value)
+}
+if nonfinite:
+    raise SystemExit(f"C27 finiteness guard failed: {nonfinite}")
+if records[-1].get("hadamard_active_batches") != records[-1].get(
+    "hadamard_expected_batches"
+):
+    raise SystemExit(
+        "C27 Hadamard accounting guard failed: "
+        f"expected={records[-1].get('hadamard_expected_batches')}, "
+        f"active={records[-1].get('hadamard_active_batches')}"
+    )
+print(
+    "C27 guard passed: C25 objective with only H1 changed to L2; "
+    "1,342,400 parameters; all logged scalars finite"
+)
+PY

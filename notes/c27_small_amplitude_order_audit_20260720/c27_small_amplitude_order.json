@@ -1,0 +1,846 @@
+{
+  "artifacts": {
+    "json": "c27_small_amplitude_order.json",
+    "npz": "c27_small_amplitude_order.npz",
+    "pdf": "c27_small_amplitude_order.pdf",
+    "png": "c27_small_amplitude_order.png"
+  },
+  "checks": {
+    "Deta_Gtheta_zero_vs_G1_error_relative_to_G0": {
+      "max": 9.96150510425419e-07,
+      "median": 1.0095238591748487e-08,
+      "min": 1.5767066893122537e-09,
+      "p95": 2.1262565815718787e-07,
+      "q25": 5.672586591064719e-09,
+      "q75": 2.4741264198717772e-08
+    },
+    "Deta_Gtheta_zero_vs_G1_relative_error": {
+      "max": 0.016549070903972528,
+      "median": 1.0443656123126368e-06,
+      "min": 4.0376581578733336e-08,
+      "p95": 1.6349074041522268e-05,
+      "q25": 1.7060736559959036e-07,
+      "q75": 2.419602008541085e-06
+    },
+    "flat_surface_Gtheta_vs_G0_relative_error": {
+      "max": 9.092303629906126e-05,
+      "median": 4.865374576725868e-07,
+      "min": 1.2973400737676837e-07,
+      "p95": 9.07389725499596e-06,
+      "q25": 2.901451149296525e-07,
+      "q75": 3.2320956089517615e-06
+    },
+    "largest_G1_relative_JVP_error_state": {
+      "G1_projected_rms": 4.669449201411534e-07,
+      "absolute_projected_rms_error": 7.727504591665737e-09,
+      "archive_index": 13,
+      "case_id": 62,
+      "depth": 38.31210708618164,
+      "family": "stokes_deep",
+      "interpretation": "The largest G1-relative value has an exceptionally small G1 denominator; its absolute and G0-relative errors remain at the float32 numerical floor.",
+      "relative_to_G0": 9.96150510425419e-07,
+      "relative_to_G1": 0.016549070903972528
+    },
+    "raw_Gtheta_vs_order6": {
+      "interpretation": "The uncorrected total error approaches the recorded float32 G0/JVP floor; it is not used to estimate the learned remainder's order.",
+      "per_state_slope": {
+        "max": 2.0786226047886056,
+        "median": 1.2772468754344874,
+        "min": -0.04111705366505796,
+        "p95": 1.877060537842765,
+        "q25": 0.6608394145230834,
+        "q75": 1.5548045869514442
+      },
+      "pooled_median_curve": [
+        6.971813241424542e-05,
+        3.008757508742662e-05,
+        1.600605412704367e-05,
+        9.183254641836232e-06,
+        3.7061274314463432e-06,
+        1.4227663475209242e-06
+      ]
+    }
+  },
+  "execution": {
+    "cpu_affinity": [
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "jax_backend": "cpu",
+    "jax_enable_x64": true,
+    "nice": 10,
+    "wall_seconds": 16.21221499494277
+  },
+  "generated_at_local": "2026-07-20T19:26:22-04:00",
+  "interpretation": [
+    "A first-order G0 truncation slope and second-order G0+G1 truncation slope quantify the analytic benefit of retaining G1.",
+    "The C27 Taylor remainder subtracts the deployed model's own value and directional derivative at eta=0, so its slope tests the trained O(eta^2) residual without a float32 baseline-subtraction floor.",
+    "The C27/reference remainder error compares only terms of order two and higher; raw total model error is retained separately and eventually reaches the measured flat-surface/first-derivative numerical floor.",
+    "The JVP comparison separately tests that the deployed model's first surface derivative agrees with the analytic padded G1 on the reported production band.",
+    "This is an empirical structural/order audit on registered initial states, not a causal training-loss or full no-G1 retraining ablation."
+  ],
+  "metrics": {
+    "c27_taylor_remainder": {
+      "expected_asymptotic_order": 2.0,
+      "family_median_curve_slopes": {
+        "bf_g0": 1.8814600021323356,
+        "bf_g1": 1.946148466827151,
+        "bf_modal": 1.9391376317460316,
+        "linear": 1.9967393785151415,
+        "random_sea_deep": 2.000738001013561,
+        "random_sea_finite": 1.8084187771660643,
+        "stokes_deep": 1.9963044063515925,
+        "stokes_finite": 1.6678022689526673,
+        "tanaka_g0": 2.0022582213157967,
+        "tanaka_g1": 1.9618424976394506
+      },
+      "family_median_state_slopes": {
+        "bf_g0": 1.9351188266278059,
+        "bf_g1": 1.995276742814195,
+        "bf_modal": 1.890283544960627,
+        "linear": 1.9852555478805043,
+        "random_sea_deep": 1.998609487180929,
+        "random_sea_finite": 1.942094523608962,
+        "stokes_deep": 1.9744067760667008,
+        "stokes_finite": 1.6883791763636056,
+        "tanaka_g0": 2.001509591186088,
+        "tanaka_g1": 1.9788960621394995
+      },
+      "per_state_slope": {
+        "max": 2.079910794607217,
+        "median": 1.9665870072688671,
+        "min": 1.4697635087748229,
+        "p95": 2.012326553209655,
+        "q25": 1.8587296534610465,
+        "q75": 2.001834408674419
+      },
+      "pooled_median_curve": [
+        0.001693833048651011,
+        0.0004244697797495763,
+        0.00011487079813221753,
+        3.226217727047392e-05,
+        8.477563531365862e-06,
+        2.0108633289709188e-06
+      ],
+      "pooled_median_curve_slope": 1.9436281957176311,
+      "pooled_q25_curve": [
+        0.0008007433695905336,
+        0.00020987112574839768,
+        5.82457334332832e-05,
+        1.4696413303566037e-05,
+        3.7263147312320175e-06,
+        1.0163843371782436e-06
+      ],
+      "pooled_q75_curve": [
+        0.003414392496743411,
+        0.0008554975716011121,
+        0.00022636556001349783,
+        5.939440259076486e-05,
+        1.5554284760158023e-05,
+        3.894384200049325e-06
+      ],
+      "pooled_state_slope_median": 1.9665870072688671,
+      "stratified_bootstrap_state_slope_median_ci95": [
+        1.9433054148129487,
+        1.9911656609822372
+      ]
+    },
+    "g01_truncation": {
+      "expected_asymptotic_order": 2.0,
+      "family_median_curve_slopes": {
+        "bf_g0": 2.000133890957679,
+        "bf_g1": 2.0002780345667777,
+        "bf_modal": 2.0002909124959585,
+        "linear": 1.9999224430579534,
+        "random_sea_deep": 2.0001649394182004,
+        "random_sea_finite": 2.0002189243572,
+        "stokes_deep": 2.0001797432273403,
+        "stokes_finite": 1.998861290652087,
+        "tanaka_g0": 1.9957780572164563,
+        "tanaka_g1": 1.9940367077078212
+      },
+      "family_median_state_slopes": {
+        "bf_g0": 2.000133740037149,
+        "bf_g1": 2.000271136825483,
+        "bf_modal": 2.0002906186670533,
+        "linear": 1.999944383542017,
+        "random_sea_deep": 2.0001177428145835,
+        "random_sea_finite": 1.999991613927833,
+        "stokes_deep": 2.000135955660423,
+        "stokes_finite": 1.9977494302459915,
+        "tanaka_g0": 1.9957777524669158,
+        "tanaka_g1": 1.9937035371994836
+      },
+      "per_state_slope": {
+        "max": 2.000991510045615,
+        "median": 2.0000264348508026,
+        "min": 1.9870278206632142,
+        "p95": 2.0004840579605543,
+        "q25": 1.999020300188478,
+        "q75": 2.0002151213850676
+      },
+      "pooled_median_curve": [
+        0.001674473876441574,
+        0.00042061052777282867,
+        0.00010538565999923477,
+        2.6374512952618155e-05,
+        6.597075053237198e-06,
+        1.649695493627704e-06
+      ],
+      "pooled_median_curve_slope": 1.9991251055187842,
+      "pooled_q25_curve": [
+        0.0008263638535124701,
+        0.00020655846774295333,
+        5.16302771399153e-05,
+        1.2906072882580232e-05,
+        3.2263106510534017e-06,
+        8.065504354662149e-07
+      ],
+      "pooled_q75_curve": [
+        0.003384827038228142,
+        0.0008629962772494324,
+        0.00021784851398739188,
+        5.472428275177373e-05,
+        1.3713811319228985e-05,
+        3.4325432421985976e-06
+      ],
+      "pooled_state_slope_median": 2.0000264348508026,
+      "stratified_bootstrap_state_slope_median_ci95": [
+        1.9999940661411382,
+        2.000097192268451
+      ]
+    },
+    "g0_truncation": {
+      "expected_asymptotic_order": 1.0,
+      "family_median_curve_slopes": {
+        "bf_g0": 1.0325593804464002,
+        "bf_g1": 1.0319079342972592,
+        "bf_modal": 1.0340759572391376,
+        "linear": 0.9999496500729687,
+        "random_sea_deep": 0.9996390928688941,
+        "random_sea_finite": 1.0002720604288131,
+        "stokes_deep": 1.0484150661049458,
+        "stokes_finite": 1.0004870919453714,
+        "tanaka_g0": 0.9981329030863714,
+        "tanaka_g1": 0.9977408763816573
+      },
+      "family_median_state_slopes": {
+        "bf_g0": 1.0325042180554593,
+        "bf_g1": 1.0293903774714956,
+        "bf_modal": 1.0356726416123534,
+        "linear": 0.9999494272264322,
+        "random_sea_deep": 0.9996354451309918,
+        "random_sea_finite": 1.0000889113722813,
+        "stokes_deep": 1.0484531627543245,
+        "stokes_finite": 1.0000061106424072,
+        "tanaka_g0": 0.9979767645105801,
+        "tanaka_g1": 0.997374958053853
+      },
+      "per_state_slope": {
+        "max": 1.048570358641413,
+        "median": 1.0001638981719803,
+        "min": 0.9942847520610179,
+        "p95": 1.0483931673272453,
+        "q25": 0.9989146336275123,
+        "q75": 1.030750890426132
+      },
+      "pooled_median_curve": [
+        0.01585990440236497,
+        0.007921505539114759,
+        0.003936798333115285,
+        0.0019400165966153658,
+        0.0009630894603563586,
+        0.0004798382290314632
+      ],
+      "pooled_median_curve_slope": 1.0119535683525824,
+      "pooled_q25_curve": [
+        0.007110614973645822,
+        0.0031645852943288162,
+        0.0014507316214378294,
+        0.0006991496133480552,
+        0.00034735336950143363,
+        0.00017312348813158248
+      ],
+      "pooled_q75_curve": [
+        0.07238999667470943,
+        0.03612457658987313,
+        0.01805884130699699,
+        0.009030460531050458,
+        0.004515736475270635,
+        0.0022580261130232225
+      ],
+      "pooled_state_slope_median": 1.0001638981719803,
+      "stratified_bootstrap_state_slope_median_ci95": [
+        0.9999969014265799,
+        1.0005500295713685
+      ]
+    }
+  },
+  "protocol": {
+    "bootstrap": {
+      "method": "fit each state separately, resample states with replacement within each of 10 family strata, and take the pooled median slope",
+      "samples": 5000,
+      "seed_base": 20260720
+    },
+    "epsilons": [
+      1.0,
+      0.5,
+      0.25,
+      0.125,
+      0.0625,
+      0.03125
+    ],
+    "norm": "projected spatial RMS divided by projected RMS of G0(h)xi for each state",
+    "projection": "Fourier modes |k| <= 128",
+    "reference": "Craig--Sulem order 6, pad factor 8, float64",
+    "slope_fit_epsilons": [
+      0.25,
+      0.125,
+      0.0625,
+      0.03125
+    ],
+    "surface_scaling": "eta -> epsilon * eta with xi and physical depth fixed"
+  },
+  "run": {
+    "checkpoint": "final",
+    "checkpoint_metadata_sha256": "f2b72907dacca8b496f62ee600694efba2efd5bd1df581fa7f0a01a4e00d032f",
+    "config_sha256": "f1c20bae257754d1e982fadb1e57b58a71ee3873aad43fe745b24f263ceda2a2",
+    "epoch": 40,
+    "run_dir": "outputs/c27_h1_to_l2_full_20260717_212550",
+    "structural_config": {
+      "cs_g1_fft_fp64": true,
+      "cs_g1_k_cut": 0,
+      "cs_residual_eta_order": 2,
+      "cs_use_g1_baseline": true,
+      "parameter_count": 1342400,
+      "precision": "fp32"
+    }
+  },
+  "sampling": {
+    "families": [
+      "tanaka_g0",
+      "tanaka_g1",
+      "bf_g0",
+      "bf_g1",
+      "bf_modal",
+      "random_sea_deep",
+      "random_sea_finite",
+      "linear",
+      "stokes_deep",
+      "stokes_finite"
+    ],
+    "frame_index": 0,
+    "rule": "sort by (depth, case_id), split each family into equal-count strata, choose each stratum midpoint",
+    "selection": [
+      {
+        "archive_index": 17,
+        "case_id": 17,
+        "depth": 0.012424125336110592,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 25,
+        "case_id": 25,
+        "depth": 0.01938674785196781,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 1,
+        "depth": 0.04449146240949631,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 16,
+        "case_id": 16,
+        "depth": 0.0659460797905922,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 3,
+        "case_id": 3,
+        "depth": 0.10717590153217316,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 0,
+        "case_id": 0,
+        "depth": 0.1390679031610489,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 18,
+        "case_id": 18,
+        "depth": 0.1669212430715561,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 31,
+        "case_id": 31,
+        "depth": 0.26861435174942017,
+        "family": "tanaka_g0"
+      },
+      {
+        "archive_index": 11,
+        "case_id": 1000011,
+        "depth": 0.011286163702607155,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 1000001,
+        "depth": 0.01463289000093937,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 28,
+        "case_id": 1000028,
+        "depth": 0.019846279174089432,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 8,
+        "case_id": 1000008,
+        "depth": 0.030291857197880745,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 23,
+        "case_id": 1000023,
+        "depth": 0.037132374942302704,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 1000021,
+        "depth": 0.057592183351516724,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 0,
+        "case_id": 1000000,
+        "depth": 0.13727504014968872,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 13,
+        "case_id": 1000013,
+        "depth": 0.21866966784000397,
+        "family": "tanaka_g1"
+      },
+      {
+        "archive_index": 30,
+        "case_id": 30,
+        "depth": 0.5919150114059448,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 5,
+        "case_id": 5,
+        "depth": 0.8248817324638367,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 12,
+        "case_id": 12,
+        "depth": 0.9602888226509094,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 15,
+        "case_id": 15,
+        "depth": 1.245275616645813,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 21,
+        "depth": 1.4081447124481201,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 11,
+        "case_id": 11,
+        "depth": 2.387237548828125,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 2,
+        "case_id": 2,
+        "depth": 2.7230420112609863,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 27,
+        "case_id": 27,
+        "depth": 3.3076915740966797,
+        "family": "bf_g0"
+      },
+      {
+        "archive_index": 23,
+        "case_id": 1000023,
+        "depth": 0.5574857592582703,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 2,
+        "case_id": 1000002,
+        "depth": 0.6074485778808594,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 24,
+        "case_id": 1000024,
+        "depth": 0.762097954750061,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 4,
+        "case_id": 1000004,
+        "depth": 0.9758257865905762,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 26,
+        "case_id": 1000026,
+        "depth": 1.284254789352417,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 6,
+        "case_id": 1000006,
+        "depth": 1.6856645345687866,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 29,
+        "case_id": 1000029,
+        "depth": 1.947097659111023,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 9,
+        "case_id": 1000009,
+        "depth": 3.4938948154449463,
+        "family": "bf_g1"
+      },
+      {
+        "archive_index": 28,
+        "case_id": 2000028,
+        "depth": 0.5665942430496216,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 19,
+        "case_id": 2000019,
+        "depth": 0.7588419914245605,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 5,
+        "case_id": 2000005,
+        "depth": 1.0815638303756714,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 12,
+        "case_id": 2000012,
+        "depth": 1.4878019094467163,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 2000001,
+        "depth": 2.0654661655426025,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 17,
+        "case_id": 2000017,
+        "depth": 2.428250789642334,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 24,
+        "case_id": 2000024,
+        "depth": 2.8015503883361816,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 13,
+        "case_id": 2000013,
+        "depth": 3.877236843109131,
+        "family": "bf_modal"
+      },
+      {
+        "archive_index": 7,
+        "case_id": 7,
+        "depth": 5.251715183258057,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 30,
+        "case_id": 30,
+        "depth": 6.765585422515869,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 10,
+        "case_id": 10,
+        "depth": 7.528395652770996,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 19,
+        "case_id": 19,
+        "depth": 8.922433853149414,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 24,
+        "case_id": 24,
+        "depth": 11.895153999328613,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 0,
+        "case_id": 0,
+        "depth": 13.179471015930176,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 18,
+        "case_id": 18,
+        "depth": 19.76370620727539,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 22,
+        "case_id": 22,
+        "depth": 23.34004783630371,
+        "family": "random_sea_deep"
+      },
+      {
+        "archive_index": 31,
+        "case_id": 31,
+        "depth": 0.10219548642635345,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 21,
+        "depth": 0.1227572038769722,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 28,
+        "case_id": 28,
+        "depth": 0.1818920373916626,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 8,
+        "case_id": 8,
+        "depth": 0.2655845880508423,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 17,
+        "case_id": 17,
+        "depth": 0.6109179854393005,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 0,
+        "case_id": 0,
+        "depth": 0.8239580392837524,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 30,
+        "case_id": 30,
+        "depth": 1.0775140523910522,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 24,
+        "case_id": 24,
+        "depth": 1.2431626319885254,
+        "family": "random_sea_finite"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 8,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 5,
+        "case_id": 34,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 9,
+        "case_id": 68,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 13,
+        "case_id": 90,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 17,
+        "case_id": 124,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 163,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 25,
+        "case_id": 202,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 29,
+        "case_id": 232,
+        "depth": 0.03831210732460022,
+        "family": "linear"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 18,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 5,
+        "case_id": 23,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 9,
+        "case_id": 41,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 13,
+        "case_id": 62,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 17,
+        "case_id": 83,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 97,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 25,
+        "case_id": 122,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 29,
+        "case_id": 145,
+        "depth": 38.31210708618164,
+        "family": "stokes_deep"
+      },
+      {
+        "archive_index": 1,
+        "case_id": 5,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 5,
+        "case_id": 13,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 9,
+        "case_id": 39,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 13,
+        "case_id": 53,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 17,
+        "case_id": 71,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 21,
+        "case_id": 86,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 25,
+        "case_id": 99,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      },
+      {
+        "archive_index": 29,
+        "case_id": 114,
+        "depth": 0.03831210732460022,
+        "family": "stokes_finite"
+      }
+    ],
+    "source_paths": [
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_soliton_spectral_guard_20260719_191228/tanaka_g0/tanaka_g0_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_soliton_spectral_guard_20260719_191228/tanaka_g1/tanaka_g1_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/bf_g0/bf_g0_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/bf_g1/bf_g1_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/bf_modal/bf_modal_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/random_sea_deep/random_sea_deep_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/random_sea_finite/random_sea_finite_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/linear/linear_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/stokes_deep/stokes_deep_trajs.npz",
+      "outputs/c27_h1_to_l2_full_20260717_212550/eval_final_guarded_non_tanaka_suite_n32_20260719_221813/stokes_finite/stokes_finite_trajs.npz"
+    ],
+    "state_count": 80,
+    "states_per_family": 8
+  },
+  "schema_version": 1
+}

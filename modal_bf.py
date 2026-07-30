@@ -1,4 +1,4 @@
-"""Modal app to generate adaptive-sampled BF rollouts on A100s, sharded.
+"""Modal app to generate deep-water JCP09-form BF rollouts on A100s.
 
 Workflow:
     modal token new                                    # once
@@ -124,7 +124,7 @@ def _preinit_shard_zip(output_path: str, start_batch: int, end_batch: int) -> No
 
     x_grid, _ = build_grid(1024, 2.0 * math.pi)
     meta = {
-        "shard_kind": "bf_adaptive_shard",
+        "shard_kind": "bf_jcp09_deep_adaptive_shard",
         "start_batch": start_batch,
         "n_batches_planned": end_batch,
         "batch_size": BATCH_SIZE,
@@ -142,6 +142,14 @@ def _preinit_shard_zip(output_path: str, start_batch: int, end_batch: int) -> No
         "adaptive_alpha": ADAPTIVE_ALPHA,
         "adaptive_smooth_sigma": ADAPTIVE_SMOOTH_SIGMA,
         "adaptive_power": ADAPTIVE_POWER,
+        "initial_condition": (
+            "Xu--Guyenne JCP09 equation (33) with the project fifth-order "
+            "deep-water Stokes carrier"
+        ),
+        "instability_support": (
+            "0 < (Delta n/n_c)/(2 sqrt(2) epsilon_c) < 1"
+        ),
+        "minimum_resolved_kh": 5.0,
     }
     with zipfile.ZipFile(out, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
         with zf.open("x.npy", mode="w", force_zip64=True) as h:
@@ -170,7 +178,9 @@ def run_shard(shard_id: int, start_batch: int, end_batch: int) -> None:
     import sys
 
     _ensure_repo_on_path()
-    output = f"{VOLUME_MOUNT}/bf_2_adaptive_modal_shard_{shard_id:02d}.npz"
+    output = (
+        f"{VOLUME_MOUNT}/bf_jcp09_deep_adaptive_modal_shard_{shard_id:02d}.npz"
+    )
 
     # The generator stops at n_batches_planned = ceil(target_samples / samples_per_batch),
     # which we steer to end_batch via target_samples.
@@ -214,17 +224,18 @@ def go_wide(n_shards: int = 2) -> None:
 
 @app.function(volumes={VOLUME_MOUNT: volume}, timeout=2 * 3600, cpu=4, memory=32 * 1024)
 def merge_shards() -> None:
-    """Concatenate every shard's batches into bf_2_adaptive_modal.npz on the volume."""
+    """Concatenate every JCP09-form shard into one canonical archive."""
     import json
     import os
     import zipfile
 
-    canonical = f"{VOLUME_MOUNT}/bf_2_adaptive_modal.npz"
-    canonical_state = f"{VOLUME_MOUNT}/bf_2_adaptive_modal.state.json"
+    canonical = f"{VOLUME_MOUNT}/bf_jcp09_deep_adaptive_modal.npz"
+    canonical_state = f"{VOLUME_MOUNT}/bf_jcp09_deep_adaptive_modal.state.json"
 
     shard_files = sorted(
         p for p in os.listdir(VOLUME_MOUNT)
-        if p.startswith("bf_2_adaptive_modal_shard_") and p.endswith(".npz")
+        if p.startswith("bf_jcp09_deep_adaptive_modal_shard_")
+        and p.endswith(".npz")
     )
     if not shard_files:
         raise RuntimeError("no shard npz files found on volume")
@@ -295,7 +306,10 @@ def status() -> dict:
 
 
 @app.local_entrypoint()
-def download(target_dir: str = "data", pattern: str = "bf_2_adaptive_modal") -> None:
+def download(
+    target_dir: str = "data",
+    pattern: str = "bf_jcp09_deep_adaptive_modal",
+) -> None:
     out = Path(target_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     print(f"Downloading volume {VOLUME_NAME!r} -> {out}/  (filter: {pattern!r})")

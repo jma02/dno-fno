@@ -1,0 +1,5878 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "run_dir": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603",
+    "checkpoint_selection": "best",
+    "checkpoint_epoch": 39,
+    "checkpoint_path": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/best_val_ckpt",
+    "checkpoint_sha256": "a9d5dbbdd65f04983646ac969db0099c036e2151eac8a1933a58eaf496420140",
+    "eval_dir": "/home/johnma/dno-fno/outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536",
+    "series_output": "/home/johnma/dno-fno/notes/c25_hadamard_tail_ranking_20260717.npz",
+    "argv": [
+      "scripts/audit_hadamard_tail_ranking.py",
+      "--run-dir",
+      "outputs/c25_capacity125_full_20260716_022603",
+      "--checkpoint",
+      "best",
+      "--eval-dir",
+      "outputs/c25_capacity125_full_20260716_022603/eval_best_soliton_spectral_guard_20260717_133536",
+      "--path-frames",
+      "17",
+      "--probes",
+      "16",
+      "--batch-size",
+      "32",
+      "--seed",
+      "20260717",
+      "--output",
+      "notes/c25_hadamard_tail_ranking_20260717.json"
+    ],
+    "execution_environment": {
+      "CUDA_VISIBLE_DEVICES": "1",
+      "JAX_PLATFORMS": "cuda",
+      "XLA_PYTHON_CLIENT_PREALLOCATE": "false"
+    },
+    "jax_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "seed": 20260717,
+    "path_frame_indices": [
+      0,
+      16,
+      31,
+      47,
+      62,
+      78,
+      94,
+      109,
+      125,
+      141,
+      156,
+      172,
+      188,
+      203,
+      219,
+      234,
+      250
+    ],
+    "probes_per_frame": 16,
+    "batch_size": 32,
+    "common_random_numbers": "probe key depends only on sampled-frame position and probe index",
+    "hadamard_config": {
+      "k_max": 128.0,
+      "sobolev_order": 1,
+      "relative_eps_min": 0.001,
+      "relative_eps_max": 0.003,
+      "eta_scale_floor": 0.001,
+      "denominator_floor": 1e-12
+    },
+    "score_definition": "mean over fixed probes and evenly sampled truth-path states of sqrt(Hadamard residual H1 energy / forcing H1 energy)",
+    "teacher_q_h1_definition": "mean over the same sampled truth states of the trainer's relative H1 Fourier error ||sqrt(1+k^2)(q_theta-q_6)|| / ||sqrt(1+k^2)q_6||",
+    "teacher_q_l2_definitions": {
+      "full": "mean over the same 17 sampled truth states of ||q_theta-q_6||_2 / ||q_6||_2",
+      "p8": "the same relative L2 error after projection onto nonzero Fourier modes |k|<=8"
+    },
+    "translation_definition": "sqrt(max(raw^2 - aligned^2, 0))"
+  },
+  "population": {
+    "n_cases": 64,
+    "tail_threshold_raw": 0.25,
+    "n_raw_tails": 6,
+    "probe_split_rank_stability": {
+      "rho": 0.9954212454212452,
+      "p_two_sided": 6.168283747135145e-65
+    },
+    "correlations": {
+      "path_mean_defect": {
+        "raw": {
+          "rho": 0.4075091575091575,
+          "p_greater": 0.0004156450169106486
+        },
+        "aligned": {
+          "rho": 0.48749999999999993,
+          "p_greater": 2.1981665423230706e-05
+        },
+        "translation": {
+          "rho": 0.36332417582417575,
+          "p_greater": 0.0015844328872443778
+        },
+        "absolute_displacement": {
+          "rho": 0.2000915750915751,
+          "p_greater": 0.05645352275193319
+        }
+      },
+      "path_p95_frame_defect": {
+        "raw": {
+          "rho": 0.39212454212454206,
+          "p_greater": 0.0006763526494702649
+        },
+        "aligned": {
+          "rho": 0.5354395604395604,
+          "p_greater": 2.571848468008716e-06
+        },
+        "translation": {
+          "rho": 0.33910256410256406,
+          "p_greater": 0.0030618747528633303
+        },
+        "absolute_displacement": {
+          "rho": 0.1648351648351648,
+          "p_greater": 0.09652397724096703
+        }
+      },
+      "terminal_mean_defect": {
+        "raw": {
+          "rho": 0.4007326007326007,
+          "p_greater": 0.0005165374469654379
+        },
+        "aligned": {
+          "rho": 0.45673076923076916,
+          "p_greater": 7.425443036570337e-05
+        },
+        "translation": {
+          "rho": 0.37010073260073256,
+          "p_greater": 0.0013057128589649344
+        },
+        "absolute_displacement": {
+          "rho": 0.18685897435897433,
+          "p_greater": 0.06964158933671107
+        }
+      },
+      "path_mean_loss": {
+        "raw": {
+          "rho": 0.4152014652014651,
+          "p_greater": 0.0003229759418696207
+        },
+        "aligned": {
+          "rho": 0.4996794871794871,
+          "p_greater": 1.3135532499188006e-05
+        },
+        "translation": {
+          "rho": 0.37092490842490833,
+          "p_greater": 0.0012749885967160183
+        },
+        "absolute_displacement": {
+          "rho": 0.19583333333333333,
+          "p_greater": 0.06046912124233562
+        }
+      },
+      "path_mean_teacher_q_h1": {
+        "raw": {
+          "rho": -0.29761904761904756,
+          "p_greater": 0.9915395783923637
+        },
+        "aligned": {
+          "rho": -0.19386446886446884,
+          "p_greater": 0.937602076905475
+        },
+        "translation": {
+          "rho": -0.3034340659340659,
+          "p_greater": 0.9926032597424312
+        },
+        "absolute_displacement": {
+          "rho": 0.022527472527472524,
+          "p_greater": 0.4298758813939383
+        }
+      },
+      "terminal_teacher_q_h1": {
+        "raw": {
+          "rho": -0.3289835164835165,
+          "p_greater": 0.9960266174634069
+        },
+        "aligned": {
+          "rho": -0.23699633699633696,
+          "p_greater": 0.9703230164055292
+        },
+        "translation": {
+          "rho": -0.33113553113553107,
+          "p_greater": 0.9962381870508928
+        },
+        "absolute_displacement": {
+          "rho": -0.02527472527472527,
+          "p_greater": 0.5785730245700391
+        }
+      },
+      "path_mean_teacher_q_l2": {
+        "raw": {
+          "rho": 0.6445970695970695,
+          "p_greater": 4.51632855377639e-09
+        },
+        "aligned": {
+          "rho": 0.8046703296703297,
+          "p_greater": 5.699971004683002e-16
+        },
+        "translation": {
+          "rho": 0.5763278388278388,
+          "p_greater": 3.122681600307692e-07
+        },
+        "absolute_displacement": {
+          "rho": 0.2749542124542125,
+          "p_greater": 0.013944267112254832
+        }
+      },
+      "path_mean_teacher_q_p8_l2": {
+        "raw": {
+          "rho": 0.673076923076923,
+          "p_greater": 5.544405877896526e-10
+        },
+        "aligned": {
+          "rho": 0.7216117216117216,
+          "p_greater": 8.645455427313055e-12
+        },
+        "translation": {
+          "rho": 0.6166666666666666,
+          "p_greater": 2.8878381939220322e-08
+        },
+        "absolute_displacement": {
+          "rho": 0.2870421245421245,
+          "p_greater": 0.010732494010171472
+        }
+      }
+    },
+    "family_correlations": {
+      "tanaka_g0": {
+        "path_mean_defect": {
+          "raw": {
+            "rho": 0.5597507331378299,
+            "p_greater": 0.0004325319185327191
+          },
+          "aligned": {
+            "rho": 0.47397360703812313,
+            "p_greater": 0.0030681923749504426
+          },
+          "translation": {
+            "rho": 0.5271260997067448,
+            "p_greater": 0.0009680336120424001
+          },
+          "absolute_displacement": {
+            "rho": 0.314882697947214,
+            "p_greater": 0.03960055275243163
+          }
+        },
+        "path_p95_frame_defect": {
+          "raw": {
+            "rho": 0.5362903225806451,
+            "p_greater": 0.0007782789826393428
+          },
+          "aligned": {
+            "rho": 0.5208944281524927,
+            "p_greater": 0.0011190045252356946
+          },
+          "translation": {
+            "rho": 0.49230205278592365,
+            "p_greater": 0.0021036998177541145
+          },
+          "absolute_displacement": {
+            "rho": 0.25659824046920815,
+            "p_greater": 0.07814614396207815
+          }
+        },
+        "terminal_mean_defect": {
+          "raw": {
+            "rho": 0.5194281524926686,
+            "p_greater": 0.001157363772428008
+          },
+          "aligned": {
+            "rho": 0.41202346041055715,
+            "p_greater": 0.009559816228893087
+          },
+          "translation": {
+            "rho": 0.5190615835777126,
+            "p_greater": 0.0011671301289517626
+          },
+          "absolute_displacement": {
+            "rho": 0.29398826979472137,
+            "p_greater": 0.051213068655197175
+          }
+        },
+        "path_mean_loss": {
+          "raw": {
+            "rho": 0.564516129032258,
+            "p_greater": 0.00038183573858901457
+          },
+          "aligned": {
+            "rho": 0.4897360703812316,
+            "p_greater": 0.002220575409324134
+          },
+          "translation": {
+            "rho": 0.531891495601173,
+            "p_greater": 0.0008648653769633574
+          },
+          "absolute_displacement": {
+            "rho": 0.31268328445747795,
+            "p_greater": 0.040717302120018846
+          }
+        },
+        "path_mean_teacher_q_h1": {
+          "raw": {
+            "rho": -0.29068914956011727,
+            "p_greater": 0.9467400903429374
+          },
+          "aligned": {
+            "rho": -0.2558651026392962,
+            "p_greater": 0.9212398933405386
+          },
+          "translation": {
+            "rho": -0.34310850439882695,
+            "p_greater": 0.9727292807711909
+          },
+          "absolute_displacement": {
+            "rho": -0.01099706744868035,
+            "p_greater": 0.523816836544889
+          }
+        },
+        "terminal_teacher_q_h1": {
+          "raw": {
+            "rho": -0.34677419354838707,
+            "p_greater": 0.9740776124396127
+          },
+          "aligned": {
+            "rho": -0.2730938416422287,
+            "p_greater": 0.9347715905498691
+          },
+          "translation": {
+            "rho": -0.40615835777126097,
+            "p_greater": 0.9894614785883402
+          },
+          "absolute_displacement": {
+            "rho": -0.063049853372434,
+            "p_greater": 0.6341311764013666
+          }
+        },
+        "path_mean_teacher_q_l2": {
+          "raw": {
+            "rho": 0.7247067448680351,
+            "p_greater": 1.3635860620237684e-06
+          },
+          "aligned": {
+            "rho": 0.7991202346041056,
+            "p_greater": 2.0829435132186817e-08
+          },
+          "translation": {
+            "rho": 0.6726539589442815,
+            "p_greater": 1.2358411191238645e-05
+          },
+          "absolute_displacement": {
+            "rho": 0.3478739002932551,
+            "p_greater": 0.025528378378283794
+          }
+        },
+        "path_mean_teacher_q_p8_l2": {
+          "raw": {
+            "rho": 0.6862170087976539,
+            "p_greater": 7.265236453587541e-06
+          },
+          "aligned": {
+            "rho": 0.7049120234604105,
+            "p_greater": 3.330815109520171e-06
+          },
+          "translation": {
+            "rho": 0.6308651026392961,
+            "p_greater": 5.4225520578289965e-05
+          },
+          "absolute_displacement": {
+            "rho": 0.282991202346041,
+            "p_greater": 0.058274453559497445
+          }
+        }
+      },
+      "tanaka_g1": {
+        "path_mean_defect": {
+          "raw": {
+            "rho": 0.282624633431085,
+            "p_greater": 0.05852172139246384
+          },
+          "aligned": {
+            "rho": 0.5388563049853372,
+            "p_greater": 0.0007313487283688268
+          },
+          "translation": {
+            "rho": 0.2452346041055718,
+            "p_greater": 0.08805541456064536
+          },
+          "absolute_displacement": {
+            "rho": 0.08174486803519061,
+            "p_greater": 0.32824417873760714
+          }
+        },
+        "path_p95_frame_defect": {
+          "raw": {
+            "rho": 0.282624633431085,
+            "p_greater": 0.05852172139246384
+          },
+          "aligned": {
+            "rho": 0.5795454545454545,
+            "p_greater": 0.0002544856182501187
+          },
+          "translation": {
+            "rho": 0.23277126099706744,
+            "p_greater": 0.09991062392970246
+          },
+          "absolute_displacement": {
+            "rho": 0.04655425219941349,
+            "p_greater": 0.40013023528546665
+          }
+        },
+        "terminal_mean_defect": {
+          "raw": {
+            "rho": 0.28042521994134895,
+            "p_greater": 0.060021769228307785
+          },
+          "aligned": {
+            "rho": 0.49266862170087966,
+            "p_greater": 0.0020874432119234536
+          },
+          "translation": {
+            "rho": 0.2569648093841642,
+            "p_greater": 0.07784045769907666
+          },
+          "absolute_displacement": {
+            "rho": 0.05278592375366568,
+            "p_greater": 0.38708597582663423
+          }
+        },
+        "path_mean_loss": {
+          "raw": {
+            "rho": 0.30095307917888564,
+            "p_greater": 0.04708762478003751
+          },
+          "aligned": {
+            "rho": 0.5560850439882697,
+            "p_greater": 0.00047546373103004696
+          },
+          "translation": {
+            "rho": 0.2628299120234604,
+            "p_greater": 0.07306600013332178
+          },
+          "absolute_displacement": {
+            "rho": 0.06854838709677419,
+            "p_greater": 0.354656275991023
+          }
+        },
+        "path_mean_teacher_q_h1": {
+          "raw": {
+            "rho": -0.2448680351906158,
+            "p_greater": 0.911610795310473
+          },
+          "aligned": {
+            "rho": -0.02639296187683284,
+            "p_greater": 0.5570072553021153
+          },
+          "translation": {
+            "rho": -0.2441348973607038,
+            "p_greater": 0.9109405333096133
+          },
+          "absolute_displacement": {
+            "rho": 0.11546920821114366,
+            "p_greater": 0.26457136554331356
+          }
+        },
+        "terminal_teacher_q_h1": {
+          "raw": {
+            "rho": -0.23533724340175952,
+            "p_greater": 0.9026161092142502
+          },
+          "aligned": {
+            "rho": -0.07697947214076245,
+            "p_greater": 0.6623037783235466
+          },
+          "translation": {
+            "rho": -0.21370967741935482,
+            "p_greater": 0.879893641779383
+          },
+          "absolute_displacement": {
+            "rho": 0.08614369501466275,
+            "p_greater": 0.3196107173362125
+          }
+        },
+        "path_mean_teacher_q_l2": {
+          "raw": {
+            "rho": 0.5344574780058651,
+            "p_greater": 0.0008133904516526515
+          },
+          "aligned": {
+            "rho": 0.7701612903225805,
+            "p_greater": 1.272933778586712e-07
+          },
+          "translation": {
+            "rho": 0.44464809384164217,
+            "p_greater": 0.005389374440489772
+          },
+          "absolute_displacement": {
+            "rho": 0.10080645161290322,
+            "p_greater": 0.2915160371485013
+          }
+        },
+        "path_mean_teacher_q_p8_l2": {
+          "raw": {
+            "rho": 0.6389296187683284,
+            "p_greater": 4.146053035639768e-05
+          },
+          "aligned": {
+            "rho": 0.7159090909090908,
+            "p_greater": 2.046597733004542e-06
+          },
+          "translation": {
+            "rho": 0.5773460410557184,
+            "p_greater": 0.0002703845327624483
+          },
+          "absolute_displacement": {
+            "rho": 0.17961876832844573,
+            "p_greater": 0.1626358694826169
+          }
+        }
+      }
+    },
+    "path_mean_defect_correlation_with_negative_depth": {
+      "rho": 0.4760073260073259,
+      "p_greater": 3.511041632692798e-05
+    },
+    "partial_rank_correlations": {
+      "raw": {
+        "controlling_family_and_depth": {
+          "partial_rho": 0.21900017478579564,
+          "p_greater": 0.04104862151550991
+        },
+        "controlling_family_depth_and_teacher_q_h1": {
+          "partial_rho": 0.25792105639708945,
+          "p_greater": 0.019811552123075116
+        },
+        "controlling_within_family_teacher_q_l2": {
+          "partial_rho": 0.014039219546115568,
+          "p_greater": 0.4561628414958485
+        },
+        "controlling_within_family_teacher_q_p8_l2": {
+          "partial_rho": -0.07037820922428087,
+          "p_greater": 0.7097364199572818
+        }
+      },
+      "aligned": {
+        "controlling_family_and_depth": {
+          "partial_rho": 0.3140013001004042,
+          "p_greater": 0.005755988140507808
+        },
+        "controlling_family_depth_and_teacher_q_h1": {
+          "partial_rho": 0.3024315328326106,
+          "p_greater": 0.007571466973108528
+        },
+        "controlling_within_family_teacher_q_l2": {
+          "partial_rho": -0.026321139596979404,
+          "p_greater": 0.5817821250862246
+        },
+        "controlling_within_family_teacher_q_p8_l2": {
+          "partial_rho": 0.025946081129974458,
+          "p_greater": 0.41936748969955917
+        }
+      },
+      "translation": {
+        "controlling_family_and_depth": {
+          "partial_rho": 0.17870885112591417,
+          "p_greater": 0.07884319050984948
+        },
+        "controlling_family_depth_and_teacher_q_h1": {
+          "partial_rho": 0.2262256372381929,
+          "p_greater": 0.03612675081865312
+        },
+        "controlling_within_family_teacher_q_l2": {
+          "partial_rho": 0.03368379999028018,
+          "p_greater": 0.3957996833396676
+        },
+        "controlling_within_family_teacher_q_p8_l2": {
+          "partial_rho": -0.05622833605160549,
+          "p_greater": 0.6705058475803144
+        }
+      },
+      "absolute_displacement": {
+        "controlling_family_and_depth": {
+          "partial_rho": 0.2572920544825874,
+          "p_greater": 0.020062380015455784
+        },
+        "controlling_family_depth_and_teacher_q_h1": {
+          "partial_rho": 0.2658289102942065,
+          "p_greater": 0.016873635907754057
+        },
+        "controlling_within_family_teacher_q_l2": {
+          "partial_rho": 0.07515320409123219,
+          "p_greater": 0.27752439857499683
+        },
+        "controlling_within_family_teacher_q_p8_l2": {
+          "partial_rho": 0.0566249380803811,
+          "p_greater": 0.32836653947738637
+        }
+      }
+    },
+    "path_mean_defect_tail_test": {
+      "tail_count": 6,
+      "non_tail_count": 58,
+      "mann_whitney_u": 305.0,
+      "roc_auc": 0.8764367816091954,
+      "p_greater": 0.0006129828263440647,
+      "median_tail_rank": 4.5,
+      "median_non_tail_rank": 34.5,
+      "top_k_recall": {
+        "6": {
+          "hits": 4,
+          "tail_count": 6,
+          "recall": 0.6666666666666666,
+          "chance_p_at_least_hits": 0.00033536794868347535
+        },
+        "10": {
+          "hits": 4,
+          "tail_count": 6,
+          "recall": 0.6666666666666666,
+          "chance_p_at_least_hits": 0.004192472819510795
+        },
+        "16": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.002903285560206389
+        },
+        "32": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.09803649161804204
+        }
+      },
+      "tail_cases": [
+        {
+          "case": "tanaka_g0:27",
+          "rank_high_to_low": 1.0,
+          "score": 0.29059768402673275
+        },
+        {
+          "case": "tanaka_g1:24",
+          "rank_high_to_low": 2.0,
+          "score": 0.23672045238701292
+        },
+        {
+          "case": "tanaka_g1:29",
+          "rank_high_to_low": 4.0,
+          "score": 0.21904273181287934
+        },
+        {
+          "case": "tanaka_g0:4",
+          "rank_high_to_low": 5.0,
+          "score": 0.21267199102614795
+        },
+        {
+          "case": "tanaka_g1:11",
+          "rank_high_to_low": 11.0,
+          "score": 0.17532491267562672
+        },
+        {
+          "case": "tanaka_g1:16",
+          "rank_high_to_low": 41.0,
+          "score": 0.08326866328595962
+        }
+      ]
+    },
+    "terminal_mean_defect_tail_test": {
+      "tail_count": 6,
+      "non_tail_count": 58,
+      "mann_whitney_u": 308.0,
+      "roc_auc": 0.8850574712643678,
+      "p_greater": 0.0004329346264045867,
+      "median_tail_rank": 5.5,
+      "median_non_tail_rank": 34.5,
+      "top_k_recall": {
+        "6": {
+          "hits": 4,
+          "tail_count": 6,
+          "recall": 0.6666666666666666,
+          "chance_p_at_least_hits": 0.00033536794868347535
+        },
+        "10": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.00018430298738897005
+        },
+        "16": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.002903285560206389
+        },
+        "32": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.09803649161804204
+        }
+      },
+      "tail_cases": [
+        {
+          "case": "tanaka_g0:27",
+          "rank_high_to_low": 1.0,
+          "score": 0.28178078788922245
+        },
+        {
+          "case": "tanaka_g0:4",
+          "rank_high_to_low": 2.0,
+          "score": 0.2535339036954532
+        },
+        {
+          "case": "tanaka_g1:24",
+          "rank_high_to_low": 5.0,
+          "score": 0.20259871949812763
+        },
+        {
+          "case": "tanaka_g1:29",
+          "rank_high_to_low": 6.0,
+          "score": 0.20030664466143638
+        },
+        {
+          "case": "tanaka_g1:11",
+          "rank_high_to_low": 9.0,
+          "score": 0.17697480700898294
+        },
+        {
+          "case": "tanaka_g1:16",
+          "rank_high_to_low": 38.0,
+          "score": 0.08953166167983646
+        }
+      ]
+    },
+    "path_mean_teacher_q_h1_tail_test": {
+      "tail_count": 6,
+      "non_tail_count": 58,
+      "mann_whitney_u": 235.0,
+      "roc_auc": 0.6752873563218391,
+      "p_greater": 0.08379753197786206,
+      "median_tail_rank": 18.0,
+      "median_non_tail_rank": 34.5,
+      "top_k_recall": {
+        "6": {
+          "hits": 2,
+          "tail_count": 6,
+          "recall": 0.3333333333333333,
+          "chance_p_at_least_hits": 0.09344945728652224
+        },
+        "10": {
+          "hits": 3,
+          "tail_count": 6,
+          "recall": 0.5,
+          "chance_p_at_least_hits": 0.04389244068052699
+        },
+        "16": {
+          "hits": 3,
+          "tail_count": 6,
+          "recall": 0.5,
+          "chance_p_at_least_hits": 0.15947306151350285
+        },
+        "32": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.09803649161804204
+        }
+      },
+      "tail_cases": [
+        {
+          "case": "tanaka_g0:27",
+          "rank_high_to_low": 2.0,
+          "score": 0.04768934549364275
+        },
+        {
+          "case": "tanaka_g1:29",
+          "rank_high_to_low": 5.0,
+          "score": 0.029282647227626846
+        },
+        {
+          "case": "tanaka_g1:11",
+          "rank_high_to_low": 10.0,
+          "score": 0.02449386195434462
+        },
+        {
+          "case": "tanaka_g0:4",
+          "rank_high_to_low": 26.0,
+          "score": 0.01158636847665525
+        },
+        {
+          "case": "tanaka_g1:24",
+          "rank_high_to_low": 28.0,
+          "score": 0.008712679382819931
+        },
+        {
+          "case": "tanaka_g1:16",
+          "rank_high_to_low": 63.0,
+          "score": 0.0015053897397421263
+        }
+      ]
+    },
+    "path_mean_teacher_q_l2_tail_test": {
+      "tail_count": 6,
+      "non_tail_count": 58,
+      "mann_whitney_u": 321.0,
+      "roc_auc": 0.9224137931034483,
+      "p_greater": 7.139773422298138e-05,
+      "median_tail_rank": 5.0,
+      "median_non_tail_rank": 35.5,
+      "top_k_recall": {
+        "6": {
+          "hits": 4,
+          "tail_count": 6,
+          "recall": 0.6666666666666666,
+          "chance_p_at_least_hits": 0.00033536794868347535
+        },
+        "10": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.00018430298738897005
+        },
+        "16": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.002903285560206389
+        },
+        "32": {
+          "hits": 6,
+          "tail_count": 6,
+          "recall": 1.0,
+          "chance_p_at_least_hits": 0.012086690747429841
+        }
+      },
+      "tail_cases": [
+        {
+          "case": "tanaka_g0:27",
+          "rank_high_to_low": 1.0,
+          "score": 0.02043740295118618
+        },
+        {
+          "case": "tanaka_g1:29",
+          "rank_high_to_low": 2.0,
+          "score": 0.011376543849298114
+        },
+        {
+          "case": "tanaka_g1:11",
+          "rank_high_to_low": 4.0,
+          "score": 0.009109418422555306
+        },
+        {
+          "case": "tanaka_g0:4",
+          "rank_high_to_low": 6.0,
+          "score": 0.003929555482472079
+        },
+        {
+          "case": "tanaka_g1:24",
+          "rank_high_to_low": 7.0,
+          "score": 0.0029450919738642422
+        },
+        {
+          "case": "tanaka_g1:16",
+          "rank_high_to_low": 28.0,
+          "score": 0.0003621477360929933
+        }
+      ]
+    },
+    "path_mean_teacher_q_p8_l2_tail_test": {
+      "tail_count": 6,
+      "non_tail_count": 58,
+      "mann_whitney_u": 335.0,
+      "roc_auc": 0.9626436781609196,
+      "p_greater": 3.9746917239769195e-06,
+      "median_tail_rank": 5.0,
+      "median_non_tail_rank": 35.5,
+      "top_k_recall": {
+        "6": {
+          "hits": 4,
+          "tail_count": 6,
+          "recall": 0.6666666666666666,
+          "chance_p_at_least_hits": 0.00033536794868347535
+        },
+        "10": {
+          "hits": 5,
+          "tail_count": 6,
+          "recall": 0.8333333333333334,
+          "chance_p_at_least_hits": 0.00018430298738897005
+        },
+        "16": {
+          "hits": 6,
+          "tail_count": 6,
+          "recall": 1.0,
+          "chance_p_at_least_hits": 0.0001068098366631113
+        },
+        "32": {
+          "hits": 6,
+          "tail_count": 6,
+          "recall": 1.0,
+          "chance_p_at_least_hits": 0.012086690747429841
+        }
+      },
+      "tail_cases": [
+        {
+          "case": "tanaka_g0:27",
+          "rank_high_to_low": 1.0,
+          "score": 0.003661985279673306
+        },
+        {
+          "case": "tanaka_g1:29",
+          "rank_high_to_low": 2.0,
+          "score": 0.0020386460352114534
+        },
+        {
+          "case": "tanaka_g1:11",
+          "rank_high_to_low": 4.0,
+          "score": 0.0016724795398031546
+        },
+        {
+          "case": "tanaka_g1:24",
+          "rank_high_to_low": 6.0,
+          "score": 0.0013188592756704295
+        },
+        {
+          "case": "tanaka_g0:4",
+          "rank_high_to_low": 7.0,
+          "score": 0.001268491025019902
+        },
+        {
+          "case": "tanaka_g1:16",
+          "rank_high_to_low": 14.0,
+          "score": 0.0005058214215567308
+        }
+      ]
+    },
+    "family_path_mean_defect_tail_tests": {
+      "tanaka_g0": {
+        "tail_count": 2,
+        "non_tail_count": 30,
+        "mann_whitney_u": 59.0,
+        "roc_auc": 0.9833333333333333,
+        "p_greater": 0.004032258064516129,
+        "median_tail_rank": 2.0,
+        "median_non_tail_rank": 17.5,
+        "top_k_recall": {
+          "2": {
+            "hits": 1,
+            "tail_count": 2,
+            "recall": 0.5,
+            "chance_p_at_least_hits": 0.12298387096774197
+          },
+          "10": {
+            "hits": 2,
+            "tail_count": 2,
+            "recall": 1.0,
+            "chance_p_at_least_hits": 0.09072580645161292
+          },
+          "16": {
+            "hits": 2,
+            "tail_count": 2,
+            "recall": 1.0,
+            "chance_p_at_least_hits": 0.24193548387096775
+          }
+        },
+        "tail_cases": [
+          {
+            "case": "tanaka_g0:27",
+            "rank_high_to_low": 1.0,
+            "score": 0.29059768402673275
+          },
+          {
+            "case": "tanaka_g0:4",
+            "rank_high_to_low": 3.0,
+            "score": 0.21267199102614795
+          }
+        ]
+      },
+      "tanaka_g1": {
+        "tail_count": 4,
+        "non_tail_count": 28,
+        "mann_whitney_u": 90.0,
+        "roc_auc": 0.8035714285714286,
+        "p_greater": 0.02705784204671858,
+        "median_tail_rank": 4.0,
+        "median_non_tail_rank": 17.5,
+        "top_k_recall": {
+          "4": {
+            "hits": 2,
+            "tail_count": 4,
+            "recall": 0.5,
+            "chance_p_at_least_hits": 0.06621245828698555
+          },
+          "10": {
+            "hits": 3,
+            "tail_count": 4,
+            "recall": 0.75,
+            "chance_p_at_least_hits": 0.0792547274749722
+          },
+          "16": {
+            "hits": 3,
+            "tail_count": 4,
+            "recall": 0.75,
+            "chance_p_at_least_hits": 0.29977753058954404
+          }
+        },
+        "tail_cases": [
+          {
+            "case": "tanaka_g1:24",
+            "rank_high_to_low": 1.0,
+            "score": 0.23672045238701292
+          },
+          {
+            "case": "tanaka_g1:29",
+            "rank_high_to_low": 2.0,
+            "score": 0.21904273181287934
+          },
+          {
+            "case": "tanaka_g1:11",
+            "rank_high_to_low": 6.0,
+            "score": 0.17532491267562672
+          },
+          {
+            "case": "tanaka_g1:16",
+            "rank_high_to_low": 23.0,
+            "score": 0.08326866328595962
+          }
+        ]
+      }
+    },
+    "score_summaries": {
+      "path_mean_defect": {
+        "median": 0.09890532481059303,
+        "p95": 0.2180871206948696,
+        "maximum": 0.29059768402673275
+      },
+      "path_p95_frame_defect": {
+        "median": 0.11604760210818987,
+        "p95": 0.25212879011163397,
+        "maximum": 0.32576642588636984
+      },
+      "terminal_mean_defect": {
+        "median": 0.10562626128257416,
+        "p95": 0.2269707874297943,
+        "maximum": 0.28178078788922245
+      },
+      "path_mean_loss": {
+        "median": 0.010478402925172145,
+        "p95": 0.054005539384838694,
+        "maximum": 0.09597235204718849
+      },
+      "path_mean_teacher_q_h1": {
+        "median": 0.006499455282165591,
+        "p95": 0.029629014292558382,
+        "maximum": 0.060818694840462005
+      },
+      "terminal_teacher_q_h1": {
+        "median": 0.005822361403689428,
+        "p95": 0.03378934471325302,
+        "maximum": 0.051060958056905324
+      },
+      "path_mean_teacher_q_l2": {
+        "median": 0.0003335331420049899,
+        "p95": 0.008866756570147736,
+        "maximum": 0.02043740295118618
+      },
+      "path_mean_teacher_q_p8_l2": {
+        "median": 0.0002517053358421556,
+        "p95": 0.0016668854181578518,
+        "maximum": 0.003661985279673306
+      }
+    }
+  },
+  "cases": [
+    {
+      "regime": "tanaka_g0",
+      "case_index": 0,
+      "case_id": 0,
+      "depth": 0.1390679031610489,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.005784313023695751,
+        "median": 0.005350462026901881,
+        "p95": 0.008991254893753589,
+        "maximum": 0.010189962535633694,
+        "initial": 0.004201503342841314,
+        "terminal": 0.008691577983283565
+      },
+      "hadamard_defect": {
+        "mean": 0.07379351776253212,
+        "median": 0.07245212001760262,
+        "p95": 0.09381696924267799,
+        "maximum": 0.09998526176671163,
+        "initial": 0.06360195571979206,
+        "terminal": 0.09227489611166959
+      },
+      "residual_h1": {
+        "mean": 0.0017903430930037514,
+        "median": 0.0017509106077965675,
+        "p95": 0.0021946016064638826,
+        "maximum": 0.0022021925852206015,
+        "initial": 0.0016135151058688495,
+        "terminal": 0.001994777482383684
+      },
+      "forcing_h1": {
+        "mean": 0.02448474858999725,
+        "median": 0.025402485264528728,
+        "p95": 0.02674074479613277,
+        "maximum": 0.027794771940855372,
+        "initial": 0.025402485264528728,
+        "terminal": 0.021401452899849453
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.027313165127161632,
+        "median": 0.02793673248151188,
+        "p95": 0.05116567620374748,
+        "maximum": 0.0575584201322446,
+        "initial": 0.020940759415166554,
+        "terminal": 0.022940536387745236
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00019780088421426082,
+        "median": 0.00020642878473215812,
+        "p95": 0.0003187963589941459,
+        "maximum": 0.00035485827362704187,
+        "initial": 0.00016054750778055237,
+        "terminal": 0.00020642878473215812
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 7.320304377265148e-05,
+        "median": 6.606305307867101e-05,
+        "p95": 0.0001092631681149854,
+        "maximum": 0.00012053446390189985,
+        "initial": 7.73649504968808e-05,
+        "terminal": 0.00012053446390189985
+      },
+      "path_defect_probe_standard_error": 0.0009129882882458166,
+      "terminal_defect_probe_standard_error": 0.0034343512814324355,
+      "terminal_rollout": {
+        "case_id": 0,
+        "valid": true,
+        "raw": 0.001343914036266081,
+        "aligned": 0.0008723070259895582,
+        "translation": 0.0010223430878537015,
+        "absolute_displacement": 0.0009182589225243375
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 1,
+      "case_id": 1,
+      "depth": 0.04449146240949631,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0022701405210045645,
+        "median": 0.0022434001418689,
+        "p95": 0.0026160544851188115,
+        "maximum": 0.002724106473502954,
+        "initial": 0.0022434001418689,
+        "terminal": 0.002589041488022776
+      },
+      "hadamard_defect": {
+        "mean": 0.046276395894524855,
+        "median": 0.046355477074803655,
+        "p95": 0.049380816817022624,
+        "maximum": 0.04947042745288055,
+        "initial": 0.04607400880752483,
+        "terminal": 0.04928031184730756
+      },
+      "residual_h1": {
+        "mean": 0.00018988849112679397,
+        "median": 0.0001905413735423557,
+        "p95": 0.00020479371685050895,
+        "maximum": 0.0002127398049703438,
+        "initial": 0.00019199251672153897,
+        "terminal": 0.00020038619697852013
+      },
+      "forcing_h1": {
+        "mean": 0.004281605278612908,
+        "median": 0.004265614316313196,
+        "p95": 0.004639042468541738,
+        "maximum": 0.004954417239712702,
+        "initial": 0.004274477324265748,
+        "terminal": 0.00421410356682872
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.00436754693764392,
+        "median": 0.004420298605482549,
+        "p95": 0.004912834426038033,
+        "maximum": 0.004918530047597566,
+        "initial": 0.0037508168032358187,
+        "terminal": 0.0037001280797452083
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0001982467210592042,
+        "median": 0.00019826114923791172,
+        "p95": 0.0002052649756720437,
+        "maximum": 0.00020550013791120902,
+        "initial": 0.00019076839146785156,
+        "terminal": 0.00018960252295986094
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0001076817604373951,
+        "median": 0.00010772036793294364,
+        "p95": 0.00010793398500168079,
+        "maximum": 0.0001079379650675554,
+        "initial": 0.00010735710574379121,
+        "terminal": 0.00010786365821437376
+      },
+      "path_defect_probe_standard_error": 0.000678096458754323,
+      "terminal_defect_probe_standard_error": 0.003271007513034214,
+      "terminal_rollout": {
+        "case_id": 1,
+        "valid": true,
+        "raw": 0.006357932361084071,
+        "aligned": 0.002507720554986703,
+        "translation": 0.005842485902954088,
+        "absolute_displacement": 0.0009446352608720762
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 2,
+      "case_id": 2,
+      "depth": 0.18546126782894135,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.005598995779523711,
+        "median": 0.0054960672864092595,
+        "p95": 0.006584699404970462,
+        "maximum": 0.006805604171150409,
+        "initial": 0.005586585433362786,
+        "terminal": 0.005701895168980122
+      },
+      "hadamard_defect": {
+        "mean": 0.07355338044147229,
+        "median": 0.07300398154922975,
+        "p95": 0.07977441982555833,
+        "maximum": 0.08092968251009644,
+        "initial": 0.07394753919222277,
+        "terminal": 0.07464427311388726
+      },
+      "residual_h1": {
+        "mean": 0.00655700121138906,
+        "median": 0.0064201710573379145,
+        "p95": 0.007164828840095464,
+        "maximum": 0.007429570848808239,
+        "initial": 0.0062913692568301455,
+        "terminal": 0.006568248619836906
+      },
+      "forcing_h1": {
+        "mean": 0.08950065400992335,
+        "median": 0.08926867050076441,
+        "p95": 0.09488708378661748,
+        "maximum": 0.09540905514477696,
+        "initial": 0.08550502784228597,
+        "terminal": 0.08781476141867056
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.029690137892252187,
+        "median": 0.02933529119323386,
+        "p95": 0.037674189607729024,
+        "maximum": 0.04165492924905747,
+        "initial": 0.02970948888461999,
+        "terminal": 0.04165492924905747
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00020294422414490382,
+        "median": 0.0002018811874145376,
+        "p95": 0.0002363419879573164,
+        "maximum": 0.0002549578167965142,
+        "initial": 0.00019977342930024207,
+        "terminal": 0.0002549578167965142
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 8.979771774769092e-05,
+        "median": 8.979907306375485e-05,
+        "p95": 8.9940176308527e-05,
+        "maximum": 8.997823417699237e-05,
+        "initial": 8.981628674644763e-05,
+        "terminal": 8.989362109722632e-05
+      },
+      "path_defect_probe_standard_error": 0.0008148238640505454,
+      "terminal_defect_probe_standard_error": 0.0029453654021137548,
+      "terminal_rollout": {
+        "case_id": 2,
+        "valid": true,
+        "raw": 0.002654411195604397,
+        "aligned": 0.0021639043756841413,
+        "translation": 0.0015373407716719775,
+        "absolute_displacement": 0.0011334135707695388
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 3,
+      "case_id": 3,
+      "depth": 0.10717590153217316,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.010178027982937909,
+        "median": 0.008597878700671016,
+        "p95": 0.01993044295422128,
+        "maximum": 0.027323390645489158,
+        "initial": 0.008502278737176001,
+        "terminal": 0.00793681244807558
+      },
+      "hadamard_defect": {
+        "mean": 0.09655480901267076,
+        "median": 0.09149382961732053,
+        "p95": 0.13744045406515645,
+        "maximum": 0.16097811577909105,
+        "initial": 0.08920329221905388,
+        "terminal": 0.08723529545423633
+      },
+      "residual_h1": {
+        "mean": 0.004008026537803958,
+        "median": 0.003678623645473743,
+        "p95": 0.005433412444050495,
+        "maximum": 0.006931343138054547,
+        "initial": 0.003505747062835752,
+        "terminal": 0.003678623645473743
+      },
+      "forcing_h1": {
+        "mean": 0.041656386530135134,
+        "median": 0.04196874972415281,
+        "p95": 0.04532713109505083,
+        "maximum": 0.04690025879425422,
+        "initial": 0.03999476616758606,
+        "terminal": 0.04196874972415281
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.016782904407771703,
+        "median": 0.012487711744979774,
+        "p95": 0.03602519427376111,
+        "maximum": 0.047315170201371916,
+        "initial": 0.009245141947479983,
+        "terminal": 0.03320270029185842
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00021583857062322363,
+        "median": 0.00019336554730126253,
+        "p95": 0.00034154024531099535,
+        "maximum": 0.0004025795150910449,
+        "initial": 0.0001729347483921707,
+        "terminal": 0.0002825643347110379
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00010509989309640075,
+        "median": 9.126726072027785e-05,
+        "p95": 0.0001744622979985405,
+        "maximum": 0.00018141045454248897,
+        "initial": 0.00013121330813460158,
+        "terminal": 0.00018141045454248897
+      },
+      "path_defect_probe_standard_error": 0.0013807098929920917,
+      "terminal_defect_probe_standard_error": 0.0046677308911837944,
+      "terminal_rollout": {
+        "case_id": 3,
+        "valid": true,
+        "raw": 0.008369158083491878,
+        "aligned": 0.006386015593810589,
+        "translation": 0.005409400323703676,
+        "absolute_displacement": 0.005300419929276149
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 4,
+      "case_id": 4,
+      "depth": 0.013775626197457314,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.05320036034197143,
+        "median": 0.04984709758587494,
+        "p95": 0.07859678123039011,
+        "maximum": 0.08018718074332479,
+        "initial": 0.040779689090820276,
+        "terminal": 0.08018718074332479
+      },
+      "hadamard_defect": {
+        "mean": 0.21267199102614798,
+        "median": 0.20946668619144812,
+        "p95": 0.24844471918958652,
+        "maximum": 0.2535339036954532,
+        "initial": 0.19172395045700238,
+        "terminal": 0.2535339036954532
+      },
+      "residual_h1": {
+        "mean": 0.00035043448420427384,
+        "median": 0.00034724315105978676,
+        "p95": 0.00037730579116714317,
+        "maximum": 0.0003802252264355019,
+        "initial": 0.0003552078964273966,
+        "terminal": 0.00037055645483648073
+      },
+      "forcing_h1": {
+        "mean": 0.0018258391892762918,
+        "median": 0.001807494524747147,
+        "p95": 0.0019583656637858974,
+        "maximum": 0.001960680262141119,
+        "initial": 0.001957787014197092,
+        "terminal": 0.0017453100177153684
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.01158636847665525,
+        "median": 0.01157807141806707,
+        "p95": 0.011662798944809791,
+        "maximum": 0.011863127807546033,
+        "initial": 0.011863127807546033,
+        "terminal": 0.01157807141806707
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.003929555482472079,
+        "median": 0.003926810262360978,
+        "p95": 0.003953084827301002,
+        "maximum": 0.004005679678570597,
+        "initial": 0.004005679678570597,
+        "terminal": 0.003924216814706486
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.001268491025019902,
+        "median": 0.001269402089327608,
+        "p95": 0.0012949791891572206,
+        "maximum": 0.0013027542958249285,
+        "initial": 0.0012174208365577717,
+        "terminal": 0.0012677083336937347
+      },
+      "path_defect_probe_standard_error": 0.00505400756191181,
+      "terminal_defect_probe_standard_error": 0.03256556506523362,
+      "terminal_rollout": {
+        "case_id": 4,
+        "valid": true,
+        "raw": 0.2723515609194609,
+        "aligned": 0.006652794579366797,
+        "translation": 0.27227029411882514,
+        "absolute_displacement": 0.011845674909701606
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 5,
+      "case_id": 5,
+      "depth": 0.2761293053627014,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006106657615014442,
+        "median": 0.005985258222794433,
+        "p95": 0.006858567365448816,
+        "maximum": 0.007297487537458969,
+        "initial": 0.0064969029101348925,
+        "terminal": 0.005742804734199944
+      },
+      "hadamard_defect": {
+        "mean": 0.0775747317286849,
+        "median": 0.07667719919662082,
+        "p95": 0.08218992411703656,
+        "maximum": 0.08496795082679826,
+        "initial": 0.0801402803277102,
+        "terminal": 0.07507954704766094
+      },
+      "residual_h1": {
+        "mean": 0.10444610628593515,
+        "median": 0.10475510581741102,
+        "p95": 0.11508683578889863,
+        "maximum": 0.11567099891138867,
+        "initial": 0.10078588597369251,
+        "terminal": 0.10253860493977142
+      },
+      "forcing_h1": {
+        "mean": 1.3568010755150364,
+        "median": 1.3828339776748595,
+        "p95": 1.4351383364735144,
+        "maximum": 1.4485329122734494,
+        "initial": 1.2669976851643616,
+        "terminal": 1.3591409764314624
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.03541309008956546,
+        "median": 0.014326222209862143,
+        "p95": 0.09102314676548812,
+        "maximum": 0.3793693031492507,
+        "initial": 0.3793693031492507,
+        "terminal": 0.010872400316767773
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003368763468673077,
+        "median": 0.00020210251761459855,
+        "p95": 0.0006743609214921489,
+        "maximum": 0.002505352279888786,
+        "initial": 0.002505352279888786,
+        "terminal": 0.0001932504754801982
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00017260216397364984,
+        "median": 0.00017257602927736517,
+        "p95": 0.00017479224508059208,
+        "maximum": 0.0001748779183540912,
+        "initial": 0.0001715809894253691,
+        "terminal": 0.0001690992927885186
+      },
+      "path_defect_probe_standard_error": 0.0005036146496043574,
+      "terminal_defect_probe_standard_error": 0.0026566438642017243,
+      "terminal_rollout": {
+        "case_id": 5,
+        "valid": true,
+        "raw": 0.06579040536558593,
+        "aligned": 0.007182202469031837,
+        "translation": 0.06539719723246518,
+        "absolute_displacement": 0.04377043137272306
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 6,
+      "case_id": 6,
+      "depth": 0.13313603401184082,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.019400310481231114,
+        "median": 0.019294670584662995,
+        "p95": 0.02185722310121936,
+        "maximum": 0.02244932859732842,
+        "initial": 0.019674932003513203,
+        "terminal": 0.018244727583674368
+      },
+      "hadamard_defect": {
+        "mean": 0.13661677680212758,
+        "median": 0.13620195929671694,
+        "p95": 0.14426882684045522,
+        "maximum": 0.14604043703333913,
+        "initial": 0.13620195929671694,
+        "terminal": 0.13279226101709435
+      },
+      "residual_h1": {
+        "mean": 0.02899264766295943,
+        "median": 0.02893155979979175,
+        "p95": 0.031079111473316354,
+        "maximum": 0.03283256938646405,
+        "initial": 0.02697298123994401,
+        "terminal": 0.028702019257967
+      },
+      "forcing_h1": {
+        "mean": 0.21597770347021616,
+        "median": 0.21360940858118516,
+        "p95": 0.23909640815056446,
+        "maximum": 0.24622943489640708,
+        "initial": 0.20417254364694049,
+        "terminal": 0.21700880006368323
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0070060603063957175,
+        "median": 0.007316909400223705,
+        "p95": 0.009204037306051804,
+        "maximum": 0.009249596703828914,
+        "initial": 0.007386557619419718,
+        "terminal": 0.008031044769418481
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00019211795838936795,
+        "median": 0.00019224313741583485,
+        "p95": 0.00020399997861054645,
+        "maximum": 0.00020452421924321943,
+        "initial": 0.00019329185195603778,
+        "terminal": 0.00019682168846450835
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0001238023360607969,
+        "median": 0.00012372854885565727,
+        "p95": 0.00012410223703849545,
+        "maximum": 0.0001241565596543115,
+        "initial": 0.00012408865638454145,
+        "terminal": 0.0001241565596543115
+      },
+      "path_defect_probe_standard_error": 0.0011938075760726898,
+      "terminal_defect_probe_standard_error": 0.006381969380696674,
+      "terminal_rollout": {
+        "case_id": 6,
+        "valid": true,
+        "raw": 0.031250288739480915,
+        "aligned": 0.001985822305013678,
+        "translation": 0.031187129654295504,
+        "absolute_displacement": 0.010563342362777608
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 7,
+      "case_id": 7,
+      "depth": 0.1449146568775177,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.005378970800849523,
+        "median": 0.005541812833867336,
+        "p95": 0.007271624545793817,
+        "maximum": 0.007887181048354553,
+        "initial": 0.004339261093255456,
+        "terminal": 0.005541812833867336
+      },
+      "hadamard_defect": {
+        "mean": 0.07203801907998486,
+        "median": 0.07402346484689205,
+        "p95": 0.0844097058405244,
+        "maximum": 0.08767913064793134,
+        "initial": 0.06474689030465537,
+        "terminal": 0.07406008364973325
+      },
+      "residual_h1": {
+        "mean": 0.0029666702139262775,
+        "median": 0.0030912509200769476,
+        "p95": 0.0035902843309737883,
+        "maximum": 0.0036678478907928823,
+        "initial": 0.0024425015974244195,
+        "terminal": 0.0030159713121625346
+      },
+      "forcing_h1": {
+        "mean": 0.0413194112392567,
+        "median": 0.04113419401412585,
+        "p95": 0.04370428068898692,
+        "maximum": 0.04419764237642633,
+        "initial": 0.03884043175421077,
+        "terminal": 0.04071660141251732
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.016550365137245653,
+        "median": 0.015593061810463793,
+        "p95": 0.025575663917897968,
+        "maximum": 0.025684298712360214,
+        "initial": 0.017700141275530747,
+        "terminal": 0.023489611761405516
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00017537506283896054,
+        "median": 0.0001833582205084131,
+        "p95": 0.00022015676758593047,
+        "maximum": 0.00022341762809373325,
+        "initial": 0.00019558415070247356,
+        "terminal": 0.00021934155245897978
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00012271730462375214,
+        "median": 0.00012916364234137346,
+        "p95": 0.00014392417112830147,
+        "maximum": 0.00014589870588252565,
+        "initial": 0.0001427328452124861,
+        "terminal": 0.00013386896665098066
+      },
+      "path_defect_probe_standard_error": 0.000638296682894767,
+      "terminal_defect_probe_standard_error": 0.0019479364065911513,
+      "terminal_rollout": {
+        "case_id": 7,
+        "valid": true,
+        "raw": 0.0026127710135714502,
+        "aligned": 0.002579875227288935,
+        "translation": 0.0004132991422445108,
+        "absolute_displacement": 0.0003860442352629373
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 8,
+      "case_id": 8,
+      "depth": 0.01546106394380331,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.04619980563235327,
+        "median": 0.04213706705284118,
+        "p95": 0.06590796103974078,
+        "maximum": 0.07218414833946786,
+        "initial": 0.03776242293082191,
+        "terminal": 0.03724830692184654
+      },
+      "hadamard_defect": {
+        "mean": 0.19389069737684617,
+        "median": 0.18654863668873398,
+        "p95": 0.22932650673839441,
+        "maximum": 0.23780157467296953,
+        "initial": 0.17682882696194924,
+        "terminal": 0.1720204058497889
+      },
+      "residual_h1": {
+        "mean": 0.0002769145326108571,
+        "median": 0.0002728303717449362,
+        "p95": 0.00031911494956309656,
+        "maximum": 0.00032081117097717995,
+        "initial": 0.00024237804702184498,
+        "terminal": 0.00027218494427249876
+      },
+      "forcing_h1": {
+        "mean": 0.0016160053434091327,
+        "median": 0.001538240979417763,
+        "p95": 0.0019189545945760087,
+        "maximum": 0.0019666650824763355,
+        "initial": 0.001535063502760905,
+        "terminal": 0.0019070269726009271
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0038311408842137684,
+        "median": 0.003831676213961628,
+        "p95": 0.0039043010770554985,
+        "maximum": 0.003905998752572894,
+        "initial": 0.003831676213961628,
+        "terminal": 0.003844180754585924
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.001186258950042508,
+        "median": 0.0011791370466477645,
+        "p95": 0.001222645725587521,
+        "maximum": 0.0012255080078586841,
+        "initial": 0.0011748900321404561,
+        "terminal": 0.001186081054968625
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0007056635925906777,
+        "median": 0.000707235078244212,
+        "p95": 0.0007097225576920067,
+        "maximum": 0.0007099397505329284,
+        "initial": 0.0006963002732121745,
+        "terminal": 0.0007075356372795528
+      },
+      "path_defect_probe_standard_error": 0.004862217969434357,
+      "terminal_defect_probe_standard_error": 0.022593932656239758,
+      "terminal_rollout": {
+        "case_id": 8,
+        "valid": true,
+        "raw": 0.015913628614716215,
+        "aligned": 0.005035909625641809,
+        "translation": 0.015095800407049732,
+        "absolute_displacement": 0.0007993072532499085
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 9,
+      "case_id": 9,
+      "depth": 0.04626735299825668,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006648411943276444,
+        "median": 0.0074768308870914535,
+        "p95": 0.010024167056928303,
+        "maximum": 0.010442310827110442,
+        "initial": 0.0032701950518057806,
+        "terminal": 0.0074768308870914535
+      },
+      "hadamard_defect": {
+        "mean": 0.0787434778867605,
+        "median": 0.08466558550241846,
+        "p95": 0.09864316031697634,
+        "maximum": 0.09949274332669797,
+        "initial": 0.05617773179031722,
+        "terminal": 0.0849648199923654
+      },
+      "residual_h1": {
+        "mean": 0.0007401920699838847,
+        "median": 0.0007605692486065527,
+        "p95": 0.0009581132041298356,
+        "maximum": 0.000983977648394664,
+        "initial": 0.0005006105153635219,
+        "terminal": 0.0007605692486065527
+      },
+      "forcing_h1": {
+        "mean": 0.009647379389821222,
+        "median": 0.009503933334419318,
+        "p95": 0.010550524087850288,
+        "maximum": 0.011055514956137774,
+        "initial": 0.009021122835386326,
+        "terminal": 0.008998584560501642
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.004456219209292467,
+        "median": 0.0037137156066599807,
+        "p95": 0.007427126807665026,
+        "maximum": 0.012652699100262876,
+        "initial": 0.003258489905911386,
+        "terminal": 0.0033158942755283985
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00036361188213135826,
+        "median": 0.00034824519092510516,
+        "p95": 0.0006032410242326294,
+        "maximum": 0.0006539898784401364,
+        "initial": 0.00018178531393263104,
+        "terminal": 0.00027343571200244923
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00017026068079598603,
+        "median": 0.00014460388104164005,
+        "p95": 0.00028682165576341203,
+        "maximum": 0.00036997155068024763,
+        "initial": 0.0001178376089916198,
+        "terminal": 0.00014606771274658598
+      },
+      "path_defect_probe_standard_error": 0.0008779288259929218,
+      "terminal_defect_probe_standard_error": 0.004145762903305792,
+      "terminal_rollout": {
+        "case_id": 9,
+        "valid": true,
+        "raw": 0.012110792534192638,
+        "aligned": 0.0059611478883387055,
+        "translation": 0.010542106604451084,
+        "absolute_displacement": 0.0015651006011383251
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 10,
+      "case_id": 10,
+      "depth": 0.0352950356900692,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006710630182090652,
+        "median": 0.00562940714216,
+        "p95": 0.0118962482902297,
+        "maximum": 0.01213822452492573,
+        "initial": 0.01050912998318628,
+        "terminal": 0.006431952646976083
+      },
+      "hadamard_defect": {
+        "mean": 0.07894778006766512,
+        "median": 0.07342477191588626,
+        "p95": 0.10728567971809894,
+        "maximum": 0.10784459631318583,
+        "initial": 0.10056495826807758,
+        "terminal": 0.0792900720113511
+      },
+      "residual_h1": {
+        "mean": 0.0004675720754363927,
+        "median": 0.00043974392924089846,
+        "p95": 0.0006433996889415422,
+        "maximum": 0.0006551484624600475,
+        "initial": 0.0005694678282416998,
+        "terminal": 0.00045305505587684715
+      },
+      "forcing_h1": {
+        "mean": 0.006174658784073962,
+        "median": 0.006177180033531431,
+        "p95": 0.006754957329847251,
+        "maximum": 0.00677416406731139,
+        "initial": 0.005723867136799269,
+        "terminal": 0.00585604705388124
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.00212636971157321,
+        "median": 0.0020553926153127826,
+        "p95": 0.002881527036757977,
+        "maximum": 0.0030982641584758296,
+        "initial": 0.002062653326439849,
+        "terminal": 0.0017409628678774149
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00038675546820958245,
+        "median": 0.00033778806871666956,
+        "p95": 0.0005911121727220916,
+        "maximum": 0.0005939523809041117,
+        "initial": 0.00043896563314261606,
+        "terminal": 0.0005904021206765865
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00026163151548739665,
+        "median": 0.00023693512253040682,
+        "p95": 0.0003503763683965776,
+        "maximum": 0.000368882152024031,
+        "initial": 0.000368882152024031,
+        "terminal": 0.0002319152136941562
+      },
+      "path_defect_probe_standard_error": 0.0011459186467051203,
+      "terminal_defect_probe_standard_error": 0.0031095243731782147,
+      "terminal_rollout": {
+        "case_id": 10,
+        "valid": true,
+        "raw": 0.04614025608345845,
+        "aligned": 0.017771009900032914,
+        "translation": 0.04258068151850152,
+        "absolute_displacement": 0.004968275185073276
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 11,
+      "case_id": 11,
+      "depth": 0.23385371267795563,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006214370466880004,
+        "median": 0.00619580466277046,
+        "p95": 0.006764159631406268,
+        "maximum": 0.007145756759945042,
+        "initial": 0.005881546794482589,
+        "terminal": 0.0066304955875832496
+      },
+      "hadamard_defect": {
+        "mean": 0.07823655692628807,
+        "median": 0.07824139242782302,
+        "p95": 0.08161802206045335,
+        "maximum": 0.0838103552583151,
+        "initial": 0.07614621701445276,
+        "terminal": 0.08106993876098792
+      },
+      "residual_h1": {
+        "mean": 0.052327809522737176,
+        "median": 0.052432914155783765,
+        "p95": 0.054761106601438174,
+        "maximum": 0.055279357375492895,
+        "initial": 0.05038663982996796,
+        "terminal": 0.055279357375492895
+      },
+      "forcing_h1": {
+        "mean": 0.6780998281123432,
+        "median": 0.6757091808141191,
+        "p95": 0.7208083545922898,
+        "maximum": 0.7338662326004184,
+        "initial": 0.6612272622375073,
+        "terminal": 0.685490065064118
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.016244511060852094,
+        "median": 0.014907458292308596,
+        "p95": 0.025332168806777477,
+        "maximum": 0.037285455604666166,
+        "initial": 0.037285455604666166,
+        "terminal": 0.012516130166762287
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00013024049070393053,
+        "median": 0.00012167381365808362,
+        "p95": 0.0001813774713397889,
+        "maximum": 0.00025473332964995234,
+        "initial": 0.00025473332964995234,
+        "terminal": 0.00011042668284144752
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 5.531865919748596e-05,
+        "median": 5.5343155491334654e-05,
+        "p95": 5.568620553343994e-05,
+        "maximum": 5.574943787993038e-05,
+        "initial": 5.567039744681733e-05,
+        "terminal": 5.510938533675629e-05
+      },
+      "path_defect_probe_standard_error": 0.0004491482489729443,
+      "terminal_defect_probe_standard_error": 0.0019691049891243885,
+      "terminal_rollout": {
+        "case_id": 11,
+        "valid": true,
+        "raw": 0.0006338841910226877,
+        "aligned": 0.00027805221673060106,
+        "translation": 0.0005696456200127287,
+        "absolute_displacement": 0.00035404608841646426
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 12,
+      "case_id": 12,
+      "depth": 0.08934430032968521,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.01521865364110385,
+        "median": 0.013648699492118797,
+        "p95": 0.02336100725572845,
+        "maximum": 0.025546814425726757,
+        "initial": 0.009932262544800284,
+        "terminal": 0.01616579685881692
+      },
+      "hadamard_defect": {
+        "mean": 0.11868349402991345,
+        "median": 0.11423992284435067,
+        "p95": 0.14951063805439377,
+        "maximum": 0.1540970642218493,
+        "initial": 0.09751895323656165,
+        "terminal": 0.12491011441000902
+      },
+      "residual_h1": {
+        "mean": 0.007943295637596614,
+        "median": 0.007899180991561752,
+        "p95": 0.010306709305711438,
+        "maximum": 0.010815577624191462,
+        "initial": 0.00612597543199961,
+        "terminal": 0.008342101150420712
+      },
+      "forcing_h1": {
+        "mean": 0.06877553204285215,
+        "median": 0.06877389807319093,
+        "p95": 0.0735818018482046,
+        "maximum": 0.08024027803350313,
+        "initial": 0.06555334789551241,
+        "terminal": 0.06885584433077956
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.005985747911237563,
+        "median": 0.004671237928193528,
+        "p95": 0.011822791766222652,
+        "maximum": 0.011982285862496658,
+        "initial": 0.008879781211669498,
+        "terminal": 0.005527332244650195
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003838081929013725,
+        "median": 0.0003399931999727304,
+        "p95": 0.0006282872017539565,
+        "maximum": 0.0006442657915180459,
+        "initial": 0.0006140663445450686,
+        "terminal": 0.00038695449546871733
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00022583609518827847,
+        "median": 0.00020222067657208007,
+        "p95": 0.00038644278768452836,
+        "maximum": 0.00040767672627189884,
+        "initial": 0.0003342235115439522,
+        "terminal": 0.00020222067657208007
+      },
+      "path_defect_probe_standard_error": 0.0018931376891080244,
+      "terminal_defect_probe_standard_error": 0.006127860838799451,
+      "terminal_rollout": {
+        "case_id": 12,
+        "valid": true,
+        "raw": 0.04952059626578513,
+        "aligned": 0.009923665819604723,
+        "translation": 0.048516083016044285,
+        "absolute_displacement": 0.01294112362737647
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 13,
+      "case_id": 13,
+      "depth": 0.16417939960956573,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.017046228532619567,
+        "median": 0.015125988148528818,
+        "p95": 0.025252211983839607,
+        "maximum": 0.027693656198041275,
+        "initial": 0.012538760014449035,
+        "terminal": 0.013580280999809674
+      },
+      "hadamard_defect": {
+        "mean": 0.12773736739026642,
+        "median": 0.12197348981979557,
+        "p95": 0.15751591468215842,
+        "maximum": 0.1649885765229379,
+        "initial": 0.11096851483723155,
+        "terminal": 0.11567798521093121
+      },
+      "residual_h1": {
+        "mean": 0.02343749192764492,
+        "median": 0.02341952511532517,
+        "p95": 0.028991628094288898,
+        "maximum": 0.02998035180266953,
+        "initial": 0.019261212870139138,
+        "terminal": 0.02123363837199777
+      },
+      "forcing_h1": {
+        "mean": 0.18435489632984398,
+        "median": 0.18346830800108158,
+        "p95": 0.19463842271403672,
+        "maximum": 0.1965527220052964,
+        "initial": 0.17544045941360967,
+        "terminal": 0.18426336086751452
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.014779833840983051,
+        "median": 0.012519246599067438,
+        "p95": 0.02502173838202043,
+        "maximum": 0.02588434331166018,
+        "initial": 0.017828972697156466,
+        "terminal": 0.01923927822311994
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003521084672323384,
+        "median": 0.0003418216556928558,
+        "p95": 0.0004951021042921205,
+        "maximum": 0.0005119779653628437,
+        "initial": 0.0004356392275287857,
+        "terminal": 0.0004254703786385968
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0003196874802852605,
+        "median": 0.0003136859364987745,
+        "p95": 0.00045290039290580365,
+        "maximum": 0.000469032461355581,
+        "initial": 0.0003986828243798808,
+        "terminal": 0.00038433886895559576
+      },
+      "path_defect_probe_standard_error": 0.0009842901030442791,
+      "terminal_defect_probe_standard_error": 0.00364128857548399,
+      "terminal_rollout": {
+        "case_id": 13,
+        "valid": true,
+        "raw": 0.012969712368005445,
+        "aligned": 0.005447856225256009,
+        "translation": 0.01177005953501225,
+        "absolute_displacement": 0.006858819778244742
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 14,
+      "case_id": 14,
+      "depth": 0.045183151960372925,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0031113622284206954,
+        "median": 0.003107621714657425,
+        "p95": 0.0037574890514923305,
+        "maximum": 0.004038592453282528,
+        "initial": 0.0034173864344587287,
+        "terminal": 0.0031627795484021936
+      },
+      "hadamard_defect": {
+        "mean": 0.05376198402566551,
+        "median": 0.05327082670315184,
+        "p95": 0.05944915673614134,
+        "maximum": 0.059623317373544156,
+        "initial": 0.055995130588760975,
+        "terminal": 0.054325187202164664
+      },
+      "residual_h1": {
+        "mean": 0.0005289173044805605,
+        "median": 0.0005261381563518315,
+        "p95": 0.0005678495945773186,
+        "maximum": 0.0005825936477400124,
+        "initial": 0.0005157370186880049,
+        "terminal": 0.0005326734137582204
+      },
+      "forcing_h1": {
+        "mean": 0.010420904845008669,
+        "median": 0.010164315907035025,
+        "p95": 0.011833900601087306,
+        "maximum": 0.012212864434082881,
+        "initial": 0.010126639551935882,
+        "terminal": 0.00996469107642011
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.002199979040711079,
+        "median": 0.0022045535517230003,
+        "p95": 0.002449276788219404,
+        "maximum": 0.0025054249840275036,
+        "initial": 0.002033083302207194,
+        "terminal": 0.0020392976635012065
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00019265142020547115,
+        "median": 0.0001926325338213372,
+        "p95": 0.00019542649011149326,
+        "maximum": 0.00019681892265243544,
+        "initial": 0.0001906346196309386,
+        "terminal": 0.00019176237079692528
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00023125268932186314,
+        "median": 0.00023120484128913747,
+        "p95": 0.00023258410596347425,
+        "maximum": 0.000232748850533561,
+        "initial": 0.00022947399859904797,
+        "terminal": 0.00023240956666269834
+      },
+      "path_defect_probe_standard_error": 0.001155104253781945,
+      "terminal_defect_probe_standard_error": 0.003755472308085524,
+      "terminal_rollout": {
+        "case_id": 14,
+        "valid": true,
+        "raw": 0.0023154707937557825,
+        "aligned": 0.0020456933542657213,
+        "translation": 0.0010846859900676767,
+        "absolute_displacement": 0.00013781519684660014
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 15,
+      "case_id": 15,
+      "depth": 0.021660035476088524,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.02180179164339064,
+        "median": 0.019082935506468862,
+        "p95": 0.03260608738901767,
+        "maximum": 0.039591337527970775,
+        "initial": 0.01810408750448464,
+        "terminal": 0.01856072546129768
+      },
+      "hadamard_defect": {
+        "mean": 0.14229449523080523,
+        "median": 0.13544633467037226,
+        "p95": 0.17350001615447844,
+        "maximum": 0.19303056933953172,
+        "initial": 0.13107548510250377,
+        "terminal": 0.13154573680200682
+      },
+      "residual_h1": {
+        "mean": 0.0003780253180482133,
+        "median": 0.0003578107626639348,
+        "p95": 0.000489416961499167,
+        "maximum": 0.0005328921957555471,
+        "initial": 0.0003578107626639348,
+        "terminal": 0.00035652788549440993
+      },
+      "forcing_h1": {
+        "mean": 0.0027444133234081824,
+        "median": 0.002830630094512046,
+        "p95": 0.003047680005052702,
+        "maximum": 0.0030944990243917747,
+        "initial": 0.002831135450304993,
+        "terminal": 0.002830630094512046
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.001815927484867545,
+        "median": 0.0016471757140745047,
+        "p95": 0.002685258365298075,
+        "maximum": 0.004775842525567593,
+        "initial": 0.0017652877993448574,
+        "terminal": 0.0018935628545461189
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00039100212635539505,
+        "median": 0.00026280630570824526,
+        "p95": 0.0007613031107078314,
+        "maximum": 0.0023991948322897765,
+        "initial": 0.00028578186115677564,
+        "terminal": 0.0002256171841408805
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00029636522678982665,
+        "median": 0.00027287635635624233,
+        "p95": 0.0004497225801261105,
+        "maximum": 0.00047427257335101345,
+        "initial": 0.00047427257335101345,
+        "terminal": 0.00029054799473790223
+      },
+      "path_defect_probe_standard_error": 0.0017076781143063038,
+      "terminal_defect_probe_standard_error": 0.009152211355786567,
+      "terminal_rollout": {
+        "case_id": 15,
+        "valid": true,
+        "raw": 0.0580078852855037,
+        "aligned": 0.036193436685178895,
+        "translation": 0.04533155519295696,
+        "absolute_displacement": 0.0038508954873671224
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 16,
+      "case_id": 16,
+      "depth": 0.0659460797905922,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006383403602232675,
+        "median": 0.005881555160965762,
+        "p95": 0.012472437228378241,
+        "maximum": 0.013210341212973776,
+        "initial": 0.005419312402472863,
+        "terminal": 0.007213624889192285
+      },
+      "hadamard_defect": {
+        "mean": 0.07739064562943747,
+        "median": 0.07589860406456579,
+        "p95": 0.10968645826457028,
+        "maximum": 0.11137879423918907,
+        "initial": 0.07232543749152773,
+        "terminal": 0.08324113271616171
+      },
+      "residual_h1": {
+        "mean": 0.001408902002480382,
+        "median": 0.0013663455852182798,
+        "p95": 0.001977643963626024,
+        "maximum": 0.0021235299305116047,
+        "initial": 0.0012462816153244443,
+        "terminal": 0.0015530865465749099
+      },
+      "forcing_h1": {
+        "mean": 0.018526843838818068,
+        "median": 0.018538661142801508,
+        "p95": 0.01974485883587375,
+        "maximum": 0.020179002766543552,
+        "initial": 0.01773877817156211,
+        "terminal": 0.019237890839596546
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.006913730299186714,
+        "median": 0.006747223621530601,
+        "p95": 0.00980830194686844,
+        "maximum": 0.012167318763847097,
+        "initial": 0.012167318763847097,
+        "terminal": 0.008085642630750024
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00032177779302796137,
+        "median": 0.00025423771436196367,
+        "p95": 0.000593175822300808,
+        "maximum": 0.0007152658002536688,
+        "initial": 0.00025423771436196367,
+        "terminal": 0.00027169701047241357
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00017260325499438345,
+        "median": 0.00016941843727930856,
+        "p95": 0.00022146785706068762,
+        "maximum": 0.00022277355082514708,
+        "initial": 0.00012508173538076884,
+        "terminal": 0.00021671423323502188
+      },
+      "path_defect_probe_standard_error": 0.001177687002237964,
+      "terminal_defect_probe_standard_error": 0.004355369967619582,
+      "terminal_rollout": {
+        "case_id": 16,
+        "valid": true,
+        "raw": 0.0051845701204208785,
+        "aligned": 0.004117292391506257,
+        "translation": 0.003150820638564761,
+        "absolute_displacement": 0.0007874288138088395
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 17,
+      "case_id": 17,
+      "depth": 0.012424125336110592,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.058475554683439845,
+        "median": 0.05722816017207838,
+        "p95": 0.08657855868196163,
+        "maximum": 0.09825152992450267,
+        "initial": 0.06212962213415852,
+        "terminal": 0.038224774257034425
+      },
+      "hadamard_defect": {
+        "mean": 0.2215576289821668,
+        "median": 0.2226913689502661,
+        "p95": 0.2527789202743483,
+        "maximum": 0.2637704029086425,
+        "initial": 0.22825874226211856,
+        "terminal": 0.19040763059262122
+      },
+      "residual_h1": {
+        "mean": 0.0003805605795446393,
+        "median": 0.0003735950143133037,
+        "p95": 0.00041731697148351146,
+        "maximum": 0.0004291686132944125,
+        "initial": 0.000394538409241343,
+        "terminal": 0.00035885476002994873
+      },
+      "forcing_h1": {
+        "mean": 0.0019293151932325632,
+        "median": 0.0019283368255088985,
+        "p95": 0.0021469893974920447,
+        "maximum": 0.002181362407927521,
+        "initial": 0.0019146044282072443,
+        "terminal": 0.002001087012666538
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.020482529012535174,
+        "median": 0.020430671015902443,
+        "p95": 0.02069062380883752,
+        "maximum": 0.021447656415102594,
+        "initial": 0.021447656415102594,
+        "terminal": 0.020474914631225017
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00749167273983824,
+        "median": 0.007471873889738988,
+        "p95": 0.007571995703360826,
+        "maximum": 0.00787542320546939,
+        "initial": 0.00787542320546939,
+        "terminal": 0.007492375872602159
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0016351853955011368,
+        "median": 0.0016391646371554942,
+        "p95": 0.001685357338464418,
+        "maximum": 0.001709423084200053,
+        "initial": 0.0015242426332250283,
+        "terminal": 0.0016495312745354236
+      },
+      "path_defect_probe_standard_error": 0.006004163053969028,
+      "terminal_defect_probe_standard_error": 0.011459227632897211,
+      "terminal_rollout": {
+        "case_id": 17,
+        "valid": true,
+        "raw": 0.011163998715399743,
+        "aligned": 0.01088742323281784,
+        "translation": 0.0024695915992215046,
+        "absolute_displacement": 9.394302237916455e-05
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 18,
+      "case_id": 18,
+      "depth": 0.1669212430715561,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.008822148290358945,
+        "median": 0.008876802806098719,
+        "p95": 0.01328860216820203,
+        "maximum": 0.015181470174760837,
+        "initial": 0.00756335444820537,
+        "terminal": 0.01123810552117303
+      },
+      "hadamard_defect": {
+        "mean": 0.091709813056989,
+        "median": 0.09272849084646695,
+        "p95": 0.11444393290769429,
+        "maximum": 0.12197063559683165,
+        "initial": 0.0863328942804226,
+        "terminal": 0.10459429813891831
+      },
+      "residual_h1": {
+        "mean": 0.007533834002184701,
+        "median": 0.0075073381263155575,
+        "p95": 0.009705211035314118,
+        "maximum": 0.010243101915797366,
+        "initial": 0.00662575991634556,
+        "terminal": 0.008526703246145781
+      },
+      "forcing_h1": {
+        "mean": 0.08223756892732952,
+        "median": 0.08279537513899254,
+        "p95": 0.0874150638367001,
+        "maximum": 0.09045886209679468,
+        "initial": 0.07768938835604285,
+        "terminal": 0.0802733293446442
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.012263312612360671,
+        "median": 0.01139251420826331,
+        "p95": 0.019080562393993684,
+        "maximum": 0.01919261389162145,
+        "initial": 0.019052549519586744,
+        "terminal": 0.017129345901655855
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002763933570496506,
+        "median": 0.00026840083774974107,
+        "p95": 0.00034628315450976644,
+        "maximum": 0.000401428294180926,
+        "initial": 0.000401428294180926,
+        "terminal": 0.00032525792405569277
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00025735510485262,
+        "median": 0.00025682076501220907,
+        "p95": 0.0003288467667692008,
+        "maximum": 0.0003707415532032744,
+        "initial": 0.0003707415532032744,
+        "terminal": 0.0002936733033709194
+      },
+      "path_defect_probe_standard_error": 0.000739883101032341,
+      "terminal_defect_probe_standard_error": 0.0044582382021010605,
+      "terminal_rollout": {
+        "case_id": 18,
+        "valid": true,
+        "raw": 0.0063806652995207075,
+        "aligned": 0.004431077274472431,
+        "translation": 0.004591126643010586,
+        "absolute_displacement": 0.003959112982364472
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 19,
+      "case_id": 19,
+      "depth": 0.08571264892816544,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.011346406797414525,
+        "median": 0.01072543540990963,
+        "p95": 0.014877144850025002,
+        "maximum": 0.014924715808408174,
+        "initial": 0.010482828787701402,
+        "terminal": 0.012287674605069162
+      },
+      "hadamard_defect": {
+        "mean": 0.1033228462048466,
+        "median": 0.10105045385220354,
+        "p95": 0.11832606141929783,
+        "maximum": 0.11902995977269937,
+        "initial": 0.10003345061791916,
+        "terminal": 0.10569590444803174
+      },
+      "residual_h1": {
+        "mean": 0.005396358315682994,
+        "median": 0.00538842821349265,
+        "p95": 0.005969477083958565,
+        "maximum": 0.00631092155659201,
+        "initial": 0.0052155725931168,
+        "terminal": 0.005548478892108755
+      },
+      "forcing_h1": {
+        "mean": 0.05361119180575713,
+        "median": 0.053049644416979284,
+        "p95": 0.056951139732047566,
+        "maximum": 0.057402106893630726,
+        "initial": 0.05226540609953739,
+        "terminal": 0.053049644416979284
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.004942391053989462,
+        "median": 0.004652856443357608,
+        "p95": 0.006674742125568884,
+        "maximum": 0.006694843943135952,
+        "initial": 0.004306075123900001,
+        "terminal": 0.00440517817888864
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003301899371426721,
+        "median": 0.000329168297932159,
+        "p95": 0.000337923427492622,
+        "maximum": 0.0003381295492927233,
+        "initial": 0.00032971111348037717,
+        "terminal": 0.0003275698531207491
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00013649950300633255,
+        "median": 0.00013646175258397677,
+        "p95": 0.00013716669666734925,
+        "maximum": 0.00013765321559182123,
+        "initial": 0.00013765321559182123,
+        "terminal": 0.00013622817266305457
+      },
+      "path_defect_probe_standard_error": 0.0007103313607836611,
+      "terminal_defect_probe_standard_error": 0.008625738182832838,
+      "terminal_rollout": {
+        "case_id": 19,
+        "valid": true,
+        "raw": 0.06352698014530016,
+        "aligned": 0.007745481781137949,
+        "translation": 0.06305303100057459,
+        "absolute_displacement": 0.015038438180679686
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 20,
+      "case_id": 20,
+      "depth": 0.13176119327545166,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.008793608331690465,
+        "median": 0.00873052303972171,
+        "p95": 0.0120124630059988,
+        "maximum": 0.012791065929316172,
+        "initial": 0.005929076743558071,
+        "terminal": 0.011817812275169457
+      },
+      "hadamard_defect": {
+        "mean": 0.09175077823136422,
+        "median": 0.09127020622356748,
+        "p95": 0.10657551789677776,
+        "maximum": 0.11065111701542257,
+        "initial": 0.07646021910099249,
+        "terminal": 0.10555661811711656
+      },
+      "residual_h1": {
+        "mean": 0.0036510530258761454,
+        "median": 0.0036609029971625675,
+        "p95": 0.004275898192637297,
+        "maximum": 0.004350932494113653,
+        "initial": 0.002833951140340121,
+        "terminal": 0.004350932494113653
+      },
+      "forcing_h1": {
+        "mean": 0.04008635086301358,
+        "median": 0.0403762722486953,
+        "p95": 0.043741164001916556,
+        "maximum": 0.044787773975052014,
+        "initial": 0.0372129874935375,
+        "terminal": 0.04023651591112164
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.020969380019450555,
+        "median": 0.019923831055955236,
+        "p95": 0.0336281151558727,
+        "maximum": 0.0342290122166283,
+        "initial": 0.0342290122166283,
+        "terminal": 0.023439321301947872
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00018710298619199238,
+        "median": 0.0001897297250490874,
+        "p95": 0.0002662322726350228,
+        "maximum": 0.00027685235250621173,
+        "initial": 0.00027685235250621173,
+        "terminal": 0.00020595116280920533
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 7.763604318591379e-05,
+        "median": 6.749457316548488e-05,
+        "p95": 0.00013591899767610553,
+        "maximum": 0.0001483122635246491,
+        "initial": 7.986844653035097e-05,
+        "terminal": 9.145038958322538e-05
+      },
+      "path_defect_probe_standard_error": 0.0012066298739379759,
+      "terminal_defect_probe_standard_error": 0.006711247508705962,
+      "terminal_rollout": {
+        "case_id": 20,
+        "valid": true,
+        "raw": 0.002425080026017222,
+        "aligned": 0.0013318313575265749,
+        "translation": 0.0020266322724403186,
+        "absolute_displacement": 0.0015622435691730224
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 21,
+      "case_id": 21,
+      "depth": 0.03339472413063049,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0074354125207594934,
+        "median": 0.007092978408084771,
+        "p95": 0.01043300929801735,
+        "maximum": 0.011021745738258048,
+        "initial": 0.007610879571803654,
+        "terminal": 0.010285825187957178
+      },
+      "hadamard_defect": {
+        "mean": 0.08331409257892809,
+        "median": 0.08254775599000287,
+        "p95": 0.09829286249168062,
+        "maximum": 0.1028937800655661,
+        "initial": 0.08608931024969542,
+        "terminal": 0.09714263309820927
+      },
+      "residual_h1": {
+        "mean": 0.0004124430450847052,
+        "median": 0.00041487710100443747,
+        "p95": 0.00045753383766840484,
+        "maximum": 0.0004592829261951233,
+        "initial": 0.00038948076881114847,
+        "terminal": 0.00045619673967212885
+      },
+      "forcing_h1": {
+        "mean": 0.005216909727594672,
+        "median": 0.005202194662545551,
+        "p95": 0.005960336048286941,
+        "maximum": 0.005989756794072167,
+        "initial": 0.004690288556197669,
+        "terminal": 0.005040048851174974
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.002020264173910938,
+        "median": 0.0017912012988667383,
+        "p95": 0.003353300019047314,
+        "maximum": 0.0037645155519248344,
+        "initial": 0.0020944482622307398,
+        "terminal": 0.00139325890003122
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0004899763651979649,
+        "median": 0.00033467920037809584,
+        "p95": 0.0016239264388352185,
+        "maximum": 0.0019411392609123704,
+        "initial": 0.0003604972204856615,
+        "terminal": 0.0003945303438010281
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0003981581669963017,
+        "median": 0.0003853945717464754,
+        "p95": 0.000645866586845009,
+        "maximum": 0.0006837412526673614,
+        "initial": 0.0004196022178233793,
+        "terminal": 0.00036577196569099834
+      },
+      "path_defect_probe_standard_error": 0.000985987941741687,
+      "terminal_defect_probe_standard_error": 0.007523890938000432,
+      "terminal_rollout": {
+        "case_id": 21,
+        "valid": true,
+        "raw": 0.21564626242364715,
+        "aligned": 0.03613780593341469,
+        "translation": 0.21259672970111124,
+        "absolute_displacement": 0.021334389977411602
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 22,
+      "case_id": 22,
+      "depth": 0.27154305577278137,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.015438255339841963,
+        "median": 0.012870923542015678,
+        "p95": 0.024491742293495246,
+        "maximum": 0.024767605960479094,
+        "initial": 0.012870923542015678,
+        "terminal": 0.0155956377464674
+      },
+      "hadamard_defect": {
+        "mean": 0.1220822589759162,
+        "median": 0.11282959849619315,
+        "p95": 0.15443812380521563,
+        "maximum": 0.155626949412841,
+        "initial": 0.11282959849619315,
+        "terminal": 0.12376926862274018
+      },
+      "residual_h1": {
+        "mean": 0.1157127142072148,
+        "median": 0.1108750504884981,
+        "p95": 0.1461827371685727,
+        "maximum": 0.15237452926617379,
+        "initial": 0.10179838643835919,
+        "terminal": 0.1118754706846262
+      },
+      "forcing_h1": {
+        "mean": 0.9531076943699968,
+        "median": 0.9510795185573099,
+        "p95": 1.0268379383324766,
+        "maximum": 1.028209885009972,
+        "initial": 0.9030932365516504,
+        "terminal": 0.8982607486356888
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.022445116616073048,
+        "median": 0.019120906872257135,
+        "p95": 0.038628669538062925,
+        "maximum": 0.06280629069654997,
+        "initial": 0.06280629069654997,
+        "terminal": 0.032109574852295084
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003884676436043854,
+        "median": 0.0003736609864455141,
+        "p95": 0.0004669945845226605,
+        "maximum": 0.0004806162316806945,
+        "initial": 0.0004402660553191467,
+        "terminal": 0.0003673977995535649
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0003517615719413662,
+        "median": 0.00033140689197164636,
+        "p95": 0.0004528331840168906,
+        "maximum": 0.0004639705761405929,
+        "initial": 0.0002854979997790679,
+        "terminal": 0.000328663130577624
+      },
+      "path_defect_probe_standard_error": 0.001131551124311989,
+      "terminal_defect_probe_standard_error": 0.004295780030521299,
+      "terminal_rollout": {
+        "case_id": 22,
+        "valid": true,
+        "raw": 0.06415477768743937,
+        "aligned": 0.008531651650545603,
+        "translation": 0.06358495435430075,
+        "absolute_displacement": 0.06679119783619068
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 23,
+      "case_id": 23,
+      "depth": 0.2085682451725006,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.007225545933968707,
+        "median": 0.007250694149089534,
+        "p95": 0.0077123878384356,
+        "maximum": 0.007732102020207403,
+        "initial": 0.006998409523451286,
+        "terminal": 0.0073419155145945155
+      },
+      "hadamard_defect": {
+        "mean": 0.08428478684543574,
+        "median": 0.0844884096804323,
+        "p95": 0.08684573868665606,
+        "maximum": 0.08725779892496789,
+        "initial": 0.08317007783904881,
+        "terminal": 0.0851612756317037
+      },
+      "residual_h1": {
+        "mean": 0.05211444744362519,
+        "median": 0.05242929929646116,
+        "p95": 0.05470398928477515,
+        "maximum": 0.055802765665370443,
+        "initial": 0.04979375485458625,
+        "terminal": 0.051116662203386884
+      },
+      "forcing_h1": {
+        "mean": 0.6265492831864254,
+        "median": 0.6258989417025711,
+        "p95": 0.6664640285589014,
+        "maximum": 0.6883890209136481,
+        "initial": 0.600514295516422,
+        "terminal": 0.6174408017135933
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.013171742154839702,
+        "median": 0.013068103438506274,
+        "p95": 0.016922511661095412,
+        "maximum": 0.02033715601706981,
+        "initial": 0.012794592108039045,
+        "terminal": 0.013619593941004057
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00015992494891459082,
+        "median": 0.00015869474843411844,
+        "p95": 0.00017800966549274383,
+        "maximum": 0.00019596727615717952,
+        "initial": 0.00015774647393098932,
+        "terminal": 0.00016028881594032452
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00010793472722036601,
+        "median": 0.00010787182562627606,
+        "p95": 0.00010843533277636738,
+        "maximum": 0.00010865051041662026,
+        "initial": 0.00010831803504291402,
+        "terminal": 0.00010764324707162851
+      },
+      "path_defect_probe_standard_error": 0.0006822684442798672,
+      "terminal_defect_probe_standard_error": 0.0024423028392005454,
+      "terminal_rollout": {
+        "case_id": 23,
+        "valid": true,
+        "raw": 0.03170545258328711,
+        "aligned": 0.0033291450056390924,
+        "translation": 0.03153018422151218,
+        "absolute_displacement": 0.01679830672877458
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 24,
+      "case_id": 24,
+      "depth": 0.1411779224872589,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0027072625902442035,
+        "median": 0.0027042178258970435,
+        "p95": 0.0035159013776996668,
+        "maximum": 0.0037478143445587022,
+        "initial": 0.0017140094456178639,
+        "terminal": 0.0021729047084886677
+      },
+      "hadamard_defect": {
+        "mean": 0.051257790665593814,
+        "median": 0.051598299608185905,
+        "p95": 0.05870587192413021,
+        "maximum": 0.060589810851011144,
+        "initial": 0.04086548241390715,
+        "terminal": 0.04632635723322815
+      },
+      "residual_h1": {
+        "mean": 0.0005649127941276196,
+        "median": 0.0005491137577903524,
+        "p95": 0.0006662749529346183,
+        "maximum": 0.0006751823296240592,
+        "initial": 0.0004340498814243578,
+        "terminal": 0.0004995562840365154
+      },
+      "forcing_h1": {
+        "mean": 0.011066677989183385,
+        "median": 0.011086702926764197,
+        "p95": 0.011894334310804772,
+        "maximum": 0.012016046165387765,
+        "initial": 0.010692271411854824,
+        "terminal": 0.010935382600954342
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.02302202381923205,
+        "median": 0.020084628477902166,
+        "p95": 0.03508740661037614,
+        "maximum": 0.03986555225435478,
+        "initial": 0.02595822025171305,
+        "terminal": 0.03389287019938148
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00016601506652091761,
+        "median": 0.0001535293584794925,
+        "p95": 0.0002338481144023403,
+        "maximum": 0.0002599906865380059,
+        "initial": 0.00018067170256459556,
+        "terminal": 0.00022534282427086078
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 5.563809126861893e-05,
+        "median": 5.653854061064702e-05,
+        "p95": 6.46338465264095e-05,
+        "maximum": 6.554271589191688e-05,
+        "initial": 6.0296463242751965e-05,
+        "terminal": 6.554271589191688e-05
+      },
+      "path_defect_probe_standard_error": 0.0005443642097632052,
+      "terminal_defect_probe_standard_error": 0.0013359973549873323,
+      "terminal_rollout": {
+        "case_id": 24,
+        "valid": true,
+        "raw": 0.0014155423222159363,
+        "aligned": 0.0010161885790703896,
+        "translation": 0.0009854546350550025,
+        "absolute_displacement": 0.0012327844430362863
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 25,
+      "case_id": 25,
+      "depth": 0.01938674785196781,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0314573797303833,
+        "median": 0.02950670873063609,
+        "p95": 0.04275943291065593,
+        "maximum": 0.05606084035021253,
+        "initial": 0.02950670873063609,
+        "terminal": 0.022877847077582808
+      },
+      "hadamard_defect": {
+        "mean": 0.16494373432429027,
+        "median": 0.16323012955562974,
+        "p95": 0.1871011725510507,
+        "maximum": 0.20053483771630756,
+        "initial": 0.16524786028542487,
+        "terminal": 0.14705945834374046
+      },
+      "residual_h1": {
+        "mean": 0.0003225046620564154,
+        "median": 0.0003190229711766709,
+        "p95": 0.00036351862979374847,
+        "maximum": 0.0003970409936393284,
+        "initial": 0.0003035206523295424,
+        "terminal": 0.0003190229711766709
+      },
+      "forcing_h1": {
+        "mean": 0.0021107595720207825,
+        "median": 0.0020948149736670528,
+        "p95": 0.002287023968997825,
+        "maximum": 0.0024322202721233,
+        "initial": 0.0020112258024572232,
+        "terminal": 0.0022507248932164565
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0015717740076953545,
+        "median": 0.0015700167267592273,
+        "p95": 0.0017060142569765844,
+        "maximum": 0.0017326196901507511,
+        "initial": 0.0014362847548286357,
+        "terminal": 0.0015171135708223332
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0004213635206440232,
+        "median": 0.00041645881994578095,
+        "p95": 0.0004714231637119853,
+        "maximum": 0.0004748459239805665,
+        "initial": 0.00041647826384303533,
+        "terminal": 0.00047056747364484
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.000395223802981454,
+        "median": 0.0003939130831398727,
+        "p95": 0.00040248728462518663,
+        "maximum": 0.000402587617661825,
+        "initial": 0.0003972231415030839,
+        "terminal": 0.00040138004921182066
+      },
+      "path_defect_probe_standard_error": 0.003684178334345421,
+      "terminal_defect_probe_standard_error": 0.009133684138865622,
+      "terminal_rollout": {
+        "case_id": 25,
+        "valid": true,
+        "raw": 0.015521857124238285,
+        "aligned": 0.0029934965732433473,
+        "translation": 0.01523046377663028,
+        "absolute_displacement": 0.000982293895305834
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 26,
+      "case_id": 26,
+      "depth": 0.048910658806562424,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.004166702286124832,
+        "median": 0.0041889802617341215,
+        "p95": 0.005222256562677693,
+        "maximum": 0.005792014799047129,
+        "initial": 0.0041889802617341215,
+        "terminal": 0.0029891264730753956
+      },
+      "hadamard_defect": {
+        "mean": 0.06275412545962544,
+        "median": 0.06235830487451759,
+        "p95": 0.06978687050988178,
+        "maximum": 0.07320998852461524,
+        "initial": 0.061590054380620686,
+        "terminal": 0.05305554612738384
+      },
+      "residual_h1": {
+        "mean": 0.0006882720209906469,
+        "median": 0.0006798873125936078,
+        "p95": 0.0007628543143263261,
+        "maximum": 0.0007737624318625148,
+        "initial": 0.00059095717456426,
+        "terminal": 0.0006219016812051708
+      },
+      "forcing_h1": {
+        "mean": 0.011430593656019072,
+        "median": 0.01137343330867142,
+        "p95": 0.012352207092779533,
+        "maximum": 0.012680755326476341,
+        "initial": 0.010324898033876066,
+        "terminal": 0.012270070034355332
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0032297286095291193,
+        "median": 0.0031067126502852356,
+        "p95": 0.004378210036437082,
+        "maximum": 0.005204816664949531,
+        "initial": 0.004147287409871427,
+        "terminal": 0.0030346366229977596
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002768995738481381,
+        "median": 0.00020379347711283065,
+        "p95": 0.0005480479161895499,
+        "maximum": 0.001077009582549224,
+        "initial": 0.00020107289027218142,
+        "terminal": 0.00019832998192972033
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0001571196417854697,
+        "median": 0.00014762436992887606,
+        "p95": 0.0002264013695619172,
+        "maximum": 0.00022815067214839913,
+        "initial": 0.00014111707574663066,
+        "terminal": 0.0001584835264351282
+      },
+      "path_defect_probe_standard_error": 0.0006992173635709494,
+      "terminal_defect_probe_standard_error": 0.0034081813156035907,
+      "terminal_rollout": {
+        "case_id": 26,
+        "valid": true,
+        "raw": 0.05132584067129566,
+        "aligned": 0.010073412222069351,
+        "translation": 0.050327609587774894,
+        "absolute_displacement": 0.00759849524278355
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 27,
+      "case_id": 27,
+      "depth": 0.011606559157371521,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.09597235204718846,
+        "median": 0.09506838822337815,
+        "p95": 0.12377907852778552,
+        "maximum": 0.1656045279721288,
+        "initial": 0.1656045279721288,
+        "terminal": 0.08979679039955235
+      },
+      "hadamard_defect": {
+        "mean": 0.2905976840267327,
+        "median": 0.29253787277972343,
+        "p95": 0.32576642588636984,
+        "maximum": 0.3561406455649926,
+        "initial": 0.3561406455649926,
+        "terminal": 0.28178078788922245
+      },
+      "residual_h1": {
+        "mean": 0.0008233247856588483,
+        "median": 0.0008258849919522654,
+        "p95": 0.0009655914781362465,
+        "maximum": 0.0009662571446848228,
+        "initial": 0.0008325996277077795,
+        "terminal": 0.000723349921465177
+      },
+      "forcing_h1": {
+        "mean": 0.003064858958911576,
+        "median": 0.0029940044438543654,
+        "p95": 0.0036747136591809724,
+        "maximum": 0.0037326104191912892,
+        "initial": 0.0029155387442368645,
+        "terminal": 0.0026771062867273947
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.04768934549364275,
+        "median": 0.0472598281758126,
+        "p95": 0.04914086149013101,
+        "maximum": 0.05349377725624293,
+        "initial": 0.05349377725624293,
+        "terminal": 0.04685500525412097
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.02043740295118618,
+        "median": 0.020207571476426777,
+        "p95": 0.021183634588688032,
+        "maximum": 0.023605764870817753,
+        "initial": 0.023605764870817753,
+        "terminal": 0.019973885131990072
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.003661985279673306,
+        "median": 0.0036413212981965355,
+        "p95": 0.0038338802637329786,
+        "maximum": 0.0038736728580316543,
+        "initial": 0.003575578401945346,
+        "terminal": 0.0038239321151583095
+      },
+      "path_defect_probe_standard_error": 0.005715953513341636,
+      "terminal_defect_probe_standard_error": 0.026326637937117835,
+      "terminal_rollout": {
+        "case_id": 27,
+        "valid": true,
+        "raw": 0.6639909382001992,
+        "aligned": 0.044010255265927084,
+        "translation": 0.6625308018827567,
+        "absolute_displacement": 0.021796236371955983
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 28,
+      "case_id": 28,
+      "depth": 0.016900684684515,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.03646054548349188,
+        "median": 0.03760939884436835,
+        "p95": 0.04695477580279381,
+        "maximum": 0.05127780080567562,
+        "initial": 0.05127780080567562,
+        "terminal": 0.029900627201975876
+      },
+      "hadamard_defect": {
+        "mean": 0.18103111270973302,
+        "median": 0.1835412889583219,
+        "p95": 0.2060563693489195,
+        "maximum": 0.2164286962535491,
+        "initial": 0.2164286962535491,
+        "terminal": 0.16558014499377788
+      },
+      "residual_h1": {
+        "mean": 0.0002372505747485689,
+        "median": 0.00023848569727821458,
+        "p95": 0.00027677894526490957,
+        "maximum": 0.00029134891097416815,
+        "initial": 0.00027313645383759494,
+        "terminal": 0.0002284596789510586
+      },
+      "forcing_h1": {
+        "mean": 0.0013790935691451133,
+        "median": 0.0013645579364218764,
+        "p95": 0.0016035401010122891,
+        "maximum": 0.0016101453103580699,
+        "initial": 0.0012799517940849572,
+        "terminal": 0.001430636731538468
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0020506173419801116,
+        "median": 0.002133158048723578,
+        "p95": 0.0026077011230312623,
+        "maximum": 0.0027240070100197607,
+        "initial": 0.001291433156438702,
+        "terminal": 0.0023117771339841893
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002476887404298943,
+        "median": 0.0002290943908878432,
+        "p95": 0.0003543517302265418,
+        "maximum": 0.00043228104622479354,
+        "initial": 0.00023733549054213702,
+        "terminal": 0.0002310341921489884
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0002378953653264992,
+        "median": 0.0002379703817072542,
+        "p95": 0.00027162801011976375,
+        "maximum": 0.0003208782247257648,
+        "initial": 0.0002593154564682635,
+        "terminal": 0.00023581860362508795
+      },
+      "path_defect_probe_standard_error": 0.0037771911182703267,
+      "terminal_defect_probe_standard_error": 0.012868159116764073,
+      "terminal_rollout": {
+        "case_id": 28,
+        "valid": true,
+        "raw": 0.01314183288871195,
+        "aligned": 0.00553690774787493,
+        "translation": 0.011918490855236398,
+        "absolute_displacement": 0.000923068933602119
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 29,
+      "case_id": 29,
+      "depth": 0.1020812839269638,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.016017114187630247,
+        "median": 0.01596763765951854,
+        "p95": 0.01790194975786969,
+        "maximum": 0.018392697461852524,
+        "initial": 0.014971939829260929,
+        "terminal": 0.01745164547670968
+      },
+      "hadamard_defect": {
+        "mean": 0.12371052857522301,
+        "median": 0.12261422486669411,
+        "p95": 0.13081270285293972,
+        "maximum": 0.1309522442694978,
+        "initial": 0.11921876969350256,
+        "terminal": 0.13020643632824785
+      },
+      "residual_h1": {
+        "mean": 0.008786033691633771,
+        "median": 0.008765279494662558,
+        "p95": 0.009677395179869014,
+        "maximum": 0.00982809988449138,
+        "initial": 0.008765279494662558,
+        "terminal": 0.00912210200429651
+      },
+      "forcing_h1": {
+        "mean": 0.07243239510070582,
+        "median": 0.07404148489237032,
+        "p95": 0.07808943923273667,
+        "maximum": 0.07824238536435946,
+        "initial": 0.07586795134199233,
+        "terminal": 0.07196041635961356
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.007188644029743471,
+        "median": 0.0065728307215969116,
+        "p95": 0.010174922606875362,
+        "maximum": 0.010181078239043649,
+        "initial": 0.00796958707668222,
+        "terminal": 0.0063029932263189885
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00029706887140216055,
+        "median": 0.00029454393332703786,
+        "p95": 0.000310582266279251,
+        "maximum": 0.00031142750553914226,
+        "initial": 0.00030071841355630655,
+        "terminal": 0.0002932703900125181
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00014852604628094694,
+        "median": 0.0001484107955304833,
+        "p95": 0.00014915225336739412,
+        "maximum": 0.00014942919603615483,
+        "initial": 0.00014942919603615483,
+        "terminal": 0.00014866898733217768
+      },
+      "path_defect_probe_standard_error": 0.002085538161428183,
+      "terminal_defect_probe_standard_error": 0.005761535764057013,
+      "terminal_rollout": {
+        "case_id": 29,
+        "valid": true,
+        "raw": 0.009380872123338884,
+        "aligned": 0.006194410230192862,
+        "translation": 0.007044859380748391,
+        "absolute_displacement": 0.002083374893298398
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 30,
+      "case_id": 30,
+      "depth": 0.12592269480228424,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006582940107893988,
+        "median": 0.005951570481879191,
+        "p95": 0.009996655469603682,
+        "maximum": 0.012050724821472306,
+        "initial": 0.00607854898411591,
+        "terminal": 0.005162692374964839
+      },
+      "hadamard_defect": {
+        "mean": 0.07886228153955305,
+        "median": 0.07632298808621688,
+        "p95": 0.09818049211830805,
+        "maximum": 0.10612366457307426,
+        "initial": 0.07704611137637779,
+        "terminal": 0.07128614773098997
+      },
+      "residual_h1": {
+        "mean": 0.0022868327627374443,
+        "median": 0.0022999011824036183,
+        "p95": 0.0029543832449586047,
+        "maximum": 0.0032358106285692995,
+        "initial": 0.002037676757780833,
+        "terminal": 0.0021549628869195793
+      },
+      "forcing_h1": {
+        "mean": 0.029018314034566887,
+        "median": 0.029231200984592972,
+        "p95": 0.032406774205229825,
+        "maximum": 0.03265495265402321,
+        "initial": 0.026176517871891583,
+        "terminal": 0.02994418836592015
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.02172300536554576,
+        "median": 0.021212756070152577,
+        "p95": 0.031721354766729756,
+        "maximum": 0.03504335648980313,
+        "initial": 0.03504335648980313,
+        "terminal": 0.014658490226107079
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00018168551034476363,
+        "median": 0.00016958644526016324,
+        "p95": 0.00023363580488027936,
+        "maximum": 0.00025882801698079026,
+        "initial": 0.00025882801698079026,
+        "terminal": 0.00012498765268037664
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 7.552591363765305e-05,
+        "median": 7.089462265234632e-05,
+        "p95": 0.00010199505262891489,
+        "maximum": 0.0001672423182027301,
+        "initial": 8.178046784947306e-05,
+        "terminal": 6.099933450418861e-05
+      },
+      "path_defect_probe_standard_error": 0.000718530684732952,
+      "terminal_defect_probe_standard_error": 0.002323467475424218,
+      "terminal_rollout": {
+        "case_id": 30,
+        "valid": true,
+        "raw": 0.0027297819279070564,
+        "aligned": 0.0025773924872319123,
+        "translation": 0.000899309368731619,
+        "absolute_displacement": 0.0007080882272750896
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g0",
+      "case_index": 31,
+      "case_id": 31,
+      "depth": 0.26861435174942017,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0023620130154792373,
+        "median": 0.001920674026200728,
+        "p95": 0.004166679936198108,
+        "maximum": 0.0053441635599762675,
+        "initial": 0.0017193119668009516,
+        "terminal": 0.001382004749564517
+      },
+      "hadamard_defect": {
+        "mean": 0.04684521057466146,
+        "median": 0.04366807333478317,
+        "p95": 0.062125874513817486,
+        "maximum": 0.07050126009299532,
+        "initial": 0.041031820415473694,
+        "terminal": 0.03681447151496913
+      },
+      "residual_h1": {
+        "mean": 0.0026018480152182246,
+        "median": 0.0025929439032510177,
+        "p95": 0.004098060155736886,
+        "maximum": 0.004357908742598866,
+        "initial": 0.003132989670472079,
+        "terminal": 0.0027457272379696838
+      },
+      "forcing_h1": {
+        "mean": 0.05633225817832616,
+        "median": 0.05601999450603731,
+        "p95": 0.07730356969606841,
+        "maximum": 0.07779868482237534,
+        "initial": 0.0761282431990098,
+        "terminal": 0.0738946838375905
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.060818694840462005,
+        "median": 0.053643248122244976,
+        "p95": 0.09564366631274532,
+        "maximum": 0.09851234575733517,
+        "initial": 0.040523260143176844,
+        "terminal": 0.051060958056905324
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002444250169501292,
+        "median": 0.00023247653495387828,
+        "p95": 0.00033426476220294504,
+        "maximum": 0.0003353218720357612,
+        "initial": 0.00020249925789741675,
+        "terminal": 0.00022812523247028662
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00012126115733539404,
+        "median": 0.00012871788336832788,
+        "p95": 0.00013309230213569758,
+        "maximum": 0.00013311515255989522,
+        "initial": 0.00012959523655916577,
+        "terminal": 0.00013239481969245403
+      },
+      "path_defect_probe_standard_error": 0.000558133516483182,
+      "terminal_defect_probe_standard_error": 0.0013341523310837552,
+      "terminal_rollout": {
+        "case_id": 31,
+        "valid": true,
+        "raw": 0.003987934024744508,
+        "aligned": 0.003985881517938686,
+        "translation": 0.00012793088239250754,
+        "absolute_displacement": 0.00031302372610212623
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 0,
+      "case_id": 1000000,
+      "depth": 0.13727504014968872,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.02654366095944346,
+        "median": 0.02433977838090025,
+        "p95": 0.03829231440447649,
+        "maximum": 0.0383865383079396,
+        "initial": 0.03172690859290572,
+        "terminal": 0.032726028468493665
+      },
+      "hadamard_defect": {
+        "mean": 0.15803396930762442,
+        "median": 0.15516411079883974,
+        "p95": 0.1912805647113963,
+        "maximum": 0.19329078171856426,
+        "initial": 0.17161369980437524,
+        "terminal": 0.17484362920632884
+      },
+      "residual_h1": {
+        "mean": 0.024549102485635004,
+        "median": 0.024415578175314222,
+        "p95": 0.028480314615036275,
+        "maximum": 0.02913846152540279,
+        "initial": 0.026560986633619332,
+        "terminal": 0.02547032561463941
+      },
+      "forcing_h1": {
+        "mean": 0.1583956750522277,
+        "median": 0.15643111008922977,
+        "p95": 0.17448025130841574,
+        "maximum": 0.17456068318530352,
+        "initial": 0.15184153279737214,
+        "terminal": 0.14789967587188824
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.010499273406611404,
+        "median": 0.011454053571334758,
+        "p95": 0.015815441821784463,
+        "maximum": 0.01742489115942348,
+        "initial": 0.00619208213978557,
+        "terminal": 0.007126982481040001
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00031297125713289,
+        "median": 0.00027083708309081435,
+        "p95": 0.00046590439274375495,
+        "maximum": 0.00046863807550741354,
+        "initial": 0.0003688396374211923,
+        "terminal": 0.00039340496882582103
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.000263321670525214,
+        "median": 0.00023129600742963682,
+        "p95": 0.0004326181773741724,
+        "maximum": 0.0004422490180663548,
+        "initial": 0.00033601350026250907,
+        "terminal": 0.00038099908301856227
+      },
+      "path_defect_probe_standard_error": 0.0018808141188931826,
+      "terminal_defect_probe_standard_error": 0.01198814357175026,
+      "terminal_rollout": {
+        "case_id": 1000000,
+        "valid": true,
+        "raw": 0.004178230507981185,
+        "aligned": 0.0037405633420719495,
+        "translation": 0.001861664862904233,
+        "absolute_displacement": 0.0009349624729094476
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 1,
+      "case_id": 1000001,
+      "depth": 0.01463289000093937,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.03585620320430599,
+        "median": 0.03467765358719578,
+        "p95": 0.05358488410391562,
+        "maximum": 0.05419856221456292,
+        "initial": 0.05419856221456292,
+        "terminal": 0.02481580626599782
+      },
+      "hadamard_defect": {
+        "mean": 0.17984135557790734,
+        "median": 0.17923172680477248,
+        "p95": 0.21031143817759707,
+        "maximum": 0.2109943148173375,
+        "initial": 0.21014071901766196,
+        "terminal": 0.1529954779764416
+      },
+      "residual_h1": {
+        "mean": 0.00021596562059023175,
+        "median": 0.00021183898822217423,
+        "p95": 0.0002465931580977717,
+        "maximum": 0.0002633250857148907,
+        "initial": 0.000242410176193492,
+        "terminal": 0.00020525456576479326
+      },
+      "forcing_h1": {
+        "mean": 0.0012374892293962223,
+        "median": 0.0012377765387557018,
+        "p95": 0.001330789056617303,
+        "maximum": 0.0013424450955726742,
+        "initial": 0.001271349410803426,
+        "terminal": 0.0013278750468784604
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0027367268998514695,
+        "median": 0.0026366411808093813,
+        "p95": 0.0033284066644661482,
+        "maximum": 0.0033426205101217007,
+        "initial": 0.0026064421833918014,
+        "terminal": 0.00332485320305226
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003216392522421308,
+        "median": 0.0003217333642346068,
+        "p95": 0.0003314325754830286,
+        "maximum": 0.0003319595604640766,
+        "initial": 0.00032524919666546327,
+        "terminal": 0.0003104756354518251
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0004729101303903411,
+        "median": 0.00048320720600127575,
+        "p95": 0.0005191841646655613,
+        "maximum": 0.0005274853800853801,
+        "initial": 0.00035167071090493957,
+        "terminal": 0.00045791032712291774
+      },
+      "path_defect_probe_standard_error": 0.0032766306879629136,
+      "terminal_defect_probe_standard_error": 0.00968913475585922,
+      "terminal_rollout": {
+        "case_id": 1000001,
+        "valid": true,
+        "raw": 0.2200132598761981,
+        "aligned": 0.18004647229349321,
+        "translation": 0.12644802227010063,
+        "absolute_displacement": 0.009401553378485535
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 2,
+      "case_id": 1000002,
+      "depth": 0.019024807959794998,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.048417965137850086,
+        "median": 0.04642479945294458,
+        "p95": 0.06496905998144309,
+        "maximum": 0.07265388226713274,
+        "initial": 0.07265388226713274,
+        "terminal": 0.042508277445359496
+      },
+      "hadamard_defect": {
+        "mean": 0.20547733485224434,
+        "median": 0.19962955494136947,
+        "p95": 0.23857244082990983,
+        "maximum": 0.25705824668720345,
+        "initial": 0.25705824668720345,
+        "terminal": 0.19529283927625188
+      },
+      "residual_h1": {
+        "mean": 0.0005125344354646418,
+        "median": 0.0005072121543756483,
+        "p95": 0.000573655724358306,
+        "maximum": 0.0005747392570960457,
+        "initial": 0.0005747392570960457,
+        "terminal": 0.0005081325099459558
+      },
+      "forcing_h1": {
+        "mean": 0.0027284404268350416,
+        "median": 0.002751865523627202,
+        "p95": 0.003038441596046226,
+        "maximum": 0.0030566687778731242,
+        "initial": 0.002486302440260776,
+        "terminal": 0.002861341354280525
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.005206392012891082,
+        "median": 0.005203700763023279,
+        "p95": 0.00528509501120886,
+        "maximum": 0.005345073219935117,
+        "initial": 0.005345073219935117,
+        "terminal": 0.005158830468339657
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.001848140634611647,
+        "median": 0.001846602707063991,
+        "p95": 0.0018865759581732859,
+        "maximum": 0.0018882771400658104,
+        "initial": 0.0018861506627001548,
+        "terminal": 0.001813247149699967
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0007894865198237941,
+        "median": 0.0007946334033835327,
+        "p95": 0.0008119826347338535,
+        "maximum": 0.000814775599305329,
+        "initial": 0.0007955810683508256,
+        "terminal": 0.0008043491325342749
+      },
+      "path_defect_probe_standard_error": 0.0057462074975196354,
+      "terminal_defect_probe_standard_error": 0.01706650593566152,
+      "terminal_rollout": {
+        "case_id": 1000002,
+        "valid": true,
+        "raw": 0.06528799317209055,
+        "aligned": 0.006781708134873863,
+        "translation": 0.0649348172185949,
+        "absolute_displacement": 0.0034226993169223724
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 3,
+      "case_id": 1000003,
+      "depth": 0.01722952537238598,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0487513060963447,
+        "median": 0.04297108665311172,
+        "p95": 0.07238813304324085,
+        "maximum": 0.07603501575273244,
+        "initial": 0.04220848344768888,
+        "terminal": 0.05688788006068167
+      },
+      "hadamard_defect": {
+        "mean": 0.20845168528516328,
+        "median": 0.20273158041590866,
+        "p95": 0.2575090641653179,
+        "maximum": 0.270892577545911,
+        "initial": 0.19412865196841622,
+        "terminal": 0.23127174059420624
+      },
+      "residual_h1": {
+        "mean": 0.0005469315730398117,
+        "median": 0.0005528086995298773,
+        "p95": 0.0006771450490853043,
+        "maximum": 0.0006879837332203902,
+        "initial": 0.00047328867872865746,
+        "terminal": 0.0005528086995298773
+      },
+      "forcing_h1": {
+        "mean": 0.002758599646488112,
+        "median": 0.0026836749966653835,
+        "p95": 0.003123648779430896,
+        "maximum": 0.0031606910284391696,
+        "initial": 0.002497098847425258,
+        "terminal": 0.002479804369200519
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0039728569295383485,
+        "median": 0.0039338535435001635,
+        "p95": 0.004583102297267791,
+        "maximum": 0.00458736055056683,
+        "initial": 0.003932790334883044,
+        "terminal": 0.003994688544639185
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0012928407662992998,
+        "median": 0.0012163258718162029,
+        "p95": 0.0018636481427279623,
+        "maximum": 0.001914626946059572,
+        "initial": 0.0012163258718162029,
+        "terminal": 0.001227808041025078
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0010494439325071973,
+        "median": 0.0009028189569733405,
+        "p95": 0.0017960891853605347,
+        "maximum": 0.0018865415855083615,
+        "initial": 0.0010671295548444842,
+        "terminal": 0.0010761101472229239
+      },
+      "path_defect_probe_standard_error": 0.002664523654022555,
+      "terminal_defect_probe_standard_error": 0.015058247049834746,
+      "terminal_rollout": {
+        "case_id": 1000003,
+        "valid": true,
+        "raw": 0.07031891813931197,
+        "aligned": 0.04673450844660097,
+        "translation": 0.05254175452473813,
+        "absolute_displacement": 0.0029532452040612143
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 4,
+      "case_id": 1000004,
+      "depth": 0.043458059430122375,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0031330833921660566,
+        "median": 0.003121381235477646,
+        "p95": 0.003923273295836281,
+        "maximum": 0.0039603557002167306,
+        "initial": 0.0039603557002167306,
+        "terminal": 0.0030549536832362592
+      },
+      "hadamard_defect": {
+        "mean": 0.054081730962457074,
+        "median": 0.05391027842996909,
+        "p95": 0.059639894555747044,
+        "maximum": 0.06074980141836456,
+        "initial": 0.06074980141836456,
+        "terminal": 0.05391027842996909
+      },
+      "residual_h1": {
+        "mean": 0.0004948632210666183,
+        "median": 0.00049346605037495,
+        "p95": 0.0005301833083191963,
+        "maximum": 0.0005329251209902542,
+        "initial": 0.00049346605037495,
+        "terminal": 0.0005014822386578656
+      },
+      "forcing_h1": {
+        "mean": 0.009752105279838505,
+        "median": 0.009575858839421834,
+        "p95": 0.010988834248942873,
+        "maximum": 0.011152264242889998,
+        "initial": 0.008824050259369175,
+        "terminal": 0.00996636574472194
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.002004147649195637,
+        "median": 0.001989343843528517,
+        "p95": 0.002355315600711436,
+        "maximum": 0.0024316746068973067,
+        "initial": 0.0020294577194440444,
+        "terminal": 0.001989343843528517
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0001872477820883443,
+        "median": 0.00018763334984869622,
+        "p95": 0.00019179136418552662,
+        "maximum": 0.0001933580705639039,
+        "initial": 0.00019000835268396217,
+        "terminal": 0.0001858203650969421
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00027372398387439707,
+        "median": 0.0002738037466715722,
+        "p95": 0.0002753009282895267,
+        "maximum": 0.00027597918725525225,
+        "initial": 0.00027432525613466227,
+        "terminal": 0.0002738037466715722
+      },
+      "path_defect_probe_standard_error": 0.0007742537046318441,
+      "terminal_defect_probe_standard_error": 0.0031478623735213163,
+      "terminal_rollout": {
+        "case_id": 1000004,
+        "valid": true,
+        "raw": 0.032836605041557027,
+        "aligned": 0.002735126930373299,
+        "translation": 0.0327224954936196,
+        "absolute_displacement": 0.003957822256481226
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 5,
+      "case_id": 1000005,
+      "depth": 0.05509520322084427,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.00464541584134864,
+        "median": 0.004481978169538212,
+        "p95": 0.005775965592053562,
+        "maximum": 0.00644855899615664,
+        "initial": 0.004337771191103908,
+        "terminal": 0.004103687792688918
+      },
+      "hadamard_defect": {
+        "mean": 0.06600386216617704,
+        "median": 0.06515476953029292,
+        "p95": 0.07326667160080017,
+        "maximum": 0.07820144284701477,
+        "initial": 0.06515476953029292,
+        "terminal": 0.06283628739458504
+      },
+      "residual_h1": {
+        "mean": 0.001703352977436726,
+        "median": 0.0016726770888494508,
+        "p95": 0.0019152840171473284,
+        "maximum": 0.001973137859450783,
+        "initial": 0.0016726510656458996,
+        "terminal": 0.001649046990830703
+      },
+      "forcing_h1": {
+        "mean": 0.027237269013095058,
+        "median": 0.02736908705697895,
+        "p95": 0.030635826565748803,
+        "maximum": 0.031084522820933283,
+        "initial": 0.026381139361056904,
+        "terminal": 0.02736908705697895
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.001956890464379748,
+        "median": 0.0019726473860928197,
+        "p95": 0.002240182347494238,
+        "maximum": 0.002305372838479233,
+        "initial": 0.002305372838479233,
+        "terminal": 0.0016940901809615278
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003417918633580167,
+        "median": 0.0003419789074484861,
+        "p95": 0.0003443294585659553,
+        "maximum": 0.0003468499860283746,
+        "initial": 0.0003468499860283746,
+        "terminal": 0.00034125140722120835
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.000423440440009999,
+        "median": 0.00042350291347464247,
+        "p95": 0.0004245180543492726,
+        "maximum": 0.00042551155704928246,
+        "initial": 0.0004218611155278081,
+        "terminal": 0.0004222866808993805
+      },
+      "path_defect_probe_standard_error": 0.0009687022938676438,
+      "terminal_defect_probe_standard_error": 0.0032175433605369608,
+      "terminal_rollout": {
+        "case_id": 1000005,
+        "valid": true,
+        "raw": 0.05331204713601068,
+        "aligned": 0.003472304200445033,
+        "translation": 0.0531988484214818,
+        "absolute_displacement": 0.007167131055896935
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 6,
+      "case_id": 1000006,
+      "depth": 0.29276910424232483,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.007606338422633202,
+        "median": 0.007538419566904219,
+        "p95": 0.008310948626535627,
+        "maximum": 0.008669907346376897,
+        "initial": 0.006718800655523646,
+        "terminal": 0.00791195620845334
+      },
+      "hadamard_defect": {
+        "mean": 0.08646943764427639,
+        "median": 0.0861748766342626,
+        "p95": 0.0902945690465579,
+        "maximum": 0.09190634120367641,
+        "initial": 0.08133559021237013,
+        "terminal": 0.08780870280186664
+      },
+      "residual_h1": {
+        "mean": 0.11499493946529789,
+        "median": 0.11431422581761859,
+        "p95": 0.1231961126928659,
+        "maximum": 0.12363905163676028,
+        "initial": 0.10770368745086534,
+        "terminal": 0.11389044589580552
+      },
+      "forcing_h1": {
+        "mean": 1.3438596037152033,
+        "median": 1.3274951193073627,
+        "p95": 1.452409693386102,
+        "maximum": 1.475423496487246,
+        "initial": 1.3372377142032628,
+        "terminal": 1.3078061498633289
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.02169537487946769,
+        "median": 0.015935063517649506,
+        "p95": 0.0403908827844283,
+        "maximum": 0.11339037339981134,
+        "initial": 0.11339037339981134,
+        "terminal": 0.01359016810110712
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00020014610228540424,
+        "median": 0.00017203687813080863,
+        "p95": 0.0002838351713896292,
+        "maximum": 0.0006542882658530692,
+        "initial": 0.0006542882658530692,
+        "terminal": 0.00016218612814800887
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0001370930367254867,
+        "median": 0.00013697710516160584,
+        "p95": 0.0001381421866464113,
+        "maximum": 0.00013820631905842737,
+        "initial": 0.00013720200994893984,
+        "terminal": 0.00013652141557247502
+      },
+      "path_defect_probe_standard_error": 0.0006708051934125795,
+      "terminal_defect_probe_standard_error": 0.0036659507244078474,
+      "terminal_rollout": {
+        "case_id": 1000006,
+        "valid": true,
+        "raw": 0.019720316490329636,
+        "aligned": 0.0042439693107174685,
+        "translation": 0.01925823478329349,
+        "absolute_displacement": 0.014233574193149358
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 7,
+      "case_id": 1000007,
+      "depth": 0.028350599110126495,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.004933271848485025,
+        "median": 0.0044292808233336875,
+        "p95": 0.00751507364547323,
+        "maximum": 0.010263074834193489,
+        "initial": 0.005627530233401994,
+        "terminal": 0.0035772516460438426
+      },
+      "hadamard_defect": {
+        "mean": 0.06754897983233861,
+        "median": 0.06446315975376209,
+        "p95": 0.08298052028136911,
+        "maximum": 0.09793025058591871,
+        "initial": 0.07331094595313628,
+        "terminal": 0.058215145001150215
+      },
+      "residual_h1": {
+        "mean": 0.00017130840028250604,
+        "median": 0.00016868107083271112,
+        "p95": 0.00021715665449167424,
+        "maximum": 0.00021718227898343516,
+        "initial": 0.00016885142242533318,
+        "terminal": 0.00016785564891332798
+      },
+      "forcing_h1": {
+        "mean": 0.002623418185796197,
+        "median": 0.0026802462943893404,
+        "p95": 0.00291993902909483,
+        "maximum": 0.002945154732184317,
+        "initial": 0.0023541131655425143,
+        "terminal": 0.002945154732184317
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0029844312498504616,
+        "median": 0.0030447981971674313,
+        "p95": 0.0039740857102889444,
+        "maximum": 0.0041684642481876165,
+        "initial": 0.002816101545998484,
+        "terminal": 0.0035678301429796543
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00023245165638620713,
+        "median": 0.00020766692631806887,
+        "p95": 0.0003258073268584678,
+        "maximum": 0.00046293916046617224,
+        "initial": 0.0001922587124356198,
+        "terminal": 0.00021324711719080384
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00016022539165015535,
+        "median": 0.00014751431053787307,
+        "p95": 0.00022407881603851013,
+        "maximum": 0.00024046408972007622,
+        "initial": 0.00012216208886160458,
+        "terminal": 0.00014754589632446968
+      },
+      "path_defect_probe_standard_error": 0.0007725236624076342,
+      "terminal_defect_probe_standard_error": 0.0035425841654447465,
+      "terminal_rollout": {
+        "case_id": 1000007,
+        "valid": true,
+        "raw": 0.00966112383680109,
+        "aligned": 0.004367361186296948,
+        "translation": 0.00861762554642711,
+        "absolute_displacement": 0.0010151982989352651
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 8,
+      "case_id": 1000008,
+      "depth": 0.030291857197880745,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.011260745678962805,
+        "median": 0.008534585708320736,
+        "p95": 0.017011094497787087,
+        "maximum": 0.02234143136719067,
+        "initial": 0.008336264437081159,
+        "terminal": 0.014194473217417448
+      },
+      "hadamard_defect": {
+        "mean": 0.10125584060851528,
+        "median": 0.0904556446072181,
+        "p95": 0.12272717267387713,
+        "maximum": 0.13716486419462087,
+        "initial": 0.08796021905466757,
+        "terminal": 0.11667891387707992
+      },
+      "residual_h1": {
+        "mean": 0.0004209935015295949,
+        "median": 0.0004112475210447245,
+        "p95": 0.0005269309158773149,
+        "maximum": 0.0005426440601400275,
+        "initial": 0.00036048545376119985,
+        "terminal": 0.0005230026298116367
+      },
+      "forcing_h1": {
+        "mean": 0.0044497879640370466,
+        "median": 0.004503519644684967,
+        "p95": 0.005105666725971795,
+        "maximum": 0.005403120486128821,
+        "initial": 0.004374065978757472,
+        "terminal": 0.004593176988413595
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0029479932104115717,
+        "median": 0.001911644400377324,
+        "p95": 0.01033954310649651,
+        "maximum": 0.01038403262718915,
+        "initial": 0.001911644400377324,
+        "terminal": 0.0016471523652494473
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0011911610308737715,
+        "median": 0.0003866453740753949,
+        "p95": 0.006421826111690714,
+        "maximum": 0.006431132176464803,
+        "initial": 0.0003141815238266235,
+        "terminal": 0.0003591515072747801
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00045617636692858027,
+        "median": 0.000313998580609685,
+        "p95": 0.0015352491481171358,
+        "maximum": 0.0016367676083243392,
+        "initial": 0.0002560322768892649,
+        "terminal": 0.0003650107429604634
+      },
+      "path_defect_probe_standard_error": 0.0012487402776349948,
+      "terminal_defect_probe_standard_error": 0.00622095530650193,
+      "terminal_rollout": {
+        "case_id": 1000008,
+        "valid": true,
+        "raw": 0.1335431291349152,
+        "aligned": 0.04891471880549803,
+        "translation": 0.12426229365066337,
+        "absolute_displacement": 0.011935145839869904
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 9,
+      "case_id": 1000009,
+      "depth": 0.05955096334218979,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.0037226172899290553,
+        "median": 0.0036487614976755314,
+        "p95": 0.004704755175527842,
+        "maximum": 0.004759923239173892,
+        "initial": 0.004690963159616329,
+        "terminal": 0.0038136111567867886
+      },
+      "hadamard_defect": {
+        "mean": 0.059226843348142356,
+        "median": 0.05901087961920718,
+        "p95": 0.06636486260849069,
+        "maximum": 0.06677556936899501,
+        "initial": 0.06626218591836461,
+        "terminal": 0.060032226314753
+      },
+      "residual_h1": {
+        "mean": 0.0007205385528513225,
+        "median": 0.0007130371194395573,
+        "p95": 0.000785181858930073,
+        "maximum": 0.0007879847674597893,
+        "initial": 0.0007093247797953265,
+        "terminal": 0.0007143804260580926
+      },
+      "forcing_h1": {
+        "mean": 0.012746632641182636,
+        "median": 0.012567516825985565,
+        "p95": 0.013872788826270004,
+        "maximum": 0.014409548496368762,
+        "initial": 0.011294546618231276,
+        "terminal": 0.012538766099234797
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0049502157929941434,
+        "median": 0.004881708071369283,
+        "p95": 0.0062179374528982005,
+        "maximum": 0.006575388872560934,
+        "initial": 0.003598525180003073,
+        "terminal": 0.005636609013480563
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002224653245938652,
+        "median": 0.00022143896693252292,
+        "p95": 0.00023390828474657748,
+        "maximum": 0.00023783265329588822,
+        "initial": 0.000212478988568626,
+        "terminal": 0.00022733236203755544
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00010977677352086444,
+        "median": 0.00010978082325393823,
+        "p95": 0.00011003314048019059,
+        "maximum": 0.00011004461554916935,
+        "initial": 0.00010955516016553451,
+        "terminal": 0.00010975723094847517
+      },
+      "path_defect_probe_standard_error": 0.0007086265247225664,
+      "terminal_defect_probe_standard_error": 0.003739366795604718,
+      "terminal_rollout": {
+        "case_id": 1000009,
+        "valid": true,
+        "raw": 0.019842210672834128,
+        "aligned": 0.001986197369992723,
+        "translation": 0.019742551618080337,
+        "absolute_displacement": 0.003856796527892766
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 10,
+      "case_id": 1000010,
+      "depth": 0.023159209638834,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.017602012268891118,
+        "median": 0.017628453507043753,
+        "p95": 0.020983685796157895,
+        "maximum": 0.023500637567210596,
+        "initial": 0.016437397230821243,
+        "terminal": 0.019445960492477023
+      },
+      "hadamard_defect": {
+        "mean": 0.1259273300345113,
+        "median": 0.12625616214571472,
+        "p95": 0.1351852058320608,
+        "maximum": 0.14304360642641017,
+        "initial": 0.1230295014339387,
+        "terminal": 0.13279148711955782
+      },
+      "residual_h1": {
+        "mean": 0.00027558741905528406,
+        "median": 0.00027147362103265124,
+        "p95": 0.0003013820689643267,
+        "maximum": 0.0003258664007236467,
+        "initial": 0.00028193908563918665,
+        "terminal": 0.00027147362103265124
+      },
+      "forcing_h1": {
+        "mean": 0.00235094763780923,
+        "median": 0.0023909910279236836,
+        "p95": 0.0026711642415587103,
+        "maximum": 0.0027421290535278803,
+        "initial": 0.0023909910279236836,
+        "terminal": 0.0021979659904267233
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.001459473945895012,
+        "median": 0.0014294232249728483,
+        "p95": 0.0016950368935729888,
+        "maximum": 0.0017144346442255168,
+        "initial": 0.0014159031760593694,
+        "terminal": 0.0015627133047081156
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0002250238655661115,
+        "median": 0.00022605633020770914,
+        "p95": 0.00023494498870822158,
+        "maximum": 0.0002372233666946814,
+        "initial": 0.00021946547052451392,
+        "terminal": 0.00022605633020770914
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00016311821619916195,
+        "median": 0.0001630738976656735,
+        "p95": 0.00016610803983935435,
+        "maximum": 0.0001663916690795088,
+        "initial": 0.0001653602455206673,
+        "terminal": 0.00016242304847112024
+      },
+      "path_defect_probe_standard_error": 0.0021724947586869306,
+      "terminal_defect_probe_standard_error": 0.010992062108792666,
+      "terminal_rollout": {
+        "case_id": 1000010,
+        "valid": true,
+        "raw": 0.025345932724247896,
+        "aligned": 0.003176670706135903,
+        "translation": 0.025146074621834685,
+        "absolute_displacement": 0.001965514579063238
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 11,
+      "case_id": 1000011,
+      "depth": 0.011286163702607155,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.03472218615218125,
+        "median": 0.03489710606643599,
+        "p95": 0.04347458975020217,
+        "maximum": 0.04352614622281037,
+        "initial": 0.036700523146949035,
+        "terminal": 0.03279915648351918
+      },
+      "hadamard_defect": {
+        "mean": 0.17532491267562675,
+        "median": 0.1741718369505697,
+        "p95": 0.19704252618765453,
+        "maximum": 0.19843333632022014,
+        "initial": 0.17327694115783887,
+        "terminal": 0.17697480700898294
+      },
+      "residual_h1": {
+        "mean": 0.00029393994667951376,
+        "median": 0.0002885923132693482,
+        "p95": 0.00034785573929973867,
+        "maximum": 0.00035743373858775616,
+        "initial": 0.0002772387941162775,
+        "terminal": 0.0003056326644781162
+      },
+      "forcing_h1": {
+        "mean": 0.001833473712287554,
+        "median": 0.0018230196918283467,
+        "p95": 0.002293462701285679,
+        "maximum": 0.0023248985030890814,
+        "initial": 0.0018230196918283467,
+        "terminal": 0.001864764108586474
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.02449386195434462,
+        "median": 0.024412244974910235,
+        "p95": 0.024809059129292797,
+        "maximum": 0.02605775408261972,
+        "initial": 0.02605775408261972,
+        "terminal": 0.024471936481300364
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.009109418422555306,
+        "median": 0.009071437297165733,
+        "p95": 0.009249738924921954,
+        "maximum": 0.009816555657952336,
+        "initial": 0.009816555657952336,
+        "terminal": 0.009099594558983055
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0016724795398031546,
+        "median": 0.001677094326697736,
+        "p95": 0.0017161598732867605,
+        "maximum": 0.0017270101684683438,
+        "initial": 0.0015402458824644552,
+        "terminal": 0.001657757624412203
+      },
+      "path_defect_probe_standard_error": 0.0038405345769021728,
+      "terminal_defect_probe_standard_error": 0.009930002241196193,
+      "terminal_rollout": {
+        "case_id": 1000011,
+        "valid": true,
+        "raw": 0.3620446552773992,
+        "aligned": 0.01228877147876235,
+        "translation": 0.36183603815882354,
+        "absolute_displacement": 0.013090415978857052
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 12,
+      "case_id": 1000012,
+      "depth": 0.1430688202381134,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.010778777867406381,
+        "median": 0.010803377887767066,
+        "p95": 0.012110325267094067,
+        "maximum": 0.013225777410549764,
+        "initial": 0.01144204468242302,
+        "terminal": 0.011732103261209454
+      },
+      "hadamard_defect": {
+        "mean": 0.10181105209164464,
+        "median": 0.10211456517270968,
+        "p95": 0.10777477674540162,
+        "maximum": 0.11091595710648845,
+        "initial": 0.10528889194958202,
+        "terminal": 0.10546791358930077
+      },
+      "residual_h1": {
+        "mean": 0.00713774083638707,
+        "median": 0.007226282694598256,
+        "p95": 0.007822894336708134,
+        "maximum": 0.007838026358886523,
+        "initial": 0.0069590444106551845,
+        "terminal": 0.007086481579387943
+      },
+      "forcing_h1": {
+        "mean": 0.07094205248541201,
+        "median": 0.07085379588466559,
+        "p95": 0.0752931807735523,
+        "maximum": 0.07776776221354537,
+        "initial": 0.06721341119024153,
+        "terminal": 0.06949878437855785
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0181957875679539,
+        "median": 0.018174362232209567,
+        "p95": 0.022050445388744587,
+        "maximum": 0.02702836267183365,
+        "initial": 0.017183980028254598,
+        "terminal": 0.02702836267183365
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00020630214249912188,
+        "median": 0.00020685557961248538,
+        "p95": 0.00022633142021621659,
+        "maximum": 0.0002538286332723539,
+        "initial": 0.00020083012784680122,
+        "terminal": 0.0002538286332723539
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00013676509099746633,
+        "median": 0.00013680215624060598,
+        "p95": 0.0001369430249417369,
+        "maximum": 0.0001369558297001107,
+        "initial": 0.0001369558297001107,
+        "terminal": 0.00013680215624060598
+      },
+      "path_defect_probe_standard_error": 0.0014475299125639442,
+      "terminal_defect_probe_standard_error": 0.006369837592535828,
+      "terminal_rollout": {
+        "case_id": 1000012,
+        "valid": true,
+        "raw": 0.006602349417450183,
+        "aligned": 0.001994996227073579,
+        "translation": 0.0062937276620510805,
+        "absolute_displacement": 0.0032933668891402465
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 13,
+      "case_id": 1000013,
+      "depth": 0.21866966784000397,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.008116313020133228,
+        "median": 0.009032069263185566,
+        "p95": 0.012679769523814468,
+        "maximum": 0.012863129873201644,
+        "initial": 0.009032069263185566,
+        "terminal": 0.012863129873201644
+      },
+      "hadamard_defect": {
+        "mean": 0.08704609887145193,
+        "median": 0.0938478103308669,
+        "p95": 0.11126766011498236,
+        "maximum": 0.11285113582358948,
+        "initial": 0.09429944178443911,
+        "terminal": 0.11285113582358948
+      },
+      "residual_h1": {
+        "mean": 0.023506036254656058,
+        "median": 0.023970082258147604,
+        "p95": 0.030875788569694692,
+        "maximum": 0.032096794205189065,
+        "initial": 0.023970082258147604,
+        "terminal": 0.0305705371608211
+      },
+      "forcing_h1": {
+        "mean": 0.27034745329567933,
+        "median": 0.2716326259999329,
+        "p95": 0.2929090597696043,
+        "maximum": 0.29469976856404445,
+        "initial": 0.2545956113775569,
+        "terminal": 0.2714883722883405
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.028099998470411294,
+        "median": 0.022723213498045628,
+        "p95": 0.045775277564043114,
+        "maximum": 0.05196258312374738,
+        "initial": 0.017132396588982822,
+        "terminal": 0.018465953505021063
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00022429368499813274,
+        "median": 0.0002563253445690825,
+        "p95": 0.0002942810553509141,
+        "maximum": 0.0003139718289445689,
+        "initial": 0.0002650016693935949,
+        "terminal": 0.0001351504961125515
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00015285925231865843,
+        "median": 0.0001612894349211997,
+        "p95": 0.00022826537901255857,
+        "maximum": 0.00023582669166757867,
+        "initial": 0.00023582669166757867,
+        "terminal": 6.773424194771635e-05
+      },
+      "path_defect_probe_standard_error": 0.0004866100239558284,
+      "terminal_defect_probe_standard_error": 0.0029183444682148686,
+      "terminal_rollout": {
+        "case_id": 1000013,
+        "valid": true,
+        "raw": 0.005851363536691891,
+        "aligned": 0.0032843778064543124,
+        "translation": 0.004842656054583868,
+        "absolute_displacement": 0.0035405452232320543
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 14,
+      "case_id": 1000014,
+      "depth": 0.17760057747364044,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.016726753835034316,
+        "median": 0.016383517299907602,
+        "p95": 0.02276491183652064,
+        "maximum": 0.023556823885192403,
+        "initial": 0.009115938945836663,
+        "terminal": 0.016383517299907602
+      },
+      "hadamard_defect": {
+        "mean": 0.1271204930551915,
+        "median": 0.12664287345553038,
+        "p95": 0.14941921719126566,
+        "maximum": 0.15232107845555243,
+        "initial": 0.09418212759510233,
+        "terminal": 0.12664287345553038
+      },
+      "residual_h1": {
+        "mean": 0.03623208762855607,
+        "median": 0.03661478150847024,
+        "p95": 0.041443543442081204,
+        "maximum": 0.04539372749962217,
+        "initial": 0.024639738535940963,
+        "terminal": 0.03593552483906513
+      },
+      "forcing_h1": {
+        "mean": 0.2865256584545686,
+        "median": 0.28703726976566923,
+        "p95": 0.30458863222865645,
+        "maximum": 0.31052995013411067,
+        "initial": 0.2646824626592549,
+        "terminal": 0.282283613776904
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.014023058558873869,
+        "median": 0.01122554794030514,
+        "p95": 0.025686240280305993,
+        "maximum": 0.03166893500288984,
+        "initial": 0.03166893500288984,
+        "terminal": 0.008077632939126873
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003391801138583382,
+        "median": 0.0003584134835154306,
+        "p95": 0.00043545327131589887,
+        "maximum": 0.0005063741233414188,
+        "initial": 0.0005063741233414188,
+        "terminal": 0.00021538455515049724
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00030675052710642226,
+        "median": 0.00033151097917763413,
+        "p95": 0.0003860339605550417,
+        "maximum": 0.00046741916843354305,
+        "initial": 0.00046741916843354305,
+        "terminal": 0.00019964938918446426
+      },
+      "path_defect_probe_standard_error": 0.0008135174495879925,
+      "terminal_defect_probe_standard_error": 0.004796525845749292,
+      "terminal_rollout": {
+        "case_id": 1000014,
+        "valid": true,
+        "raw": 0.02832437581763115,
+        "aligned": 0.005103967961542471,
+        "translation": 0.027860721033490073,
+        "absolute_displacement": 0.014200796503740065
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 15,
+      "case_id": 1000015,
+      "depth": 0.03204395994544029,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.007841265121393584,
+        "median": 0.006772549157022536,
+        "p95": 0.013851563173545835,
+        "maximum": 0.01387512961280864,
+        "initial": 0.006151973491805308,
+        "terminal": 0.006689609013293202
+      },
+      "hadamard_defect": {
+        "mean": 0.08551454497469635,
+        "median": 0.08114893418288974,
+        "p95": 0.11394421458916222,
+        "maximum": 0.11424948757710462,
+        "initial": 0.07697220289024373,
+        "terminal": 0.08000662106120254
+      },
+      "residual_h1": {
+        "mean": 0.00037266840979286207,
+        "median": 0.0003618608113985824,
+        "p95": 0.0004749622289904228,
+        "maximum": 0.0005293366483244172,
+        "initial": 0.0003289677173752189,
+        "terminal": 0.0003919369780967097
+      },
+      "forcing_h1": {
+        "mean": 0.004501275310029412,
+        "median": 0.004553160040339739,
+        "p95": 0.005164770677221119,
+        "maximum": 0.005247238741639151,
+        "initial": 0.0043662470955828855,
+        "terminal": 0.005023228739067836
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.003865196657634107,
+        "median": 0.0035384705519893546,
+        "p95": 0.007484077097145043,
+        "maximum": 0.00902718569429373,
+        "initial": 0.0021971878045707,
+        "terminal": 0.003961740224679292
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0011641946889581365,
+        "median": 0.0003551387478266294,
+        "p95": 0.00409472386679219,
+        "maximum": 0.005265936963795643,
+        "initial": 0.00027501613656583297,
+        "terminal": 0.0003012500223268216
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00034357693726001684,
+        "median": 0.00026355928335751623,
+        "p95": 0.000719484117310534,
+        "maximum": 0.0008951537204063333,
+        "initial": 0.00022988954576319507,
+        "terminal": 0.0002480545867223602
+      },
+      "path_defect_probe_standard_error": 0.001160241300442343,
+      "terminal_defect_probe_standard_error": 0.0043859594135707185,
+      "terminal_rollout": {
+        "case_id": 1000015,
+        "valid": true,
+        "raw": 0.042688164344753185,
+        "aligned": 0.03689249637061179,
+        "translation": 0.02147610501625127,
+        "absolute_displacement": 0.0025042602109453245
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 16,
+      "case_id": 1000016,
+      "depth": 0.03433812037110329,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.00740001609343593,
+        "median": 0.00743730240095883,
+        "p95": 0.008793599347105918,
+        "maximum": 0.008915874582238841,
+        "initial": 0.006998967557153263,
+        "terminal": 0.008203271865743577
+      },
+      "hadamard_defect": {
+        "mean": 0.08326866328595962,
+        "median": 0.08368837252896728,
+        "p95": 0.08973054459893719,
+        "maximum": 0.09052607627534008,
+        "initial": 0.08241338553892537,
+        "terminal": 0.08953166167983646
+      },
+      "residual_h1": {
+        "mean": 0.00045897816168121927,
+        "median": 0.00045631248505376924,
+        "p95": 0.0004979641364047289,
+        "maximum": 0.000498177282102677,
+        "initial": 0.00043798889971959694,
+        "terminal": 0.0004979108499802419
+      },
+      "forcing_h1": {
+        "mean": 0.005822436039158344,
+        "median": 0.005821913354355297,
+        "p95": 0.00644847493168538,
+        "maximum": 0.0072589302159936815,
+        "initial": 0.005547044808053777,
+        "terminal": 0.005614443883703822
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0015053897397421263,
+        "median": 0.0014549441710806105,
+        "p95": 0.001884655087888885,
+        "maximum": 0.0019246331042061843,
+        "initial": 0.0013444133145993644,
+        "terminal": 0.0015187986291361124
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0003621477360929933,
+        "median": 0.0003658263454938468,
+        "p95": 0.00037912545914026017,
+        "maximum": 0.0003802625431851243,
+        "initial": 0.00033465483278658376,
+        "terminal": 0.0003776438157805287
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0005058214215567308,
+        "median": 0.0005055059724013152,
+        "p95": 0.0005127690327337268,
+        "maximum": 0.0005135874827623051,
+        "initial": 0.0004964777131578464,
+        "terminal": 0.0005135874827623051
+      },
+      "path_defect_probe_standard_error": 0.0014478119436580094,
+      "terminal_defect_probe_standard_error": 0.003534151690678452,
+      "terminal_rollout": {
+        "case_id": 1000016,
+        "valid": true,
+        "raw": 0.33674756491835467,
+        "aligned": 0.011257895916537176,
+        "translation": 0.3365593294769496,
+        "absolute_displacement": 0.0319727726753993
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 17,
+      "case_id": 1000017,
+      "depth": 0.0589042603969574,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.006287647691743318,
+        "median": 0.006142001965608848,
+        "p95": 0.008311287572010608,
+        "maximum": 0.008597218010247707,
+        "initial": 0.0032383484528250633,
+        "terminal": 0.007537342264691078
+      },
+      "hadamard_defect": {
+        "mean": 0.07730026904759824,
+        "median": 0.07694117289969858,
+        "p95": 0.08988641113243084,
+        "maximum": 0.09116075387072112,
+        "initial": 0.055951623129692846,
+        "terminal": 0.08555234573241699
+      },
+      "residual_h1": {
+        "mean": 0.001816484674207623,
+        "median": 0.001805352102204883,
+        "p95": 0.0020564512349305984,
+        "maximum": 0.002268524748423875,
+        "initial": 0.0013367043650445267,
+        "terminal": 0.0020034328565572794
+      },
+      "forcing_h1": {
+        "mean": 0.024145262846282385,
+        "median": 0.0241874125420447,
+        "p95": 0.026161433080008886,
+        "maximum": 0.026558279847842703,
+        "initial": 0.02442756070734948,
+        "terminal": 0.023724979311677274
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.004027942553010958,
+        "median": 0.0032221208620412914,
+        "p95": 0.00632327556373342,
+        "maximum": 0.007595803248838524,
+        "initial": 0.002979067096558218,
+        "terminal": 0.0045669133522554025
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00040804840103211045,
+        "median": 0.0003666894826575725,
+        "p95": 0.0006212420056178898,
+        "maximum": 0.000628904715168461,
+        "initial": 0.0003666894826575725,
+        "terminal": 0.000599462109630606
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00024605556683169114,
+        "median": 0.00023622859819054663,
+        "p95": 0.0002958142390006038,
+        "maximum": 0.000323563395216837,
+        "initial": 0.0002508528457676014,
+        "terminal": 0.0002703340381188587
+      },
+      "path_defect_probe_standard_error": 0.0007675663959625945,
+      "terminal_defect_probe_standard_error": 0.0038134708982069526,
+      "terminal_rollout": {
+        "case_id": 1000017,
+        "valid": true,
+        "raw": 0.03990293469840622,
+        "aligned": 0.016332126132767744,
+        "translation": 0.036407497215939416,
+        "absolute_displacement": 0.006349877934697849
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 18,
+      "case_id": 1000018,
+      "depth": 0.020388275384902954,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.034340717227567305,
+        "median": 0.024912297271901217,
+        "p95": 0.06260382295452391,
+        "maximum": 0.07576315078586802,
+        "initial": 0.024912297271901217,
+        "terminal": 0.05722959890530792
+      },
+      "hadamard_defect": {
+        "mean": 0.17438159313782936,
+        "median": 0.15260088320902473,
+        "p95": 0.23633574827239034,
+        "maximum": 0.2489670463944803,
+        "initial": 0.15191799269995593,
+        "terminal": 0.23317792374186785
+      },
+      "residual_h1": {
+        "mean": 0.00047528061859655144,
+        "median": 0.0004562494012623426,
+        "p95": 0.0005879774520795455,
+        "maximum": 0.0006505537091867287,
+        "initial": 0.00043143989555722456,
+        "terminal": 0.0005378826384684402
+      },
+      "forcing_h1": {
+        "mean": 0.0029106703516832626,
+        "median": 0.0029325883249001847,
+        "p95": 0.0032297992240168973,
+        "maximum": 0.003283031938436388,
+        "initial": 0.0030987866877236116,
+        "terminal": 0.002505723054624681
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.002631347036600797,
+        "median": 0.0023470992537278058,
+        "p95": 0.004131448416030336,
+        "maximum": 0.005046611635652803,
+        "initial": 0.0023470992537278058,
+        "terminal": 0.001982878285756317
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0009529937476512501,
+        "median": 0.000664375731102085,
+        "p95": 0.002113008022348632,
+        "maximum": 0.0027554101960071877,
+        "initial": 0.0006559976586043493,
+        "terminal": 0.000588389340499738
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0007863777599791365,
+        "median": 0.0007028637014376793,
+        "p95": 0.0012687629416967708,
+        "maximum": 0.0013309318859552708,
+        "initial": 0.0006405239529187776,
+        "terminal": 0.0007316909182118244
+      },
+      "path_defect_probe_standard_error": 0.0027894435174188616,
+      "terminal_defect_probe_standard_error": 0.013802547554079928,
+      "terminal_rollout": {
+        "case_id": 1000018,
+        "valid": true,
+        "raw": 0.039614843571034467,
+        "aligned": 0.026589385970502904,
+        "translation": 0.02936563271699001,
+        "absolute_displacement": 0.002009592637749047
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 19,
+      "case_id": 1000019,
+      "depth": 0.09969567507505417,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.017837249588408814,
+        "median": 0.016975671294883143,
+        "p95": 0.025022302652667347,
+        "maximum": 0.03536072563607186,
+        "initial": 0.013992349848945958,
+        "terminal": 0.01777037326026861
+      },
+      "hadamard_defect": {
+        "mean": 0.12911810429721426,
+        "median": 0.12752841554226654,
+        "p95": 0.15322468431366407,
+        "maximum": 0.17986742764841432,
+        "initial": 0.11627089001016312,
+        "terminal": 0.12982139844302742
+      },
+      "residual_h1": {
+        "mean": 0.012980559598379477,
+        "median": 0.012688941010818026,
+        "p95": 0.015807003193080177,
+        "maximum": 0.01815899675909826,
+        "initial": 0.011572542433257591,
+        "terminal": 0.01210598475112032
+      },
+      "forcing_h1": {
+        "mean": 0.10371832870447924,
+        "median": 0.10472875557883023,
+        "p95": 0.11508039195500991,
+        "maximum": 0.11735163819083855,
+        "initial": 0.10221197063250699,
+        "terminal": 0.09548110457188694
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.006085180265144468,
+        "median": 0.0061511776835710625,
+        "p95": 0.008330920859291636,
+        "maximum": 0.008331213862324955,
+        "initial": 0.007633250766771772,
+        "terminal": 0.004059624267037007
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00044812118557990875,
+        "median": 0.00035456432425569,
+        "p95": 0.0009912950536888016,
+        "maximum": 0.0011144672675893223,
+        "initial": 0.00024124965739625098,
+        "terminal": 0.0009605020002136715
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0003028192569733223,
+        "median": 0.00021905446112602904,
+        "p95": 0.0006519127434984046,
+        "maximum": 0.0006831451467372195,
+        "initial": 0.00012843568865649493,
+        "terminal": 0.0006441046426887009
+      },
+      "path_defect_probe_standard_error": 0.0021187947716963906,
+      "terminal_defect_probe_standard_error": 0.007817833316912165,
+      "terminal_rollout": {
+        "case_id": 1000019,
+        "valid": true,
+        "raw": 0.05172483732559408,
+        "aligned": 0.010548815616949987,
+        "translation": 0.050637745659130234,
+        "absolute_displacement": 0.015585000591061512
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 20,
+      "case_id": 1000020,
+      "depth": 0.04659133031964302,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.004880484006961549,
+        "median": 0.0038894735869120325,
+        "p95": 0.008465408913067674,
+        "maximum": 0.010045648217614736,
+        "initial": 0.0038170392574209755,
+        "terminal": 0.002168830962396509
+      },
+      "hadamard_defect": {
+        "mean": 0.06771900357512466,
+        "median": 0.061545142307321526,
+        "p95": 0.09090709500722037,
+        "maximum": 0.09904301970373094,
+        "initial": 0.06124795880989451,
+        "terminal": 0.04616080663512766
+      },
+      "residual_h1": {
+        "mean": 0.00040770837683472505,
+        "median": 0.0003941758869350281,
+        "p95": 0.0005735926311100348,
+        "maximum": 0.0006663842524233703,
+        "initial": 0.00035491152920104525,
+        "terminal": 0.00030032832487181585
+      },
+      "forcing_h1": {
+        "mean": 0.006112058570702291,
+        "median": 0.006166113090934927,
+        "p95": 0.006975829266189667,
+        "maximum": 0.007215854235120769,
+        "initial": 0.005884846073286043,
+        "terminal": 0.006532102343702112
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0070955311777890885,
+        "median": 0.007740181439472623,
+        "p95": 0.01014464895872597,
+        "maximum": 0.010392699939559645,
+        "initial": 0.006668488966145787,
+        "terminal": 0.002720171664349012
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00038744564050836855,
+        "median": 0.00023819474375872947,
+        "p95": 0.001388460922013161,
+        "maximum": 0.001404753640819433,
+        "initial": 0.0002316984761965952,
+        "terminal": 0.0003199239920933617
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0001491352727378907,
+        "median": 0.00013125037422336878,
+        "p95": 0.00023824833974974506,
+        "maximum": 0.0002757196652003549,
+        "initial": 0.00016027006603120024,
+        "terminal": 0.000126913316741901
+      },
+      "path_defect_probe_standard_error": 0.0007481464454510634,
+      "terminal_defect_probe_standard_error": 0.0015918729679398212,
+      "terminal_rollout": {
+        "case_id": 1000020,
+        "valid": true,
+        "raw": 0.011868672339017653,
+        "aligned": 0.010786105776868997,
+        "translation": 0.00495230302598256,
+        "absolute_displacement": 0.0014478102783428565
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 21,
+      "case_id": 1000021,
+      "depth": 0.057592183351516724,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.004327192049550886,
+        "median": 0.004134612162740886,
+        "p95": 0.0056486478599306975,
+        "maximum": 0.005831472446854332,
+        "initial": 0.005831472446854332,
+        "terminal": 0.004060319707213565
+      },
+      "hadamard_defect": {
+        "mean": 0.06363921139416856,
+        "median": 0.06277249783492861,
+        "p95": 0.07203120887546607,
+        "maximum": 0.07269809541002033,
+        "initial": 0.07269809541002033,
+        "terminal": 0.06222243997947086
+      },
+      "residual_h1": {
+        "mean": 0.0010560897104737452,
+        "median": 0.0010444120419064438,
+        "p95": 0.0011706436287688064,
+        "maximum": 0.001194742165223898,
+        "initial": 0.0010359704978127864,
+        "terminal": 0.0010462469532153862
+      },
+      "forcing_h1": {
+        "mean": 0.017475373348602878,
+        "median": 0.01741493004979392,
+        "p95": 0.01985067397584221,
+        "maximum": 0.020186298021134867,
+        "initial": 0.015429295765031131,
+        "terminal": 0.017956616585590206
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0035065190218369962,
+        "median": 0.0034720685296336685,
+        "p95": 0.004274750586541631,
+        "maximum": 0.004471767568643091,
+        "initial": 0.0028674828036252525,
+        "terminal": 0.003661774750438652
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00019955722883457838,
+        "median": 0.00019909995660346398,
+        "p95": 0.00020673913730435894,
+        "maximum": 0.0002092021492298524,
+        "initial": 0.0001947301646917302,
+        "terminal": 0.00020164538409230486
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00014750193480820258,
+        "median": 0.00014761890927517717,
+        "p95": 0.00014790717985143113,
+        "maximum": 0.00014791793052260468,
+        "initial": 0.00014689162464145362,
+        "terminal": 0.00014762013533286977
+      },
+      "path_defect_probe_standard_error": 0.0009762525847738499,
+      "terminal_defect_probe_standard_error": 0.0035467136921824086,
+      "terminal_rollout": {
+        "case_id": 1000021,
+        "valid": true,
+        "raw": 0.07952983738039698,
+        "aligned": 0.005791035097823383,
+        "translation": 0.07931871750254266,
+        "absolute_displacement": 0.013378569553292382
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 22,
+      "case_id": 1000022,
+      "depth": 0.012947448529303074,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.014241473109496795,
+        "median": 0.014422380916846212,
+        "p95": 0.017110307998811747,
+        "maximum": 0.017114169905839943,
+        "initial": 0.017114169905839943,
+        "terminal": 0.012094085487774856
+      },
+      "hadamard_defect": {
+        "mean": 0.11565785089603234,
+        "median": 0.11720384059142752,
+        "p95": 0.12536715972881274,
+        "maximum": 0.12849663835664876,
+        "initial": 0.12849663835664876,
+        "terminal": 0.10739011211362379
+      },
+      "residual_h1": {
+        "mean": 0.00019828481747248599,
+        "median": 0.00019989827830194887,
+        "p95": 0.0002188752991336065,
+        "maximum": 0.00022185884533223234,
+        "initial": 0.00019989827830194887,
+        "terminal": 0.00017955996598878363
+      },
+      "forcing_h1": {
+        "mean": 0.0017725922296121799,
+        "median": 0.001771332433129939,
+        "p95": 0.001897162936572819,
+        "maximum": 0.0019050330524389343,
+        "initial": 0.0015929496607956155,
+        "terminal": 0.0017244474882780842
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0058821922090215445,
+        "median": 0.005832689994961233,
+        "p95": 0.006100965744795829,
+        "maximum": 0.006466914189895001,
+        "initial": 0.006466914189895001,
+        "terminal": 0.006008113793898293
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.001729324217806269,
+        "median": 0.0017243147361343284,
+        "p95": 0.0017870724866822516,
+        "maximum": 0.0018325226942541763,
+        "initial": 0.0018325226942541763,
+        "terminal": 0.0017757099347892704
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0006892370610372655,
+        "median": 0.000702721658632024,
+        "p95": 0.0007767401856050152,
+        "maximum": 0.0007852977797220286,
+        "initial": 0.0005388517532396791,
+        "terminal": 0.0007746007870757618
+      },
+      "path_defect_probe_standard_error": 0.0013217828437339495,
+      "terminal_defect_probe_standard_error": 0.006118002440874357,
+      "terminal_rollout": {
+        "case_id": 1000022,
+        "valid": true,
+        "raw": 0.10597797409726671,
+        "aligned": 0.024729271051964707,
+        "translation": 0.10305238545031063,
+        "absolute_displacement": 0.005183021913029005
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 23,
+      "case_id": 1000023,
+      "depth": 0.037132374942302704,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.002590107471275513,
+        "median": 0.002542050532387594,
+        "p95": 0.003186947326193886,
+        "maximum": 0.0032608592778531164,
+        "initial": 0.0025995460792355126,
+        "terminal": 0.0023494941437690875
+      },
+      "hadamard_defect": {
+        "mean": 0.049398475024916406,
+        "median": 0.048689158803425385,
+        "p95": 0.05408017683848233,
+        "maximum": 0.054368584922637894,
+        "initial": 0.05027396989777594,
+        "terminal": 0.04736225274037345
+      },
+      "residual_h1": {
+        "mean": 0.00012998237406353037,
+        "median": 0.00012808928920975766,
+        "p95": 0.00014109587176901412,
+        "maximum": 0.00014257362422358418,
+        "initial": 0.0001272605071923553,
+        "terminal": 0.00012681620275782843
+      },
+      "forcing_h1": {
+        "mean": 0.0027300327336349265,
+        "median": 0.0027176480924426477,
+        "p95": 0.0029400023127526677,
+        "maximum": 0.003037551271263472,
+        "initial": 0.0025288898563895715,
+        "terminal": 0.0027992307562358506
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.004402996853960138,
+        "median": 0.004286236855556499,
+        "p95": 0.005230373295726126,
+        "maximum": 0.005237300758207516,
+        "initial": 0.00394032991954854,
+        "terminal": 0.005237300758207516
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00017856321649094628,
+        "median": 0.0001762939809344516,
+        "p95": 0.00019078565606513756,
+        "maximum": 0.00019082018552792987,
+        "initial": 0.00017277907410008,
+        "terminal": 0.00019082018552792987
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 8.216121162585488e-05,
+        "median": 8.214121923261711e-05,
+        "p95": 8.224187402429847e-05,
+        "maximum": 8.226137769771112e-05,
+        "initial": 8.214121923261711e-05,
+        "terminal": 8.213080206554431e-05
+      },
+      "path_defect_probe_standard_error": 0.0007451618324733732,
+      "terminal_defect_probe_standard_error": 0.002662219113522593,
+      "terminal_rollout": {
+        "case_id": 1000023,
+        "valid": true,
+        "raw": 0.006004087134135401,
+        "aligned": 0.002197220489929637,
+        "translation": 0.00558760095505429,
+        "absolute_displacement": 0.0008684989059838715
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 24,
+      "case_id": 1000024,
+      "depth": 0.01549047976732254,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.061994613005456944,
+        "median": 0.06274196105830135,
+        "p95": 0.0816960840980608,
+        "maximum": 0.08951039220825067,
+        "initial": 0.0681360374214192,
+        "terminal": 0.04408519753102852
+      },
+      "hadamard_defect": {
+        "mean": 0.23672045238701292,
+        "median": 0.24306220817933605,
+        "p95": 0.2630743611216891,
+        "maximum": 0.2743096966196654,
+        "initial": 0.2502433955916783,
+        "terminal": 0.20259871949812763
+      },
+      "residual_h1": {
+        "mean": 0.0005470451545022415,
+        "median": 0.0005506836483232303,
+        "p95": 0.0005967835790343663,
+        "maximum": 0.0006205845771184006,
+        "initial": 0.0005908333295133577,
+        "terminal": 0.00048740550324646734
+      },
+      "forcing_h1": {
+        "mean": 0.0024588866685350728,
+        "median": 0.0024724148779910818,
+        "p95": 0.002630392767889395,
+        "maximum": 0.002671779182360283,
+        "initial": 0.0024884528532564077,
+        "terminal": 0.002493557564940697
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.008712679382819931,
+        "median": 0.009199207739544073,
+        "p95": 0.009293228126549483,
+        "maximum": 0.009313822756427746,
+        "initial": 0.008295898092363743,
+        "terminal": 0.009219053945093309
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0029450919738642422,
+        "median": 0.0030456277000424463,
+        "p95": 0.003160837661168207,
+        "maximum": 0.003193460790866839,
+        "initial": 0.003152681878743549,
+        "terminal": 0.003030893558271648
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0013188592756704295,
+        "median": 0.0013458323325775366,
+        "p95": 0.0018023127582559113,
+        "maximum": 0.0018913301914414598,
+        "initial": 0.0009697972080669352,
+        "terminal": 0.0013048896211943007
+      },
+      "path_defect_probe_standard_error": 0.004397674734153222,
+      "terminal_defect_probe_standard_error": 0.01423366054756006,
+      "terminal_rollout": {
+        "case_id": 1000024,
+        "valid": true,
+        "raw": 1.141915937746801,
+        "aligned": 0.5806727594488916,
+        "translation": 0.9832553866184336,
+        "absolute_displacement": 0.09570810666372848
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 25,
+      "case_id": 1000025,
+      "depth": 0.010818541049957275,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.02977488782776409,
+        "median": 0.02665275484922322,
+        "p95": 0.042284014356822414,
+        "maximum": 0.042656173576800155,
+        "initial": 0.023903896799361946,
+        "terminal": 0.03216808796851485
+      },
+      "hadamard_defect": {
+        "mean": 0.16082761778876614,
+        "median": 0.15594986414811934,
+        "p95": 0.18488770164682702,
+        "maximum": 0.1891078498761699,
+        "initial": 0.14820206199627817,
+        "terminal": 0.16741693829299828
+      },
+      "residual_h1": {
+        "mean": 0.00026737112792109903,
+        "median": 0.00026703481191984665,
+        "p95": 0.0003155733345404907,
+        "maximum": 0.0003175170442111669,
+        "initial": 0.00023699019434667812,
+        "terminal": 0.00029134245763919107
+      },
+      "forcing_h1": {
+        "mean": 0.001816660988251191,
+        "median": 0.001822790777025538,
+        "p95": 0.0020292683445408354,
+        "maximum": 0.0020715376663204338,
+        "initial": 0.001693322161952429,
+        "terminal": 0.0018927662729013878
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.026744888904800247,
+        "median": 0.026637963169754274,
+        "p95": 0.027235916233185,
+        "maximum": 0.02877725334359796,
+        "initial": 0.02877725334359796,
+        "terminal": 0.02664940115058256
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.010078724229908811,
+        "median": 0.010023690068863403,
+        "p95": 0.010290283595124095,
+        "maximum": 0.011019368697284664,
+        "initial": 0.011019368697284664,
+        "terminal": 0.010023690068863403
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0016758740951252505,
+        "median": 0.001680836329457456,
+        "p95": 0.0017089115365714778,
+        "maximum": 0.0017244250201065854,
+        "initial": 0.0015852199454441328,
+        "terminal": 0.0016672254926856278
+      },
+      "path_defect_probe_standard_error": 0.003371726597591467,
+      "terminal_defect_probe_standard_error": 0.016612558986327693,
+      "terminal_rollout": {
+        "case_id": 1000025,
+        "valid": true,
+        "raw": 0.022449439907654162,
+        "aligned": 0.012293395829452469,
+        "translation": 0.01878429586510434,
+        "absolute_displacement": 0.0006492831482843679
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 26,
+      "case_id": 1000026,
+      "depth": 0.03519833832979202,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.004584205419719659,
+        "median": 0.004519235686060895,
+        "p95": 0.005650757305830191,
+        "maximum": 0.006332802546073727,
+        "initial": 0.005142596036043848,
+        "terminal": 0.0045606599161797405
+      },
+      "hadamard_defect": {
+        "mean": 0.06552315938185108,
+        "median": 0.06457920916073562,
+        "p95": 0.07285783481444084,
+        "maximum": 0.07814666227198139,
+        "initial": 0.06806214302953303,
+        "terminal": 0.06532188929726829
+      },
+      "residual_h1": {
+        "mean": 0.00032331275759925923,
+        "median": 0.00032298286140431775,
+        "p95": 0.00035566017448130234,
+        "maximum": 0.0003610830915313934,
+        "initial": 0.0003247662250090646,
+        "terminal": 0.0003198847863201519
+      },
+      "forcing_h1": {
+        "mean": 0.005203642555142202,
+        "median": 0.005125077313893746,
+        "p95": 0.005943730462579817,
+        "maximum": 0.006107856163898851,
+        "initial": 0.005079138857199403,
+        "terminal": 0.0050293966324884715
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0015646873917011218,
+        "median": 0.0015602441610308437,
+        "p95": 0.0017709793379233907,
+        "maximum": 0.0018075906674019527,
+        "initial": 0.00158474708975456,
+        "terminal": 0.0013889195377956081
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00024815273790115947,
+        "median": 0.0002492649431184573,
+        "p95": 0.00025633923737958714,
+        "maximum": 0.00025658692403019155,
+        "initial": 0.00023963417871512738,
+        "terminal": 0.0002442991851839129
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0003100434184488549,
+        "median": 0.0003096069080156512,
+        "p95": 0.000312428168568526,
+        "maximum": 0.00031258407275030163,
+        "initial": 0.00030725459622038494,
+        "terminal": 0.00030894983762516057
+      },
+      "path_defect_probe_standard_error": 0.0008632397513505044,
+      "terminal_defect_probe_standard_error": 0.004425009942099318,
+      "terminal_rollout": {
+        "case_id": 1000026,
+        "valid": true,
+        "raw": 0.10990634227432527,
+        "aligned": 0.006310207591227795,
+        "translation": 0.10972504432569964,
+        "absolute_displacement": 0.010980277566322508
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 27,
+      "case_id": 1000027,
+      "depth": 0.013703261502087116,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.017175543880729914,
+        "median": 0.016277525547367645,
+        "p95": 0.02348067499962943,
+        "maximum": 0.02963405085187601,
+        "initial": 0.015041605365816163,
+        "terminal": 0.01928770716133516
+      },
+      "hadamard_defect": {
+        "mean": 0.12410765145319815,
+        "median": 0.12210484164374485,
+        "p95": 0.14315375442897543,
+        "maximum": 0.15618449480367463,
+        "initial": 0.1190683297613775,
+        "terminal": 0.13012733548980843
+      },
+      "residual_h1": {
+        "mean": 0.00016193406074005583,
+        "median": 0.00015957160372195964,
+        "p95": 0.0001875408883740508,
+        "maximum": 0.00019197705245366527,
+        "initial": 0.00015003038875562144,
+        "terminal": 0.00017537432969624514
+      },
+      "forcing_h1": {
+        "mean": 0.0013871829697207785,
+        "median": 0.0013951134425397448,
+        "p95": 0.0014980336496269115,
+        "maximum": 0.0015095391880359066,
+        "initial": 0.0013191142951735194,
+        "terminal": 0.0014372879654096725
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0030725327851479885,
+        "median": 0.0030727401082779457,
+        "p95": 0.003167928304699611,
+        "maximum": 0.003200639605525896,
+        "initial": 0.003119119866048022,
+        "terminal": 0.002999175422373714
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.0008075265215561916,
+        "median": 0.000793461051308683,
+        "p95": 0.0008635197606987457,
+        "maximum": 0.0008825528767390071,
+        "initial": 0.0008587614816886805,
+        "terminal": 0.0007802525380590586
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00044538709887838936,
+        "median": 0.000407877996662982,
+        "p95": 0.0006360184349977082,
+        "maximum": 0.000713049923174349,
+        "initial": 0.0006167605629535481,
+        "terminal": 0.0004346385610864106
+      },
+      "path_defect_probe_standard_error": 0.002878124130324191,
+      "terminal_defect_probe_standard_error": 0.012528856610928243,
+      "terminal_rollout": {
+        "case_id": 1000027,
+        "valid": true,
+        "raw": 0.023754704802065003,
+        "aligned": 0.007008232305125249,
+        "translation": 0.02269737165820415,
+        "absolute_displacement": 0.0013569877684297886
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 28,
+      "case_id": 1000028,
+      "depth": 0.019846279174089432,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.024967530443406126,
+        "median": 0.024219287967537827,
+        "p95": 0.032241552012111555,
+        "maximum": 0.03525435497666651,
+        "initial": 0.022045756484275904,
+        "terminal": 0.02318727993945126
+      },
+      "hadamard_defect": {
+        "mean": 0.1505706971072417,
+        "median": 0.14958433015509867,
+        "p95": 0.16671702874410857,
+        "maximum": 0.1777088087010332,
+        "initial": 0.1449134796460096,
+        "terminal": 0.14693196080239496
+      },
+      "residual_h1": {
+        "mean": 0.000332369267882406,
+        "median": 0.00032810390354769695,
+        "p95": 0.00037767266140873893,
+        "maximum": 0.00039216118112214574,
+        "initial": 0.0003060635274717224,
+        "terminal": 0.00033621420937049034
+      },
+      "forcing_h1": {
+        "mean": 0.0023515910526925713,
+        "median": 0.0023156790980674844,
+        "p95": 0.0025748142048166197,
+        "maximum": 0.0026043681938597903,
+        "initial": 0.002196071538567364,
+        "terminal": 0.002456400497343016
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.0017550229511296494,
+        "median": 0.0017190302358331237,
+        "p95": 0.0020193203355214897,
+        "maximum": 0.002155714796772348,
+        "initial": 0.00164832436337432,
+        "terminal": 0.002155714796772348
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.000483668220116169,
+        "median": 0.00045322983476073816,
+        "p95": 0.0006274489876220941,
+        "maximum": 0.0006462878620302339,
+        "initial": 0.0004133601465706118,
+        "terminal": 0.0006462878620302339
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0005312237485024075,
+        "median": 0.0005331048134775075,
+        "p95": 0.0006490346541447958,
+        "maximum": 0.0006971861553376652,
+        "initial": 0.0004455879499339383,
+        "terminal": 0.0006971861553376652
+      },
+      "path_defect_probe_standard_error": 0.0023474166590108187,
+      "terminal_defect_probe_standard_error": 0.010322399056468536,
+      "terminal_rollout": {
+        "case_id": 1000028,
+        "valid": true,
+        "raw": 0.008959491404999987,
+        "aligned": 0.00806270150774636,
+        "translation": 0.0039070872313340015,
+        "absolute_displacement": 0.00026452558103383687
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 29,
+      "case_id": 1000029,
+      "depth": 0.01194613054394722,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.05414762980416823,
+        "median": 0.05388749059383246,
+        "p95": 0.06335464918982901,
+        "maximum": 0.0638341759604127,
+        "initial": 0.06170626500254343,
+        "terminal": 0.0464808149936711
+      },
+      "hadamard_defect": {
+        "mean": 0.21904273181287937,
+        "median": 0.22136311069904058,
+        "p95": 0.23911973683803647,
+        "maximum": 0.2427043232025866,
+        "initial": 0.2330268145172698,
+        "terminal": 0.20030664466143638
+      },
+      "residual_h1": {
+        "mean": 0.00044464024711895366,
+        "median": 0.0004438017335885016,
+        "p95": 0.0004899605324688351,
+        "maximum": 0.000506639176898859,
+        "initial": 0.0004847819914791643,
+        "terminal": 0.00044396450494564143
+      },
+      "forcing_h1": {
+        "mean": 0.0022239720364574003,
+        "median": 0.0022296871863497388,
+        "p95": 0.0025752057017870613,
+        "maximum": 0.0027235274719112305,
+        "initial": 0.0023162488324182688,
+        "terminal": 0.002538125259256019
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.029282647227626846,
+        "median": 0.029190925279816447,
+        "p95": 0.02971404985654157,
+        "maximum": 0.03142832703038901,
+        "initial": 0.03142832703038901,
+        "terminal": 0.029261815603570843
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.011376543849298114,
+        "median": 0.01132895686351406,
+        "p95": 0.011577292656619886,
+        "maximum": 0.012369965171827108,
+        "initial": 0.012369965171827108,
+        "terminal": 0.011379124527818082
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.0020386460352114534,
+        "median": 0.002022854328844009,
+        "p95": 0.002102514111928543,
+        "maximum": 0.0021201646241182275,
+        "initial": 0.002020820426393074,
+        "terminal": 0.002098101483881122
+      },
+      "path_defect_probe_standard_error": 0.004374867853760424,
+      "terminal_defect_probe_standard_error": 0.02058812456757238,
+      "terminal_rollout": {
+        "case_id": 1000029,
+        "valid": true,
+        "raw": 0.6926070621203521,
+        "aligned": 0.020508491034316366,
+        "translation": 0.6923033614640915,
+        "absolute_displacement": 0.02570289654102238
+      },
+      "raw_tail": true
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 30,
+      "case_id": 1000030,
+      "depth": 0.16189146041870117,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.01819754792787573,
+        "median": 0.01464801907777976,
+        "p95": 0.030357691993151605,
+        "maximum": 0.033681094964782936,
+        "initial": 0.01464801907777976,
+        "terminal": 0.015528104748987932
+      },
+      "hadamard_defect": {
+        "mean": 0.1310124894394338,
+        "median": 0.12053473612656512,
+        "p95": 0.17235779051216987,
+        "maximum": 0.18012242314858878,
+        "initial": 0.12053473612656512,
+        "terminal": 0.12337519276204881
+      },
+      "residual_h1": {
+        "mean": 0.021338028077039432,
+        "median": 0.0207133579500544,
+        "p95": 0.029842503559421325,
+        "maximum": 0.03197767355906536,
+        "initial": 0.0207133579500544,
+        "terminal": 0.022992624845791197
+      },
+      "forcing_h1": {
+        "mean": 0.1640383817618175,
+        "median": 0.17137181676548574,
+        "p95": 0.19019278122786035,
+        "maximum": 0.1906608561935575,
+        "initial": 0.17137181676548574,
+        "terminal": 0.18837672584829052
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.01837957213016027,
+        "median": 0.017339975144654976,
+        "p95": 0.030150400052411472,
+        "maximum": 0.0373795398677497,
+        "initial": 0.013680161966129225,
+        "terminal": 0.017339975144654976
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.000368161285295923,
+        "median": 0.0003005275580653425,
+        "p95": 0.0005905598934758974,
+        "maximum": 0.0006639149103611932,
+        "initial": 0.0005695654177774393,
+        "terminal": 0.0005053384331519505
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00031431767889326294,
+        "median": 0.0002510472593207212,
+        "p95": 0.0005431536750868833,
+        "maximum": 0.0005527978066816818,
+        "initial": 0.0005527978066816818,
+        "terminal": 0.00047102997823104725
+      },
+      "path_defect_probe_standard_error": 0.0008166658960355608,
+      "terminal_defect_probe_standard_error": 0.0045215525351014405,
+      "terminal_rollout": {
+        "case_id": 1000030,
+        "valid": true,
+        "raw": 0.009135592635359218,
+        "aligned": 0.0035849703529607533,
+        "translation": 0.008402799555363797,
+        "absolute_displacement": 0.008514587348316956
+      },
+      "raw_tail": false
+    },
+    {
+      "regime": "tanaka_g1",
+      "case_index": 31,
+      "case_id": 1000031,
+      "depth": 0.27700796723365784,
+      "n_path_frames": 17,
+      "n_probes_per_frame": 16,
+      "hadamard_loss": {
+        "mean": 0.010812976112838971,
+        "median": 0.010552142229117652,
+        "p95": 0.014127590364328233,
+        "maximum": 0.015197264255360178,
+        "initial": 0.011457825996027293,
+        "terminal": 0.015197264255360178
+      },
+      "hadamard_defect": {
+        "mean": 0.10289508399904121,
+        "median": 0.1021386457334007,
+        "p95": 0.11765127130868544,
+        "maximum": 0.12227448676573086,
+        "initial": 0.10651414256988731,
+        "terminal": 0.12227448676573086
+      },
+      "residual_h1": {
+        "mean": 0.06356457350259008,
+        "median": 0.06310257177922272,
+        "p95": 0.07134032339803206,
+        "maximum": 0.0741026867127714,
+        "initial": 0.06441025104830218,
+        "terminal": 0.0741026867127714
+      },
+      "forcing_h1": {
+        "mean": 0.625493323510034,
+        "median": 0.62337749192588,
+        "p95": 0.6508383025464676,
+        "maximum": 0.6509318322693873,
+        "initial": 0.6116348552810176,
+        "terminal": 0.6203070226071763
+      },
+      "teacher_q_relative_h1": {
+        "mean": 0.024495105080282416,
+        "median": 0.024192436838169528,
+        "p95": 0.03376073576122334,
+        "maximum": 0.03519952452864178,
+        "initial": 0.0249263913925421,
+        "terminal": 0.021160072501386355
+      },
+      "teacher_q_relative_l2": {
+        "mean": 0.00024044272142089812,
+        "median": 0.0002360921843743369,
+        "p95": 0.00029551562104743103,
+        "maximum": 0.0003230707371336478,
+        "initial": 0.0002360921843743369,
+        "terminal": 0.0002134676291771584
+      },
+      "teacher_q_p8_relative_l2": {
+        "mean": 0.00019750338985814476,
+        "median": 0.00019291531012162314,
+        "p95": 0.0002702242392059522,
+        "maximum": 0.00027362054076559536,
+        "initial": 0.00019349885581063854,
+        "terminal": 0.0001773503529962042
+      },
+      "path_defect_probe_standard_error": 0.0008218189378998118,
+      "terminal_defect_probe_standard_error": 0.004051453578962211,
+      "terminal_rollout": {
+        "case_id": 1000031,
+        "valid": true,
+        "raw": 0.007965239107816845,
+        "aligned": 0.00754098037814306,
+        "translation": 0.0025648877131672306,
+        "absolute_displacement": 0.0025167633850231796
+      },
+      "raw_tail": false
+    }
+  ]
+}
