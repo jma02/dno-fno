@@ -43,7 +43,7 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-$EPOCHS}"
 
 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
-uv run python train-jax-10m/1d_dno_fno_jax.py \
+uv run python scripts/train_dno.py \
   --model cs_dno \
   --norm scale \
   --dataset "$DATASET" \

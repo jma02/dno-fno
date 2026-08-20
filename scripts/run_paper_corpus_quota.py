@@ -51,6 +51,13 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_population import (  # noqa: E402
     BENJAMIN_FEIR_POPULATION_CELLS,
+    PAPER_FOCUSED_STEEPNESS_LIMIT,
+    PAPER_PERTURBATION_RATIO_MAX,
+)
+from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
+    CARRIER_STEEPNESS_MAX,
+    CARRIER_STEEPNESS_MIN,
+    PERTURBATION_RATIO_MIN,
 )
 from solver.gen_data.jonswap_tma_population import (  # noqa: E402
     JONSWAP_TMA_POPULATION_CELLS,
@@ -65,11 +72,11 @@ from solver.gen_data.pipeline.manifest import (  # noqa: E402
     build_dataset_view,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
-    PAPER_CORPUS_REVISION_ID,
     CellQuota,
     PhysicalFamilyId,
     SplitId,
     balanced_cell_quotas,
+    paper_corpus_revision_id,
 )
 from solver.gen_data.pipeline.quality import (  # noqa: E402
     reasons_from_bits,
@@ -410,6 +417,45 @@ def _execution_record(execution: PaperExecution) -> dict[str, object]:
     return execution.to_json_record()
 
 
+def _benjamin_feir_population_support_record() -> dict[str, object]:
+    """Return an elementary, complete description of the BF sampling law."""
+
+    return {
+        "schema": "paper_benjamin_feir_population_support_v1",
+        "mode_pair_cells": [
+            {
+                "cell_id": cell.cell_id,
+                "carrier_mode": cell.carrier_mode,
+                "sideband_offset": cell.sideband_offset,
+            }
+            for cell in BENJAMIN_FEIR_POPULATION_CELLS
+        ],
+        "conditional_carrier_steepness": {
+            "law": "uniform",
+            "interval": "(lower, upper]",
+            "lower_formula": "max(0.05, Delta_n/(2*sqrt(2)*n_c))",
+            "upper_formula": "min(0.13, (-F+2*sqrt(F^2+3*ell^2))/3)",
+            "ell_definition": "Delta_n/(2*sqrt(2)*n_c)",
+            "base_lower": CARRIER_STEEPNESS_MIN,
+            "base_upper": CARRIER_STEEPNESS_MAX,
+        },
+        "focused_steepness": {
+            "formula": "epsilon_c*(1+2*sqrt(1-beta^2))",
+            "beta_definition": "Delta_n/(2*sqrt(2)*epsilon_c*n_c)",
+            "upper_inclusive": PAPER_FOCUSED_STEEPNESS_LIMIT,
+        },
+        "sideband_to_carrier_ratio": {
+            "law": "uniform",
+            "lower_inclusive": PERTURBATION_RATIO_MIN,
+            "upper_inclusive": PAPER_PERTURBATION_RATIO_MAX,
+        },
+        "translation": {
+            "law": "uniform",
+            "interval": "[0, L)",
+        },
+    }
+
+
 def incremental_cell_quotas(
     cell_ids: Sequence[str],
     *,
@@ -485,11 +531,15 @@ def build_run_spec(
         family_configuration = {
             "trajectory_execution": selected_execution.to_json_record(),
         }
+        if request.family == "benjamin_feir":
+            family_configuration["population_support"] = (
+                _benjamin_feir_population_support_record()
+            )
     return AcceptedQuotaRunSpec(
         root=request.output_root,
         family_name=request.family,
         family_id=FAMILY_IDS[request.family],
-        revision_id=PAPER_CORPUS_REVISION_ID,
+        revision_id=paper_corpus_revision_id(FAMILY_IDS[request.family]),
         split_id=request.split,
         stream_id=request.stream_id,
         quotas=quotas,
@@ -599,6 +649,19 @@ def preflight(request: GenerationRequest) -> tuple[
 
     execution = _paper_execution(request.family)
     spec = build_run_spec(request, execution=execution)
+    if request.family == "jonswap_tma":
+        assert isinstance(execution, TrajectoryExecutionConfig)
+        try:
+            TrajectoryQuotaExecutor(
+                run_spec=spec,
+                execution=execution,
+            )
+        except ValueError as error:
+            raise RuntimeError(
+                "paper-corpus JONSWAP/TMA must use "
+                "scripts/run_paper_corpus_jonswap_bucketed.py so the "
+                "fingerprinted nonlinear adjustment cannot be bypassed"
+            ) from error
     state = scan_quota_run(spec)
     cumulative_before = balanced_cell_quotas(
         FAMILY_CELL_IDS[request.family],
@@ -636,6 +699,7 @@ def preflight(request: GenerationRequest) -> tuple[
         "schema": "paper_corpus_quota_preflight_v1",
         "mode": "dry_run",
         "no_numerical_generation_performed": True,
+        "revision_id": spec.revision_id,
         "output_root": str(request.output_root),
         "artifact_namespace": {
             "family": request.family,
@@ -680,13 +744,13 @@ def preflight(request: GenerationRequest) -> tuple[
             "spatial_points_per_row": (
                 execution.target.nx
                 if isinstance(execution, StaticStokesContract)
-                else execution.numerical.nx
+                else execution.numerical.delivered_nx
             ),
             "field_values_per_row": 3
             * (
                 execution.target.nx
                 if isinstance(execution, StaticStokesContract)
-                else execution.numerical.nx
+                else execution.numerical.delivered_nx
             ),
         },
         "resume_state": _state_record(state),
@@ -814,7 +878,7 @@ def _validate_view(
         if isinstance(execution, StaticStokesContract)
         else {
             "length": execution.numerical.length,
-            "nx": execution.numerical.nx,
+            "nx": execution.numerical.delivered_nx,
         }
     )
     if grid != expected_grid:

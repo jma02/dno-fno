@@ -81,6 +81,12 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
             "benjamin_feir": 68,
             "jonswap_tma": 29,
         }
+        expected_revision_by_family = {
+            "stokes": 2,
+            "tanaka": 3,
+            "benjamin_feir": 4,
+            "jonswap_tma": 4,
+        }
         with tempfile.TemporaryDirectory() as directory:
             for family, accepted_cases in accepted_by_family.items():
                 with self.subTest(family=family):
@@ -93,6 +99,10 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                         platform=BOOTSTRAP_PLATFORM,
                     )
                     spec = build_run_spec(request)
+                    self.assertEqual(
+                        spec.revision_id,
+                        expected_revision_by_family[family],
+                    )
                     targets = tuple(
                         quota.target_accepted for quota in spec.quotas
                     )
@@ -108,6 +118,23 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                         spec.configuration["execution_platform"],
                         BOOTSTRAP_PLATFORM,
                     )
+                    if family == "benjamin_feir":
+                        support = spec.configuration["population_support"]
+                        self.assertEqual(
+                            support["schema"],
+                            "paper_benjamin_feir_population_support_v1",
+                        )
+                        self.assertEqual(len(support["mode_pair_cells"]), 66)
+                        self.assertEqual(
+                            support["focused_steepness"]["upper_inclusive"],
+                            (1.0 + np.sqrt(2.0)) / 10.0,
+                        )
+                        self.assertEqual(
+                            support["sideband_to_carrier_ratio"][
+                                "upper_inclusive"
+                            ],
+                            0.10,
+                        )
                     dependency = spec.configuration["dependency_environment"]
                     self.assertEqual(
                         set(dependency["packages"]),
@@ -153,6 +180,15 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                         ).to_json_record(),
                     )
                     numerical = execution["numerical"]
+                    expected_evolution_order = (
+                        6 if family == "tanaka" else 4
+                    )
+                    expected_internal_nx = (
+                        2048 if family == "jonswap_tma" else 1024
+                    )
+                    expected_internal_cutoff = (
+                        704.0 if family == "jonswap_tma" else 256.0
+                    )
                     self.assertEqual(
                         (
                             numerical["nx"],
@@ -160,8 +196,47 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                             numerical["pad_factor"],
                             numerical["maximum_wavenumber"],
                         ),
-                        (1024, 6, 8, 128.0),
+                        (
+                            expected_internal_nx,
+                            expected_evolution_order,
+                            8,
+                            expected_internal_cutoff,
+                        ),
                     )
+                    if family == "jonswap_tma":
+                        self.assertEqual(numerical["target_nx"], 1024)
+                        self.assertEqual(numerical["gl2_iteration_cap"], 5)
+                    else:
+                        self.assertNotIn("target_nx", numerical)
+                    if family == "tanaka":
+                        self.assertEqual(
+                            numerical["target_maximum_wavenumber"],
+                            128.0,
+                        )
+                        self.assertEqual(
+                            numerical["post_step_state_filter"],
+                            "hou_li",
+                        )
+                        self.assertEqual(
+                            numerical["post_step_maximum_wavenumber"],
+                            256.0,
+                        )
+                        self.assertEqual(numerical["hou_li_coefficient"], 36.0)
+                        self.assertEqual(numerical["hou_li_power"], 36)
+                    else:
+                        self.assertEqual(numerical["target_dno_order"], 6)
+                        self.assertEqual(
+                            numerical["target_maximum_wavenumber"],
+                            128.0,
+                        )
+                        self.assertEqual(
+                            numerical["internal_hamiltonian_drift_threshold"],
+                            1.0e-3,
+                        )
+                        self.assertEqual(
+                            numerical["post_step_state_filter"],
+                            "sharp",
+                        )
                     self.assertEqual(numerical["dt"], 0.01)
                     self.assertNotIn("fine_dt", numerical)
                     self.assertNotIn("retry_dt", numerical)
@@ -178,13 +253,20 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                     if family == "jonswap_tma":
                         self.assertEqual(
                             horizon["kind"],
-                            "jonswap_16_peak_periods_floor_saved_grid",
+                            "jonswap_peak_periods_floor_saved_grid",
                         )
-                        self.assertEqual(horizon["peak_period_count"], 16)
+                        self.assertEqual(horizon["period_count"], 16)
                         self.assertEqual(
                             execution["jonswap_quadrature_order"],
                             16,
                         )
+                    elif family == "benjamin_feir":
+                        self.assertEqual(
+                            horizon["kind"],
+                            "benjamin_feir_carrier_periods_floor_saved_grid",
+                        )
+                        self.assertEqual(horizon["period_count"], 100)
+                        self.assertIsNone(execution["jonswap_quadrature_order"])
                     else:
                         self.assertEqual(
                             horizon["kind"],
@@ -247,6 +329,8 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(state.complete)
             self.assertTrue(plan["no_numerical_generation_performed"])
+            self.assertEqual(plan["revision_id"], 3)
+            self.assertEqual(plan["run_spec"]["revision_id"], 3)
             allocation = plan["allocation"]
             self.assertEqual(allocation["cell_count"], 11)
             self.assertEqual(allocation["nonzero_quota_cell_count"], 5)
@@ -274,6 +358,23 @@ class PaperCorpusQuotaLauncherTests(unittest.TestCase):
                 TrajectoryExecutionConfig.paper("tanaka"),
             )
             json.dumps(plan, sort_keys=True, allow_nan=False)
+
+    def test_base_preflight_rejects_unadjusted_jonswap_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = GenerationRequest(
+                output_root=Path(directory) / "jonswap",
+                family="jonswap_tma",
+                split=SplitId.TEST,
+                accepted_cases=27,
+                batch_size=27,
+                platform=BOOTSTRAP_PLATFORM,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "run_paper_corpus_jonswap_bucketed.py",
+            ):
+                preflight(request)
 
     def test_stokes_preflight_reports_static_rows_and_exact_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
