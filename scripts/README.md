@@ -8,9 +8,10 @@ There are two supported training entrypoints:
   on Modal and manages the persistent data/output volume.
 
 The files under `train-jax-10m/` are the internal training engine and its
-importable helpers. The older `train/`, `train-jax/`, and `train-dnonet-jax/`
-directories are retained for experiment provenance; they are not current
-training entrypoints.
+importable helpers. The older `train/` and `train-jax/` directories are
+retained for experiment provenance; they are not current training entrypoints.
+The superseded DNO-Net-specific training stack remains available through Git
+history rather than in the working tree.
 
 The directory is intentionally limited to the current paper workflow:
 
