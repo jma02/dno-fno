@@ -2,8 +2,8 @@
 
 There are two supported training entrypoints:
 
-- `uv run python scripts/train_dno.py ...` runs the canonical local JAX
-  trainer.
+- `uv run python train-jax-10m/1d_dno_fno_jax.py ...` runs the canonical
+  local JAX trainer.
 - `uv run modal run scripts/modal_train.py::train ...` runs that same trainer
   on Modal and manages the persistent data/output volume.
 
@@ -22,6 +22,6 @@ The directory is intentionally limited to the current paper workflow:
   test.
 
 A `launch_*` recipe configures an experiment but ultimately delegates
-training to `train_dno.py` or `modal_train.py`; it is not another trainer
-implementation. Superseded exploratory and scheduled launch scripts remain
-available through Git history rather than in the working tree.
+training to the canonical JAX engine or `modal_train.py`; it is not another
+trainer implementation. Superseded exploratory and scheduled launch scripts
+remain available through Git history rather than in the working tree.

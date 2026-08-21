@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Discretization invariance probe for a trained CS-DNO checkpoint.
 
-Loads a checkpoint produced by scripts/train_dno.py, picks test cases
+Loads a checkpoint produced by the canonical JAX trainer, picks test cases
 from a flat .npz dataset, and runs one-step inference at the native grid
 resolution and at an arbitrary other resolution.  The test resolution may be
 finer or coarser than the native 1024 grid.  For refined inputs the test output

@@ -1,6 +1,6 @@
 """Profile a single training step of the cs_dno model.
 
-Mirrors the training entry (``scripts/train_dno.py``) as closely as
+Mirrors the canonical JAX training engine as closely as
 possible: same shard_map(batch) over both GPUs, same relative-L2 loss, same
 AdamW schedule, same batch=256 → 128/GPU, nx=1024.
 
