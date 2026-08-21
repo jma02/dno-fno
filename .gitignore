@@ -60,9 +60,3 @@ site/
 
 # Claude Code session transcript dumps
 *-local-command-caveatcaveat-*.txt
-
-# Playground generated run outputs (scripts themselves are tracked)
-playground/runs/
-playground/paper_dashboard/
-playground/rollout_dashboard/
-playground/tanaka_sensitivity/

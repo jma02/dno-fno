@@ -481,7 +481,7 @@ level for this discretisation), global Lipschitz bounds on the operator
 (kills the modulational dynamics for dispersive PDEs), simple capacity
 scaling (current architecture is 17M params vs.\ FNO's 13M; capacity is
 not the bottleneck). See the literature review
-(\texttt{playground/diagnostics/literature\_review.md}) for full
+(\texttt{notes/rollout\_accuracy/literature\_review.md}) for full
 reasoning on skipped directions.
 
 % ===================================================================
@@ -525,17 +525,18 @@ reasoning on skipped directions.
 \section*{Artifacts}
 
 \begin{itemize}[leftmargin=1.3em,itemsep=1pt]
-  \item Data audit: \texttt{playground/diagnostics/data\_audit\_report.md},
-        \texttt{data\_audit.json}, \texttt{audit\_data.py}.
-  \item Rollout forensics: \texttt{playground/diagnostics/
-        rollout\_forensics\_report.md}, \texttt{rollout\_forensics.json},
-        and the analysis scripts \texttt{rollout\_forensics*.py}.
+  \item Data audit: \texttt{notes/rollout\_accuracy/data\_audit\_report.md}
+        and \texttt{data\_audit.json}.
+  \item Rollout forensics:
+        \texttt{notes/rollout\_accuracy/rollout\_forensics\_report.md}
+        and \texttt{rollout\_forensics.json}. The exploratory analysis scripts
+        remain available through Git history.
   \item Literature scan:
-        \texttt{playground/diagnostics/literature\_review.md}.
+        \texttt{notes/rollout\_accuracy/literature\_review.md}.
   \item Per-regime error-vs-wavenumber plots:
-        \texttt{outputs/error\_vs\_k/*\_err\_vs\_k.png}; site builder at
-        \texttt{playground/build\_paper\_dashboard.py};
-        live at \href{https://stunning-cocada-db3a7d.netlify.app}{stunning-cocada-db3a7d.netlify.app}.
+        \texttt{outputs/error\_vs\_k/*\_err\_vs\_k.png}; the historical site
+        builder remains available through Git history, and the deployed site is
+        at \href{https://stunning-cocada-db3a7d.netlify.app}{stunning-cocada-db3a7d.netlify.app}.
   \item Linear-regime fix:
         \texttt{solver/evals/eval\_suite.py}, function
         \texttt{truth\_rollout\_linear\_analytic}.

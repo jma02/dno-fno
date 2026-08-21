@@ -4,7 +4,8 @@ Mirrors generate_tanaka_dataset_v2.py / generate_bf_dataset.py: same rollout
 settings, same NPZ + state.json sidecar, same per-sample (eta, xi, gxi, time,
 case_id, depth) layout.
 
-Differs from playground/gen_random_sea.py in three ways:
+Differs from the legacy deep-water random-sea IC generator, preserved in Git
+history, in three ways:
 1. **Finite-depth xi transfer.** The original deep-water transfer
    xi_hat = -i sign(k) sqrt(g/|k|) eta_hat is replaced by the linearized
    finite-depth dispersion
@@ -17,9 +18,9 @@ Differs from playground/gen_random_sea.py in three ways:
 3. **Full rollout.** Instead of saving just the IC, we run batched_rollout
    for tmax with subsampling, then evaluate gxi at the saved snapshots.
 
-Default domain matches the existing playground scripts: L=164, NX=1024, g=1.
-Default Hs/kp/bw ranges match playground/gen_random_sea.py and
-notes/random_sea_generation.tex.
+The default domain preserves the historical experimental convention:
+L=164, NX=1024, g=1. Default Hs/kp/bw ranges match the recorded legacy
+generator and `notes/random_sea_generation.tex`.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--rollout_dtype", choices=("float32", "float64"), default="float64",
         help="float64 needed: order-6 DNO at k_max=NX/2 amplifies float32 eps to amplitude order under the rollout.",
     )
-    # Spectrum hyperparameter ranges (match playground/gen_random_sea.py defaults).
+    # Spectrum hyperparameter ranges preserve the legacy generator defaults.
     parser.add_argument("--Hs_lo", type=float, default=0.1)
     parser.add_argument("--Hs_hi", type=float, default=0.6)
     parser.add_argument("--kp_lo", type=float, default=0.06)

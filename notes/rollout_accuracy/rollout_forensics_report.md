@@ -109,5 +109,5 @@ broadband-noise ICs for fidelity on coherent soliton-like ICs.
 
 ## Artifacts
 
-- Raw data: `playground/diagnostics/rollout_forensics.json`
+- Raw data: `notes/rollout_accuracy/rollout_forensics.json`
 - Scripts: `rollout_forensics{,_part2,_part3,_table,_within}.py`

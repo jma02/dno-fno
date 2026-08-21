@@ -70,5 +70,5 @@ data-coverage problem.** Improvements need to come from model / training
 
 ## Artifacts
 
-- Raw stats: `playground/diagnostics/data_audit.json`
-- Sampling script: `playground/diagnostics/audit_data.py`
+- Raw stats: `notes/rollout_accuracy/data_audit.json`
+- Sampling script: preserved in Git history.
