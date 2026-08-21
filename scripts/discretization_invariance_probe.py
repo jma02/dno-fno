@@ -42,8 +42,8 @@ for _d in (
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from model_rollout import build_predict_gxi_with_depth, load_run
-from util import compute_log_depth
+from model_rollout import build_predict_gxi_batched, load_run  # noqa: E402
+from util import compute_log_depth  # noqa: E402
 
 
 def change_resolution_rfft(f: np.ndarray, n_new: int) -> np.ndarray:
@@ -170,7 +170,20 @@ def main() -> int:
     if args.domain_length is not None:
         config_overrides["domain_length"] = float(args.domain_length)
     loaded = load_run(args.run_dir, checkpoint="best", config_overrides=config_overrides or None)
-    predict = build_predict_gxi_with_depth(loaded)
+    predict_batched = build_predict_gxi_batched(loaded)
+
+    def predict(
+        eta: np.ndarray,
+        xi: np.ndarray,
+        log_depth: float,
+    ) -> np.ndarray:
+        return np.asarray(
+            predict_batched(
+                np.asarray(eta, dtype=np.float32)[None, :],
+                np.asarray(xi, dtype=np.float32)[None, :],
+                np.asarray([log_depth], dtype=np.float32),
+            )
+        )[0]
     load_time = time.perf_counter() - t0
     print(f"Loaded checkpoint from {args.run_dir} in {load_time:.2f}s")
     print(f"Epoch: {loaded.epoch}, config model: {loaded.config.get('model')}")
@@ -249,7 +262,6 @@ def main() -> int:
         if args.n_test > n_native:
             gxi_test_hat = np.fft.rfft(gxi_test, norm="forward")
             native_freq_count = n_native // 2 + 1
-            test_freq_count = args.n_test // 2 + 1
             high_mode_energy = np.sum(np.abs(gxi_test_hat[native_freq_count:]) ** 2)
             total_mode_energy = np.sum(np.abs(gxi_test_hat) ** 2)
             high_mode_fraction = float(high_mode_energy / (total_mode_energy + 1e-30))
