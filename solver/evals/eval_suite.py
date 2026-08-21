@@ -1,4 +1,4 @@
-"""Batched rollout test suite for FNO / SpectralDNO surrogates.
+"""Batched rollout test suite for FNO / CS-DNO surrogates.
 
 For each regime (linear, stokes_deep, stokes_finite, random_sea_finite,
 random_sea_deep, tanaka_g0, tanaka_g1, bf_g0, bf_g1, bf_modal), pulls N ICs
@@ -1925,11 +1925,6 @@ def run_regime(
         "gxi_highband_k_cut": gxi_highband_k_cut,
         "gxi_highband_r_max": gxi_highband_r_max,
         "gxi_highband_abs_floor": gxi_highband_abs_floor,
-        "cs_residual_highband_cap": bool(loaded.config.get("cs_residual_highband_cap", False)),
-        "cs_block_k_cut": int(loaded.config.get("cs_block_k_cut", 0)),
-        "cs_residual_highband_cap_k_cut": float(loaded.config.get("cs_residual_highband_cap_k_cut", 32.0)),
-        "cs_residual_highband_cap_beta": float(loaded.config.get("cs_residual_highband_cap_beta", 0.10)),
-        "cs_residual_highband_cap_floor": float(loaded.config.get("cs_residual_highband_cap_floor", 0.0)),
         "batched_surrogate": batched_surrogate,
         "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         "gl2_residual_check": gl2_residual_check,
@@ -2099,22 +2094,6 @@ def main() -> None:
                         help="Maximum allowed high/low Gxi energy ratio above the abs floor.")
     parser.add_argument("--gxi_highband_abs_floor", type=float, default=5.0,
                         help="Absolute sqrt(sum |Gxi_hat(k>=k_cut)|^2) floor for the high-band cap.")
-    parser.add_argument(
-        "--cs_residual_highband_cap", action="store_true",
-        help="Enable the model's parameter-free structural cap on only the learned "
-             "CS-DNO residual high band. This preserves G_0 xi and changes no "
-             "checkpoint tensor shapes.",
-    )
-    parser.add_argument("--cs_residual_highband_cap_k_cut", type=float, default=32.0,
-                        help="|k| boundary for the learned-residual high-band cap.")
-    parser.add_argument("--cs_residual_highband_cap_beta", type=float, default=0.10,
-                        help="Residual high-band cap as beta*||G_0 xi||.")
-    parser.add_argument("--cs_residual_highband_cap_floor", type=float, default=0.0,
-                        help="Additive normalized-output floor for the residual high-band cap.")
-    parser.add_argument("--cs_block_k_cut", type=int, default=None,
-                        help="Eval-only override for the CS-DNO learned block transfer cutoff. "
-                             "0 leaves all transfer kernels active; positive values block "
-                             "learned transfer-kernel corrections for |k| >= cut.")
     parser.add_argument("--truth_cache", default=None,
                         help="Directory containing prior `{regime}_trajs.npz` files. If present and "
                              "shape+case_ids match, truth is loaded instead of recomputed. "
@@ -2184,13 +2163,6 @@ def main() -> None:
             f"_etagxihl_k{args.eta_growth_gxi_limiter_k_lo:g}-{args.eta_growth_gxi_limiter_k_hi:g}"
             f"_g{args.eta_growth_gxi_limiter_growth_factor:g}"
         ).replace(".", "p")
-    if args.cs_residual_highband_cap:
-        default_name += (
-            f"_csrcap_kc{args.cs_residual_highband_cap_k_cut:g}"
-            f"_b{args.cs_residual_highband_cap_beta:g}"
-        )
-    if args.cs_block_k_cut is not None:
-        default_name += f"_csbkc{args.cs_block_k_cut}"
     if args.gl2_residual_check:
         default_name += f"_gl2rc_tol{args.gl2_residual_tol:g}"
     if args.ic_panel_dir:
@@ -2198,20 +2170,7 @@ def main() -> None:
     out_dir = Path(args.output_dir).resolve() if args.output_dir else run_dir / default_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model_config_overrides = {}
-    if args.cs_residual_highband_cap:
-        model_config_overrides.update({
-            "cs_residual_highband_cap": True,
-            "cs_residual_highband_cap_k_cut": float(args.cs_residual_highband_cap_k_cut),
-            "cs_residual_highband_cap_beta": float(args.cs_residual_highband_cap_beta),
-            "cs_residual_highband_cap_floor": float(args.cs_residual_highband_cap_floor),
-        })
-    if args.cs_block_k_cut is not None:
-        model_config_overrides["cs_block_k_cut"] = int(args.cs_block_k_cut)
-    loaded = load_run(
-        run_dir, checkpoint=args.checkpoint,
-        config_overrides=model_config_overrides or None,
-    )
+    loaded = load_run(run_dir, checkpoint=args.checkpoint)
     checkpoint_dir = run_dir / (
         "best_val_ckpt" if args.checkpoint == "best" else "final_ckpt"
     )

@@ -1,11 +1,13 @@
-"""Modal app to run the train-jax-10m FNO trainer on a remote GPU.
+"""Modal app to run the JAX DNO/FNO trainer on remote GPUs.
 
 Workflow:
     # 0. Authenticate once:
     modal token new
 
-    # 1. Upload the combined training dataset + the rescaled DNO test set:
+    # 1. Upload a flat NPZ training dataset:
     modal run scripts/modal_train.py::upload_data
+
+    # For a manifest-backed corpus, use upload_dataset_view instead.
 
     # 2. Train (single-GPU H100 by default; pass --gpu-spec to override):
     modal run scripts/modal_train.py::train \\
@@ -20,7 +22,7 @@ Workflow:
     # Quick peek at what's on the volume:
     modal run scripts/modal_train.py::status
 
-The volume keeps both the input npz files and the run outputs, so re-running
+The volume keeps both the input files and the run outputs, so re-running
 ``train`` re-uses the same dataset upload.
 """
 from __future__ import annotations
@@ -111,21 +113,18 @@ def status() -> dict:
 @app.local_entrypoint()
 def upload_data(
     train_dataset: str = "combined_dataset.npz",
-    test_dataset: str = "test_dno_rescaled.npz",
     local_dir: str = "data",
 ) -> None:
-    """Push training + test datasets (and their .meta.json sidecars) onto the volume."""
+    """Push one flat training dataset and its sidecars onto the volume."""
     src = Path(local_dir).resolve()
-    targets: list[tuple[Path, str]] = []
-    for name in (train_dataset, test_dataset):
-        npz = src / name
-        if not npz.exists():
-            raise FileNotFoundError(f"missing local file: {npz}")
-        targets.append((npz, f"/{name}"))
-        for suffix in (".meta.json", ".stats.json"):
-            sidecar = npz.with_suffix(suffix)
-            if sidecar.exists():
-                targets.append((sidecar, f"/{sidecar.name}"))
+    npz = src / train_dataset
+    if not npz.exists():
+        raise FileNotFoundError(f"missing local file: {npz}")
+    targets = [(npz, f"/{train_dataset}")]
+    for suffix in (".meta.json", ".stats.json"):
+        sidecar = npz.with_suffix(suffix)
+        if sidecar.exists():
+            targets.append((sidecar, f"/{sidecar.name}"))
 
     total = sum(p.stat().st_size for p, _ in targets) / 1e9
     print(f"Uploading {len(targets)} files ({total:.2f} GB) -> volume {VOLUME_NAME!r}")
@@ -208,7 +207,6 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
 def run_training(
     *,
     dataset: str,
-    test_dataset: str,
     run_name: str,
     epochs: int,
     batch_size: int,
@@ -217,27 +215,11 @@ def run_training(
     modes: int,
     width: int,
     n_blocks: int,
-    sobolev_k: int,
     norm: str,
     model_kind: str,
     seed: int,
-    skip_dno_eval: bool,
     latent: int,
     cs_mult_hidden: int,
-    cs_use_g1_baseline: bool,
-    cs_g1_k_cut: int,
-    cs_tie_xi_out_mult: bool,
-    hamiltonian_weight: float,
-    hamiltonian_dt: float,
-    hamiltonian_warmup_steps: int,
-    hamiltonian_clip: float,
-    pushforward_steps: int,
-    pushforward_weight: float,
-    pushforward_dt: float,
-    pushforward_order: int,
-    pushforward_pad_factor: int,
-    psd_hinge_weight: float,
-    psd_hinge_warmup_steps: int,
     precision: str,
     resume_from: str,
     total_epochs: int,
@@ -257,41 +239,22 @@ def run_training(
     cmd = [
         sys.executable, "/repo/train-jax-10m/1d_dno_fno_jax.py",
         "--dataset", dataset,
-        "--dno_eval_dataset", test_dataset,
         "--precision", precision,
         "--epochs", str(epochs),
         "--batch_size", str(batch_size),
         "--lr", str(lr),
         "--weight_decay", str(weight_decay),
-        "--modes", str(modes),
         "--width", str(width),
         "--n_blocks", str(n_blocks),
-        "--sobolev_k", str(sobolev_k),
         "--norm", norm,
         "--model", model_kind,
         "--seed", str(seed),
         "--run_name", run_name,
         "--latent", str(latent),
         "--cs_mult_hidden", str(cs_mult_hidden),
-        "--cs_g1_k_cut", str(cs_g1_k_cut),
-        "--hamiltonian_weight", str(hamiltonian_weight),
-        "--hamiltonian_dt", str(hamiltonian_dt),
-        "--hamiltonian_warmup_steps", str(hamiltonian_warmup_steps),
-        "--hamiltonian_clip", str(hamiltonian_clip),
-        "--pushforward_steps", str(pushforward_steps),
-        "--pushforward_weight", str(pushforward_weight),
-        "--pushforward_dt", str(pushforward_dt),
-        "--pushforward_order", str(pushforward_order),
-        "--pushforward_pad_factor", str(pushforward_pad_factor),
-        "--psd_hinge_weight", str(psd_hinge_weight),
-        "--psd_hinge_warmup_steps", str(psd_hinge_warmup_steps),
     ]
-    if skip_dno_eval:
-        cmd.append("--skip_dno_eval")
-    if cs_use_g1_baseline:
-        cmd.append("--cs_use_g1_baseline")
-    if cs_tie_xi_out_mult:
-        cmd.append("--cs_tie_xi_out_mult")
+    if model_kind == "fno":
+        cmd.extend(["--modes", str(modes)])
     if resume_from:
         cmd.extend(["--resume_from", resume_from])
     if total_epochs > 0:
@@ -362,7 +325,6 @@ def run_training(
 @app.local_entrypoint()
 def train(
     dataset: str = "combined_dataset.npz",
-    test_dataset: str = "test_dno_rescaled.npz",
     run_name: str = "",
     epochs: int = 30,
     batch_size: int = 1024,
@@ -371,27 +333,11 @@ def train(
     modes: int = 64,
     width: int = 64,
     n_blocks: int = 4,
-    sobolev_k: int = 1,
     norm: str = "scale",
     model_kind: str = "fno",
     seed: int = 0,
-    skip_dno_eval: bool = False,
     latent: int = 64,
     cs_mult_hidden: int = 32,
-    cs_use_g1_baseline: bool = False,
-    cs_g1_k_cut: int = 128,
-    cs_tie_xi_out_mult: bool = False,
-    hamiltonian_weight: float = 0.0,
-    hamiltonian_dt: float = 0.01,
-    hamiltonian_warmup_steps: int = 10000,
-    hamiltonian_clip: float = 10.0,
-    pushforward_steps: int = 0,
-    pushforward_weight: float = 1.0,
-    pushforward_dt: float = 0.01,
-    pushforward_order: int = 4,
-    pushforward_pad_factor: int = 4,
-    psd_hinge_weight: float = 0.0,
-    psd_hinge_warmup_steps: int = 10000,
     precision: str = "fp32",
     resume_from: str = "",
     total_epochs: int = 0,
@@ -415,7 +361,6 @@ def train(
 
     call_kwargs = dict(
         dataset=dataset,
-        test_dataset=test_dataset,
         run_name=run_name,
         epochs=epochs,
         batch_size=batch_size,
@@ -424,27 +369,11 @@ def train(
         modes=modes,
         width=width,
         n_blocks=n_blocks,
-        sobolev_k=sobolev_k,
         norm=norm,
         model_kind=model_kind,
         seed=seed,
-        skip_dno_eval=skip_dno_eval,
         latent=latent,
         cs_mult_hidden=cs_mult_hidden,
-        cs_use_g1_baseline=cs_use_g1_baseline,
-        cs_g1_k_cut=cs_g1_k_cut,
-        cs_tie_xi_out_mult=cs_tie_xi_out_mult,
-        hamiltonian_weight=hamiltonian_weight,
-        hamiltonian_dt=hamiltonian_dt,
-        hamiltonian_warmup_steps=hamiltonian_warmup_steps,
-        hamiltonian_clip=hamiltonian_clip,
-        pushforward_steps=pushforward_steps,
-        pushforward_weight=pushforward_weight,
-        pushforward_dt=pushforward_dt,
-        pushforward_order=pushforward_order,
-        pushforward_pad_factor=pushforward_pad_factor,
-        psd_hinge_weight=psd_hinge_weight,
-        psd_hinge_warmup_steps=psd_hinge_warmup_steps,
         precision=precision,
         resume_from=resume_from,
         total_epochs=total_epochs,

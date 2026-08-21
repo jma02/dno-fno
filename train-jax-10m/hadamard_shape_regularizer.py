@@ -26,7 +26,6 @@ Array: TypeAlias = jax.Array
 ApplyFn: TypeAlias = Callable[[dict[str, Any], Array, Array], Array]
 NormalizeInputsFn: TypeAlias = Callable[[Array, Array], Array]
 DenormalizeTargetsFn: TypeAlias = Callable[[Array], Array]
-FilterPredictionsFn: TypeAlias = Callable[[Array], Array]
 Diagnostics: TypeAlias = dict[str, Array]
 
 
@@ -45,6 +44,18 @@ class HadamardRegConfig:
     relative_eps_max: float = 3e-3
     eta_scale_floor: float = 1e-3
     denominator_floor: float = 1e-12
+
+
+def sample_microbatch(
+    rng: Array,
+    eta: Array,
+    xi: Array,
+    depth_per_sample: Array,
+    local_size: int,
+) -> tuple[Array, Array, Array]:
+    """Sample a device-local microbatch without replacement."""
+    indices = jax.random.permutation(rng, eta.shape[0])[:local_size]
+    return eta[indices], xi[indices], depth_per_sample[indices]
 
 
 def _validate_config(cfg: HadamardRegConfig) -> None:
@@ -178,13 +189,11 @@ def evaluate_operator(
     batch_depth_local: Array,
     norm_inputs_fn: NormalizeInputsFn,
     denorm_targets_fn: DenormalizeTargetsFn,
-    filter_predictions_fn: FilterPredictionsFn,
     dtype: jnp.dtype,
 ) -> Array:
     """Evaluate the learned DNO in physical units with production zero-mean output."""
     inputs = norm_inputs_fn(eta_phys, xi_phys)
     predictions = apply_fn({"params": model_params}, inputs, batch_depth_local)
-    predictions = filter_predictions_fn(predictions)
     gxi = denorm_targets_fn(predictions)[..., 0].astype(dtype)
     return gxi - jnp.mean(gxi, axis=-1, keepdims=True)
 
@@ -204,7 +213,6 @@ def compute_hadamard_reg(
     batch_depth_local: Array,
     norm_inputs_fn: NormalizeInputsFn,
     denorm_targets_fn: DenormalizeTargetsFn,
-    filter_predictions_fn: FilterPredictionsFn,
     k: Array,
     cfg: HadamardRegConfig,
     dtype: jnp.dtype,
@@ -239,7 +247,6 @@ def compute_hadamard_reg(
         depth,
         norm_inputs_fn,
         denorm_targets_fn,
-        filter_predictions_fn,
         dtype,
     )
     eta_x = spectral_dx(eta, k_typed)
@@ -256,7 +263,6 @@ def compute_hadamard_reg(
         depth,
         norm_inputs_fn,
         denorm_targets_fn,
-        filter_predictions_fn,
         dtype,
     )
     secant = (gxi_perturbed - gxi) / eps_broadcast
@@ -270,7 +276,6 @@ def compute_hadamard_reg(
         depth,
         norm_inputs_fn,
         denorm_targets_fn,
-        filter_predictions_fn,
         dtype,
     )
     product_dx = spectral_dx(zeta * v_velocity, k_typed)

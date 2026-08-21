@@ -1,4 +1,4 @@
-"""Shared rollout-evaluation infrastructure for trained FNO/SpectralDNO checkpoints.
+"""Shared rollout-evaluation infrastructure for trained FNO/CS-DNO checkpoints.
 
 Loads an orbax checkpoint produced by ``train-jax-10m/1d_dno_fno_jax.py``,
 wraps the trained model as a `predict_gxi(eta, xi)` callable that's a drop-in
@@ -31,8 +31,7 @@ for _d in (
         sys.path.insert(0, str(_d))
 
 from fno1d import FNO1d
-from dno_net import SpectralDNO
-from dno_net_v2 import CraigSulemDNO
+from dno_net_v2 import CraigSulemDNO, validate_fixed_craig_sulem_config
 from solver.solvers import time_integrator as ti
 from solver.solvers.dno_series_jax import dno_series_eval, myfft, myifft
 
@@ -61,13 +60,9 @@ def load_run(
     stats = metadata["stats"]
     norm_mode = config.get("norm", "minmax")
 
-    # Checkpoints with any fp64 spectral path require x64 at inference too;
-    # otherwise explicit float64 casts silently downgrade and change rollout.
-    if (
-        bool(config.get("cs_fft_fp64", False))
-        or bool(config.get("cs_g1_fft_fp64", False))
-        or config.get("precision") == "fp64"
-    ):
+    # CS-DNO's fixed analytic G1 backbone uses fp64 FFTs; fp64 FNO checkpoints
+    # likewise require x64 so explicit casts are not silently downgraded.
+    if config.get("model", "fno") == "cs_dno" or config.get("precision") == "fp64":
         jax.config.update("jax_enable_x64", True)
 
     restored = checkpoints.restore_checkpoint(
@@ -78,19 +73,10 @@ def load_run(
     )
     params = jax.tree_util.tree_map(jnp.asarray, restored["params"])
 
-    if config.get("model", "fno") == "spectral_dno":
-        model = SpectralDNO(
-            modes=int(config["modes"]),
-            width=int(config["width"]),
-            n_blocks=int(config.get("n_blocks", 4)),
-            latent=int(config.get("latent", 64)),
-            domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
-            xi_scale=float(config.get("xi_scale", np.asarray(stats["feature_absmax"]).reshape(-1)[1])),
-            target_scale=float(config.get("target_scale", stats["target_absmax"])),
-        )
-    elif config.get("model", "fno") == "cs_dno":
+    model_name = config.get("model", "fno")
+    if model_name == "cs_dno":
+        validate_fixed_craig_sulem_config(config)
         model = CraigSulemDNO(
-            modes=int(config["modes"]),
             width=int(config["width"]),
             n_blocks=int(config.get("n_blocks", 4)),
             latent=int(config.get("latent", 64)),
@@ -99,32 +85,13 @@ def load_run(
             use_second_deriv=bool(config.get("cs_use_second_deriv", True)),
             use_half_deriv=bool(config.get("cs_use_half_deriv", True)),
             use_hilbert=bool(config.get("cs_use_hilbert", True)),
-            use_g0_eta=bool(config.get("cs_use_g0_eta", False)),
-            use_g0_eta_dx=bool(config.get("cs_use_g0_eta_dx", False)),
             mult_hidden=int(config.get("cs_mult_hidden", 32)),
-            use_g1_baseline=bool(config.get("cs_use_g1_baseline", False)),
-            g1_k_cut=int(config.get("cs_g1_k_cut", 0)),
-            fft_fp64=bool(config.get("cs_fft_fp64", False)),
-            g1_fft_fp64=bool(config.get("cs_g1_fft_fp64", False)),
-            tie_xi_out_mult=bool(config.get("cs_tie_xi_out_mult", False)),
-            phi_bias_free=bool(config.get("cs_phi_bias_free", False)),
-            residual_eta_order=int(config.get("cs_residual_eta_order", 1)),
-            depth_scaled_residual=bool(config.get("cs_depth_scaled_residual", False)),
-            block_k_cut=int(config.get("cs_block_k_cut", 0)),
-            residual_highband_cap=bool(config.get("cs_residual_highband_cap", False)),
-            residual_highband_cap_k_cut=float(config.get("cs_residual_highband_cap_k_cut", 32.0)),
-            residual_highband_cap_beta=float(config.get("cs_residual_highband_cap_beta", 0.10)),
-            residual_highband_cap_floor=float(config.get("cs_residual_highband_cap_floor", 0.0)),
-            output_highband_cap=bool(config.get("cs_output_highband_cap", False)),
-            output_highband_cap_k_cut=float(config.get("cs_output_highband_cap_k_cut", 32.0)),
-            output_highband_cap_r_max=float(config.get("cs_output_highband_cap_r_max", 1e-2)),
-            output_highband_cap_abs_floor=float(config.get("cs_output_highband_cap_abs_floor", 5.0)),
             domain_length=float(config.get("domain_length", stats.get("domain_length", 2.0 * np.pi))),
             xi_scale=float(config.get("xi_scale", np.asarray(stats["feature_absmax"]).reshape(-1)[1])),
             eta_scale=float(config.get("eta_scale", np.asarray(stats["feature_absmax"]).reshape(-1)[0])),
             target_scale=float(config.get("target_scale", stats["target_absmax"])),
         )
-    else:
+    elif model_name == "fno":
         model = FNO1d(
             modes=int(config["modes"]),
             width=int(config["width"]),
@@ -134,6 +101,8 @@ def load_run(
             target_scale=float(stats["target_absmax"]),
             eta_features=bool(config.get("fno_eta_features", False)),
         )
+    else:
+        raise ValueError(f"Unsupported model in checkpoint config: {model_name!r}")
 
     return LoadedRun(model, params, config, stats, norm_mode, int(metadata["epoch"]))
 

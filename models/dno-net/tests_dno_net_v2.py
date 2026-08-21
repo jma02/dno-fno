@@ -17,23 +17,18 @@ import jax
 import jax.numpy as jnp
 from flax.core import freeze, unfreeze
 
-from dno_net_v2 import CraigSulemDNO, DepthAwareMultiplier
+from dno_net_v2 import CraigSulemDNO, validate_fixed_craig_sulem_config
 
 jax.config.update("jax_enable_x64", True)
 
 
 def _model(**overrides: object) -> CraigSulemDNO:
     config: dict[str, object] = {
-        "modes": 16,
         "width": 32,
         "n_blocks": 2,
         "latent": 8,
         "n_polys": 3,
         "mult_hidden": 16,
-        "use_g1_baseline": True,
-        "g1_k_cut": 0,
-        "g1_fft_fp64": True,
-        "tie_xi_out_mult": True,
         "domain_length": 2.0 * jnp.pi,
     }
     config.update(overrides)
@@ -73,27 +68,10 @@ def _learned_residual(
     return output - baseline
 
 
-def test_order_one_is_unchanged() -> None:
-    """The default and explicit order-one models retain identical trees/outputs."""
-    eta, xi, depth = _state()
-    inputs = jnp.stack((eta, xi), axis=-1)
-    default_model = _model(g1_fft_fp64=False)
-    order_one_model = _model(g1_fft_fp64=False, residual_eta_order=1)
-    default_vars = default_model.init(jax.random.PRNGKey(0), inputs, depth)
-    order_one_vars = order_one_model.init(jax.random.PRNGKey(0), inputs, depth)
-
-    default_shapes = jax.tree.map(lambda value: value.shape, default_vars)
-    order_one_shapes = jax.tree.map(lambda value: value.shape, order_one_vars)
-    assert default_shapes == order_one_shapes
-    default_output = default_model.apply(default_vars, inputs, depth)
-    order_one_output = order_one_model.apply(order_one_vars, inputs, depth)
-    assert jnp.array_equal(default_output, order_one_output)
-
-
 def test_order_two_has_zero_value_and_first_variation() -> None:
     """R(0,xi) and D_eta R(0,xi) are structural zeros after nonzero weights."""
     eta, xi, depth = _state()
-    model = _model(residual_eta_order=2)
+    model = _model()
     inputs = jnp.stack((eta, xi), axis=-1)
     variables = _activate_residual(model.init(jax.random.PRNGKey(1), inputs, depth))
 
@@ -109,7 +87,7 @@ def test_order_two_has_zero_value_and_first_variation() -> None:
 def test_order_two_is_quadratic_near_zero() -> None:
     """The diagnostic ||R(eps*eta)||/eps tends to zero linearly in eps."""
     eta, xi, depth = _state()
-    model = _model(residual_eta_order=2)
+    model = _model()
     inputs = jnp.stack((eta, xi), axis=-1)
     variables = _activate_residual(model.init(jax.random.PRNGKey(2), inputs, depth))
     epsilons = (0.25, 0.125, 0.0625)
@@ -129,7 +107,7 @@ def test_order_two_residual_is_self_adjoint() -> None:
     psi = jnp.roll(xi, 9, axis=-1) + 0.03 * jnp.sin(
         jnp.linspace(0.0, 6.0 * jnp.pi, xi.shape[-1], endpoint=False)
     )[None, :]
-    model = _model(residual_eta_order=2)
+    model = _model()
     inputs = jnp.stack((eta, xi), axis=-1)
     variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
 
@@ -141,65 +119,47 @@ def test_order_two_residual_is_self_adjoint() -> None:
     assert float(jnp.abs(lhs - rhs) / scale) < 1e-11
 
 
-def test_g1_only_fp64_is_isolated() -> None:
-    """The narrow fp64 flag matches full-fp64 G1 and does not alter G0."""
+def test_eta_feature_configuration_controls_trunk_shape() -> None:
+    """Polynomial and derivative switches remain a live exploratory surface."""
     eta, xi, depth = _state()
-    eta32, xi32, depth32 = eta.astype(jnp.float32), xi.astype(jnp.float32), depth.astype(jnp.float32)
-    regular = _model(fft_fp64=False, g1_fft_fp64=False)
-    g1_only = _model(fft_fp64=False, g1_fft_fp64=True)
-    full = _model(fft_fp64=True, g1_fft_fp64=False)
-
-    assert jnp.array_equal(
-        regular._linear_baseline(xi32, depth32),
-        g1_only._linear_baseline(xi32, depth32),
-    )
-    assert jnp.array_equal(
-        g1_only._g1_baseline(eta32, xi32, depth32),
-        full._g1_baseline(eta32, xi32, depth32),
-    )
-
-
-def test_dimensionless_multiplier_depends_only_on_kh() -> None:
-    """Equal kh pairs receive exactly equal multiplier features and outputs."""
-    depth = jnp.log(jnp.asarray([[0.5], [1.0]], dtype=jnp.float64))
-    multiplier = DepthAwareMultiplier(
-        out_channels=4,
-        domain_length=2.0 * jnp.pi,
-        h_clip_max=5.0,
-        hidden=8,
-        dimensionless_depth=True,
-    )
-    variables = multiplier.init(jax.random.PRNGKey(4), depth, 5)
-    output = multiplier.apply(variables, depth, 5)
-    # h=0.5,k=2 and h=1,k=1 both have kh=1.
-    assert jnp.array_equal(output[0, 2], output[1, 1])
-
-
-def test_depth_scaled_residual_remains_self_adjoint() -> None:
-    """Zakharov input/output scaling preserves the tied block symmetry."""
-    eta, xi, depth = _state()
-    psi = jnp.roll(xi, 7, axis=-1)
-    model = _model(residual_eta_order=2, depth_scaled_residual=True)
     inputs = jnp.stack((eta, xi), axis=-1)
-    variables = _activate_residual(model.init(jax.random.PRNGKey(5), inputs, depth))
+    configurations = (
+        ({"n_polys": 1}, 5),
+        ({"n_polys": 2, "use_second_deriv": False}, 5),
+        ({
+            "n_polys": 3,
+            "use_first_deriv": False,
+            "use_second_deriv": False,
+            "use_half_deriv": False,
+            "use_hilbert": False,
+        }, 3),
+    )
+    for overrides, expected_channels in configurations:
+        model = _model(**overrides)
+        variables = model.init(jax.random.PRNGKey(expected_channels), inputs, depth)
+        kernel = variables["params"]["eta_feat_proj"]["kernel"]
+        assert kernel.shape[0] == expected_channels
+        assert jnp.all(jnp.isfinite(model.apply(variables, inputs, depth)))
 
-    residual_xi = _learned_residual(model, variables, eta, xi, depth)
-    residual_psi = _learned_residual(model, variables, eta, psi, depth)
-    lhs = jnp.vdot(psi, residual_xi)
-    rhs = jnp.vdot(residual_psi, xi)
-    scale = jnp.maximum(jnp.maximum(jnp.abs(lhs), jnp.abs(rhs)), 1e-14)
-    assert float(jnp.abs(lhs - rhs) / scale) < 1e-11
+
+def test_legacy_config_guard_accepts_only_c27_architecture() -> None:
+    """Archived C27 configs load, while removed CS-DNO variants fail loudly."""
+    validate_fixed_craig_sulem_config({"cs_use_g1_baseline": True})
+    try:
+        validate_fixed_craig_sulem_config({"cs_use_g1_baseline": False})
+    except ValueError as exc:
+        assert "removed experimental CS-DNO architecture" in str(exc)
+    else:
+        raise AssertionError("legacy non-C27 architecture was accepted")
 
 
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
-        test_order_one_is_unchanged,
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
         test_order_two_residual_is_self_adjoint,
-        test_g1_only_fp64_is_isolated,
-        test_dimensionless_multiplier_depends_only_on_kh,
-        test_depth_scaled_residual_remains_self_adjoint,
+        test_eta_feature_configuration_controls_trunk_shape,
+        test_legacy_config_guard_accepts_only_c27_architecture,
     )
     for test in tests:
         test()

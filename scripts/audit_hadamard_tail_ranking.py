@@ -121,9 +121,8 @@ def make_normalizers(
 ) -> tuple[
     Callable[[Array, Array], Array],
     Callable[[Array], Array],
-    Callable[[Array], Array],
 ]:
-    """Recreate the trainer's input, target, and production-filter maps."""
+    """Recreate the trainer's input and target normalization maps."""
     if loaded.norm_mode == "scale":
         feature_scale = jnp.asarray(
             loaded.stats["feature_absmax"], dtype=jnp.float32
@@ -169,10 +168,7 @@ def make_normalizers(
             "filter; checkpoint config enables a limiter or filter"
         )
 
-    def filter_predictions(values: Array) -> Array:
-        return values
-
-    return normalize_inputs, denormalize_targets, filter_predictions
+    return normalize_inputs, denormalize_targets
 
 
 def build_sample_evaluator(
@@ -181,9 +177,7 @@ def build_sample_evaluator(
     length: float,
 ) -> tuple[SampleEvaluator, HadamardRegConfig]:
     """Vmap the exact production Hadamard loss over singleton states."""
-    normalize_inputs, denormalize_targets, filter_predictions = make_normalizers(
-        loaded
-    )
+    normalize_inputs, denormalize_targets = make_normalizers(loaded)
     _, wave_numbers = build_grid(nx, length)
     config = HadamardRegConfig(
         k_max=float(loaded.config["hadamard_k_max"]),
@@ -210,7 +204,6 @@ def build_sample_evaluator(
             batch_depth_local=log_depth.reshape(1, 1),
             norm_inputs_fn=normalize_inputs,
             denorm_targets_fn=denormalize_targets,
-            filter_predictions_fn=filter_predictions,
             k=wave_numbers,
             cfg=config,
             dtype=jnp.float64,

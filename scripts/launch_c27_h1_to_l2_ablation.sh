@@ -48,19 +48,11 @@ uv run python scripts/train_dno.py \
   --norm scale \
   --dataset "$DATASET" \
   --data_fraction "$DATA_FRACTION" \
-  --modes 64 \
   --width 640 \
   --n_blocks 8 \
   --latent 320 \
-  --sobolev_k 0 \
   --cs_n_polys 3 \
   --cs_mult_hidden 160 \
-  --cs_use_g1_baseline \
-  --cs_g1_k_cut 0 \
-  --cs_g1_fft_fp64 \
-  --cs_tie_xi_out_mult \
-  --cs_phi_bias_free \
-  --cs_residual_eta_order 2 \
   --translation_tangent_weight "$TRANSLATION_TANGENT_WEIGHT" \
   --translation_tangent_window_depths 1 \
   --translation_tangent_energy_floor_relative 1e-3 \
@@ -85,8 +77,6 @@ uv run python scripts/train_dno.py \
   --weight_decay 1e-4 \
   --epochs "$EPOCHS" \
   --total_epochs "$TOTAL_EPOCHS" \
-  --skip_dno_eval \
-  --skip_plots \
   --run_name "$RUN_NAME" 2>&1 | tee "/tmp/${RUN_NAME}.log"
 
 uv run python - \
@@ -112,11 +102,9 @@ run_dir = Path("outputs") / run_name
 config = json.loads((run_dir / "config.json").read_text())
 expected = {
     "model": "cs_dno",
-    "modes": 64,
     "width": 640,
     "n_blocks": 8,
     "latent": 320,
-    "sobolev_k": 0,
     "batch_size": int(batch_size),
     "device_count": len(cuda_devices.split(",")),
     "cs_n_polys": 3,
@@ -124,41 +112,15 @@ expected = {
     "cs_use_second_deriv": True,
     "cs_use_half_deriv": True,
     "cs_use_hilbert": True,
-    "cs_use_g0_eta": False,
-    "cs_use_g0_eta_dx": False,
     "cs_mult_hidden": 160,
-    "cs_use_g1_baseline": True,
-    "cs_g1_k_cut": 0,
-    "cs_fft_fp64": False,
-    "cs_g1_fft_fp64": True,
-    "cs_tie_xi_out_mult": True,
-    "cs_phi_bias_free": True,
-    "cs_residual_eta_order": 2,
-    "cs_depth_scaled_residual": False,
-    "cs_block_k_cut": 0,
-    "cs_residual_highband_cap": False,
-    "cs_output_highband_cap": False,
     "translation_tangent_weight": float(tangent_weight),
     "translation_tangent_window_depths": 1.0,
     "translation_tangent_energy_floor_relative": 1e-3,
-    "phase_growth_weight": 0.0,
     "mode_balanced_weight": float(mode_weight),
     "mode_balanced_warmup_steps": int(mode_warmup_steps),
     "mode_balanced_k_max": 128.0,
     "mode_balanced_active_scale_relative": 1e-4,
     "mode_balanced_denominator_floor_relative": 1e-6,
-    "modal_phase_rate_weight": 0.0,
-    "finite_time_phase_weight": 0.0,
-    "hamiltonian_weight": 0.0,
-    "pushforward_steps": 0,
-    "stage_reg_weight": 0.0,
-    "stage_reg_gain_weight": 0.0,
-    "jac_reg_lambda": 0.0,
-    "psd_hinge_weight": 0.0,
-    "input_noise_sigma": 0.0,
-    "gxi_highband_limiter": False,
-    "gxi_highband_penalty_weight": 0.0,
-    "filter_gxi_fraction": 1.0,
     "hadamard_weight": float(hadamard_weight),
     "hadamard_interval": int(hadamard_interval),
     "hadamard_microbatch": 8,

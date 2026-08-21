@@ -54,6 +54,14 @@ def sobolev_loss(
     return jnp.mean(diff_norm / tgt_norm)
 
 
+def relative_l2_loss(
+    prediction: jnp.ndarray,
+    target: jnp.ndarray,
+) -> jnp.ndarray:
+    """Relative spectral L2 used by the locked C27 training objective."""
+    return sobolev_loss(prediction, target, k=0)
+
+
 LossFn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 
 

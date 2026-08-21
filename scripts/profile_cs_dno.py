@@ -1,7 +1,7 @@
 """Profile a single training step of the cs_dno model.
 
 Mirrors the training entry (``scripts/train_dno.py``) as closely as
-possible: same shard_map(batch) over both GPUs, same H1 Sobolev loss, same
+possible: same shard_map(batch) over both GPUs, same relative-L2 loss, same
 AdamW schedule, same batch=256 → 128/GPU, nx=1024.
 
 Reports median of many measurements for:
@@ -48,19 +48,17 @@ for _d in (REPO_ROOT, DNO_DIR, FNO_DIR, TRAIN_DIR):
 from util import replicate_pytree_from_host
 
 from dno_net_v2 import CraigSulemDNO, CraigSulemBlock
-from losses import build_loss, count_params
+from losses import count_params, relative_l2_loss
 
 
 # ----- match the training CLI ------------------------------------------------
 BATCH_SIZE = 256
 NX = 1024
-MODES = 64
 WIDTH = 512
 N_BLOCKS = 8
 LATENT = 256
 N_POLYS = 3
 MULT_HIDDEN = 128
-SOBOLEV_K = 1
 LR = 2e-4
 WEIGHT_DECAY = 1e-4
 DOMAIN_LENGTH = 2.0 * float(np.pi)
@@ -73,7 +71,6 @@ DOMAIN_LENGTH = 2.0 * float(np.pi)
 
 def build_model() -> CraigSulemDNO:
     return CraigSulemDNO(
-        modes=MODES,
         width=WIDTH,
         n_blocks=N_BLOCKS,
         latent=LATENT,
@@ -82,14 +79,7 @@ def build_model() -> CraigSulemDNO:
         use_second_deriv=True,
         use_half_deriv=True,
         use_hilbert=True,
-        use_g0_eta=False,
-        use_g0_eta_dx=False,
         mult_hidden=MULT_HIDDEN,
-        use_g1_baseline=False,
-        g1_k_cut=128,
-        fft_fp64=False,
-        tie_xi_out_mult=False,
-        phi_bias_free=False,
         domain_length=DOMAIN_LENGTH,
         xi_scale=1.0,
         eta_scale=1.0,
@@ -158,7 +148,7 @@ def main() -> None:
     ts = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=opt)
     ts = replicate_pytree_from_host(ts, replicated)
 
-    loss_fn = build_loss(sobolev_k=SOBOLEV_K)
+    loss_fn = relative_l2_loss
 
     # ------------------------------------------------------------------
     # Case 1: full training step (forward + backward + AdamW + all_gather)
@@ -236,9 +226,6 @@ def main() -> None:
         domain_length=DOMAIN_LENGTH,
         h_clip_max=5.0,
         mult_hidden=MULT_HIDDEN,
-        tie_xi_out_mult=False,
-        phi_bias_free=False,
-        fft_fp64=False,
     )
     B_local = BATCH_SIZE // n_devices  # 128
     eta_feats_shape = (B_local, NX, WIDTH // 2)  # 128 x 1024 x 256

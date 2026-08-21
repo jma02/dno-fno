@@ -73,10 +73,6 @@ def _identity_targets(values: Array) -> Array:
     return values
 
 
-def _identity_filter(values: Array) -> Array:
-    return values
-
-
 def _g01_apply(
     variables: dict[str, Any], inputs: Array, depth: Array
 ) -> Array:
@@ -174,7 +170,6 @@ def test_exact_g01_has_zero_flat_surface_defect() -> None:
         batch_depth_local=depth,
         norm_inputs_fn=_identity_norm_inputs,
         denorm_targets_fn=_identity_targets,
-        filter_predictions_fn=_identity_filter,
         k=k,
         cfg=_config(),
         dtype=jnp.float64,
@@ -204,7 +199,6 @@ def test_g0_only_detects_missing_shape_derivative() -> None:
         batch_depth_local=depth,
         norm_inputs_fn=_identity_norm_inputs,
         denorm_targets_fn=_identity_targets,
-        filter_predictions_fn=_identity_filter,
         k=k,
         cfg=_config(),
         dtype=jnp.float64,
@@ -242,7 +236,6 @@ def test_normalizers_and_output_mean_match_production() -> None:
         depth,
         norm_inputs,
         denorm_targets,
-        _identity_filter,
         jnp.float64,
     )
     np.testing.assert_allclose(np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14)
@@ -256,7 +249,6 @@ def test_normalizers_and_output_mean_match_production() -> None:
         depth,
         norm_inputs,
         denorm_targets,
-        _identity_filter,
         k,
         _config(),
         jnp.float64,
@@ -292,7 +284,6 @@ def test_loss_is_jittable_and_differentiable() -> None:
             depth,
             _identity_norm_inputs,
             _identity_targets,
-            _identity_filter,
             k,
             cfg,
             jnp.float64,

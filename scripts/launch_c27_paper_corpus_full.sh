@@ -97,11 +97,9 @@ candidate = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
 
 expected = {
     "model": "cs_dno",
-    "modes": 64,
     "width": 640,
     "n_blocks": 8,
     "latent": 320,
-    "sobolev_k": 0,
     "batch_size": 1024,
     "device_count": 2,
     "lr": 2e-5,
