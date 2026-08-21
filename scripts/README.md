@@ -14,7 +14,7 @@ training entrypoints.
 
 The directory is intentionally limited to the current paper workflow:
 
-- C27/C28/C29 launchers and their evaluation, ablation, and rendering tools;
+- the locked C27 launcher and its current evaluation and rendering tools;
 - the frozen paper-corpus generation, completion-audit, and release-test
   closure listed by `reproducibility/paper_corpus_release_files.json`; and
 - `modal_bf.py`, which remains covered by the Benjamin--Feir Modal contract
