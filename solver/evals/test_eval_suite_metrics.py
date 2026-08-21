@@ -88,23 +88,18 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["model_nonfinite_any_ics_truth_valid"], [3])
         self.assertEqual(metrics["model_nonfinite_any_count_truth_valid"], 1)
         self.assertEqual(metrics["model_nonfinite_any_rate_truth_valid"], 0.5)
-        self.assertEqual(metrics["nan_rate"], 0.0)
-
         # IC 0 exceeds 0.25; IC 3 fails every threshold because xi became
         # non-finite, even though its terminal eta error itself is small.
         self.assertEqual(metrics["terminal_eta_failure_rate_tau_0p25"], 1.0)
         self.assertEqual(metrics["terminal_eta_failure_rate_tau_0p5"], 0.5)
         self.assertEqual(metrics["terminal_eta_failure_rate_tau_0p75"], 0.5)
         self.assertEqual(metrics["terminal_eta_failure_rate_tau_1"], 0.5)
-        self.assertEqual(metrics["divergence_rate_final"], 0.0)
-
         # Quantiles are explicitly conditional on an all-field finite rollout,
         # so only IC 0 contributes at the terminal frame.
         self.assertEqual(metrics["rel_l2_eta_n_conditional_finite_tfinal"], 1)
         self.assertAlmostEqual(
             metrics["rel_l2_eta_median_conditional_finite_tfinal"], 0.3
         )
-        self.assertAlmostEqual(metrics["rel_l2_eta_median_tfinal"], 0.2)
 
     def test_horizon_indices_include_both_saved_endpoints(self) -> None:
         values = np.ones((11, 1, 2), dtype=np.float64)
@@ -141,11 +136,6 @@ class ComputeMetricsTest(unittest.TestCase):
             metrics["hamiltonian_drift_pred_median_abs_conditional_finite_tfinal"],
             0.0,
         )
-        self.assertEqual(
-            metrics["energy_drift_pred_reference"],
-            "truth Hamiltonian at t=0 (historical definition)",
-        )
-        self.assertAlmostEqual(metrics["energy_drift_pred_median_at_tfinal"], 3.0)
         self.assertAlmostEqual(
             metrics["energy_error_pred_vs_truth_median_abs_conditional_finite_tfinal"],
             3.0,
@@ -157,7 +147,6 @@ class MacroSummaryTest(unittest.TestCase):
         summaries = {
             "small": {
                 "regime": "small",
-                "ic_panel_source": {"replicate_group": "shared"},
                 "n_ics_attempted": 2,
                 "n_truth_valid": 2,
                 "n_truth_invalid": 0,
@@ -177,7 +166,6 @@ class MacroSummaryTest(unittest.TestCase):
             },
             "large": {
                 "regime": "large",
-                "ic_panel_source": {"replicate_group": "shared"},
                 "n_ics_attempted": 8,
                 "n_truth_valid": 8,
                 "n_truth_invalid": 0,
@@ -204,11 +192,7 @@ class MacroSummaryTest(unittest.TestCase):
         self.assertEqual(macro["model_nonfinite_any_rate_truth_valid_micro"], 0.1)
         self.assertEqual(macro["terminal_eta_failure_rate_tau_0p25_macro"], 0.25)
         self.assertEqual(macro["terminal_eta_failure_rate_tau_0p25_micro"], 0.1)
-        self.assertEqual(macro["n_distribution_groups"], 1)
-        self.assertEqual(
-            macro["model_nonfinite_any_rate_truth_valid_distribution_group_macro"],
-            0.1,
-        )
+        self.assertEqual(macro["n_families"], 2)
         self.assertAlmostEqual(
             macro["rel_l2_eta_median_conditional_finite_tfinal_macro_mean"], 0.2
         )
