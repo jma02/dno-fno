@@ -20,7 +20,7 @@ history, in three ways:
 
 The default domain preserves the historical experimental convention:
 L=164, NX=1024, g=1. Default Hs/kp/bw ranges match the recorded legacy
-generator and `notes/random_sea_generation.tex`.
+generator and `notes/random_sea_generation/random_sea_generation.tex`.
 """
 from __future__ import annotations
 

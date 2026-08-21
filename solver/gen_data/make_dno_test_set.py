@@ -4,7 +4,7 @@ canonical L=2π, h≈0.0383 domain.
 We apply the *Zakharov-invariant* rescaling (x, y, t) -> (alpha X, alpha Y, sqrt(alpha) tau)
 with g preserved. This keeps numerical magnitudes in the same units as our
 training data (Zakharov-generated on L=2pi with g=1). The static-BVP rescaling
-in notes/rescaling.tex (eta /= a, xi unchanged, gxi *= a) is also geometrically
+in notes/rescaling/rescaling.tex (eta /= a, xi unchanged, gxi *= a) is also geometrically
 self-consistent but leaves xi at legacy magnitudes (~300x our training xi).
 
 For alpha = 164 / (2pi):

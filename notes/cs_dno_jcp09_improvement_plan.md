@@ -5,7 +5,7 @@ formulated in `JCP09.pdf` (Xu & Guyenne, *Numerical simulation of
 three-dimensional nonlinear water waves*, JCP 228 (2009) 8446–8466).
 
 **Scope of this note.** Findings from reading JCP09, the CS-DNO architecture
-reference (`notes/cs_dno_architecture.tex`), the ablation study
+reference (`notes/cs_dno_architecture/cs_dno_architecture.tex`), the ablation study
 (`notes/cs_dno_ablation_study.md`), the v5 Tanaka failure audit
 (`notes/v7_tanaka_failure_audit.md`), and the current implementation
 (`models/dno-net/dno_net_v2.py`, `solver/evals/model_rollout.py`,
@@ -58,7 +58,7 @@ cascade.
 
 Cross-referencing `models/dno-net/dno_net_v2.py`,
 `solver/evals/model_rollout.py`, and the parked-variants section
-(`notes/cs_dno_architecture.tex` §"Parked architectural variants"):
+(`notes/cs_dno_architecture/cs_dno_architecture.tex` §"Parked architectural variants"):
 
 | JCP09 property | CS-DNO status | Evidence |
 |---|---|---|
@@ -230,7 +230,7 @@ than further architecture changes.
   76–90.
 - `train-jax-10m/1d_dno_fno_jax.py` — training entrypoint with all CS-DNO
   flags plumbed (lines 100–201) and pushforward args (lines 181–201).
-- `notes/cs_dno_architecture.tex` — architecture reference and parked
+- `notes/cs_dno_architecture/cs_dno_architecture.tex` — architecture reference and parked
   variants (§"Parked architectural variants", lines 363–386).
 - `notes/cs_dno_ablation_study.md` — `n_blocks=1` Pareto win, feature stack
   is load-bearing.

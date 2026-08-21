@@ -117,7 +117,7 @@ being slightly steeper than \texttt{KdV} as expected for a small-$h$ exact-Tanak
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.82\linewidth]{figures/tanaka_audit/ic_profiles.png}
+\includegraphics[width=0.82\linewidth]{../figures/tanaka_audit/ic_profiles.png}
 \caption{Initial conditions for the four failing cases overlaid with the matched-$a/h$
 KdV reference. \texttt{cid5} and \texttt{cid1000006} have visible wrap residuals
 ($\sim 0.04$) at the opposite domain edge --- numerically marginal at $L=2\pi$
@@ -136,7 +136,7 @@ the \texttt{eval\_suite} truth-validity gate of $10^{-3}$. \texttt{eval\_suite}'
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.82\linewidth]{figures/tanaka_audit/energy_drift.png}
+\includegraphics[width=0.82\linewidth]{../figures/tanaka_audit/energy_drift.png}
 \caption{Truth energy drift $\mathcal{E}(t)/\mathcal{E}(0)-1$ for each failing case. The
 horizontal scale is in the same time-units the model sees; the vertical band is the
 $10^{-3}$ validity gate. All four cases stay $\geq\!3$ orders below.}
@@ -159,19 +159,19 @@ banded $L^{2}$ growth curves.
 \begin{figure}[h]
 \centering
 \begin{subfigure}[t]{0.48\linewidth}
-  \includegraphics[width=\linewidth]{figures/tanaka_audit/spec_heatmap_tanaka_g0_cid5.png}
+  \includegraphics[width=\linewidth]{../figures/tanaka_audit/spec_heatmap_tanaka_g0_cid5.png}
   \caption{\texttt{cid5}}
 \end{subfigure}\hfill
 \begin{subfigure}[t]{0.48\linewidth}
-  \includegraphics[width=\linewidth]{figures/tanaka_audit/spec_heatmap_tanaka_g0_cid11.png}
+  \includegraphics[width=\linewidth]{../figures/tanaka_audit/spec_heatmap_tanaka_g0_cid11.png}
   \caption{\texttt{cid11}}
 \end{subfigure}\\[2pt]
 \begin{subfigure}[t]{0.48\linewidth}
-  \includegraphics[width=\linewidth]{figures/tanaka_audit/spec_heatmap_tanaka_g1_cid1000006.png}
+  \includegraphics[width=\linewidth]{../figures/tanaka_audit/spec_heatmap_tanaka_g1_cid1000006.png}
   \caption{\texttt{cid1000006}}
 \end{subfigure}\hfill
 \begin{subfigure}[t]{0.48\linewidth}
-  \includegraphics[width=\linewidth]{figures/tanaka_audit/spec_heatmap_tanaka_g1_cid1000011.png}
+  \includegraphics[width=\linewidth]{../figures/tanaka_audit/spec_heatmap_tanaka_g1_cid1000011.png}
   \caption{\texttt{cid1000011}}
 \end{subfigure}
 \caption{Per-case error heatmaps $\log_{10}|\hat e(t,k)|$. The horizontal axis is wavenumber
@@ -183,7 +183,7 @@ nearly flat until the very end.}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.82\linewidth]{figures/tanaka_audit/banded_spectral.png}
+\includegraphics[width=0.82\linewidth]{../figures/tanaka_audit/banded_spectral.png}
 \caption{Banded model error vs.\ truth's own spectral mass per band. The high-$k$ residual
 crosses truth's tiny high-$k$ floor between $t\!\approx\!1.6$ and $t\!\approx\!2.4$
 (integrator steps 2--3) --- the ratio jumps from $\sim 0.4$ to $\sim 1.3$ at that point ---
@@ -198,7 +198,7 @@ but a structural mismatch above the carrier.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.82\linewidth]{figures/tanaka_audit/coherent_incoherent.png}
+\includegraphics[width=0.82\linewidth]{../figures/tanaka_audit/coherent_incoherent.png}
 \caption{Per-IC decomposition of the error into the projection onto truth (amplitude bias)
 and the orthogonal complement (phase/shape). The orthogonal component dominates and grows
 fastest, consistent with high-$k$ structural noise rather than coherent low-$k$ drift.}

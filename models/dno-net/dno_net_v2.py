@@ -1,7 +1,7 @@
 """Craig-Sulem-structured neural Dirichlet-to-Neumann operator.
 
 This module implements the polynomial-in-η + depth-aware spectral filter
-architecture proposed in ``notes/rollout_accuracy_report.tex``. It is a drop-in
+architecture proposed in ``notes/rollout_accuracy_report/rollout_accuracy_report.tex``. It is a drop-in
 replacement for ``SpectralDNO`` (same ``__call__`` signature and IO shape) with a
 fundamentally different inductive bias.
 
