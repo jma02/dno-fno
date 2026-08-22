@@ -40,20 +40,19 @@ expected = {
     "stats_fingerprint": (
         "4e8ec96947bc05cee3b375467499b0ae00a7814f9982614084efd859efe7c3b8"
     ),
-    "train_epoch_0_count": 65_536,
-    "validation_epoch_0_count": 4_096,
+    "train_rows": 6_832_128,
+    "validation_rows": 427_008,
 }
+rows_by_split = handoff["final_contract"]["observed"][
+    "accepted_rows_by_split_and_family"
+]
 observed = {
     "status": handoff["status"],
     "combined_summary_sha256": handoff["combined_summary"]["sha256"],
     "manifest_sha256": handoff["dataset_view"]["manifest"]["sha256"],
     "stats_fingerprint": canonical_json_sha256(stats),
-    "train_epoch_0_count": normalization["schema_v2_sampler"][
-        "train_epoch_0"
-    ]["count"],
-    "validation_epoch_0_count": normalization["schema_v2_sampler"][
-        "fixed_validation_epoch_0"
-    ]["count"],
+    "train_rows": sum(rows_by_split["train"].values()),
+    "validation_rows": sum(rows_by_split["validation"].values()),
 }
 if observed != expected:
     raise SystemExit(
@@ -114,13 +113,8 @@ expected = {
     "hadamard_interval": 16,
     "param_count": 1_342_400,
     "dataset": str(dataset_path),
-    "train_examples": 65_536,
-    "train_stored_rows": 6_832_128,
-    "val_examples": 4_096,
-    "val_stored_rows": 427_008,
-    "hierarchical_case_time_sampling": True,
-    "hierarchical_case_time_validation": True,
-    "validation_sampling_policy": "fixed_one_time_per_case",
+    "train_examples": 6_832_128,
+    "val_examples": 427_008,
     "eta_scale": 0.15583430230617523,
     "xi_scale": 0.09394174814224243,
     "target_scale": 0.12198150902986526,

@@ -1251,20 +1251,15 @@ def get_batches(
         limit = (limit // batch_size) * batch_size
     ordered_indices = ordered_indices[:limit]
 
-    # Gather into contiguous arrays once so batch iteration is sequential slicing.
-    eta_epoch = eta[ordered_indices]
-    xi_epoch = xi[ordered_indices]
-    gxi_epoch = gxi[ordered_indices]
-    log_depth_epoch = compute_log_depth(depth[ordered_indices])
-
     for start in range(0, limit, batch_size):
         end = start + batch_size
+        batch_indices = ordered_indices[start:end]
         yield (
-            eta_epoch[start:end],
-            xi_epoch[start:end],
-            gxi_epoch[start:end],
-            log_depth_epoch[start:end],
-            ordered_indices[start:end],
+            eta[batch_indices],
+            xi[batch_indices],
+            gxi[batch_indices],
+            compute_log_depth(depth[batch_indices]),
+            batch_indices,
         )
 
 

@@ -35,9 +35,7 @@ from util import (
     FlatParams,
     NormStats,
     assert_pytree_replicated,
-    build_case_balanced_validation_indices,
     build_dataset_split_indices,
-    build_epoch_sample_indices,
     device_prefetch,
     ensure_no_config_mismatches,
     get_batches,
@@ -330,12 +328,12 @@ def main() -> None:
     )
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
-    hierarchical_training = "split_id" in dataset
     source_conditioning = source_conditioning_for_dataset(dataset)
+    schema_v2_dataset = "split_id" in dataset
     stats_indices = train_indices if "trajectory_index" in dataset else None
-    if hierarchical_training and args.data_fraction < 1.0:
+    if schema_v2_dataset and args.data_fraction < 1.0:
         raise ValueError(
-            "schema-v2 hierarchical training does not support row-level "
+            "schema-v2 paper-corpus training does not support row-level "
             "--data_fraction; generate a smaller whole-case pilot instead"
         )
     if args.data_fraction < 1.0:
@@ -350,19 +348,18 @@ def main() -> None:
     ))
     stats["target_kind"] = "gxi"
     ns = NormStats.from_dict(stats, mode=args.norm)
-    epoch_train_examples = build_epoch_sample_indices(
-        dataset,
-        train_indices,
-        split_id=0,
-        seed=args.seed,
-        epoch=0,
-    ).shape[0]
-    checkpoint_val_indices = build_case_balanced_validation_indices(
-        dataset,
-        val_indices,
-        seed=args.seed,
-    )
-    train_steps_per_epoch = epoch_train_examples // args.batch_size
+    if schema_v2_dataset and train_indices.size % args.batch_size != 0:
+        raise ValueError(
+            "schema-v2 training rows must be divisible by batch_size so every "
+            f"stored row is consumed; got {train_indices.size} rows and "
+            f"batch_size={args.batch_size}"
+        )
+    if val_indices.size % n_devices != 0:
+        raise ValueError(
+            "validation rows must be divisible by device count; got "
+            f"{val_indices.size} rows and {n_devices} devices"
+        )
+    train_steps_per_epoch = train_indices.shape[0] // args.batch_size
 
     domain_length = float(stats.get("domain_length", dataset.get("domain_length", 2.0 * np.pi)))
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
@@ -518,18 +515,9 @@ def main() -> None:
         "weight_decay": args.weight_decay,
         "early_stopping_patience": args.early_stopping_patience,
         "param_count": count_params(params),
-        "train_examples": int(epoch_train_examples),
-        "train_stored_rows": int(train_indices.shape[0]),
-        "hierarchical_case_time_sampling": hierarchical_training,
         "source_id_schema": source_conditioning.dataset_schema,
-        "val_examples": int(checkpoint_val_indices.shape[0]),
-        "val_stored_rows": int(val_indices.shape[0]),
-        "hierarchical_case_time_validation": hierarchical_training,
-        "validation_sampling_policy": (
-            "fixed_one_time_per_case"
-            if hierarchical_training
-            else "all_stored_rows"
-        ),
+        "train_examples": int(train_indices.shape[0]),
+        "val_examples": int(val_indices.shape[0]),
         "data_fraction": float(args.data_fraction),
         "dataset_identity": stats.get("dataset_identity"),
     }
@@ -1009,17 +997,10 @@ def main() -> None:
             context=f"epoch {epoch} start",
         )
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
-        epoch_train_indices = build_epoch_sample_indices(
-            dataset,
-            train_indices,
-            split_id=0,
-            seed=args.seed,
-            epoch=epoch - 1,
-        )
         batch_iter = get_batches(
             dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            epoch_train_indices, args.batch_size, epoch_rng,
-            shuffle=not hierarchical_training,
+            train_indices, args.batch_size, epoch_rng,
+            shuffle=True,
             drop_last=True,
         )
         batch_iter = (
@@ -1119,17 +1100,11 @@ def main() -> None:
             )
         train_loss = float(np.mean(batch_losses)) if batch_losses else float("inf")
 
-        if hierarchical_training and checkpoint_val_indices.size % n_devices != 0:
-            raise ValueError(
-                "schema-v2 validation case count must be divisible by device "
-                f"count; got {checkpoint_val_indices.size} cases and "
-                f"{n_devices} devices"
-            )
         val_batches = get_batches(
             dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            checkpoint_val_indices, args.batch_size, None,
+            val_indices, args.batch_size, None,
             shuffle=False,
-            drop_last=not hierarchical_training,
+            drop_last=False,
         )
         val_batches = (
             (eta_b, xi_b, gxi_b, depth_b, dataset_source[indices_b])
@@ -1168,9 +1143,7 @@ def main() -> None:
         def mean_validation_batches(losses: list[float]) -> float:
             if not losses:
                 return float("inf")
-            if hierarchical_training:
-                return float(np.average(losses, weights=val_batch_sizes))
-            return float(np.mean(losses))
+            return float(np.average(losses, weights=val_batch_sizes))
 
         val_data_loss = mean_validation_batches(val_data_losses)
         val_mode_loss = mean_validation_batches(val_mode_losses)
