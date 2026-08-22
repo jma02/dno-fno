@@ -7,12 +7,13 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from analyze_c21_worst_gxi_phase import periodic_shift, spectral_derivative
+from analyze_neutral_multiarm import periodic_shift
 from analyze_rollout_translation_decomposition import (
     analyze_archive,
     compute_alignment_velocity_identity,
     compute_eta_alignment,
     compute_field_metrics,
+    spectral_derivative,
 )
 
 

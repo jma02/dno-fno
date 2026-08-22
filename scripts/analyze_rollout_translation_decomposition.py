@@ -23,11 +23,9 @@ from typing import Any
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
-from analyze_neutral_multiarm import unwrap_displacements
-from analyze_c21_worst_gxi_phase import spectral_derivative
-from audit_c21_translation_tail_population import (
-    aligned_fields,
-    fitted_displacements,
+from analyze_neutral_multiarm import (
+    optimal_displacement,
+    unwrap_displacements,
 )
 
 
@@ -37,6 +35,46 @@ FIELD_KEYS: dict[str, tuple[str, str]] = {
     "xi": ("truth_xi", "pred_xi"),
     "q": ("truth_gxi", "pred_gxi"),
 }
+
+
+def spectral_derivative(values: Array, length: float) -> Array:
+    """Return the periodic Fourier derivative along the last axis."""
+    nx = values.shape[-1]
+    wave_numbers = 2.0 * np.pi * np.fft.fftfreq(nx, d=length / nx)
+    return np.fft.ifft(
+        1j * wave_numbers * np.fft.fft(values, axis=-1),
+        axis=-1,
+    ).real
+
+
+def aligned_fields(
+    prediction: Array,
+    displacement: Array,
+    length: float,
+) -> Array:
+    """Shift each predicted row by the negative fitted displacement."""
+    nx = prediction.shape[-1]
+    wave_numbers = 2.0 * np.pi * np.fft.fftfreq(nx, d=length / nx)
+    phase = np.exp(1j * displacement[:, None] * wave_numbers[None, :])
+    return np.fft.ifft(
+        np.fft.fft(prediction, axis=-1) * phase,
+        axis=-1,
+    ).real
+
+
+def fitted_displacements(
+    prediction: Array,
+    truth: Array,
+    length: float,
+) -> Array:
+    """Compute the continuous best periodic displacement for every row."""
+    return np.asarray(
+        [
+            optimal_displacement(prediction_i, truth_i, length)
+            for prediction_i, truth_i in zip(prediction, truth)
+        ],
+        dtype=np.float64,
+    )
 
 
 def parse_float_list(value: str) -> tuple[float, ...]:
