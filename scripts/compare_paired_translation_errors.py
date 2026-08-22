@@ -9,7 +9,10 @@ from typing import Any
 import numpy as np
 from scipy.stats import wilcoxon
 
-from analyze_neutral_multiarm import optimal_displacement, periodic_shift
+from analyze_rollout_translation_decomposition import (
+    optimal_displacement,
+    periodic_shift,
+)
 
 
 REGIMES = ("tanaka_g0", "tanaka_g1")

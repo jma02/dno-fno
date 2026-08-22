@@ -21,12 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 from scipy.stats import pearsonr, spearmanr
-
-from analyze_neutral_multiarm import (
-    optimal_displacement,
-    unwrap_displacements,
-)
 
 
 Array = np.ndarray
@@ -35,6 +31,71 @@ FIELD_KEYS: dict[str, tuple[str, str]] = {
     "xi": ("truth_xi", "pred_xi"),
     "q": ("truth_gxi", "pred_gxi"),
 }
+
+
+def periodic_shift(
+    values: Array,
+    displacement: float,
+    length: float,
+) -> Array:
+    """Return ``values(x - displacement)`` by Fourier interpolation."""
+    nx = values.shape[-1]
+    wave_numbers = 2.0 * np.pi * np.fft.fftfreq(nx, d=length / nx)
+    return np.fft.ifft(
+        np.fft.fft(values) * np.exp(-1j * wave_numbers * displacement)
+    ).real
+
+
+def optimal_displacement(
+    prediction: Array,
+    truth: Array,
+    length: float,
+) -> float:
+    """Find the continuous periodic displacement aligning prediction to truth."""
+    if not np.isfinite(prediction).all() or not np.isfinite(truth).all():
+        return float("nan")
+    nx = truth.size
+    dx = length / nx
+    wave_numbers = 2.0 * np.pi * np.fft.fftfreq(nx, d=length / nx)
+    prediction_hat = np.fft.fft(prediction)
+    correlation = np.fft.ifft(prediction_hat * np.conj(np.fft.fft(truth))).real
+    candidate_count = min(8, nx)
+    peak_indices = np.argpartition(correlation, -candidate_count)[-candidate_count:]
+
+    def objective(displacement: float) -> float:
+        aligned = np.fft.ifft(
+            prediction_hat * np.exp(1j * wave_numbers * displacement)
+        ).real
+        difference = aligned - truth
+        return float(np.vdot(difference, difference).real)
+
+    candidates: list[tuple[float, float]] = []
+    for peak_index in peak_indices:
+        signed_index = int(peak_index)
+        if signed_index > nx // 2:
+            signed_index -= nx
+        coarse = signed_index * dx
+        result = minimize_scalar(
+            objective,
+            bounds=(coarse - dx, coarse + dx),
+            method="bounded",
+            options={"xatol": 1e-12},
+        )
+        candidates.append((float(result.fun), float(result.x)))
+    return min(candidates)[1]
+
+
+def unwrap_displacements(displacements: Array, length: float) -> Array:
+    """Unwrap each contiguous finite portion of a periodic displacement series."""
+    result = np.asarray(displacements, dtype=np.float64).copy()
+    finite_indices = np.flatnonzero(np.isfinite(result))
+    if not finite_indices.size:
+        return result
+    split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
+    for segment in np.split(finite_indices, split_points):
+        angles = result[segment] * (2.0 * np.pi / length)
+        result[segment] = np.unwrap(angles) * (length / (2.0 * np.pi))
+    return result
 
 
 def spectral_derivative(values: Array, length: float) -> Array:
