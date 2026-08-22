@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh exact-C27 training on the authenticated paper corpus using two Modal A100s.
+# Fresh C27-derived all-family tangent training on two Modal A100s.
 
 set -euo pipefail
 cd /home/johnma/dno-fno
@@ -14,19 +14,18 @@ fi
 GPU_SPEC="${GPU_SPEC:-A100-80GB:2}"
 GPU_TAG="${GPU_SPEC//:/x}"
 GPU_TAG="${GPU_TAG,,}"
-RUN_NAME="${RUN_NAME:-c27_paper_corpus_full_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
+RUN_NAME="${RUN_NAME:-c27_all_family_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
 DATASET="/data/outputs/paper_corpus_literature_aligned_v1/combined/c16384_v01024_t01024/paper_corpus_all_splits_c16384.dataset.json"
 mkdir -p logs
 LOG="logs/${RUN_NAME}.log"
 
-TRAINER_ARGS="--cs_n_polys 3 --translation_tangent_weight 10 --translation_tangent_window_depths 1 --translation_tangent_energy_floor_relative 1e-3 --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 --mode_balanced_k_max 128 --mode_balanced_active_scale_relative 1e-4 --mode_balanced_denominator_floor_relative 1e-6 --hadamard_weight 1e-2 --hadamard_interval 16 --hadamard_microbatch 8 --hadamard_warmup_steps 500 --hadamard_k_max 128 --hadamard_sobolev_order 1 --hadamard_relative_eps_min 1e-3 --hadamard_relative_eps_max 3e-3 --hadamard_eta_scale_floor 1e-3 --hadamard_denominator_floor 1e-12 --lr_warmup_steps 500 --data_fraction 1.0"
+TRAINER_ARGS="--cs_n_polys 3 --translation_tangent_weight 10 --translation_tangent_window_depths 1 --translation_tangent_energy_floor_relative 1e-3 --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 --mode_balanced_k_max 128 --mode_balanced_active_scale_relative 1e-4 --mode_balanced_denominator_floor_relative 1e-6 --hadamard_weight 1e-2 --hadamard_interval 16 --hadamard_microbatch 8 --hadamard_warmup_steps 500 --hadamard_k_max 128 --hadamard_sobolev_order 1 --hadamard_relative_eps_min 1e-3 --hadamard_relative_eps_max 3e-3 --hadamard_eta_scale_floor 1e-3 --hadamard_denominator_floor 1e-12 --lr_warmup_steps 500"
 
 MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --dataset "$DATASET" \
   --run-name "$RUN_NAME" \
   --model-kind cs_dno \
   --norm scale \
-  --precision fp32 \
   --seed 0 \
   --width 640 \
   --n-blocks 8 \

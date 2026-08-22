@@ -220,11 +220,7 @@ def run_training(
     seed: int,
     latent: int,
     cs_mult_hidden: int,
-    precision: str,
-    resume_from: str,
     total_epochs: int,
-    reset_opt_state: bool,
-    keep_schedule_step: bool,
     trainer_args: str,
 ) -> dict:
     import json
@@ -239,7 +235,6 @@ def run_training(
     cmd = [
         sys.executable, "/repo/train-jax-10m/1d_dno_fno_jax.py",
         "--dataset", dataset,
-        "--precision", precision,
         "--epochs", str(epochs),
         "--batch_size", str(batch_size),
         "--lr", str(lr),
@@ -255,14 +250,8 @@ def run_training(
     ]
     if model_kind == "fno":
         cmd.extend(["--modes", str(modes)])
-    if resume_from:
-        cmd.extend(["--resume_from", resume_from])
     if total_epochs > 0:
         cmd.extend(["--total_epochs", str(total_epochs)])
-    if reset_opt_state:
-        cmd.append("--reset_opt_state")
-    if keep_schedule_step:
-        cmd.append("--keep_schedule_step")
     cmd.extend(shlex.split(trainer_args))
 
     print("$", " ".join(cmd))
@@ -338,11 +327,7 @@ def train(
     seed: int = 0,
     latent: int = 64,
     cs_mult_hidden: int = 32,
-    precision: str = "fp32",
-    resume_from: str = "",
     total_epochs: int = 0,
-    reset_opt_state: bool = False,
-    keep_schedule_step: bool = False,
     trainer_args: str = "",
     spawn: bool = False,
 ) -> None:
@@ -374,11 +359,7 @@ def train(
         seed=seed,
         latent=latent,
         cs_mult_hidden=cs_mult_hidden,
-        precision=precision,
-        resume_from=resume_from,
         total_epochs=total_epochs,
-        reset_opt_state=reset_opt_state,
-        keep_schedule_step=keep_schedule_step,
         trainer_args=trainer_args,
     )
     if spawn:

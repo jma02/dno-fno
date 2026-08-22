@@ -1,10 +1,10 @@
 #!/bin/bash
-# Fresh C27 replica on the authenticated four-family paper corpus.
+# Fresh C27-derived all-family tangent run on the authenticated paper corpus.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUN_NAME="${RUN_NAME:-c27_paper_corpus_full_$(date +%Y%m%d_%H%M%S)}"
+RUN_NAME="${RUN_NAME:-c27_all_family_tangent_paper_corpus_full_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="outputs/$RUN_NAME"
 DATASET_PATH="/home/johnma/dno-fno/outputs/paper_corpus_literature_aligned_v1/combined/c16384_v01024_t01024/paper_corpus_all_splits_c16384.dataset.json"
 HANDOFF_PATH="outputs/paper_corpus_final_postcompletion/32f764cf865c90892ee0329e48fe992cbc24df2707e05fd1af2ee9cd2b84307c/training_handoff_audit.json"
@@ -56,11 +56,12 @@ observed = {
 }
 if observed != expected:
     raise SystemExit(
-        f"paper-corpus/C27 preflight mismatch: expected={expected}, observed={observed}"
+        "paper-corpus/all-family tangent preflight mismatch: "
+        f"expected={expected}, observed={observed}"
     )
 if stats != normalization["stats"]:
     raise SystemExit("trainer statistics cache differs from authenticated handoff")
-print("paper-corpus/C27 preflight passed")
+print("paper-corpus/all-family tangent preflight passed")
 PY
 
 if [[ "${PREFLIGHT_ONLY:-0}" == "1" ]]; then
@@ -69,7 +70,6 @@ fi
 
 RUN_NAME="$RUN_NAME" \
 DATASET="$DATASET_PATH" \
-DATA_FRACTION=1.0 \
 BATCH_SIZE=1024 \
 LR=2e-5 \
 LR_WARMUP_STEPS=500 \
@@ -81,7 +81,7 @@ MODE_BALANCED_WARMUP_STEPS=500 \
 EPOCHS=40 \
 TOTAL_EPOCHS=40 \
 CUDA_VISIBLE_DEVICES=0,1 \
-  bash scripts/launch_c27_h1_to_l2_ablation.sh full
+  bash scripts/launch_c27_h1_to_l2_ablation.sh
 
 uv run python - "$RUN_DIR" "$DATASET_PATH" <<'PY'
 from __future__ import annotations
@@ -107,6 +107,7 @@ expected = {
     "epochs": 40,
     "total_epochs": 40,
     "translation_tangent_weight": 10.0,
+    "translation_tangent_scope": "all_nonflat_rows",
     "mode_balanced_weight": 6.0,
     "mode_balanced_warmup_steps": 500,
     "hadamard_weight": 1e-2,
@@ -141,5 +142,5 @@ nonfinite = {
 }
 if nonfinite:
     raise SystemExit(f"nonfinite training scalars: {nonfinite}")
-print("fresh C27/new-corpus guard passed: frozen recipe and corpus are authenticated")
+print("all-family tangent/new-corpus guard passed: recipe and corpus are authenticated")
 PY

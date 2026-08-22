@@ -8,7 +8,7 @@ import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -39,43 +39,6 @@ _TRAJECTORY_MAP_V2_DTYPES = {
     "trajectory_first_row": np.dtype(np.int64),
     "trajectory_row_count": np.dtype(np.int32),
 }
-
-
-def ensure_no_config_mismatches(
-    current_config: Mapping[str, object],
-    checkpoint_config: Mapping[str, object],
-    *,
-    mismatch_context: str,
-) -> None:
-    """Raise with all fields that differ from a checkpoint configuration."""
-    mismatches: list[str] = []
-    for key, current_value in current_config.items():
-        if isinstance(current_value, bool):
-            default_value: object = False
-        elif isinstance(current_value, int):
-            default_value = 0
-        else:
-            default_value = None
-
-        checkpoint_value = checkpoint_config.get(key, default_value)
-        if checkpoint_value is None and isinstance(current_value, int):
-            checkpoint_value = 0
-        if isinstance(current_value, bool):
-            checkpoint_value = bool(checkpoint_value)
-        elif isinstance(current_value, int):
-            checkpoint_value = int(checkpoint_value)
-        if checkpoint_value != current_value:
-            mismatches.append(
-                f"{key}: checkpoint={checkpoint_value!r}, current={current_value!r}"
-            )
-
-    if mismatches:
-        details = "\n  ".join(mismatches)
-        raise ValueError(
-            f"{mismatch_context}.\n"
-            f"Refusing to restore into a different model template:\n  {details}"
-        )
-
 
 @dataclass(frozen=True)
 class DatasetLocation:

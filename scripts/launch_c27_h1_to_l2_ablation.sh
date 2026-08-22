@@ -1,11 +1,10 @@
 #!/bin/bash
-# One-variable C25 ablation: replace relative H1 supervision by relative L2
-# while preserving the architecture and every auxiliary loss.
+# C27-derived full-corpus run with the translation-tangent auxiliary extended
+# from Tanaka rows to every nonflat row.
 
 set -euo pipefail
 cd /home/johnma/dno-fno
 
-MODE="${1:-full}"
 DATASET="${DATASET:-combined_dataset_v9.npz}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 LR="${LR:-2e-5}"
@@ -13,30 +12,11 @@ HADAMARD_WEIGHT="${HADAMARD_WEIGHT:-1e-2}"
 HADAMARD_INTERVAL="${HADAMARD_INTERVAL:-16}"
 TRANSLATION_TANGENT_WEIGHT="${TRANSLATION_TANGENT_WEIGHT:-10}"
 MODE_BALANCED_WEIGHT="${MODE_BALANCED_WEIGHT:-6}"
-LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-}"
-MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-}"
+LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-500}"
+MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-500}"
 CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
-
-case "$MODE" in
-  full)
-    DATA_FRACTION="${DATA_FRACTION:-1.0}"
-    EPOCHS="${EPOCHS:-40}"
-    LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-500}"
-    MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-500}"
-    RUN_PREFIX="c27_h1_to_l2_full"
-    ;;
-  smoke)
-    DATA_FRACTION="${DATA_FRACTION:-0.01}"
-    EPOCHS="${EPOCHS:-1}"
-    LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-50}"
-    MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-50}"
-    RUN_PREFIX="c27_h1_to_l2_smoke"
-    ;;
-  *)
-    echo "usage: $0 [full|smoke]" >&2
-    exit 2
-    ;;
-esac
+EPOCHS="${EPOCHS:-40}"
+RUN_PREFIX="c27_all_family_tangent_full"
 
 RUN_NAME="${RUN_NAME:-${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-$EPOCHS}"
@@ -47,7 +27,6 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --model cs_dno \
   --norm scale \
   --dataset "$DATASET" \
-  --data_fraction "$DATA_FRACTION" \
   --width 640 \
   --n_blocks 8 \
   --latent 320 \
@@ -114,6 +93,7 @@ expected = {
     "cs_use_hilbert": True,
     "cs_mult_hidden": 160,
     "translation_tangent_weight": float(tangent_weight),
+    "translation_tangent_scope": "all_nonflat_rows",
     "translation_tangent_window_depths": 1.0,
     "translation_tangent_energy_floor_relative": 1e-3,
     "mode_balanced_weight": float(mode_weight),
@@ -139,11 +119,11 @@ mismatches = {
     if config.get(key) != value
 }
 if mismatches:
-    raise SystemExit(f"C27 configuration guard failed: {mismatches}")
+    raise SystemExit(f"all-family tangent configuration guard failed: {mismatches}")
 
 records = [json.loads(line) for line in (run_dir / "train_log.jsonl").read_text().splitlines()]
 if not records:
-    raise SystemExit("C27 configuration guard failed: empty training log")
+    raise SystemExit("all-family tangent configuration guard failed: empty training log")
 nonfinite = {
     f"epoch_{record.get('epoch', index + 1)}.{key}": value
     for index, record in enumerate(records)
@@ -151,17 +131,9 @@ nonfinite = {
     if isinstance(value, (int, float)) and not math.isfinite(value)
 }
 if nonfinite:
-    raise SystemExit(f"C27 finiteness guard failed: {nonfinite}")
-if records[-1].get("hadamard_active_batches") != records[-1].get(
-    "hadamard_expected_batches"
-):
-    raise SystemExit(
-        "C27 Hadamard accounting guard failed: "
-        f"expected={records[-1].get('hadamard_expected_batches')}, "
-        f"active={records[-1].get('hadamard_active_batches')}"
-    )
+    raise SystemExit(f"all-family tangent finiteness guard failed: {nonfinite}")
 print(
-    "C27 guard passed: C25 objective with only H1 changed to L2; "
+    "C27-derived all-family tangent guard passed; "
     "1,342,400 parameters; all logged scalars finite"
 )
 PY

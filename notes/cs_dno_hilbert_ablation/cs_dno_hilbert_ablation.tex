@@ -1,0 +1,147 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\Hil}{\mathcal{H}}
+\newcommand{\D}{D}
+
+\title{The Hilbert-Transform Surface Channel in CS-DNO\\
+Rationale, Evidence Gap, and Deletion Ablation}
+\author{}
+\date{August 22, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Question and present status}
+
+The C27 CS-DNO represents the surface with the fixed feature stack
+\begin{equation}
+E_0(\eta)
+=
+\left[
+\eta,
+\eta^2,
+\eta^3,
+\partial_x\eta,
+\partial_x^2\eta,
+|\D|^{1/2}\eta,
+\Hil\eta
+\right].
+\label{eq:feature-stack}
+\end{equation}
+The final channel was inherited from the early broad CS-DNO feature bank.
+It was never isolated in an ablation.  Its inclusion is therefore a plausible
+architectural hypothesis, not an experimentally established requirement of
+C27.
+
+\section{What transform is used?}
+
+For a real periodic surface, the spatial Hilbert transform is the Fourier
+multiplier
+\begin{equation}
+\widehat{\Hil\eta}(k)
+=
+-\mathrm{i}\,\operatorname{sgn}(k)\,\widehat{\eta}(k).
+\label{eq:hilbert-symbol}
+\end{equation}
+It preserves the magnitude of every nonzero Fourier mode and shifts its phase
+by ninety degrees.  It is an order-zero, nonlocal operator: unlike
+$\partial_x\eta$ or $\partial_x^2\eta$, it does not amplify high wavenumbers.
+It also satisfies
+\begin{equation}
+\Hil\partial_x = |\D|,
+\label{eq:hilbert-derivative}
+\end{equation}
+which connects it to the nonlocal multipliers that occur in water-wave
+operators.
+
+This channel is unrelated to the strip-Hilbert transform used in constructing
+Tanaka initial conditions.  Here it is only a deterministic input feature of
+the learned surface trunk.
+
+\section{Why was it plausible?}
+
+After the fixed feature construction, the shared surface trunk is pointwise in
+$x$.  Pointwise powers of $\eta$ cannot reconstruct the quadrature component
+$\Hil\eta$.  Supplying it explicitly gives the trunk access to nonlocal phase
+information without asking a learned local map to synthesize a Fourier
+operator.  A concise explanation, if the channel survives ablation, is:
+
+\begin{quote}
+We include the periodic Hilbert transform of the surface to expose nonlocal
+quadrature information to an otherwise pointwise surface-feature trunk.  The
+channel is order zero, so it supplies phase information without the
+high-wavenumber amplification of derivative channels.
+\end{quote}
+
+This explains what information the channel makes available.  It does not show
+that the information improves the learned DNO.
+
+\section{What evidence do we actually have?}
+
+The historical minimal-feature experiment compared the complete feature bank
+against a model that simultaneously reduced the polynomial degree and disabled
+all spectral surface channels.  The deletion regressed validation loss by a
+factor of approximately $2.3$, establishing that the \emph{feature bank as a
+whole} matters.  It does not identify the contribution of $\Hil\eta$.
+
+In particular:
+\begin{itemize}
+  \item no run changed only the Hilbert channel;
+  \item neither the analytic $G_0+G_1$ backbone nor the three C27 loss terms
+        requires an explicit $\Hil\eta$ input;
+  \item the current evidence cannot distinguish a useful phase feature from a
+        redundant inherited channel.
+\end{itemize}
+
+The defensible pre-ablation statement is therefore that $\Hil\eta$ is an
+unisolated, physics-motivated feature.  It should not be described as
+load-bearing on the basis of the existing grouped ablation.
+
+\section{Hilbert-only deletion protocol}
+
+Run a one-variable comparison after fixing the full-row C27 optimizer-step
+budget.  Both arms must use the same fresh seed, authenticated corpus, row
+order, normalization, batch size, optimizer schedule, and three loss terms.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Arm & Hilbert channel & All other settings \\
+\midrule
+Control & enabled & locked C27 recipe \\
+Deletion & disabled & identical to control \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The trainer already exposes the required switch:
+\begin{center}
+\texttt{--cs\_use\_hilbert}
+\qquad versus \qquad
+\texttt{--no-cs\_use\_hilbert}.
+\end{center}
+
+At the locked C27 dimensions, the control has $1{,}342{,}400$ parameters and
+the deletion has $1{,}342{,}080$.  The difference is only $320$ parameters,
+approximately $0.024\%$, so the comparison is effectively capacity matched.
+
+Evaluate both held-out one-step error and the frozen case-by-case rollout
+panel.  The rollout comparison must include nonfinite counts, raw and
+translation-aligned tail errors, and per-family worst cases.  A validation-only
+win is insufficient if rollout stability regresses.
+
+\section{Decision rule}
+
+Retain $\Hil\eta$ only if the control shows a reproducible accuracy or stability
+benefit larger than run-to-run variation.  If the deletion is equivalent or
+better, remove the channel and prefer the smaller, easier-to-defend feature
+stack.  Until that comparison is complete, preserve C27 when reproducing the
+locked model, but mark the channel as unresolved rather than justified.
+
+\end{document}

@@ -9,13 +9,12 @@ from translation_tangent_regularizer import (
     TranslationTangentConfig,
     compute_translation_tangent_loss,
 )
-from source_conditioning import source_conditioning_for_dataset
 
 
 jax.config.update("jax_enable_x64", True)
 
 
-def _inputs() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def _inputs() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     n = 256
     x = jnp.arange(n, dtype=jnp.float64) * (2.0 * jnp.pi / n)
     k = jnp.fft.fftfreq(n, d=1.0 / n)
@@ -23,12 +22,10 @@ def _inputs() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     eta_x = jnp.cos(x)[None, :]
     target = -0.4 * eta_x
     depth = jnp.asarray([0.16], dtype=jnp.float64)
-    source = jnp.asarray([5], dtype=jnp.int32)
-    return eta, target, depth, source, k
+    return eta, target, depth, k
 
 
 def _batched_inputs() -> tuple[
-    jax.Array,
     jax.Array,
     jax.Array,
     jax.Array,
@@ -46,8 +43,7 @@ def _batched_inputs() -> tuple[
         (modes[:, None] + 1.0) * x[None, :]
     )
     depth = jnp.asarray([0.16, 0.21, 0.09], dtype=eta.dtype)
-    source = jnp.asarray([5, 6, 14], dtype=jnp.int32)
-    return eta, prediction, target, depth, source, k
+    return eta, prediction, target, depth, k
 
 
 def _assert_results_allclose(
@@ -69,9 +65,9 @@ def _assert_results_allclose(
 
 
 def test_exact_prediction_has_zero_loss() -> None:
-    eta, target, depth, source, k = _inputs()
+    eta, target, depth, k = _inputs()
     loss, diagnostics = compute_translation_tangent_loss(
-        eta, target, target, depth, source, k, TranslationTangentConfig()
+        eta, target, target, depth, k, TranslationTangentConfig()
     )
     np.testing.assert_allclose(loss, 0.0, atol=1e-14)
     np.testing.assert_allclose(diagnostics["phase_growth_loss"], 0.0, atol=1e-14)
@@ -85,7 +81,7 @@ def test_exact_prediction_has_zero_loss() -> None:
 
 
 def test_local_objective_detects_globally_cancelling_error() -> None:
-    eta, target, depth, source, k = _inputs()
+    eta, target, depth, k = _inputs()
     x = jnp.arange(eta.shape[-1], dtype=eta.dtype) * (2.0 * jnp.pi / eta.shape[-1])
     eta_x = jnp.cos(x)[None, :]
     cancelling_error = 0.02 * jnp.sin(x)[None, :] * eta_x
@@ -93,7 +89,7 @@ def test_local_objective_detects_globally_cancelling_error() -> None:
     global_projection = jnp.sum(cancelling_error * eta_x)
     np.testing.assert_allclose(global_projection, 0.0, atol=1e-14)
     loss, diagnostics = compute_translation_tangent_loss(
-        eta, prediction, target, depth, source, k, TranslationTangentConfig()
+        eta, prediction, target, depth, k, TranslationTangentConfig()
     )
     assert float(loss) > 1e-5
     assert float(diagnostics["differential_phase_growth_loss"]) > 100.0 * float(
@@ -119,11 +115,10 @@ def test_rigid_phase_growth_matches_relative_elevation_growth() -> None:
     target = -0.4 * eta_x
     prediction = target - speed_error * eta_x
     depth = jnp.asarray([0.16], dtype=eta.dtype)
-    source = jnp.asarray([5], dtype=jnp.int32)
     config = TranslationTangentConfig(energy_floor_relative=1e-12)
 
     loss, diagnostics = compute_translation_tangent_loss(
-        eta, prediction, target, depth, source, k, config
+        eta, prediction, target, depth, k, config
     )
     expected_phase_growth = (mode * speed_error) ** 2
 
@@ -164,7 +159,6 @@ def test_phase_growth_weights_narrower_profiles_by_wave_number_squared() -> None
     target = -0.4 * eta_x
     prediction = target - 0.01 * eta_x
     depth = jnp.asarray([0.2, 0.2], dtype=eta.dtype)
-    source = jnp.asarray([5, 5], dtype=jnp.int32)
     config = TranslationTangentConfig(energy_floor_relative=1e-12)
 
     def one_sample(index: int) -> tuple[float, float]:
@@ -173,7 +167,6 @@ def test_phase_growth_weights_narrower_profiles_by_wave_number_squared() -> None
             prediction[index : index + 1],
             target[index : index + 1],
             depth[index : index + 1],
-            source[index : index + 1],
             k,
             config,
         )
@@ -190,18 +183,17 @@ def test_phase_growth_weights_narrower_profiles_by_wave_number_squared() -> None
 
 
 def test_loss_is_translation_invariant() -> None:
-    eta, target, depth, source, k = _inputs()
+    eta, target, depth, k = _inputs()
     prediction = target + 0.01 * jnp.sin(2.0 * jnp.pi * jnp.arange(256) / 256)[None, :]
     config = TranslationTangentConfig()
     loss, _ = compute_translation_tangent_loss(
-        eta, prediction, target, depth, source, k, config
+        eta, prediction, target, depth, k, config
     )
     shifted_loss, _ = compute_translation_tangent_loss(
         jnp.roll(eta, 37, axis=-1),
         jnp.roll(prediction, 37, axis=-1),
         jnp.roll(target, 37, axis=-1),
         depth,
-        source,
         k,
         config,
     )
@@ -209,10 +201,10 @@ def test_loss_is_translation_invariant() -> None:
 
 
 def test_per_sample_constant_offsets_leave_all_outputs_unchanged() -> None:
-    eta, prediction, target, depth, source, k = _batched_inputs()
+    eta, prediction, target, depth, k = _batched_inputs()
     config = TranslationTangentConfig()
     baseline = compute_translation_tangent_loss(
-        eta, prediction, target, depth, source, k, config
+        eta, prediction, target, depth, k, config
     )
     prediction_offsets = jnp.asarray([3.5, -0.7, 11.0])[:, None]
     target_offsets = jnp.asarray([-2.0, 4.25, 0.3])[:, None]
@@ -221,7 +213,6 @@ def test_per_sample_constant_offsets_leave_all_outputs_unchanged() -> None:
         prediction + prediction_offsets,
         target + target_offsets,
         depth,
-        source,
         k,
         config,
     )
@@ -229,33 +220,32 @@ def test_per_sample_constant_offsets_leave_all_outputs_unchanged() -> None:
 
 
 def test_raw_and_precentered_inputs_have_identical_outputs() -> None:
-    eta, prediction, target, depth, source, k = _batched_inputs()
+    eta, prediction, target, depth, k = _batched_inputs()
     prediction = prediction + jnp.asarray([1.25, -8.0, 0.4])[:, None]
     target = target + jnp.asarray([-3.0, 2.5, 6.75])[:, None]
     config = TranslationTangentConfig()
     raw = compute_translation_tangent_loss(
-        eta, prediction, target, depth, source, k, config
+        eta, prediction, target, depth, k, config
     )
     precentered = compute_translation_tangent_loss(
         eta,
         prediction - jnp.mean(prediction, axis=-1, keepdims=True),
         target - jnp.mean(target, axis=-1, keepdims=True),
         depth,
-        source,
         k,
         config,
     )
     _assert_results_allclose(raw, precentered)
 
 
-def test_non_target_source_is_gated_out() -> None:
-    eta, target, depth, _, k = _inputs()
+def test_flat_sample_is_gated_out() -> None:
+    eta, target, depth, k = _inputs()
+    eta = jnp.zeros_like(eta)
     loss, diagnostics = compute_translation_tangent_loss(
         eta,
-        target + 0.1,
+        target + 0.01 * jnp.sin(2.0 * jnp.pi * jnp.arange(256) / 256)[None, :],
         target,
         depth,
-        jnp.asarray([0], dtype=jnp.int32),
         k,
         TranslationTangentConfig(),
     )
@@ -264,56 +254,38 @@ def test_non_target_source_is_gated_out() -> None:
     np.testing.assert_allclose(diagnostics["selected_samples"], 0.0, atol=1e-14)
 
 
-def test_dataset_aware_tanaka_selection_does_not_mix_source_schemas() -> None:
-    eta, target, depth, _, k = _inputs()
+def test_nonflat_sample_is_selected() -> None:
+    eta, target, depth, k = _inputs()
     prediction = target - 0.02 * jnp.cos(
         2.0 * jnp.pi * jnp.arange(eta.shape[-1]) / eta.shape[-1]
     )[None, :]
 
-    schema_v2 = source_conditioning_for_dataset({"split_id": object()})
-    schema_v2_loss, schema_v2_diagnostics = compute_translation_tangent_loss(
+    loss, diagnostics = compute_translation_tangent_loss(
         eta,
         prediction,
         target,
         depth,
-        jnp.asarray([2], dtype=jnp.int32),
         k,
-        TranslationTangentConfig(source_ids=schema_v2.tanaka_source_ids),
+        TranslationTangentConfig(),
     )
-    assert float(schema_v2_loss) > 0.0
+    assert float(loss) > 0.0
     np.testing.assert_allclose(
-        schema_v2_diagnostics["selected_samples"], 1.0, atol=1e-14
-    )
-
-    legacy = source_conditioning_for_dataset({})
-    assert TranslationTangentConfig().source_ids == legacy.tanaka_source_ids
-    legacy_loss, legacy_diagnostics = compute_translation_tangent_loss(
-        eta,
-        prediction,
-        target,
-        depth,
-        jnp.asarray([2], dtype=jnp.int32),
-        k,
-        TranslationTangentConfig(source_ids=legacy.tanaka_source_ids),
-    )
-    np.testing.assert_allclose(legacy_loss, 0.0, atol=1e-14)
-    np.testing.assert_allclose(
-        legacy_diagnostics["selected_samples"], 0.0, atol=1e-14
+        diagnostics["selected_samples"], 1.0, atol=1e-14
     )
 
 
 def test_gradient_is_finite_and_nonzero() -> None:
-    eta, target, depth, source, k = _inputs()
+    eta, target, depth, k = _inputs()
     prediction = target + 0.01 * jnp.sin(2.0 * jnp.pi * jnp.arange(256) / 256)[None, :]
 
     def objective(value: jax.Array) -> jax.Array:
         return compute_translation_tangent_loss(
-            eta, value, target, depth, source, k, TranslationTangentConfig()
+            eta, value, target, depth, k, TranslationTangentConfig()
         )[0]
 
     def phase_growth_objective(value: jax.Array) -> jax.Array:
         return compute_translation_tangent_loss(
-            eta, value, target, depth, source, k, TranslationTangentConfig()
+            eta, value, target, depth, k, TranslationTangentConfig()
         )[1]["phase_growth_loss"]
 
     for gradient in (
@@ -333,8 +305,8 @@ if __name__ == "__main__":
         test_loss_is_translation_invariant,
         test_per_sample_constant_offsets_leave_all_outputs_unchanged,
         test_raw_and_precentered_inputs_have_identical_outputs,
-        test_non_target_source_is_gated_out,
-        test_dataset_aware_tanaka_selection_does_not_mix_source_schemas,
+        test_flat_sample_is_gated_out,
+        test_nonflat_sample_is_selected,
         test_gradient_is_finite_and_nonzero,
     )
     for test in tests:

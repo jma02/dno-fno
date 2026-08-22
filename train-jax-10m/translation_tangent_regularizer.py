@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-
 @dataclass(frozen=True)
 class TranslationTangentConfig:
     """Configuration for the local projection of DNO error onto ``eta_x``."""
@@ -14,7 +13,6 @@ class TranslationTangentConfig:
     window_depths: float = 1.0
     energy_floor_relative: float = 1e-3
     gravity: float = 1.0
-    source_ids: tuple[int, ...] = (5, 6, 14)
 
 
 def _periodic_gaussian_smooth(
@@ -41,7 +39,6 @@ def compute_translation_tangent_loss(
     gxi_prediction: jax.Array,
     gxi_target: jax.Array,
     depth: jax.Array,
-    source: jax.Array,
     k: jax.Array,
     config: TranslationTangentConfig,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
@@ -138,12 +135,8 @@ def compute_translation_tangent_loss(
         phase_growth_multiplier * per_sample_differential_speed_loss
     )
 
-    selected = jnp.zeros_like(source, dtype=jnp.bool_)
-    for source_id in config.source_ids:
-        selected = jnp.logical_or(selected, source == source_id)
-    selected = jnp.logical_and(
-        selected,
-        jnp.max(local_energy, axis=-1) > jnp.asarray(1e-20, dtype=dtype),
+    selected = (
+        jnp.max(local_energy, axis=-1) > jnp.asarray(1e-20, dtype=dtype)
     ).astype(dtype)
     selected_count = jnp.sum(selected)
     selected_denom = jnp.maximum(selected_count, jnp.asarray(1.0, dtype=dtype))

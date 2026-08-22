@@ -21,6 +21,8 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
+jax.config.update("jax_enable_x64", True)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FNO_DIR = REPO_ROOT / "models" / "fno-jax"
 DNO_DIR = REPO_ROOT / "models" / "dno-net"
@@ -29,7 +31,7 @@ for _d in (REPO_ROOT, FNO_DIR, DNO_DIR):
         sys.path.insert(0, str(_d))
 
 from fno1d import FNO1d
-from dno_net_v2 import CraigSulemDNO, validate_fixed_craig_sulem_config
+from dno_net_v2 import CraigSulemDNO
 from losses import count_params, relative_l2_loss
 from util import (
     FlatParams,
@@ -37,7 +39,6 @@ from util import (
     assert_pytree_replicated,
     build_dataset_split_indices,
     device_prefetch,
-    ensure_no_config_mismatches,
     get_batches,
     load_dataset_arrays,
     load_or_compute_stats,
@@ -59,7 +60,6 @@ from mode_balanced_regularizer import (
     ModeBalancedConfig,
     compute_mode_balanced_loss,
 )
-from source_conditioning import source_conditioning_for_dataset
 
 
 def save_checkpoint(
@@ -129,20 +129,6 @@ def read_committed_checkpoint_metadata(checkpoint_dir: Path) -> dict[str, object
     return metadata
 
 
-def expected_periodic_fires(start_step: int, n_steps: int, interval: int) -> int:
-    """Number of integers divisible by ``interval`` in a step interval."""
-    if start_step < 0:
-        raise ValueError(f"start_step must be nonnegative, got {start_step}")
-    if n_steps < 0:
-        raise ValueError(f"n_steps must be nonnegative, got {n_steps}")
-    if interval < 1:
-        raise ValueError(f"interval must be positive, got {interval}")
-    first_offset = (-start_step) % interval
-    if first_offset >= n_steps:
-        return 0
-    return 1 + (n_steps - 1 - first_offset) // interval
-
-
 def replicated_scalar_value(value: jax.Array, *, name: str) -> int:
     """Return a replicated scalar after verifying every local device agrees."""
     replica_values = [int(np.asarray(shard.data)) for shard in value.addressable_shards]
@@ -195,16 +181,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cs_mult_hidden", type=int, default=32,
                         help="Hidden size of the depth-aware Fourier-multiplier MLP.")
     parser.add_argument("--norm", choices=("minmax", "scale"), default="minmax")
-    parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32",
-                        help="Numerical precision for params/activations/optimizer. fp64 enables "
-                             "jax_enable_x64 and casts all internal arrays. Roughly 5-10× slower "
-                             "on H100 (and an order of magnitude on A100) — only use if you have "
-                             "evidence the f32 ceiling is the bottleneck.")
     parser.add_argument("--dataset", default="combined_dataset.npz")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--data_fraction", type=float, default=1.0,
-                        help="Fraction of train/val indices to keep (after the 80/10/10 "
-                        "split). 1.0 = full dataset. Useful for quick A/B comparisons.")
     parser.add_argument("--modes", type=int, default=32)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--n_blocks", type=int, default=2)
@@ -226,24 +204,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
-    parser.add_argument("--resume_from", default=None,
-                        help="Path to a checkpoint dir (e.g. outputs/<run>/best_val_ckpt) "
-                             "to warm-start from. Restores params, Adam (mu, nu, count) and the "
-                             "cosine-schedule step counter so LR resumes mid-schedule. "
-                             "The state.step counter is reset to 0 unless "
-                             "--keep_schedule_step is also passed.")
-    parser.add_argument("--keep_schedule_step", action="store_true",
-                        help="When --resume_from is set, also restore state.step (the counter "
-                             "consumed by regularizer warmup ramps). The LR schedule itself "
-                             "is always restored.")
-    parser.add_argument("--reset_opt_state", action="store_true",
-                        help="When --resume_from is set, skip restoring Adam moments and start "
-                             "the optimizer fresh (cosine LR also restarts from base). Use only "
-                             "if you explicitly want a fresh warmup on top of saved params.")
     parser.add_argument("--translation_tangent_weight", type=float, default=0.0,
-                        help="Weight of the localized translation-tangent error on Tanaka "
-                             "sources. Projects the DNO error onto eta_x in periodic windows "
-                             "and normalizes by sqrt(g*h). 0 disables.")
+                        help="Weight of the localized translation-tangent error. Projects "
+                             "the DNO error onto eta_x in periodic windows and normalizes "
+                             "by sqrt(g*h). 0 disables.")
     parser.add_argument("--translation_tangent_window_depths", type=float, default=1.0,
                         help="Gaussian localization width as a multiple of physical depth h.")
     parser.add_argument("--translation_tangent_energy_floor_relative", type=float, default=1e-3,
@@ -287,13 +251,7 @@ def main() -> None:
     args = parse_args()
     start_time = perf_counter()
 
-    if (
-        args.precision == "fp64"
-        or args.model == "cs_dno"
-        or args.hadamard_weight > 0.0
-    ):
-        jax.config.update("jax_enable_x64", True)
-    compute_dtype = jnp.float64 if args.precision == "fp64" else jnp.float32
+    training_dtype = jnp.float32
 
     backend, devices = require_jax_devices()
     n_devices = len(devices)
@@ -322,25 +280,9 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset_arrays(dataset_path)
-    dataset_source = np.asarray(
-        dataset.get("source", np.zeros(dataset["eta"].shape[0], dtype=np.int8)),
-        dtype=np.int8,
-    )
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
-    source_conditioning = source_conditioning_for_dataset(dataset)
-    schema_v2_dataset = "split_id" in dataset
     stats_indices = train_indices if "trajectory_index" in dataset else None
-    if schema_v2_dataset and args.data_fraction < 1.0:
-        raise ValueError(
-            "schema-v2 paper-corpus training does not support row-level "
-            "--data_fraction; generate a smaller whole-case pilot instead"
-        )
-    if args.data_fraction < 1.0:
-        n_train_keep = int(train_indices.shape[0] * args.data_fraction)
-        n_val_keep = int(val_indices.shape[0] * args.data_fraction)
-        train_indices = train_indices[:n_train_keep]
-        val_indices = val_indices[:n_val_keep]
     stats = dict(load_or_compute_stats(
         dataset_path,
         dataset=dataset,
@@ -348,7 +290,7 @@ def main() -> None:
     ))
     stats["target_kind"] = "gxi"
     ns = NormStats.from_dict(stats, mode=args.norm)
-    if schema_v2_dataset and train_indices.size % args.batch_size != 0:
+    if train_indices.size % args.batch_size != 0:
         raise ValueError(
             "schema-v2 training rows must be divisible by batch_size so every "
             f"stored row is consumed; got {train_indices.size} rows and "
@@ -396,15 +338,9 @@ def main() -> None:
     with jax.default_device(devices[0]):
         params = model.init(
             jax.random.PRNGKey(args.seed),
-            jnp.zeros((1, nx, 2), dtype=compute_dtype),
-            jnp.zeros((1, 1), dtype=compute_dtype),
+            jnp.zeros((1, nx, 2), dtype=training_dtype),
+            jnp.zeros((1, 1), dtype=training_dtype),
         )["params"]
-    # Flax modules default to fp32 param_dtype regardless of input dtype, so a
-    # naive init produces fp32 weights even when --precision fp64. Cast so the
-    # actual matmuls/FFTs run fp64 instead of upcasting fp64 inputs onto fp32
-    # kernels.
-    if args.precision == "fp64":
-        params = jax.tree_util.tree_map(lambda x: x.astype(compute_dtype), params)
     loss_fn = relative_l2_loss
 
     schedule_epochs = args.total_epochs if args.total_epochs is not None else args.epochs
@@ -430,78 +366,12 @@ def main() -> None:
     optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
     training_state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
 
-    if args.resume_from is not None:
-        resume_dir = Path(args.resume_from).resolve()
-        resume_metadata = read_committed_checkpoint_metadata(resume_dir)
-        resume_epoch = int(resume_metadata["epoch"])
-        resume_config_path = resume_dir.parent / "config.json"
-        if resume_config_path.exists():
-            resume_config = json.loads(resume_config_path.read_text(encoding="utf-8"))
-            if args.model == "cs_dno":
-                validate_fixed_craig_sulem_config(resume_config)
-            current_arch_config: dict[str, object] = {
-                "model": args.model,
-                "width": int(args.width),
-                "n_blocks": int(args.n_blocks),
-                "param_count": int(count_params(params)),
-            }
-            if args.model == "cs_dno":
-                current_arch_config.update({
-                    "latent": int(args.latent),
-                    "cs_n_polys": int(args.cs_n_polys),
-                    "cs_use_first_deriv": bool(args.cs_use_first_deriv),
-                    "cs_use_second_deriv": bool(args.cs_use_second_deriv),
-                    "cs_use_half_deriv": bool(args.cs_use_half_deriv),
-                    "cs_use_hilbert": bool(args.cs_use_hilbert),
-                    "cs_mult_hidden": int(args.cs_mult_hidden),
-                })
-            else:
-                current_arch_config.update({
-                    "modes": int(args.modes),
-                })
-            ensure_no_config_mismatches(
-                current_arch_config,
-                resume_config,
-                mismatch_context=(
-                    f"--resume_from architecture/config mismatch for {resume_dir}"
-                ),
-            )
-        # Restore against a target template built from the freshly-initialized state.
-        # Without target=, orbax PyTreeCheckpointer cannot reconstruct optax NamedTuples
-        # (ScaleByAdamState / ScaleByScheduleState / EmptyState); they would come back as
-        # plain dicts and tree_structure(loaded_opt) != tree_structure(state.opt_state),
-        # forcing --reset_opt_state and destroying Adam moments + the cosine schedule step.
-        template = {
-            "params": training_state.params,
-            "opt_state": training_state.opt_state,
-            "step": int(training_state.step),
-        }
-        restored = checkpoints.restore_checkpoint(
-            ckpt_dir=resume_dir, target=template, step=resume_epoch, prefix="ckpt_",
-            orbax_checkpointer=ocp.PyTreeCheckpointer(),
-        )
-        loaded_params = restored["params"]
-        replace_kwargs: dict[str, object] = {"params": loaded_params}
-        if not args.reset_opt_state:
-            replace_kwargs["opt_state"] = restored["opt_state"]
-            if args.keep_schedule_step:
-                replace_kwargs["step"] = jnp.asarray(int(restored["step"]), dtype=jnp.int32)
-            sched_step = int(restored["opt_state"][-1].count)
-            print(f"resumed params + opt_state from {resume_dir} "
-                  f"(LR schedule step={sched_step}; "
-                  + (f"state.step={int(restored['step'])})" if args.keep_schedule_step
-                     else "state.step reset to 0)"))
-        else:
-            print(f"resumed params only from {resume_dir} (--reset_opt_state: Adam state will rewarm)")
-        training_state = training_state.replace(**replace_kwargs)
-
     training_state = replicate_pytree_from_host(training_state, replicated)
     checkpoint_async_manager = checkpoints.AsyncManager(max_workers=1)
 
     config_payload: dict[str, object] = {
         "model": args.model,
         "norm": args.norm,
-        "precision": args.precision,
         "dataset": args.dataset,
         "device": backend,
         "device_count": n_devices,
@@ -515,10 +385,8 @@ def main() -> None:
         "weight_decay": args.weight_decay,
         "early_stopping_patience": args.early_stopping_patience,
         "param_count": count_params(params),
-        "source_id_schema": source_conditioning.dataset_schema,
         "train_examples": int(train_indices.shape[0]),
         "val_examples": int(val_indices.shape[0]),
-        "data_fraction": float(args.data_fraction),
         "dataset_identity": stats.get("dataset_identity"),
     }
     config_payload["domain_length"] = domain_length
@@ -532,9 +400,7 @@ def main() -> None:
     config_payload["translation_tangent_energy_floor_relative"] = float(
         args.translation_tangent_energy_floor_relative
     )
-    config_payload["translation_tangent_source_ids"] = list(
-        source_conditioning.tanaka_source_ids
-    )
+    config_payload["translation_tangent_scope"] = "all_nonflat_rows"
     config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
     config_payload["mode_balanced_warmup_steps"] = int(
         args.mode_balanced_warmup_steps
@@ -566,8 +432,6 @@ def main() -> None:
         config_payload["cs_use_half_deriv"] = bool(args.cs_use_half_deriv)
         config_payload["cs_use_hilbert"] = bool(args.cs_use_hilbert)
         config_payload["cs_mult_hidden"] = args.cs_mult_hidden
-    if args.resume_from is not None:
-        config_payload["resume_from"] = str(Path(args.resume_from).resolve())
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
 
@@ -580,7 +444,6 @@ def main() -> None:
         window_depths=float(args.translation_tangent_window_depths),
         energy_floor_relative=float(args.translation_tangent_energy_floor_relative),
         gravity=gravity,
-        source_ids=source_conditioning.tanaka_source_ids,
     )
     mode_balanced_weight = float(args.mode_balanced_weight)
     mode_balanced_warmup_steps = int(args.mode_balanced_warmup_steps)
@@ -605,7 +468,7 @@ def main() -> None:
         denominator_floor=float(args.hadamard_denominator_floor),
     )
     _, _k_grid = build_grid(nx, domain_length)
-    k_grid_jax = jnp.asarray(_k_grid, dtype=compute_dtype)
+    k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
     hadamard_metric_names = (
@@ -648,13 +511,11 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-        source: jax.Array,
     ):
-        eta = eta.astype(compute_dtype)
-        xi = xi.astype(compute_dtype)
-        gxi = gxi.astype(compute_dtype)
-        batch_depth = batch_depth.astype(compute_dtype)
-        source = source.astype(jnp.int32)
+        eta = eta.astype(training_dtype)
+        xi = xi.astype(training_dtype)
+        gxi = gxi.astype(training_dtype)
+        batch_depth = batch_depth.astype(training_dtype)
         batch_inputs = norm_inputs_jax(eta, xi)
         batch_targets = norm_targets_jax(gxi)
         log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
@@ -665,16 +526,16 @@ def main() -> None:
                 {"params": current_params}, batch_inputs, batch_depth
             )
             data_loss = loss_fn(predictions_0, batch_targets)
-            extra = jnp.asarray(0.0, dtype=compute_dtype)
-            zero = jnp.asarray(0.0, dtype=compute_dtype)
+            extra = jnp.asarray(0.0, dtype=training_dtype)
+            zero = jnp.asarray(0.0, dtype=training_dtype)
             hadamard_metrics = jnp.zeros(
-                (len(hadamard_metric_names),), dtype=compute_dtype,
+                (len(hadamard_metric_names),), dtype=training_dtype,
             )
             translation_tangent_metrics = jnp.zeros(
-                (len(translation_tangent_metric_names),), dtype=compute_dtype,
+                (len(translation_tangent_metric_names),), dtype=training_dtype,
             )
             mode_balanced_metrics = jnp.zeros(
-                (len(mode_balanced_metric_names),), dtype=compute_dtype,
+                (len(mode_balanced_metric_names),), dtype=training_dtype,
             )
 
             if mode_balanced_weight > 0.0:
@@ -688,23 +549,23 @@ def main() -> None:
                     k_rfft=k_rfft_jax,
                     config=mode_balanced_cfg,
                 )
-                step_f = jnp.asarray(current_state.step, dtype=compute_dtype)
+                step_f = jnp.asarray(current_state.step, dtype=training_dtype)
                 mode_warmup = jnp.minimum(
                     step_f
                     / jnp.asarray(
-                        max(mode_balanced_warmup_steps, 1), dtype=compute_dtype
+                        max(mode_balanced_warmup_steps, 1), dtype=training_dtype
                     ),
                     1.0,
                 )
                 mode_weight_eff = (
-                    jnp.asarray(mode_balanced_weight, dtype=compute_dtype)
+                    jnp.asarray(mode_balanced_weight, dtype=training_dtype)
                     * mode_warmup
                 )
                 mode_extra = mode_weight_eff * loss_mode
                 extra = extra + mode_extra
                 mode_balanced_metrics = jnp.stack(
                     (
-                        jnp.asarray(1.0, dtype=compute_dtype),
+                        jnp.asarray(1.0, dtype=training_dtype),
                         loss_mode,
                         mode_extra,
                         mode_weight_eff,
@@ -725,26 +586,25 @@ def main() -> None:
                     gxi_prediction=gxi_pred_phys_tan,
                     gxi_target=gxi,
                     depth=h_phys,
-                    source=source,
                     k=k_grid_jax,
                     config=translation_tangent_cfg,
                 )
                 local_selected = tangent_diagnostics["selected_samples"]
                 global_selected = jax.lax.psum(local_selected, axis_name="batch")
                 device_count = jax.lax.psum(
-                    jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+                    jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"
                 )
                 shard_weight = (
                     device_count
                     * local_selected
-                    / jnp.maximum(global_selected, jnp.asarray(1.0, dtype=compute_dtype))
+                    / jnp.maximum(global_selected, jnp.asarray(1.0, dtype=training_dtype))
                 )
                 loss_tangent = loss_tangent * shard_weight
                 tangent_extra = translation_tangent_weight * loss_tangent
                 extra = extra + tangent_extra
                 translation_tangent_metrics = jnp.stack(
                     (
-                        jnp.asarray(1.0, dtype=compute_dtype),
+                        jnp.asarray(1.0, dtype=training_dtype),
                         loss_tangent,
                         tangent_extra,
                         tangent_diagnostics["speed_abs_error"] * shard_weight,
@@ -804,12 +664,12 @@ def main() -> None:
                             warmup,
                             weight_eff,
                         ]
-                    ).astype(compute_dtype)
-                    return hadamard_extra.astype(compute_dtype), metrics
+                    ).astype(training_dtype)
+                    return hadamard_extra.astype(training_dtype), metrics
 
                 def _hadamard_skip_branch(_):
                     return zero, jnp.zeros(
-                        (len(hadamard_metric_names),), dtype=compute_dtype,
+                        (len(hadamard_metric_names),), dtype=training_dtype,
                     )
 
                 hadamard_extra, hadamard_metrics = jax.lax.cond(
@@ -861,7 +721,7 @@ def main() -> None:
     train_step = jax.jit(shard_map(
         _train_step_body,
         mesh=mesh,
-        in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch"), P("batch")),
+        in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch")),
         out_specs=(P(), P(), P(), P(), P()),
         check_rep=False,
     ))
@@ -872,20 +732,18 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-        source: jax.Array,
     ):
-        eta = eta.astype(compute_dtype)
-        xi = xi.astype(compute_dtype)
-        gxi = gxi.astype(compute_dtype)
-        batch_depth = batch_depth.astype(compute_dtype)
-        source = source.astype(jnp.int32)
+        eta = eta.astype(training_dtype)
+        xi = xi.astype(training_dtype)
+        gxi = gxi.astype(training_dtype)
+        batch_depth = batch_depth.astype(training_dtype)
         batch_inputs = norm_inputs_jax(eta, xi)
         batch_targets = norm_targets_jax(gxi)
         predictions = model.apply({"params": current_params}, batch_inputs, batch_depth)
         data_loss = loss_fn(predictions, batch_targets)
         log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
         h_phys = jnp.exp(log_h)
-        mode_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        mode_loss = jnp.asarray(0.0, dtype=training_dtype)
         if mode_balanced_weight > 0.0:
             mode_loss, _ = compute_mode_balanced_loss(
                 eta=eta,
@@ -895,28 +753,27 @@ def main() -> None:
                 k_rfft=k_rfft_jax,
                 config=mode_balanced_cfg,
             )
-        tangent_loss = jnp.asarray(0.0, dtype=compute_dtype)
+        tangent_loss = jnp.asarray(0.0, dtype=training_dtype)
         if translation_tangent_weight > 0.0:
             tangent_loss, tangent_diagnostics = compute_translation_tangent_loss(
                 eta=eta,
                 gxi_prediction=denorm_targets_jax(predictions)[..., 0],
                 gxi_target=gxi,
                 depth=h_phys,
-                source=source,
                 k=k_grid_jax,
                 config=translation_tangent_cfg,
             )
             local_selected = tangent_diagnostics["selected_samples"]
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(
-                jnp.asarray(1.0, dtype=compute_dtype), axis_name="batch"
+                jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"
             )
             shard_weight = (
                 device_count
                 * local_selected
                 / jnp.maximum(
                     global_selected,
-                    jnp.asarray(1.0, dtype=compute_dtype),
+                    jnp.asarray(1.0, dtype=training_dtype),
                 )
             )
             tangent_loss = tangent_loss * shard_weight
@@ -935,7 +792,6 @@ def main() -> None:
             P("batch"),
             P("batch"),
             P("batch"),
-            P("batch"),
         ),
         out_specs=(P(), P(), P()),
         check_rep=False,
@@ -948,11 +804,8 @@ def main() -> None:
     train_loss = float("inf")
     start_epoch = 1
 
-    # Auto-resume from per-epoch checkpoint when present (so Modal preemption restarts
-    # don't lose progress). The current run_dir's latest_ckpt takes priority over
-    # --resume_from, because preempt-restart re-invokes with the same CLI (--resume_from
-    # still pointing at the original warm-start ckpt) and we want to pick up where we
-    # left off, not rewind to the warm-start ckpt.
+    # Auto-resume from the current run's per-epoch checkpoint so Modal preemption
+    # does not lose progress.
     latest_ckpt_dir = run_dir / "latest_ckpt"
     if (latest_ckpt_dir / "metadata.json").exists():
         meta = read_committed_checkpoint_metadata(latest_ckpt_dir)
@@ -1004,11 +857,10 @@ def main() -> None:
             drop_last=True,
         )
         batch_iter = (
-            (eta_b, xi_b, gxi_b, depth_b, dataset_source[indices_b])
-            for eta_b, xi_b, gxi_b, depth_b, indices_b in batch_iter
+            (eta_b, xi_b, gxi_b, depth_b)
+            for eta_b, xi_b, gxi_b, depth_b, _ in batch_iter
         )
         train_destinations = (
-            data_sharding,
             data_sharding,
             data_sharding,
             data_sharding,
@@ -1022,7 +874,7 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for eta_b, xi_b, gxi_b, depth_b, source_b in train_bar:
+        for eta_b, xi_b, gxi_b, depth_b in train_bar:
             train_rng, step_key = jax.random.split(train_rng)
             if len(batch_losses) == 0:
                 hadamard_metric_sums = np.zeros(
@@ -1040,9 +892,7 @@ def main() -> None:
                 batch_hadamard_metrics,
                 batch_translation_tangent_metrics,
                 batch_mode_balanced_metrics,
-            ) = train_step(
-                training_state, step_key, eta_b, xi_b, gxi_b, depth_b, source_b
-            )
+            ) = train_step(training_state, step_key, eta_b, xi_b, gxi_b, depth_b)
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             hadamard_metrics_np = np.asarray(
@@ -1107,11 +957,10 @@ def main() -> None:
             drop_last=False,
         )
         val_batches = (
-            (eta_b, xi_b, gxi_b, depth_b, dataset_source[indices_b])
-            for eta_b, xi_b, gxi_b, depth_b, indices_b in val_batches
+            (eta_b, xi_b, gxi_b, depth_b)
+            for eta_b, xi_b, gxi_b, depth_b, _ in val_batches
         )
         val_destinations = (
-            data_sharding,
             data_sharding,
             data_sharding,
             data_sharding,
@@ -1122,7 +971,7 @@ def main() -> None:
         val_mode_losses: list[float] = []
         val_tangent_losses: list[float] = []
         val_batch_sizes: list[int] = []
-        for eta_b, xi_b, gxi_b, depth_b, source_b in val_batches:
+        for eta_b, xi_b, gxi_b, depth_b in val_batches:
             val_batch_sizes.append(int(eta_b.shape[0]))
             (
                 data_bl,
@@ -1134,7 +983,6 @@ def main() -> None:
                 xi_b,
                 gxi_b,
                 depth_b,
-                source_b,
             )
             val_data_losses.append(float(jax.device_get(data_bl)))
             val_mode_losses.append(float(jax.device_get(mode_bl)))
@@ -1164,14 +1012,6 @@ def main() -> None:
         if hadamard_weight > 0.0:
             active_hadamard_batches = (
                 float(hadamard_metric_sums[0]) if batch_losses else 0.0
-            )
-            expected_hadamard_batches = expected_periodic_fires(
-                epoch_start_step,
-                completed_steps,
-                hadamard_interval,
-            )
-            epoch_record["hadamard_expected_batches"] = float(
-                expected_hadamard_batches
             )
             epoch_record["hadamard_active_batches"] = active_hadamard_batches
             epoch_record["hadamard_active_fraction"] = (
