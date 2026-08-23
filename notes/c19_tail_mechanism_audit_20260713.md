@@ -190,7 +190,7 @@ substeps will reduce these secular operator errors.
 
 ### A simple missing-depth data gap
 
-The v9 corpus contains 7,633,989 rows.  Tanaka sources 5 and 6 contribute one
+The v9 dataset contains 7,633,989 rows.  Tanaka sources 5 and 6 contribute one
 million rows each and source 14 contributes 200,000.  Sources 5 and 6 contain
 about 198,400 and 206,600 rows below `h=0.02`, respectively, directly covering
 the shallowest tail cluster.  The tail depths and amplitudes lie inside dense
@@ -260,7 +260,7 @@ day-long run.
 
 Train one fresh 40-epoch model with:
 
-- the exact accepted C16 architecture and v9 corpus;
+- the exact accepted C16 architecture and v9 dataset;
 - the existing pointwise/Sobolev objective;
 - the existing Hadamard weight `0.01` and schedule;
 - the corrected h-localized tangent loss at its current weight `10`, active

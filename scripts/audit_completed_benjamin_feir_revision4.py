@@ -1,7 +1,7 @@
-"""Fail-closed CPU audit of the completed Benjamin--Feir revision-4 corpus.
+"""Fail-closed CPU audit of the completed Benjamin--Feir revision-4 dataset.
 
 The quota scanner remains the authority for transaction replay.  This audit
-adds corpus-wide interval and identity checks, exact replay of every proposed
+adds dataset-wide interval and identity checks, exact replay of every proposed
 Benjamin--Feir parameter specification, numerical-health extrema, stored-field
 finiteness, and an independent check of each loader-facing trajectory map.
 """
@@ -33,20 +33,20 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig-bf-completion-audit")
 
 import numpy as np  # noqa: E402
 
-from scripts.build_paper_corpus_view import (  # noqa: E402
+from scripts.build_paper_dataset_view import (  # noqa: E402
     CompletedChunk,
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_corpus_quota import (  # noqa: E402
-    _benjamin_feir_population_support_record,
+from scripts.run_paper_dataset_quota import (  # noqa: E402
+    _benjamin_feir_sampling_support_record,
     dependency_environment,
 )
-from solver.gen_data.benjamin_feir_population import (  # noqa: E402
-    BENJAMIN_FEIR_POPULATION_CELLS,
+from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
+    BENJAMIN_FEIR_SAMPLE_CELLS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
-    benjamin_feir_support_violations,
-    sample_benjamin_feir_population,
+    find_benjamin_feir_sample_violations,
+    sample_benjamin_feir_case,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     file_sha256,
@@ -79,10 +79,10 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
 )
 
 
-DEFAULT_CORPUS_ROOT = (
-    ROOT / "outputs/paper_corpus_bf_revision4_jonswap_revision3_literature_aligned_v1"
+DEFAULT_DATASET_ROOT = (
+    ROOT / "outputs/paper_dataset_bf_revision4_jonswap_revision3_literature_aligned_v1"
 )
-AUDIT_SCHEMA = "paper_corpus_benjamin_feir_revision4_completion_audit_v1"
+AUDIT_SCHEMA = "paper_dataset_benjamin_feir_revision4_completion_audit_v1"
 ROWS_PER_ACCEPTED_CASE = 200
 EXPECTED_FAMILY_ID = int(PhysicalFamilyId.BENJAMIN_FEIR)
 EXPECTED_REVISION_ID = 4
@@ -135,9 +135,9 @@ EXPECTED_SHARD_ARRAYS = frozenset(
 )
 EXPECTED_MAP_ARRAYS = frozenset(TRAJECTORY_MAP_DTYPES)
 CURRENT_SUPPORT_SOURCE_PATHS = (
-    "solver/data/stokes_truth_jax.py",
+    "solver/reference_solutions/stokes_wave.py",
     "solver/gen_data/benjamin_feir_jcp09.py",
-    "solver/gen_data/benjamin_feir_population.py",
+    "solver/gen_data/benjamin_feir_sampling.py",
 )
 HISTORICAL_SHARED_SOURCE_SNAPSHOT_ROOT = (
     ROOT / "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f"
@@ -154,10 +154,10 @@ HISTORICAL_SHARED_SOURCE_SNAPSHOTS = {
 }
 EXPECTED_GENERATION_SOURCE_PATHS = frozenset(
     {
-        "scripts/run_paper_corpus_quota.py",
-        "solver/data/stokes_truth_jax.py",
+        "scripts/run_paper_dataset_quota.py",
+        "solver/reference_solutions/stokes_wave.py",
         "solver/gen_data/benjamin_feir_jcp09.py",
-        "solver/gen_data/benjamin_feir_population.py",
+        "solver/gen_data/benjamin_feir_sampling.py",
         "solver/gen_data/pipeline/acceptance.py",
         "solver/gen_data/pipeline/archive.py",
         "solver/gen_data/pipeline/manifest.py",
@@ -224,7 +224,7 @@ class ExpectedChunk:
     @property
     def summary_path(self) -> Path:
         return self.relative_root / (
-            f"paper_corpus_benjamin_feir_{self.split.value}.summary.json"
+            f"paper_dataset_benjamin_feir_{self.split.value}.summary.json"
         )
 
 
@@ -334,7 +334,7 @@ class Extrema:
 
 @dataclass
 class AuditTotals:
-    """Mutable corpus-wide counters accumulated during the read-only scan."""
+    """Mutable dataset-wide counters accumulated during the read-only scan."""
 
     attempted: int = 0
     accepted: int = 0
@@ -585,8 +585,8 @@ def _case_specifications(
                 f"{proposal_path} case {index} has inconsistent run coordinates"
             )
         assignment = AttemptAssignment(case_key=key, cell_id=cell_id)
-        expected_sample = sample_benjamin_feir_population(assignment)
-        violations = benjamin_feir_support_violations(expected_sample)
+        expected_sample = sample_benjamin_feir_case(assignment)
+        violations = find_benjamin_feir_sample_violations(expected_sample)
         if violations:
             raise ValueError(
                 f"current BF sampler produced unsupported case {key.case_id}: "
@@ -649,7 +649,7 @@ def _validate_result_metadata(
     execution: Mapping[str, object],
     context: str,
 ) -> None:
-    if result.get("schema") != "paper_corpus_batch_result_v1":
+    if result.get("schema") != "paper_dataset_batch_result_v1":
         raise ValueError(f"{context} has an unknown result schema")
     metadata = _required_mapping(result, "metadata", context=context)
     if metadata.get("family") != "benjamin_feir":
@@ -1219,7 +1219,7 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
     """Require the exact current ordered 66-cell BF taxonomy."""
 
     raw_codes = _required_mapping(run_spec, "cell_codes", context="run_spec")
-    expected_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_POPULATION_CELLS)
+    expected_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
     if tuple(raw_codes) != expected_ids:
         raise ValueError("BF run cell order is not the current 66-cell taxonomy")
     mapping = {
@@ -1244,7 +1244,7 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
 
 
 def _expected_chunk_quotas(expected: ExpectedChunk) -> dict[str, int]:
-    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_POPULATION_CELLS)
+    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
     before = balanced_cell_quotas(
         cell_ids,
         accepted_case_count=expected.accepted_before,
@@ -1556,7 +1556,7 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
     discovered_paths = {
         path.resolve()
         for path in root.glob(
-            "*/benjamin_feir/*/paper_corpus_benjamin_feir_*.summary.json"
+            "*/benjamin_feir/*/paper_dataset_benjamin_feir_*.summary.json"
         )
     }
     if discovered_paths != expected_paths:
@@ -1640,7 +1640,7 @@ def _historical_shared_source_snapshot_record(
         }
 
     return {
-        "schema": "paper_corpus_bf_revision4_historical_source_binding_v1",
+        "schema": "paper_dataset_bf_revision4_historical_source_binding_v1",
         "role": "inert_historical_byte_recovery_only",
         "snapshot_root": str(root),
         "sha256sums": {
@@ -1727,7 +1727,7 @@ def _nonhistorical_generation_source_record(
         }
 
     return {
-        "schema": "paper_corpus_bf_revision4_current_source_binding_v1",
+        "schema": "paper_dataset_bf_revision4_current_source_binding_v1",
         "role": "current_repository_bytes_for_all_nonhistorical_generation_sources",
         "repository_root": str(resolved_root),
         "source_map_fingerprint": canonical_json_sha256(first_sources),
@@ -1775,7 +1775,7 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
         raise ValueError(
             "current BF construction/support sources differ from generation"
         )
-    current_support = _benjamin_feir_population_support_record()
+    current_support = _benjamin_feir_sampling_support_record()
     support_fingerprint = canonical_json_sha256(current_support)
     for chunk in chunks:
         summary = _strict_json_object(chunk.summary_path)
@@ -1787,16 +1787,16 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
         )
         declared_support = _required_mapping(
             configuration,
-            "population_support",
+            "sampling_support",
             context="summary.run_spec.configuration",
         )
         if not _same_json(declared_support, current_support):
-            raise ValueError("BF chunk declares a noncurrent population support")
+            raise ValueError("BF chunk declares a noncurrent sampling support")
     return {
         "dependency_environment_fingerprint": dependency_fingerprint,
         "execution_record_fingerprint": execution_fingerprint,
         "source_sha256_fingerprint": next(iter(source_fingerprints)),
-        "population_support_fingerprint": support_fingerprint,
+        "sampling_support_fingerprint": support_fingerprint,
         "current_support_source_sha256": current_support_hashes,
         "historical_shared_source_snapshot_binding": historical_shared_sources,
         "nonhistorical_generation_source_binding": nonhistorical_sources,
@@ -1808,7 +1808,7 @@ def _accepted_cell_totals_by_split(
 ) -> dict[str, dict[str, int]]:
     """Require the frozen split totals to balance all 66 current cells."""
 
-    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_POPULATION_CELLS)
+    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
     expected_totals = {
         SplitId.TRAIN: EXPECTED_TRAIN_ACCEPTED,
         SplitId.VALIDATION: EXPECTED_VALIDATION_ACCEPTED,
@@ -1842,7 +1842,7 @@ def _accepted_cell_totals_by_split(
 
 
 def audit(root: Path) -> dict[str, object]:
-    """Run the complete read-only BF corpus audit and return its record."""
+    """Run the complete read-only BF dataset audit and return its record."""
 
     resolved_root = Path(root).expanduser().resolve()
     started_at = datetime.now().astimezone()
@@ -1907,14 +1907,14 @@ def audit(root: Path) -> dict[str, object]:
         "validation": EXPECTED_VALIDATION_ACCEPTED,
         "test": EXPECTED_TEST_ACCEPTED,
     }:
-        raise ValueError("BF split totals differ from the paper corpus plan")
+        raise ValueError("BF split totals differ from the paper dataset plan")
     if totals.accepted != EXPECTED_ACCEPTED:
         raise ValueError("BF accepted total differs from 18,432")
     if totals.proposal_specs_checked != totals.attempted:
         raise ValueError("not every BF proposal specification was replayed")
     if totals.retained_rows != EXPECTED_ACCEPTED * ROWS_PER_ACCEPTED_CASE:
         raise ValueError("BF retained-row total is incorrect")
-    if len(BENJAMIN_FEIR_POPULATION_CELLS) != 66:
+    if len(BENJAMIN_FEIR_SAMPLE_CELLS) != 66:
         raise ValueError("current BF support no longer has 66 allocation cells")
     accepted_cells = _accepted_cell_totals_by_split(chunk_records)
 
@@ -1922,7 +1922,7 @@ def audit(root: Path) -> dict[str, object]:
     return {
         "schema": AUDIT_SCHEMA,
         "status": "pass",
-        "corpus_root": str(resolved_root),
+        "dataset_root": str(resolved_root),
         "accepted": totals.accepted,
         "attempted": totals.attempted,
         "rejected": totals.rejected,
@@ -1939,7 +1939,7 @@ def audit(root: Path) -> dict[str, object]:
         "accepted_by_split_and_cell": accepted_cells,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "support": {
-            "allocation_cell_count": len(BENJAMIN_FEIR_POPULATION_CELLS),
+            "allocation_cell_count": len(BENJAMIN_FEIR_SAMPLE_CELLS),
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },
@@ -2000,8 +2000,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=DEFAULT_CORPUS_ROOT,
-        help="Completed revision-4 BF corpus root.",
+        default=DEFAULT_DATASET_ROOT,
+        help="Completed revision-4 BF dataset root.",
     )
     parser.add_argument(
         "--output",

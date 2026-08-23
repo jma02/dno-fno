@@ -29,8 +29,7 @@ from solver.gen_data.adaptive_sampling import (
     adaptive_indices_from_energy,
     surface_gradient_energy,
 )
-from solver.gen_data.generate_tanaka_dataset_v2 import (
-    _grad_energy_traj,
+from solver.gen_data.tanaka_initial_conditions import (
     build_per_case_initial_conditions,
 )
 from solver.gen_data.multi_crest import CrestSpec
@@ -131,9 +130,11 @@ def main() -> None:
     jax.block_until_ready(payload["eta"])
 
     eta_BTN = payload["eta"]  # (T, B, N)
-    grad_energy_BT = np.asarray(jax.device_get(_grad_energy_traj(eta_BTN, float(args.length))))
+    grad_energy_BT = surface_gradient_energy(
+        np.asarray(jax.device_get(eta_BTN)),
+        float(args.length),
+    )
     s = grad_energy_BT[0]  # (T,)
-    activity = np.abs(np.gradient(s)) / (s + 1e-12)
 
     idx_adaptive = adaptive_indices_from_energy(
         grad_energy_BT,
@@ -188,8 +189,10 @@ def main() -> None:
         ax_x.plot(x_grid, xi_traj[t_idx], color="#1f77b4", lw=0.8)
         ax_e.set_ylim(-eta_max, eta_max)
         ax_x.set_ylim(-xi_max, xi_max)
-        ax_e.set_xticks([]); ax_x.set_xticks([])
-        ax_e.set_yticks([]); ax_x.set_yticks([])
+        ax_e.set_xticks([])
+        ax_x.set_xticks([])
+        ax_e.set_yticks([])
+        ax_x.set_yticks([])
         ax_e.set_title(f"t={times[t_idx]:.1f}", fontsize=7, pad=1)
         if col == 0:
             ax_e.set_ylabel("η", rotation=0, labelpad=8, fontsize=9)

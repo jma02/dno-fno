@@ -39,7 +39,7 @@ numbers without inspecting a realized wave.
 ## Endpoint comparison
 
 The CPU-only audit sampled 32 deterministic cases from each of the 27
-population cells, for 864 cases. It reconstructed fields on 512 points and
+sample cells, for 864 cases. It reconstructed fields on 512 points and
 performed no time integration. The comparison used a practically untapered
 \(k\leq128\) spectrum as a reference. The current window retains almost all
 of that spectral mass:

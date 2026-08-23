@@ -1,11 +1,12 @@
 """Deep-water Benjamin--Feir initial conditions in the form of JCP09 (33).
 
-The carrier phase is fixed to zero.  A case is described by a carrier mode,
-carrier steepness, symmetric sideband offset, one relative sideband amplitude,
-and one common sideband phase.  The discrete modes are restricted to the
-leading deep-water modulational-instability band.  JCP09 used a numerically
-computed steady Stokes carrier; this module uses the project's analytic
-fifth-order deep-water carrier and does not claim that stronger equivalence.
+A case is described by a carrier mode, first-harmonic carrier steepness,
+symmetric sideband offset, one relative sideband amplitude, and one global
+translation.  In the translated frame, both sidebands have the JCP09 phase
+shift ``-pi/4``.  The discrete modes are restricted to the leading deep-water
+modulational-instability band.  JCP09 used a numerically computed steady
+Stokes carrier; this module uses the project's analytic fifth-order deep-water
+carrier and does not claim that stronger equivalence.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..data.stokes_truth_jax import stokes_eta_xi
+from ..reference_solutions.stokes_wave import stokes_eta_xi
 
 ParameterArrays: TypeAlias = dict[str, np.ndarray]
 
@@ -27,6 +28,10 @@ CARRIER_STEEPNESS_MAX = 0.13
 PERTURBATION_RATIO_MIN = 0.05
 PERTURBATION_RATIO_MAX = 0.20
 DEEP_WATER_MINIMUM_KH = 5.0
+JCP09_RELATIVE_SIDEBAND_PHASE = -math.pi / 4.0
+BENJAMIN_FEIR_CONSTRUCTOR = (
+    "jcp09_equation_33_with_project_fifth_order_carrier_v2"
+)
 
 
 def deep_water_proxy_depth(
@@ -59,6 +64,57 @@ def instability_band_fraction(
     steepness = np.asarray(carrier_steepness)
     denominator = 2.0 * np.sqrt(2.0) * steepness * carrier
     return offset / denominator
+
+
+def focused_steepness_proxy(
+    carrier_mode: int | np.ndarray,
+    sideband_offset: int | np.ndarray,
+    carrier_steepness: float | np.ndarray,
+) -> np.ndarray:
+    """Return the leading-NLS focused-envelope steepness proxy.
+
+    If ``beta`` is the value returned by :func:`instability_band_fraction`,
+    the proxy is ``epsilon_c * (1 + 2 sqrt(1 - beta**2))``.  It is undefined
+    outside the leading instability band and is returned as ``nan`` there.
+    """
+
+    steepness = np.asarray(carrier_steepness)
+    band_fraction = instability_band_fraction(
+        carrier_mode,
+        sideband_offset,
+        steepness,
+    )
+    radicand = 1.0 - band_fraction**2
+    in_band = (band_fraction > 0.0) & (radicand >= 0.0)
+    value = steepness * (
+        1.0 + 2.0 * np.sqrt(np.maximum(radicand, 0.0))
+    )
+    return np.where(in_band, value, np.nan)
+
+
+def focused_steepness_carrier_upper_bound(
+    carrier_mode: int | np.ndarray,
+    sideband_offset: int | np.ndarray,
+    *,
+    focused_steepness_limit: float,
+) -> np.ndarray:
+    """Return the carrier-steepness endpoint implied by the focus bound."""
+
+    if (
+        not math.isfinite(focused_steepness_limit)
+        or focused_steepness_limit <= 0.0
+    ):
+        raise ValueError("focused_steepness_limit must be finite and positive")
+    carrier = np.asarray(carrier_mode)
+    offset = np.asarray(sideband_offset)
+    instability_threshold = offset / (2.0 * np.sqrt(2.0) * carrier)
+    return (
+        -focused_steepness_limit
+        + 2.0
+        * np.sqrt(
+            focused_steepness_limit**2 + 3.0 * instability_threshold**2
+        )
+    ) / 3.0
 
 
 def is_supported(
@@ -176,7 +232,11 @@ def sample_parameters(
         perturbation_ratio_max,
         size=batch_size,
     ).astype(np.float64)
-    phase = rng.uniform(0.0, 2.0 * math.pi, size=batch_size).astype(np.float64)
+    translation = rng.uniform(
+        0.0,
+        length,
+        size=batch_size,
+    ).astype(np.float64)
     depth = np.full(
         batch_size,
         deep_water_proxy_depth(length),
@@ -190,7 +250,7 @@ def sample_parameters(
         "n_r": (carrier_mode + sideband_offset).astype(np.int32),
         "eps_carrier": carrier_steepness,
         "eps_pert": perturbation_ratio,
-        "phase": phase,
+        "translation": translation,
         "depth": depth,
     }
     if not np.all(
@@ -211,7 +271,9 @@ def sample_parameters(
     return parameters
 
 
-def serialize_parameters(parameters: ParameterArrays) -> list[dict[str, float | int]]:
+def serialize_parameters(
+    parameters: ParameterArrays,
+) -> list[dict[str, float | int | str]]:
     """Convert a batch to complete JSON-compatible case specifications."""
 
     count = int(parameters["n_carr"].shape[0])
@@ -221,9 +283,15 @@ def serialize_parameters(parameters: ParameterArrays) -> list[dict[str, float | 
             "side_offset": int(parameters["side_offset"][index]),
             "n_l": int(parameters["n_l"][index]),
             "n_r": int(parameters["n_r"][index]),
-            "eps_carrier": float(parameters["eps_carrier"][index]),
-            "eps_pert": float(parameters["eps_pert"][index]),
-            "phase": float(parameters["phase"][index]),
+            "first_harmonic_carrier_steepness": float(
+                parameters["eps_carrier"][index]
+            ),
+            "first_harmonic_sideband_ratio": float(
+                parameters["eps_pert"][index]
+            ),
+            "translation": float(parameters["translation"][index]),
+            "relative_sideband_phase": JCP09_RELATIVE_SIDEBAND_PHASE,
+            "carrier_phase_in_translated_frame": 0.0,
             "depth": float(parameters["depth"][index]),
             "instability_band_fraction": float(
                 instability_band_fraction(
@@ -279,14 +347,15 @@ def _initial_condition(
     sideband_offset: jax.Array,
     carrier_steepness: jax.Array,
     perturbation_ratio: jax.Array,
-    phase: jax.Array,
+    translation: jax.Array,
     length: float,
     gravity: float,
 ) -> tuple[jax.Array, jax.Array]:
     """Construct one JCP09 equation-(33) state with the project carrier."""
 
+    translated_x = x - translation
     eta_carrier, xi_carrier, carrier_amplitude = _deep_stokes_carrier(
-        x,
+        translated_x,
         carrier_mode=carrier_mode,
         carrier_steepness=carrier_steepness,
         length=length,
@@ -299,8 +368,12 @@ def _initial_condition(
         carrier_mode + sideband_offset
     ).astype(dtype) * fundamental
     sideband_amplitude = perturbation_ratio * carrier_amplitude
-    left_phase = left_wavenumber * x + phase
-    right_phase = right_wavenumber * x + phase
+    left_phase = (
+        left_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
+    )
+    right_phase = (
+        right_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
+    )
     eta = (
         eta_carrier
         + sideband_amplitude * jnp.cos(left_phase)
@@ -335,14 +408,14 @@ def build_initial_conditions(
     sideband_offset = jnp.asarray(parameters["side_offset"], dtype=jnp.int32)
     carrier_steepness = jnp.asarray(parameters["eps_carrier"], dtype=dtype)
     perturbation_ratio = jnp.asarray(parameters["eps_pert"], dtype=dtype)
-    phase = jnp.asarray(parameters["phase"], dtype=dtype)
+    translation = jnp.asarray(parameters["translation"], dtype=dtype)
 
     def construct(
         mode: jax.Array,
         offset: jax.Array,
         steepness: jax.Array,
         ratio: jax.Array,
-        sideband_phase: jax.Array,
+        global_translation: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         return _initial_condition(
             x_array,
@@ -350,7 +423,7 @@ def build_initial_conditions(
             sideband_offset=offset,
             carrier_steepness=steepness,
             perturbation_ratio=ratio,
-            phase=sideband_phase,
+            translation=global_translation,
             length=length,
             gravity=gravity,
         )
@@ -360,5 +433,5 @@ def build_initial_conditions(
         sideband_offset,
         carrier_steepness,
         perturbation_ratio,
-        phase,
+        translation,
     )

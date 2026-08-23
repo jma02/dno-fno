@@ -119,9 +119,9 @@ The resulting profile has higher-harmonic ratio \(0.383\), crest height
 well ordered, but this bound removes \(8.96\%\) of the current 500,000-row
 archive, compared with \(2.23\%\) for the direct coefficient-order condition.
 
-## Recommended corpus change
+## Recommended dataset change
 
-For the paper corpus, sample \((k,a,h)\), compute the five elevation
+For the paper dataset, sample \((k,a,h)\), compute the five elevation
 coefficients, and accept the parameters only when
 \[
   ka\leq0.15

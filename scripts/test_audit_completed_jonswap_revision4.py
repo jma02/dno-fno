@@ -43,9 +43,9 @@ from scripts.audit_completed_jonswap_revision4 import (  # noqa: E402
     _validate_dataset_view,
     _validate_shard_rows,
 )
-from scripts.build_paper_corpus_view import CompletedChunk  # noqa: E402
-from solver.gen_data.jonswap_tma_population import (  # noqa: E402
-    JONSWAP_TMA_POPULATION_CELLS,
+from scripts.build_paper_dataset_view import CompletedChunk  # noqa: E402
+from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
+    JONSWAP_TMA_SAMPLE_CELLS,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
@@ -110,7 +110,7 @@ def _attempted_extrema() -> dict[str, Extrema]:
 
 def _conditioning_chunk(*, rejected_cell_index: int | None = None) -> dict[str, object]:
     cells: dict[str, object] = {}
-    for index, cell in enumerate(JONSWAP_TMA_POPULATION_CELLS):
+    for index, cell in enumerate(JONSWAP_TMA_SAMPLE_CELLS):
         rejected = int(index == rejected_cell_index)
         cells[cell.cell_id] = {
             "target_accepted": 1,
@@ -132,7 +132,7 @@ def _sampled_specification() -> tuple[CaseKey, dict[str, object]]:
     )
     assignment = AttemptAssignment(
         case_key=key,
-        cell_id=JONSWAP_TMA_POPULATION_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
     )
     sampled = sample_jonswap_tma_trajectory_cases(
         (assignment,),
@@ -223,7 +223,7 @@ def _replayed(specification: dict[str, object]) -> ReplayedSpecification:
         case_id=key.case_id,
         attempt_index=0,
         cell_code=0,
-        cell_id=JONSWAP_TMA_POPULATION_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
         record=specification,
     )
 
@@ -327,7 +327,7 @@ def _view_fixture(root: Path) -> _ViewFixture:
         case_id=key.case_id,
         attempt_index=0,
         cell_code=0,
-        cell_id=JONSWAP_TMA_POPULATION_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
         record=specification_record,
     )
     case = AuditedCase(
@@ -522,9 +522,9 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         cells = record["cells"]
         assert isinstance(cells, dict)
         self.assertEqual(
-            set(cells), {cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS}
+            set(cells), {cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS}
         )
-        first = cells[JONSWAP_TMA_POPULATION_CELLS[0].cell_id]
+        first = cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
         self.assertEqual(
             first,
             {
@@ -539,7 +539,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        malformed_cells.pop(JONSWAP_TMA_POPULATION_CELLS[-1].cell_id)
+        malformed_cells.pop(JONSWAP_TMA_SAMPLE_CELLS[-1].cell_id)
         with self.assertRaisesRegex(ValueError, "exact 27 JONSWAP cells"):
             _population_conditioning_record(
                 (malformed,),
@@ -551,7 +551,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        first = malformed_cells[JONSWAP_TMA_POPULATION_CELLS[0].cell_id]
+        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
         assert isinstance(first, dict)
         first["attempted"] = 2
         with self.assertRaisesRegex(ValueError, "counts do not close"):
@@ -565,7 +565,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        first = malformed_cells[JONSWAP_TMA_POPULATION_CELLS[0].cell_id]
+        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
         assert isinstance(first, dict)
         first["target_accepted"] = 2
         with self.assertRaisesRegex(ValueError, "does not meet its quota"):
@@ -638,7 +638,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                 path,
                 split=SplitId.TRAIN,
                 stream_id=0,
-                cell_ids_by_code={0: JONSWAP_TMA_POPULATION_CELLS[0].cell_id},
+                cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
                 support_extrema=_support_extrema(),
                 totals=totals,
             )
@@ -655,7 +655,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                     path,
                     split=SplitId.TRAIN,
                     stream_id=0,
-                    cell_ids_by_code={0: JONSWAP_TMA_POPULATION_CELLS[0].cell_id},
+                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
                     support_extrema=_support_extrema(),
                     totals=AuditTotals(),
                 )
@@ -670,7 +670,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                     path,
                     split=SplitId.TRAIN,
                     stream_id=0,
-                    cell_ids_by_code={0: JONSWAP_TMA_POPULATION_CELLS[0].cell_id},
+                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
                     support_extrema=_support_extrema(),
                     totals=AuditTotals(),
                 )

@@ -6,7 +6,7 @@ Date: 2026-07-22
 
 The historical sign-transition count should not be the primary data-quality
 criterion in the manuscript.  It remains part of the exact historical record of the
-April Tanaka pilot corpus.  The final methodology should instead separate:
+April Tanaka pilot dataset.  The final methodology should instead separate:
 
 1. prevention of nonperiodic embedding by construction;
 2. independent fixed-band grid-consistency of the initial state and DNO label;
@@ -132,8 +132,8 @@ criterion but does not yet freeze its threshold; that requires a cross-family
 
 The completed matched Tanaka calibration is sufficient to replace the sign
 count in the explanation of the historical generator revision.  A claim that
-the entire final corpus was filtered by \(\Delta_K\) would be false.  Before
-calling it a corpus-wide acceptance rule, apply the state screen to every
+the entire final dataset was filtered by \(\Delta_K\) would be false.  Before
+calling it a dataset-wide acceptance rule, apply the state screen to every
 candidate trajectory and run the DNO screen on a predeclared stratified panel
 from every physical family at its delivered cutoff.  Until then, the correct
 term in the manuscript is **fixed-band resolution audit**.

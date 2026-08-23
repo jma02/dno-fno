@@ -26,12 +26,12 @@ from solver.gen_data.pipeline.writer import (
     build_proposal_arrays,
     commit_case_outcomes,
 )
-from solver.gen_data.stokes_population import (
+from solver.gen_data.stokes_sampling import (
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_POPULATION_CELLS,
-    StokesPopulationSample,
-    StokesPopulationSamplingError,
-    sample_stokes_population,
+    STOKES_SAMPLE_CELLS,
+    StokesSample,
+    StokesSamplingError,
+    sample_stokes_case,
 )
 from solver.gen_data.stokes_static_pipeline import (
     STATIC_STOKES_REQUIRED_CHECKS,
@@ -46,10 +46,10 @@ from solver.gen_data.pipeline.reference import evaluate_discrete_dno_target
 
 JsonRecord: TypeAlias = Mapping[str, object]
 JsonScalar: TypeAlias = str | int | float | bool | None
-_STOKES_CELL_IDS = frozenset(cell.cell_id for cell in STOKES_POPULATION_CELLS)
+_STOKES_CELL_IDS = frozenset(cell.cell_id for cell in STOKES_SAMPLE_CELLS)
 
 
-class StokesPopulationSampler(Protocol):
+class StokesSampler(Protocol):
     """Callable with the complete deterministic Stokes sampler interface."""
 
     def __call__(
@@ -59,14 +59,14 @@ class StokesPopulationSampler(Protocol):
         domain_length: float,
         gravity: float,
         maximum_ursell_redraws: int,
-    ) -> StokesPopulationSample: ...
+    ) -> StokesSample: ...
 
 
 @dataclass(frozen=True)
 class _ResolvedStokesAttempt:
     assignment: AttemptAssignment
     specification: JsonRecord
-    sample: StokesPopulationSample | None
+    sample: StokesSample | None
     preconstruction_outcome: CaseOutcome | None
 
     def __post_init__(self) -> None:
@@ -97,7 +97,6 @@ def _require_failure_identity(
 ) -> None:
     key = assignment.case_key
     expected: dict[str, object] = {
-        "schema": "stokes_population_failure_v1",
         "status": "failed_ursell_redraw_limit",
         "case_id": key.case_id,
         "family_id": key.family_id,
@@ -172,7 +171,7 @@ class StaticStokesQuotaExecutor:
     contract: StaticStokesContract
     maximum_ursell_redraws: int = DEFAULT_MAXIMUM_URSELL_REDRAWS
     metadata: Mapping[str, object] | None = None
-    sampler: StokesPopulationSampler = sample_stokes_population
+    sampler: StokesSampler = sample_stokes_case
     state_constructor: StaticStokesStateConstructor = construct_stokes_state
     target_evaluator: StaticDnoEvaluator = evaluate_discrete_dno_target
 
@@ -210,14 +209,14 @@ class StaticStokesQuotaExecutor:
                 "run configuration sampler redraw limit differs from the "
                 "supplied static Stokes executor"
             )
-        if self.contract.role == "paper_corpus" and (
+        if self.contract.role == "paper_dataset" and (
             self.maximum_ursell_redraws != DEFAULT_MAXIMUM_URSELL_REDRAWS
-            or self.sampler is not sample_stokes_population
+            or self.sampler is not sample_stokes_case
             or self.state_constructor is not construct_stokes_state
             or self.target_evaluator is not evaluate_discrete_dno_target
         ):
             raise ValueError(
-                "paper-corpus execution requires the production redraw limit, "
+                "paper-dataset execution requires the production redraw limit, "
                 "sampler, state constructor, and target evaluator"
             )
         object.__setattr__(
@@ -237,7 +236,7 @@ class StaticStokesQuotaExecutor:
                 gravity=self.contract.gravity,
                 maximum_ursell_redraws=self.maximum_ursell_redraws,
             )
-        except StokesPopulationSamplingError as error:
+        except StokesSamplingError as error:
             record = dict(error.failure_record)
             _require_failure_identity(assignment, record)
             return _ResolvedStokesAttempt(

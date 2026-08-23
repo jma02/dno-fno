@@ -1,4 +1,4 @@
-"""Common proposal and complete-case shard assembly for paper-corpus writers."""
+"""Common proposal and complete-case shard assembly for paper-dataset writers."""
 
 from __future__ import annotations
 

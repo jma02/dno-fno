@@ -21,6 +21,10 @@ RandomSeaStratum: TypeAlias = Literal["shallow", "finite", "deep"]
 PAPER_PEAK_ENHANCEMENTS = (1.0, 3.3, 5.0)
 PAPER_RIGHT_MOVING_FRACTIONS = (0.0, 0.5, 1.0)
 PAPER_SHALLOW_PEAK_MODES = (16, 18, 20, 22, 24)
+PAPER_PEAK_STEEPNESS_MAXIMUM = 0.08
+PAPER_RELATIVE_FREQUENCY_MINIMUM = 0.5
+PAPER_RELATIVE_FREQUENCY_MAXIMUM = 2.5
+PAPER_RELATIVE_FREQUENCY_WINDOW = "sharp_relative_frequency_interval_v1"
 PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER = 128.0
 PAPER_RESOLVED_BAND_TRANSITION_WAVENUMBER = 96.0
 PAPER_RESOLVED_BAND_TRANSITION_FRACTION = (
@@ -185,13 +189,38 @@ def positive_mode_wavenumbers(*, band: ResolvedBand) -> FloatArray:
     return wavenumbers[wavenumbers <= band.maximum_wavenumber + 1.0e-12]
 
 
+def relative_frequency_interval_fits(
+    parameters: JonswapTmaParameters,
+    *,
+    band: ResolvedBand,
+    relative_maximum: float,
+    gravity: float = 1.0,
+) -> bool:
+    """Return whether the relative upper frequency fits in ``band``."""
+
+    if parameters.depth <= 0.0 or parameters.peak_wavenumber <= 0.0:
+        return False
+    if not np.isfinite(relative_maximum) or relative_maximum <= 1.0:
+        raise ValueError("relative_maximum must be finite and greater than one")
+    if not np.isfinite(gravity) or gravity <= 0.0:
+        raise ValueError("gravity must be finite and positive")
+    frequencies = finite_depth_angular_frequency(
+        np.asarray([parameters.peak_wavenumber, band.maximum_wavenumber]),
+        depth=parameters.depth,
+        gravity=gravity,
+    )
+    return bool(frequencies[1] >= relative_maximum * frequencies[0])
+
+
 def paper_support_violations(
     parameters: JonswapTmaParameters,
     *,
     stratum: RandomSeaStratum,
     length: float = 2.0 * np.pi,
+    band: ResolvedBand | None = None,
+    relative_frequency_maximum: float | None = None,
 ) -> tuple[str, ...]:
-    """Return violations of the predeclared paper-corpus parameter support.
+    """Return violations of the predeclared paper-dataset parameter support.
 
     This predicate depends only on the five parameters and the named stratum.
     It does not inspect random phases or a realized surface profile.
@@ -231,6 +260,27 @@ def paper_support_violations(
     depth_wavenumber = peak_wavenumber * h
     relative_height = significant_height / (2.0 * h)
     peak_steepness = peak_wavenumber * significant_height / 2.0
+    if peak_steepness > PAPER_PEAK_STEEPNESS_MAXIMUM:
+        violations.append(
+            "JONSWAP/TMA k_p H_s/2 must not exceed "
+            f"{PAPER_PEAK_STEEPNESS_MAXIMUM:g}"
+        )
+    if (band is None) != (relative_frequency_maximum is None):
+        raise ValueError(
+            "band and relative_frequency_maximum must be provided together"
+        )
+    if (
+        band is not None
+        and relative_frequency_maximum is not None
+        and not relative_frequency_interval_fits(
+            parameters,
+            band=band,
+            relative_maximum=relative_frequency_maximum,
+        )
+    ):
+        violations.append(
+            "JONSWAP/TMA relative upper frequency must fit in the resolved band"
+        )
 
     if stratum == "shallow":
         peak_mode = peak_wavenumber * length / (2.0 * np.pi)
@@ -243,8 +293,6 @@ def paper_support_violations(
             violations.append("shallow k_p h must lie in [0.2, 1.5]")
         if not 0.03 <= relative_height <= 0.16:
             violations.append("shallow H_s/(2h) must lie in [0.03, 0.16]")
-        if peak_steepness > 0.15:
-            violations.append("shallow k_p H_s/2 must not exceed 0.15")
     elif stratum == "finite":
         if not 2.0 <= peak_wavenumber <= 12.0:
             violations.append("finite peak_wavenumber must lie in [2, 12]")
@@ -270,7 +318,7 @@ def is_in_paper_support(
     stratum: RandomSeaStratum,
     length: float = 2.0 * np.pi,
 ) -> bool:
-    """Return whether parameters belong to the named paper-corpus stratum."""
+    """Return whether parameters belong to the named paper-dataset stratum."""
 
     return not paper_support_violations(parameters, stratum=stratum, length=length)
 
@@ -280,8 +328,9 @@ def jonswap_tma_spectrum(
     *,
     band: ResolvedBand,
     gravity: float = 1.0,
+    relative_frequency_interval: tuple[float, float] | None = None,
 ) -> JonswapTmaSpectrum:
-    """Integrate the windowed JONSWAP/TMA density over Fourier cells."""
+    """Integrate the selected JONSWAP/TMA density over Fourier cells."""
 
     if parameters.depth <= 0.0:
         raise ValueError("depth must be positive")
@@ -297,6 +346,15 @@ def jonswap_tma_spectrum(
         raise ValueError("peak_wavenumber must lie in the untapered spectral interior")
     if gravity <= 0.0 or not np.isfinite(gravity):
         raise ValueError("gravity must be finite and positive")
+    if relative_frequency_interval is not None:
+        relative_minimum, relative_maximum = relative_frequency_interval
+        if (
+            not np.isfinite((relative_minimum, relative_maximum)).all()
+            or not 0.0 < relative_minimum < 1.0 < relative_maximum
+        ):
+            raise ValueError(
+                "relative_frequency_interval must satisfy 0 < minimum < 1 < maximum"
+            )
 
     centers = positive_mode_wavenumbers(band=band)
     spacing = 2.0 * np.pi / band.length
@@ -318,6 +376,18 @@ def jonswap_tma_spectrum(
             gravity=gravity,
         )[0]
     )
+    if relative_frequency_interval is not None:
+        maximum_frequency = float(
+            finite_depth_angular_frequency(
+                np.asarray([band.maximum_wavenumber]),
+                depth=depth,
+                gravity=gravity,
+            )[0]
+        )
+        if maximum_frequency < relative_maximum * peak_frequency:
+            raise ValueError(
+                "relative JONSWAP/TMA frequency interval exceeds the resolved band"
+            )
     sigma = np.where(angular_frequency <= peak_frequency, 0.07, 0.09)
     peak_shape = np.exp(
         -((angular_frequency - peak_frequency) ** 2)
@@ -333,7 +403,15 @@ def jonswap_tma_spectrum(
     group_velocity = finite_depth_group_velocity(
         cell_wavenumbers, depth=depth, gravity=gravity
     )
-    window = resolved_band_window(cell_wavenumbers, band=band)
+    if relative_frequency_interval is None:
+        window = resolved_band_window(cell_wavenumbers, band=band)
+    else:
+        relative_frequency = angular_frequency / peak_frequency
+        window = np.asarray(
+            (relative_frequency >= relative_minimum)
+            & (relative_frequency <= relative_maximum),
+            dtype=np.float64,
+        )
     density = jonswap_density * tma_factor * group_velocity * window
     cell_energy = half_width * np.sum(weights[None, :] * density, axis=1)
     total_energy = float(np.sum(cell_energy))
@@ -368,6 +446,7 @@ def build_jonswap_tma_initial_condition(
     phase_left: FloatArray,
     band: ResolvedBand,
     gravity: float = 1.0,
+    relative_frequency_interval: tuple[float, float] | None = None,
 ) -> JonswapTmaState:
     """Construct one resolved-band random-phase ``(eta, xi)`` state.
 
@@ -382,7 +461,12 @@ def build_jonswap_tma_initial_condition(
     if not np.isfinite(coordinates).all():
         raise ValueError("x must contain only finite values")
 
-    spectrum = jonswap_tma_spectrum(parameters, band=band, gravity=gravity)
+    spectrum = jonswap_tma_spectrum(
+        parameters,
+        band=band,
+        gravity=gravity,
+        relative_frequency_interval=relative_frequency_interval,
+    )
     right_phases = np.asarray(phase_right, dtype=np.float64)
     left_phases = np.asarray(phase_left, dtype=np.float64)
     expected_shape = spectrum.wavenumbers.shape

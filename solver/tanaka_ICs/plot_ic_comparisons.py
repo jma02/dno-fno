@@ -13,8 +13,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ..data.solitary_loader_jax import DEFAULT_SOLITON_ROOT, load_soliton_file
+from ..reference_solutions.solitary_wave import DEFAULT_SOLITON_ROOT, load_soliton_file
 from .modified_tanaka import (
+    DEFAULT_OUTER_ITERATIONS,
+    DEFAULT_QC_UPPER,
     REAL_DTYPE,
     ModifiedTanakaBatchSolution,
     ModifiedTanakaParams,
@@ -44,8 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.01)
     parser.add_argument("--transform_power", type=int, default=5)
     parser.add_argument("--qc_lower", type=float, default=0.2)
-    parser.add_argument("--qc_upper", type=float, default=0.999)
-    parser.add_argument("--outer_iterations", type=int, default=24)
+    parser.add_argument("--qc_upper", type=float, default=DEFAULT_QC_UPPER)
+    parser.add_argument(
+        "--outer_iterations",
+        type=int,
+        default=DEFAULT_OUTER_ITERATIONS,
+    )
     parser.add_argument("--fixed_point_iterations", type=int, default=80)
     parser.add_argument("--f2_tolerance", type=float, default=1e-10)
     parser.add_argument("--continuation", action="store_true")

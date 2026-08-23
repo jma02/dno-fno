@@ -164,6 +164,9 @@ def _quantile_indices(
         for i in range(1, keep_samples):
             if idx[i] <= idx[i - 1]:
                 idx[i] = min(idx[i - 1] + 1, n_times - 1)
+        for i in range(keep_samples - 2, -1, -1):
+            if idx[i] >= idx[i + 1]:
+                idx[i] = max(idx[i + 1] - 1, 0)
         out[b] = idx
     return out
 

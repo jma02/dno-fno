@@ -9,7 +9,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..solvers.dno_series_jax import build_grid, dno_series_eval
-from ..tanaka_ICs.modified_tanaka import make_default_tanaka_template, solve_modified_tanaka_batched
+from ..tanaka_ICs.modified_tanaka import (
+    DEFAULT_OUTER_ITERATIONS,
+    DEFAULT_QC_UPPER,
+    make_default_tanaka_template,
+    solve_modified_tanaka_batched,
+)
 
 DEFAULT_RANDOM_MIN_SEPARATION = 50.0
 DEFAULT_RANDOM_MIN_CRESTS = 1
@@ -211,8 +216,8 @@ def build_multi_crest_initial_condition(
     alpha: float = 0.01,
     transform_power: int = 5,
     qc_lower: float = 0.2,
-    qc_upper: float = 0.999,
-    outer_iterations: int = 24,
+    qc_upper: float = DEFAULT_QC_UPPER,
+    outer_iterations: int = DEFAULT_OUTER_ITERATIONS,
     fixed_point_iterations: int = 80,
     f2_tolerance: float = 1e-10,
 ) -> dict[str, object]:
@@ -358,8 +363,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.01)
     parser.add_argument("--transform_power", type=int, default=5)
     parser.add_argument("--qc_lower", type=float, default=0.2)
-    parser.add_argument("--qc_upper", type=float, default=0.999)
-    parser.add_argument("--outer_iterations", type=int, default=24)
+    parser.add_argument("--qc_upper", type=float, default=DEFAULT_QC_UPPER)
+    parser.add_argument(
+        "--outer_iterations",
+        type=int,
+        default=DEFAULT_OUTER_ITERATIONS,
+    )
     parser.add_argument("--fixed_point_iterations", type=int, default=80)
     parser.add_argument("--f2_tolerance", type=float, default=1e-10)
     return parser.parse_args()

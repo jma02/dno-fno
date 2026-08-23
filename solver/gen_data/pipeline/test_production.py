@@ -5,11 +5,12 @@ from __future__ import annotations
 import unittest
 
 from solver.gen_data.pipeline.production import (
-    PAPER_CORPUS_REVISION_ID,
+    PAPER_DATASET_REVISION_BY_FAMILY,
     CaseKey,
     PhysicalFamilyId,
     SplitId,
     balanced_cell_quotas,
+    paper_dataset_revision_id,
     schedule_attempt_batch,
     split_code,
     split_root,
@@ -17,7 +18,7 @@ from solver.gen_data.pipeline.production import (
 
 
 class FamilyIdentityTest(unittest.TestCase):
-    def test_paper_family_ids_and_revision_are_stable(self) -> None:
+    def test_paper_family_ids_and_revisions_are_stable(self) -> None:
         self.assertEqual(
             tuple((family.name, int(family)) for family in PhysicalFamilyId),
             (
@@ -27,7 +28,26 @@ class FamilyIdentityTest(unittest.TestCase):
                 ("JONSWAP_TMA", 4),
             ),
         )
-        self.assertEqual(PAPER_CORPUS_REVISION_ID, 2)
+        self.assertEqual(
+            dict(PAPER_DATASET_REVISION_BY_FAMILY),
+            {
+                PhysicalFamilyId.STOKES: 2,
+                PhysicalFamilyId.TANAKA: 3,
+                PhysicalFamilyId.BENJAMIN_FEIR: 4,
+                PhysicalFamilyId.JONSWAP_TMA: 4,
+            },
+        )
+        self.assertEqual(
+            {
+                family: paper_dataset_revision_id(family)
+                for family in PhysicalFamilyId
+            },
+            dict(PAPER_DATASET_REVISION_BY_FAMILY),
+        )
+
+    def test_revision_accessor_requires_a_typed_family(self) -> None:
+        with self.assertRaisesRegex(TypeError, "PhysicalFamilyId"):
+            paper_dataset_revision_id(1)  # type: ignore[arg-type]
 
 
 class BalancedCellQuotasTest(unittest.TestCase):

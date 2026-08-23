@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["solver", "solver.solvers", "solver.data", "solver.tanaka_ICs", "solver.gen_data", "solver.gen_data.pipeline", "solver.evals", "fno_jax"]
+packages = ["solver", "solver.solvers", "solver.reference_solutions", "solver.tanaka_ICs", "solver.gen_data", "solver.gen_data.pipeline", "solver.evals", "fno_jax"]
 
 [tool.setuptools.package-dir]
 fno_jax = "models/fno-jax"

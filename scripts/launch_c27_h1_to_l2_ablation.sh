@@ -1,11 +1,11 @@
 #!/bin/bash
-# C27-derived full-corpus run with the translation-tangent auxiliary extended
+# C27-derived full-dataset run with the translation-tangent auxiliary extended
 # from Tanaka rows to every nonflat row.
 
 set -euo pipefail
 cd /home/johnma/dno-fno
 
-DATASET="${DATASET:-combined_dataset_v9.npz}"
+DATASET="${DATASET:-outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 LR="${LR:-2e-5}"
 HADAMARD_WEIGHT="${HADAMARD_WEIGHT:-1e-2}"

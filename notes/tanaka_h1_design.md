@@ -4,7 +4,7 @@ Doc reference: `notes/cs_dno_jcp09_improvement_plan.md` §3I; `notes/v7_tanaka_f
 
 ## Goal
 
-Add the JCP09-canonical Tanaka solitary-wave regime (`h = 1`, `a/h ∈ [0.3, 0.6]`) to the training corpus. The current dataset samples `h ∈ [0.01, 0.30]` exclusively — it *never* sees the paper's reference configuration. The audit shows the failing regime `(h ≥ 0.23 ∧ a/h ≥ 0.27)` has **~1% coverage** in v8.
+Add the JCP09-canonical Tanaka solitary-wave regime (`h = 1`, `a/h ∈ [0.3, 0.6]`) to the training dataset. The current dataset samples `h ∈ [0.01, 0.30]` exclusively — it *never* sees the paper's reference configuration. The audit shows the failing regime `(h ≥ 0.23 ∧ a/h ≥ 0.27)` has **~1% coverage** in v8.
 
 ## What to generate
 

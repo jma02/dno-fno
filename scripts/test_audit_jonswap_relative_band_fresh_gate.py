@@ -10,13 +10,13 @@ from scripts.audit_jonswap_relative_band_fresh_gate import (
     SUMMARY_NAME,
     audit,
 )
-from solver.gen_data.jonswap_tma_population import (
-    JONSWAP_TMA_POPULATION_CELLS,
+from solver.gen_data.jonswap_tma_sampling import (
+    JONSWAP_TMA_SAMPLE_CELLS,
 )
 
 
 def _summary(stream_id: int, *, rejected: int) -> dict[str, object]:
-    cells = tuple(cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS)
+    cells = tuple(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS)
     by_cell = {
         cell_id: {
             "accepted": 10,

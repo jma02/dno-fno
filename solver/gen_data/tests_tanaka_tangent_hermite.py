@@ -21,7 +21,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.generate_tanaka_dataset_v2 import (  # noqa: E402
+from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_FINE_FACTOR,
     _validate_tanaka_profile_batch,
     build_per_case_initial_conditions,
@@ -45,9 +45,12 @@ from solver.solvers.time_integrator import (  # noqa: E402
     make_normalized_rollout_settings,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
+    DEFAULT_OUTER_ITERATIONS,
+    DEFAULT_QC_UPPER,
     ModifiedTanakaBatchSolution,
     make_default_tanaka_template,
     solve_modified_tanaka_batched,
+    validate_solved_amplitudes,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -212,6 +215,45 @@ def test_profile_validation_rejects_nonincreasing_knots() -> None:
         assert "strictly increasing" in str(error)
     else:
         raise AssertionError("Duplicate Tanaka knots were not rejected.")
+
+
+def test_small_profiles_realize_their_requested_amplitudes() -> None:
+    requested = jnp.asarray(
+        (1.0e-8, 2.4102831187118947e-5, 1.0e-3),
+        dtype=jnp.float64,
+    )
+    template = make_default_tanaka_template(
+        nx=32,
+        dno_order=0,
+        pad_factor=1,
+    )
+    assert template.qc_upper == DEFAULT_QC_UPPER
+    assert template.outer_iterations == DEFAULT_OUTER_ITERATIONS
+    solution = solve_modified_tanaka_batched(template, requested)
+    achieved = jnp.max(solution.eta_profile, axis=-1)
+    validate_solved_amplitudes(solution.eta_profile, requested)
+    np.testing.assert_allclose(
+        achieved,
+        requested,
+        rtol=1.0e-6,
+        atol=1.0e-14,
+    )
+    jax.clear_caches()
+
+
+def test_profile_amplitude_validation_rejects_the_old_floor() -> None:
+    eta_profile = jnp.asarray(
+        ((0.0, 4.0e-4, 9.947786769e-4, 4.0e-4, 0.0),),
+        dtype=jnp.float64,
+    )
+    requested = jnp.asarray((1.0e-5,), dtype=jnp.float64)
+    try:
+        validate_solved_amplitudes(eta_profile, requested)
+    except ValueError as error:
+        assert "requested=1.0000000000000001e-05" in str(error)
+        assert "achieved=0.0009947786769" in str(error)
+    else:
+        raise AssertionError("The old Tanaka amplitude floor was not rejected.")
 
 
 def test_profiles_remain_nonnegative_and_monotone() -> None:
@@ -379,6 +421,8 @@ def main() -> None:
     tests = (
         test_cubic_hermite_exact_and_zero_exterior,
         test_profile_validation_rejects_nonincreasing_knots,
+        test_small_profiles_realize_their_requested_amplitudes,
+        test_profile_amplitude_validation_rejects_the_old_floor,
         test_profiles_remain_nonnegative_and_monotone,
         test_periodic_placement_translation_and_image_convergence,
         test_case31_tail_and_direction_regression,

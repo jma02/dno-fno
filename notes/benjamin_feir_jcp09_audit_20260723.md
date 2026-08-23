@@ -47,10 +47,10 @@ The paper uses a fourth-order Gauss--Legendre method with
 \(N=64\) points. It reports the first carrier minimum near 60 carrier
 periods.
 
-## Differences in the current generator
+## Differences in the generator audited here
 
-The current construction is in
-`solver/gen_data/generate_bf_dataset.py:306-380`.
+This section describes the now-retired standalone Benjamin--Feir generator,
+not the revision-4 paper-dataset implementation that replaced it.
 
 1. The carrier and sidebands use deep-water formulas even when the generated
    rollout has finite depth. The initial-condition function does not receive
@@ -206,7 +206,7 @@ series. Correcting the sideband coefficients and removing the empirical
 cross-terms makes the construction match the paper, but does not cure a known
 failing trajectory. More GL iterations and step halving also do not cure it.
 
-For a clean new corpus:
+For a clean new dataset:
 
 1. Define a deep-water Benjamin--Feir family directly from the paper's
    Stokes carrier plus two linear sidebands.

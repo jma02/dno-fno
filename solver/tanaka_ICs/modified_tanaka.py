@@ -8,18 +8,68 @@ from functools import partial
 from pathlib import Path
 
 import jax
+import numpy as np
 
 TANAKA_DTYPE_NAME = os.environ.get("DNO_TANAKA_DTYPE", "float64").strip().lower()
 if TANAKA_DTYPE_NAME not in {"float32", "float64"}:
     raise ValueError(f"Unsupported DNO_TANAKA_DTYPE={TANAKA_DTYPE_NAME!r}; expected 'float32' or 'float64'.")
 
 jax.config.update("jax_enable_x64", TANAKA_DTYPE_NAME == "float64")
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: E402
 
-from ..solvers.time_integrator import make_solver_params, myfft, myifft, spectral_dx
+from ..solvers.time_integrator import (  # noqa: E402
+    make_solver_params,
+    myfft,
+    myifft,
+    spectral_dx,
+)
 
 
 REAL_DTYPE = jnp.float64 if TANAKA_DTYPE_NAME == "float64" else jnp.float32
+DEFAULT_QC_UPPER = 1.0 - 1.0e-12
+DEFAULT_OUTER_ITERATIONS = 48
+AMPLITUDE_RELATIVE_TOLERANCE = 1.0e-6
+AMPLITUDE_ABSOLUTE_TOLERANCE = 1.0e-14
+
+
+def validate_solved_amplitudes(
+    eta_profile: jax.Array,
+    requested_amplitudes: jax.Array,
+) -> None:
+    """Fail if a profile solve did not realize every requested crest height."""
+
+    eta = jnp.asarray(eta_profile)
+    requested = jnp.asarray(requested_amplitudes, dtype=eta.dtype)
+    if eta.ndim != 2 or requested.shape != (eta.shape[0],):
+        raise ValueError(
+            "Tanaka profiles and requested amplitudes must have matching batch size."
+        )
+    achieved = jnp.max(eta, axis=-1)
+    absolute_error = jnp.abs(achieved - requested)
+    allowed_error = jnp.maximum(
+        AMPLITUDE_ABSOLUTE_TOLERANCE,
+        AMPLITUDE_RELATIVE_TOLERANCE * requested,
+    )
+    valid = (
+        jnp.isfinite(requested)
+        & (requested > 0.0)
+        & jnp.isfinite(achieved)
+        & (absolute_error <= allowed_error)
+    )
+    if bool(jnp.all(valid)):
+        return
+
+    invalid = np.flatnonzero(~np.asarray(jax.device_get(valid), dtype=bool))
+    requested_host = np.asarray(jax.device_get(requested), dtype=np.float64)
+    achieved_host = np.asarray(jax.device_get(achieved), dtype=np.float64)
+    details = ", ".join(
+        (
+            f"component {int(index)} requested={requested_host[index]:.17g} "
+            f"achieved={achieved_host[index]:.17g}"
+        )
+        for index in invalid
+    )
+    raise ValueError(f"Tanaka profile amplitude solve failed: {details}")
 
 
 @dataclass(frozen=True)
@@ -41,8 +91,8 @@ class ModifiedTanakaParams:
     alpha: float = 0.01
     transform_power: int = 5
     qc_lower: float = 0.2
-    qc_upper: float = 0.999
-    outer_iterations: int = 24
+    qc_upper: float = DEFAULT_QC_UPPER
+    outer_iterations: int = DEFAULT_OUTER_ITERATIONS
     fixed_point_iterations: int = 80
     f2_tolerance: float = 1e-10
     cg_maxiter: int = 400
@@ -111,8 +161,8 @@ def make_default_tanaka_template(
     alpha: float = 0.01,
     transform_power: int = 5,
     qc_lower: float = 0.2,
-    qc_upper: float = 0.999,
-    outer_iterations: int = 24,
+    qc_upper: float = DEFAULT_QC_UPPER,
+    outer_iterations: int = DEFAULT_OUTER_ITERATIONS,
     fixed_point_iterations: int = 80,
     f2_tolerance: float = 1e-10,
     cg_maxiter: int = 400,
@@ -631,6 +681,10 @@ def solve_modified_tanaka(params: ModifiedTanakaParams, seed: ModifiedTanakaSeed
     x_periodic, eta_periodic = _interpolate_to_periodic_grid(x_profile, eta_profile, params)
     speed = float(jnp.sqrt(f2) * jnp.sqrt(params.gravity * params.depth))
     xi_periodic, gxi_periodic = _solve_surface_potential(eta_periodic, speed, params, direction=params.direction)
+    validate_solved_amplitudes(
+        (eta_profile * params.depth)[None, :],
+        jnp.asarray((params.amplitude,), dtype=eta_profile.dtype),
+    )
 
     return ModifiedTanakaSolution(
         amplitude=params.amplitude,
@@ -676,6 +730,10 @@ def solve_modified_tanaka_batched(
         centers,
         directions,
         jit_params,
+    )
+    validate_solved_amplitudes(
+        eta_profile * template_params.depth,
+        amplitudes,
     )
 
     return ModifiedTanakaBatchSolution(
@@ -735,8 +793,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.01)
     parser.add_argument("--transform_power", type=int, default=5)
     parser.add_argument("--qc_lower", type=float, default=0.2)
-    parser.add_argument("--qc_upper", type=float, default=0.999)
-    parser.add_argument("--outer_iterations", type=int, default=24)
+    parser.add_argument("--qc_upper", type=float, default=DEFAULT_QC_UPPER)
+    parser.add_argument(
+        "--outer_iterations",
+        type=int,
+        default=DEFAULT_OUTER_ITERATIONS,
+    )
     parser.add_argument("--fixed_point_iterations", type=int, default=80)
     parser.add_argument("--f2_tolerance", type=float, default=1e-10)
     parser.add_argument("--cg_maxiter", type=int, default=400)

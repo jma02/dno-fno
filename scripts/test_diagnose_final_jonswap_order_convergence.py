@@ -87,7 +87,7 @@ def _fixture(root: Path) -> Path:
     )
     result_sha256 = file_sha256(result_path)
 
-    map_path = chunk / "paper_corpus_jonswap_tma_train.trajectory_map.npz"
+    map_path = chunk / "paper_dataset_jonswap_tma_train.trajectory_map.npz"
     np.savez(
         map_path,
         schema_version=np.asarray(2, dtype=np.int16),
@@ -106,7 +106,7 @@ def _fixture(root: Path) -> Path:
     )
     map_sha256 = file_sha256(map_path)
 
-    manifest_path = chunk / "paper_corpus_jonswap_tma_train.dataset.json"
+    manifest_path = chunk / "paper_dataset_jonswap_tma_train.dataset.json"
     _write_json(
         manifest_path,
         {
@@ -138,7 +138,7 @@ def _fixture(root: Path) -> Path:
     )
     manifest_sha256 = file_sha256(manifest_path)
 
-    summary_path = chunk / "paper_corpus_jonswap_tma_train.summary.json"
+    summary_path = chunk / "paper_dataset_jonswap_tma_train.summary.json"
     _write_json(
         summary_path,
         {
@@ -172,7 +172,7 @@ def _fixture(root: Path) -> Path:
         {
             "schema": diagnostic.AUDIT_SCHEMA,
             "status": "pass",
-            "corpus_root": str(root),
+            "dataset_root": str(root),
             "accepted": 3,
             "retained_rows": 3 * frames,
             "identity": {
@@ -264,7 +264,7 @@ def _renderer_fixture(path: Path, scan: diagnostic.ScanResult) -> Path:
         {
             "schema": diagnostic.RENDERER_SCHEMA,
             "status": "complete",
-            "parameters": {"final_paper_corpus_contract_required": True},
+            "parameters": {"final_paper_dataset_contract_required": True},
             "source_binding": {
                 "mode": "combined_summary",
                 "combined_summary_path": str(combined_path),
@@ -335,8 +335,8 @@ class FinalJonswapOrderDiagnosticTests(unittest.TestCase):
             )
             self.assertEqual(record["status"], "pass")
             self.assertTrue(record["diagnostic_only"])
-            self.assertFalse(record["affects_corpus_acceptance"])
-            self.assertFalse(record["affects_corpus_release"])
+            self.assertFalse(record["affects_dataset_acceptance"])
+            self.assertFalse(record["affects_dataset_release"])
             self.assertEqual(len(record["cases"]), 3)
             case = record["cases"][0]
             self.assertEqual(len(case["successive_order_changes"]), 4)

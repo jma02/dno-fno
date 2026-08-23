@@ -1,0 +1,61 @@
+\section{Discussion}
+\label{sec:discussion}
+
+The experiments support two conclusions at different levels of certainty.
+First, one-step accuracy alone is insufficient for long rollout accuracy.
+Earlier models had relative DNO errors near $2\times10^{-4}$ on exact
+trajectory states but developed large secant responses transverse to those
+states.  Including $\G_1$ analytically restores the exact first-order
+null-form cancellation, and the Hadamard loss constrains the shape derivative
+that enters the Hamiltonian vector field.  The clean C16 model, which
+introduced these changes as a
+bundle, produced finite predictions in all 320 unguarded rollouts.  Because
+the analytic backbone, learned remainder, shape loss, capacity, and solver
+path changed together, this comparison supports the combined construction but
+does not assign the finiteness result to any one component.  In particular,
+the manuscript does not treat the incomplete literal $\G_1$ deletion or the
+absence of a matched Hadamard deletion as causal evidence.
+
+Second, the C27/C28 comparison isolates the active-mode complex loss within
+the stated training recipe.  Removing it slightly improves one-step
+$\mathcal L_2$ while worsening the raw and alignment-removable rollout tails.
+This establishes that the aggregate one-step norm and the long-time
+translation-sensitive error rank these two checkpoints differently.  It does
+not establish that coefficient 6 is optimal, that every affected case is a
+translation, or that the active-mode term is necessary for finiteness.  The
+completed C29 training run similarly suggests that deleting the localized
+tangent term is harmful, but its archived rollout comparison used a changed
+evaluator source and nonidentical reference-$q$ protocol hashes.  We therefore
+treat C29 as secondary evidence until C27 and C29 are replayed with one frozen
+evaluator.
+
+The spectral guard must also be kept separate from the learned operator.  The
+C27 and C28 headline statistics are conditional on the common guarded
+protocol.  Its initial-profile selector is exactly inactive on the 256
+non-Tanaka test conditions, and no saved C27 Tanaka state reaches the nominal
+activation threshold, but the saved cadence does not rule out activation at
+an internal integrator substep.  Thus the result is a property of the
+checkpoint--integrator--guard combination, not an unconditional
+320-trajectory stability theorem for $\Gtheta$.  The unguarded C16 result is
+the relevant evidence that finite rollouts can be obtained without this
+intervention, although C16 retains two finite Tanaka errors above one.
+
+The numerical scope is also finite.  The reference is the order-six,
+$|k|\leq128$ projected DNO under the stated padding and time-integration
+protocol, rather than the exact continuum DNO\@.  The suite contains 32 fixed
+attempts per panel, and error statistics use the 305 cases whose reference
+trajectories pass the declared validity test.  These empirical quantiles are
+descriptive statistics for five constructed wave families, not confidence
+bounds for an underlying ocean-wave population.  The exact mode deletion uses
+one initialization seed, and the evaluation families are broader than, but
+not independent of, the data-generation choices used during model
+development.
+
+The next comparisons should therefore freeze the evaluator and reference
+cache before replaying the tangent deletion, then test a matched Hadamard
+deletion from the selected objective.  Final accuracy claims should be
+repeated on fresh case-level test draws from the paper dataset, with errors
+reported by family and depth as well as in aggregate.  A runtime comparison
+against the same order-six reference implementation is also needed before
+making a speed claim; parameter count alone does not determine wall-clock
+cost.

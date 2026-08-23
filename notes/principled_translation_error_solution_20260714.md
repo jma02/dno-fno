@@ -119,7 +119,7 @@ The repository evidence rules out the tempting simple alternatives:
   Fourier based, hence equivariant to a common periodic shift.  Equivariance
   says a translated input gets a translated output; it does not make the
   learned vector field advance at exactly the right speed.
-- **More of the same global tangent weight:** C21 lowers the corpus tangent
+- **More of the same global tangent weight:** C21 lowers the dataset tangent
   statistic by 17% and repairs case 27, but worsens case 24 and rigid g1 case 2.
   It redistributes phase error rather than eliminating the relevant risk.
 - **Training modulo translation:** aligning the target inside the loss would
@@ -507,7 +507,7 @@ phase defect elsewhere.
 
 The stability problem that produced NaNs has been solved structurally.  The
 remaining Tanaka error is a neutral-direction accuracy problem.  C22 confirms
-that the `gamma^2` normalization can repair a rigid phase tail, but its corpus
+that the `gamma^2` normalization can repair a rigid phase tail, but its dataset
 mean does not control the differential multi-crest tail.  The present
 `gamma_diff_sq` is also not a clean inter-crest statistic, so naive
 fourth-moment/CVaR reweighting is contraindicated.  The next step is to validate

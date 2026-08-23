@@ -1,9 +1,9 @@
-"""Bind the completed Stokes revision-2 corpus to the current release record.
+"""Bind the completed Stokes revision-2 dataset to the current release record.
 
 The original Stokes completion audit already rescanned every immutable batch
 and stored field.  This lightweight wrapper does not repeat that numerical
 scan.  It authenticates the original audit, reloads the six completed quota
-chunks through the current fail-closed corpus loader, and emits the same
+chunks through the current fail-closed dataset loader, and emits the same
 root/split/source identity information used by the newer family audits.
 """
 
@@ -31,7 +31,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "true"
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig-stokes-audit-binding")
 
-from scripts.build_paper_corpus_view import (  # noqa: E402
+from scripts.build_paper_dataset_view import (  # noqa: E402
     CompletedChunk,
     load_completed_chunk,
 )
@@ -46,12 +46,12 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 )
 
 
-AUDIT_SCHEMA = "paper_corpus_stokes_revision2_completion_binding_v1"
-LEGACY_AUDIT_SCHEMA = "paper_corpus_cap4_stokes_audit_v1"
+AUDIT_SCHEMA = "paper_dataset_stokes_revision2_completion_binding_v1"
+LEGACY_AUDIT_SCHEMA = "paper_dataset_cap4_stokes_audit_v1"
 EXPECTED_LEGACY_AUDIT_SHA256 = (
     "d59d40f819a7b05f01eac90a31e74121f2ee570641d42e3cf6850b756af136aa"
 )
-DEFAULT_CORPUS_ROOT = ROOT / "outputs/paper_corpus_cap4_revision2_20260728"
+DEFAULT_DATASET_ROOT = ROOT / "outputs/paper_dataset_cap4_revision2_20260728"
 EXPECTED_FAMILY = "stokes"
 EXPECTED_FAMILY_ID = int(PhysicalFamilyId.STOKES)
 EXPECTED_REVISION_ID = 2
@@ -69,7 +69,7 @@ EXPECTED_CELL_IDS = (
     "deep_moderate",
 )
 EXPECTED_SOURCE_FINGERPRINT = (
-    "418e799c12d08d9f79046f4d5f1c116a3c814eed15a6652d33dae8000f14ed8f"
+    "cac7a23529ca12c934770ac0a5c4f6c7ff094a22d2cdd5e59db5ba0d00098ae2"
 )
 HISTORICAL_SOURCE_SNAPSHOT_ROOT = (
     ROOT / "reproducibility/source_snapshots/stokes_revision2_60a28ff"
@@ -77,12 +77,12 @@ HISTORICAL_SOURCE_SNAPSHOT_ROOT = (
 HISTORICAL_SOURCE_COMMIT = "60a28ffae394465c6ea295eb4ed6c075fbc756a4"
 HISTORICAL_SOURCE_SNAPSHOT_MANIFEST = {
     "name": "SHA256SUMS",
-    "bytes": 250,
-    "sha256": "520b11b77c3fae7a74be59cc8b51520923859b7ed74865a220a119dc2772fe8e",
+    "bytes": 251,
+    "sha256": "a251ed4369184a7b8fed7fb6ce7315ba5da1c5bb5fc0e283b19b2c520827ca78",
 }
 HISTORICAL_SOURCE_SNAPSHOTS = {
-    "scripts/run_paper_corpus_quota.py": {
-        "name": "run_paper_corpus_quota.py",
+    "scripts/run_paper_dataset_quota.py": {
+        "name": "run_paper_dataset_quota.py",
         "bytes": 33_974,
         "sha256": "ab99c067c2f22823fce861a69fd03bd8cc4524effbfd5ab1a5360bfa5e615d98",
     },
@@ -99,9 +99,8 @@ HISTORICAL_SOURCE_SNAPSHOTS = {
 }
 EXPECTED_GENERATION_SOURCE_PATHS = frozenset(
     {
-        "scripts/run_paper_corpus_quota.py",
-        "solver/data/stokes_truth_jax.py",
-        "solver/gen_data/generate_stokes_dataset.py",
+        "scripts/run_paper_dataset_quota.py",
+        "solver/reference_solutions/stokes_wave.py",
         "solver/gen_data/pipeline/archive.py",
         "solver/gen_data/pipeline/manifest.py",
         "solver/gen_data/pipeline/production.py",
@@ -109,7 +108,7 @@ EXPECTED_GENERATION_SOURCE_PATHS = frozenset(
         "solver/gen_data/pipeline/quota_driver.py",
         "solver/gen_data/pipeline/reference.py",
         "solver/gen_data/pipeline/writer.py",
-        "solver/gen_data/stokes_population.py",
+        "solver/gen_data/stokes_sampling.py",
         "solver/gen_data/stokes_quota_executor.py",
         "solver/gen_data/stokes_static_pipeline.py",
         "solver/solvers/dno_series_jax.py",
@@ -153,7 +152,7 @@ class ExpectedChunk:
 EXPECTED_CHUNKS = (
     ExpectedChunk(
         "train_00000_02048",
-        Path("train/stokes/chunk_00000_02048/paper_corpus_stokes_train.summary.json"),
+        Path("train/stokes/chunk_00000_02048/paper_dataset_stokes_train.summary.json"),
         SplitId.TRAIN,
         0,
         0,
@@ -161,7 +160,7 @@ EXPECTED_CHUNKS = (
     ),
     ExpectedChunk(
         "train_02048_02048",
-        Path("train/stokes/chunk_02048_02048/paper_corpus_stokes_train.summary.json"),
+        Path("train/stokes/chunk_02048_02048/paper_dataset_stokes_train.summary.json"),
         SplitId.TRAIN,
         1,
         2_048,
@@ -169,7 +168,7 @@ EXPECTED_CHUNKS = (
     ),
     ExpectedChunk(
         "train_04096_04096",
-        Path("train/stokes/chunk_04096_04096/paper_corpus_stokes_train.summary.json"),
+        Path("train/stokes/chunk_04096_04096/paper_dataset_stokes_train.summary.json"),
         SplitId.TRAIN,
         2,
         4_096,
@@ -177,7 +176,7 @@ EXPECTED_CHUNKS = (
     ),
     ExpectedChunk(
         "train_08192_08192",
-        Path("train/stokes/chunk_08192_08192/paper_corpus_stokes_train.summary.json"),
+        Path("train/stokes/chunk_08192_08192/paper_dataset_stokes_train.summary.json"),
         SplitId.TRAIN,
         3,
         8_192,
@@ -185,7 +184,7 @@ EXPECTED_CHUNKS = (
     ),
     ExpectedChunk(
         "validation_01024",
-        Path("validation/stokes/c01024/paper_corpus_stokes_validation.summary.json"),
+        Path("validation/stokes/c01024/paper_dataset_stokes_validation.summary.json"),
         SplitId.VALIDATION,
         100,
         0,
@@ -193,7 +192,7 @@ EXPECTED_CHUNKS = (
     ),
     ExpectedChunk(
         "test_01024",
-        Path("test/stokes/c01024/paper_corpus_stokes_test.summary.json"),
+        Path("test/stokes/c01024/paper_dataset_stokes_test.summary.json"),
         SplitId.TEST,
         200,
         0,
@@ -489,7 +488,7 @@ def _validate_view_hashes(
         if file_sha256(map_path) != map_sha:
             raise RuntimeError(f"trajectory-map bytes changed for {expected.label}")
         if not chunk.root.is_relative_to(root):
-            raise RuntimeError(f"Stokes chunk {expected.label} escapes corpus root")
+            raise RuntimeError(f"Stokes chunk {expected.label} escapes dataset root")
         records.append(
             {
                 "label": expected.label,
@@ -517,7 +516,7 @@ def _validate_view_hashes(
 def _source_mappings(
     chunks: Sequence[CompletedChunk],
 ) -> tuple[dict[str, str], ...]:
-    """Require one exact, canonical 14-path source map in all six chunks."""
+    """Require one exact, canonical 13-path source map in all six chunks."""
 
     if len(chunks) != len(EXPECTED_CHUNKS):
         raise ValueError("Stokes source binding requires all six chunks")
@@ -528,7 +527,7 @@ def _source_mappings(
             missing = sorted(EXPECTED_GENERATION_SOURCE_PATHS - set(source_mapping))
             extra = sorted(set(source_mapping) - EXPECTED_GENERATION_SOURCE_PATHS)
             raise ValueError(
-                "Stokes source map differs from the exact frozen 14-path contract: "
+                "Stokes source map differs from the exact frozen 13-path contract: "
                 f"missing={missing}, extra={extra}"
             )
         for path, digest in source_mapping.items():
@@ -615,7 +614,7 @@ def _historical_source_snapshot_record(
         }
 
     return {
-        "schema": "paper_corpus_stokes_revision2_historical_source_binding_v1",
+        "schema": "paper_dataset_stokes_revision2_historical_source_binding_v1",
         "role": "inert_historical_byte_recovery_only",
         "source_commit": HISTORICAL_SOURCE_COMMIT,
         "snapshot_root": str(root),
@@ -637,7 +636,7 @@ def _current_source_record(
     *,
     repository_root: Path = ROOT,
 ) -> dict[str, object]:
-    """Physically authenticate all 11 unchanged sources in the repository."""
+    """Physically authenticate all 10 unchanged sources in the repository."""
 
     if len(source_mappings) != len(EXPECTED_CHUNKS):
         raise ValueError("current Stokes source binding requires all six chunks")
@@ -653,8 +652,8 @@ def _current_source_record(
         for path, digest in first_sources.items()
         if path not in historical_paths
     }
-    if len(current_sources) != 11:
-        raise ValueError("Stokes source map does not contain exactly 11 current files")
+    if len(current_sources) != 10:
+        raise ValueError("Stokes source map does not contain exactly 10 current files")
     bindings: dict[str, object] = {}
     for repository_path, expected_digest in sorted(current_sources.items()):
         source_path = _resolve_regular_file_inside(
@@ -673,7 +672,7 @@ def _current_source_record(
             "sha256": observed_digest,
         }
     return {
-        "schema": "paper_corpus_stokes_revision2_current_source_binding_v1",
+        "schema": "paper_dataset_stokes_revision2_current_source_binding_v1",
         "role": "current_repository_bytes_for_all_nonhistorical_generation_sources",
         "repository_root": str(root),
         "source_map_fingerprint": EXPECTED_SOURCE_FINGERPRINT,
@@ -700,29 +699,29 @@ def _source_identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, objec
     }
 
 
-def audit_corpus(root: Path, legacy_audit_path: Path) -> dict[str, object]:
-    """Authenticate the completed Stokes corpus and return its binding."""
+def audit_dataset(root: Path, legacy_audit_path: Path) -> dict[str, object]:
+    """Authenticate the completed Stokes dataset and return its binding."""
 
     started = perf_counter()
-    corpus_root = _require_real_directory(root, label="Stokes corpus root")
+    dataset_root = _require_real_directory(root, label="Stokes dataset root")
     requested_legacy = _absolute_lexical(
         legacy_audit_path,
         label="legacy Stokes audit",
     )
-    if requested_legacy.parent != corpus_root:
-        raise ValueError("legacy Stokes audit must live in the corpus root")
+    if requested_legacy.parent != dataset_root:
+        raise ValueError("legacy Stokes audit must live in the dataset root")
     legacy_path = _resolve_regular_file_inside(
-        corpus_root,
+        dataset_root,
         Path(requested_legacy.name),
         label="legacy Stokes audit",
     )
     legacy = _load_legacy_audit(legacy_path)
     chunks = tuple(
-        load_completed_chunk(corpus_root / expected.relative_summary)
+        load_completed_chunk(dataset_root / expected.relative_summary)
         for expected in EXPECTED_CHUNKS
     )
     _validate_chunk_plan(chunks)
-    chunk_records = _validate_view_hashes(corpus_root, chunks, legacy)
+    chunk_records = _validate_view_hashes(dataset_root, chunks, legacy)
     accepted_by_split = {
         split.value: sum(
             chunk.accepted_count for chunk in chunks if chunk.split is split
@@ -750,7 +749,7 @@ def audit_corpus(root: Path, legacy_audit_path: Path) -> dict[str, object]:
         "status": "pass",
         "generated_at": datetime.now().astimezone().isoformat(),
         "runtime_seconds": perf_counter() - started,
-        "root": str(corpus_root),
+        "root": str(dataset_root),
         "family": EXPECTED_FAMILY,
         "family_id": EXPECTED_FAMILY_ID,
         "revision_id": EXPECTED_REVISION_ID,
@@ -791,7 +790,7 @@ def audit_corpus(root: Path, legacy_audit_path: Path) -> dict[str, object]:
             "summary_cell_counts_match_completed_quota_state": True,
             "manifest_and_trajectory_map_hashes_bound": True,
             "common_source_execution_and_dependency_identity": True,
-            "exact_equal_14_path_source_maps": True,
+            "exact_equal_13_path_source_maps": True,
             "source_map_fingerprint_verified": True,
             "historical_generation_source_snapshots_bound_to_all_chunks": True,
             "all_nonhistorical_generation_sources_match_current_bytes": True,
@@ -801,9 +800,9 @@ def audit_corpus(root: Path, legacy_audit_path: Path) -> dict[str, object]:
 
 
 def _validate_output_path(output: Path, *, root: Path, legacy: Path) -> None:
-    """Prevent a diagnostic invocation from replacing corpus evidence."""
+    """Prevent a diagnostic invocation from replacing dataset evidence."""
 
-    corpus_root = _require_real_directory(root, label="Stokes corpus root")
+    dataset_root = _require_real_directory(root, label="Stokes dataset root")
     requested = _absolute_lexical(output, label="binding output")
     legacy_path = _absolute_lexical(legacy, label="legacy Stokes audit")
     if requested == legacy_path:
@@ -816,14 +815,14 @@ def _validate_output_path(output: Path, *, root: Path, legacy: Path) -> None:
         requested.parent,
         label="binding output parent",
     )
-    if requested.parent != corpus_root or output_parent != corpus_root:
-        raise ValueError("binding output must live directly in the corpus root")
+    if requested.parent != dataset_root or output_parent != dataset_root:
+        raise ValueError("binding output must live directly in the dataset root")
     if requested.exists():
         if not requested.is_file():
             raise FileExistsError("binding output is not a regular file")
         existing = _read_json_object(requested)
         if existing.get("schema") != AUDIT_SCHEMA:
-            raise FileExistsError("refusing to overwrite a non-binding corpus artifact")
+            raise FileExistsError("refusing to overwrite a non-binding dataset artifact")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -831,8 +830,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=DEFAULT_CORPUS_ROOT,
-        help="Completed Stokes revision-2 corpus root.",
+        default=DEFAULT_DATASET_ROOT,
+        help="Completed Stokes revision-2 dataset root.",
     )
     parser.add_argument(
         "--legacy-audit",
@@ -849,7 +848,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    root = _require_real_directory(args.root, label="Stokes corpus root")
+    root = _require_real_directory(args.root, label="Stokes dataset root")
     legacy = (
         _absolute_lexical(args.legacy_audit, label="legacy Stokes audit")
         if args.legacy_audit is not None
@@ -861,7 +860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else root / "stokes_completion_binding.json"
     )
     _validate_output_path(output, root=root, legacy=legacy)
-    record = audit_corpus(root, legacy)
+    record = audit_dataset(root, legacy)
     write_json_atomic(output, record)
     print(json.dumps({"status": "pass", "output": str(output)}, sort_keys=True))
     return 0

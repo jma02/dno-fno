@@ -1,0 +1,144 @@
+\section{Uniform rescaling of the Dirichlet--Neumann operator}
+\label{app:rescaling}
+
+This appendix records the exact change of variables used to map legacy data
+from an original spatial period \(L_{\mathrm{old}}\) to \(L=2\pi\). Set
+\(a=L_{\mathrm{old}}/L>0\), so \(L_{\mathrm{old}}=aL\). We keep the period in
+the notation here: $\G^{(L)}(\eta;h)$ denotes the DNO on $\T_L$ at depth $h$,
+with the unnormalized-normal convention of \eqref{eq:dno-definition}.
+
+\subsection{Covariance of the elliptic boundary-value problem}
+
+Define the pullback
+\begin{equation}
+  (\mathcal P_a f)(X)=f(aX),
+  \qquad \mathcal P_a:C_{\mathrm{per}}(\T_{aL})
+  \longrightarrow C_{\mathrm{per}}(\T_L).
+  \label{eq:rescaling-pullback}
+\end{equation}
+Here \(C_{\mathrm{per}}(\T_\ell)\) denotes the periodic functions on a
+one-dimensional torus of period \(\ell\).
+Let $\eta$ and $\xi$ be posed on $\T_{aL}$, let the original depth be
+$h_{\mathrm{old}}$, and let $\Phi$ solve the corresponding harmonic-extension
+problem.  Under
+\begin{equation}
+  x=aX,\qquad y=aY,\qquad
+  \phi(X,Y)=\Phi(aX,aY),
+  \label{eq:rescaling-coordinates}
+\end{equation}
+the free surface and depth become
+\begin{equation}
+  \eta^\flat(X)=a^{-1}(\mathcal P_a\eta)(X),
+  \qquad h^\flat=a^{-1}h_{\mathrm{old}}.
+  \label{eq:rescaling-geometry}
+\end{equation}
+The chain rule gives
+\[
+  \phi_{XX}+\phi_{YY}
+  =a^2(\Phi_{xx}+\Phi_{yy})(aX,aY)=0,
+  \qquad
+  \phi_Y(X,-h^\flat)=a\Phi_y(aX,-h_{\mathrm{old}})=0,
+\]
+and the transformed Dirichlet condition is
+\[
+  \phi(X,\eta^\flat(X))=(\mathcal P_a\xi)(X).
+\]
+Thus $\phi$ is precisely the harmonic extension associated with
+$\G^{(L)}(\eta^\flat;h^\flat)(\mathcal P_a\xi)$.  Moreover,
+\begin{equation}
+  \partial_X\eta^\flat=\mathcal P_a\eta_x,
+  \qquad
+  \Phi_x(aX,aY)=a^{-1}\phi_X(X,Y),
+  \qquad
+  \Phi_y(aX,aY)=a^{-1}\phi_Y(X,Y).
+  \label{eq:rescaling-chain-rule}
+\end{equation}
+Substitution into the unnormalized normal derivative proves
+\begin{equation}
+  \boxed{
+  \mathcal P_a\!\left[
+    \G^{(aL)}(\eta;h_{\mathrm{old}})\xi
+  \right]
+  =\frac1a\,
+  \G^{(L)}\!\left(
+    \frac1a\mathcal P_a\eta;\frac{h_{\mathrm{old}}}{a}
+  \right)(\mathcal P_a\xi).}
+  \label{eq:dno-rescaling}
+\end{equation}
+The factor $a^{-1}$ comes from the derivative, not from a normalization of the
+normal vector. As a consistency check, when $\eta=0$, every periodic function
+\(f\) satisfies
+\[
+  \begin{aligned}
+  \mathcal P_a\!\left[
+    |D_x|\tanh(h_{\mathrm{old}}|D_x|)f
+  \right]
+  &=a^{-1}|D_X|\tanh((h_{\mathrm{old}}/a)|D_X|)
+    (\mathcal P_a f),\\
+  D_x&=-i\partial_x=a^{-1}D_X,
+  \qquad D_X=-i\partial_X.
+  \end{aligned}
+\]
+
+\subsection{Fixed-gravity Zakharov scaling}
+
+Equation \eqref{eq:dno-rescaling} leaves the pulled-back Dirichlet datum
+$\mathcal P_a\xi$ unscaled.  To obtain a change of variables for the full
+fixed-$g$ evolution, the amplitude of $\xi$ and the time coordinate must also
+be rescaled.  Let
+$q=\G^{(aL)}(\eta;h_{\mathrm{old}})\xi$, set $t=\sqrt a\,\tau$, and define
+\begin{equation}
+  \begin{aligned}
+    \eta^\sharp(X,\tau)
+      &=a^{-1}\eta(aX,\sqrt a\,\tau),
+    &\xi^\sharp(X,\tau)
+      &=a^{-3/2}\xi(aX,\sqrt a\,\tau),\\
+    q^\sharp(X,\tau)
+      &=a^{-1/2}q(aX,\sqrt a\,\tau),
+    &h^\sharp&=h_{\mathrm{old}}/a.
+  \end{aligned}
+  \label{eq:zakharov-rescaling}
+\end{equation}
+Linearity in $\xi$ and \eqref{eq:dno-rescaling} imply
+\begin{equation}
+  q^\sharp=\G^{(L)}(\eta^\sharp;h^\sharp)\xi^\sharp.
+  \label{eq:rescaled-q-identity}
+\end{equation}
+The first Zakharov equation follows immediately:
+\[
+  \partial_\tau\eta^\sharp
+  =a^{-1/2}\mathcal P_a\eta_t=q^\sharp.
+\]
+For the second equation, the required factors are
+\[
+  \partial_\tau\xi^\sharp=a^{-1}\mathcal P_a\xi_t,
+  \qquad
+  \partial_X\eta^\sharp=\mathcal P_a\eta_x,
+  \qquad
+  \partial_X\xi^\sharp=a^{-1/2}\mathcal P_a\xi_x.
+\]
+Consequently every term on the right-hand side of
+\eqref{eq:zakharov-xi} acquires the common factor $a^{-1}$:
+\begin{align*}
+  -g\eta^\sharp&=a^{-1}\mathcal P_a(-g\eta),\\
+  -\tfrac12(\xi_X^\sharp)^2
+    &=a^{-1}\mathcal P_a(-\tfrac12\xi_x^2),\\
+  \frac{(q^\sharp+\eta_X^\sharp\xi_X^\sharp)^2}
+       {2(1+(\eta_X^\sharp)^2)}
+    &=a^{-1}\mathcal P_a
+      \left[\frac{(q+\eta_x\xi_x)^2}{2(1+\eta_x^2)}\right].
+\end{align*}
+Hence $(\eta^\sharp,\xi^\sharp)$ solves the same fixed-gravity Zakharov
+system on $\T_L$ at depth $h^\sharp$.
+
+\subsection{Scope of the identity}
+
+The covariance requires a common dilation of the horizontal and vertical
+coordinates; it does not justify changing period and depth independently.
+It is also an identity of the continuum DNO and the reference dynamics, not a
+claim that a learned residual is exactly equivariant. The analytic
+$\G_0+\G_1$ backbone inherits the covariance, whereas the learned residual
+used in the reported model also depends on absolute wavenumber, depth, and
+dataset-level feature normalization. The rejected residual-only
+reparameterization discussed in \cref{sec:rejected-remedies} therefore tests
+a model-design choice and does not test \eqref{eq:dno-rescaling} itself.

@@ -259,7 +259,7 @@ The smallest principled generator change is:
 3. retain the existing three-copy periodic construction and fixed-band
    projection;
 4. validate the change on a depth-and-steepness-stratified panel before
-   regenerating the Tanaka corpus.
+   regenerating the Tanaka dataset.
 
 The exact paired \(T=200\) case-31 test has now been completed. Tangent-Hermite
 placement changes the count at \(t=76.32\) from \(162\) to \(4\), never exceeds

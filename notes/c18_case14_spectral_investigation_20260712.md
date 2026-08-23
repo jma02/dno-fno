@@ -75,7 +75,7 @@ states for which the scalar interpretation is least valid.
 
 For case 14 itself, C16's initial scalar speed error is only about `9.6e-5`
 relative, while 99.2% of the squared DNO error is orthogonal to the global
-translation direction.  C18 lowers the corpus-average scalar diagnostic but
+translation direction.  C18 lowers the dataset-average scalar diagnostic but
 worsens the case-specific localized tangent error and the transverse rollout.
 
 The training implementation has therefore been corrected to use an

@@ -1,4 +1,4 @@
-"""CPU tests for transactional paper-corpus batch storage."""
+"""CPU tests for transactional paper-dataset batch storage."""
 
 from __future__ import annotations
 

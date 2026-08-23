@@ -1,4 +1,4 @@
-"""Isolated integration tests for the sequential corpus supervisor."""
+"""Isolated integration tests for the sequential dataset supervisor."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ GPU_ADMISSION = ROOT / "scripts/check_tanaka_gpu_admission.sh"
 EXPECTED_CASES = {"train": 16_384, "validation": 1_024, "test": 1_024}
 
 
-class SequentialCorpusSupervisorTest(unittest.TestCase):
+class SequentialDatasetSupervisorTest(unittest.TestCase):
     temporary: tempfile.TemporaryDirectory[str]
     mock_root: Path
     event_log: Path
@@ -212,7 +212,7 @@ class SequentialCorpusSupervisorTest(unittest.TestCase):
                 (root / "direct_preflight_seen").touch()
                 execution = {"mock": "execution"}
                 print(json.dumps({
-                    "schema": "paper_corpus_quota_preflight_v1",
+                    "schema": "paper_dataset_quota_preflight_v1",
                     "no_numerical_generation_performed": True,
                     "run_spec": {
                         "family_name": "tanaka",
@@ -274,12 +274,12 @@ class SequentialCorpusSupervisorTest(unittest.TestCase):
                 rows += 1
             record = {
                 "schema": (
-                    "paper_corpus_jonswap_tma_revision4_completion_audit_v1"
+                    "paper_dataset_jonswap_tma_revision4_completion_audit_v1"
                     if is_jonswap
-                    else "paper_corpus_tanaka_revision3_completion_audit_v1"
+                    else "paper_dataset_tanaka_revision3_completion_audit_v1"
                 ),
                 "status": "pass",
-                "corpus_root": str(root),
+                "dataset_root": str(root),
                 "accepted": 18_432,
                 "attempted": 18_435,
                 "rejected": 3,

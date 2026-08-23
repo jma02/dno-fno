@@ -729,7 +729,6 @@ def main() -> int:
                 "cs_g1_k_cut": loaded.config["cs_g1_k_cut"],
                 "cs_g1_fft_fp64": loaded.config["cs_g1_fft_fp64"],
                 "cs_residual_eta_order": loaded.config["cs_residual_eta_order"],
-                "precision": loaded.config["precision"],
                 "parameter_count": parameter_count,
             },
         },

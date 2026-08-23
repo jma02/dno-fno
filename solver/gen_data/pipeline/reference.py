@@ -1,4 +1,4 @@
-"""Frozen discrete Dirichlet--Neumann target for the paper corpus."""
+"""Frozen discrete Dirichlet--Neumann target for the paper dataset."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ from solver.solvers.dno_series_jax import build_grid, dno_series_eval
 
 @dataclass(frozen=True)
 class DiscreteDnoTarget:
-    """Numerical target for the proposed regenerated-corpus model."""
+    """Numerical target for the proposed regenerated-dataset model."""
 
     nx: int = 1024
     length: float = 2.0 * math.pi

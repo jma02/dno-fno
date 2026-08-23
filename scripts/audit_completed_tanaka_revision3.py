@@ -1,7 +1,7 @@
-"""Fail-closed CPU audit of the fresh corrected Tanaka revision-3 corpus.
+"""Fail-closed CPU audit of the fresh corrected Tanaka revision-3 dataset.
 
 The quota scanner remains the authority for deterministic transaction replay.
-This audit adds the release-level checks specific to the fresh Tanaka corpus:
+This audit adds the release-level checks specific to the fresh Tanaka dataset:
 the exact six-chunk interval plan, exact replay of every eleven-cell proposal,
 the current corrected amplitude-inversion construction, numerical-health and
 terminal-time checks, stored-field finiteness, and an independent audit of
@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # All imports below this point can initialize JAX.  A completion audit must
-# never claim a GPU or perturb the live corpus generators.
+# never claim a GPU or perturb the live dataset generators.
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "true"
@@ -45,16 +45,16 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig-tanaka-completion-audit")
 
 import numpy as np  # noqa: E402
 
-from scripts.build_paper_corpus_view import (  # noqa: E402
+from scripts.build_paper_dataset_view import (  # noqa: E402
     CompletedChunk,
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_corpus_quota import (  # noqa: E402
+from scripts.run_paper_dataset_quota import (  # noqa: E402
     dependency_environment,
     source_hashes,
 )
-from solver.gen_data.generate_tanaka_dataset_v2 import (  # noqa: E402
+from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_FINE_FACTOR,
     TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
     TANAKA_PROFILE_RECONSTRUCTION,
@@ -82,7 +82,7 @@ from solver.gen_data.pipeline.quality import (  # noqa: E402
 from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
     canonical_json_sha256,
 )
-from solver.gen_data.tanaka_population import (  # noqa: E402
+from solver.gen_data.tanaka_sampling import (  # noqa: E402
     MAIN_DEPTH_BOUNDS,
     MAIN_TOTAL_ALPHA_BOUNDS,
     SEPARATION_TO_DEPTH_RATIO,
@@ -90,10 +90,10 @@ from solver.gen_data.tanaka_population import (  # noqa: E402
     STEEP_DEPTH_BOUNDS,
     TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
     TANAKA_MINIMUM_RESOLUTION_RATIO,
-    TANAKA_POPULATION_CELLS,
-    TANAKA_POPULATION_REVISION_V3,
-    TanakaPopulationSample,
-    sample_tanaka_population,
+    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLING_REVISION_V3,
+    TanakaSample,
+    sample_tanaka_case,
     tanaka_support_violations,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -116,11 +116,11 @@ from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
 )
 
 
-DEFAULT_CORPUS_ROOT = ROOT / "outputs/paper_corpus_revision3_literature_aligned_v1"
-AUDIT_SCHEMA = "paper_corpus_tanaka_revision3_completion_audit_v1"
+DEFAULT_DATASET_ROOT = ROOT / "outputs/paper_dataset_revision3_literature_aligned_v1"
+AUDIT_SCHEMA = "paper_dataset_tanaka_revision3_completion_audit_v1"
 ROWS_PER_ACCEPTED_CASE = 200
 EXPECTED_FAMILY_ID = int(PhysicalFamilyId.TANAKA)
-EXPECTED_REVISION_ID = TANAKA_POPULATION_REVISION_V3
+EXPECTED_REVISION_ID = TANAKA_SAMPLING_REVISION_V3
 EXPECTED_ACCEPTED = 18_432
 EXPECTED_TRAIN_ACCEPTED = 16_384
 EXPECTED_VALIDATION_ACCEPTED = 1_024
@@ -246,7 +246,7 @@ class ExpectedChunk:
     @property
     def summary_path(self) -> Path:
         return (
-            self.relative_root / f"paper_corpus_tanaka_{self.split.value}.summary.json"
+            self.relative_root / f"paper_dataset_tanaka_{self.split.value}.summary.json"
         )
 
 
@@ -310,7 +310,7 @@ class ProposedCase:
     cell_code: int
     cell_id: str
     depth: float
-    sample: TanakaPopulationSample
+    sample: TanakaSample
 
 
 @dataclass(frozen=True)
@@ -352,7 +352,7 @@ class Extrema:
 
 @dataclass
 class AuditTotals:
-    """Corpus-wide counters accumulated by the read-only audit."""
+    """Dataset-wide counters accumulated by the read-only audit."""
 
     attempted: int = 0
     accepted: int = 0
@@ -661,9 +661,9 @@ def _support_record() -> dict[str, object]:
     """Return the elementary revision-3 support bound by current source."""
 
     return {
-        "schema": "paper_tanaka_population_support_revision3_v1",
+        "schema": "paper_tanaka_sampling_support_revision3_v1",
         "revision_id": EXPECTED_REVISION_ID,
-        "cells": [asdict(cell) for cell in TANAKA_POPULATION_CELLS],
+        "cells": [asdict(cell) for cell in TANAKA_SAMPLE_CELLS],
         "main_depth_bounds": list(MAIN_DEPTH_BOUNDS),
         "main_total_alpha_bounds": list(MAIN_TOTAL_ALPHA_BOUNDS),
         "steep_depth_bounds": list(STEEP_DEPTH_BOUNDS),
@@ -727,7 +727,7 @@ def _proposal_cases(
                 f"{proposal_path} case {index} has inconsistent run coordinates"
             )
         assignment = AttemptAssignment(case_key=key, cell_id=cell_id)
-        expected_sample = sample_tanaka_population(
+        expected_sample = sample_tanaka_case(
             assignment,
             domain_length=TrajectoryExecutionConfig.paper("tanaka").numerical.length,
         )
@@ -826,7 +826,7 @@ def _validate_result_metadata(
     execution: Mapping[str, object],
     context: str,
 ) -> None:
-    if result.get("schema") != "paper_corpus_batch_result_v1":
+    if result.get("schema") != "paper_dataset_batch_result_v1":
         raise ValueError(f"{context} has an unknown result schema")
     metadata = _required_mapping(result, "metadata", context=context)
     if metadata.get("family") != "tanaka":
@@ -1658,7 +1658,7 @@ def _validate_dataset_view(
 
 def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
     raw_codes = _required_mapping(run_spec, "cell_codes", context="run_spec")
-    expected_ids = tuple(cell.cell_id for cell in TANAKA_POPULATION_CELLS)
+    expected_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
     if tuple(raw_codes) != expected_ids:
         raise ValueError("Tanaka run cell order is not the current eleven cells")
     mapping = {
@@ -1675,7 +1675,7 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
 
 
 def _expected_chunk_quotas(expected: ExpectedChunk) -> dict[str, int]:
-    cell_ids = tuple(cell.cell_id for cell in TANAKA_POPULATION_CELLS)
+    cell_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
     before = balanced_cell_quotas(
         cell_ids,
         accepted_case_count=expected.accepted_before,
@@ -1967,7 +1967,7 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
     }
     discovered_paths = {
         path.resolve()
-        for path in root.glob("*/tanaka/*/paper_corpus_tanaka_*.summary.json")
+        for path in root.glob("*/tanaka/*/paper_dataset_tanaka_*.summary.json")
     }
     if discovered_paths != expected_paths:
         missing = sorted(map(str, expected_paths - discovered_paths))
@@ -1978,7 +1978,7 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
         )
     chunks = tuple(
         # Deliberately omit the historical compatibility policy.  This fresh
-        # corpus must validate directly against the current execution contract.
+        # dataset must validate directly against the current execution contract.
         load_completed_chunk(root / expected.summary_path)
         for expected in EXPECTED_CHUNKS
     )
@@ -2005,11 +2005,11 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
             raise ValueError(f"{expected.label} differs from its immutable plan")
         if chunk.generation_compatibility_id is not None:
             raise ValueError(
-                "fresh Tanaka corpus resolved through a historical compatibility "
+                "fresh Tanaka dataset resolved through a historical compatibility "
                 "variant"
             )
         if chunk.execution_platform != "gpu":
-            raise ValueError("fresh Tanaka release corpus was not generated on GPU")
+            raise ValueError("fresh Tanaka release dataset was not generated on GPU")
     return chunks
 
 
@@ -2080,8 +2080,8 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
         "dependency_environment_fingerprint": dependency_fingerprint,
         "execution_record_fingerprint": execution_fingerprint,
         "source_sha256_fingerprint": source_fingerprint,
-        "population_support_fingerprint": canonical_json_sha256(support),
-        "population_support": support,
+        "sampling_support_fingerprint": canonical_json_sha256(support),
+        "sampling_support": support,
         "corrected_amplitude_inversion_fingerprint": canonical_json_sha256(
             amplitude_inversion
         ),
@@ -2095,7 +2095,7 @@ def _accepted_cell_totals_by_split(
 ) -> dict[str, dict[str, int]]:
     """Require the final accepted population to balance all eleven cells."""
 
-    cell_ids = tuple(cell.cell_id for cell in TANAKA_POPULATION_CELLS)
+    cell_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
     expected_totals = {
         SplitId.TRAIN: EXPECTED_TRAIN_ACCEPTED,
         SplitId.VALIDATION: EXPECTED_VALIDATION_ACCEPTED,
@@ -2129,7 +2129,7 @@ def _accepted_cell_totals_by_split(
 
 
 def audit(root: Path) -> dict[str, object]:
-    """Run the complete read-only fresh Tanaka corpus audit."""
+    """Run the complete read-only fresh Tanaka dataset audit."""
 
     resolved_root = Path(root).expanduser().resolve()
     started_at = datetime.now().astimezone()
@@ -2174,7 +2174,7 @@ def audit(root: Path) -> dict[str, object]:
         "validation": EXPECTED_VALIDATION_ACCEPTED,
         "test": EXPECTED_TEST_ACCEPTED,
     }:
-        raise ValueError("Tanaka split totals differ from the paper corpus plan")
+        raise ValueError("Tanaka split totals differ from the paper dataset plan")
     if totals.accepted != EXPECTED_ACCEPTED:
         raise ValueError("Tanaka accepted total differs from 18,432")
     if totals.proposal_specs_checked != totals.attempted:
@@ -2183,14 +2183,14 @@ def audit(root: Path) -> dict[str, object]:
         raise ValueError("not every Tanaka proposal had a requested crest checked")
     if totals.retained_rows != EXPECTED_ACCEPTED * ROWS_PER_ACCEPTED_CASE:
         raise ValueError("Tanaka retained-row total is incorrect")
-    if len(TANAKA_POPULATION_CELLS) != 11:
+    if len(TANAKA_SAMPLE_CELLS) != 11:
         raise ValueError("current Tanaka support no longer has eleven cells")
     accepted_cells = _accepted_cell_totals_by_split(chunk_records)
     elapsed = perf_counter() - started
     return {
         "schema": AUDIT_SCHEMA,
         "status": "pass",
-        "corpus_root": str(resolved_root),
+        "dataset_root": str(resolved_root),
         "accepted": totals.accepted,
         "attempted": totals.attempted,
         "rejected": totals.rejected,
@@ -2208,8 +2208,8 @@ def audit(root: Path) -> dict[str, object]:
         "accepted_by_split_and_cell": accepted_cells,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "support": {
-            "cell_count": len(TANAKA_POPULATION_CELLS),
-            "direction_aware_cells": [asdict(cell) for cell in TANAKA_POPULATION_CELLS],
+            "cell_count": len(TANAKA_SAMPLE_CELLS),
+            "direction_aware_cells": [asdict(cell) for cell in TANAKA_SAMPLE_CELLS],
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },
@@ -2264,8 +2264,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=DEFAULT_CORPUS_ROOT,
-        help="Completed fresh corrected revision-3 Tanaka corpus root.",
+        default=DEFAULT_DATASET_ROOT,
+        help="Completed fresh corrected revision-3 Tanaka dataset root.",
     )
     parser.add_argument(
         "--output",

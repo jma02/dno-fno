@@ -1,4 +1,4 @@
-"""Static Stokes adapter for the common paper-corpus transaction."""
+"""Static Stokes adapter for the common paper-dataset transaction."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.data.stokes_truth_jax import stokes_eta_xi_at_phase
+from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
 from solver.gen_data.pipeline.archive import BatchPaths, ensure_proposal
 from solver.gen_data.pipeline.quality import (
     QualityDecision,
@@ -33,10 +33,10 @@ from solver.gen_data.pipeline.writer import (
     build_proposal_arrays,
     commit_case_outcomes,
 )
-from solver.gen_data.stokes_population import (
+from solver.gen_data.stokes_sampling import (
     PAPER_GRAVITY,
-    STOKES_POPULATION_CELLS,
-    StokesPopulationSample,
+    STOKES_SAMPLE_CELLS,
+    StokesSample,
     stokes_support_violations,
 )
 from solver.solvers.dno_series_jax import build_grid
@@ -45,7 +45,7 @@ from solver.solvers.dno_series_jax import build_grid
 Array: TypeAlias = jax.Array | NDArray[np.floating]
 JsonScalar: TypeAlias = str | int | float | bool | None
 ContractRole: TypeAlias = Literal[
-    "paper_corpus",
+    "paper_dataset",
     "reduced_wiring_evidence_only",
 ]
 
@@ -57,7 +57,7 @@ STATIC_STOKES_REQUIRED_CHECKS = (
 )
 STOKES_CELL_CODES = {
     cell.cell_id: index
-    for index, cell in enumerate(STOKES_POPULATION_CELLS)
+    for index, cell in enumerate(STOKES_SAMPLE_CELLS)
 }
 
 
@@ -67,12 +67,12 @@ class StaticStokesContract:
 
     target: DiscreteDnoTarget = PAPER_DNO_TARGET
     gravity: float = PAPER_GRAVITY
-    role: ContractRole = "paper_corpus"
+    role: ContractRole = "paper_dataset"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.gravity) or self.gravity <= 0.0:
             raise ValueError("gravity must be positive and finite")
-        if self.role == "paper_corpus" and (
+        if self.role == "paper_dataset" and (
             self.target != PAPER_DNO_TARGET
             or not math.isclose(
                 self.gravity,
@@ -86,7 +86,7 @@ class StaticStokesContract:
                 "'reduced_wiring_evidence_only'"
             )
         if self.role not in (
-            "paper_corpus",
+            "paper_dataset",
             "reduced_wiring_evidence_only",
         ):
             raise ValueError(f"unknown static Stokes contract role: {self.role}")
@@ -129,7 +129,7 @@ class StaticStokesStateConstructor(Protocol):
 
     def __call__(
         self,
-        sample: StokesPopulationSample,
+        sample: StokesSample,
         contract: StaticStokesContract,
     ) -> tuple[Array, Array]: ...
 
@@ -156,7 +156,7 @@ class StaticStokesBatchResult:
 
 
 def construct_stokes_state(
-    sample: StokesPopulationSample,
+    sample: StokesSample,
     contract: StaticStokesContract,
 ) -> tuple[jax.Array, jax.Array]:
     """Construct one fifth-order state with the repository's public formula."""
@@ -252,7 +252,7 @@ def _decision(
 
 
 def evaluate_static_stokes_sample(
-    sample: StokesPopulationSample,
+    sample: StokesSample,
     *,
     contract: StaticStokesContract = PAPER_STATIC_STOKES_CONTRACT,
     state_constructor: StaticStokesStateConstructor = construct_stokes_state,
@@ -392,7 +392,7 @@ def evaluate_static_stokes_sample(
 
 def write_static_stokes_batch(
     root: Path,
-    samples: Sequence[StokesPopulationSample],
+    samples: Sequence[StokesSample],
     *,
     batch_id: int,
     config_fingerprint: str,

@@ -92,7 +92,7 @@ The old steep-Tanaka generator used \(10^{-3}\).  It rejected 1,981 of 9,728
 attempts: 1,786 had no finite drift recorded and the other 195 had drift above
 \(10^{-3}\).  This does not exhibit the same overly strict threshold.
 However, those attempts used the pre-Hermite initial-state constructor, so the
-new corpus should regenerate them rather than inherit either decision.
+new dataset should regenerate them rather than inherit either decision.
 
 ## Audit of the proposed checks
 

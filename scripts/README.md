@@ -16,8 +16,8 @@ history rather than in the working tree.
 The directory is intentionally limited to the current paper workflow:
 
 - the locked C27 launcher and its current evaluation and rendering tools;
-- the frozen paper-corpus generation, completion-audit, and release-test
-  closure listed by `reproducibility/paper_corpus_release_files.json`.
+- the frozen paper-dataset generation, completion-audit, and release-test
+  closure listed by `reproducibility/paper_dataset_release_files.json`.
 
 A `launch_*` recipe configures an experiment but ultimately delegates
 training to the canonical JAX engine or `modal_train.py`; it is not another

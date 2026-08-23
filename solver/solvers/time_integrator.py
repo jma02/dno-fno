@@ -55,6 +55,12 @@ class SolverParams(NamedTuple):
     filter_fraction: float
     k: jnp.ndarray
     g0: jnp.ndarray
+    gl2_post_step_houli: bool = False
+    gl2_post_step_houli_a: float = 36.0
+    gl2_post_step_houli_m: float = 18.0
+    gl2_post_step_filter_fraction: float | None = None
+    nonlinear_ramp_time: float | jnp.ndarray | None = None
+    nonlinear_ramp_order: int = 4
 
 
 class RolloutSettings(NamedTuple):
@@ -89,6 +95,12 @@ def make_solver_params(
     dno_order: int = 6,
     pad_factor: int = 8,
     filter_fraction: float = 1.0,
+    gl2_post_step_houli: bool = False,
+    gl2_post_step_houli_a: float = 36.0,
+    gl2_post_step_houli_m: float = 18.0,
+    gl2_post_step_filter_fraction: float | None = None,
+    nonlinear_ramp_time: float | jnp.ndarray | None = None,
+    nonlinear_ramp_order: int = 4,
 ) -> SolverParams:
     _, k = build_grid(nx, length)
     g0 = make_linear_dno_symbol(k, depth)
@@ -102,6 +114,12 @@ def make_solver_params(
         filter_fraction=filter_fraction,
         k=k,
         g0=g0,
+        gl2_post_step_houli=gl2_post_step_houli,
+        gl2_post_step_houli_a=gl2_post_step_houli_a,
+        gl2_post_step_houli_m=gl2_post_step_houli_m,
+        gl2_post_step_filter_fraction=gl2_post_step_filter_fraction,
+        nonlinear_ramp_time=nonlinear_ramp_time,
+        nonlinear_ramp_order=nonlinear_ramp_order,
     )
 
 
@@ -123,6 +141,16 @@ def cast_solver_params_dtype(params: SolverParams, dtype: jnp.dtype) -> SolverPa
         filter_fraction=params.filter_fraction,
         k=jnp.asarray(params.k, dtype=dtype),
         g0=jnp.asarray(params.g0, dtype=dtype),
+        gl2_post_step_houli=params.gl2_post_step_houli,
+        gl2_post_step_houli_a=params.gl2_post_step_houli_a,
+        gl2_post_step_houli_m=params.gl2_post_step_houli_m,
+        gl2_post_step_filter_fraction=params.gl2_post_step_filter_fraction,
+        nonlinear_ramp_time=(
+            None
+            if params.nonlinear_ramp_time is None
+            else jnp.asarray(params.nonlinear_ramp_time, dtype=dtype)
+        ),
+        nonlinear_ramp_order=params.nonlinear_ramp_order,
     )
 
 
@@ -199,15 +227,36 @@ def apply_houli(
     m: float = 36.0,
     filter_fraction: float = 1.0,
 ) -> jnp.ndarray:
-    # Hou-Li exponential filter c_k = exp(-a * (|k|/k_eff)^{2m}) (JCP09 eq 29; Hou & Li, JCP 226, 2007).
-    # k_eff = filter_fraction * k_max places the half-power point near (filter_fraction * k_max).
-    # filter_fraction=1.0 → JCP09 default (cutoff near Nyquist); filter_fraction<1.0 → shifts the
-    # roll-off lower while preserving smoothness. a=m=36 gives machine-zero at k_eff.
+    # Hou--Li filter c_k = exp(-a * (|k|/k_eff)^(2m)).  Thus m=18
+    # realizes the power 36 in JCP09 equation (29).  At |k|=k_eff the
+    # multiplier is exp(-a), not one half.
     k_max = jnp.max(jnp.abs(k))
     k_eff = jnp.maximum(filter_fraction * k_max, 1e-12)
     c_k = jnp.exp(-a * (jnp.abs(k) / k_eff) ** (2.0 * m))
     spec = myfft(field, field.shape[-1])
     return myifft(c_k.astype(spec.dtype) * spec)
+
+
+def _apply_gl2_post_step_state_filter(
+    field: jnp.ndarray,
+    params: SolverParams,
+) -> jnp.ndarray:
+    """Apply the configured state filter after one completed GL2 step."""
+
+    filter_fraction = (
+        params.filter_fraction
+        if params.gl2_post_step_filter_fraction is None
+        else params.gl2_post_step_filter_fraction
+    )
+    if params.gl2_post_step_houli:
+        return apply_houli(
+            field,
+            params.k,
+            a=params.gl2_post_step_houli_a,
+            m=params.gl2_post_step_houli_m,
+            filter_fraction=filter_fraction,
+        )
+    return apply_lowpass(field, params.k, filter_fraction)
 
 
 def apply_filter(
@@ -369,11 +418,37 @@ def rhs_nonlinear(state: State, params: SolverParams) -> State:
     return State(eta=eta_t, xi=xi_t)
 
 
+def nonlinear_ramp_factor(
+    time: float | jnp.ndarray,
+    params: SolverParams,
+) -> jnp.ndarray:
+    """Return the Dommermuth factor multiplying the nonlinear residual."""
+
+    if params.nonlinear_ramp_time is None:
+        return jnp.asarray(1.0, dtype=params.k.dtype)
+    ramp_time = jnp.asarray(params.nonlinear_ramp_time, dtype=params.k.dtype)
+    if ramp_time.ndim > 0:
+        ramp_time = ramp_time[..., jnp.newaxis]
+    nonnegative_time = jnp.maximum(
+        jnp.asarray(time, dtype=params.k.dtype),
+        jnp.asarray(0.0, dtype=params.k.dtype),
+    )
+    if nonnegative_time.ndim > 0:
+        nonnegative_time = nonnegative_time[..., jnp.newaxis]
+    return 1.0 - jnp.exp(
+        -(nonnegative_time / ramp_time) ** params.nonlinear_ramp_order
+    )
+
+
 def rhs_nonlinear_if(v_hat: SpectralState, t: float | jnp.ndarray, params: SolverParams) -> SpectralState:
     physical_hat = apply_linear_flow_hat(v_hat, t, params)
     physical_state = _hat_to_state(physical_hat)
     nonlinear_state = rhs_nonlinear(physical_state, params)
     nonlinear_hat = _state_to_hat(nonlinear_state, params.nx)
+    nonlinear_hat = _tree_scale(
+        nonlinear_hat,
+        nonlinear_ramp_factor(t, params),
+    )
     return apply_linear_flow_hat(nonlinear_hat, -t, params)
 
 
@@ -482,16 +557,8 @@ def _finish_gauss_legendre_2_step(
     next_state = _hat_to_state(apply_linear_flow_hat(v1, t + dt, params))
     if params.filter_fraction < 1.0:
         next_state = State(
-            eta=apply_lowpass(
-                next_state.eta,
-                params.k,
-                params.filter_fraction,
-            ),
-            xi=apply_lowpass(
-                next_state.xi,
-                params.k,
-                params.filter_fraction,
-            ),
+            eta=_apply_gl2_post_step_state_filter(next_state.eta, params),
+            xi=_apply_gl2_post_step_state_filter(next_state.xi, params),
         )
     return next_state
 

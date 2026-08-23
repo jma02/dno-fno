@@ -107,13 +107,13 @@ explicitly Craig--Sulem-shaped blocks and analytic depth conditioning.
 The module signature is \texttt{(inputs, depth) $\to$ gxi} with
 \texttt{inputs} of shape $(B, 1024, 2)$ holding normalized $(\hat\eta, \hat\xi)$
 and \texttt{depth} of shape $(B,1)$ holding $\log h$. Under \texttt{norm=scale}
-each quantity is divided by its training-corpus absolute maximum:
+each quantity is divided by its training-dataset absolute maximum:
 \[
 \hat\eta = \eta / s_\eta, \qquad
 \hat\xi  = \xi  / s_\xi, \qquad
 \widehat{\Gop\xi} = \Gop\xi / s_g,
 \]
-with $s_\xi = 0.14096$ and $s_g = 0.76948$ for the v3 corpus (recorded in
+with $s_\xi = 0.14096$ and $s_g = 0.76948$ for the v3 dataset (recorded in
 \texttt{config.json}; recomputed per dataset). Internally the model un-scales
 $\xi$ to physical units before every operator application and re-scales the
 output, so the learned parts operate on physically meaningful fields. Depth is
@@ -297,7 +297,7 @@ across ten families --- Tanaka solitons g0/g1 (2.0M), Benjamin--Feir g0/g1/modal
 (2.03M), Stokes deep/finite (1.0M), linear shallow sweeps (0.5M), random seas
 deep/finite (0.46M). Labels are the order-6/pad-8 operator \emph{lowpassed to
 the $k\le128$ subspace} (the pipeline's invariant subspace). Split 80/10/10 by a
-seeded global permutation: 4{,}795{,}193 train / 599{,}398 val. The v4 corpus in
+seeded global permutation: 4{,}795{,}193 train / 599{,}398 val. The v4 dataset in
 the current retrain appends a shallow--steep wavetrain family ($+480$k, source
 11) and changes nothing else; see \texttt{v4\_dataset\_report.pdf}.
 

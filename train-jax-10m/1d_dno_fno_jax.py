@@ -181,7 +181,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cs_mult_hidden", type=int, default=32,
                         help="Hidden size of the depth-aware Fourier-multiplier MLP.")
     parser.add_argument("--norm", choices=("minmax", "scale"), default="minmax")
-    parser.add_argument("--dataset", default="combined_dataset.npz")
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help="Schema-v2 paper-dataset *.dataset.json manifest.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--modes", type=int, default=32)
     parser.add_argument("--width", type=int, default=32)
@@ -282,17 +286,16 @@ def main() -> None:
     dataset = load_dataset_arrays(dataset_path)
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
-    stats_indices = train_indices if "trajectory_index" in dataset else None
     stats = dict(load_or_compute_stats(
         dataset_path,
         dataset=dataset,
-        indices=stats_indices,
+        indices=train_indices,
     ))
     stats["target_kind"] = "gxi"
     ns = NormStats.from_dict(stats, mode=args.norm)
     if train_indices.size % args.batch_size != 0:
         raise ValueError(
-            "schema-v2 training rows must be divisible by batch_size so every "
+            "training rows must be divisible by batch_size so every "
             f"stored row is consumed; got {train_indices.size} rows and "
             f"batch_size={args.batch_size}"
         )

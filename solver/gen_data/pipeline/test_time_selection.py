@@ -8,7 +8,6 @@ import numpy as np
 
 from solver.gen_data.pipeline.time_selection import (
     _midpoint_quantile_indices,
-    select_benjamin_feir_times,
     select_tanaka_times,
     select_uniform_times,
 )
@@ -46,20 +45,6 @@ class TemporalSelectionTest(unittest.TestCase):
         self.assertEqual((selection.indices[0], selection.indices[-1]), (0, 300))
         self.assertTrue(np.all(np.diff(selection.indices) > 0))
         self.assertAlmostEqual(float(np.sum(selection.density)), 1.0)
-
-    def test_benjamin_feir_activity_matches_the_declared_fourth_power(self) -> None:
-        x = 2.0 * np.pi * np.arange(32) / 32
-        envelope = np.asarray([1.0, 1.5, 2.0, 1.25, 1.0])
-        eta = envelope[:, None] * np.cos(4.0 * x)[None, :]
-        selection = select_benjamin_feir_times(
-            eta,
-            length=2.0 * np.pi,
-            keep_samples=5,
-            sigma_steps=0.0,
-        )
-        expected = (envelope - np.min(envelope)) ** 4
-        np.testing.assert_allclose(selection.activity, expected)
-        np.testing.assert_array_equal(selection.indices, np.arange(5))
 
     def test_concentrated_density_still_returns_unique_indices(self) -> None:
         density = np.zeros(251, dtype=np.float64)

@@ -1,0 +1,418 @@
+{
+  "purpose": "Smallest release-specific file set for the literature-aligned paper-dataset generation, audit, assembly, and read-only post-completion chain.",
+  "scope": "This inventory names the release integration surface and its focused tests. Curated numerical source-identity files are enumerated and source-bound by COMMON_SOURCE_PATHS and FAMILY_SOURCE_PATHS in scripts/run_paper_dataset_quota.py, with JONSWAP additions in EXTRA_SOURCE_PATHS in scripts/run_paper_dataset_jonswap_bucketed.py; they are intentionally not duplicated here. Those source maps are identity contracts, not a complete Python import-closure inventory.",
+  "publication_closure": {
+    "purpose": "Exact coherent code-repository publication closure: release integration files, current JONSWAP/Tanaka/Benjamin-Feir numerical source and dependency paths, recovered historical Stokes/Benjamin-Feir source bytes, and supplemental import, document, and test paths. It intentionally excludes the ignored private paper/ tree; its source refresh, figure installation, and compile verification are separately governed by notes/paper_dataset_generation_readiness_20260726.md.",
+      "count": 133,
+    "path_serialization": "Sort paths by Unicode code point, encode each path as UTF-8, and terminate every path, including the last, with LF.",
+      "sorted_path_set_sha256": "6b9a5f14463ac0059e360a0bb1cdeca04fbeca4fbf57bd353b6daa794862cec2",
+    "paths": [
+      "EXPERIMENTS.md",
+      "jax_training_util.py",
+      "models/dno-net/dno_net_v2.py",
+      "models/fno-jax/fno1d.py",
+      "models/fno-jax/losses.py",
+      "notes/bf_jonswap_numerical_cleanup_20260801.md",
+      "notes/bf_stream930_simple_support_20260802.md",
+      "notes/jonswap_defensible_support_review_20260804.md",
+      "notes/jonswap_support_bulk_diagnosis_20260804.md",
+      "notes/paper_dataset_generation_condensed_20260726/paper_dataset_generation_condensed_20260726.pdf",
+      "notes/paper_dataset_generation_condensed_20260726/paper_dataset_generation_condensed_20260726.tex",
+      "notes/paper_dataset_generation_readiness_20260726.md",
+      "notes/paper_dataset_population_smoke_500k_20260725.md",
+      "notes/paper_dataset_production_readiness_20260725.md",
+      "notes/parameterized_paper_dataset_plan_20260722/parameterized_paper_dataset_plan_20260722.pdf",
+      "notes/parameterized_paper_dataset_plan_20260722/parameterized_paper_dataset_plan_20260722.tex",
+      "pyproject.toml",
+      "reproducibility/paper_dataset_release_files.json",
+      "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/README.md",
+      "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/SHA256SUMS",
+      "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/production.py",
+      "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/trajectory_family_adapters.py",
+      "reproducibility/source_snapshots/stokes_revision2_60a28ff/README.md",
+      "reproducibility/source_snapshots/stokes_revision2_60a28ff/SHA256SUMS",
+      "reproducibility/source_snapshots/stokes_revision2_60a28ff/manifest.py",
+      "reproducibility/source_snapshots/stokes_revision2_60a28ff/production.py",
+      "reproducibility/source_snapshots/stokes_revision2_60a28ff/run_paper_dataset_quota.py",
+      "scripts/audit_completed_benjamin_feir_revision4.py",
+      "scripts/audit_completed_jonswap_revision4.py",
+      "scripts/audit_completed_tanaka_revision3.py",
+      "scripts/audit_jonswap_relative_band_fresh_gate.py",
+      "scripts/audit_paper_dataset_training_handoff.py",
+      "scripts/bind_completed_stokes_revision2_audit.py",
+      "scripts/build_literature_aligned_paper_dataset_views.sh",
+      "scripts/build_paper_dataset_document_handoff.py",
+      "scripts/build_paper_dataset_view.py",
+      "scripts/build_parameterized_dataset_case_figure.py",
+      "scripts/check_tanaka_gpu_admission.sh",
+      "scripts/diagnose_final_jonswap_order_convergence.py",
+      "scripts/launch_paper_dataset_postcompletion.sh",
+      "scripts/launch_revision3_tanaka_bulk.sh",
+      "scripts/launch_revision4_jonswap_bulk.sh",
+      "scripts/launch_tanaka_after_revision4_jonswap.sh",
+      "scripts/render_paper_dataset_worst_cases.py",
+      "scripts/run_paper_dataset_jonswap_bucketed.py",
+      "scripts/run_paper_dataset_postcompletion.py",
+      "scripts/run_paper_dataset_quota.py",
+      "scripts/test_audit_completed_benjamin_feir_revision4.py",
+      "scripts/test_audit_completed_jonswap_revision4.py",
+      "scripts/test_audit_completed_tanaka_revision3.py",
+      "scripts/test_audit_jonswap_relative_band_fresh_gate.py",
+      "scripts/test_audit_paper_dataset_training_handoff.py",
+      "scripts/test_benjamin_feir_revision4_source_snapshot.py",
+      "scripts/test_bind_completed_stokes_revision2_audit.py",
+      "scripts/test_build_paper_dataset_document_handoff.py",
+      "scripts/test_build_paper_dataset_view.py",
+      "scripts/test_build_parameterized_dataset_case_figure.py",
+      "scripts/test_diagnose_final_jonswap_order_convergence.py",
+      "scripts/test_launch_tanaka_after_revision4_jonswap.py",
+      "scripts/test_paper_dataset_release_file_manifest.py",
+      "scripts/test_paper_dataset_release_layout_contract.py",
+      "scripts/test_render_paper_dataset_worst_cases.py",
+      "scripts/test_run_paper_dataset_postcompletion.py",
+      "scripts/test_run_paper_dataset_quota.py",
+      "scripts/test_watch_paper_dataset_workers.py",
+      "scripts/watch_paper_dataset_workers.py",
+      "solver/__init__.py",
+      "solver/evals/__init__.py",
+      "solver/evals/compare_rollout_jax.py",
+      "solver/evals/render_rollout_movie.py",
+      "solver/gen_data/README.md",
+      "solver/gen_data/__init__.py",
+      "solver/gen_data/adaptive_sampling.py",
+      "solver/gen_data/benjamin_feir_jcp09.py",
+      "solver/gen_data/benjamin_feir_sampling.py",
+      "solver/gen_data/jonswap_horizon_executor.py",
+      "solver/gen_data/jonswap_tma.py",
+      "solver/gen_data/jonswap_tma_sampling.py",
+      "solver/gen_data/multi_crest.py",
+      "solver/gen_data/pipeline/__init__.py",
+      "solver/gen_data/pipeline/acceptance.py",
+      "solver/gen_data/pipeline/archive.py",
+      "solver/gen_data/pipeline/health.py",
+      "solver/gen_data/pipeline/manifest.py",
+      "solver/gen_data/pipeline/production.py",
+      "solver/gen_data/pipeline/quality.py",
+      "solver/gen_data/pipeline/quota_driver.py",
+      "solver/gen_data/pipeline/reference.py",
+      "solver/gen_data/pipeline/refinement.py",
+      "solver/gen_data/pipeline/schema.py",
+      "solver/gen_data/pipeline/test_acceptance.py",
+      "solver/gen_data/pipeline/test_manifest.py",
+      "solver/gen_data/pipeline/test_production.py",
+      "solver/gen_data/pipeline/test_refinement.py",
+      "solver/gen_data/pipeline/test_time_selection.py",
+      "solver/gen_data/pipeline/test_trajectory_writer.py",
+      "solver/gen_data/pipeline/time_selection.py",
+      "solver/gen_data/pipeline/trajectory_writer.py",
+      "solver/gen_data/pipeline/writer.py",
+      "solver/gen_data/stokes_quota_executor.py",
+      "solver/gen_data/stokes_sampling.py",
+      "solver/gen_data/stokes_static_pipeline.py",
+      "solver/gen_data/tanaka_initial_conditions.py",
+      "solver/gen_data/tanaka_sampling.py",
+      "solver/gen_data/tests_adaptive_sampling.py",
+      "solver/gen_data/tests_benjamin_feir_jcp09.py",
+      "solver/gen_data/tests_benjamin_feir_sampling.py",
+      "solver/gen_data/tests_jonswap_horizon_executor.py",
+      "solver/gen_data/tests_jonswap_tma.py",
+      "solver/gen_data/tests_jonswap_tma_sampling.py",
+      "solver/gen_data/tests_tanaka_potential_radicand.py",
+      "solver/gen_data/tests_tanaka_sampling.py",
+      "solver/gen_data/tests_tanaka_tangent_hermite.py",
+      "solver/gen_data/tests_trajectory_family_adapters.py",
+      "solver/gen_data/tests_trajectory_quota_executor.py",
+      "solver/gen_data/trajectory_family_adapters.py",
+      "solver/gen_data/trajectory_quota_executor.py",
+      "solver/reference_solutions/__init__.py",
+      "solver/reference_solutions/solitary_wave.py",
+      "solver/reference_solutions/stokes_wave.py",
+      "solver/solvers/__init__.py",
+      "solver/solvers/dno_series_jax.py",
+      "solver/solvers/test_time_integrator_telemetry.py",
+      "solver/solvers/tests_rollout_saved_gxi.py",
+      "solver/solvers/time_integrator.py",
+      "solver/tanaka_ICs/__init__.py",
+      "solver/tanaka_ICs/modified_tanaka.py",
+      "train-jax-10m/1d_dno_fno_jax.py",
+      "train-jax-10m/hadamard_shape_regularizer.py",
+      "train-jax-10m/mode_balanced_regularizer.py",
+      "train-jax-10m/translation_tangent_regularizer.py",
+      "train-jax-10m/util.py",
+      "uv.lock"
+    ]
+  },
+  "files": [
+    {
+      "path": "scripts/launch_revision4_jonswap_bulk.sh",
+      "kind": "shell",
+      "role": "Two-GPU revision-4 JONSWAP generation entrypoint.",
+      "executable": true
+    },
+    {
+      "path": "scripts/launch_revision3_tanaka_bulk.sh",
+      "kind": "shell",
+      "role": "Two-GPU corrected revision-3 Tanaka generation entrypoint.",
+      "executable": true
+    },
+    {
+      "path": "scripts/launch_tanaka_after_revision4_jonswap.sh",
+      "kind": "shell",
+      "role": "Sequential resume, completion-audit, and combined-build supervisor.",
+      "executable": true
+    },
+    {
+      "path": "scripts/check_tanaka_gpu_admission.sh",
+      "kind": "shell_library",
+      "role": "Source-only physical-GPU admission library for Tanaka launch orchestration.",
+      "executable": false
+    },
+    {
+      "path": "scripts/run_paper_dataset_quota.py",
+      "kind": "python",
+      "role": "Shared exact-quota generation runner and numerical source-closure authority."
+    },
+    {
+      "path": "scripts/run_paper_dataset_jonswap_bucketed.py",
+      "kind": "python",
+      "role": "Adjustment-first, horizon-bucketed JONSWAP runner."
+    },
+    {
+      "path": "solver/gen_data/jonswap_horizon_executor.py",
+      "kind": "python",
+      "role": "Horizon-sorted JONSWAP numerical executor."
+    },
+    {
+      "path": "scripts/audit_completed_jonswap_revision4.py",
+      "kind": "python",
+      "role": "Source-bound revision-4 JONSWAP completion audit."
+    },
+    {
+      "path": "scripts/audit_jonswap_relative_band_fresh_gate.py",
+      "kind": "python",
+      "role": "Revision-4 JONSWAP constructor-adoption evidence auditor."
+    },
+    {
+      "path": "scripts/audit_completed_tanaka_revision3.py",
+      "kind": "python",
+      "role": "Source-bound corrected revision-3 Tanaka completion audit."
+    },
+    {
+      "path": "scripts/bind_completed_stokes_revision2_audit.py",
+      "kind": "python",
+      "role": "Current release binding for the completed Stokes audit."
+    },
+    {
+      "path": "scripts/audit_completed_benjamin_feir_revision4.py",
+      "kind": "python",
+      "role": "Hardened source-bound revision-4 Benjamin-Feir completion audit."
+    },
+    {
+      "path": "scripts/build_literature_aligned_paper_dataset_views.sh",
+      "kind": "shell",
+      "role": "Four-checkpoint literature-aligned combined-view entrypoint.",
+      "executable": true
+    },
+    {
+      "path": "scripts/build_paper_dataset_view.py",
+      "kind": "python",
+      "role": "Fail-closed combined-view builder."
+    },
+    {
+      "path": "scripts/watch_paper_dataset_workers.py",
+      "kind": "python",
+      "role": "Identity-bound durable-progress watchdog with a canonical final-view exit gate."
+    },
+    {
+      "path": "scripts/launch_paper_dataset_postcompletion.sh",
+      "kind": "shell",
+      "role": "CPU-only post-completion watcher entrypoint.",
+      "executable": true
+    },
+    {
+      "path": "scripts/run_paper_dataset_postcompletion.py",
+      "kind": "python",
+      "role": "Release-binding and bounded post-completion stage runner."
+    },
+    {
+      "path": "scripts/render_paper_dataset_worst_cases.py",
+      "kind": "python",
+      "role": "Authenticated all-family diagnostic-tail renderer."
+    },
+    {
+      "path": "scripts/diagnose_final_jonswap_order_convergence.py",
+      "kind": "python",
+      "role": "Final JONSWAP Craig-Sulem order-convergence diagnostic."
+    },
+    {
+      "path": "scripts/audit_paper_dataset_training_handoff.py",
+      "kind": "python",
+      "role": "Training selection and normalization handoff audit."
+    },
+    {
+      "path": "train-jax-10m/1d_dno_fno_jax.py",
+      "kind": "python",
+      "role": "Canonical trainer entrypoint named by the handoff command template."
+    },
+    {
+      "path": "train-jax-10m/util.py",
+      "kind": "python",
+      "role": "Trainer dataset loading, split-selection, sampling, and normalization helpers authenticated by the handoff audit."
+    },
+    {
+      "path": "scripts/build_parameterized_dataset_case_figure.py",
+      "kind": "python",
+      "role": "Deterministic source-bound four-family illustration builder."
+    },
+    {
+      "path": "scripts/build_paper_dataset_document_handoff.py",
+      "kind": "python",
+      "role": "Authenticated final dataset facts handoff for manuscript updates; invoke with python -m scripts.build_paper_dataset_document_handoff."
+    },
+    {
+      "path": "scripts/test_run_paper_dataset_quota.py",
+      "kind": "python",
+      "role": "Focused shared quota-runner tests."
+    },
+    {
+      "path": "solver/gen_data/tests_jonswap_horizon_executor.py",
+      "kind": "python",
+      "role": "Focused horizon-bucketed JONSWAP executor tests."
+    },
+    {
+      "path": "scripts/test_launch_tanaka_after_revision4_jonswap.py",
+      "kind": "python",
+      "role": "Focused sequential-supervisor integration tests."
+    },
+    {
+      "path": "scripts/test_paper_dataset_release_layout_contract.py",
+      "kind": "python",
+      "role": "Cross-chain launcher, audit, builder, and handoff layout contract."
+    },
+    {
+      "path": "scripts/test_audit_completed_jonswap_revision4.py",
+      "kind": "python",
+      "role": "Focused revision-4 JONSWAP completion-audit tests."
+    },
+    {
+      "path": "scripts/test_audit_jonswap_relative_band_fresh_gate.py",
+      "kind": "python",
+      "role": "Focused JONSWAP constructor-adoption evidence tests."
+    },
+    {
+      "path": "scripts/test_audit_completed_tanaka_revision3.py",
+      "kind": "python",
+      "role": "Focused corrected revision-3 Tanaka completion-audit tests."
+    },
+    {
+      "path": "scripts/test_bind_completed_stokes_revision2_audit.py",
+      "kind": "python",
+      "role": "Focused completed-Stokes release-binding tests."
+    },
+    {
+      "path": "scripts/test_audit_completed_benjamin_feir_revision4.py",
+      "kind": "python",
+      "role": "Focused revision-4 Benjamin-Feir completion-audit tests."
+    },
+    {
+      "path": "scripts/test_build_paper_dataset_view.py",
+      "kind": "python",
+      "role": "Focused combined-view builder tests."
+    },
+    {
+      "path": "scripts/test_watch_paper_dataset_workers.py",
+      "kind": "python",
+      "role": "Focused worker-watchdog identity, timeout, and final-view authentication tests."
+    },
+    {
+      "path": "scripts/test_run_paper_dataset_postcompletion.py",
+      "kind": "python",
+      "role": "Focused release-binding and post-completion runner tests."
+    },
+    {
+      "path": "scripts/test_render_paper_dataset_worst_cases.py",
+      "kind": "python",
+      "role": "Focused authenticated renderer tests."
+    },
+    {
+      "path": "scripts/test_diagnose_final_jonswap_order_convergence.py",
+      "kind": "python",
+      "role": "Focused final JONSWAP order-diagnostic tests."
+    },
+    {
+      "path": "scripts/test_audit_paper_dataset_training_handoff.py",
+      "kind": "python",
+      "role": "Focused training-handoff audit tests."
+    },
+    {
+      "path": "scripts/test_build_parameterized_dataset_case_figure.py",
+      "kind": "python",
+      "role": "Focused deterministic family-figure tests."
+    },
+    {
+      "path": "scripts/test_build_paper_dataset_document_handoff.py",
+      "kind": "python",
+      "role": "Focused authenticated document-handoff tests."
+    },
+    {
+      "path": "scripts/test_benjamin_feir_revision4_source_snapshot.py",
+      "kind": "python",
+      "role": "Frozen Benjamin-Feir generation-source archive test."
+    },
+    {
+      "path": "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/README.md",
+      "kind": "text",
+      "role": "Frozen Benjamin-Feir source archive explanation."
+    },
+    {
+      "path": "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/SHA256SUMS",
+      "kind": "checksums",
+      "role": "Stable hashes for the frozen Benjamin-Feir source files."
+    },
+    {
+      "path": "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/production.py",
+      "kind": "python",
+      "role": "Frozen production-contract source used by Benjamin-Feir revision 4."
+    },
+    {
+      "path": "reproducibility/source_snapshots/benjamin_feir_revision4_e16773f/trajectory_family_adapters.py",
+      "kind": "python",
+      "role": "Frozen trajectory-adapter source used by Benjamin-Feir revision 4."
+    },
+    {
+      "path": "reproducibility/source_snapshots/stokes_revision2_60a28ff/README.md",
+      "kind": "text",
+      "role": "Frozen Stokes revision-2 source archive explanation."
+    },
+    {
+      "path": "reproducibility/source_snapshots/stokes_revision2_60a28ff/SHA256SUMS",
+      "kind": "checksums",
+      "role": "Stable hashes for the frozen Stokes revision-2 source files."
+    },
+    {
+      "path": "reproducibility/source_snapshots/stokes_revision2_60a28ff/manifest.py",
+      "kind": "python",
+      "role": "Frozen manifest source used by Stokes revision 2."
+    },
+    {
+      "path": "reproducibility/source_snapshots/stokes_revision2_60a28ff/production.py",
+      "kind": "python",
+      "role": "Frozen production-contract source used by Stokes revision 2."
+    },
+    {
+      "path": "reproducibility/source_snapshots/stokes_revision2_60a28ff/run_paper_dataset_quota.py",
+      "kind": "python",
+      "role": "Frozen quota-runner source used by Stokes revision 2."
+    },
+    {
+      "path": "reproducibility/paper_dataset_release_files.json",
+      "kind": "json",
+      "role": "This inert release-file inventory."
+    },
+    {
+      "path": "scripts/test_paper_dataset_release_file_manifest.py",
+      "kind": "python",
+      "role": "Existence, file-type, syntax, and executable-mode test for this inventory."
+    }
+  ]
+}

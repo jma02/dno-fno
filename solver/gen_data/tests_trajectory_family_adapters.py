@@ -7,6 +7,7 @@ are not spatial-, order-, or full-horizon validation of the paper contract.
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import math
 import os
@@ -22,15 +23,22 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.benjamin_feir_population import (  # noqa: E402
-    BENJAMIN_FEIR_POPULATION_CELLS,
+from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
+    BENJAMIN_FEIR_SAMPLE_CELLS,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
+    JonswapTmaParameters,
+    PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+    PAPER_RELATIVE_FREQUENCY_MINIMUM,
+    PAPER_RELATIVE_FREQUENCY_WINDOW,
     PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
     PAPER_RESOLVED_BAND_WINDOW,
+    finite_depth_angular_frequency,
+    paper_support_violations,
 )
-from solver.gen_data.jonswap_tma_population import (  # noqa: E402
-    JONSWAP_TMA_POPULATION_CELLS,
+from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
+    JONSWAP_TMA_SAMPLING_REVISION_V4,
+    JONSWAP_TMA_SAMPLE_CELLS,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     BatchPaths,
@@ -48,6 +56,8 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
     SplitId,
 )
 from solver.gen_data.pipeline.refinement import (  # noqa: E402
+    PAPER_GL2_CONTRACT,
+    PAPER_JONSWAP_GL2_CONTRACT,
     ResidualControlledGL2Contract,
     execute_residual_controlled_refinement,
 )
@@ -58,10 +68,13 @@ from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
 from solver.gen_data.pipeline.writer import (  # noqa: E402
     commit_case_outcomes,
 )
-from solver.gen_data.tanaka_population import (  # noqa: E402
-    TANAKA_POPULATION_CELLS,
+from solver.gen_data.tanaka_sampling import (  # noqa: E402
+    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLING_REVISION_V2,
+    TANAKA_SAMPLING_REVISION_V3,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
+    JonswapInitialStateDomainError,
     TrajectoryInitialBatch,
     construct_benjamin_feir_trajectory_batch,
     construct_jonswap_tma_trajectory_batch,
@@ -101,13 +114,19 @@ def assignment(
     family_id: int,
     cell_id: str,
     attempt_index: int,
+    revision_id: int | None = None,
 ) -> AttemptAssignment:
     """Return one deterministic test-split attempt."""
 
+    selected_revision = (
+        TANAKA_SAMPLING_REVISION_V3
+        if revision_id is None and family_id == 2
+        else 1 if revision_id is None else revision_id
+    )
     return AttemptAssignment(
         case_key=CaseKey(
             family_id=family_id,
-            revision_id=1,
+            revision_id=selected_revision,
             split_id=SplitId.TEST,
             stream_id=7,
             attempt_index=attempt_index,
@@ -181,21 +200,384 @@ def write_single_row_shard(
 
 
 class TrajectoryFamilyAdapterTest(unittest.TestCase):
+    def test_jonswap_support_valid_graph_failure_is_declared_per_case(
+        self,
+    ) -> None:
+        contract = PAPER_JONSWAP_GL2_CONTRACT
+        cell_id = "shallow__gamma_1__right_0p5"
+        attempted = (
+            assignment(
+                family_id=4,
+                revision_id=3,
+                cell_id=cell_id,
+                attempt_index=101,
+            ),
+            assignment(
+                family_id=4,
+                revision_id=3,
+                cell_id=cell_id,
+                attempt_index=102,
+            ),
+        )
+        sampled = sample_jonswap_tma_trajectory_cases(
+            attempted,
+            contract=contract,
+        )
+        parameters = JonswapTmaParameters(
+            depth=0.02,
+            significant_height=math.nextafter(0.0064, 0.0),
+            peak_wavenumber=18.0,
+            peak_enhancement=1.0,
+            right_moving_fraction=0.5,
+        )
+        self.assertEqual(
+            paper_support_violations(
+                parameters,
+                stratum="shallow",
+                length=contract.length,
+            ),
+            (),
+        )
+        phase_count = len(sampled.samples[0].phase_right)
+        witness = replace(
+            sampled.samples[0],
+            parameters=parameters,
+            phase_right=np.full(phase_count, np.pi, dtype=np.float64),
+            phase_left=np.full(phase_count, np.pi, dtype=np.float64),
+        )
+        witness_record = {
+            **sampled.specification_records[0],
+            **witness.to_json_record(),
+        }
+        sampled = replace(
+            sampled,
+            samples=(witness, sampled.samples[1]),
+            specification_records=(
+                witness_record,
+                sampled.specification_records[1],
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            proposed = persist_sampled_trajectory_proposal(
+                sampled,
+                root=Path(directory),
+                family_name="jonswap_tma",
+                batch_id=0,
+                cell_codes={cell_id: 0},
+                config_fingerprint="b" * 64,
+                metadata={"test_scope": "jonswap_per_case_graph_domain"},
+            )
+            with self.assertRaises(JonswapInitialStateDomainError) as caught:
+                construct_jonswap_tma_trajectory_batch(proposed)
+            failure = caught.exception.failure_record
+            self.assertEqual(failure["invalid_case_indices"], [0])
+            invalid = failure["cases"]
+            assert isinstance(invalid, list)
+            self.assertEqual(
+                invalid[0]["failure_reason"],
+                "nonpositive_initial_water_column",
+            )
+            self.assertAlmostEqual(
+                float(invalid[0]["minimum_water_column"]),
+                -0.006597951264634552,
+                places=13,
+            )
+
+            valid = construct_jonswap_tma_trajectory_batch(
+                proposed,
+                selected_local_indices=(1,),
+            )
+            self.assertEqual(valid.eta0.shape, (1, contract.nx))
+            self.assertEqual(
+                valid.specification_records,
+                (sampled.specification_records[1],),
+            )
+
+    def test_paper_jonswap_constructs_on_target_band_before_wide_evolution(
+        self,
+    ) -> None:
+        contract = PAPER_JONSWAP_GL2_CONTRACT
+        attempted = assignment(
+            family_id=4,
+            revision_id=3,
+            cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
+            attempt_index=29,
+        )
+        sampled = sample_jonswap_tma_trajectory_cases(
+            (attempted,),
+            contract=contract,
+        )
+        record = sampled.specification_records[0]
+        band = resolved_band_for_contract(contract)
+
+        self.assertEqual(contract.nx, 2048)
+        self.assertEqual(contract.maximum_wavenumber, 704.0)
+        self.assertEqual(contract.target_definition.nx, 1024)
+        self.assertEqual(contract.target_definition.maximum_wavenumber, 128.0)
+        self.assertEqual(band.maximum_wavenumber, 128.0)
+        self.assertEqual(band.transition_wavenumber, 96.0)
+        self.assertEqual(len(record["phase_right"]), 128)
+        self.assertEqual(len(record["phase_left"]), 128)
+        self.assertEqual(
+            record["initial_projection"]["maximum_wavenumber"],
+            128.0,
+        )
+        self.assertEqual(
+            record["constructor_settings"]["transition_wavenumber"],
+            96.0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            proposed = persist_sampled_trajectory_proposal(
+                sampled,
+                root=Path(directory),
+                family_name="jonswap_tma",
+                batch_id=0,
+                cell_codes={attempted.cell_id: 0},
+                config_fingerprint="9" * 64,
+                metadata={"test_scope": "paper_target_band_before_evolution"},
+            )
+            initial = construct_jonswap_tma_trajectory_batch(proposed)
+
+        metrics = initial.construction_metrics[0]
+        self.assertEqual(metrics["initial_discrete_peak_wavenumber"], 7.0)
+        self.assertGreaterEqual(
+            int(metrics["initial_half_maximum_spectral_cell_count"]),
+            1,
+        )
+        self.assertAlmostEqual(
+            float(metrics["initial_realized_height_ratio"]),
+            1.0,
+            places=13,
+        )
+        self.assertLess(
+            float(metrics["initial_linear_hamiltonian_relative_error"]),
+            1.0e-12,
+        )
+        self.assertGreater(
+            float(metrics["initial_minimum_water_column"]),
+            0.0,
+        )
+
+        wavenumbers = 2.0 * np.pi * np.fft.fftfreq(
+            contract.nx,
+            d=contract.length / contract.nx,
+        )
+        outside_target = np.abs(wavenumbers) > 128.0
+        for field in (initial.eta0, initial.xi0):
+            coefficients = np.fft.fft(field, axis=-1)
+            self.assertLess(
+                float(np.max(np.abs(coefficients[:, outside_target]))),
+                1.0e-10,
+            )
+
+    def test_revision_4_jonswap_uses_the_published_relative_frequency_band(
+        self,
+    ) -> None:
+        contract = PAPER_JONSWAP_GL2_CONTRACT
+        attempted = assignment(
+            family_id=4,
+            revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
+            cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
+            attempt_index=31,
+        )
+        sampled = sample_jonswap_tma_trajectory_cases(
+            (attempted,),
+            contract=contract,
+        )
+        record = sampled.specification_records[0]
+        self.assertEqual(
+            record["initial_condition_constructor"],
+            "relative_frequency_jonswap_tma_linear_state_v2",
+        )
+        self.assertEqual(
+            record["constructor_settings"]["density_window"],
+            PAPER_RELATIVE_FREQUENCY_WINDOW,
+        )
+        self.assertEqual(
+            record["constructor_settings"]["relative_frequency_minimum"],
+            PAPER_RELATIVE_FREQUENCY_MINIMUM,
+        )
+        self.assertEqual(
+            record["constructor_settings"]["relative_frequency_maximum"],
+            PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            proposed = persist_sampled_trajectory_proposal(
+                sampled,
+                root=Path(directory),
+                family_name="jonswap_tma",
+                batch_id=0,
+                cell_codes={attempted.cell_id: 0},
+                config_fingerprint="4" * 64,
+                metadata={"test_scope": "revision_4_relative_frequency_band"},
+            )
+            initial = construct_jonswap_tma_trajectory_batch(proposed)
+
+        parameters = sampled.samples[0].parameters
+        wavenumbers = 2.0 * np.pi * np.fft.rfftfreq(
+            contract.nx,
+            d=contract.length / contract.nx,
+        )
+        frequencies = finite_depth_angular_frequency(
+            wavenumbers,
+            depth=parameters.depth,
+            gravity=contract.gravity,
+        )
+        peak_frequency = finite_depth_angular_frequency(
+            np.asarray([parameters.peak_wavenumber]),
+            depth=parameters.depth,
+            gravity=contract.gravity,
+        )[0]
+        coefficients = np.fft.rfft(initial.eta0[0])
+        far_outside = (frequencies > 2.6 * peak_frequency) | (
+            frequencies < 0.4 * peak_frequency
+        )
+        self.assertLess(float(np.max(np.abs(coefficients[far_outside]))), 1.0e-10)
+
+    def test_revision_2_tanaka_strict_records_are_byte_locked(self) -> None:
+        cases = (
+            (
+                0,
+                91,
+                "b36118476137049c092cb4360e40234a2d55718d07a6abadb83e41cd4d827f08",
+            ),
+            (
+                6,
+                97,
+                "934ce73e70275fb82abb5de289439e48e3da8a23258e619a445fb42f3c291663",
+            ),
+            (
+                10,
+                103,
+                "4f833869234c8aa23596eddf8db459c8880da33753de483d8dfe7749aa9dc883",
+            ),
+        )
+        strict_records: list[object] = []
+        for cell_index, attempt_index, expected in cases:
+            attempted = AttemptAssignment(
+                case_key=CaseKey(
+                    family_id=2,
+                    revision_id=TANAKA_SAMPLING_REVISION_V2,
+                    split_id=SplitId.TRAIN,
+                    stream_id=0,
+                    attempt_index=attempt_index,
+                ),
+                cell_id=TANAKA_SAMPLE_CELLS[cell_index].cell_id,
+            )
+            record = sample_tanaka_trajectory_cases(
+                (attempted,),
+                contract=PAPER_GL2_CONTRACT,
+            ).specification_records[0]
+            strict_records.append(record)
+            encoded = json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected)
+
+        combined = json.dumps(
+            strict_records,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(combined).hexdigest(),
+            "d95e3c5c62d910cc6fc34ca340c192834bd0e7323ecff6e2b5358ff8b0158ad7",
+        )
+
+    def test_buffered_tanaka_reuses_the_exact_delivered_band_initial_state(
+        self,
+    ) -> None:
+        hard = wiring_contract()
+        buffered = replace(
+            hard,
+            maximum_wavenumber=24.0,
+            target_maximum_wavenumber=16.0,
+            post_step_state_filter="hou_li",
+            post_step_maximum_wavenumber=24.0,
+        )
+        attempted = assignment(
+            family_id=2,
+            cell_id=TANAKA_SAMPLE_CELLS[0].cell_id,
+            attempt_index=19,
+        )
+        hard_sampled = sample_tanaka_trajectory_cases(
+            (attempted,),
+            contract=hard,
+        )
+        buffered_sampled = sample_tanaka_trajectory_cases(
+            (attempted,),
+            contract=buffered,
+        )
+        self.assertEqual(
+            hard_sampled.specification_records,
+            buffered_sampled.specification_records,
+        )
+        self.assertEqual(
+            buffered_sampled.specification_records[0]["initial_projection"][
+                "maximum_wavenumber"
+            ],
+            16.0,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hard_proposal = persist_sampled_trajectory_proposal(
+                hard_sampled,
+                root=root / "hard",
+                family_name="tanaka",
+                batch_id=0,
+                cell_codes={attempted.cell_id: 0},
+                config_fingerprint="1" * 64,
+                metadata={"test_scope": "hard_initial_state"},
+            )
+            buffered_proposal = persist_sampled_trajectory_proposal(
+                buffered_sampled,
+                root=root / "buffered",
+                family_name="tanaka",
+                batch_id=0,
+                cell_codes={attempted.cell_id: 0},
+                config_fingerprint="2" * 64,
+                metadata={"test_scope": "buffered_initial_state"},
+            )
+            hard_initial = construct_tanaka_trajectory_batch(hard_proposal)
+            buffered_initial = construct_tanaka_trajectory_batch(
+                buffered_proposal
+            )
+
+        np.testing.assert_array_equal(
+            hard_initial.eta0,
+            buffered_initial.eta0,
+        )
+        np.testing.assert_array_equal(
+            hard_initial.xi0,
+            buffered_initial.xi0,
+        )
+        np.testing.assert_array_equal(
+            hard_initial.depths,
+            buffered_initial.depths,
+        )
+
     def test_all_families_construct_finite_graph_states_with_exact_replay(
         self,
     ) -> None:
         contract = wiring_contract()
         tanaka_assignment = assignment(
             family_id=2,
-            cell_id=TANAKA_POPULATION_CELLS[0].cell_id,
+            cell_id=TANAKA_SAMPLE_CELLS[0].cell_id,
             attempt_index=19,
         )
         bf_assignment = assignment(
             family_id=3,
-            cell_id=BENJAMIN_FEIR_POPULATION_CELLS[0].cell_id,
+            cell_id=BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id,
             attempt_index=23,
         )
-        finite_random_sea_cell = JONSWAP_TMA_POPULATION_CELLS[9]
+        finite_random_sea_cell = JONSWAP_TMA_SAMPLE_CELLS[9]
         jonswap_assignment = assignment(
             family_id=4,
             cell_id=finite_random_sea_cell.cell_id,
@@ -236,6 +618,16 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                         first_sampled.specification_records,
                         replayed_sampled.specification_records,
                     )
+                    if family == "benjamin_feir":
+                        bf_record = first_sampled.specification_records[0]
+                        self.assertNotIn("schema", bf_record)
+                        self.assertEqual(
+                            bf_record["initial_condition_constructor"],
+                            (
+                                "jcp09_equation_33_with_project_"
+                                "fifth_order_carrier_v2"
+                            ),
+                        )
                     proposed = persist_sampled_trajectory_proposal(
                         first_sampled,
                         root=root,
@@ -287,7 +679,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_POPULATION_CELLS[9].cell_id,
+            cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
             attempt_index=31,
         )
         sampled = sample_jonswap_tma_trajectory_cases(
@@ -338,7 +730,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_POPULATION_CELLS[9].cell_id,
+            cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
             attempt_index=35,
         )
         sampled = sample_jonswap_tma_trajectory_cases(
@@ -367,7 +759,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_POPULATION_CELLS[9].cell_id,
+            cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
             attempt_index=37,
         )
         sampled = sample_jonswap_tma_trajectory_cases(
@@ -440,7 +832,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
     def test_construction_refuses_failed_and_corrupt_batches(self) -> None:
         contract = wiring_contract()
-        cell_id = JONSWAP_TMA_POPULATION_CELLS[9].cell_id
+        cell_id = JONSWAP_TMA_SAMPLE_CELLS[9].cell_id
 
         failed_attempt = assignment(
             family_id=4,
@@ -523,7 +915,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 "benjamin_feir",
                 assignment(
                     family_id=3,
-                    cell_id=BENJAMIN_FEIR_POPULATION_CELLS[0].cell_id,
+                    cell_id=BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id,
                     attempt_index=41,
                 ),
                 sample_benjamin_feir_trajectory_cases,
@@ -533,7 +925,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 "jonswap_tma",
                 assignment(
                     family_id=4,
-                    cell_id=JONSWAP_TMA_POPULATION_CELLS[9].cell_id,
+                    cell_id=JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
                     attempt_index=43,
                 ),
                 sample_jonswap_tma_trajectory_cases,

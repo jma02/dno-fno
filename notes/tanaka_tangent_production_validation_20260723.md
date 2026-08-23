@@ -141,7 +141,7 @@ the resolved initial condition.
 A paired four-case GL2 rollout through \(T=20\) was run for:
 
 - the narrow, steep corner \(h=0.01,\ a/h=0.35\);
-- the broad main-corpus corner \(h=0.30,\ a/h=0.35\);
+- the broad main-dataset corner \(h=0.30,\ a/h=0.35\);
 - the steep-Tanaka corner \(h=0.35,\ a/h=0.45\); and
 - exact May-v2 case 31.
 

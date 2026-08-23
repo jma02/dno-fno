@@ -83,7 +83,7 @@ next mechanism:
 - v8 contains 2,000,000 Tanaka rows, but only 8.13% have `h >= 0.23`.
   Sampling 20,000 of those rows found 14.77% with proxy `a/h >= 0.27`,
   giving approximately 1.20% joint coverage, or about 24,000 rows. This is
-  only 0.32% of the complete 7.43M-row v8 corpus.
+  only 0.32% of the complete 7.43M-row v8 dataset.
 - v8's added `shallow_steep_wide` family does not fill the spectral hole.
   Its deep, high-amplitude states can have large physical slopes, but their
   `k=64:128` content remains near zero.

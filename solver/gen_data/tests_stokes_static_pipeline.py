@@ -27,10 +27,10 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
 from solver.gen_data.pipeline.reference import DiscreteDnoTarget  # noqa: E402
-from solver.gen_data.stokes_population import (  # noqa: E402
-    STOKES_POPULATION_CELLS,
-    StokesPopulationSample,
-    sample_stokes_population,
+from solver.gen_data.stokes_sampling import (  # noqa: E402
+    STOKES_SAMPLE_CELLS,
+    StokesSample,
+    sample_stokes_case,
 )
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     PAPER_STATIC_STOKES_CONTRACT,
@@ -62,7 +62,7 @@ def assignment(
             stream_id=9,
             attempt_index=attempt_index,
         ),
-        cell_id=STOKES_POPULATION_CELLS[cell_index].cell_id,
+        cell_id=STOKES_SAMPLE_CELLS[cell_index].cell_id,
     )
 
 
@@ -90,7 +90,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                 PAPER_STATIC_STOKES_CONTRACT.target.maximum_wavenumber,
                 PAPER_STATIC_STOKES_CONTRACT.role,
             ),
-            (1024, 6, 8, 128.0, "paper_corpus"),
+            (1024, 6, 8, 128.0, "paper_dataset"),
         )
         with self.assertRaisesRegex(ValueError, "must be labeled"):
             StaticStokesContract(target=reduced_contract().target)
@@ -101,10 +101,10 @@ class StokesStaticPipelineTest(unittest.TestCase):
 
     def test_real_finite_and_deep_cases_reach_schema_v2_view(self) -> None:
         samples = (
-            sample_stokes_population(assignment(0, attempt_index=10)),
-            sample_stokes_population(assignment(2, attempt_index=11)),
-            sample_stokes_population(assignment(0, attempt_index=12)),
-            sample_stokes_population(assignment(2, attempt_index=13)),
+            sample_stokes_case(assignment(0, attempt_index=10)),
+            sample_stokes_case(assignment(2, attempt_index=11)),
+            sample_stokes_case(assignment(0, attempt_index=12)),
+            sample_stokes_case(assignment(2, attempt_index=13)),
         )
         contract = reduced_contract()
 
@@ -117,7 +117,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
             proposal_existed_during_construction: list[bool] = []
 
             def injected_constructor(
-                sample: StokesPopulationSample,
+                sample: StokesSample,
                 active_contract: StaticStokesContract,
             ) -> tuple[jax.Array, jax.Array]:
                 proposal_existed_during_construction.append(
@@ -279,7 +279,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                 )
 
     def test_nonfinite_target_is_a_zero_row_rejection(self) -> None:
-        sample = sample_stokes_population(assignment(2, attempt_index=30))
+        sample = sample_stokes_case(assignment(2, attempt_index=30))
         contract = reduced_contract()
 
         def nonfinite_target(
@@ -307,11 +307,11 @@ class StokesStaticPipelineTest(unittest.TestCase):
         self.assertEqual(outcome.metrics["target_finite"], False)
 
     def test_constructor_and_target_exceptions_propagate(self) -> None:
-        sample = sample_stokes_population(assignment(2, attempt_index=31))
+        sample = sample_stokes_case(assignment(2, attempt_index=31))
         contract = reduced_contract()
 
         def failing_constructor(
-            sample: StokesPopulationSample,
+            sample: StokesSample,
             contract: StaticStokesContract,
         ) -> tuple[jax.Array, jax.Array]:
             del sample, contract

@@ -34,7 +34,7 @@ from scripts.bind_completed_stokes_revision2_audit import (
     _validate_summary_cell_counts,
     _validate_view_hashes,
 )
-from scripts.build_paper_corpus_view import CompletedChunk
+from scripts.build_paper_dataset_view import CompletedChunk
 from solver.gen_data.pipeline.archive import file_sha256
 
 
@@ -146,13 +146,13 @@ class SourceClosureTests(unittest.TestCase):
             chunks = _chunks(Path(directory))
         mappings = _source_mappings(chunks)
         self.assertEqual(len(mappings), 6)
-        self.assertEqual(len(mappings[0]), 14)
+        self.assertEqual(len(mappings[0]), 13)
         self.assertEqual(_canonical_sha256(mappings[0]), EXPECTED_SOURCE_FINGERPRINT)
 
         historical = _historical_source_snapshot_record(mappings)
         current = _current_source_record(mappings)
         self.assertEqual(historical["historical_source_count"], 3)
-        self.assertEqual(current["current_source_count"], 11)
+        self.assertEqual(current["current_source_count"], 10)
         self.assertEqual(
             set(historical["sources"]),
             set(HISTORICAL_SOURCE_SNAPSHOTS),
@@ -179,7 +179,7 @@ class SourceClosureTests(unittest.TestCase):
         missing = dict(chunks[0].source_sha256)
         missing.pop("solver/gen_data/pipeline/archive.py")
         chunks[0] = replace(chunks[0], source_sha256=missing)
-        with self.assertRaisesRegex(ValueError, "frozen 14-path contract"):
+        with self.assertRaisesRegex(ValueError, "frozen 13-path contract"):
             _source_mappings(chunks)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -187,7 +187,7 @@ class SourceClosureTests(unittest.TestCase):
         extra = dict(chunks[0].source_sha256)
         extra["solver/gen_data/pipeline/extra.py"] = "0" * 64
         chunks[0] = replace(chunks[0], source_sha256=extra)
-        with self.assertRaisesRegex(ValueError, "frozen 14-path contract"):
+        with self.assertRaisesRegex(ValueError, "frozen 13-path contract"):
             _source_mappings(chunks)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -452,7 +452,7 @@ class OutputSafetyTests(unittest.TestCase):
     def test_output_symlink_and_symlinked_parent_alias_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
-            root = base / "corpus"
+            root = base / "dataset"
             root.mkdir()
             legacy = root / "stokes_completion_audit.json"
             victim = root / "victim.json"
@@ -467,7 +467,7 @@ class OutputSafetyTests(unittest.TestCase):
             )
 
             output.unlink()
-            alias = base / "corpus_alias"
+            alias = base / "dataset_alias"
             alias.symlink_to(root, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 _validate_output_path(

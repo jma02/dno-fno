@@ -1,0 +1,367 @@
+\section{Training objectives}
+\label{sec:hamiltonian-loss}
+
+\subsection{Base supervised loss}
+
+Let
+$q^\star=\G^\star(\eta;h)\xi$ denote the stored source-protocol reference
+target defined in \cref{sec:data}, and let
+$q^\theta=\Gtheta(\eta;h)\xi$ denote the model value.  Thus $q$ represents
+the first Zakharov vector-field component $\eta_t$, not an additional state
+variable.  Let $B$ be the batch size, and let hats denote the one-sided real
+FFT in the spatial coordinate.
+Within the modal band below, $q^\star$ is the projected order-six reference
+value for every source.  The accepted C27 model uses the mean per-sample
+relative one-sided spectral $L^2$ loss
+\begin{equation}
+  \ell_{2,b}
+  =\frac{\left(\sum_{k=0}^{N/2}
+  |\widehat{\widetilde q}^{\,\theta}_{b,k}
+   -\widehat{\widetilde q}^{\,\star}_{b,k}|^2\right)^{1/2}}
+  {\left[\max\left\{
+  \sum_{k=0}^{N/2}|\widehat{\widetilde q}^{\,\star}_{b,k}|^2,
+  10^{-12}\right\}\right]^{1/2}},
+  \qquad
+  \mathcal L_2=\frac1B\sum_{b=1}^B\ell_{2,b}.
+  \label{eq:data-loss}
+\end{equation}
+Here $\widetilde q=q/s_q$ uses the fixed global target scale supplied to the
+network.  Away from the numerical floor, $s_q$ and the fixed FFT normalization
+cancel.  Equation~\eqref{eq:data-loss} is the implemented one-sided real-FFT
+norm: the interior modes are not multiplied by their Parseval multiplicity.
+This convention does not affect the argument below because all positive
+interior modes carry the same omitted factor.
+
+The single normalization in \eqref{eq:data-loss} allocates accuracy according
+to absolute target power.  To make this precise away from the numerical floor,
+let
+\begin{equation}
+  Q_b=\sum_j|\widehat q_{b,j}^\star|^2,
+  \qquad
+  \mathcal A_b=\{k:\widehat q_{b,k}^\star\ne0\},
+  \qquad
+  \mathcal Z_b=\{k:\widehat q_{b,k}^\star=0\}.
+\end{equation}
+For $e_{b,k}=\widehat q_{b,k}^\theta-\widehat q_{b,k}^\star$,
+\begin{equation}
+  \ell_{2,b}^2
+  =\sum_{k\in\mathcal A_b}
+  \underbrace{\frac{|\widehat q_{b,k}^\star|^2}{Q_b}}
+  _{\displaystyle \beta_{b,k}}
+  \left|\frac{e_{b,k}}{\widehat q_{b,k}^\star}\right|^2
+  +\frac1{Q_b}\sum_{k\in\mathcal Z_b}|e_{b,k}|^2.
+  \label{eq:l2-modal-weighting}
+\end{equation}
+Thus a nonzero mode containing $10^{-4}$ of the carrier target power
+contributes only $10^{-4}$ as much when the two modes have the same fractional
+error.  This is
+appropriate for total one-step error, but it can hide a weak harmonic or
+Benjamin--Feir sideband whose phase-rate bias accumulates over a long rollout.
+The second term in \eqref{eq:l2-modal-weighting} penalizes a coefficient that
+the model creates where the stored target is exactly zero.
+
+\subsection{Active-mode phase-space-normalized complex loss}
+\label{sec:mode-loss}
+
+The quantity called the \emph{mode-balanced loss} in the implementation is
+more precisely an active-mode relative error in the modal vector field
+$q=\eta_t$.  It does not compare Fourier magnitudes alone.  It compares the
+full complex coefficients, so it retains both radial and angular components
+of the instantaneous modal motion.
+
+For $1\leq k\leq K$, with $K=128$, define
+\begin{equation}
+  g_{0,b,k}=k\tanh(\widetilde h_b k),
+  \qquad
+  \omega_{b,k}^2=g g_{0,b,k},
+  \qquad
+  \widetilde h_b=\min\{h_b,5\}.
+  \label{eq:mode-dispersion}
+\end{equation}
+The depth clipping agrees with the model. For $h\geq5$, its largest discrepancy
+from the infinite-depth symbol is $1-\tanh(5)\simeq9.1\times10^{-5}$ relative
+to $k$, attained at $k=1$. Hats in this subsection denote the
+forward-normalized real FFT of the physical, denormalized fields. For every
+training example, set
+\begin{equation}
+  P_{b,k}
+  =|\widehat q_{b,k}^\star|^2
+   +\omega_{b,k}^2|\widehat\eta_{b,k}|^2,
+  \qquad
+  S_b=\max_{1\leq j\leq K}P_{b,j}.
+  \label{eq:mode-phase-space-scale}
+\end{equation}
+This scale has a direct origin. Suppressing the sample index, the flat-surface
+dynamics of mode $k$ at the clipped depth are
+\begin{equation}
+  \partial_t\widehat\eta_k=\widehat q_k,
+  \qquad
+  \partial_t\widehat q_k=-\omega_k^2\widehat\eta_k,
+  \qquad
+  \frac{\dd}{\dd t}
+  \left(|\widehat q_k|^2+\omega_k^2|\widehat\eta_k|^2\right)=0.
+  \label{eq:linear-modal-oscillator}
+\end{equation}
+Moreover, if
+\begin{equation}
+  H_k^{\mathrm{lin}}
+  =\frac12\left(g|\widehat\eta_k|^2
+  +g_{0,k}|\widehat\xi_k|^2\right)
+\end{equation}
+denotes the linear Hamiltonian contribution of that mode at the clipped depth,
+then
+\begin{equation}
+  |\widehat q_k|^2+\omega_k^2|\widehat\eta_k|^2
+  =2g_{0,k} H_k^{\mathrm{lin}},
+  \qquad \widehat q_k=g_{0,k}\widehat\xi_k.
+  \label{eq:mode-scale-hamiltonian}
+\end{equation}
+Consequently, in the linear limit, $P_{b,k}$ is the squared phase-space radius
+of the corresponding oscillator. In nonlinear data,
+\eqref{eq:mode-phase-space-scale} evaluates that motivated radius formula using
+the nonlinear target $q^\star$; it is only a reference scale and is not asserted
+to be a separately conserved nonlinear modal energy. The
+$\eta$ contribution also prevents a singular relative error when
+$\widehat q_k^\star$ passes through a turning point while the oscillator
+remains active.
+
+The Hamiltonian relation therefore fixes the units of the denominator only.
+This is not an energy-matching or energy-conservation penalty: the numerator
+is the full complex vector-field error
+$\widehat q^\theta_k-\widehat q^\star_k$, and the reference scale $P_{b,k}$ is
+held fixed during optimization. In particular, coefficients with equal
+magnitude but different phase are not identified.
+
+The implemented soft activity, relative defect, and robust penalty are
+\begin{align}
+  a_{b,k}
+  &=\frac{P_{b,k}}{P_{b,k}+\alpha S_b+\epsilon_a},
+  &\alpha&=10^{-4},\label{eq:mode-activity}\\
+  r_{b,k}
+  &=\frac{|\widehat q_{b,k}^\theta-\widehat q_{b,k}^\star|^2}
+  {P_{b,k}+\beta S_b+\epsilon_a},
+  &\beta&=10^{-6},\label{eq:mode-ratio}\\
+  \rho(r)
+  &=2\left(\sqrt{1+\min\{r,100\}}-1\right),
+  &\epsilon_a&=10^{-24}.
+  \label{eq:mode-robust}
+\end{align}
+All quantities derived from the reference state are held fixed under
+differentiation.  The loss is
+\begin{equation}
+  \ell_{\mathrm{mode},b}
+  =\frac{\sum_{k=1}^{K}a_{b,k}\rho(r_{b,k})}
+  {\max\{\sum_{k=1}^{K}a_{b,k},\epsilon_a\}},
+  \qquad
+  \mathcal L_{\mathrm{mode}}
+  =\frac1B\sum_{b=1}^B\ell_{\mathrm{mode},b}.
+  \label{eq:mode-loss}
+\end{equation}
+For $r\ll1$, $\rho(r)=r+O(r^2)$.  For $P_{b,k}\gg\alpha S_b$,
+$a_{b,k}\approx1$, so \eqref{eq:mode-loss} is approximately the average of
+$|e_{b,k}|^2/P_{b,k}$ over reference-active modes rather than the target-power-
+weighted average in \eqref{eq:l2-modal-weighting}.  Activity is soft,
+not binary: a mode with $P_{b,k}=10^{-4}S_b$ has weight $1/2$.  Since $P$ is a
+squared scale, this corresponds roughly to one percent of the strongest modal
+phase-space radius. Modes below that level fade continuously, while the smaller
+denominator floor and the capped pseudo-Huber penalty prevent numerical-noise
+coefficients or a single outlier from dominating.
+
+The connection to phase accumulation is exact at the level of the vector
+field.  Write a nonzero elevation coefficient as
+\begin{equation}
+  \widehat\eta_k=A_k e^{\mathrm i\phi_k}.
+\end{equation}
+Because $q=\eta_t$, any candidate value of $\widehat q_k$ induces
+\begin{equation}
+  \widehat q_k=e^{\mathrm i\phi_k}
+  \left(\dot A_k+\mathrm i A_k\dot\phi_k\right).
+\end{equation}
+At the same fixed training state, the reference and model therefore satisfy
+\begin{equation}
+  |\widehat q_k^\theta-\widehat q_k^\star|^2
+  =(\delta\dot A_k)^2+A_k^2(\delta\dot\phi_k)^2,
+  \label{eq:mode-rate-decomposition}
+\end{equation}
+where
+$\delta\dot A_k=\dot A_k^\theta-\dot A_k^\star$ and
+$\delta\dot\phi_k=\dot\phi_k^\theta-\dot\phi_k^\star$.
+Thus the complex loss measures errors in both modal amplitude-growth rate and
+modal phase rate without estimating or unwrapping a phase angle.  For a
+progressive linear mode, $|\widehat q_k^\star|=\omega_k A_k$, and hence
+\begin{equation}
+  r_k\approx\frac12\left[
+  \left(\frac{\delta\dot A_k}{\omega_k A_k}\right)^2
+  +\left(\frac{\delta\dot\phi_k}{\omega_k}\right)^2
+  \right].
+  \label{eq:mode-linear-rate-error}
+\end{equation}
+A traveling-wave speed defect gives
+$\delta\dot\phi_k=-k\,\delta c$ and $c_k=\omega_k/k$, so its phase component is
+$r_k\approx\tfrac12(\delta c/c_k)^2$.  A persistent bias accumulates as
+$\delta\phi_k(T)=\int_0^T\delta\dot\phi_k(t)\dd t$ and therefore as a spatial
+translation.  This explains why a small one-step defect can matter in a long
+rollout.
+
+The loss does not pin an absolute position.  Simultaneously translating
+$\eta$, $q^\star$, and $q^\theta$ multiplies their Fourier coefficients by the
+same unit complex number and leaves \eqref{eq:mode-loss} unchanged.  It instead
+penalizes the erroneous modal velocity that would subsequently create a
+relative translation.  It is also complementary to the localized tangent
+loss below: the tangent loss retains one source-restricted physical-space
+projection of $q^\theta-q^\star$, whereas \eqref{eq:mode-loss} is universal and
+retains the complete complex error of every reference-active mode.
+
+\subsection{Hadamard identity}
+
+We suppress the fixed depth argument $h$ in this subsection.
+Define the vertical and horizontal surface velocities associated with a DNO
+evaluation by
+\begin{equation}
+  B_\theta=
+  \frac{\Gtheta(\eta)\xi+\eta_x\xi_x}{1+\eta_x^2},
+  \qquad
+  V_\theta=\xi_x-B_\theta\eta_x.
+  \label{eq:BV}
+\end{equation}
+For an exact DNO and any surface perturbation $\zeta$, the Hadamard
+shape-derivative formula is \cite[Theorem~3.20]{lannes2005}
+\begin{equation}
+  \D_\eta\G(\eta)[\zeta]\xi
+  =-\G(\eta)(\zeta B)-\partial_x(\zeta V).
+  \label{eq:hadamard}
+\end{equation}
+This is precisely the identity that makes the geometric expression for
+$\xi_t$ equal to the negative $\eta$-variation of the kinetic energy
+\begin{equation}
+  K_\theta(\eta,\xi)=\frac12\ip{\xi}{\Gtheta(\eta)\xi}.
+  \label{eq:learned-kinetic}
+\end{equation}
+Hence it is stronger and more local than merely penalizing the drift of the
+scalar Hamiltonian along one approximate time step.
+
+We approximate the derivative by a finite secant,
+\begin{equation}
+  S_\theta=
+  \frac{\Gtheta(\eta+\epsilon\zeta)\xi-
+        \Gtheta(\eta)\xi}{\epsilon}
+  +\Gtheta(\eta)(\zeta B_\theta)
+  +\partial_x(\zeta V_\theta).
+  \label{eq:hadamard-residual}
+\end{equation}
+The randomized direction is zero mean and supported on
+$0<|k|\leq128$. Its Fourier coefficients are divided by the $H^1$ weight
+before RMS normalization, preventing the probe energy from concentrating at
+the largest modes. Its physical RMS is matched to
+$\max(\mathrm{rms}(\eta-\bar\eta),10^{-3})$, and
+$\epsilon$ is sampled log-uniformly from $[10^{-3},3\times10^{-3}]$.
+
+Let $W(k)^2=1+k^2$ and $\project$ denote projection onto the resolved modes.
+The normalized consistency loss is
+\begin{equation}
+  \mathcal L_{\mathrm{shape}}(\theta)
+  =\mathbb E_{(\eta,\xi,h),\zeta}
+  \frac{\norm{W\project S_\theta}_2^2}
+  {\norm{W\project\left[
+      \Gtheta(\eta)(\zeta B_\theta)+
+      \partial_x(\zeta V_\theta)\right]}_2^2+10^{-12}}.
+  \label{eq:shape-loss}
+\end{equation}
+The finite secant avoids the mixed input--parameter higher-order automatic
+differentiation that would arise when optimizing a Jacobian-vector-product
+penalty directly.
+
+\subsection{Localized translation-tangent loss}
+\label{sec:tangent-loss}
+
+A translated solitary wave has the same Hamiltonian as the original profile,
+so scalar energy control cannot determine its propagation speed.  A global
+projection onto $\eta_x$ can cancel between counter-propagating or interacting
+crests.  C27 therefore uses a local least-squares projection on the three
+Tanaka training sources (historical source identifiers 5, 6, and 14).  First
+remove the spatial mean from $q^\theta$ and $q^\star$ and set
+$e=(q^\theta-\overline q^\theta)-(q^\star-\overline q^\star)$. Let
+$\widetilde h=\min\{h,5\}$, and let $K_{\widetilde h}$ denote periodic Gaussian
+smoothing with physical width $\widetilde h$. Define
+\begin{align}
+  C_{\widetilde h}&=K_{\widetilde h}*(\eta_x e),
+  &E_{\widetilde h}&=\max\{K_{\widetilde h}*(\eta_x^2),0\},\\
+  \delta c_{\widetilde h}(x)
+  &=-\frac{C_{\widetilde h}(x)}
+  {E_{\widetilde h}(x)+10^{-3}\max_y E_{\widetilde h}(y)+10^{-30}}.
+  \label{eq:localized-speed-error}
+\end{align}
+For the eligible batch indices
+$\mathcal I=\{b:\operatorname{source}_b\in\{5,6,14\},
+\max_x E_{\widetilde h_b}(x)>10^{-20}\}$, the dimensionless loss is
+\begin{equation}
+  \ell_{\mathrm{tan,loc},b}
+  =\frac{\int E_{\widetilde h_b}|\delta c_{\widetilde h_b}|^2/
+  (g\widetilde h_b)\dd x}{\int E_{\widetilde h_b}\dd x},
+  \qquad
+  \mathcal L_{\mathrm{tan,loc}}
+  =\frac{\sum_{b\in\mathcal I}\ell_{\mathrm{tan,loc},b}}
+  {\max\{|\mathcal I|,1\}}.
+  \label{eq:localized-tangent-loss}
+\end{equation}
+The $\sqrt{g\widetilde h}$ speed scale makes the local error dimensionless without an
+inverse fitted-speed singularity.  Unlike \eqref{eq:mode-loss}, this term
+discards the component of $e$ orthogonal to the locally smoothed translation
+direction and is inactive outside the designated solitary-wave sources.
+
+\subsection{Combined objective and optimization}
+
+Let $\chi_{16}(s)=1$ when the zero-based optimizer step satisfies
+$s\equiv0\pmod{16}$ and let it be zero otherwise. The C27 per-step training
+objective is
+\begin{equation}
+  \boxed{\begin{aligned}
+  \mathcal L_{\mathrm{C27}}(\theta;s)
+  &={\mathcal L}_2
+  +6w(s)\mathcal L_{\mathrm{mode}}
+  +10\mathcal L_{\mathrm{tan,loc}}
+  +10^{-2}w(s)\chi_{16}(s)\mathcal L_{\mathrm{shape}},\\
+  w(s)&=\min\left(\frac{s}{500},1\right).
+  \end{aligned}}
+  \label{eq:combined-loss}
+\end{equation}
+The active-mode term is evaluated on every batch and all wave families.  The
+tangent term is evaluated on every batch but averages only the eligible
+examples.  The shape term is evaluated in float64 on a random global
+microbatch of eight examples every 16 optimizer steps. This
+selective evaluation makes the shape regularizer affordable while sampling
+many independent states and directions over an epoch.
+
+The coefficient 6 in \eqref{eq:combined-loss} is empirical: the ablation below
+tests 6 against 0, not its optimality.  The three target-dependent terms use
+the same reference values in different geometries.  The mathematical distinction is
+that $\mathcal L_2$ controls total DNO error,
+$\mathcal L_{\mathrm{mode}}$ approximately equalizes the influence of the
+complete complex error over reference-active modal phase-space scales, and
+$\mathcal L_{\mathrm{tan,loc}}$ selects a local
+translation component on particular sources.  The Hadamard term is the only
+one that adds an independent operator-derivative identity.  Thus
+\eqref{eq:combined-loss} has four algebraic summands: three target-dependent
+losses and one intermittently evaluated identity penalty.  The three-term
+description used below refers only to the target-dependent part; it does not
+silently absorb or omit $\mathcal L_{\mathrm{shape}}$.
+
+Checkpoint selection uses
+\begin{equation}
+  \mathcal L_{\mathrm{val}}
+  =\mathcal L_2+6\mathcal L_{\mathrm{mode}}
+   +10\mathcal L_{\mathrm{tan,loc}},
+  \label{eq:c27-validation-loss}
+\end{equation}
+without a Hadamard secant. The primary C27/C28 deletion comparison uses the
+final epoch-40 checkpoint in both arms; epoch 40 also minimizes each arm's own
+validation objective.
+
+We optimize for 40 epochs with AdamW, global batch size 1024, learning rate
+$2\times10^{-5}$, weight decay $10^{-4}$, a 500-step learning-rate warmup, and
+cosine decay. Training is data-parallel over two devices. Because the periodic
+shape regularizer depends on the exact optimizer counter, checkpoint
+restoration verifies equality of the full train state across replicas,
+equality of Adam and schedule counters, and exact agreement between expected
+and observed regularizer activations. Checkpoint data are made durable before
+atomic publication of metadata.

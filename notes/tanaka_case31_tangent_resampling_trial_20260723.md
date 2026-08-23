@@ -167,7 +167,7 @@ oscillation without damping the GL evolution or changing the resolved
 surface dynamics materially. The result supports replacing piecewise-linear
 Tanaka placement in the generator.
 
-It does not yet justify immediate corpus regeneration. The next implementation
+It does not yet justify immediate dataset regeneration. The next implementation
 step is to move the tested Hermite evaluator into the Tanaka construction,
 add its knot/symmetry/periodicity tests, and repeat the comparison on a
 depth-and-steepness-stratified panel. The existing 257 nonnegative Tanaka

@@ -39,6 +39,9 @@ def test_saved_gxi_respects_rollout_lowpass() -> None:
         dno_order=0,
         pad_factor=1,
         filter_fraction=0.25,
+        gl2_post_step_houli=True,
+        gl2_post_step_houli_a=36.0,
+        gl2_post_step_houli_m=18.0,
     )
     initial_state = State(
         eta=jnp.zeros((2, nx)),

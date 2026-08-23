@@ -639,7 +639,7 @@ class QuotaDriverTests(unittest.TestCase):
         )
         self.assertEqual(
             first.to_json_record()["schema"],
-            "paper_corpus_accepted_quota_run_v2",
+            "paper_dataset_accepted_quota_run_v2",
         )
         for invalid_limit in (0, -1, True, 1.5):
             with self.subTest(invalid_limit=invalid_limit):

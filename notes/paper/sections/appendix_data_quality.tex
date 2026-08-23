@@ -1,0 +1,105 @@
+\section{Historical Tanaka screening and its replacement}
+\label{app:historical-cleaning}
+
+This appendix records a preprocessing rule used for the exploratory April FNO
+dataset.  The final v9 dataset was generated independently and did not inherit
+this rule.  We include the details because they explain exactly which pilot
+rows were removed and how that decision led to the periodic generator revision
+described in \cref{sec:data}.  That replacement constructor and dataset are
+complete, but the replacement dataset has not been used for reported training.
+
+\subsection{The rule that was applied}
+
+For one stored row, let $q^\star_j$ denote its stored DNO target at grid node
+$x_j$, set $q^\star_N=q^\star_0$, and form the cyclic forward differences
+$d_j=q^\star_{j+1}-q^\star_j$ for $j=0,\ldots,N-1$.  Given a relative dead
+zone $\rho$, retain only the signs of differences satisfying
+\begin{equation}
+  |d_j|>\rho\max_\ell|d_\ell|
+\end{equation}
+in their cyclic spatial order.  If the remaining signs are
+$s_1,\ldots,s_m$ with \(m\geq1\), define
+\begin{equation}
+  C_\rho(q^\star)=\sum_{i=1}^{m}\mathbf 1\{s_i\ne s_{i+1}\},
+  \qquad s_{m+1}=s_1.
+  \label{eq:historical-sign-count}
+\end{equation}
+If no difference survives the dead zone, set \(C_\rho(q^\star)=0\).
+The cleaner used $\rho=0.03$ and rejected a row when
+$C_{0.03}(q^\star)>10$.  It removed \num{548360} of \num{4261232} rows
+($12.87\%$), leaving a \num{3712872}-row archive.  The 500,000-row Tanaka set
+used by the April FNO runs was sampled from this retained archive.
+
+\subsection{Why it detected the old generator defect}
+
+The rule has a restricted interpretation for the pilot family.  For the
+exact water-wave equations, let
+$q=\G(\eta;h)\xi=\eta_t$.  An exactly translating profile
+$\eta(x,t)=\bar\eta(x-ct)$ satisfies
+\begin{equation}
+  q=-c\bar\eta_x,
+  \qquad q_x=-c\bar\eta_{xx}.
+  \label{eq:traveling-curvature-count}
+\end{equation}
+When the stored approximation $q^\star$ resolves this physical $q$, the
+dead-zoned count $C_\rho(q^\star)$ therefore approximately counts transitions
+between the principal curvature lobes of a translating profile.  A smooth
+unimodal crest has two inflection points.  The one-to-three-crest pilot
+construction consequently has a nominal count of roughly two to six; the
+cutoff at ten allowed distortion and crest interaction.
+
+The old builder translated a real-line solitary-wave profile and interpolated
+it with zero values outside the tabulated support.  A crest near a periodic
+endpoint could therefore have a non-negligible tail cut to zero.  The resulting
+endpoint mismatch has slowly decaying Fourier coefficients, and derivatives in
+the order-six DNO amplify the associated ringing.  This produces additional
+alternating curvature lobes in $q^\star$, which explains why
+\cref{eq:historical-sign-count} responded to the defect.
+
+The connection can be measured on all 254 reconstructable initial conditions
+from historical batch zero.  Define the normalized discrete endpoint mismatch
+\begin{equation}
+  J_\eta=
+  \frac{|\eta(x_0)-\eta(x_{N-1})|}{\norm{\eta}_\infty}.
+  \label{eq:endpoint-mismatch}
+\end{equation}
+Here \(\norm{\eta}_\infty=\max_j|\eta(x_j)|\).
+All 12 initial rows rejected by the sign rule had $J_\eta>0.05$, with median
+$0.219$, while the 242 retained rows had median $2.50\times10^{-6}$.  For each
+case, the fraction rejected over its 200 stored times had Spearman correlation
+$-0.701$ with the initial distance of the nearest crest from the boundary
+($p=8.4\times10^{-39}$).
+
+A construction-level counterfactual isolates the cause.  The diagnostic
+script rebuilt the same 12 rejected crest specifications by summing the
+central profile and its two adjacent periodic images.  Those three images
+were sufficient for these particular compactly supported profiles because
+all other images vanished on $[0,L)$.  This change from nonperiodic zero
+extension reduced every sign count from $12$--$38$ to $2$--$8$.  The
+replacement constructor does not hard-code three images; it sums every
+periodic image whose support intersects $[0,L)$.  On the three-grid fixed-band
+audit of
+\cref{eq:three-grid-discrepancy}, their median $N$--$2N$ DNO discrepancy falls
+from $0.0827$ to $7.03\times10^{-6}$, and their median $2N$--$4N$ discrepancy
+falls from $0.147$ to $2.18\times10^{-6}$.  Thus the sign rule was responding
+to the old embedding operation, not merely to globally rough profiles.
+
+\subsection{Why it is not a production validity criterion}
+
+The count is neither necessary nor sufficient for fixed-band resolution.  At
+the $10^{-3}$ two-grid tolerance, all 12 historical frame-zero sign
+rejections fail the fixed-band resolution test, but so do 29 of the 242
+sign-retained cases.  Thus every sign-rule rejection failed that test, but the
+rule found only $12$ of its $41$ failures.  Conversely, independently
+converged periodic multi-crest and Stokes states can have more than ten
+physical sign transitions.
+For example, three corrected periodic Tanaka states with 12, 18, and 20
+transitions have fixed-band $N$--$2N$ discrepancies between
+$4.90\times10^{-6}$ and $7.17\times10^{-6}$.
+
+Consequently, the sign count is reported only as a family-specific historical
+curvature screen.  The replacement construction removes its failure mechanism
+by periodic wrapping and spectral restriction, while the cross-grid
+fixed-band quantity \cref{eq:three-grid-discrepancy} tests the numerical
+property of interest without imposing a bound on the number of physical
+extrema.

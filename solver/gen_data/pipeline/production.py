@@ -1,4 +1,4 @@
-"""Deterministic case allocation for the paper-corpus generators.
+"""Deterministic case allocation for the paper-dataset generators.
 
 This module deliberately contains no numerical solver or archive logic.  It
 only fixes a split, a parameter cell, and a reproducible random-stream key for
@@ -10,6 +10,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+from types import MappingProxyType
+from typing import Final
+
+import numpy as np
 
 
 class SplitId(str, Enum):
@@ -21,7 +25,7 @@ class SplitId(str, Enum):
 
 
 class PhysicalFamilyId(IntEnum):
-    """Stable integer identifiers for the four paper-corpus families."""
+    """Stable integer identifiers for the four paper-dataset families."""
 
     STOKES = 1
     TANAKA = 2
@@ -29,7 +33,24 @@ class PhysicalFamilyId(IntEnum):
     JONSWAP_TMA = 4
 
 
-PAPER_CORPUS_REVISION_ID = 2
+PAPER_DATASET_REVISION_BY_FAMILY: Final[Mapping[PhysicalFamilyId, int]] = (
+    MappingProxyType(
+        {
+            PhysicalFamilyId.STOKES: 2,
+            PhysicalFamilyId.TANAKA: 3,
+            PhysicalFamilyId.BENJAMIN_FEIR: 4,
+            PhysicalFamilyId.JONSWAP_TMA: 4,
+        }
+    )
+)
+
+
+def paper_dataset_revision_id(family_id: PhysicalFamilyId) -> int:
+    """Return the current generator revision for one physical family."""
+
+    if not isinstance(family_id, PhysicalFamilyId):
+        raise TypeError("family_id must be a PhysicalFamilyId")
+    return PAPER_DATASET_REVISION_BY_FAMILY[family_id]
 
 
 _SPLIT_ROOTS = {
@@ -114,6 +135,15 @@ class CaseKey:
         )
 
 
+def random_generator_for_case(case_key: CaseKey) -> np.random.Generator:
+    """Create the reproducible NumPy PCG64 generator for one attempted case."""
+
+    seed_sequence = np.random.SeedSequence(case_key.seed_words)
+    # PCG64 is NumPy's 64-bit Permuted Congruential Generator. Keeping the
+    # algorithm fixed makes every case's random draws exactly reproducible.
+    return np.random.Generator(np.random.PCG64(seed_sequence))
+
+
 @dataclass(frozen=True)
 class CellQuota:
     """Required accepted-case count for one declared parameter cell."""
@@ -149,7 +179,7 @@ def balanced_cell_quotas(
 
     If ``accepted_case_count = q * len(cell_ids) + r``, the first ``r`` cells
     receive ``q + 1`` cases and every other cell receives ``q``.  The caller's
-    cell order is therefore part of the reproducible corpus specification.
+    cell order is therefore part of the reproducible dataset specification.
     """
 
     if accepted_case_count < 0:

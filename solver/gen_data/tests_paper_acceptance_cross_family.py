@@ -1,8 +1,7 @@
 """Cross-family CPU smoke for the shared refinement decision.
 
-The Benjamin--Feir arm exercises the repository's current production
-constructor. It is not evidence for the proposed literal-JCP09 constructor,
-which does not yet have a public parameterized implementation.
+The Benjamin--Feir arm exercises the revision-4 JCP09 constructor used by the
+current paper dataset.
 
 Run with:
 
@@ -24,12 +23,11 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.generate_bf_dataset import (  # noqa: E402
-    build_bf_initial_conditions_batched,
+from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
+    build_initial_conditions as build_benjamin_feir_initial_conditions,
+    deep_water_proxy_depth,
 )
-from solver.gen_data.generate_linear_dataset import build_linear_batch  # noqa: E402
-from solver.gen_data.generate_stokes_dataset import build_stokes_batch  # noqa: E402
-from solver.gen_data.generate_tanaka_dataset_v2 import (  # noqa: E402
+from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     build_per_case_initial_conditions,
 )
 from solver.gen_data.multi_crest import CrestSpec  # noqa: E402
@@ -48,6 +46,9 @@ from solver.solvers.time_integrator import (  # noqa: E402
     apply_lowpass,
     rollout,
 )
+from solver.reference_solutions.stokes_wave import (  # noqa: E402
+    stokes_eta_xi_at_phase,
+)
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
     make_default_tanaka_template,
 )
@@ -60,7 +61,6 @@ GRAVITY = 1.0
 FILTER_FRACTION = 0.25
 DELIVERED_WAVENUMBER = 32.0
 FAMILY_NAMES = (
-    "linear",
     "finite_stokes",
     "tanaka",
     "current_benjamin_feir",
@@ -73,32 +73,18 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
     x = jnp.asarray(x, dtype=jnp.float64)
     k = jnp.asarray(k, dtype=jnp.float64)
 
-    linear_eta, linear_xi, _ = build_linear_batch(
+    stokes_eta, stokes_xi = stokes_eta_xi_at_phase(
         x=x,
-        k=k,
+        phase=0.0,
+        n0=2,
+        a0=0.025,
         length=LENGTH,
+        depth=0.5,
         gravity=GRAVITY,
-        n0=jnp.asarray([2], dtype=jnp.int32),
-        a0=jnp.asarray([0.025], dtype=jnp.float64),
-        depth=jnp.asarray([0.5], dtype=jnp.float64),
-        phase=jnp.asarray([0.3], dtype=jnp.float64),
-        direction=jnp.asarray([1], dtype=jnp.int32),
-        dno_order=6,
-        pad_factor=8,
-    )
-    stokes_eta, stokes_xi, _ = build_stokes_batch(
-        x=x,
-        k=k,
-        length=LENGTH,
-        gravity=GRAVITY,
-        n0=jnp.asarray([2], dtype=jnp.int32),
-        a0=jnp.asarray([0.025], dtype=jnp.float64),
-        depth=jnp.asarray([0.5], dtype=jnp.float64),
-        phase=jnp.asarray([0.0], dtype=jnp.float64),
         ichoi=1,
-        dno_order=6,
-        pad_factor=8,
     )
+    stokes_eta = stokes_eta[None, :]
+    stokes_xi = stokes_xi[None, :]
 
     tanaka_depth = 0.08
     template = make_default_tanaka_template(
@@ -130,36 +116,32 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
 
     bf_params = {
         "n_carr": np.asarray([5], dtype=np.int32),
-        "n_l": np.asarray([3], dtype=np.int32),
-        "n_r": np.asarray([7], dtype=np.int32),
+        "side_offset": np.asarray([1], dtype=np.int32),
         "eps_carrier": np.asarray([0.08], dtype=np.float64),
-        "eps_pert_l": np.asarray([0.10], dtype=np.float64),
-        "eps_pert_r": np.asarray([0.10], dtype=np.float64),
-        "phase_l": np.asarray([-np.pi / 4.0], dtype=np.float64),
-        "phase_r": np.asarray([-np.pi / 4.0], dtype=np.float64),
+        "eps_pert": np.asarray([0.10], dtype=np.float64),
+        "translation": np.asarray([0.0], dtype=np.float64),
     }
-    bf_eta, bf_xi = build_bf_initial_conditions_batched(
+    bf_eta, bf_xi = build_benjamin_feir_initial_conditions(
         x=x,
-        params=bf_params,
+        parameters=bf_params,
         length=LENGTH,
         gravity=GRAVITY,
-        bf_2nd_order=True,
         dtype=jnp.float64,
     )
 
     eta = jnp.concatenate(
-        (linear_eta, stokes_eta, tanaka_eta, bf_eta),
+        (stokes_eta, tanaka_eta, bf_eta),
         axis=0,
     )
     xi = jnp.concatenate(
-        (linear_xi, stokes_xi, tanaka_xi, bf_xi),
+        (stokes_xi, tanaka_xi, bf_xi),
         axis=0,
     )
     eta = apply_lowpass(eta, k, FILTER_FRACTION)
     xi = apply_lowpass(xi, k, FILTER_FRACTION)
     xi = xi - jnp.mean(xi, axis=-1, keepdims=True)
     depths = jnp.asarray(
-        [[0.5], [0.5], [tanaka_depth], [2.0]],
+        [[0.5], [tanaka_depth], [deep_water_proxy_depth(LENGTH)]],
         dtype=jnp.float64,
     )
     jax.block_until_ready(xi)

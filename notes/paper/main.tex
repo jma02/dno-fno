@@ -1,0 +1,80 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm,mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\hypersetup{colorlinks=true,linkcolor=blue!45!black,
+  citecolor=blue!45!black,urlcolor=blue!45!black}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\T}{\mathbb{T}}
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\Gtheta}{\mathcal{G}_{\theta}}
+\newcommand{\D}{\mathrm{D}}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\ip}[2]{\left\langle #1,#2\right\rangle}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\project}{P_K}
+
+\title{A Structure-Constrained Neural Surrogate for the\\
+Dirichlet--Neumann Operator in Nonlinear Water-Wave Simulation}
+\author{Jonathan Ma}
+\date{Draft of \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study neural approximation of the finite-depth Dirichlet--Neumann operator
+for the two-dimensional irrotational water-wave problem with one horizontal
+coordinate.
+The central difficulty is that a small error in one operator evaluation need
+not remain small after repeated use inside a Hamiltonian time integrator.  Our
+surrogate retains the exact zeroth- and first-order Craig--Sulem terms and
+represents only the second- and higher-order contribution by a self-adjoint
+neural residual.  Its training objective combines relative $L^2$ data
+misfit with Fourier-mode, local translation-tangent, and Hadamard
+shape-derivative consistency terms.  Reference trajectories use a
+double-precision order-six Craig--Sulem expansion, padded nonlinear products,
+and an integrating-factor two-stage Gauss--Legendre method.  The reported
+checkpoints use the historical v9 snapshot archive.  The parameterized,
+case-split replacement dataset specified in this paper is complete and
+source-authenticated, but no reported checkpoint was trained on it.
+
+An unguarded 320-trajectory test of an earlier model with the same structural
+decomposition contains no nonfinite surrogate rollout, although two finite
+Tanaka trajectories exceed unit relative surface error.  Under the stated
+soliton-selective guarded protocol, the selected model remains finite in all
+320 registered rollouts drawn from ten panels representing five initial-wave
+families.  Among the 305 cases with valid reference trajectories, the terminal
+relative surface error has median $0.00285$ and 95th percentile $0.04769$.
+Removing only the Fourier-mode term improves one-step validation error but
+worsens the pooled terminal 95th percentile by $31\%$ and the mean by $45\%$.
+These results show that one-step value accuracy alone does not predict the
+long-time error tail.  They also leave a clear limitation: the strongest
+current accuracy result is conditional on the declared guard, and its worst
+remaining error is a finite Tanaka error.
+\end{abstract}
+
+\input{sections/01_problem_introduction}
+\input{sections/02_numerical_solver}
+\input{sections/03_data_generation}
+\input{sections/04_csdno_architecture}
+\input{sections/05_hamiltonian_loss}
+\input{sections/06_numerical_results}
+\input{sections/07_discussion}
+
+\appendix
+\input{sections/appendix_data_quality}
+\input{sections/appendix_rescaling}
+
+\bibliographystyle{plain}
+\bibliography{references}
+\end{document}

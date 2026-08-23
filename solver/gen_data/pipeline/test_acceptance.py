@@ -1,4 +1,4 @@
-"""Smoke-level tests for the paper-corpus acceptance decisions."""
+"""Smoke-level tests for the paper-dataset acceptance decisions."""
 from __future__ import annotations
 
 import math
@@ -10,6 +10,8 @@ from solver.gen_data.pipeline.acceptance import (
     RefinementTrajectory,
     evaluate_complete_numerical_trajectory,
     evaluate_finite_stokes_support,
+    evaluate_hamiltonian_drift,
+    evaluate_internal_trajectory_health,
     evaluate_temporal_refinement,
 )
 from solver.gen_data.pipeline.quality import QualityReason
@@ -122,6 +124,93 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
         self.assertTrue(decision.failed & QualityReason.INCOMPLETE_TRAJECTORY)
         self.assertTrue(decision.failed & QualityReason.NONFINITE_TARGET)
         self.assertTrue(decision.failed & QualityReason.GL2_STAGE_RESIDUAL)
+
+
+class HamiltonianDriftTest(unittest.TestCase):
+    def test_exact_threshold_passes_and_larger_drift_fails(self) -> None:
+        threshold = 1.0 / 1024.0
+        eta = np.zeros((2, 1), dtype=np.float64)
+        xi = np.ones_like(eta)
+        boundary_gxi = np.asarray(
+            [[2.0], [2.0 * (1.0 + threshold)]],
+            dtype=np.float64,
+        )
+
+        metrics, boundary = evaluate_hamiltonian_drift(
+            eta,
+            xi,
+            boundary_gxi,
+            gravity=1.0,
+            dx=1.0,
+            threshold=threshold,
+        )
+        _, larger = evaluate_hamiltonian_drift(
+            eta,
+            xi,
+            np.asarray([[2.0], [2.0 * (1.0 + 2.0 * threshold)]]),
+            gravity=1.0,
+            dx=1.0,
+            threshold=threshold,
+        )
+
+        self.assertEqual(metrics.maximum_relative_drift, threshold)
+        self.assertTrue(boundary.accepted)
+        self.assertFalse(larger.accepted)
+        self.assertTrue(larger.failed & QualityReason.HAMILTONIAN_DRIFT)
+
+    def test_zero_initial_hamiltonian_uses_declared_tiny_denominator(self) -> None:
+        eta = np.asarray([[0.0], [1.0e-6]], dtype=np.float64)
+        xi = np.zeros_like(eta)
+        gxi = np.zeros_like(eta)
+
+        metrics, decision = evaluate_hamiltonian_drift(
+            eta,
+            xi,
+            gxi,
+            gravity=1.0,
+            dx=1.0,
+            threshold=1.0,
+            tiny=1.0e-6,
+        )
+
+        self.assertEqual(metrics.maximum_relative_drift, 5.0e-7)
+        self.assertTrue(decision.accepted)
+
+
+class InternalTrajectoryHealthTest(unittest.TestCase):
+    def test_each_internal_requirement_rejects_independently(self) -> None:
+        healthy = {
+            "hamiltonian": np.asarray([2.0, 2.001], dtype=np.float64),
+            "state_finite": np.asarray([True, True]),
+            "dno_finite": np.asarray([True, True]),
+            "minimum_water_column": np.asarray([1.0, 0.5]),
+        }
+
+        metrics, decision = evaluate_internal_trajectory_health(
+            **healthy,
+            hamiltonian_drift_threshold=1.0e-3,
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertAlmostEqual(
+            metrics.maximum_relative_hamiltonian_drift,
+            5.0e-4,
+        )
+        defects = (
+            ("hamiltonian", np.asarray([2.0, 2.01]), QualityReason.HAMILTONIAN_DRIFT),
+            ("state_finite", np.asarray([True, False]), QualityReason.NONFINITE_STATE),
+            ("dno_finite", np.asarray([True, False]), QualityReason.NONFINITE_TARGET),
+            ("minimum_water_column", np.asarray([1.0, 0.0]), QualityReason.BOTTOM_CLEARANCE),
+        )
+        for name, value, reason in defects:
+            inputs = {**healthy, name: value}
+            with self.subTest(name=name):
+                _, failed = evaluate_internal_trajectory_health(
+                    **inputs,
+                    hamiltonian_drift_threshold=1.0e-3,
+                )
+                self.assertFalse(failed.accepted)
+                self.assertTrue(failed.failed & reason)
 
 
 class TemporalRefinementSmokeTest(unittest.TestCase):

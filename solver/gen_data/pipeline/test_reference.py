@@ -1,4 +1,4 @@
-"""Tests for the frozen paper-corpus DNO target."""
+"""Tests for the frozen paper-dataset DNO target."""
 from __future__ import annotations
 
 import os

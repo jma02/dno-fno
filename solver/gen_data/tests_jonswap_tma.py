@@ -8,6 +8,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.jonswap_tma import (
+    PAPER_PEAK_STEEPNESS_MAXIMUM,
+    PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+    PAPER_RELATIVE_FREQUENCY_MINIMUM,
     PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER,
     PAPER_RESOLVED_BAND_QUADRATURE_ORDER,
     PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
@@ -24,6 +27,7 @@ from solver.gen_data.jonswap_tma import (
     jonswap_tma_spectrum,
     paper_support_violations,
     positive_mode_wavenumbers,
+    relative_frequency_interval_fits,
     resolved_band_window,
     sample_jonswap_tma_phases,
     tma_depth_factor,
@@ -157,13 +161,62 @@ class JonswapTmaFormulaTest(unittest.TestCase):
             resolved_band_window(probe, band=BAND), expected, atol=1.0e-15
         )
 
+    def test_relative_frequency_spectrum_is_normalized_and_truncated(self) -> None:
+        parameters = JonswapTmaParameters(0.2, 0.016, 9.0, 3.3, 0.5)
+        interval = (
+            PAPER_RELATIVE_FREQUENCY_MINIMUM,
+            PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+        )
+        spectrum = jonswap_tma_spectrum(
+            parameters,
+            band=BAND,
+            relative_frequency_interval=interval,
+        )
+        frequencies = finite_depth_angular_frequency(
+            spectrum.wavenumbers,
+            depth=parameters.depth,
+            gravity=1.0,
+        )
+        peak_frequency = finite_depth_angular_frequency(
+            np.asarray([parameters.peak_wavenumber]),
+            depth=parameters.depth,
+            gravity=1.0,
+        )[0]
+        self.assertAlmostEqual(float(np.sum(spectrum.energy_fractions)), 1.0)
+        self.assertTrue(
+            np.all(spectrum.energy_fractions[frequencies > 2.6 * peak_frequency] == 0.0)
+        )
+        self.assertTrue(
+            np.all(spectrum.energy_fractions[frequencies < 0.4 * peak_frequency] == 0.0)
+        )
+
+    def test_relative_frequency_spectrum_fails_if_upper_endpoint_is_unresolved(
+        self,
+    ) -> None:
+        parameters = JonswapTmaParameters(1.5 / 24.0, 0.004, 24.0, 3.3, 0.5)
+        self.assertFalse(
+            relative_frequency_interval_fits(
+                parameters,
+                band=BAND,
+                relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds the resolved band"):
+            jonswap_tma_spectrum(
+                parameters,
+                band=BAND,
+                relative_frequency_interval=(
+                    PAPER_RELATIVE_FREQUENCY_MINIMUM,
+                    PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+                ),
+            )
 
 class JonswapTmaSupportTest(unittest.TestCase):
     def test_three_declared_strata(self) -> None:
         examples = {
             "shallow": JonswapTmaParameters(0.04, 0.008, 20.0, 3.3, 0.5),
-            "finite": JonswapTmaParameters(0.2, 0.02, 9.0, 1.0, 1.0),
-            "deep": JonswapTmaParameters(10.0, 0.02, 9.0, 5.0, 0.0),
+            "finite": JonswapTmaParameters(0.2, 0.016, 9.0, 1.0, 1.0),
+            "deep": JonswapTmaParameters(10.0, 0.016, 9.0, 5.0, 0.0),
         }
         for stratum, parameters in examples.items():
             with self.subTest(stratum=stratum):
@@ -172,15 +225,60 @@ class JonswapTmaSupportTest(unittest.TestCase):
                     paper_support_violations(parameters, stratum=stratum), ()
                 )
 
-    def test_support_rejects_parameters_not_random_phases(self) -> None:
-        too_steep = JonswapTmaParameters(0.05, 0.016, 20.0, 3.3, 0.5)
-        violations = paper_support_violations(too_steep, stratum="shallow")
-        self.assertIn("shallow k_p H_s/2 must not exceed 0.15", violations)
+    def test_global_peak_steepness_boundary_is_closed(self) -> None:
+        for stratum, template in {
+            "shallow": JonswapTmaParameters(0.05, 0.008, 20.0, 3.3, 0.5),
+            "finite": JonswapTmaParameters(0.5, 0.02, 8.0, 3.3, 0.5),
+            "deep": JonswapTmaParameters(10.0, 0.02, 8.0, 3.3, 0.5),
+        }.items():
+            boundary_height = (
+                2.0 * PAPER_PEAK_STEEPNESS_MAXIMUM / template.peak_wavenumber
+            )
+            inside = JonswapTmaParameters(
+                template.depth,
+                boundary_height,
+                template.peak_wavenumber,
+                template.peak_enhancement,
+                template.right_moving_fraction,
+            )
+            with self.subTest(stratum=stratum, side="inside"):
+                self.assertEqual(
+                    paper_support_violations(inside, stratum=stratum), ()
+                )
+            outside = JonswapTmaParameters(
+                template.depth,
+                np.nextafter(boundary_height, np.inf),
+                template.peak_wavenumber,
+                template.peak_enhancement,
+                template.right_moving_fraction,
+            )
+            with self.subTest(stratum=stratum, side="outside"):
+                self.assertIn(
+                    "JONSWAP/TMA k_p H_s/2 must not exceed 0.08",
+                    paper_support_violations(outside, stratum=stratum),
+                )
+
+    def test_support_rejects_unsupported_discrete_parameters(self) -> None:
 
         unsupported_gamma = JonswapTmaParameters(0.2, 0.02, 9.0, 2.0, 0.5)
+
         self.assertIn(
             "peak_enhancement must be one of {1, 3.3, 5}",
             paper_support_violations(unsupported_gamma, stratum="finite"),
+        )
+
+    def test_relative_frequency_resolution_is_an_input_only_support_condition(
+        self,
+    ) -> None:
+        unresolved = JonswapTmaParameters(1.5 / 24.0, 0.004, 24.0, 3.3, 0.5)
+        self.assertIn(
+            "JONSWAP/TMA relative upper frequency must fit in the resolved band",
+            paper_support_violations(
+                unresolved,
+                stratum="shallow",
+                band=BAND,
+                relative_frequency_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+            ),
         )
 
 

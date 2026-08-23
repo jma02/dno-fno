@@ -40,7 +40,7 @@ exactly \emph{one} systematic weakness: \textbf{shallow water ($h \lesssim 0.1$)
 at moderate steepness ($a/h \gtrsim 0.15$) on non-soliton states}, a region
 where the training set has essentially no coverage. The v4 dataset adds a
 purpose-built \emph{shallow--steep wavetrain} family ($\sim$480k samples) to the
-otherwise-unchanged v3 corpus, followed by a from-scratch retrain.
+otherwise-unchanged v3 dataset, followed by a from-scratch retrain.
 
 \section{Findings that reshaped the evaluation}
 
@@ -186,7 +186,7 @@ amplitudes sit well inside v3's normalization envelope.
 
 \texttt{combined\_dataset\_v4.npz} = v3 byte-identical (5{,}993{,}989 rows; no
 relabeling, no resampling) $+$ the new family appended as source 11
-($\sim$7.4\% of the corpus). No global reshuffle is needed: the trainer's
+($\sim$7.4\% of the dataset). No global reshuffle is needed: the trainer's
 \texttt{build\_split\_indices} applies a seeded random permutation, scattering
 new rows uniformly over train/val/test. Normalization statistics are recomputed
 from v4 (no sidecar pinning --- this is a from-scratch train, not a resume).

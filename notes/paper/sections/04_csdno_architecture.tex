@@ -1,0 +1,129 @@
+\section{CS-DNO architecture}
+\label{sec:architecture}
+
+\subsection{Structural requirements}
+
+For fixed $(\eta,h)$, the DNO is linear and self-adjoint in $\xi$ and is
+positive semidefinite modulo constant potentials.  Its dependence on $\eta$
+is analytic near the flat surface, and the Craig--Sulem coefficients alternate
+Fourier multipliers with pointwise multiplication by surface fields.  CS-DNO
+imposes linearity and self-adjointness, fixes the first two Taylor
+coefficients, and restricts the learned remainder to second and higher order:
+\begin{equation}
+  \boxed{\quad
+  \Gtheta(\eta;h)\xi
+  =\G_0(h)\xi+\G_1(\eta;h)\xi+R_\theta(\eta;h)\xi,
+  \qquad R_\theta(\eta;h)=O(\eta^2).
+  \quad}
+  \label{eq:current-model}
+\end{equation}
+The analytic terms are given by \eqref{eq:g0}--\eqref{eq:g1}; the $\G_1$
+Fourier chain is evaluated in float64 and is not cut in wavenumber.
+
+The exact first-order term is important for more than low-amplitude accuracy.
+Its Fourier kernel between modes $k'$ and $k$ is
+\begin{equation}
+  \left(kk'-g_0(k;h)g_0(k';h)\right)\widehat\eta_{k-k'}.
+  \label{eq:g1-kernel}
+\end{equation}
+In deep water this vanishes for same-sign $k$ and $k'$. Earlier fully learned
+models approximated this cancellation using several blocks and features, but
+transfer-kernel probes revealed persistent same-sign sidebands. Fixing
+$\G_1$ analytically and forcing $R_\theta$ to begin at $O(\eta^2)$ prevents
+the learned residual from overwriting the null form.
+
+The corresponding literal component deletion is
+\begin{equation}
+  \Gtheta^{(-1)}(\eta;h)\xi
+  =\G_0(h)\xi+R_\theta^{(-1)}(\eta;h)\xi,
+  \qquad R_\theta^{(-1)}(\eta;h)=O(\eta^2).
+  \label{eq:g1-ablation}
+\end{equation}
+This definition holds the learned parameterization and parameter count fixed;
+only the analytic summand $\G_1$ is deleted.  Since
+$R_\theta^{(-1)}=O(\eta^2)$, the ablated model has zero first variation at the
+flat surface and cannot recover the missing $\G_1$ by training.  It therefore
+defines a literal component deletion, not a comparison with a different
+$\G_0$-only architecture whose learned residual is allowed to begin at
+$O(\eta)$.
+
+\subsection{Surface features and depth-aware multipliers}
+
+The surface is represented by the fixed feature stack
+\begin{equation}
+  E_0(\eta)=
+  \left[\eta,\eta^2,\eta^3,\partial_x\eta,
+  \partial_x^2\eta,|D|^{1/2}\eta,\mathcal H\eta\right].
+  \label{eq:eta-features}
+\end{equation}
+Here $|D|^{1/2}$ and $\mathcal H$ are the Fourier multipliers with symbols
+$|k|^{1/2}$ and $-\mathrm i\,\operatorname{sgn}(k)$, respectively.
+A shared pointwise multilayer perceptron maps these channels to 320 latent
+features. Polynomial channels expose the analyticity orders directly, while
+slope, curvature, half-derivative, and Hilbert-transform channels expose
+geometric and phase information that a pointwise polynomial cannot recover.
+There are no learned spatial convolutions in this trunk; nonlocal coupling is
+introduced by Fourier multipliers.
+
+For each nonnegative Fourier mode represented on the grid, a small MLP
+produces a real multiplier from the physical dispersion coordinates
+\begin{equation}
+  m_\theta(k,h)
+  =\operatorname{MLP}_\theta
+  \left(k,\widetilde h,\tanh(\widetilde h|k|),
+  |k|\tanh(\widetilde h|k|)\right),
+  \qquad \widetilde h=\min\{h,5\}.
+  \label{eq:depth-multiplier}
+\end{equation}
+Thus the shallow-to-deep crossover is supplied explicitly rather than learned
+from unrelated depth channels.  The same clipped depth $\widetilde h$ is used
+in the analytic $\G_0$ and $\G_1$ terms.
+Before depth clipping, the combination $h|k|$ is invariant under the
+simultaneous dilation in \eqref{eq:dno-rescaling}: $h$ gains the same factor
+that $|k|$ loses.  This motivates exposing $h|k|$ to the multiplier network.
+The active model also
+uses absolute $k$ and $h$ and statistically normalized surface features, so we
+do not claim that its learned residual is exactly dilation-equivariant.
+
+\subsection{Self-adjoint Craig--Sulem blocks}
+
+Each learned block is a sum of $r$ multiplier--gain--multiplier sandwiches,
+\begin{equation}
+  R_{\theta,b}(\eta;h)\xi
+  =\sum_{j=1}^{r}M_{b,j}(h)^*
+    \left[\Phi_{b,j}(\eta)\,M_{b,j}(h)\xi\right].
+  \label{eq:cs-block}
+\end{equation}
+Here $M_{b,j}$ is diagonal in Fourier space and
+$\Phi_{b,j}(\eta)$ is a real pointwise gain obtained by projecting the shared
+surface features. Tying the input and output multipliers makes every branch
+self-adjoint. Since $\xi$ appears exactly once, the full network is exactly
+linear in $\xi$.  The gain $\Phi_{b,j}$ is not constrained to be nonnegative,
+so this factorization does not impose positive semidefiniteness on the learned
+remainder.
+
+The residual must vanish to first order in $\eta$. In the implementation,
+biases are removed from the residual feature path.  If $f_\theta(\eta)$
+denotes the resulting latent feature, the block receives
+$f_\theta(\eta)\tanh(f_\theta(\eta))$.  Since
+$f_\theta(\epsilon\eta)=O(\epsilon)$, this lifted feature is
+$O(\epsilon^2)$. Consequently $R_\theta(0)=0$ and
+$\D_\eta R_\theta(0)=0$ for every parameter value, not only at
+initialization. Eight blocks with 320 branches each are summed and divided by
+the square root of the total branch count. The C27 configuration has
+1,342,400 trainable parameters, approximately 9.8 times fewer than the
+generic 13.1-million-parameter FNO baseline.
+
+\subsection{Why this factorization matters}
+
+For fixed $(\eta,h)$, a generic neural operator may learn arbitrary nonlinear
+dependence on $\xi$ and must rediscover both flat-surface dispersion and the
+first nonlinear cancellation. CS-DNO restricts learning to the unknown
+higher-order correction. The architecture is globally nonlocal because its
+Fourier multipliers have global physical support, while retaining the
+multilinear organization of the analytic expansion. In earlier single-seed,
+three-epoch screens on the v7 dataset, replacing the full feature stack by
+$\eta$ alone increased validation loss from $0.00701$ to $0.0162$, whereas
+reducing eight blocks to one increased it to $0.00765$.  These short
+one-step tests identify the feature stack as more important than block count
+in that setting; they are not long-rollout or C27 ablations.

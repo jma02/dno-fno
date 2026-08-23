@@ -7,7 +7,7 @@ Workflow:
     # 1. Upload a flat NPZ training dataset:
     modal run scripts/modal_train.py::upload_data
 
-    # For a manifest-backed corpus, use upload_dataset_view instead.
+    # For a manifest-backed dataset, use upload_dataset_view instead.
 
     # 2. Train (single-GPU H100 by default; pass --gpu-spec to override):
     modal run scripts/modal_train.py::train \\

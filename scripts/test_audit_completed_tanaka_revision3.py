@@ -35,16 +35,16 @@ from scripts.audit_completed_tanaka_revision3 import (  # noqa: E402
     _validate_summary_cell_counts,
     _validate_shard,
 )
-from scripts.build_paper_corpus_view import TRAJECTORY_MAP_DTYPES  # noqa: E402
+from scripts.build_paper_dataset_view import TRAJECTORY_MAP_DTYPES  # noqa: E402
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
-from solver.gen_data.tanaka_population import (  # noqa: E402
-    TANAKA_POPULATION_CELLS,
-    sample_tanaka_population,
+from solver.gen_data.tanaka_sampling import (  # noqa: E402
+    TANAKA_SAMPLE_CELLS,
+    sample_tanaka_case,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     sample_tanaka_trajectory_cases,
@@ -78,13 +78,13 @@ def _assignment() -> AttemptAssignment:
             stream_id=0,
             attempt_index=0,
         ),
-        TANAKA_POPULATION_CELLS[0].cell_id,
+        TANAKA_SAMPLE_CELLS[0].cell_id,
     )
 
 
 def _proposed_case() -> ProposedCase:
     assignment = _assignment()
-    sample = sample_tanaka_population(
+    sample = sample_tanaka_case(
         assignment,
         domain_length=TrajectoryExecutionConfig.paper("tanaka").numerical.length,
     )

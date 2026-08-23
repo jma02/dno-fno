@@ -1,4 +1,4 @@
-"""CPU tests for the paper-corpus Benjamin--Feir construction.
+"""CPU tests for the paper-dataset Benjamin--Feir construction.
 
 Run with:
 
@@ -18,14 +18,18 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.data.stokes_truth_jax import stokes_eta_xi  # noqa: E402
+from solver.reference_solutions.stokes_wave import stokes_eta_xi  # noqa: E402
 from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
+    PERTURBATION_RATIO_MAX,
     build_initial_conditions,
     deep_water_proxy_depth,
     feasible_mode_pairs,
+    focused_steepness_carrier_upper_bound,
+    focused_steepness_proxy,
     instability_band_fraction,
     is_supported,
     sample_parameters,
+    serialize_parameters,
 )
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
     RefinementTrajectory,
@@ -56,7 +60,7 @@ def _canonical_parameters() -> dict[str, np.ndarray]:
         "n_r": np.asarray([11], dtype=np.int32),
         "eps_carrier": np.asarray([0.13], dtype=np.float64),
         "eps_pert": np.asarray([0.10], dtype=np.float64),
-        "phase": np.asarray([-np.pi / 4.0], dtype=np.float64),
+        "translation": np.asarray([0.0], dtype=np.float64),
         "depth": np.asarray([5.0], dtype=np.float64),
     }
 
@@ -123,16 +127,39 @@ def _fixed_band_relative_error(
 class BenjaminFeirJCP09Test(unittest.TestCase):
     def test_support_is_exactly_the_declared_instability_band(self) -> None:
         self.assertTrue(bool(is_supported(9, 2, 0.13, 0.10)))
+        self.assertTrue(bool(is_supported(10, 2, 0.10, 0.10)))
         self.assertTrue(bool(is_supported(10, 2, 0.11, 0.10)))
+        self.assertTrue(bool(is_supported(10, 2, 0.10, 0.100001)))
         self.assertFalse(bool(is_supported(9, 4, 0.13, 0.10)))
         self.assertFalse(bool(is_supported(4, 4, 0.13, 0.10)))
+        self.assertEqual(PERTURBATION_RATIO_MAX, 0.20)
         self.assertAlmostEqual(
             float(instability_band_fraction(9, 2, 0.13)),
             0.6043647702,
             places=9,
         )
         pairs = {tuple(pair) for pair in feasible_mode_pairs().tolist()}
+        self.assertEqual(len(pairs), 66)
         self.assertIn((10, 2), pairs)
+
+    def test_focused_proxy_has_the_closed_form_sample_support_endpoint(self) -> None:
+        focused_limit = (1.0 + np.sqrt(2.0)) / 10.0
+        self.assertAlmostEqual(
+            float(focused_steepness_proxy(10, 2, 0.10)),
+            focused_limit,
+            places=15,
+        )
+        self.assertAlmostEqual(
+            float(
+                focused_steepness_carrier_upper_bound(
+                    10,
+                    2,
+                    focused_steepness_limit=focused_limit,
+                )
+            ),
+            0.10,
+            places=15,
+        )
 
     def test_sampler_never_rewrites_or_leaves_support(self) -> None:
         parameters = sample_parameters(
@@ -147,6 +174,9 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             parameters["eps_pert"],
         )
         self.assertTrue(np.all(supported))
+        self.assertTrue(
+            np.all(parameters["eps_pert"] <= PERTURBATION_RATIO_MAX)
+        )
         self.assertTrue(np.all(parameters["n_l"] >= 1))
         self.assertTrue(
             np.all(parameters["n_r"] == parameters["n_carr"] + parameters["side_offset"])
@@ -159,6 +189,8 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
                 atol=0.0,
             )
         )
+        self.assertTrue(np.all(parameters["translation"] >= 0.0))
+        self.assertTrue(np.all(parameters["translation"] < 2.0 * np.pi))
         self.assertIn(
             (10, 2),
             set(
@@ -205,7 +237,7 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
         np.testing.assert_allclose(xi[0], expected_xi, rtol=2e-14, atol=2e-14)
         self.assertLess(float(jnp.abs(jnp.mean(xi[0]))), 1e-15)
 
-    def test_constructor_is_batched_periodic_and_has_no_empirical_cross_modes(
+    def test_constructor_is_batched_translation_covariant_and_has_no_cross_modes(
         self,
     ) -> None:
         nx = 256
@@ -223,22 +255,29 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             gravity=GRAVITY,
             dtype=jnp.float64,
         )
+        translated_parameters = {
+            **parameters,
+            "translation": np.mod(
+                parameters["translation"] + shift * LENGTH / nx,
+                LENGTH,
+            ),
+        }
         translated_eta, translated_xi = build_initial_conditions(
-            x=x + shift * LENGTH / nx,
-            parameters=parameters,
+            x=x,
+            parameters=translated_parameters,
             length=LENGTH,
             gravity=GRAVITY,
             dtype=jnp.float64,
         )
         np.testing.assert_allclose(
             translated_eta,
-            np.roll(np.asarray(eta), -shift, axis=-1),
+            np.roll(np.asarray(eta), shift, axis=-1),
             rtol=2e-13,
             atol=2e-13,
         )
         np.testing.assert_allclose(
             translated_xi,
-            np.roll(np.asarray(xi), -shift, axis=-1),
+            np.roll(np.asarray(xi), shift, axis=-1),
             rtol=2e-13,
             atol=2e-13,
         )
@@ -253,6 +292,70 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
         eta_coefficients = np.fft.rfft(np.asarray(canonical_eta[0])) / nx
         self.assertLess(abs(eta_coefficients[16]), 1e-15)
         self.assertLess(abs(eta_coefficients[20]), 1e-15)
+
+    def test_relative_sideband_and_resonant_quartet_phases_are_fixed(
+        self,
+    ) -> None:
+        nx = 256
+        translation = 0.371
+        x = jnp.asarray(LENGTH * np.arange(nx) / nx, dtype=jnp.float64)
+        parameters = _canonical_parameters()
+        parameters["translation"] = np.asarray(
+            [translation],
+            dtype=np.float64,
+        )
+        eta, _ = build_initial_conditions(
+            x=x,
+            parameters=parameters,
+            length=LENGTH,
+            gravity=GRAVITY,
+            dtype=jnp.float64,
+        )
+        coefficients = np.fft.rfft(np.asarray(eta[0])) / nx
+
+        carrier_phase = coefficients[9] * np.exp(1j * 9.0 * translation)
+        left_phase = coefficients[7] * np.exp(1j * 7.0 * translation)
+        right_phase = coefficients[11] * np.exp(1j * 11.0 * translation)
+        np.testing.assert_allclose(
+            carrier_phase / abs(carrier_phase),
+            1.0 + 0.0j,
+            rtol=0.0,
+            atol=2e-13,
+        )
+        fixed_sideband_phase = np.exp(-1j * np.pi / 4.0)
+        np.testing.assert_allclose(
+            left_phase / abs(left_phase),
+            fixed_sideband_phase,
+            rtol=0.0,
+            atol=2e-13,
+        )
+        np.testing.assert_allclose(
+            right_phase / abs(right_phase),
+            fixed_sideband_phase,
+            rtol=0.0,
+            atol=2e-13,
+        )
+        quartet = coefficients[7] * coefficients[11] / coefficients[9] ** 2
+        np.testing.assert_allclose(
+            quartet / abs(quartet),
+            -1j,
+            rtol=0.0,
+            atol=2e-13,
+        )
+
+    def test_serialized_parameters_name_translation_and_harmonic_quantities(
+        self,
+    ) -> None:
+        record = serialize_parameters(_canonical_parameters())[0]
+        self.assertNotIn("schema", record)
+        self.assertEqual(record["translation"], 0.0)
+        self.assertEqual(record["relative_sideband_phase"], -np.pi / 4.0)
+        self.assertEqual(record["carrier_phase_in_translated_frame"], 0.0)
+        self.assertEqual(record["first_harmonic_carrier_steepness"], 0.13)
+        self.assertEqual(record["first_harmonic_sideband_ratio"], 0.10)
+        self.assertNotIn("phase", record)
+        self.assertNotIn("eps_carrier", record)
+        self.assertNotIn("eps_pert", record)
 
     def test_canonical_fixed_band_spatial_refinement(self) -> None:
         states: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []

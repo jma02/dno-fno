@@ -1,13 +1,13 @@
 """Diagnose Craig--Sulem order convergence on the final JONSWAP tail.
 
 This program is deliberately CPU-only and read-only with respect to the
-corpus.  It requires the passed revision-4 completion audit, independently
+dataset.  It requires the passed revision-4 completion audit, independently
 rescans every accepted trajectory to find the three largest predefined
 ``G(eta)xi`` modes-96:128 fractions, and recomputes those trajectories at
 orders four through eight in float64 with the frozen P128/pad-eight target.
 
 The resulting JSON is diagnostic evidence only.  Neither its values nor its
-status participate in corpus acceptance or release.
+status participate in dataset acceptance or release.
 """
 
 from __future__ import annotations
@@ -49,11 +49,11 @@ from solver.solvers.dno_series_jax import (  # noqa: E402
 )
 
 
-AUDIT_SCHEMA = "paper_corpus_jonswap_tma_revision4_completion_audit_v1"
-DIAGNOSTIC_SCHEMA = "paper_corpus_jonswap_revision4_order_convergence_v1"
-RENDERER_SCHEMA = "paper_corpus_all_family_diagnostic_tail_v3"
-COMBINED_SUMMARY_SCHEMA = "paper_corpus_combined_view_summary_v1"
-DEFAULT_CORPUS_ROOT = ROOT / "outputs/paper_corpus_jonswap_revision4_relative_band_v1"
+AUDIT_SCHEMA = "paper_dataset_jonswap_tma_revision4_completion_audit_v1"
+DIAGNOSTIC_SCHEMA = "paper_dataset_jonswap_revision4_order_convergence_v1"
+RENDERER_SCHEMA = "paper_dataset_all_family_diagnostic_tail_v3"
+COMBINED_SUMMARY_SCHEMA = "paper_dataset_combined_view_summary_v1"
+DEFAULT_DATASET_ROOT = ROOT / "outputs/paper_dataset_jonswap_revision4_relative_band_v1"
 EXPECTED_ACCEPTED = 18_432
 EXPECTED_CHUNKS = 8
 ROWS_PER_TRAJECTORY = 16
@@ -64,7 +64,7 @@ PAD_FACTOR = 8
 ORDERS = (4, 5, 6, 7, 8)
 TOP_COUNT = 3
 HIGH_BAND = (96.0, 128.0)
-IMPLEMENTATION_SCHEMA = "paper_corpus_order_diagnostic_implementation_v1"
+IMPLEMENTATION_SCHEMA = "paper_dataset_order_diagnostic_implementation_v1"
 IMPLEMENTATION_FILES = (
     (
         "scripts/diagnose_final_jonswap_order_convergence.py",
@@ -340,7 +340,7 @@ def _contained_path(root: Path, value: object, *, context: str) -> Path:
     try:
         resolved.relative_to(root.resolve())
     except ValueError as error:
-        raise ValueError(f"{context} escapes the corpus root") from error
+        raise ValueError(f"{context} escapes the dataset root") from error
     if not resolved.is_file():
         raise FileNotFoundError(f"{context} does not exist: {resolved}")
     return resolved
@@ -578,7 +578,7 @@ def _split_code(split: str) -> int:
 
 
 def _scan_chunk(
-    corpus_root: Path,
+    dataset_root: Path,
     audit_chunk: JsonObject,
     *,
     scan_start: int,
@@ -597,7 +597,7 @@ def _scan_chunk(
     if retained_rows != accepted * ROWS_PER_TRAJECTORY:
         raise ValueError("audit chunk retained-row count is inconsistent")
     summary_path = _contained_path(
-        corpus_root, audit_chunk.get("summary_path"), context="audit chunk.summary_path"
+        dataset_root, audit_chunk.get("summary_path"), context="audit chunk.summary_path"
     )
     summary_sha256 = _verified_hash(
         summary_path, audit_chunk.get("summary_sha256"), context="chunk summary"
@@ -868,14 +868,14 @@ def scan_final_tail(
         raise ValueError("completion audit does not contain the exact final case count")
     if audit.get("retained_rows") != expected_accepted * ROWS_PER_TRAJECTORY:
         raise ValueError("completion audit does not contain the exact final row count")
-    corpus_root = (
-        Path(_string(audit.get("corpus_root"), context="audit.corpus_root"))
+    dataset_root = (
+        Path(_string(audit.get("dataset_root"), context="audit.dataset_root"))
         .expanduser()
         .resolve()
     )
-    if not corpus_root.is_dir():
+    if not dataset_root.is_dir():
         raise FileNotFoundError(
-            f"completion-audit corpus root does not exist: {corpus_root}"
+            f"completion-audit dataset root does not exist: {dataset_root}"
         )
     raw_chunks = _list(audit.get("chunks"), context="audit.chunks")
     if len(raw_chunks) != expected_chunks:
@@ -887,14 +887,14 @@ def scan_final_tail(
     for raw_chunk in raw_chunks:
         chunk = _mapping(raw_chunk, context="audit chunk")
         candidates, rows, shards, binding = _scan_chunk(
-            corpus_root, chunk, scan_start=len(all_candidates)
+            dataset_root, chunk, scan_start=len(all_candidates)
         )
         all_candidates.extend(candidates)
         rows_scanned += rows
         shards_scanned += shards
         chunk_bindings.append(binding)
     if len(all_candidates) != expected_accepted:
-        raise RuntimeError("chunk scan does not cover the complete accepted corpus")
+        raise RuntimeError("chunk scan does not cover the complete accepted dataset")
     target_source_records = {
         json.dumps(
             binding["generation_target_source_sha256"],
@@ -952,13 +952,13 @@ def authenticate_renderer_selection(
     ):
         raise ValueError("a completed final diagnostic-renderer summary is required")
     parameters = _mapping(renderer.get("parameters"), context="renderer.parameters")
-    if parameters.get("final_paper_corpus_contract_required") is not True:
-        raise ValueError("renderer did not enforce the final paper-corpus contract")
+    if parameters.get("final_paper_dataset_contract_required") is not True:
+        raise ValueError("renderer did not enforce the final paper-dataset contract")
     source_binding = _mapping(
         renderer.get("source_binding"), context="renderer.source_binding"
     )
     if source_binding.get("mode") != "combined_summary":
-        raise ValueError("renderer summary is not bound to a combined corpus summary")
+        raise ValueError("renderer summary is not bound to a combined dataset summary")
     combined_path = (
         Path(
             _string(
@@ -983,7 +983,7 @@ def authenticate_renderer_selection(
         combined.get("schema") != COMBINED_SUMMARY_SCHEMA
         or combined.get("status") != "complete"
     ):
-        raise ValueError("renderer names a non-complete combined corpus summary")
+        raise ValueError("renderer names a non-complete combined dataset summary")
     if source_binding.get("expected_sources") != 26:
         raise ValueError("renderer is not bound to the exact 26 final source chunks")
     if source_binding.get("expected_accepted_cases") != 73_728:
@@ -1345,8 +1345,8 @@ def run_diagnostic(
         "schema": DIAGNOSTIC_SCHEMA,
         "status": "pass",
         "diagnostic_only": True,
-        "affects_corpus_acceptance": False,
-        "affects_corpus_release": False,
+        "affects_dataset_acceptance": False,
+        "affects_dataset_release": False,
         "completion_audit": {
             "path": str(resolved_audit),
             "sha256": file_sha256(resolved_audit),
@@ -1405,7 +1405,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--audit",
         type=Path,
-        default=DEFAULT_CORPUS_ROOT / "jonswap_tma_completion_audit.json",
+        default=DEFAULT_DATASET_ROOT / "jonswap_tma_completion_audit.json",
         help="Passed final revision-4 JONSWAP completion-audit JSON.",
     )
     parser.add_argument(
@@ -1422,7 +1422,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Optional completed all-family renderer summary. When supplied, "
             "authenticate its combined-view hash and require its JONSWAP top "
-            "three to equal the independent full-corpus rescan."
+            "three to equal the independent full-dataset rescan."
         ),
     )
     return parser.parse_args(argv)

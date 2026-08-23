@@ -1,4 +1,4 @@
-"""Build a loader-facing view from committed paper-corpus batch shards."""
+"""Build a loader-facing view from committed paper-dataset batch shards."""
 
 from __future__ import annotations
 
@@ -44,6 +44,27 @@ _STORED_DTYPES = {
 }
 
 
+def _same_json_value(left: object, right: object) -> bool:
+    """Compare strict JSON values without Python's numeric coercions."""
+
+    return canonical_json_sha256(
+        _plain_json_value(left)
+    ) == canonical_json_sha256(_plain_json_value(right))
+
+
+def _plain_json_value(value: object) -> object:
+    """Copy immutable JSON-like mappings/sequences into plain containers."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class DatasetViewPaths:
     """The two derived files consumed by the training loader."""
@@ -68,6 +89,161 @@ class _GenerationCompatibility:
     dependency_environment: Mapping[str, object]
     source_sha256: Mapping[str, str]
     execution_platform: str
+
+
+@dataclass(frozen=True)
+class GenerationCompatibilityVariant:
+    """One explicitly audited execution/source pair for a family revision."""
+
+    family_id: int
+    revision_id: int
+    execution_record_fingerprint: str
+    source_sha256_fingerprint: str
+    compatibility_id: str
+    canonical_execution_record: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.family_id, bool)
+            or not isinstance(self.family_id, int)
+            or self.family_id < 0
+        ):
+            raise ValueError("family_id must be a nonnegative integer")
+        if (
+            isinstance(self.revision_id, bool)
+            or not isinstance(self.revision_id, int)
+            or self.revision_id < 0
+        ):
+            raise ValueError("revision_id must be a nonnegative integer")
+        for name in (
+            "execution_record_fingerprint",
+            "source_sha256_fingerprint",
+            "compatibility_id",
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in value
+                )
+            ):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        canonical = _plain_json_value(self.canonical_execution_record)
+        if not isinstance(canonical, dict):
+            raise TypeError("canonical_execution_record must be a JSON object")
+        object.__setattr__(self, "canonical_execution_record", canonical)
+        if canonical_json_sha256(canonical) != self.compatibility_id:
+            raise ValueError(
+                "compatibility_id must be the canonical execution-record "
+                "fingerprint"
+            )
+
+
+@dataclass(frozen=True)
+class GenerationCompatibilityResolution:
+    """Canonical execution identity for one exact audited raw variant."""
+
+    compatibility_id: str
+    canonical_execution_record: Mapping[str, object]
+    execution_record_fingerprint: str
+    source_sha256_fingerprint: str
+
+
+class GenerationCompatibilityPolicy:
+    """Fail-closed lookup of explicitly audited generation variants.
+
+    The lookup key includes the family, revision, raw execution record, and
+    raw source mapping.  A policy has no effect outside the family revisions
+    named by its variants.  Within those scopes, an unknown pair is rejected.
+    """
+
+    def __init__(
+        self,
+        variants: Sequence[GenerationCompatibilityVariant],
+    ) -> None:
+        selected = tuple(variants)
+        if not selected:
+            raise ValueError("generation compatibility variants must not be empty")
+        by_key: dict[
+            tuple[int, int, str, str],
+            GenerationCompatibilityVariant,
+        ] = {}
+        canonical_by_id: dict[str, Mapping[str, object]] = {}
+        for variant in selected:
+            key = (
+                variant.family_id,
+                variant.revision_id,
+                variant.execution_record_fingerprint,
+                variant.source_sha256_fingerprint,
+            )
+            if key in by_key:
+                raise ValueError("generation compatibility variants must be unique")
+            previous = canonical_by_id.setdefault(
+                variant.compatibility_id,
+                variant.canonical_execution_record,
+            )
+            if previous != variant.canonical_execution_record:
+                raise ValueError(
+                    "one compatibility_id cannot name different canonical "
+                    "execution records"
+                )
+            by_key[key] = variant
+        self._variants = selected
+        self._by_key = by_key
+        self._scopes = frozenset(
+            (variant.family_id, variant.revision_id)
+            for variant in selected
+        )
+
+    @property
+    def variants(self) -> tuple[GenerationCompatibilityVariant, ...]:
+        return self._variants
+
+    def applies_to(self, *, family_id: int, revision_id: int) -> bool:
+        return (family_id, revision_id) in self._scopes
+
+    def resolve(
+        self,
+        *,
+        family_id: int,
+        revision_id: int,
+        execution_record: Mapping[str, object],
+        source_sha256: Mapping[str, str],
+    ) -> GenerationCompatibilityResolution | None:
+        """Resolve one exact pair, or reject an unknown pair in policy scope."""
+
+        if not self.applies_to(
+            family_id=family_id,
+            revision_id=revision_id,
+        ):
+            return None
+        execution_fingerprint = canonical_json_sha256(
+            _plain_json_value(execution_record)
+        )
+        source_fingerprint = canonical_json_sha256(
+            _plain_json_value(source_sha256)
+        )
+        variant = self._by_key.get(
+            (
+                family_id,
+                revision_id,
+                execution_fingerprint,
+                source_fingerprint,
+            )
+        )
+        if variant is None:
+            raise ValueError(
+                "generation record is not an explicitly audited compatibility "
+                "variant"
+            )
+        return GenerationCompatibilityResolution(
+            compatibility_id=variant.compatibility_id,
+            canonical_execution_record=variant.canonical_execution_record,
+            execution_record_fingerprint=execution_fingerprint,
+            source_sha256_fingerprint=source_fingerprint,
+        )
 
 
 def _read_npz(path: Path) -> dict[str, NDArray[Any]]:
@@ -104,6 +280,19 @@ def _object_field(
     return field
 
 
+def _finite_positive_real(value: object, *, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise TypeError(f"{name} must be a finite number")
+    converted = float(value)
+    if converted <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return converted
+
+
 def _shared_target(
     numerical: Mapping[str, object],
     *,
@@ -122,25 +311,58 @@ def _shared_target(
         for name in integer_fields
     ):
         raise TypeError("shared target integer fields must be integers")
-    real_fields = ("length", "gravity", "maximum_wavenumber")
-    if any(
-        isinstance(numerical[name], bool)
-        or not isinstance(numerical[name], (int, float))
-        or not math.isfinite(float(numerical[name]))
-        for name in real_fields
+    raw_target_nx = numerical.get("target_nx")
+    if raw_target_nx is not None and (
+        isinstance(raw_target_nx, bool)
+        or not isinstance(raw_target_nx, int)
+        or raw_target_nx <= 0
+        or raw_target_nx % 2
     ):
-        raise TypeError("shared target real fields must be finite numbers")
+        raise ValueError("target_nx must be a positive even integer")
+    target_nx = int(numerical["nx"] if raw_target_nx is None else raw_target_nx)
+    length = _finite_positive_real(numerical["length"], name="length")
+    gravity = _finite_positive_real(numerical["gravity"], name="gravity")
+    evolution_maximum_wavenumber = _finite_positive_real(
+        numerical["maximum_wavenumber"],
+        name="maximum_wavenumber",
+    )
+    raw_target_maximum_wavenumber = numerical.get(
+        "target_maximum_wavenumber"
+    )
+    target_maximum_wavenumber = (
+        evolution_maximum_wavenumber
+        if raw_target_maximum_wavenumber is None
+        else _finite_positive_real(
+            raw_target_maximum_wavenumber,
+            name="target_maximum_wavenumber",
+        )
+    )
+    if target_maximum_wavenumber > evolution_maximum_wavenumber:
+        raise ValueError(
+            "target_maximum_wavenumber cannot exceed maximum_wavenumber"
+        )
+    raw_target_dno_order = numerical.get("target_dno_order")
+    target_dno_order = numerical["dno_order"]
+    if raw_target_dno_order is not None:
+        if isinstance(raw_target_dno_order, bool) or not isinstance(
+            raw_target_dno_order,
+            int,
+        ):
+            raise TypeError("target_dno_order must be an integer")
+        if raw_target_dno_order < 0:
+            raise ValueError("target_dno_order must be nonnegative")
+        target_dno_order = raw_target_dno_order
     dtype = numerical["dtype"]
     if not isinstance(dtype, str) or not dtype:
         raise TypeError("shared target dtype must be a nonempty string")
     return {
         "role": role,
-        "nx": int(numerical["nx"]),
-        "length": float(numerical["length"]),
-        "gravity": float(numerical["gravity"]),
-        "dno_order": int(numerical["dno_order"]),
+        "nx": target_nx,
+        "length": length,
+        "gravity": gravity,
+        "dno_order": int(target_dno_order),
         "pad_factor": int(numerical["pad_factor"]),
-        "maximum_wavenumber": float(numerical["maximum_wavenumber"]),
+        "maximum_wavenumber": target_maximum_wavenumber,
         "dtype": dtype,
     }
 
@@ -199,7 +421,7 @@ def _generation_compatibility(
         "configuration",
         context="proposal run_spec",
     )
-    if configuration.get("schema") != "paper_corpus_quota_configuration_v1":
+    if configuration.get("schema") != "paper_dataset_quota_configuration_v1":
         return None
     dependency_environment = _object_field(
         configuration,
@@ -340,10 +562,13 @@ def build_dataset_view(
     root: Path,
     batches: Sequence[BatchPaths],
     *,
-    name: str = "paper_corpus",
+    name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
     expected_fingerprint: str | None = None,
     expected_fingerprints: Sequence[str] | None = None,
+    generation_compatibility_policy: (
+        GenerationCompatibilityPolicy | None
+    ) = None,
 ) -> DatasetViewPaths:
     """Write a schema-v2 manifest and attempted-case trajectory map.
 
@@ -403,10 +628,23 @@ def build_dataset_view(
         tuple[int, int],
         _GenerationCompatibility,
     ] = {}
+    family_generation_compatibility_ids: dict[
+        tuple[int, int],
+        str | None,
+    ] = {}
+    family_generation_variants: dict[
+        tuple[int, int],
+        dict[
+            tuple[str, str],
+            _GenerationCompatibility,
+        ],
+    ] = {}
+    family_trajectory_numerical: dict[
+        tuple[int, int],
+        Mapping[str, object],
+    ] = {}
     dependency_environment: Mapping[str, object] | None = None
-    source_sha256: dict[str, str] = {}
     shared_target: Mapping[str, object] | None = None
-    trajectory_numerical: Mapping[str, object] | None = None
     global_row_count = 0
     trajectory_offset = 0
     spatial_size: int | None = None
@@ -428,6 +666,28 @@ def build_dataset_view(
         batch_contracts.append(contract)
         generation_compatibility = _generation_compatibility(proposal)
         generation_compatibilities.append(generation_compatibility)
+        family_id = int(proposal["family_id"])
+        revision_id = int(proposal["revision_id"])
+        generation_resolution: GenerationCompatibilityResolution | None = None
+        if (
+            generation_compatibility_policy is not None
+            and generation_compatibility_policy.applies_to(
+                family_id=family_id,
+                revision_id=revision_id,
+            )
+        ):
+            if contract is None or generation_compatibility is None:
+                raise ValueError(
+                    "an audited generation compatibility variant requires "
+                    "both execution and source records"
+                )
+            generation_resolution = generation_compatibility_policy.resolve(
+                family_id=family_id,
+                revision_id=revision_id,
+                execution_record=contract.family_execution,
+                source_sha256=generation_compatibility.source_sha256,
+            )
+            assert generation_resolution is not None
 
         proposed_case_ids = proposal["case_id"]
         number_of_cases = int(proposed_case_ids.size)
@@ -444,7 +704,7 @@ def build_dataset_view(
             if spatial_size is None:
                 spatial_size = current_spatial_size
             elif current_spatial_size != spatial_size:
-                raise ValueError("all corpus shards must use the same spatial grid")
+                raise ValueError("all dataset shards must use the same spatial grid")
             shard_index = len(shard_records)
             shard_row_count = int(shard["eta"].shape[0])
             shard_records.append(
@@ -467,8 +727,6 @@ def build_dataset_view(
             row_shard_row_parts.append(np.arange(shard_row_count, dtype=np.int64))
         blocks = _batch_case_rows(shard, number_of_cases=number_of_cases)
 
-        family_id = int(proposal["family_id"])
-        revision_id = int(proposal["revision_id"])
         split_id = int(proposal["split_id"])
         batch_id = int(proposal["batch_id"])
         accepted_in_batch = 0
@@ -534,21 +792,31 @@ def build_dataset_view(
                     "all batches in one dataset view must share the DNO target contract"
                 )
             family_key = (family_id, revision_id)
+            effective_execution = (
+                generation_resolution.canonical_execution_record
+                if generation_resolution is not None
+                else contract.family_execution
+            )
             previous_execution = family_execution_contracts.setdefault(
                 family_key,
-                contract.family_execution,
+                effective_execution,
             )
-            if previous_execution != contract.family_execution:
+            if not _same_json_value(previous_execution, effective_execution):
                 raise ValueError(
                     "one family revision cannot mix execution contracts"
                 )
             if contract.trajectory_numerical is not None:
-                if trajectory_numerical is None:
-                    trajectory_numerical = contract.trajectory_numerical
-                elif contract.trajectory_numerical != trajectory_numerical:
+                previous_numerical = family_trajectory_numerical.setdefault(
+                    family_key,
+                    contract.trajectory_numerical,
+                )
+                if not _same_json_value(
+                    previous_numerical,
+                    contract.trajectory_numerical,
+                ):
                     raise ValueError(
-                        "all trajectory families must share the numerical "
-                        "integration contract"
+                        "one family revision cannot mix numerical integration "
+                        "contracts"
                     )
 
         if generation_compatibility is not None:
@@ -556,29 +824,39 @@ def build_dataset_view(
                 dependency_environment = (
                     generation_compatibility.dependency_environment
                 )
-            elif (
-                generation_compatibility.dependency_environment
-                != dependency_environment
+            elif not _same_json_value(
+                generation_compatibility.dependency_environment,
+                dependency_environment,
             ):
                 raise ValueError(
                     "all generation runs in one dataset view must share the "
                     "dependency environment"
                 )
-            for path, digest in generation_compatibility.source_sha256.items():
-                previous_digest = source_sha256.setdefault(path, digest)
-                if previous_digest != digest:
-                    raise ValueError(
-                        "generation runs disagree on the hash of shared source "
-                        f"path {path!r}"
-                    )
             family_key = (family_id, revision_id)
             previous_generation = family_generation_compatibilities.setdefault(
                 family_key,
                 generation_compatibility,
             )
+            compatibility_id = (
+                generation_resolution.compatibility_id
+                if generation_resolution is not None
+                else None
+            )
+            previous_compatibility_id = (
+                family_generation_compatibility_ids.setdefault(
+                    family_key,
+                    compatibility_id,
+                )
+            )
+            if previous_compatibility_id != compatibility_id:
+                raise ValueError(
+                    "one family revision cannot mix generation compatibility "
+                    "identities"
+                )
             if (
                 previous_generation.source_sha256
                 != generation_compatibility.source_sha256
+                and compatibility_id is None
             ):
                 raise ValueError(
                     "one family revision cannot mix source mappings"
@@ -590,6 +868,15 @@ def build_dataset_view(
                 raise ValueError(
                     "one family revision cannot mix execution platforms"
                 )
+            execution_fingerprint = canonical_json_sha256(
+                contract.family_execution
+            ) if contract is not None else ""
+            source_fingerprint = canonical_json_sha256(
+                generation_compatibility.source_sha256
+            )
+            family_generation_variants.setdefault(family_key, {})[
+                (execution_fingerprint, source_fingerprint)
+            ] = generation_compatibility
 
         if shard is not None:
             global_row_count += int(shard["eta"].shape[0])
@@ -616,6 +903,18 @@ def build_dataset_view(
         raise ValueError(
             "all mixed generation runs must record dependency and source identity"
         )
+    if generation_compatibility_policy is not None:
+        for (
+            family_id,
+            revision_id,
+        ), compatibility_id in family_generation_compatibility_ids.items():
+            if generation_compatibility_policy.applies_to(
+                family_id=family_id,
+                revision_id=revision_id,
+            ) and compatibility_id is None:
+                raise ValueError(
+                    "audited generation compatibility scope was not resolved"
+                )
     if len(fingerprints) != 1 and not all(has_contract):
         raise ValueError(
             "mixed configuration fingerprints require shared execution-contract "
@@ -704,31 +1003,75 @@ def build_dataset_view(
     configuration_fingerprints = sorted(fingerprints)
     dataset_contract: dict[str, object] | None = None
     if shared_target is not None:
+        trajectory_numerical_records = [
+            {
+                "family_id": family_id,
+                "revision_id": revision_id,
+                "numerical": dict(numerical),
+            }
+            for (family_id, revision_id), numerical in sorted(
+                family_trajectory_numerical.items()
+            )
+        ]
+        trajectory_numerical_values = tuple(
+            family_trajectory_numerical.values()
+        )
+        common_trajectory_numerical = (
+            dict(trajectory_numerical_values[0])
+            if trajectory_numerical_values
+            and all(
+                _same_json_value(numerical, trajectory_numerical_values[0])
+                for numerical in trajectory_numerical_values[1:]
+            )
+            else None
+        )
         generation_identity: dict[str, object] | None = None
         if all(has_generation_compatibility):
             assert dependency_environment is not None
-            family_revision_records = [
-                {
+            family_revision_records = []
+            for (
+                family_id,
+                revision_id,
+            ), compatibility in sorted(
+                family_generation_compatibilities.items()
+            ):
+                raw_variants = family_generation_variants[
+                    (family_id, revision_id)
+                ]
+                variant_records = [
+                    {
+                        "execution_record_fingerprint": (
+                            execution_fingerprint
+                        ),
+                        "source_sha256_fingerprint": source_fingerprint,
+                        "source_sha256": dict(
+                            sorted(raw_compatibility.source_sha256.items())
+                        ),
+                    }
+                    for (
+                        execution_fingerprint,
+                        source_fingerprint,
+                    ), raw_compatibility in sorted(raw_variants.items())
+                ]
+                record: dict[str, object] = {
                     "family_id": family_id,
                     "revision_id": revision_id,
                     "execution_platform": compatibility.execution_platform,
-                    "source_sha256_fingerprint": canonical_json_sha256(
-                        compatibility.source_sha256
-                    ),
+                    "generation_variants": variant_records,
                 }
-                for (
-                    family_id,
-                    revision_id,
-                ), compatibility in sorted(
-                    family_generation_compatibilities.items()
-                )
-            ]
+                compatibility_id = family_generation_compatibility_ids[
+                    (family_id, revision_id)
+                ]
+                if compatibility_id is not None:
+                    record["generation_compatibility_id"] = compatibility_id
+                if len(variant_records) == 1:
+                    record["source_sha256_fingerprint"] = variant_records[0][
+                        "source_sha256_fingerprint"
+                    ]
+                family_revision_records.append(record)
             generation_identity = {
                 "dependency_environment_fingerprint": canonical_json_sha256(
                     dependency_environment
-                ),
-                "source_sha256_fingerprint": canonical_json_sha256(
-                    source_sha256
                 ),
                 "family_revisions": family_revision_records,
             }
@@ -737,10 +1080,9 @@ def build_dataset_view(
             )
         dataset_contract = {
             "target": dict(shared_target),
-            "trajectory_numerical": (
-                dict(trajectory_numerical)
-                if trajectory_numerical is not None
-                else None
+            "trajectory_numerical": common_trajectory_numerical,
+            "trajectory_numerical_by_family_revision": (
+                trajectory_numerical_records
             ),
             "stored_dtypes": dict(_STORED_DTYPES),
             "whole_case_rows": True,

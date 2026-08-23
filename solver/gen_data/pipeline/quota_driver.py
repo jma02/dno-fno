@@ -1,4 +1,4 @@
-"""Durable accepted-quota orchestration for paper-corpus families.
+"""Durable accepted-quota orchestration for paper-dataset families.
 
 The numerical executor remains family-specific.  This module owns only the
 outer transaction loop: recover committed counts, replay an interrupted batch,
@@ -202,7 +202,7 @@ class AcceptedQuotaRunSpec:
         configuration = _strict_json_loads(self._configuration_json)
         assert isinstance(configuration, dict)
         record: dict[str, object] = {
-            "schema": "paper_corpus_accepted_quota_run_v2",
+            "schema": "paper_dataset_accepted_quota_run_v2",
             "family_name": self.family_name,
             "family_id": int(self.family_id),
             "revision_id": self.revision_id,
@@ -519,7 +519,7 @@ def _accepted_cells(
     assignments: Sequence[AttemptAssignment],
 ) -> tuple[str, ...]:
     result = _read_json_object(paths.result)
-    if result.get("schema") != "paper_corpus_batch_result_v1":
+    if result.get("schema") != "paper_dataset_batch_result_v1":
         raise RuntimeError("result has an unknown schema")
     values = result.get("cases")
     if not isinstance(values, list) or len(values) != len(assignments):

@@ -1,0 +1,1953 @@
+\section{Historical v9 data used for the reported checkpoints}
+\label{sec:data}
+
+\subsection{Snapshot construction}
+
+All checkpoint results reported in this manuscript use the historical
+\texttt{combined\_dataset\_v9.npz} archive.  The parameterized replacement
+dataset discussed below has not yet been used to train a reported model.
+Each historical training example is a tuple
+\begin{equation}
+  (\eta_j,\xi_j,h_j)\longmapsto q_j^\star,
+  \label{eq:data-map}
+\end{equation}
+on the $N=1024$ grid, where $q_j^\star$ is the stored reference target under
+that source's generation protocol.  Initial conditions are sampled by wave
+family and integrated with the double-precision reference method of
+\cref{sec:solver}.  For rollout-derived sources we save multiple trajectory
+times, recompute the order-six, pad-eight DNO label in manageable chunks, and
+project the label to $|k|\leq128$.  Three static sources (IDs 2--4) instead
+store their unfiltered order-six labels.  The mode loss uses only
+$1\leq k\leq128$, where the conventions agree; the base loss also supervises
+the stored high modes of the static sources.  Fields are stored as 32-bit
+arrays, while trajectory generation and label evaluation use float64.
+
+The current v9 dataset contains \num{7633989} snapshots and occupies
+approximately \SI{88}{GB}.  Its composition is shown in
+\cref{tab:data-composition}.  The families deliberately combine coherent
+solutions, spectrally broad random fields, shallow and finite-depth cases, and
+nonlinear modulation, broadening the training support beyond solitary-wave
+states.
+
+The archive uses fourteen source identifiers to record the generating shard.
+In particular, suffixes such as \texttt{g0}, \texttt{g1}, and
+\texttt{modal} identify independent generation shards or entry points.  They
+do not denote different DNO truncation orders, target definitions, or physical
+wave families.  We pool those shards in \cref{tab:data-composition}.
+
+\begin{table}[t]
+  \centering
+  \caption{Construction-category composition of the historical
+  \texttt{combined\_dataset\_v9.npz}, with independent generator shards pooled.}
+  \label{tab:data-composition}
+  \begin{tabular}{lr@{\qquad}lr}
+    \toprule
+    Construction category & Snapshots & Construction category & Snapshots\\
+    \midrule
+    Random sea       & 460,740   & Manufactured harmonic & 500,000\\
+    Stokes           & 1,000,000 & Tanaka          & 2,200,000\\
+    BF-inspired wavetrain & 2,033,249 & Sparse Fourier packets & 1,440,000\\
+    \midrule
+    \multicolumn{3}{r}{Total} & 7,633,989\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Three roles of the historical construction categories}
+
+The six historical construction categories in \cref{tab:data-composition}
+are grouped below according to the states they contribute.  This grouping is
+independent of the GPU or generator shard that produced a snapshot.
+
+\paragraph{Coherent traveling and periodic waves (3,200,000 snapshots).}
+This group contains both Tanaka and Stokes sources.  Single- and multi-crest
+Tanaka conditions are constructed from numerical solitary-wave profiles, with
+crest amplitude sampled relative to depth and positions randomized subject to
+a minimum separation.  The main shallow set reaches $h=0.01$ and uses an
+occupancy-aware upper bound to avoid cutting a broad tail at the periodic
+boundary.  The steep addition contributes 200,000 snapshots in
+$h\in[0.20,0.35]$ and $a/h\in[0.25,0.45]$.  Deep- and finite-depth Stokes waves
+supply periodic states with controlled harmonic content.  Together these
+sources resolve coherent nonlinear structure across depth without treating
+the deep/finite data partitions as separate physical families.
+
+\paragraph{JCP09-inspired modulated wavetrains (2,033,249 snapshots).}
+The historical constructor starts from a fifth-order Stokes carrier and two
+sidebands inspired by \cite{xu2009}, but it is not the literal JCP09 initial
+condition.  It uses one carrier coefficient for both sidebands, adds empirical
+cross terms, and applies the deep-water sideband formula at sampled finite
+depths.  Only \(46.7\%\) of the archived parameter draws lie inside the
+leading deep-water modulational-instability band.  The three archived shards
+are independent samples from this same construction; the suffix
+\texttt{modal} does not define a separate family.
+
+\paragraph{Spectral-coverage and perturbation states (2,400,740 snapshots).}
+This group combines the manufactured-harmonic, random-sea, and three sparse
+Fourier-packet sources.  Manufactured harmonics anchor the small-amplitude
+limit, while random seas broaden phase, bandwidth, and local-slope coverage.
+The sparse packet sources address the
+neighborhood of solitary waves rather than the exact solitary-wave manifold:
+they combine one to five Fourier modes while controlling $kh$, $a/h$, and
+$ka$.
+
+\subsection{Forward paper-dataset design}
+
+The definitions in this subsection belong to a replacement dataset that has
+not yet been used for training.  In particular, they do not describe a
+retrospective cleaning of v9 and cannot explain the errors of the checkpoints
+reported in this manuscript.  The replacement has four physical families:
+fifth-order Stokes states, periodic tangent-Hermite Tanaka profiles, the
+equation-(33) sideband construction paired with the project's analytic
+fifth-order deep-water carrier, and resolved-band JONSWAP/TMA random seas.
+The four physical constructors and their parameter samplers are implemented.
+The current family revisions are 2 for Stokes, 3 for Tanaka, and 4 for both
+Benjamin--Feir and JONSWAP/TMA.  A revision number is therefore local
+to a physical family, rather than a single dataset-wide version number.
+Unless an endpoint convention is written explicitly, closed brackets in a
+displayed parameter box denote the closure of the continuous support.  The
+ordinary floating-point uniform draw uses its lower endpoint and excludes its
+upper endpoint.  An endpoint convention written explicitly in an individual
+sampling formula---including the half-open phase and center intervals and the
+mixed open--closed Benjamin--Feir steepness draw---overrides that default.
+These endpoint choices do not change a continuous uniform law, but they are
+recorded for exact numerical replay.
+For each trajectory family, one common executor runs a
+residual-controlled GL2 trajectory with time step \(0.01\), saving a
+candidate state every \(0.08\).  JONSWAP/TMA first uses the explicitly
+time-dependent adjustment defined below and then starts its autonomous
+production trajectory.  A case is retained only when its declared numerical
+path returns a complete admissible trajectory on the requested interval.  The
+\(0.005\) and \(0.0025\) steps are used only by a separate method-validation
+utility; they are not additional production rollouts or retry steps.
+
+Common modules assign a split and parameter category before numerical work, write
+atomic proposal, array-shard, result, and failure records, and build a checked
+multi-shard manifest and case-to-row map.  A resumable driver continues until
+the accepted-case quota in every parameter category is met.  A rejected attempt is
+replaced only in its original category.  The training loader uses the preassigned
+splits and draws one stored time from every accepted case, with equal accepted
+case counts across the four physical families.  Unexpected construction or
+target-evaluation errors propagate and leave the durable proposal available
+for replay; they are not silently converted into ordinary rejected samples.
+The family laws below therefore describe attempted specifications, not the
+unconditional law of loader-visible cases.  If \(X\) is a complete attempted
+specification in preassigned category \(i\), \(A_f\) is the declared complete
+case-acceptance event for family \(f\), and \(w_i\) is the accepted-quota
+weight, then the released law is
+\begin{equation}
+  p_{\mathrm{release}}(i,x)
+  =w_i\,p_{\mathrm{proposal}}(x\mid i,A_f=1).
+  \label{eq:paper-accepted-law}
+\end{equation}
+For Stokes, \(A_f\) comprises declared static support, a finite state, positive
+water column, and a finite target.  For Tanaka, it comprises declared
+construction support followed by complete autonomous-trajectory acceptance;
+for Benjamin--Feir, initial-state validity followed by complete autonomous-
+trajectory acceptance.  For JONSWAP/TMA, it comprises initial construction and
+graph validity followed by nonlinear adjustment and complete autonomous-
+trajectory acceptance.  Thus the quotas preserve the declared category
+marginals, not the unconditioned proposal law within a category.  This is a
+statement about how the release is constructed; it does not by itself assert a
+measured within-category shift for every family.  Every rejected proposal
+remains recorded, and no retrospective parameter cutoff is applied.
+The manifest compares the numerical contract and the hashes of its defining
+source files only among shards having the same physical family and revision.
+A loader-facing view must contain exactly one revision of each included
+family.  The final view may therefore combine Stokes revision 2, Tanaka
+revision 3, Benjamin--Feir revision 4, and JONSWAP/TMA revision 4, but it
+cannot mix two revisions of any one family.
+
+An earlier generator-revision-1 complete transaction smoke test used a reduced
+wiring contract:
+64 spatial grid points, Craig--Sulem order zero, padding factor one, largest
+delivered wavenumber 16, and the former paired \(0.04/0.02\) validation path.
+One Tanaka case, one Benjamin--Feir case, and one random-sea case were each
+accepted to a quota of one case; each committed three rows, and all nine rows
+were finite when read by the training loader.  This reduced calculation tests
+the transaction and loader, not the current family-revision executors, the
+paper target, the long-horizon numerical contract, or a population acceptance
+rate.  The current numerical paths have focused software-test coverage.
+A former revision-2 104-category trajectory pilot predates the Tanaka
+revision-3 support and numerical contract and remains historical software-path
+evidence.  The present family specifications contain 108 categories: four
+Stokes, eleven Tanaka, 66 Benjamin--Feir, and 27 JONSWAP/TMA.  The exact
+revision-3 Tanaka pilot passed all eleven Tanaka categories.  The revision-4
+Benjamin--Feir exact-source gate passed all 66 categories, and its production
+splits are complete at 16384 training cases and 1024 cases in each of
+validation and test.  The revision-4 JONSWAP/TMA source was tested more
+broadly: a predeclared gate retained 540 trajectories, 20 in each of its 27
+categories, from 548 attempts.  Its observed rejection rate was therefore
+\(8/548=1.46\%\), below the predeclared two-percent bound.  This was the
+completed constructor-adoption criterion, not a bulk release threshold.  The
+subsequent revision-4 bulk release is complete: it retained \num{18432} cases
+from \num{18726} attempts, recorded \num{294} zero-row rejections, and stored
+\num{294912} rows.
+
+The revision-2 Stokes splits are complete at the same accepted-case counts as
+Benjamin--Feir.  A historical Tanaka run produced 2048 training, 1024
+validation, and 1024 test cases, but those trajectories are excluded from the
+paper dataset.  The old solitary-wave solve could not realize crest amplitudes
+below \(9.9478\times10^{-4}\); 64 of the 4096 historical cases contain one
+requested component below this floor.  The smallest requested component was
+inflated by a factor \(41.27\) after periodic construction and projection.
+The corrected solve uses \(q_c^{\max}=1-10^{-12}\), 48 bisections, and checks
+that every realized crest height matches its request.  The corrected
+revision-3 release is a fresh deterministic population with 16384
+training cases and 1024 cases in each of validation and test.  It does not
+reuse the historical random specifications, and no old and corrected Tanaka
+rows are mixed.  All \num{18432} corrected attempts were accepted and stored
+\num{3686400} rows.
+
+\paragraph{One frozen learning target.}
+Let the spatial period be $L=2\pi$, let $N=1024$, and let
+$\Delta x=L/N$ and $x_\ell=\ell\Delta x$, $\ell=0,\ldots,N-1$, be the grid
+spacing and nodes.  For a periodic grid function $u$, let $P_K u$ retain its
+Fourier modes with $|k|\leq K$, where $K=128$, and let $P_K^\circ u$ also set
+the zero Fourier mode to zero.  We
+write $\G_M^{N,p}(\eta;h)\xi$ for the order-$M$ Craig--Sulem approximation on
+$N$ points with product-padding factor $p$, surface elevation $\eta$, surface
+potential $\xi$, and depth $h>0$.  The target is fixed to
+\begin{equation}
+  q_{\mathrm{ref}}(\eta,\xi;h)
+  =
+  P_K^\circ\!\left[
+    \G_{6}^{1024,8}(P_K\eta;h)(P_K\xi)
+  \right].
+  \label{eq:forward-dataset-target}
+\end{equation}
+Thus both inputs are restricted before evaluation, and the output is
+restricted and made mean zero afterward.  The target is evaluated in float64;
+the three fields $\eta$, $\xi$, and $q_{\mathrm{ref}}$ are stored in float32,
+while the parameters from which they were constructed are stored in float64.
+Thus the mean-zero statement is exact for the float64 target and is preserved
+in the stored array only to float32 rounding error.
+Static Stokes states use exactly \cref{eq:forward-dataset-target}, rather than
+the unfiltered labels in some historical v9 sources.  The generator rejects
+changes to $L,N,K,M,p$, or the evaluation precision, and each archive records
+a hash of this target configuration and the source files that implement it.
+The three trajectory families have internal evolution contracts specified
+below, but all deliver the same target in
+\cref{eq:forward-dataset-target}.
+
+JONSWAP/TMA is evolved on a larger grid than the stored target.  To specify
+the transfer without an FFT-normalization ambiguity, for a field sampled on
+\(N'\) points define
+\begin{equation}
+  \widehat f_k^{(N')}
+  =\frac1{N'}\sum_{j=0}^{N'-1}
+    f\!\left(\frac{2\pi j}{N'}\right)e^{-2\pi i jk/N'}.
+  \label{eq:paper-normalized-fourier-coefficient}
+\end{equation}
+At each retained JONSWAP/TMA time, the coefficients of \(\eta\) and \(\xi\)
+with \(|k|\le128\) are copied from the 2048-point internal grid and
+reconstructed on the 1024-point grid.  Equation
+\eqref{eq:forward-dataset-target} is then evaluated from those reconstructed
+fields.  The internal value of \(G(\eta;h)\xi\) is never transferred between
+grids; recomputing it is necessary because the stored label is the declared
+1024-point order-six operator, not the order-four operator used for evolution.
+
+\paragraph{Static fifth-order Stokes states.}
+Let $n\geq1$ be an integer carrier mode, $k=2\pi n/L$ its wavenumber,
+$a>0$ the amplitude parameter in Fenton's fifth-order expansion
+\cite{fenton1985}, $h>0$ the depth, and
+$\phi\in[0,2\pi)$ a spatial phase.  The finite- and deep-water coefficient
+tables are two parameter branches of the same fifth-order family.  In either
+branch the constructor evaluates the state directly at
+\begin{equation}
+  \theta=kx+\phi,
+  \qquad \phi\sim\operatorname{Unif}[0,2\pi).
+  \label{eq:paper-stokes-phase}
+\end{equation}
+No sampled time is used as a substitute for $\phi$: changing $a$ changes the
+nonlinear temporal frequency, whereas \cref{eq:paper-stokes-phase} preserves
+the requested spatial translation.  The spatial mean of $\xi$ is removed to
+fix the irrelevant constant-potential gauge.
+
+The common amplitude interval is
+\begin{equation}
+  0.000766\leq a\leq0.011494.
+  \label{eq:paper-stokes-amplitude}
+\end{equation}
+In the finite-depth branch,
+\begin{equation}
+  n\in\{14,\ldots,26\},\qquad
+  0.02\leq h\leq1.5,\qquad
+  0.5\leq kh\leq5,
+  \label{eq:paper-stokes-finite-support}
+\end{equation}
+whereas the deep-water branch uses
+\begin{equation}
+  n\in\{1,\ldots,20\},\qquad
+  4\leq h\leq50,\qquad
+  kh\geq5.
+  \label{eq:paper-stokes-deep-support}
+\end{equation}
+The steepness $ka$ is assigned to one of the two categories
+\begin{equation}
+  0.005\leq ka<0.03,
+  \qquad
+  0.03\leq ka\leq0.15.
+  \label{eq:paper-stokes-cells}
+\end{equation}
+The finite/deep branches crossed with these two intervals form four parameter
+categories.  Within an assigned category, the sampler first enumerates the carrier
+modes for which the branch, depth, amplitude, and steepness intervals have
+nonempty intersection, and chooses one of those modes uniformly.  It then
+draws \(h\) log-uniformly on the mode-conditioned depth interval, draws
+\(\phi\) uniformly on \([0,2\pi)\), and draws \(a\) uniformly from the
+intersection of \cref{eq:paper-stokes-amplitude} with the assigned steepness
+interval.
+
+The finite-depth branch has an additional support condition.  Write its
+elevation as
+\begin{equation}
+  \eta_5(\theta)=\sum_{m=1}^{5}E_m\cos(m\theta),
+  \label{eq:paper-stokes-harmonics}
+\end{equation}
+where $E_m$ is the coefficient of the $m$th harmonic.  Let
+$H=\max_\theta\eta_5(\theta)-\min_\theta\eta_5(\theta)$ be the exact
+crest-to-trough height, and let $H_{4096}$ be the corresponding maximum minus
+minimum over 4096 equally spaced values of $\theta$.  Define
+\begin{equation}
+  H_+
+  =
+  H_{4096}
+  +\frac{1}{4}\left(\frac{2\pi}{4096}\right)^2
+    \sum_{m=1}^{5}m^2|E_m|,
+  \qquad
+  \mathrm{Ur}_+
+  =
+  \frac{H_+\lambda^2}{h^3},
+  \qquad
+  \lambda=\frac{2\pi}{k}.
+  \label{eq:paper-stokes-ursell}
+\end{equation}
+Since $|\eta_5''|\leq\sum_{m=1}^5m^2|E_m|$, Taylor's theorem at the true
+maximum and minimum gives $H\leq H_+$.  The finite-depth sampler therefore
+requires the conservative condition $\mathrm{Ur}_+\leq26$.  This is a
+restriction on the parameter support of the fifth-order family, not a filter
+trained on integration failures.  Fenton identifies the corresponding
+shallow-water expansion parameter for fifth-order Stokes theory
+\cite{fenton1985}, and Zhao, Wang, and Liu use $\mathrm{Ur}=26$ to separate
+the fifth-order Stokes and shallower cnoidal regimes \cite{zhao2024}.
+The coefficient implementation follows the fifth-order formula checked
+against Zhao and Liu \cite{zhao2022}.  The deep-water branch instead requires
+$kh\geq5$.
+
+\paragraph{Seeded sampling and complete records.}
+Let $s$ be the root seed fixed by the data split, let $f$ and $v$ identify the
+physical family and generator revision, let $r$ be an integer stream
+identifier, and let $i$ be the attempted-case index.  A case uses NumPy PCG64
+initialized by a seed sequence with integer entropy $(s,f,v,r,i)$.  The four
+categories are the finite/deep branches crossed with the two intervals in
+\cref{eq:paper-stokes-cells}.  Requested accepted-case counts are divided
+among these categories by quotient and remainder before any state is constructed.
+This is a seeded stratified pseudorandom construction, not a low-discrepancy
+sequence.  The proposal stores all five seed coordinates and every realized
+mode, amplitude, depth, phase, branch, and category.
+
+If a finite-depth amplitude draw violates
+$\mathrm{Ur}_+\leq26$, only the amplitude is redrawn, uniformly from the same
+category intersection.  Its mode, depth, phase, and category remain fixed.  The case
+record stores every rejected amplitude and its value of $\mathrm{Ur}_+$ as
+well as the accepted draw.  At most 1000 such redraws are permitted.  If this
+cap is exhausted, the sampler raises an exception containing the fixed
+parameters and every rejected amplitude--$\mathrm{Ur}_+$ pair.  No member of
+the attempt is appended as training data.  This event is a declared
+out-of-support case, not a fatal batch failure: the production driver stores
+the strict record in the proposal, commits a zero-row rejection, and schedules
+a replacement in the same category.  Only an explicitly declared deterministic
+fatal error writes a terminal failure sidecar.  An ordinary exception
+propagates without writing that record, so the attempt can replay from its last
+durable state.  Static transactions verify the proposal, archive entries, and
+stored configuration hash before commit.
+
+\paragraph{Static archive and replay checks.}
+These checks concern only the implemented Stokes component of the replacement
+dataset.  A 16-case finite-depth archive contained eight cases from each category
+in \cref{eq:paper-stokes-cells}, required three same-category redraws, and had
+$\max\mathrm{Ur}_+=18.0578589$.  A separate 16-case deep archive was finite
+and had $\min kh=10.0678$.  Its category counts were nine and seven because some
+carrier modes admitted only one steepness category; the subset admitting both remained
+balanced to within one.  Re-evaluating
+\cref{eq:forward-dataset-target} from the stored float64 parameters and then
+converting the fields to float32 reproduced both archives bit for bit.  A
+synthetic interruption after two batches likewise resumed to the same 30
+ordered archive entries, byte for byte, as an uninterrupted 32-case run.  In
+a 20,000-case finite-depth sampling stress with root seed 20260725 and stream
+zero, the two category counts were 10,000 and 10,000, the largest accepted value
+was $\mathrm{Ur}_+=25.9724665$, the largest redraw count was 56, and no case
+exhausted the cap.  A separate forced-exhaustion quota test committed the
+complete record as a zero-row out-of-support attempt and scheduled a
+replacement in the same category.
+
+The common static transaction was also exercised at the exact target
+resolution $(N,M,p,K)=(1024,6,8,128)$ in float64.  One validation attempt was
+assigned to each finite/deep and low/moderate category, and its complete
+specification was written before construction.  All four attempts had finite
+input and target fields, positive water column, no support violation, and no
+failed required quality check.  The transaction therefore committed one
+$t=0$ row per case and constructed the split-aware dataset view.  This
+accepted-quota calculation accepted all four attempts and checks the exact
+implementation path; it does not estimate a population acceptance
+probability.
+
+\paragraph{Periodic tangent-Hermite Tanaka states.}
+Let $\alpha=a/h>0$ be the ratio of crest amplitude $a$ to depth $h$.
+Following Tanaka's solitary-wave formulation \cite{tanaka1986}, a unit-depth
+solve at amplitude ratio $\alpha$ returns a dimensionless surface profile
+$\bar\eta_\alpha(X)$, a tabulated surface angle $\theta_\alpha(X)$, and a
+Froude number $F_\alpha$.  Xu and Guyenne also use a solitary wave computed
+by Tanaka's method \cite{xu2009}.  The tangent-Hermite interpolation,
+periodization, multi-crest superposition, and parameter sampling below are
+choices of the present dataset; they are not parts of either cited
+solitary-wave construction.  Here $X$ is the dimensionless horizontal
+coordinate, and
+\begin{equation}
+  \frac{\dd\bar\eta_\alpha}{\dd X}(X)
+  =\tan\theta_\alpha(X).
+  \label{eq:paper-tanaka-slope}
+\end{equation}
+Before interpolation, the constructor verifies that both endpoint elevations
+and the endpoint and crest tangents differ from zero by at most $10^{-12}$,
+then sets those quantities exactly to zero.  The corrected tabulated profile
+is extended by zero outside its finite tabulation interval.  Between adjacent
+tabulation points, the constructor uses the unique cubic polynomial matching
+both endpoint values of $\bar\eta_\alpha$ and both endpoint values of
+$\tan\theta_\alpha$.  Thus ``tangent-Hermite'' specifies the interpolation,
+not an additional wave model.  The physical derivative is correctly scaled
+because
+\begin{equation}
+  \partial_x\!\left[
+    h\bar\eta_\alpha\!\left(\frac{x-x_0+rL}{h}\right)
+  \right]
+  =
+  \frac{\dd\bar\eta_\alpha}{\dd X}
+  \!\left(\frac{x-x_0+rL}{h}\right).
+  \label{eq:paper-tanaka-scaled-slope}
+\end{equation}
+
+For a crest centered at $x_0\in[0,L)$, define the periodic elevation
+\begin{equation}
+  \eta_{\alpha,h,x_0}(x)
+  =
+  h\sum_{r\in\mathbb Z}
+  \bar\eta_\alpha\!\left(\frac{x-x_0+rL}{h}\right).
+  \label{eq:paper-tanaka-periodization}
+\end{equation}
+Only finitely many terms in \cref{eq:paper-tanaka-periodization} are nonzero
+at a given $x$, because the extended profile has finite support.  The
+implementation sums every periodic image whose support intersects $[0,L)$;
+it does not retain only the nearest three images.  The sum is evaluated on an
+$8N$-point grid and Fourier-restricted to the $N$-point grid.
+
+Let $g>0$ be gravitational acceleration, let
+$c_\alpha=F_\alpha\sqrt{gh}$ be the unsigned wave speed, and let
+$s\in\{-1,1\}$ denote the direction of travel.  Write
+$\eta_x=\partial_x\eta_{\alpha,h,x_0}$.  The traveling-wave relation first
+defines
+\begin{equation}
+  r_{\alpha,h,x_0,s}(x)
+  =
+  s\left[
+    c_\alpha-
+    \sqrt{(1+\eta_x(x)^2)
+      (c_\alpha^2-2g\eta_{\alpha,h,x_0}(x))}
+  \right].
+  \label{eq:paper-tanaka-potential-derivative}
+\end{equation}
+Define the expression under the square root by
+\begin{equation}
+  \mathcal R_{\alpha,h,x_0}(x)
+  =
+  (1+\eta_x(x)^2)
+  (c_\alpha^2-2g\eta_{\alpha,h,x_0}(x)).
+  \label{eq:paper-tanaka-radicand}
+\end{equation}
+The constructor requires the nodewise condition
+$\min_\ell\mathcal R_{\alpha,h,x_0}(x_\ell)\geq0$ and records an attempted component
+that violates this condition as inadmissible; it does not replace a negative
+value by zero.  For the fixed upper-steepness, seam-centered test case, the
+initial value is
+$\min_\ell\mathcal R_{\alpha,h,x_0}(x_\ell)/c_\alpha^2=0.372151$.  Hence the clipping
+in the old writer did not change that particular initial condition.  This
+single positive margin does not establish the condition for the full
+population.
+
+Let $\widehat r_n$ be the Fourier coefficient of
+$r_{\alpha,h,x_0,s}$ at wavenumber $k_n=2\pi n/L$.  The periodic,
+zero-mean surface potential is defined by
+\begin{equation}
+  \widehat\xi_n
+  =
+  \begin{cases}
+    \widehat r_n/(ik_n),&n\ne0,\\
+    0,&n=0.
+  \end{cases}
+  \label{eq:paper-tanaka-potential}
+\end{equation}
+Consequently $\partial_x\xi=r_{\alpha,h,x_0,s}-\widehat r_0$; subtracting
+the constant $\widehat r_0$ is necessary for a periodic antiderivative.
+
+A case with $m\geq1$ crests has parameters
+$(h,m,\alpha_j,x_j,s_j)_{j=1}^m$ and initial state
+\begin{equation}
+  (\eta_0,\xi_0)
+  =
+  P_K\sum_{j=1}^{m}
+  \left(
+    \eta_{\alpha_j,h,x_j},
+    \xi_{\alpha_j,h,x_j,s_j}
+  \right).
+  \label{eq:paper-tanaka-state}
+\end{equation}
+For $m>1$, \cref{eq:paper-tanaka-state} is a superposition of separately
+constructed solitary-wave profiles, not an exact steady multi-solitary-wave
+solution.
+The sharp $P_K=P_{128}$ map in \cref{eq:paper-tanaka-state} is applied once
+before time integration.  Revision 3 then embeds this state in the larger
+$|k|\leq256$ evolution space by setting modes $129\leq|k|\leq256$ initially
+to zero.  Nonlinear evolution may populate those workspace modes, but the
+initial-value problem is exactly the sharp-$P_{128}$ problem used in the
+resolution calculation below.
+For two centers $x_i,x_j\in[0,L)$, define their periodic distance by
+\begin{equation}
+  d_L(x_i,x_j)
+  =
+  \min_{r\in\mathbb Z}|x_i-x_j+rL|.
+  \label{eq:paper-periodic-distance}
+\end{equation}
+The centers must satisfy $d_L(x_i,x_j)\geq3h$ whenever $i\ne j$.
+
+The amplitudes are sampled before the depth.  In a main group, define the
+total dimensionless amplitude
+$\alpha_\Sigma=\sum_{j=1}^m\alpha_j$ and draw
+$\alpha_\Sigma\sim\operatorname{Unif}[0.10,0.35]$.  Draw nonnegative weights
+$(\lambda_1,\ldots,\lambda_m)$ uniformly on the simplex
+$\sum_j\lambda_j=1$, equivalently from
+$\operatorname{Dirichlet}(1,\ldots,1)$, and set
+$\alpha_j=\alpha_\Sigma\lambda_j$.  For $m=1$, this means
+$\lambda_1=1$.  In a steep group, draw the single amplitude ratio
+$\alpha_1\sim\operatorname{Unif}[0.25,0.45]$.  In both groups, define
+\begin{equation}
+  \alpha_{\max}=\max_{1\leq j\leq m}\alpha_j.
+  \label{eq:paper-tanaka-maximum-amplitude}
+\end{equation}
+
+The depth interval is then restricted before a profile is constructed.  The
+small-amplitude KdV profile has the form
+\begin{equation}
+  \frac{\eta(x)}{h}
+  \approx
+  \alpha_{\max}\operatorname{sech}^2\!\bigl(\kappa(x-x_0)\bigr),
+  \qquad
+  \kappa=\frac{\sqrt{3\alpha_{\max}}}{2h},
+  \label{eq:paper-tanaka-kdv-width}
+\end{equation}
+where $\operatorname{sech}z=1/\cosh z$ and $\kappa$ is an inverse length.
+We use $\kappa$ only as a small-amplitude KdV inverse-width proxy for the
+narrowest component.  It is not the exact width of a Tanaka profile.  With
+the delivered cutoff $K=128$, define the number of delivered wavenumbers per
+proxy inverse width by
+\begin{equation}
+  R=\frac{128}{\kappa}
+   =\frac{256h}{\sqrt{3\alpha_{\max}}}.
+  \label{eq:paper-tanaka-resolution-ratio}
+\end{equation}
+Tanaka revision 3 requires $R\geq10$.  This threshold is a numerical design
+choice established by the resolution tests below; it is not a condition
+stated in \cite{tanaka1986} or \cite{xu2009}.
+
+The proxy first arose from a retrospective resolution audit, rather than from
+a fitted rejection statistic.  We reconstructed 256 tangent-Hermite proposals
+before their sharp $P_{128}$ projection.  All eleven cases that exceeded the
+historical $K_{\mathrm{evol}}=224$ Hamiltonian-drift diagnostic had $R<8$.
+The 210 cases with $R\geq8$ contained none of those diagnostic failures, and
+their largest raw-to-$P_{128}$ relative root-mean-square errors were
+$6.80\times10^{-5}$ for $\eta$ and $4.47\times10^{-6}$ for $\xi$.  By
+comparison, the unrelated fixed restriction $h\geq0.025$ admitted a larger
+maximum $\eta$ projection error, $4.33\times10^{-4}$.  These observations
+identify under-resolved input width as the mechanism; the full-horizon panel
+below, not the historical Hamiltonian threshold, determines the revision-3
+support.
+
+For a base lower depth $b>0$, define
+\begin{equation}
+  h_-(\alpha;b)
+  =\max\!\left\{b,\frac{10\sqrt{3\alpha}}{256}\right\}.
+  \label{eq:paper-tanaka-depth-lower-bound}
+\end{equation}
+After the amplitudes have been drawn, sample $U_h\sim\operatorname{Unif}[0,1]$
+and set
+\begin{equation}
+  h=h_-^{\,1-U_h}h_+^{\,U_h},
+  \label{eq:paper-tanaka-geometric-depth}
+\end{equation}
+where $h_-=h_-(\alpha_{\max};0.01)$ and $h_+=0.30$ in a main group, while
+$h_-=h_-(\alpha_1;0.20)$ and $h_+=0.35$ in a steep group.  Thus $h$ is
+log-uniform on the conditional interval $[h_-,h_+]$.  The resolution term in
+\cref{eq:paper-tanaka-depth-lower-bound} is at most $0.0454$ on the steep
+amplitude interval, so the steep lower bound remains $0.20$ and the
+resolution restriction is inactive there.  The resulting supports are
+therefore
+\begin{align}
+  &m\in\{1,2,3\},\quad
+    \alpha_\Sigma\in[0.10,0.35],\quad
+    h\in[h_-(\alpha_{\max};0.01),0.30]
+    &&\text{(main)},
+  \label{eq:paper-tanaka-main-support}\\
+  &m=1,\quad
+    \alpha_1\in[0.25,0.45],\quad
+    h\in[0.20,0.35]
+    &&\text{(steep)}.
+  \label{eq:paper-tanaka-steep-support}
+\end{align}
+Equal increments of $U_h$ give equal multiplicative changes of depth.  This is
+a coverage rule for the numerical experiment, not a probability model for
+physical water depths.  In a deterministic million-draw audit for each
+$m=1,2,3$, the $R\geq10$ condition removed $28.55\%$ of the former
+independent-depth law after weighting the nine main categories by their
+$2:3:4$ category counts.  The median depths for $m=1,2,3$ were respectively
+$0.0973$, $0.0902$, and $0.0857$, and their 95th percentiles were $0.2680$,
+$0.2659$, and $0.2647$.
+
+For each case let
+\begin{equation}
+  q=\#\{j:s_j=+1\}
+  \label{eq:paper-tanaka-right-count}
+\end{equation}
+be the number of right-moving crests.  The three choices of $m$ in
+\cref{eq:paper-tanaka-main-support}, crossed with
+$q=0,\ldots,m$, give nine parameter categories.  The steep support in
+\cref{eq:paper-tanaka-steep-support}, crossed with $q=0,1$, gives two more.
+Thus the Tanaka family has eleven parameter categories.
+
+The requested Tanaka accepted-case count is divided equally across these
+eleven categories, up to the unavoidable difference of one case when the
+total is not divisible by eleven.  Conditional on $q$, the sampler chooses
+uniformly which $q$ of the $m$ exchangeable crest labels have sign $+1$; all
+remaining signs are $-1$.  Hence left and right directions remain balanced
+marginally in the ideal equal-category population, while the direction
+compositions $q=0,\ldots,m$ receive equal coverage instead of their former
+binomial frequencies under independent fair signs.  For a finite quota, the
+quotient--remainder assignment changes category counts by at most one and may
+therefore introduce a one-case direction imbalance.  In particular, the
+fixed category order gives a quota of 1024 one extra left-moving one-crest
+case.  This law also gives more aggregate Tanaka weight to
+$m=2$ and $m=3$, because they have three and four distinct direction
+compositions, respectively.  The corrected full-size Tanaka production is
+complete.  Its historical 4096-case predecessor and its eleven-case
+revision-3 pilot are excluded from the replacement-dataset view.
+
+Tanaka revision 3 retains the eleven direction-aware categories introduced in
+revision 2, but changes the amplitude--depth draw order, the admissible depth
+support, and the internal numerical contract.  Earlier Tanaka revision-1 and
+revision-2 smokes, dry runs, and pilot artifacts remain historical
+constructor or transaction evidence; they cannot be resumed into a
+revision-3 run.  Benjamin--Feir and JONSWAP/TMA use revision 4; static Stokes
+remains at revision 2.
+
+To sample centers without a translation bias, let
+$(w_1,\ldots,w_m)$ have the same uniform-simplex law and set the cyclic gaps
+to
+\begin{equation}
+  g_j=3h+(L-3mh)w_j,\qquad j=1,\ldots,m.
+  \label{eq:paper-tanaka-gap-law}
+\end{equation}
+A uniform global rotation places the resulting point set on the periodic
+domain.  Directions are then assigned according to the category as described
+above.  In a steep group, the center uses this same uniform rotation and the
+direction is fixed by $q\in\{0,1\}$.  The separation is always feasible on
+the declared support because $3mh\leq2.7<2\pi=L$.  Thus separation and
+translation symmetry are enforced before integration.
+
+The population sampler and the ordered common archive adapter are
+implemented.  In particular, the complete sampled parameters are persisted
+before the tangent-Hermite constructor is called.  The potential routine
+transfers the computed radicand to the host once before taking the square root
+and introduces no clipping tolerance.  An everywhere-finite, positive-speed
+component with a negative radicand is a declared support rejection: it
+contributes no rows and is replaced in the same category.  A nonfinite radicand,
+a nonpositive or nonfinite computed speed, a malformed diagnostic record, or
+an unexpected exception remains an implementation error and stops the run.
+In the historical reduced paired calculation described above, the Tanaka
+attempt was accepted, committed three finite rows, and was finite when read by
+the training loader.  This is transaction evidence at the reduced contract,
+not evidence about the current Tanaka trajectory executor or the Tanaka
+population.
+
+Tanaka revision 3 evolves an internal band
+$|k|\leq K_{\mathrm{evol}}$ with $K_{\mathrm{evol}}=256$.  Let
+$\widehat\eta_{0,k}$ and $\widehat\xi_{0,k}$ be the Fourier coefficients of
+the sharp-$P_{128}$ state in \cref{eq:paper-tanaka-state}.  The internal state
+is initialized by the zero-filled lift
+\begin{equation}
+  \bigl(\widehat\eta_k(0),\widehat\xi_k(0)\bigr)
+  =
+  \begin{cases}
+    \bigl(\widehat\eta_{0,k},\widehat\xi_{0,k}\bigr),&|k|\leq128,\\
+    (0,0),&128<|k|\leq256.
+  \end{cases}
+  \label{eq:paper-tanaka-zero-filled-lift}
+\end{equation}
+Thus no discarded raw-profile mode is supplied to the wider evolution at
+$t=0$; modes above 128 can arise only from the subsequent dynamics.  The
+$K_{\mathrm{evol}}=224$ comparison arm uses the same construction with upper
+limit 224.  After every completed GL2 step, the Fourier coefficients
+$\widehat\eta_k$ and $\widehat\xi_k$ are multiplied by
+\begin{equation}
+  \sigma_k
+  =\exp\!\left[-36\left(\frac{|k|}{256}\right)^{36}\right].
+  \label{eq:paper-tanaka-hou-li-filter}
+\end{equation}
+This is the power-36 Hou--Li filter \cite{hou2007} used on both canonical
+variables, with the parameters of \cite[Eq.~(29)]{xu2009}.  The
+$K_{\mathrm{evol}}=224$ comparison arm replaces 256 in
+\cref{eq:paper-tanaka-hou-li-filter} by 224.  At each saved time, the delivered
+state is
+$(P_{128}\eta,P_{128}\xi)$ and the delivered label is
+$q_{\mathrm{ref}}$ from \cref{eq:forward-dataset-target}.  Modes
+$129\leq|k|\leq256$ therefore stabilize the internal evolution but are not
+stored as inputs or labels for learning.
+This sharp \(P_{128}\) initial projection, zero-filled lift to
+\(K_{\mathrm{evol}}=256\), post-step Hou--Li multiplier, and final
+\(P_{128}\) delivery is the exact revision-3 contract used by the pilot.  The
+excluded historical July training shards used the same numerical contract but
+are not part of the fresh paper dataset.
+
+The resolution choice was tested on nine one-crest cases.  Their amplitude
+ratios were $\alpha\in\{0.225,0.30,0.35\}$, and their resolution ratios were
+$R\in\{6,8,10\}$.  Each case was evolved from the same bit-identical
+$P_{128}$ initial state with
+$K_{\mathrm{evol}}=224$ and 256 through $T=200$.  Define the dimensionless
+delivered fields
+\begin{equation}
+  \widetilde\eta_J(t)=\frac{P_{128}\eta_J(t)}{h},\qquad
+  \widetilde\xi_J(t)=\frac{P_{128}\xi_J(t)}{h\sqrt{gh}},\qquad
+  \widetilde q_J(t)
+  =\frac{q_{\mathrm{ref}}(\eta_J(t),\xi_J(t);h)}{\sqrt{gh}},
+  \label{eq:paper-tanaka-dimensionless-comparison-fields}
+\end{equation}
+where $J\in\{224,256\}$ is the internal cutoff and
+$(\eta_J,\xi_J)$ is that arm's internal state.  For
+$u\in\{\widetilde\eta,\widetilde\xi,\widetilde q\}$, define the reported
+cross-resolution error by
+\begin{equation}
+  \epsilon_u
+  =\max_t
+  \frac{\lVert u_{224}(t)-u_{256}(t)\rVert_{2,N}}
+       {\max_s\lVert u_{256}(s)\rVert_{2,N}+10^{-12}},
+  \qquad
+  \lVert v\rVert_{2,N}^2
+  =\frac{1}{N}\sum_{\ell=0}^{N-1}|v(x_\ell)|^2.
+  \label{eq:paper-tanaka-cross-resolution-error}
+\end{equation}
+The three fields are nondimensionalized before the additive $10^{-12}$ floor
+is applied.  Write $\epsilon_\eta$, $\epsilon_\xi$, and $\epsilon_q$ for
+\cref{eq:paper-tanaka-cross-resolution-error} evaluated with
+$u=\widetilde\eta$, $\widetilde\xi$, and $\widetilde q$, respectively.  The
+audit also checked the analogous full-history RMS error.  To measure whether
+hidden state modes alter the delivered operator, define
+\begin{equation}
+  d_J(t)
+  =P_{128}^\circ\!\left[
+    \G_6^{1024,8}(\eta_J(t);h)\xi_J(t)
+  \right]
+  -q_{\mathrm{ref}}(\eta_J(t),\xi_J(t);h),
+  \label{eq:paper-tanaka-hidden-band-defect}
+\end{equation}
+where $(\eta_J,\xi_J)$ is the internal state of arm $J$.  Its reported closure
+error is
+\begin{equation}
+  C_J
+  =\max_t
+  \frac{\lVert d_J(t)\rVert_{2,N}}
+       {\max_s\lVert q_{\mathrm{ref}}(\eta_J(s),\xi_J(s);h)\rVert_{2,N}
+        +10^{-12}}.
+  \label{eq:paper-tanaka-hidden-band-closure}
+\end{equation}
+
+All three $R=6$ controls failed the predeclared $10^{-3}$ comparison; their
+worst operator error was $\epsilon_q=9.36\times10^{-3}$ and
+their worst closure error was $2.91\times10^{-3}$.  All three $R=8$ cases
+passed, but their worst errors were
+$(\epsilon_\eta,\epsilon_\xi,\epsilon_q)
+=(1.87\times10^{-4},1.29\times10^{-5},7.34\times10^{-4})$ and
+$\max_J C_J=6.31\times10^{-4}$.  At $R=10$, these values fell to
+$(2.94\times10^{-5},1.62\times10^{-6},1.35\times10^{-4})$ and
+$1.40\times10^{-4}$.  Each arm completed all 20,000 GL2 time steps, and both
+coupled implicit stage equations converged at every step.  The largest
+delivered-$P_{128}$ Hamiltonian drift among the $R=10$
+arms was $2.99\times10^{-8}$; this value is reported only as a numerical
+diagnostic and is not a production acceptance condition.  We therefore use
+the round margin $R\geq10$ and the exact two-times internal band
+$K_{\mathrm{evol}}=256$ in Tanaka revision 3.
+
+\paragraph{Equation-(33) Benjamin--Feir states.}
+This family is restricted to deep water.  Let $n_c\in\mathbb N$ be the
+carrier-mode index, let $\Delta n\in\mathbb N$ be the symmetric sideband
+offset with $\Delta n<n_c$, let $\varepsilon_c>0$ be the steepness of the
+first elevation harmonic, let $\rho>0$ be the sideband-to-carrier amplitude
+ratio, and let $x_0\in[0,L)$ be a global spatial translation.  Thus
+$\varepsilon_c$ is not defined from half the crest-to-trough wave height.
+Define
+\begin{equation}
+  k_c=\frac{2\pi n_c}{L},\qquad
+  k_-=\frac{2\pi(n_c-\Delta n)}{L},\qquad
+  k_+=\frac{2\pi(n_c+\Delta n)}{L},\qquad
+  a=\frac{\varepsilon_c}{k_c}.
+  \label{eq:paper-bf-wavenumbers}
+\end{equation}
+The sideband ansatz follows equation~(33) of Xu and Guyenne, who in turn
+follow Dommermuth and Yue \cite{dommermuth1987,xu2009}.  Their published test
+uses, in the present notation,
+\begin{equation}
+  (n_c,\Delta n,\varepsilon_c,\rho,\theta)
+  =
+  (9,2,0.13,0.10,-\pi/4),
+  \qquad L=2\pi,\qquad g=1.
+  \label{eq:paper-bf-published-tuple}
+\end{equation}
+It also uses a numerically computed exact steady Stokes carrier.  The
+construction below is our randomized generalization over 66 integer
+mode-pair categories, not a reproduction of that single parameter tuple.
+
+Let $y=x-x_0$, and let $(\eta_c(y),\xi_c(y))$ denote the project's analytic
+fifth-order deep-water Stokes formula, with carrier phase zero in this
+translated coordinate and first elevation harmonic of amplitude $a$.  This
+analytic fifth-order carrier is an approximation to the published exact
+steady carrier; it is not the Xu--Guyenne carrier itself.  Both sidebands use
+the fixed relative phase $\theta=-\pi/4$ from the cited calculation.
+
+With $\eta_0$ evaluated before $\xi_0$, the implemented sideband construction
+is
+\begin{align}
+  \eta_0(x)
+  &=
+  \eta_c(y)+\rho a\left[
+    \cos(k_-y+\theta)+\cos(k_+y+\theta)
+  \right],
+  \notag\\
+  \xi_0(x)
+  &=
+  \xi_c(y)+\rho a\left[
+    \sqrt{\frac{g}{k_-}}\,e^{k_-\eta_0(x)}\sin(k_-y+\theta)
+    +
+    \sqrt{\frac{g}{k_+}}\,e^{k_+\eta_0(x)}\sin(k_+y+\theta)
+  \right].
+  \label{eq:paper-bf-state}
+\end{align}
+The spatial mean of $\xi_0$ is removed after
+\cref{eq:paper-bf-state}.  Both sidebands use the same $\rho$ and $\theta$;
+there are no empirical cross terms.  Translating the complete state changes
+neither the relative phases nor the resonant quartet phase, which remains
+$\theta+\theta-2(0)=-\pi/2$.  The numerical depth is
+$h=5L/(2\pi)$, so the first nonzero wavenumber $k_1=2\pi/L$ satisfies
+$k_1h=5$.
+
+For a proposed pair, define the normalized sideband location and a
+focused-envelope steepness proxy by
+\begin{equation}
+  \beta
+  =\frac{\Delta n/n_c}{2\sqrt{2}\,\varepsilon_c},
+  \qquad
+  \varepsilon_f
+  =\varepsilon_c\left(1+2\sqrt{1-\beta^2}\right).
+  \label{eq:paper-bf-band}
+\end{equation}
+Benjamin and Feir give the historical deep-water instability
+condition~\cite{benjaminfeir1967}.  In the present normalization,
+equation~(4.6) of Andrade and Stuhlmeier gives $0<\beta<1$, while their
+equations~(5.7)--(5.11) give the Akhmediev-breather correspondence and the
+peak-envelope amplification factor
+$1+2\sqrt{1-\beta^2}$~\cite{andrade2023}.  We use that factor only to define
+the scalar population-screening proxy above.  Yang and Liu use
+$\varepsilon_c=0.10$, five-percent sidebands, and the maximum-growth
+frequency coordinate $\Delta\omega/(\omega_c\varepsilon_c)=1$
+\cite[Sec.~4.3.1]{yangliu2024}.  Under the leading deep-water narrowband
+relation $\Delta k/k_c\simeq2\Delta\omega/\omega_c$, this corresponds to
+$\beta\simeq1/\sqrt2$ in our symmetric-wavenumber normalization.  The
+ten-percent endpoint below is the sideband ratio in the Xu--Guyenne test tuple in
+\cref{eq:paper-bf-published-tuple}.  Revision 4 uses the declared support
+\begin{equation}
+  \begin{gathered}
+    n_c\in\{4,\ldots,20\},\qquad
+    \Delta n\in\{1,\ldots,n_c-1\},\qquad
+    \varepsilon_c\in[0.05,0.13],\\
+    0<\beta<1,qquad
+    \varepsilon_f\leq F_0,qquad
+    F_0=\frac{1+\sqrt2}{10},\\
+    \rho\in[0.05,0.10],\qquad x_0\in[0,L).
+  \end{gathered}
+  \label{eq:paper-bf-support}
+\end{equation}
+The scalar $\varepsilon_f$ is a population-screening proxy, not a maximum
+physical slope, a wave-breaking criterion, or a regularity theorem.
+
+Let $\mathcal P$ be the 66 integer pairs $(n_c,\Delta n)$ for which this
+support is nonempty.  Conditional on a pair in $\mathcal P$, set
+\begin{equation}
+  \ell=\frac{\Delta n}{2\sqrt2\,n_c},\qquad
+  \varepsilon_{\min}=\max\{0.05,\ell\},\qquad
+  \varepsilon_{\max}
+  =\min\left\{0.13,
+    \frac{-F_0+2\sqrt{F_0^2+3\ell^2}}{3}\right\}.
+  \label{eq:paper-bf-conditional-steepness}
+\end{equation}
+The implemented sampler draws
+$\varepsilon_c\sim\operatorname{Unif}
+(\varepsilon_{\min},\varepsilon_{\max}]$,
+$\rho\sim\operatorname{Unif}[0.05,0.10)$, and
+$x_0\sim\operatorname{Unif}[0,L)$.  The upper endpoint in
+\cref{eq:paper-bf-conditional-steepness} is obtained by solving
+$\varepsilon_f=F_0$ at fixed $(n_c,\Delta n)$.  The relative phase
+$\theta=-\pi/4$ is fixed rather than sampled.  The closed intervals in
+\cref{eq:paper-bf-support} denote the closure of the physical support; the
+half-open endpoint conventions above specify finite-precision sampling and do
+not change the corresponding continuous uniform laws.
+The quota rule treats each of the 66 pairs in
+$\mathcal P$ as a parameter category.  If a family--split accepted-case quota is $C$, each
+pair receives either $\lfloor C/66\rfloor$ or $\lceil C/66\rceil$ accepted
+cases, in the fixed enumerated category order.  A rejected attempt is replaced in
+the same pair category.  The pair-conditioned sampler and the general category
+allocator are both implemented.
+
+At the final split quotas, the 16384 training cases assign 248 or 249 accepted
+cases to every pair, while the 1024 validation cases and 1024 test cases each
+assign 15 or 16.  Additive training chunks contain the differences between
+these cumulative balanced allocations.  Before bulk generation, the direct
+revision-4 source gate accepted the first proposal in each of the 66
+categories.  The completed production dataset subsequently retained 18432
+cases from 18455 attempts: 16384 training cases, 1024 validation cases, and
+1024 test cases.  The 23 rejected attempts retained no rows.  A source-bound
+completion audit independently checked the ordered 66-category taxonomy and
+quotas, exact proposal replay, transaction and array hashes, the 200
+endpoint-pinned, approximately uniform selections from each saved grid,
+stored depths and water columns, and the declared numerical conditions.  Its
+artifact is
+\path{outputs/paper_dataset_bf_revision4_jonswap_revision3_literature_aligned_v1/benjamin_feir_completion_audit.json},
+with SHA-256
+\par\noindent
+\texttt{c155b35276d0cfef6844f6b0db3e91da}\allowbreak
+\texttt{3ce15579ad8b0f0ca482f44cc912753c}.
+Two shared Python modules changed after this calculation and their exact run
+versions were absent from the Git history.  Those two files are now preserved,
+without being imported by current code, in
+\path{reproducibility/source_snapshots/}, in the subdirectory
+\path{benjamin_feir_revision4_e16773f/};
+the accompanying \texttt{SHA256SUMS} file equals the hashes recorded by every
+one of the six chunk source maps.  The completion audit also reconstructs the
+attempted, accepted, and rejected count in every category from the immutable
+transactions and physically rehashes the other 17 recorded generation sources
+against the current repository.  It remains the binding record for the dataset
+arrays and transactions.
+These counts measure the implemented population and numerical path; they do
+not turn the proxy bound into a physical wave-breaking criterion.
+
+The common adapter persists the pair, continuous parameters, translation,
+and fixed relative phase before constructing the equation-(33) state.  In the
+reduced accepted-quota
+calculation, the Benjamin--Feir attempt was accepted, committed three rows,
+and was finite when read by the training loader.  This historical transaction
+used the former paired validation path and exercised proposal, construction,
+post-acceptance time selection, whole-case commit, and split-aware view
+construction.  It checks order and storage logic only; the full-horizon
+panel below is the separate method-level numerical test.
+
+For each carrier, define the linear carrier period and the requested horizon
+by
+\begin{equation}
+  T_c=\frac{2\pi}{\sqrt{gk_c}},\qquad
+  H_{\mathrm{BF}}=100T_c,
+  \qquad
+  T_{\mathrm{BF}}
+  =0.08\left\lfloor\frac{H_{\mathrm{BF}}}{0.08}\right\rfloor.
+  \label{eq:paper-bf-horizon}
+\end{equation}
+The intended horizon is $H_{\mathrm{BF}}=100T_c$, and the calculation ends
+at $T_{\mathrm{BF}}$, the last saved-grid time not exceeding that horizon.
+This follows the carrier-period time coordinate used by Xu and Guyenne while
+placing every endpoint on the common saved-time grid.  Across the 66 equally
+weighted pair categories, $T_{\mathrm{BF}}$ ranges from $140.48$ to $314.08$
+and has mean $174.50$; equivalently,
+$T_{\mathrm{BF}}/T_c\in[99.9541,99.9973]$.
+
+\paragraph{Resolved-band JONSWAP/TMA random seas.}
+JONSWAP denotes the Joint North Sea Wave Project frequency spectrum, and TMA
+denotes its standard Texel--Marsen--Arsloe finite-depth
+modification.  Let $h>0$ be depth, let $k_p>0$ be the reference peak
+wavenumber, let $\gamma\geq1$ be the peak-enhancement factor, and let $g>0$
+be gravitational acceleration.  For wavenumber $k>0$, define
+\begin{equation}
+  \omega(k,h)=\sqrt{gk\tanh(kh)},\qquad
+  c_g(k,h)=\frac{\partial\omega}{\partial k}
+  =
+  \frac{g[\tanh(kh)+kh\,\operatorname{sech}^2(kh)]}
+       {2\omega(k,h)}.
+  \label{eq:paper-random-dispersion}
+\end{equation}
+Set $\omega_p=\omega(k_p,h)$ and define the peak period
+$T_p=2\pi/\omega_p$.  The intended terminal time, saved-time spacing, final
+saved index, and realized terminal time are, respectively,
+\begin{equation}
+  H=16T_p=16\frac{2\pi}{\omega_p},
+  \qquad
+  \delta t_s=0.08,
+  \qquad
+  J=\left\lfloor\frac{H}{\delta t_s}\right\rfloor,
+  \qquad
+  T_s=J\delta t_s
+      =0.08\left\lfloor\frac{H}{0.08}\right\rfloor.
+  \label{eq:paper-random-horizon}
+\end{equation}
+Thus \(T_s\) is the last point on the saved-time grid that does not exceed
+the intended horizon \(H\).  For angular frequency $\omega>0$, define
+\begin{equation}
+  \sigma(\omega)=
+  \begin{cases}
+    0.07,&\omega\leq\omega_p,\\
+    0.09,&\omega>\omega_p,
+  \end{cases}
+  \label{eq:paper-jonswap-width}
+\end{equation}
+and the unnormalized JONSWAP density \cite{hasselmann1973}:
+\begin{equation}
+  \widetilde S_J(\omega)
+  =
+  g^2\omega^{-5}
+  \exp\!\left[-\frac54\left(\frac{\omega_p}{\omega}\right)^4\right]
+  \gamma^{\exp[-(\omega-\omega_p)^2/
+    (2\sigma(\omega)^2\omega_p^2)]}.
+  \label{eq:paper-jonswap-density}
+\end{equation}
+For the dimensionless number $z=kh$, define the TMA multiplier
+\cite{bouws1985}:
+\begin{equation}
+  \Phi_{\mathrm{TMA}}(z)
+  =
+  \frac{\tanh^2z}{1+2z/\sinh(2z)}.
+  \label{eq:paper-tma-factor}
+\end{equation}
+The cited works supply these spectral forms.  Published numerical JONSWAP
+realizations have used the interval
+$0.5f_p\leq f\leq2.5f_p$ \cite{draycott2026}, and an earlier random-wave
+calculation used the upper endpoint
+$\omega_{\max}=2.5\omega_p$ \cite{grice2015}.  We adopt this finite component
+interval as a reproducible numerical definition, not as a wave-breaking
+criterion.  The resolved Fourier cells, direction split, phase sampling, and
+parameter strata below remain choices of the present dataset.
+The finite-depth frequency density evaluated at wavenumber $k$ is
+$\widetilde S_J(\omega(k,h))\Phi_{\mathrm{TMA}}(kh)$.  The factor
+$c_g(k,h)=\partial\omega/\partial k$ in
+\cref{eq:paper-random-dispersion} converts this frequency density to a
+wavenumber density.
+
+Let $\Delta k=2\pi/L$, let $k_j=j\Delta k$ for positive integers $j$, and
+let $\mathcal J=\{j\in\mathbb N:k_j\leq K\}$ with $K=128$.  Revision 4
+retains the fixed relative-frequency interval
+\begin{equation}
+  I_p(k)
+  =
+  \begin{cases}
+    1,&\displaystyle \frac12\leq
+       \frac{\omega(k,h)}{\omega_p}\leq\frac52,\\
+    0,&\text{otherwise}.
+  \end{cases}
+  \label{eq:paper-random-relative-frequency-window}
+\end{equation}
+This is a sharp restriction in frequency relative to the prescribed peak; it
+is not a cosine taper in absolute wavenumber.  The support requires
+\begin{equation}
+  \omega(K,h)\geq\frac52\,\omega_p,
+  \qquad K=128,
+  \label{eq:paper-random-relative-frequency-fit}
+\end{equation}
+so the complete upper end of the declared interval lies in the delivered
+band for every proposed case.
+For $j\in\mathcal J$, define the Fourier-cell endpoints
+$a_j=\max\{0,k_j-\Delta k/2\}$ and
+$b_j=\min\{K,k_j+\Delta k/2\}$.  Define the cell energy $E_j$ and normalized
+energy fraction $\varpi_j$ by
+\begin{align}
+  E_j
+  &=
+  \int_{a_j}^{b_j}
+  \widetilde S_J(\omega(k,h))
+  \Phi_{\mathrm{TMA}}(kh)c_g(k,h)I_p(k)\,\dd k,
+  \notag\\
+  \varpi_j
+  &=
+  \frac{E_j}{\sum_{\ell\in\mathcal J}E_\ell}.
+  \label{eq:paper-random-cell-energy}
+\end{align}
+Thus $\varpi_j\geq0$ and $\sum_{j\in\mathcal J}\varpi_j=1$.
+The implementation evaluates each integral $E_j$ by 16-point
+Gauss--Legendre quadrature.
+
+Let $H_s>0$ be the ensemble significant wave height, define
+$m_0=(H_s/4)^2$, and let $r_d\in[0,1]$ be the fraction of the linear wave
+energy assigned to right-moving modes.  For every $j\in\mathcal J$, define
+\begin{equation}
+  A_{j,+}=\sqrt{2r_d m_0\varpi_j},\qquad
+  A_{j,-}=\sqrt{2(1-r_d)m_0\varpi_j}.
+  \label{eq:paper-random-amplitudes}
+\end{equation}
+The phase arrays $(\phi_{j,+})_{j\in\mathcal J}$ and
+$(\phi_{j,-})_{j\in\mathcal J}$ are independent, and every entry is uniform
+on $[0,2\pi)$.  Let $\G_0(h)$ be the flat-surface DNO, whose symbol at positive
+wavenumber $k$ is $\G_0(k;h)=k\tanh(kh)$.  The initial state is
+\begin{align}
+  \eta_0(x)
+  &=
+  \sum_{j\in\mathcal J}\left[
+    A_{j,+}\cos(k_j x+\phi_{j,+})
+    +A_{j,-}\cos(k_j x+\phi_{j,-})
+  \right],
+  \notag\\
+  \xi_0(x)
+  &=
+  \sum_{j\in\mathcal J}
+  \frac{\omega(k_j,h)}{\G_0(k_j;h)}
+  \left[
+    A_{j,+}\sin(k_j x+\phi_{j,+})
+    -A_{j,-}\sin(k_j x+\phi_{j,-})
+  \right].
+  \label{eq:paper-random-state}
+\end{align}
+The minus sign in the left-moving part of $\xi_0$ is the linear
+traveling-wave relation.  The construction fixes
+$\frac12\int_0^L(\xi_0\G_0(h)\xi_0+g\eta_0^2)\,\dd x=gLm_0$ independently
+of phase; it does not rescale an individual realization to force its sampled
+surface variance to equal $m_0$.
+
+For every stratum, define the input peak steepness
+\begin{equation}
+  \varepsilon_p=\frac{k_pH_s}{2}.
+  \label{eq:paper-random-peak-steepness}
+\end{equation}
+The declared support has three depth strata.  For the shallow stratum, let
+$n_p\in\{16,18,20,22,24\}$, set $k_p=2\pi n_p/L$, and define
+$\chi_p=k_p h$ and $\delta_s=H_s/(2h)$.  Its support is
+\begin{equation}
+  \chi_p\in[0.2,1.5],\qquad
+  h=\chi_p/k_p,\qquad
+  \delta_s\in[0.03,0.16],\qquad
+  \varepsilon_p=\chi_p\delta_s\leq0.08.
+  \label{eq:paper-random-shallow-support}
+\end{equation}
+The finite-depth and deep supports are, respectively,
+\begin{align}
+  k_p&\in[2,12],&
+  h&\in[0.1,1.5],&
+  H_s&\in[0.005,0.03],&
+  \varepsilon_p&\leq0.08,
+  \label{eq:paper-random-finite-support}\\
+  k_p&\in[2,12],&
+  h&\in[5,25],&
+  H_s&\in[0.005,0.03],&
+  \varepsilon_p&\leq0.08.
+  \label{eq:paper-random-deep-support}
+\end{align}
+Every depth stratum also satisfies the resolved-frequency condition
+\cref{eq:paper-random-relative-frequency-fit}.
+Every stratum uses
+$\gamma\in\{1,3.3,5\}$ and $r_d\in\{0,\tfrac12,1\}$.  The
+parameter categories are the 27 combinations of depth stratum, $\gamma$, and
+$r_d$, with requested accepted-case counts divided across those categories by
+quotient and remainder.
+
+The proposal law inside a shallow category is the following.  Draw
+$n_p$ uniformly from the five values
+\[
+  n_p\in\{16,18,20,22,24\}.
+\]
+Draw $\chi_p$ uniformly on
+$[0.2,1.5]$ and $\delta_s$ uniformly on $[0.03,0.16]$, repeating the pair
+until both $\chi_p\delta_s\leq0.08$ and
+\cref{eq:paper-random-relative-frequency-fit} hold.  This is the uniform
+distribution, with respect to area, on the part of the displayed rectangle
+that satisfies both conditions.  Then set $k_p=2\pi n_p/L$,
+$h=\chi_p/k_p$, and $H_s=2h\delta_s$.  Inside a
+finite-depth or deep category, draw $k_p$, $h$, and $H_s$ independently and
+uniformly over the intervals in
+\cref{eq:paper-random-finite-support} and
+\cref{eq:paper-random-deep-support}, repeating the triple until
+$k_pH_s/2\leq0.08$ and
+\cref{eq:paper-random-relative-frequency-fit} both hold.  Equivalently, the
+resulting proposed triple is uniform on the part of the corresponding
+rectangular box that satisfies both displayed conditions.  In every
+category, all entries of both phase arrays are independent and uniform on
+$[0,2\pi)$.
+
+The bound $\varepsilon_p\leq0.08$ is a restriction on the population being
+studied, not a theorem that waves break immediately above it.  Ducrozet et
+al. describe $k_pH_s/2=0.08$ as typical of a moderate JONSWAP sea state in a
+HOS calculation~\cite{ducrozet2021rogue}.  A separate applicability study
+shows that increasing the resolved HOS bandwidth can expose short-wave
+content that a coarser calculation suppresses, thereby reducing the range in
+which an apparently robust computation is accurate~\cite{ducrozet2017applicability}.
+Since the present potential-flow solver has no physical wave-breaking model,
+we use the moderate value as a conservative input restriction.  It does not
+replace the full-trajectory numerical checks below: random phases and
+nonlinear focusing can still make a proposed trajectory fail.
+
+The spectrum, phase sampler, support predicate, state
+\cref{eq:paper-random-state}, and 27-category proposal law are implemented.
+Every case proposal record stores both realized phase arrays.  The ordered
+adapter persists that record before construction.  It then checks the
+realized graph condition
+\begin{equation}
+  \min_\ell\{h+\eta_0(x_\ell)\}>0.
+  \label{eq:paper-random-initial-graph-condition}
+\end{equation}
+This condition cannot be decided from $(h,H_s,k_p,\gamma,r_d)$ alone because
+the minimum depends on the sampled phases.  If one realization fails, that
+case contributes zero rows and is replaced in the same parameter category;
+other cases in the same proposed numerical batch continue.  No deterministic
+sum-of-amplitudes bound is used to reject otherwise valid phase realizations.
+
+For JONSWAP/TMA, the event \(A_f\) in
+\cref{eq:paper-accepted-law} specifically includes the phase-dependent initial
+construction and graph condition above, the nonlinear adjustment, and the
+autonomous trajectory decision.  This is not a separate phase-valued support
+gate: it is the common complete-case conditioning specialized to this family.
+The JONSWAP/TMA completion audit reports its effect separately; the analogous
+common-law statement does not claim measured bias in another family.  No
+retrospective parameter cutoff or bulk rejection-rate gate is applied.
+
+For every valid construction, the result record includes the discrete peak
+wavenumber, the number of spectral cells whose energy is at least half the
+largest cell energy, the RMS values of $\eta_0$ and $\xi_0$, the ratio
+$4\operatorname{RMS}(\eta_0)/H_s$, the minimum water column, and the relative
+error in the exact linear-energy identity below \cref{eq:paper-random-state}.
+These are diagnostics of what was constructed, not additional acceptance
+rules.  The adapter then connects the result to
+the dedicated adjusted trajectory executor, 16-time selection, whole-case
+writer, and split-aware view.  An earlier reduced accepted-quota calculation
+used the former paired validation path: its random-sea attempt was accepted,
+committed three finite rows, and was finite when read by the training loader.  Its
+intended horizon was \(H=30.0341\), and its realized terminal time was
+\(T_s=30.0\), in agreement with \cref{eq:paper-random-horizon}.  This is
+historical software-path evidence, not a test of the current exact-contract
+adjustment and autonomous path, the population law, or a population acceptance
+rate.
+The historical pre-adjustment 27-case pilot contains nine deterministic
+support-spanning cases
+per depth stratum and uses each $(\gamma,r_d)$ pair once per stratum; it was
+not drawn from the population law and remains only a historical validation
+panel.  It does not test the later adjustment and autonomous numerical
+contract, nor does it test the revision-4 relative-frequency population.
+
+Revision-4 JONSWAP/TMA generation does not insert the linear random sea
+directly into the autonomous nonlinear equations.  Write the nonlinear
+evolution equation as $z_t=Lz+R(z)$, where $z=(\eta,\xi)$, $Lz$ is its
+linear gravity-wave part, and $R(z)$ is the nonlinear remainder.  During a
+Dommermuth adjustment \cite{dommermuth2000}, the program instead solves
+\begin{equation}
+  z_t=Lz+A(t)R(z),
+  \qquad
+  A(t)=1-\exp\!\left[-\left(\frac{t}{10T_p}\right)^4\right].
+  \label{eq:paper-jonswap-adjustment}
+\end{equation}
+Dommermuth supplies the ramped-nonlinearity construction; the exponent four,
+the scale $10T_p$, and the $20T_p$ handoff horizon are fixed project
+settings validated below rather than unique prescriptions of that method.
+For each case, this nonautonomous calculation ends at
+\begin{equation}
+  T_{\mathrm{adj}}
+  =0.08\left\lfloor\frac{20T_p}{0.08}\right\rfloor,
+  \label{eq:paper-jonswap-adjustment-time}
+\end{equation}
+the last saved-grid time not exceeding $20T_p$.  Its complete internal-band
+endpoint is passed to the autonomous solver without projection to
+$P_{128}$ or componentwise rescaling.  The autonomous clock is then restarted
+at $t=0$, $A$ is fixed to one, and the production interval has length
+$T_s$ from \cref{eq:paper-random-horizon}.  Since
+\cref{eq:paper-jonswap-adjustment} depends explicitly on time, Hamiltonian
+conservation is not imposed during adjustment.  Finiteness, positive water
+depth, and convergence of every implicit stage are still required.
+
+\paragraph{Production rollout and whole-case acceptance.}
+Tanaka cases are integrated over \(0\leq t\leq200\).  A Benjamin--Feir case
+is integrated over \(0\leq t\leq T_{\mathrm{BF}}\), with
+\(T_{\mathrm{BF}}\) defined in \cref{eq:paper-bf-horizon}; a random-sea
+autonomous case is integrated over \(0\leq t\leq T_s\), with \(T_s\) defined
+in \cref{eq:paper-random-horizon}.  Tanaka revision 3 uses
+the order-six DNO on 1024 points in its filtered internal band
+\(K_{\mathrm{evol}}=256\), as defined above.  Benjamin--Feir revision 4 uses
+the order-four DNO on 1024 points in the sharp band \(|k|\le256\).
+JONSWAP/TMA revision 4 uses the order-four DNO on 2048 points in the sharp
+band \(|k|\le704\).  Both sharp-band methods use padding factor eight and
+sharply project both state fields to \(P_{256}\) or \(P_{704}\), respectively,
+after every completed GL2 step.  This repeated projection enforces the stated
+Galerkin space but is not a Hou--Li filter: it applies no smooth damping to
+retained modes.  Their constructed \(P_{128}\) states are embedded in the
+corresponding internal grid and band; for JONSWAP/TMA the full-band result of
+\cref{eq:paper-jonswap-adjustment} replaces that initial state before
+autonomous evolution.  In every family the delivered state is a 1024-point
+\((P_{128}\eta,P_{128}\xi)\) pair, and its label remains the order-six
+quantity \(q_{\mathrm{ref}}\) in \cref{eq:forward-dataset-target}.  Thus the
+order-four operator determines the Benjamin--Feir and random-sea
+dynamics, whereas the order-six operator defines the learning label.
+
+The production integrator uses GL2 step \(0.01\) and saves candidate states
+every \(0.08\), without temporal interpolation.  JONSWAP/TMA permits at most
+five fixed-point updates per implicit stage; the other trajectory contracts
+retain their declared cap of four.  An attempted case must first
+satisfy the parameter and construction support declared for its family.
+Conditional on that support, a case is retained exactly when its declared
+numerical path reaches the requested terminal time, every implicit stage is
+marked converged, the stage and updated state are finite, every relative stage
+residual is finite and at most \(10^{-8}\), all saved \(\eta\), \(\xi\), and
+\(q_{\mathrm{ref}}\) values are finite, and
+\[
+  \min_{j,\ell}\{h+\eta(x_\ell,t_j)\}>0.
+\]
+Revision-4 Benjamin--Feir and JONSWAP/TMA cases have one further numerical
+condition on their autonomous saved frames.  Let \(K_F=256\) for
+Benjamin--Feir and \(K_F=704\) for JONSWAP/TMA, and define
+\begin{equation}
+  H_F(t_j)
+  =\frac12\int_0^{2\pi}
+    \left\{\xi\,G^{K_F}_4(\eta;h)\xi+g\eta^2\right\}\,\dd x,
+  \qquad
+  d_{H,F}
+  =\max_j\frac{|H_F(t_j)-H_F(0)|}
+                   {\max\{|H_F(0)|,\varepsilon_{64}\}},
+  \label{eq:paper-internal-hamiltonian-gate}
+\end{equation}
+where \(G^{K_F}_4\) is the order-four DNO evaluated from the full sharp
+internal state and \(\varepsilon_{64}\) is the smallest positive normal
+float64 number.  The executor requires \(d_{H,F}\leq10^{-3}\).  Before
+projection to \(P_{128}\), it also records at every saved autonomous frame
+whether the internal state and \(G^{K_F}_4(\eta;h)\xi\) are finite and the
+minimum value of \(h+\eta\).  These dense saved-frame quantities, including
+the initial Hamiltonian and maximum drift, are persisted with the case.
+The Hamiltonian reference is the adjusted endpoint for JONSWAP/TMA; no
+Hamiltonian gate is applied during its nonautonomous adjustment.
+
+These statements define one requirement: the fixed method must return a
+complete admissible trajectory.  The individual diagnostics record why this
+requirement failed; they are not separately fitted data filters.  An
+incomplete case contributes no rows, including no finite prefix, and its
+replacement is drawn from the same predeclared parameter category.  Sign
+changes, slope, spectral roughness, target magnitude, visual appearance, and
+model error do not enter this decision.  Hamiltonian drift enters only through
+the declared autonomous revision-4 Benjamin--Feir and JONSWAP/TMA condition
+\cref{eq:paper-internal-hamiltonian-gate}.
+
+\paragraph{Method-level time-step validation.}
+The production time step was fixed before bulk generation by a separate
+comparison of two trajectories.  For steps $\Delta t_c$ and
+$\Delta t_f=\Delta t_c/2$, let $y_{c,j}^{(\alpha)}$ and
+$y_{f,j}^{(\alpha)}$ denote, at common saved time $t_j$, the coarse and fine
+versions of the three fields
+\begin{equation}
+  y^{(1)}=\frac{P_K\eta}{h},
+  \qquad
+  y^{(2)}=\frac{P_K\xi}{h\sqrt{gh}},
+  \qquad
+  y^{(3)}=\frac{q_{\mathrm{ref}}}{\sqrt{gh}},
+  \label{eq:paper-refinement-fields}
+\end{equation}
+where $g>0$ is gravitational acceleration.  With
+$\lVert v\rVert_{2,N}^2=N^{-1}\sum_{\ell=0}^{N-1}|v_\ell|^2$, the refinement
+defect is
+\begin{equation}
+  E
+  =
+  \max_{\alpha=1,2,3}
+  \frac{\max_j
+    \lVert y_{c,j}^{(\alpha)}-y_{f,j}^{(\alpha)}\rVert_{2,N}}
+       {\max_j\lVert y_{f,j}^{(\alpha)}\rVert_{2,N}+10^{-12}}.
+  \label{eq:paper-refinement-defect}
+\end{equation}
+The validation panel used $\Delta t_c=0.01$ and
+$\Delta t_f=0.005$ and compared \(E\) with \(10^{-3}\).  This comparison,
+and the optional \(0.005/0.0025\) diagnostic implemented by the audit utility,
+are not run for individual production cases and do not choose which
+trajectory is stored.
+
+The two Stokes propagation cases in the predeclared full-horizon panel have
+defects $E=5.42\times10^{-8}$ (finite depth) and
+$8.24\times10^{-8}$ (deep water).  Five of the seven Tanaka and
+Benjamin--Feir stress cases pass with $E\leq1.13\times10^{-5}$.  The remaining
+steep seam-centered Tanaka case and equation-(33) stress case become
+nonfinite at essentially the same physical times under both step sizes.
+Thus halving the step changed no whole-trajectory decision.  Under the
+production rule, those two incomplete \(0.01\) trajectories would contribute
+no rows; their failure is not a large value of the refinement defect.  The
+Tanaka members of this panel used the earlier $K_{\mathrm{evol}}=128$
+contract, before revision 3 introduced the conditional support and buffered
+evolution described above.  They are historical method-development evidence,
+not a validation of the revision-3 Tanaka contract.
+
+\paragraph{Historical pre-revision-3 failure-mechanism audit.}
+Separate restart experiments diagnosed the two incomplete stress cases under
+the earlier Tanaka and Benjamin--Feir contracts; they do not alter the dataset
+rule.  The restart times are chosen before the
+baseline tail exceeds a fixed guard, so we
+distinguish the source-history measure from the post-restart arm measure.  Let
+\(c_k^{\mathrm{src}}(t)\) be the \(k\)-th Fourier coefficient of the source
+baseline DNO field, let \(c_k^{\mathrm r}(t)\) be that coefficient for one
+restarted arm, and let \(t_r\) be its restart time.  In each arm, ``DNO field''
+means \(P_K^\circ[\G_M^{N,p}(\eta(t);h)\xi(t)]\), evaluated with that arm's
+values of \(N,M,p\), and \(K\).  For wavenumber bounds \(0\leq a\leq b\) and
+any coefficient sequence \(c=(c_k)\), define
+\[
+  \mathcal E_{a:b}[c](t)=\sum_{a\leq |k|\leq b}|c_k(t)|^2,
+  \qquad
+  [z]_+=\max\{z,0\}.
+\]
+Here \(\mathcal E_{a:b}\) is the energy in wavenumbers
+\(a\leq|k|\leq b\), and \([z]_+\) is the positive part of \(z\).  The two
+growth measures are
+\begin{align}
+  G_{\mathrm B}^{\mathrm{src}}(t)
+  &=
+  \frac{
+    [\mathcal E_{80:128}[c^{\mathrm{src}}](t)
+     -\mathcal E_{80:128}[c^{\mathrm{src}}](0)]_+
+  }{
+    \mathcal E_{1:128}[c^{\mathrm{src}}](0)
+  },
+  \label{eq:paper-source-high-band-growth}\\
+  G_{\mathrm B}^{\mathrm r}(t)
+  &=
+  \frac{
+    [\mathcal E_{80:128}[c^{\mathrm r}](t)
+     -\mathcal E_{80:128}[c^{\mathrm r}](t_r)]_+
+  }{
+    \mathcal E_{1:128}[c^{\mathrm r}](t_r)
+  }.
+  \label{eq:paper-high-band-growth}
+\end{align}
+The subscript ``B'' denotes the terminal band \(80\leq|k|\leq128\); the
+superscripts ``src'' and ``r'' denote the source trajectory and restarted arm,
+respectively.  At the selected restart, the source measures are
+\(G_{\mathrm B}^{\mathrm{src}}(80)=4.65\times10^{-5}\) for Tanaka and
+\(G_{\mathrm B}^{\mathrm{src}}(88)=6.26\times10^{-5}\) for
+Benjamin--Feir, both below the predeclared \(10^{-4}\) guard.
+
+In the one-factor Tanaka restart from \(t_r=80\), the
+baseline \(N=1024,p=8\) arm and the \(N=1024,p=16\) arm both fail at
+\(t=119.48\), whereas the \(N=2048,p=8\) arm remains finite with every GL2
+stage solved through \(t=122\), but reaches
+\(\max_t G_{\mathrm B}^{\mathrm r}(t)=0.562\).  The high-band threshold
+times are nearly unchanged in all three arms.  A fourth arm changes only the
+delivered cutoff
+from \(K=128\) to \(K=192\).  It remains finite with every stage solved and
+has \(\max_t G_{\mathrm B}^{\mathrm r}(t)=3.19\times10^{-5}\), below
+\(10^{-4}\), in the former terminal band
+\(80\leq |k|\leq128\), while permitting nonzero energy in
+\(129\leq |k|\leq192\).  The largest energy in that added band is
+\(2.80\times10^{-4}\) times the restart-time nonzero-mode energy, so the
+improvement is not caused by a large amount of newly admitted energy.
+The \(M=5\) and \(M=4\) arms also remain finite with every stage solved through
+\(t=122\), but reach \(\max_t G_{\mathrm B}^{\mathrm r}(t)=0.463\) and
+\(0.390\), respectively.
+Lowering the series order therefore avoids the terminal solve failure in this
+restart without removing the preceding high-band accumulation.
+
+The corresponding Benjamin--Feir restart gives the opposite cutoff result.
+The \(K=128,M=6\) baseline fails at \(t=108.78\), while changing only to
+\(K=192\) makes the first failed stage earlier, at \(t=103.755\).  Changing
+only to \(M=5\) remains finite with every stage solved through \(t=112\), but
+still reaches \(\max_t G_{\mathrm B}^{\mathrm r}(t)=0.182\).  The \(M=4\)
+arm also remains finite with every stage solved through \(t=112\), but reaches
+\(\max_t G_{\mathrm B}^{\mathrm r}(t)=0.283\).  Over the finite saved prefix
+of the \(K=192\) arm, its largest energy in \(129\leq|k|\leq192\), divided by
+\(\mathcal E_{1:128}[c^{\mathrm r}](t_r)\), is \(0.0482\).  Thus extra product
+padding does not remove either failure, a finer base grid prevents only the
+Tanaka terminal breakdown, and a larger delivered band suppresses the Tanaka
+accumulation but worsens the Benjamin--Feir failure.  Lower series order
+avoids both terminal failures without suppressing their high-band growth:
+both lower-order arms cross \(10^{-4}\), \(10^{-3}\), and \(10^{-2}\) at
+\(t=92.32\), \(96.8\), and \(101.2\), the same times as the \(M=6\)
+baseline.  The restart calculations inherit the baseline history before their
+restart times and do not justify a change to the common dataset target.  Any
+replacement numerical contract must instead pass a complete-horizon
+comparison from the original initial condition.  The Tanaka revision-3
+boundary panel summarized by \cref{eq:paper-tanaka-cross-resolution-error}
+and \cref{eq:paper-tanaka-hidden-band-closure} is that separate comparison;
+no restarted arm enters the revision-3 support decision.
+
+In the historical pre-adjustment revision-2 panel, the shallow JONSWAP/TMA
+case reaches the last saved-grid time not exceeding
+16 peak periods with
+$E=4.52\times10^{-6}$ and every implicit stage solved.  The finite-depth case
+also reaches that last saved-grid time, with $E=5.63\times10^{-6}$, all 3864
+coarse and 7728 fine stages solved, and no iteration-cap or nonfinite event.
+The deep case does the same with $E=4.75\times10^{-6}$, all 3496 coarse and
+6992 fine stages solved, and no cap or nonfinite event.  In total, 10 of the
+12 fixed cases complete at both steps: both Stokes cases, three of four Tanaka
+cases, two of three Benjamin--Feir cases, and all three random-sea cases.  No
+\(0.0025\) diagnostic was invoked.  These are method-validation cases; they
+do not constitute a generated dataset or estimate population acceptance
+rates.
+
+\paragraph{Historical JONSWAP/TMA spatial-cutoff validation.}
+Before revision 4 changed the spectral population, the random-sea internal
+cutoff was selected on a predeclared shallow revision-3 sentinel after its
+complete nonlinear adjustment.  Both arms used 2048 internal grid
+points, \(M=4\), padding factor eight, GL2 step \(0.01\), saved spacing
+\(0.08\), residual tolerance \(10^{-8}\), and an iteration cap of five.  Over
+the complete 16-peak-period autonomous history, the largest relative
+whole-field discrepancies between independently evolved \(K=704\) and
+\(K=768\) arms were
+\begin{equation}
+  (e_\eta,e_\xi,e_{G\xi})
+  =(4.64267,1.93035,7.91931)\times10^{-4}.
+  \label{eq:paper-jonswap-final-cutoff-errors}
+\end{equation}
+Here each field was transferred by the normalized Fourier construction in
+\cref{eq:paper-normalized-fourier-coefficient}, and the order-six target was
+recomputed on the common 1024-point grid.  The corresponding \(K=640\) versus
+\(K=768\) calculation exceeded \(10^{-3}\).  Errors computed only from modes
+\(96\le |k|\le128\) were about \(3\times10^{-3}\), so
+\cref{eq:paper-jonswap-final-cutoff-errors} certifies only the three global
+whole-field quantities, not a bandwise error bound.  In particular, this
+calculation supports the inherited \(K=704\) evolution method but does not
+validate the revision-4 relative-frequency population.
+
+The then-current revision-3 source was replayed from the archived full
+internal \(K=704\) endpoint.  It reproduced all 289 autonomous saved frames
+with maximum relative \(L^2\) errors
+\(3.99\times10^{-16}\), \(4.66\times10^{-16}\), and
+\(1.17\times10^{-15}\) in \(\eta\), \(\xi\), and the recomputed target.  The
+replay was accepted, solved every stage, had maximum residual
+\(9.994198\times10^{-9}\), internal Hamiltonian drift
+\(1.831187\times10^{-5}\), minimum water column \(0.0387699\), and CPU wall
+time 197.355 seconds.  This verifies that the then-current source reproduces
+the archived sentinel.  It remains historical method evidence.
+
+The direct revision-4 population gate instead fixed 20 accepted cases in each
+of the 27 categories before execution.  It retained all 540 requested cases
+from 548 attempts.  Eight attempts failed the declared complete numerical
+path and retained zero rows, giving rejection rate \(1.46\%\).  This is the
+current-constructor gate used before revision-4 bulk generation.
+
+\subsection{Historical v9 quality controls and the Tanaka generator revision}
+
+The historical v9 acceptance tests are source-dependent because the dataset
+was assembled in stages.  We therefore distinguish prevention during construction, rowwise
+acceptance at assembly, whole-trajectory acceptance for the later nonlinear
+additions, and an independent grid-refinement audit.  The sign-transition
+screen used for an earlier Tanaka pilot dataset is documented separately in
+\cref{app:historical-cleaning}; it was not applied to the v9 dataset used by the
+reported model.
+
+\paragraph{Prevention during construction.}
+The first Tanaka pilot generator embedded a solitary-wave profile in the
+periodic interval by interpolation with zero values outside the tabulated
+profile.  If a randomly translated crest lay near an endpoint, this operation
+cut off a non-negligible tail.  The resulting endpoint mismatch has slowly
+decaying Fourier coefficients, which are amplified by the derivatives in a
+high-order Craig--Sulem expansion.  The replacement Tanaka constructor removes
+this mechanism before integration.  Each tabulated profile is extended by zero
+outside its finite interval, and the generator sums every periodic image whose
+support intersects $[0,L)$.  It evaluates each image by cubic Hermite
+interpolation using the tabulated elevation and surface slope, evaluates the
+sum on an $8N$ grid, and Fourier-restricts it to the $N$-point grid.  The
+initial state and each rollout-derived target are then projected to
+$|k|\leq128$.  Thus a profile that crosses $x=0$ is represented by periodic
+wrapping rather than by truncation.
+
+\paragraph{Historical row and case acceptance.}
+The common assembly pass for the first ten archived sources retains a snapshot
+only if
+\begin{equation}
+  \eta,\xi,q^\star,h,t\ \text{are finite},
+  \qquad \norm{q^\star}_{\infty}\leq1,
+  \label{eq:row-acceptance}
+\end{equation}
+where $q^\star$ denotes that source's stored target.
+This pass removed \num{14751} of \num{2048000} Benjamin--Feir rows:
+\num{14750} were nonfinite and one finite row violated the target-magnitude
+bound.  Before assembly, the two random-sea archives had respectively 26 and
+34 nonfinite rows removed.  No row from the two principal Tanaka archives was
+removed by \cref{eq:row-acceptance}.
+
+In historical v9 generation, the later shallow--steep and steep-Tanaka sources
+use a stronger, case-level test.  At stored time $t_j$ and node $x_n$, let
+$\eta_{j,n}$, $\xi_{j,n}$, and $q^\star_{j,n}$ denote the elevation,
+potential, and source-specific stored target.  Define
+\begin{equation}
+  H_j=\frac{\Delta x}{2}\sum_{n=0}^{N-1}
+      \left(\xi_{j,n}q^\star_{j,n}+g\eta_{j,n}^{2}\right),
+  \qquad
+  D_H=\max_j\frac{|H_j-H_0|}{|H_0|+10^{-30}}.
+  \label{eq:data-hamiltonian-drift}
+\end{equation}
+A case is accepted only when all stored fields are finite,
+$\min_{j,n}\eta_{j,n}>-0.9h$, and $D_H\leq\tau_H$.  We use
+$\tau_H=10^{-5}$ for the three shallow--steep sources and
+$\tau_H=10^{-3}$ for the steep-Tanaka addition.  The three shallow--steep
+generation runs rejected 253, 230, and 209 cases, while the two steep-Tanaka
+shards rejected 985 and 996 cases; generation continued until the target row
+counts were reached.  These are acceptance tests on the stored temporal
+subsample, rather than a claim that one identical filter was retroactively
+applied to every source family.
+
+\paragraph{Independent fixed-band resolution audit.}
+Let $\vartheta$ denote the latent parameters from which an initial condition is
+constructed.  We construct the same $\vartheta$ independently, in float64, on
+$n_j=2^j N$ points for $j=0,1,2$; Fourier interpolation of the $N$-point state is
+not an independent test.  Fix the delivered physical band $K$ and define
+\begin{equation}
+  q_j^K=P_K^\circ\!\left[
+    \G_{6}^{n_j,8}(P_K\eta_{n_j};h)(P_K\xi_{n_j})
+  \right].
+  \label{eq:fixed-band-label}
+\end{equation}
+Let $Q_j^K$ be the vector of consistently normalized Fourier coefficients of
+$q_j^K$ for $|k|\leq K$.  Our three-grid discrepancy is
+\begin{equation}
+  \Delta_K(\vartheta)
+  =\max_{0\leq r<s\leq2}
+  \frac{\norm{Q_r^K-Q_s^K}_{\ell^2}}
+       {\norm{Q_s^K}_{\ell^2}+10^{-30}}.
+  \label{eq:three-grid-discrepancy}
+\end{equation}
+The additive constant only defines the quotient for a vanishing target; it is
+negligible for every case in the calibration panel.  We declare a relative
+label accuracy budget $\tau_{\mathrm{ref}}=10^{-3}$ and require
+$\Delta_K\leq\tau_{\mathrm{ref}}$ when accepting a generator configuration.
+
+A matched Tanaka calibration used $N=1024$, $2N=2048$, $4N=4096$, and the
+historical delivered band $K=341$.  It contained all 12 reconstructable
+frame-zero sign rejections, four interior controls, and the same 12 rejected
+crest specifications rebuilt with the corrected periodic construction.
+\Cref{tab:three-grid-calibration} shows the resulting separation.  Decisions
+were unchanged when
+$\tau_{\mathrm{ref}}$ varied over
+$3\times10^{-4}$, $10^{-3}$, and $3\times10^{-3}$.  For the matched periodic
+counterfactuals, the median $N$--$2N$ label defect was
+$7.03\times10^{-6}$ and the median $2N$--$4N$ defect was
+$2.18\times10^{-6}$; the clipped construction gave medians $0.0827$ and
+$0.147$, respectively.  This is a convergence test for the fixed order-six
+target on a fixed physical band.  It does not test Craig--Sulem order
+truncation, physical admissibility, or time-integration error, which are
+addressed separately.
+
+\begin{table}[t]
+  \centering
+  \caption{Three-grid fixed-band discrepancy on the matched Tanaka
+  calibration.  The same decision is obtained at all three tested tolerances.}
+  \label{tab:three-grid-calibration}
+  \begin{tabular}{lrr}
+    \toprule
+    Construction & Cases & Range of $\Delta_K$\\
+    \midrule
+    Corrected periodic counterfactual & 12 &
+      $5.86\times10^{-6}$--$1.10\times10^{-5}$\\
+    Historical interior control & 4 &
+      $1.46\times10^{-4}$--$1.64\times10^{-4}$\\
+    Historical clipped profile & 12 &
+      $2.33\times10^{-2}$--$7.08\times10^{-1}$\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+For the existing v9 archive this is a generator-level resolution audit, not a
+claim that all \num{7633989} snapshots were retrospectively filtered by
+\cref{eq:three-grid-discrepancy}.  For the replacement dataset, this particular
+three-grid statistic audits the Tanaka construction.  The separate cutoff
+comparisons for other families have only the scope stated with each panel; in
+particular, the historical revision-3 JONSWAP/TMA sentinel does not validate
+the revision-4 input population.  None of these method-level comparisons is
+repeated as a per-candidate state or label filter.  Individual rollout cases
+are governed by the declared-family and whole-trajectory rules above.
+
+\paragraph{Historical pilot cleaning.}
+The April Tanaka pilot dataset was in fact cleaned with a dead-zoned sign-count
+rule before its 500,000-row training subset was drawn.  We retain that fact for
+reproducibility, but do not present the count as a general numerical validity
+criterion.  Its exact definition, removal count, mechanism, and matched
+periodization counterfactual are given in \cref{app:historical-cleaning}.
+
+\subsection{Sampling, splitting, and normalization}
+
+\paragraph{Historical v9 split.}
+The historical v9 archive has no trajectory map used by the training loader.
+If $R$ denotes its total number of stored rows, the loader applies a
+fixed-seed random permutation to the integers $0,\ldots,R-1$.  The validation
+and test counts are each $\lfloor0.1R\rfloor$, and all remaining rows are
+training rows.  The training rows occur first in the permutation, followed
+by validation and then test.  This is a row split: two saved times from the same
+trajectory can occur in different subsets.  That fact must be retained when
+interpreting the reported v9 holdout error.
+
+\paragraph{Replacement-dataset temporal selection.}
+Temporal selection is applied only after a complete reference trajectory has
+passed the numerical acceptance calculation.  A Tanaka trajectory has
+candidate times $t_j=0.08j$, $j=0,\ldots,2500$.  Define
+\begin{equation}
+  S_{\mathrm T,j}
+  =
+  \sum_{\ell=0}^{N-1}
+  |\partial_x\eta(x_\ell,t_j)|^2,
+  \qquad
+  A_{\mathrm T,j}
+  =
+  \frac{|D S_{\mathrm T,j}|}{S_{\mathrm T,j}+10^{-12}},
+  \label{eq:paper-tanaka-activity}
+\end{equation}
+where $D S_{\mathrm T,j}=(S_{\mathrm T,j+1}-S_{\mathrm T,j-1})/2$ at
+interior indices and is the corresponding one-sided difference at the two
+endpoints.  This activity is smoothed by a normalized discrete Gaussian with
+standard deviation 50 candidate-time indices.  Values beyond either endpoint
+are set equal to the nearest endpoint value during this convolution.  Denote
+the smoothed sequence by $\widetilde A_{\mathrm T,j}$.  The sampling mass is
+\begin{equation}
+  p_{\mathrm T,j}
+  =
+  \frac{1-\alpha_{\mathrm T}}{2501}
+  +
+  \alpha_{\mathrm T}
+  \frac{\widetilde A_{\mathrm T,j}}
+       {\sum_{r=0}^{2500}\widetilde A_{\mathrm T,r}},
+  \qquad \alpha_{\mathrm T}=0.5.
+  \label{eq:paper-time-density}
+\end{equation}
+If the smoothed activity is identically zero, its normalized term in
+\cref{eq:paper-time-density} is replaced by the uniform mass $1/2501$.
+A deterministic inverse-CDF rule first computes indices at the
+midpoint quantiles $(\nu+\tfrac12)/200$, where
+$\nu=0,\ldots,199$.  The first and last indices are fixed to 0 and 2500.
+Each remaining index is restricted so that enough later integer indices
+remain available and is then advanced if necessary.  This gives exactly 200
+strictly increasing indices even when the activity density is concentrated.
+
+For a Benjamin--Feir trajectory, let
+$t_j=0.08j$, $j=0,\ldots,J_{\mathrm{BF}}$, where
+$J_{\mathrm{BF}}=T_{\mathrm{BF}}/0.08$.  Retain the 200 indices
+\begin{equation}
+  j_\ell
+  =\left\lfloor\frac{\ell J_{\mathrm{BF}}}{199}+\frac12\right\rfloor,
+  \qquad \ell=0,\ldots,199.
+  \label{eq:paper-bf-retained-indices}
+\end{equation}
+Thus the realized interval $[0,T_{\mathrm{BF}}]$, which is approximately
+100 carrier periods, is sampled approximately uniformly, including both
+endpoints, without introducing an additional event score.
+
+For a random-sea trajectory, let \(t_j=j\delta t_s\),
+\(j=0,\ldots,J\), be the dense saved times, where \(\delta t_s=0.08\) and
+\(J=\lfloor H/\delta t_s\rfloor\) are defined in
+\cref{eq:paper-random-horizon}.  Here \(t=0\) is the adjusted full-band
+endpoint and the beginning of the autonomous production clock, not the
+linear random sea before adjustment.  For each \(\ell=0,\ldots,15\), retain the
+index
+\begin{equation}
+  j_\ell=
+  \left\lfloor\frac{\ell J}{15}+\frac12\right\rfloor.
+  \label{eq:paper-random-retained-indices}
+\end{equation}
+Thus \(j_\ell\) is the nearest integer to \(\ell J/15\), and the retained time
+is \(t_{j_\ell}\).  In particular, \(t_{j_{15}}=T_s\) is the last saved-grid
+time not exceeding \(H=16T_p\).  A static Stokes case retains only \(t=0\).
+These rules change which accepted states are stored; they do not change the
+target in \cref{eq:forward-dataset-target}.
+
+\paragraph{Replacement-dataset case split and loader sampling.}
+An attempted case is assigned to training, validation, or test before its
+initial condition is constructed.  The three split roots are 2026072210,
+2026072204, and 2026072205, respectively.  A rejection remains attached to
+its assigned split and parameter category, and no saved times from one case may
+belong to different splits.  In each epoch, the training loader uses every
+accepted training case once and chooses one of its stored times uniformly.
+Because the four families have equal accepted-case counts, every family and
+every case have equal epoch weight; the number of stored times does not
+determine either weight.  Validation uses one fixed, deterministic stored time
+from every accepted validation case.
+
+A training case from each of the four families contributes
+\[
+  1+200+200+16=417
+\]
+stored rows in total.  Training is generated in four cumulative stages,
+\[
+ C\in\{2048,4096,8192,16384\}
+\]
+accepted cases per family, while validation and test remain fixed at 1024
+cases per family.  The first stage therefore contains
+\(417(2048+1024+1024)=1{,}708{,}032\) rows and is a learning-curve checkpoint,
+not the completed dataset.  The final target contains
+\(417(16384+1024+1024)=7{,}686{,}144\) rows, which is 52,155 rows (0.68\%)
+larger than the 7,633,989-row historical v9 dataset.  The four additive
+training-stage increments contain 2048, 2048, 4096, and 8192 cases per family,
+respectively; a completed chunk is never enlarged in place.  An increment may
+itself be divided into disjoint execution shards.  Stokes, Tanaka, and
+Benjamin--Feir use one shard for each of these four increments.  To balance
+the two longer-running JONSWAP/TMA worker lanes, its final 8192-case increment
+uses the three disjoint intervals \([8192,12288)\), \([12288,14336)\), and
+\([14336,16384)\).
+
+The split-tagged attempt allocator, atomic proposal/shard/result/failure
+transaction, multi-shard manifest, and loader are implemented and tested as
+family-independent modules.  The loader uses the stored split and chooses one
+stored time from every accepted case in each epoch; it requires equal accepted
+case counts across families and stops if that condition is absent.  The static
+Stokes adapter exercises this transaction at the exact paper target.  Under
+Stokes revision 2, one case from each of its four parameter categories passed
+this exact calculation, with all four quality-decision masks equal to zero.
+Its completed production splits contain 16384 training cases and 1024 cases
+in each of validation and test; these artifacts are retained.
+The Tanaka, Benjamin--Feir, and random-sea adapters enforce sampling, durable
+proposal, then construction.  One reduced accepted-quota case from each of
+these three families continued through the former paired GL2 validation path
+and loader-facing view, and each produced three finite loaded rows.  Those
+family-revision-1 calculations are historical transaction tests, not tests of
+the current family-revision executors, numerical validation of the paper
+target, or evidence about any family population.
+
+The exact Tanaka revision-3 pilot was instead run with the paper contract in
+two complementary validation-tagged shards covering categories 0--5 and
+6--10.  All 11 attempted cases were accepted, no case was rejected, and the
+11 trajectories produced 2200 rows.  These rows are diagnostic pilot output:
+their dedicated roots are excluded from the replacement-dataset manifest,
+training, and normalization despite their validation split tags.  A later
+historical Tanaka run completed 4096 cases and retained 200 rows from each,
+but a constructor audit found 64 mislabeled initial conditions caused by the
+small-amplitude floor described above.  A corrected initial condition changes
+the nonlinear trajectory and its selected times, so the old rows cannot be
+repaired algebraically or mixed with corrected rows.  The corrected
+revision-3 release instead draws a fresh deterministic population with 16384
+training cases and 1024 cases in each of validation and test.  It explicitly
+does not reuse the historical random specifications.
+
+All four family releases and all four cumulative dataset views are complete.
+The final release retained \num{73728} cases from \num{74045} attempts,
+recorded \num{317} zero-row rejections, and stored \num{7686144} rows.  The
+family totals (attempted/accepted/rejected/rows) are Stokes revision~2,
+\num{18432}/\num{18432}/0/\num{18432}; Tanaka revision~3,
+\num{18432}/\num{18432}/0/\num{3686400}; Benjamin--Feir revision~4,
+\num{18455}/\num{18432}/23/\num{3686400}; and JONSWAP/TMA revision~4,
+\num{18726}/\num{18432}/294/\num{294912}.  No reported model has been trained
+on this replacement release.
+
+\begin{table}[t]
+  \centering
+  \caption{Attempted/accepted replacement-dataset cases by family and split.}
+  \label{tab:replacement-family-split-counts}
+  \begin{tabular}{lrrr}
+    \toprule
+    Family & Training & Validation & Test\\
+    \midrule
+    Stokes & 16384/16384 & 1024/1024 & 1024/1024\\
+    Tanaka & 16384/16384 & 1024/1024 & 1024/1024\\
+    Benjamin--Feir & 16404/16384 & 1024/1024 & 1027/1024\\
+    JONSWAP/TMA & 16644/16384 & 1040/1024 & 1042/1024\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The declared category marginals also close exactly.  Each of the four Stokes
+categories has \num{4608}/\num{4608} attempted/accepted cases.  Across the
+eleven Tanaka categories, six contain \num{1675}, four contain \num{1676}, and
+one contains \num{1678} attempted and accepted cases.  Across the 66
+Benjamin--Feir categories, 32 contain 278 accepted cases, 18 contain 280, and
+16 contain 281; only \texttt{n\_c\_04\_\_delta\_n\_01} has rejections
+(304 attempted, 281 accepted), while every other category has
+attempted=accepted.  The 27 JONSWAP/TMA categories contain 22 accepted quotas
+of 683, three of 682, and two of 680; 16 categories account for all 294
+rejections.  The immutable document handoff records every named category's
+exact attempted, accepted, and rejected counts rather than reducing those
+JONSWAP/TMA counts to a bulk threshold.
+
+The exact SHA-256 identities of the cumulative combined summaries, indexed by
+training cases per family, are
+\begin{description}
+  \item[2048:] \texttt{2265cb71270accb3}\allowbreak
+    \texttt{f6d9103e90433b664}\allowbreak
+    \texttt{ca813989dfab6340}\allowbreak
+    \texttt{3d8612af22d28c3};
+  \item[4096:] \texttt{7feb018ee4d94eab}\allowbreak
+    \texttt{10278917c1452620}\allowbreak
+    \texttt{26cccab6169eaaa2}\allowbreak
+    \texttt{d8877f7c7b28c9da};
+  \item[8192:] \texttt{43b1eb91198e724c}\allowbreak
+    \texttt{6f32b871c2d0efd0}\allowbreak
+    \texttt{d8355533789919df}\allowbreak
+    \texttt{5897ad588e7e85f6};
+  \item[16384:] \texttt{32f764cf865c9089}\allowbreak
+    \texttt{2ee0329e48fe992c}\allowbreak
+    \texttt{bc24df2707e05fd1}\allowbreak
+    \texttt{af2ee9cd2b84307c}.
+\end{description}
+The final summary binds the following 26-source manifest and trajectory-map
+SHA-256 identities:
+\begin{center}
+\small
+\texttt{dbb76ed1cba4d0146f3c9643a73d168d3a9fa97bc27c37fe0fd7ad08554bd734}\\
+\texttt{f26888ad0a2c738405fb1662b9410337e1babfe48f7913805b5243ae0f279cc8}.
+\end{center}
+
+\paragraph{Historical and replacement-dataset normalization.}
+Let $\mathcal I_{\mathrm{v9}}$ be the set of all historical v9 row indices.
+Let $\eta_i$ and $\xi_i$ denote the two input fields in row $i$, and let
+$q_i^\star$ denote its stored target under that source's historical label
+convention.  The reported scale-normalized v9 checkpoints use the
+dataset-wide absolute maxima
+\begin{equation}
+  s_\eta^{\mathrm{v9}}
+  =\max_{i\in\mathcal I_{\mathrm{v9}},\,x}|\eta_i(x)|,\qquad
+  s_\xi^{\mathrm{v9}}
+  =\max_{i\in\mathcal I_{\mathrm{v9}},\,x}|\xi_i(x)|,\qquad
+  s_q^{\mathrm{v9}}
+  =\max_{i\in\mathcal I_{\mathrm{v9}},\,x}|q_i^\star(x)|.
+  \label{eq:paper-v9-scales}
+\end{equation}
+For the replacement dataset, let $\mathcal I_{\mathrm{train}}$ contain only rows
+from accepted cases preassigned to training.  For
+$u\in\{\eta,\xi,q_{\mathrm{ref}}\}$, let $u_i(x)$ denote field $u$ at
+coordinate $x$ in row $i$, and define
+\begin{equation}
+  s_u
+  =
+  \max_{i\in\mathcal I_{\mathrm{train}},\,x}|u_i(x)|,
+  \qquad
+  u\in\{\eta,\xi,q_{\mathrm{ref}}\}.
+  \label{eq:paper-training-scales}
+\end{equation}
+For the authenticated release these training-only scales are
+\(s_\eta=0.15583430230617523\),
+\(s_\xi=0.09394174814224243\), and
+\(s_{q_{\mathrm{ref}}}=0.12198150902986526\), computed from
+\num{6832128} training rows.  Their statistics fingerprint is
+\begin{center}
+\small
+\texttt{4e8ec96947bc05cee3b375467499b0ae00a7814f9982614084efd859efe7c3b8}.
+\end{center}
+For one replacement-dataset row, the scale-normalized fields are
+\begin{equation}
+  \widetilde\eta=\eta/s_\eta,\qquad
+  \widetilde\xi=\xi/s_\xi,\qquad
+  \widetilde q_{\mathrm{ref}}=q_{\mathrm{ref}}/s_{q_{\mathrm{ref}}}.
+  \label{eq:normalization}
+\end{equation}
+The historical formula has the same form after replacing
+$(s_\eta,s_\xi,s_{q_{\mathrm{ref}}},q_{\mathrm{ref}})$ by
+$(s_\eta^{\mathrm{v9}},s_\xi^{\mathrm{v9}},s_q^{\mathrm{v9}},q^\star)$.
+The replacement-dataset depth coordinate is
+$d_h=\log(h/h_\star)$, where $h_\star=L/(2\pi)$ is a fixed reference length.
+Because $L=2\pi$ in the present calculations, $d_h$ has the same numerical
+value as the historical input $\log h$.  The analytic $\G_0+\G_1$ paths
+recover physical $\eta$ and $\xi$ before applying their Fourier symbols, and
+predictions are returned to physical target units for rollout.  This
+empirical normalization is distinct from the exact coordinate dilation
+derived in \cref{app:rescaling}: it changes neither the period nor the depth.
+
+Several audits distinguish missing data from missing structure.  Random and
+source-stratified scans found no nonfinite base rows, and models that later
+fail in rollout can still predict the stored target $q^\star$ accurately on
+the corresponding exact truth states.  Fine-tuning on states harvested from an
+older model rollout was actively harmful.  Their order-six labels were correct
+for the harvested states,
+but those off-manifold inputs already contained high-band contamination created
+by the older model; the resulting physical high-band response was therefore an
+undesirable training signal, not a corrupted label.  These
+observations motivate the shape-consistency constraint in
+\cref{sec:hamiltonian-loss}: more pointwise samples on the same trajectory
+manifold do not determine the derivative transverse to that manifold.

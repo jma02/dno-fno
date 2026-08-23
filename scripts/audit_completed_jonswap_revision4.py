@@ -1,7 +1,7 @@
-"""Fail-closed CPU audit of the completed JONSWAP/TMA revision-4 corpus.
+"""Fail-closed CPU audit of the completed JONSWAP/TMA revision-4 dataset.
 
 The quota scanner remains the authority for transaction replay.  This audit
-adds corpus-wide interval and identity checks, exact replay of every proposed
+adds dataset-wide interval and identity checks, exact replay of every proposed
 parameter and phase specification, numerical-health extrema for the nonlinear
 adjustment and autonomous production portions, stored-field finiteness, and an
 independent check of each loader-facing trajectory map.
@@ -34,15 +34,15 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig-jonswap-completion-audit")
 
 import numpy as np  # noqa: E402
 
-from scripts.build_paper_corpus_view import (  # noqa: E402
+from scripts.build_paper_dataset_view import (  # noqa: E402
     CompletedChunk,
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_corpus_jonswap_bucketed import (  # noqa: E402
+from scripts.run_paper_dataset_jonswap_bucketed import (  # noqa: E402
     EXTRA_SOURCE_PATHS,
 )
-from scripts.run_paper_corpus_quota import (  # noqa: E402
+from scripts.run_paper_dataset_quota import (  # noqa: E402
     dependency_environment,
     source_hashes,
 )
@@ -62,12 +62,12 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     paper_support_violations,
     positive_mode_wavenumbers,
 )
-from solver.gen_data.jonswap_tma_population import (  # noqa: E402
+from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     DEEP_DEPTH_BOUNDS,
     DEEP_PEAK_WAVENUMBER_BOUNDS,
     FINITE_DEPTH_BOUNDS,
     FINITE_PEAK_WAVENUMBER_BOUNDS,
-    JONSWAP_TMA_POPULATION_CELLS,
+    JONSWAP_TMA_SAMPLE_CELLS,
     SHALLOW_DEPTH_WAVENUMBER_BOUNDS,
     SHALLOW_RELATIVE_HEIGHT_BOUNDS,
     SIGNIFICANT_HEIGHT_BOUNDS,
@@ -103,8 +103,8 @@ from solver.gen_data.pipeline.time_selection import (  # noqa: E402
 )
 
 
-DEFAULT_CORPUS_ROOT = ROOT / "outputs/paper_corpus_jonswap_revision4_relative_band_v1"
-AUDIT_SCHEMA = "paper_corpus_jonswap_tma_revision4_completion_audit_v1"
+DEFAULT_DATASET_ROOT = ROOT / "outputs/paper_dataset_jonswap_revision4_relative_band_v1"
+AUDIT_SCHEMA = "paper_dataset_jonswap_tma_revision4_completion_audit_v1"
 PROPOSAL_LAW_APPLIES_TO = "attempted_specifications"
 RELEASED_CASE_LAW = (
     "proposal_conditioned_on_complete_case_acceptance_within_preassigned_cell"
@@ -269,7 +269,7 @@ class ExpectedChunk:
     @property
     def summary_path(self) -> Path:
         return self.relative_root / (
-            f"paper_corpus_jonswap_tma_{self.split.value}.summary.json"
+            f"paper_dataset_jonswap_tma_{self.split.value}.summary.json"
         )
 
 
@@ -391,7 +391,7 @@ class Extrema:
 
 @dataclass
 class AuditTotals:
-    """Mutable corpus-wide counters accumulated during the read-only scan."""
+    """Mutable dataset-wide counters accumulated during the read-only scan."""
 
     attempted: int = 0
     accepted: int = 0
@@ -450,7 +450,7 @@ class DiagnosticObservation:
 
 @dataclass
 class DiagnosticSeries:
-    """O(number of trajectories) scalar storage for fixed corpus quantiles."""
+    """O(number of trajectories) scalar storage for fixed dataset quantiles."""
 
     values: list[float] = dataclass_field(default_factory=list)
     minimum: DiagnosticObservation | None = None
@@ -706,8 +706,8 @@ def _population_conditioning_record(
     """Aggregate exact 27-cell counts and state released-population semantics."""
 
     if min(attempted, accepted, rejected) < 0 or attempted != accepted + rejected:
-        raise ValueError("corpus attempted/accepted/rejected counts do not close")
-    cell_ids = tuple(cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS)
+        raise ValueError("dataset attempted/accepted/rejected counts do not close")
+    cell_ids = tuple(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS)
     expected_cells = set(cell_ids)
     aggregate = {
         cell_id: {
@@ -768,11 +768,11 @@ def _population_conditioning_record(
         }
 
     if sum(int(record["attempted"]) for record in aggregate.values()) != attempted:
-        raise ValueError("aggregate cell attempted counts differ from corpus total")
+        raise ValueError("aggregate cell attempted counts differ from dataset total")
     if sum(int(record["accepted"]) for record in aggregate.values()) != accepted:
-        raise ValueError("aggregate cell accepted counts differ from corpus total")
+        raise ValueError("aggregate cell accepted counts differ from dataset total")
     if sum(int(record["rejected"]) for record in aggregate.values()) != rejected:
-        raise ValueError("aggregate cell rejected counts differ from corpus total")
+        raise ValueError("aggregate cell rejected counts differ from dataset total")
     return {
         "proposal_law_applies_to": PROPOSAL_LAW_APPLIES_TO,
         "released_case_law": RELEASED_CASE_LAW,
@@ -1004,7 +1004,7 @@ def _validate_result_metadata(
     )
     if not _same_json(result_run_spec, run_spec):
         raise ValueError(f"{context} run spec differs from its summary")
-    if additional.get("launcher") != "scripts/run_paper_corpus_jonswap_bucketed.py":
+    if additional.get("launcher") != "scripts/run_paper_dataset_jonswap_bucketed.py":
         raise ValueError(f"{context} was not produced by the bucketed launcher")
     configuration = _required_mapping(
         run_spec,
@@ -2312,7 +2312,7 @@ def _audit_chunk(
             context="run_spec quota",
             minimum=0,
         )
-    if set(expected_by_cell) != {cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS}:
+    if set(expected_by_cell) != {cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS}:
         raise ValueError("run specification does not contain the exact 27 cells")
     if dict(accepted_by_cell) != {
         cell_id: count for cell_id, count in expected_by_cell.items() if count
@@ -2394,7 +2394,7 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
     }
     discovered_paths = {
         path.resolve()
-        for path in root.glob("*/jonswap_tma/*/paper_corpus_jonswap_tma_*.summary.json")
+        for path in root.glob("*/jonswap_tma/*/paper_dataset_jonswap_tma_*.summary.json")
     }
     if discovered_paths != expected_paths:
         missing = sorted(map(str, expected_paths - discovered_paths))
@@ -2429,7 +2429,7 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
         if observed != wanted:
             raise ValueError(f"{expected.label} differs from its immutable plan")
         if chunk.execution_platform != "gpu":
-            raise ValueError("fresh JONSWAP release corpus was not generated on GPU")
+            raise ValueError("fresh JONSWAP release dataset was not generated on GPU")
     return chunks
 
 
@@ -2441,7 +2441,7 @@ def _current_support_record() -> dict[str, object]:
         quadrature_order=int(CURRENT_JONSWAP_EXECUTION.jonswap_quadrature_order),
     )
     return {
-        "schema": "paper_jonswap_tma_population_support_v4",
+        "schema": "paper_jonswap_tma_sampling_support_v4",
         "allocation_cells": [
             {
                 "cell_id": cell.cell_id,
@@ -2449,7 +2449,7 @@ def _current_support_record() -> dict[str, object]:
                 "peak_enhancement": cell.peak_enhancement,
                 "right_moving_fraction": cell.right_moving_fraction,
             }
-            for cell in JONSWAP_TMA_POPULATION_CELLS
+            for cell in JONSWAP_TMA_SAMPLE_CELLS
         ],
         "finite": {
             "peak_wavenumber_uniform_bounds": list(FINITE_PEAK_WAVENUMBER_BOUNDS),
@@ -2556,31 +2556,31 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
             "ordered_cell_ids",
             context="summary.run_spec.configuration",
         )
-        if ordered_cells != [cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS]:
+        if ordered_cells != [cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS]:
             raise ValueError("JONSWAP chunk has a noncurrent 27-cell ordering")
     current_support_hashes = {
         path: current_sources[path]
         for path in (
             "solver/gen_data/jonswap_tma.py",
-            "solver/gen_data/jonswap_tma_population.py",
+            "solver/gen_data/jonswap_tma_sampling.py",
             "solver/gen_data/trajectory_family_adapters.py",
             "solver/gen_data/jonswap_horizon_executor.py",
-            "scripts/run_paper_corpus_jonswap_bucketed.py",
+            "scripts/run_paper_dataset_jonswap_bucketed.py",
         )
     }
     return {
         "dependency_environment_fingerprint": dependency_fingerprint,
         "execution_record_fingerprint": execution_fingerprint,
         "source_sha256_fingerprint": next(iter(source_fingerprints)),
-        "population_support_fingerprint": support_fingerprint,
-        "population_support": current_support,
+        "sampling_support_fingerprint": support_fingerprint,
+        "sampling_support": current_support,
         "bucketing_policy_fingerprint": canonical_json_sha256(expected_policy),
         "current_support_source_sha256": current_support_hashes,
     }
 
 
 def audit(root: Path) -> dict[str, object]:
-    """Run the complete read-only JONSWAP corpus audit and return its record."""
+    """Run the complete read-only JONSWAP dataset audit and return its record."""
 
     resolved_root = Path(root).expanduser().resolve()
     started_at = datetime.now().astimezone()
@@ -2654,14 +2654,14 @@ def audit(root: Path) -> dict[str, object]:
         "validation": EXPECTED_VALIDATION_ACCEPTED,
         "test": EXPECTED_TEST_ACCEPTED,
     }:
-        raise ValueError("JONSWAP split totals differ from the paper corpus plan")
+        raise ValueError("JONSWAP split totals differ from the paper dataset plan")
     if totals.accepted != EXPECTED_ACCEPTED:
         raise ValueError("JONSWAP accepted total differs from 18,432")
     if totals.proposal_specs_checked != totals.attempted:
         raise ValueError("not every JONSWAP proposal specification was replayed")
     if totals.retained_rows != EXPECTED_ACCEPTED * ROWS_PER_ACCEPTED_CASE:
         raise ValueError("JONSWAP retained-row total is incorrect")
-    if len(JONSWAP_TMA_POPULATION_CELLS) != 27:
+    if len(JONSWAP_TMA_SAMPLE_CELLS) != 27:
         raise ValueError("current JONSWAP support no longer has 27 allocation cells")
     if totals.stored_case_blocks_checked != totals.accepted:
         raise ValueError("not every accepted JONSWAP trajectory owns one row block")
@@ -2693,7 +2693,7 @@ def audit(root: Path) -> dict[str, object]:
     return {
         "schema": AUDIT_SCHEMA,
         "status": "pass",
-        "corpus_root": str(resolved_root),
+        "dataset_root": str(resolved_root),
         "accepted": totals.accepted,
         "attempted": totals.attempted,
         "rejected": totals.rejected,
@@ -2718,7 +2718,7 @@ def audit(root: Path) -> dict[str, object]:
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "population_conditioning": population_conditioning,
         "support": {
-            "allocation_cell_count": len(JONSWAP_TMA_POPULATION_CELLS),
+            "allocation_cell_count": len(JONSWAP_TMA_SAMPLE_CELLS),
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },
@@ -2772,8 +2772,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=DEFAULT_CORPUS_ROOT,
-        help="Completed revision-4 JONSWAP corpus root.",
+        default=DEFAULT_DATASET_ROOT,
+        help="Completed revision-4 JONSWAP dataset root.",
     )
     parser.add_argument(
         "--output",

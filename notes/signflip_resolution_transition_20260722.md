@@ -6,7 +6,7 @@ Date: 2026-07-22
 
 The historical sign-flip filter was genuinely used.  It is not merely a rule
 that appeared in an unused script.  It produced the 3,712,872-row parent
-archive from which the 500,000-row Tanaka corpus used by the April FNO runs
+archive from which the 500,000-row Tanaka dataset used by the April FNO runs
 was sampled.
 
 The proposed fixed-band resolution test is **not** a set-theoretic superset of
@@ -60,8 +60,8 @@ and rejected the row when
 C_{0.03}(q)>10.
 \]
 
-The implementation is `solver/gen_data/clean_tanaka_dataset.py`.  Its saved
-summary, `data/old_tanaka_1_clean.clean.json`, records
+The retired cleaner's saved summary,
+`data/old_tanaka_1_clean.clean.json`, records
 
 | quantity | rows |
 | --- | ---: |
@@ -79,7 +79,7 @@ also recorded on disk:
    `outputs/fno_jax_10m_20260405_191326/config.json`, explicitly name
    `tanaka_1_clean_sub500k.npz` as their training set.
 
-The current v9 corpus is different.  Its Tanaka sources are
+The current v9 dataset is different.  Its Tanaka sources are
 `tanaka_2_adaptive_g0.npz` and `tanaka_2_adaptive_g1.npz`, as specified in
 `solver/gen_data/combine_datasets.py`; those sources were not passed through
 the historical sign filter.
@@ -309,7 +309,7 @@ rule.  The full case-level transition plot is
 ## 4. Decision
 
 1. Preserve the historical fact: the 3%-dead-zone, 10-transition rule was
-   used to produce the old FNO training corpus and removed 548,360 rows.
+   used to produce the old FNO training dataset and removed 548,360 rows.
 2. Do not claim that a one-grid tail-energy threshold supersets it.  Complete
    containment has a practically 100% false-positive rate.
 3. Do not apply the historical sign rule to current periodic data.  It rejects

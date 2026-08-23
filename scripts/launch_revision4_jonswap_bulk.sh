@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON=${PYTHON:-$ROOT/.venv/bin/python}
-OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_corpus_jonswap_revision4_relative_band_v1}
+OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_dataset_jonswap_revision4_relative_band_v1}
 GPU_ZERO=${GPU_ZERO:-0}
 GPU_ONE=${GPU_ONE:-1}
 lane_zero=""
@@ -45,11 +45,11 @@ build_chunk() {
     GPU=$GPU_ONE
     [[ "$LANE" == 0 ]] && GPU=$GPU_ZERO
     CHUNK_ROOT="$OUTPUT_BASE/$LEAF"
-    SUMMARY="$CHUNK_ROOT/paper_corpus_jonswap_tma_${SPLIT}.summary.json"
+    SUMMARY="$CHUNK_ROOT/paper_dataset_jonswap_tma_${SPLIT}.summary.json"
     PREFLIGHT="$OUTPUT_BASE/logs/jonswap_${LABEL}.preflight.json"
     LOG="$OUTPUT_BASE/logs/jonswap_${LABEL}.log"
     COMMAND=(
-        "$PYTHON" scripts/run_paper_corpus_jonswap_bucketed.py
+        "$PYTHON" scripts/run_paper_dataset_jonswap_bucketed.py
         --solver-batch-size 8
         --family jonswap_tma --split "$SPLIT"
         --accepted-cases "$COUNT" --accepted-cases-before "$BEFORE"
@@ -100,7 +100,7 @@ for plan in plans:
     config = run.get("configuration", {})
     numerical = plan.get("execution", {}).get("numerical", {})
     policy = config.get("jonswap_horizon_bucketing", {})
-    if (plan.get("schema") != "paper_corpus_quota_preflight_v1"
+    if (plan.get("schema") != "paper_dataset_quota_preflight_v1"
             or plan.get("no_numerical_generation_performed") is not True
             or run.get("family_name") != "jonswap_tma"
             or run.get("revision_id") != 4 or run.get("batch_size") != 32
@@ -124,7 +124,7 @@ check_summary() {
 import json, sys
 from pathlib import Path
 p, s = (json.loads(Path(path).read_text()) for path in sys.argv[1:])
-if (s.get("schema") != "paper_corpus_quota_summary_v1"
+if (s.get("schema") != "paper_dataset_quota_summary_v1"
         or s.get("status") != "complete"
         or s.get("configuration_fingerprint")
         != p.get("configuration_fingerprint")):
@@ -184,13 +184,13 @@ wait "$remaining" || remaining_status=$?
 ((remaining_status == 0)) || cleanup "$remaining_status"
 
 summaries=(
-    "$OUTPUT_BASE/train/jonswap_tma/chunk_00000_02048/paper_corpus_jonswap_tma_train.summary.json"
+    "$OUTPUT_BASE/train/jonswap_tma/chunk_00000_02048/paper_dataset_jonswap_tma_train.summary.json"
 )
 for row in "${CHUNKS[@]}"; do build_chunk "$row"; summaries+=("$SUMMARY"); done
 CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu "$PYTHON" -c '
 import json, sys
 from pathlib import Path
-from scripts.build_paper_corpus_view import load_completed_chunk
+from scripts.build_paper_dataset_view import load_completed_chunk
 
 chunks = tuple(load_completed_chunk(Path(path)) for path in sys.argv[1:])
 expected = {

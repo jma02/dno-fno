@@ -18,7 +18,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.generate_tanaka_dataset_v2 import (  # noqa: E402
+from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
     TanakaPotentialRadicandError,
     _validate_tanaka_surface_potential_radicand,
@@ -33,8 +33,8 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 from solver.gen_data.pipeline.refinement import (  # noqa: E402
     ResidualControlledGL2Contract,
 )
-from solver.gen_data.tanaka_population import (  # noqa: E402
-    TANAKA_POPULATION_CELLS,
+from solver.gen_data.tanaka_sampling import (  # noqa: E402
+    TANAKA_SAMPLE_CELLS,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
@@ -272,11 +272,11 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             relative_floor=1.0e-12,
             target_time_chunk_size=2,
         )
-        cell = TANAKA_POPULATION_CELLS[0]
+        cell = TANAKA_SAMPLE_CELLS[0]
         attempted = AttemptAssignment(
             case_key=CaseKey(
                 family_id=2,
-                revision_id=1,
+                revision_id=3,
                 split_id=SplitId.TEST,
                 stream_id=7,
                 attempt_index=53,

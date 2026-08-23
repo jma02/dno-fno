@@ -1,4 +1,4 @@
-"""Fixed-band spatial-refinement smoke for the Stokes generator revision.
+"""Fixed-band spatial-refinement smoke for the retained Stokes formulas.
 
 This is method-level validation, not a per-sample acceptance rule.
 
@@ -20,18 +20,10 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.data.stokes_truth_jax import (  # noqa: E402
+from solver.reference_solutions.stokes_wave import (  # noqa: E402
     finite_depth_stokes_in_ursell_support,
     stokes_eta_xi,
     stokes_eta_xi_at_phase,
-)
-from solver.gen_data.generate_stokes_dataset import (  # noqa: E402
-    build_paper_stokes_batch,
-    build_stokes_states,
-)
-from solver.gen_data.pipeline.reference import (  # noqa: E402
-    PAPER_DNO_TARGET,
-    evaluate_discrete_dno_target,
 )
 from solver.solvers.dno_series_jax import (  # noqa: E402
     build_grid,
@@ -94,85 +86,6 @@ def _build_stokes_fields(nx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 class StokesSpatialRefinementSmokeTest(unittest.TestCase):
-    def test_paper_batch_uses_the_frozen_projected_target(self) -> None:
-        x, k = build_grid(
-            PAPER_DNO_TARGET.nx,
-            PAPER_DNO_TARGET.length,
-        )
-        n0 = jnp.asarray([26], dtype=jnp.int32)
-        a0 = jnp.asarray([0.005], dtype=jnp.float64)
-        depth = jnp.asarray([0.2], dtype=jnp.float64)
-        phase = jnp.asarray([0.4], dtype=jnp.float64)
-        raw_eta, raw_xi = build_stokes_states(
-            x=jnp.asarray(x, dtype=jnp.float64),
-            length=PAPER_DNO_TARGET.length,
-            gravity=1.0,
-            n0=n0,
-            a0=a0,
-            depth=depth,
-            phase=phase,
-            ichoi=1,
-        )
-        expected = evaluate_discrete_dno_target(
-            raw_eta,
-            raw_xi,
-            depth[:, None],
-        )
-        actual = build_paper_stokes_batch(
-            gravity=1.0,
-            n0=n0,
-            a0=a0,
-            depth=depth,
-            phase=phase,
-            ichoi=1,
-        )
-        raw_eta_coefficients = np.fft.fft(np.asarray(raw_eta), axis=-1)
-        self.assertGreater(
-            float(
-                np.max(
-                    np.abs(
-                        raw_eta_coefficients[
-                            ..., np.abs(np.asarray(k)) > 128.0
-                        ]
-                    )
-                )
-            ),
-            1e-6,
-        )
-
-        for actual_field, expected_field in zip(actual, expected):
-            np.testing.assert_allclose(
-                np.asarray(actual_field),
-                np.asarray(expected_field),
-                rtol=1e-13,
-                atol=1e-14,
-            )
-            coefficients = np.fft.fft(np.asarray(actual_field), axis=-1)
-            self.assertLess(
-                float(
-                    np.max(
-                        np.abs(
-                            coefficients[
-                                ..., np.abs(np.asarray(k)) > 128.0
-                            ]
-                        )
-                    )
-                ),
-                1e-10,
-            )
-        self.assertLess(abs(float(jnp.mean(actual[2]))), 1e-14)
-
-    def test_paper_batch_rejects_noncanonical_gravity(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires gravity"):
-            build_paper_stokes_batch(
-                gravity=9.81,
-                n0=jnp.asarray([2]),
-                a0=jnp.asarray([0.01]),
-                depth=jnp.asarray([1.0]),
-                phase=jnp.asarray([0.0]),
-                ichoi=1,
-            )
-
     def test_phase_is_a_translation_and_xi_has_zero_mean(self) -> None:
         nx = 128
         length = 2.0 * np.pi

@@ -18,8 +18,8 @@ AUDIT_TIMEOUT_SECONDS=${AUDIT_TIMEOUT_SECONDS:-3600}
 BUILD_TIMEOUT_SECONDS=${BUILD_TIMEOUT_SECONDS:-1800}
 TIMEOUT_KILL_AFTER_SECONDS=${TIMEOUT_KILL_AFTER_SECONDS:-120}
 
-JONSWAP_ROOT=${JONSWAP_ROOT:-$ROOT/outputs/paper_corpus_jonswap_revision4_relative_band_v1}
-TANAKA_ROOT=${TANAKA_ROOT:-$ROOT/outputs/paper_corpus_revision3_literature_aligned_v1}
+JONSWAP_ROOT=${JONSWAP_ROOT:-$ROOT/outputs/paper_dataset_jonswap_revision4_relative_band_v1}
+TANAKA_ROOT=${TANAKA_ROOT:-$ROOT/outputs/paper_dataset_revision3_literature_aligned_v1}
 JONSWAP_COMPLETION_GATE=${JONSWAP_COMPLETION_GATE:-$JONSWAP_ROOT/jonswap_view_builder_input_check.json}
 TANAKA_COMPLETION_GATE=${TANAKA_COMPLETION_GATE:-$TANAKA_ROOT/tanaka_view_builder_input_check.json}
 JONSWAP_AUDIT_ARTIFACT=${JONSWAP_AUDIT_ARTIFACT:-$JONSWAP_ROOT/jonswap_tma_completion_audit.json}
@@ -32,8 +32,8 @@ GPU_ZERO=${GPU_ZERO:-0}
 GPU_ONE=${GPU_ONE:-1}
 JONSWAP_AUDIT_SCRIPT=${JONSWAP_AUDIT_SCRIPT:-$ROOT/scripts/audit_completed_jonswap_revision4.py}
 TANAKA_AUDIT_SCRIPT=${TANAKA_AUDIT_SCRIPT:-$ROOT/scripts/audit_completed_tanaka_revision3.py}
-BUILD_SCRIPT=${BUILD_SCRIPT:-$ROOT/scripts/build_literature_aligned_paper_corpus_views.sh}
-SUPERVISOR_LOG=${SUPERVISOR_LOG:-$ROOT/outputs/paper_corpus_sequential_supervisor.log}
+BUILD_SCRIPT=${BUILD_SCRIPT:-$ROOT/scripts/build_literature_aligned_paper_dataset_views.sh}
+SUPERVISOR_LOG=${SUPERVISOR_LOG:-$ROOT/outputs/paper_dataset_sequential_supervisor.log}
 
 ACTIVE_CHILD=""
 
@@ -130,7 +130,7 @@ wait_for_session() {
 }
 
 resume_until_gate() {
-    local label=$1 family=$2 corpus_root=$3 gate=$4 launch_script=$5
+    local label=$1 family=$2 dataset_root=$3 gate=$4 launch_script=$5
     local temporary_status=${6:-} telemetry_status=${7:-}
     local launch_number launch_status max_launches
     max_launches=$((MAX_RETRIES + 1))
@@ -144,7 +144,7 @@ resume_until_gate() {
         log "$label exact-resume launch $launch_number/$max_launches: $launch_script"
         launch_status=0
         run_supervised_child env \
-            OUTPUT_BASE="$corpus_root" \
+            OUTPUT_BASE="$dataset_root" \
             PYTHON="$PYTHON" \
             "$BASH_BIN" "$launch_script" || launch_status=$?
 
@@ -196,7 +196,7 @@ wait_for_tanaka_gpu_admission() {
 }
 
 run_completion_audit() {
-    local label=$1 schema=$2 corpus_root=$3 artifact=$4 audit_script=$5
+    local label=$1 schema=$2 dataset_root=$3 artifact=$4 audit_script=$5
     local expected_rows=$6 audit_status=0
 
     log "$label CPU completion audit starting (timeout ${AUDIT_TIMEOUT_SECONDS}s; TERM then KILL after ${TIMEOUT_KILL_AFTER_SECONDS}s): $audit_script"
@@ -206,7 +206,7 @@ run_completion_audit() {
         JAX_ENABLE_X64=true \
         XLA_PYTHON_CLIENT_PREALLOCATE=false \
         "$PYTHON" "$audit_script" \
-        --root "$corpus_root" --output "$artifact" || audit_status=$?
+        --root "$dataset_root" --output "$artifact" || audit_status=$?
     if ((audit_status == 124 || audit_status == 137)); then
         die "$label CPU completion audit exceeded ${AUDIT_TIMEOUT_SECONDS}s"
     fi
@@ -229,7 +229,7 @@ except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
 expected_splits = {"train": 16384, "validation": 1024, "test": 1024}
 if (record.get("schema") != expected_schema
         or record.get("status") != "pass"
-        or Path(record.get("corpus_root", "")).resolve() != expected_root
+        or Path(record.get("dataset_root", "")).resolve() != expected_root
         or record.get("accepted") != 18432
         or record.get("accepted_by_split") != expected_splits
         or record.get("retained_rows") != expected_rows
@@ -237,7 +237,7 @@ if (record.get("schema") != expected_schema
         or record.get("rejected")
         != record.get("attempted") - record.get("accepted")):
     raise SystemExit("completion audit artifact does not satisfy the release gate")
-' "$artifact" "$schema" "$corpus_root" "$expected_rows" \
+' "$artifact" "$schema" "$dataset_root" "$expected_rows" \
         || die "$label completion audit artifact did not pass validation: $artifact"
     log "$label CPU completion audit passed: $artifact"
 }
@@ -275,13 +275,13 @@ source "$GPU_ADMISSION_SCRIPT"
 trap 'stop_active_child 130' INT
 trap 'stop_active_child 143' TERM
 
-log "sequential corpus supervisor started (maximum retries per family: $MAX_RETRIES)"
+log "sequential dataset supervisor started (maximum retries per family: $MAX_RETRIES)"
 wait_for_session
 resume_until_gate \
     JONSWAP jonswap_tma "$JONSWAP_ROOT" \
     "$JONSWAP_COMPLETION_GATE" "$JONSWAP_LAUNCH_SCRIPT"
 run_completion_audit \
-    JONSWAP paper_corpus_jonswap_tma_revision4_completion_audit_v1 \
+    JONSWAP paper_dataset_jonswap_tma_revision4_completion_audit_v1 \
     "$JONSWAP_ROOT" "$JONSWAP_AUDIT_ARTIFACT" \
     "$JONSWAP_AUDIT_SCRIPT" 294912
 
@@ -294,7 +294,7 @@ resume_until_gate \
     "$TANAKA_GPU_TEMPORARILY_UNAVAILABLE_EXIT" \
     "$TANAKA_GPU_TELEMETRY_ERROR_EXIT"
 run_completion_audit \
-    Tanaka paper_corpus_tanaka_revision3_completion_audit_v1 \
+    Tanaka paper_dataset_tanaka_revision3_completion_audit_v1 \
     "$TANAKA_ROOT" "$TANAKA_AUDIT_ARTIFACT" \
     "$TANAKA_AUDIT_SCRIPT" 3686400
 

@@ -1,0 +1,552 @@
+"""CPU tests for the paper-dataset Tanaka sampler."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+import hashlib
+import json
+import math
+import unittest
+
+import numpy as np
+
+from solver.gen_data.pipeline.production import (
+    AttemptAssignment,
+    CaseKey,
+    SplitId,
+    random_generator_for_case,
+)
+from solver.gen_data.tanaka_sampling import (
+    MAIN_DEPTH_BOUNDS,
+    MAIN_TOTAL_ALPHA_BOUNDS,
+    STEEP_ALPHA_BOUNDS,
+    STEEP_DEPTH_BOUNDS,
+    TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
+    TANAKA_MINIMUM_RESOLUTION_RATIO,
+    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLING_REVISION_V2,
+    TANAKA_SAMPLING_REVISION_V3,
+    TanakaCrest,
+    TanakaSampleCell,
+    sample_tanaka_case,
+    tanaka_conditional_depth_bounds,
+    tanaka_inverse_width,
+    tanaka_resolution_ratio,
+    tanaka_support_violations,
+)
+
+
+DOMAIN_LENGTH = 2.0 * np.pi
+
+
+def assignment(
+    cell_index: int,
+    *,
+    family_id: int = 1,
+    revision_id: int = TANAKA_SAMPLING_REVISION_V2,
+    split_id: SplitId = SplitId.TRAIN,
+    stream_id: int = 0,
+    attempt_index: int | None = None,
+) -> AttemptAssignment:
+    """Return one deterministic assignment for a Tanaka sample cell."""
+
+    attempt = cell_index if attempt_index is None else attempt_index
+    return AttemptAssignment(
+        case_key=CaseKey(
+            family_id=family_id,
+            revision_id=revision_id,
+            split_id=split_id,
+            stream_id=stream_id,
+            attempt_index=attempt,
+        ),
+        cell_id=TANAKA_SAMPLE_CELLS[cell_index].cell_id,
+    )
+
+
+def canonical_json_sha256(record: dict[str, object]) -> str:
+    """Return the canonical strict-JSON digest used by proposal records."""
+
+    encoded = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class TanakaSamplingTest(unittest.TestCase):
+    def test_cells_are_exactly_the_declared_eleven(self) -> None:
+        coordinates = tuple(
+            (
+                cell.cell_id,
+                cell.regime,
+                cell.crest_count,
+                cell.right_moving_count,
+            )
+            for cell in TANAKA_SAMPLE_CELLS
+        )
+        self.assertEqual(
+            coordinates,
+            (
+                ("main_m1_q0", "main", 1, 0),
+                ("main_m1_q1", "main", 1, 1),
+                ("main_m2_q0", "main", 2, 0),
+                ("main_m2_q1", "main", 2, 1),
+                ("main_m2_q2", "main", 2, 2),
+                ("main_m3_q0", "main", 3, 0),
+                ("main_m3_q1", "main", 3, 1),
+                ("main_m3_q2", "main", 3, 2),
+                ("main_m3_q3", "main", 3, 3),
+                ("steep_m1_q0", "steep", 1, 0),
+                ("steep_m1_q1", "steep", 1, 1),
+            ),
+        )
+
+    def test_revision_2_replay_is_bitwise_deterministic(self) -> None:
+        for cell_index in range(len(TANAKA_SAMPLE_CELLS)):
+            with self.subTest(cell=TANAKA_SAMPLE_CELLS[cell_index].cell_id):
+                first = sample_tanaka_case(
+                    assignment(cell_index, attempt_index=91)
+                )
+                second = sample_tanaka_case(
+                    assignment(cell_index, attempt_index=91)
+                )
+                self.assertEqual(first, second)
+                self.assertEqual(first.to_json_record(), second.to_json_record())
+                self.assertNotIn("schema", first.to_json_record())
+
+    def test_revision_2_canonical_json_is_byte_locked(self) -> None:
+        cases = (
+            (
+                0,
+                91,
+                "49f24050146acbb9712c1d952b2f760a4ecd8e5672a370348dc8c69cda83abda",
+            ),
+            (
+                6,
+                97,
+                "b372d681afcf3ab18a615b17710f540058495ffac0ae14a7696f374615257673",
+            ),
+            (
+                10,
+                103,
+                "f50ea60f1cd601b8f656a4079ef665f045166cd21d660a9fb1800db50a753800",
+            ),
+        )
+        for cell_index, attempt_index, expected in cases:
+            with self.subTest(
+                cell=TANAKA_SAMPLE_CELLS[cell_index].cell_id,
+                attempt=attempt_index,
+            ):
+                sample = sample_tanaka_case(
+                    assignment(
+                        cell_index,
+                        family_id=2,
+                        revision_id=TANAKA_SAMPLING_REVISION_V2,
+                        attempt_index=attempt_index,
+                    )
+                )
+                self.assertEqual(
+                    canonical_json_sha256(sample.to_json_record()),
+                    expected,
+                )
+
+    def test_revision_3_replay_is_bitwise_deterministic(self) -> None:
+        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
+            with self.subTest(cell=cell.cell_id):
+                attempted = assignment(
+                    cell_index,
+                    revision_id=TANAKA_SAMPLING_REVISION_V3,
+                    attempt_index=91,
+                )
+                first = sample_tanaka_case(attempted)
+                second = sample_tanaka_case(attempted)
+                self.assertEqual(first, second)
+                self.assertEqual(first.to_json_record(), second.to_json_record())
+                self.assertNotIn("schema", first.to_json_record())
+
+    def test_pcg64_uses_all_case_key_seed_words(self) -> None:
+        base = assignment(0, attempt_index=41).case_key
+        expected = np.random.Generator(
+            np.random.PCG64(np.random.SeedSequence(base.seed_words))
+        ).random(8)
+        np.testing.assert_array_equal(
+            random_generator_for_case(base).random(8), expected
+        )
+
+        keys = (
+            base,
+            CaseKey(2, 1, SplitId.TRAIN, 0, 41),
+            CaseKey(1, 3, SplitId.TRAIN, 0, 41),
+            CaseKey(1, 1, SplitId.VALIDATION, 0, 41),
+            CaseKey(1, 1, SplitId.TRAIN, 1, 41),
+            CaseKey(1, 1, SplitId.TRAIN, 0, 42),
+        )
+        first_draws = {
+            tuple(random_generator_for_case(key).random(8)) for key in keys
+        }
+        self.assertEqual(len(first_draws), len(keys))
+
+    def test_support_sums_and_separation_over_many_attempts(self) -> None:
+        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
+            for attempt_index in range(512):
+                sample = sample_tanaka_case(
+                    assignment(cell_index, attempt_index=attempt_index)
+                )
+                self.assertEqual(tanaka_support_violations(sample), ())
+                self.assertEqual(len(sample.crests), cell.crest_count)
+                self.assertEqual(
+                    sum(crest.direction == 1 for crest in sample.crests),
+                    cell.right_moving_count,
+                )
+                self.assertEqual(
+                    sample.total_dimensionless_amplitude,
+                    sum(crest.alpha for crest in sample.crests),
+                )
+                self.assertTrue(
+                    all(crest.alpha > 0.0 for crest in sample.crests)
+                )
+                self.assertTrue(
+                    all(
+                        0.0 <= crest.center < DOMAIN_LENGTH
+                        for crest in sample.crests
+                    )
+                )
+                if cell.crest_count > 1:
+                    self.assertGreaterEqual(
+                        sample.achieved_minimum_separation,
+                        sample.required_minimum_separation,
+                    )
+
+                if cell.regime == "main":
+                    self.assertTrue(
+                        MAIN_DEPTH_BOUNDS[0]
+                        <= sample.depth
+                        <= MAIN_DEPTH_BOUNDS[1]
+                    )
+                    self.assertTrue(
+                        MAIN_TOTAL_ALPHA_BOUNDS[0]
+                        <= sample.total_dimensionless_amplitude
+                        <= MAIN_TOTAL_ALPHA_BOUNDS[1]
+                    )
+                else:
+                    self.assertTrue(
+                        STEEP_DEPTH_BOUNDS[0]
+                        <= sample.depth
+                        <= STEEP_DEPTH_BOUNDS[1]
+                    )
+                    self.assertTrue(
+                        STEEP_ALPHA_BOUNDS[0]
+                        <= sample.crests[0].alpha
+                        <= STEEP_ALPHA_BOUNDS[1]
+                    )
+
+    def test_revision_3_direct_sampling_satisfies_conditional_support(
+        self,
+    ) -> None:
+        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
+            for attempt_index in range(512):
+                sample = sample_tanaka_case(
+                    assignment(
+                        cell_index,
+                        revision_id=TANAKA_SAMPLING_REVISION_V3,
+                        attempt_index=attempt_index,
+                    )
+                )
+                alpha_max = max(crest.alpha for crest in sample.crests)
+                inverse_width = math.sqrt(3.0 * alpha_max) / (
+                    2.0 * sample.depth
+                )
+                resolution_ratio = (
+                    TANAKA_DELIVERED_MAXIMUM_WAVENUMBER / inverse_width
+                )
+                base_bounds = (
+                    MAIN_DEPTH_BOUNDS
+                    if cell.regime == "main"
+                    else STEEP_DEPTH_BOUNDS
+                )
+                expected_lower = max(
+                    base_bounds[0],
+                    TANAKA_MINIMUM_RESOLUTION_RATIO
+                    * math.sqrt(3.0 * alpha_max)
+                    / (2.0 * TANAKA_DELIVERED_MAXIMUM_WAVENUMBER),
+                )
+
+                self.assertEqual(tanaka_support_violations(sample), ())
+                self.assertEqual(
+                    sample.maximum_dimensionless_crest_amplitude,
+                    alpha_max,
+                )
+                self.assertEqual(sample.maximum_inverse_width, inverse_width)
+                self.assertEqual(sample.resolution_ratio, resolution_ratio)
+                self.assertEqual(
+                    sample.conditional_depth_lower_bound,
+                    expected_lower,
+                )
+                self.assertGreaterEqual(sample.depth, expected_lower)
+                self.assertGreaterEqual(
+                    sample.resolution_ratio,
+                    TANAKA_MINIMUM_RESOLUTION_RATIO,
+                )
+
+                record = sample.to_json_record()
+                profile = record["profile_resolution"]
+                self.assertIsInstance(profile, dict)
+                assert isinstance(profile, dict)
+                self.assertEqual(
+                    profile,
+                    {
+                        "delivered_maximum_wavenumber": 128.0,
+                        "maximum_dimensionless_crest_amplitude": alpha_max,
+                        "maximum_inverse_width": inverse_width,
+                        "wavenumbers_per_inverse_width": resolution_ratio,
+                        "required_minimum_wavenumbers_per_inverse_width": 10.0,
+                        "conditional_depth_lower_bound": expected_lower,
+                    },
+                )
+
+    def test_revision_3_draw_order_is_amplitudes_then_conditional_depth(
+        self,
+    ) -> None:
+        cell_index = 6
+        attempted = assignment(
+            cell_index,
+            revision_id=TANAKA_SAMPLING_REVISION_V3,
+            attempt_index=314,
+        )
+        cell = TANAKA_SAMPLE_CELLS[cell_index]
+        rng = random_generator_for_case(attempted.case_key)
+
+        total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
+        weights = rng.dirichlet(
+            np.ones(cell.crest_count, dtype=np.float64)
+        )
+        alpha_values = [float(total_alpha * weight) for weight in weights]
+        alpha_values[-1] = total_alpha - sum(alpha_values[:-1])
+        alphas = tuple(alpha_values)
+        depth_bounds = tanaka_conditional_depth_bounds(cell, alphas)
+        depth = float(
+            np.exp(
+                rng.uniform(
+                    np.log(depth_bounds[0]),
+                    np.log(depth_bounds[1]),
+                )
+            )
+        )
+
+        minimum_separation = 3.0 * depth
+        slack = DOMAIN_LENGTH - cell.crest_count * minimum_separation
+        gap_weights = rng.dirichlet(
+            np.ones(cell.crest_count, dtype=np.float64)
+        )
+        gaps = minimum_separation + slack * gap_weights
+        origin = float(rng.uniform(0.0, DOMAIN_LENGTH))
+        offsets = np.concatenate(
+            (np.zeros(1, dtype=np.float64), np.cumsum(gaps[:-1]))
+        )
+        centers = tuple(
+            float(center)
+            for center in np.mod(origin + offsets, DOMAIN_LENGTH)
+        )
+        direction_multiset = np.concatenate(
+            (
+                -np.ones(
+                    cell.crest_count - cell.right_moving_count,
+                    dtype=np.int8,
+                ),
+                np.ones(cell.right_moving_count, dtype=np.int8),
+            )
+        )
+        directions = tuple(
+            int(direction) for direction in rng.permutation(direction_multiset)
+        )
+
+        sample = sample_tanaka_case(attempted)
+        self.assertEqual(sample.depth, depth)
+        self.assertEqual(tuple(crest.alpha for crest in sample.crests), alphas)
+        self.assertEqual(
+            tuple(crest.center for crest in sample.crests),
+            centers,
+        )
+        self.assertEqual(
+            tuple(crest.direction for crest in sample.crests),
+            directions,
+        )
+
+    def test_direction_compositions_and_json_are_exact(self) -> None:
+        directions: set[int] = set()
+        for cell_index in range(len(TANAKA_SAMPLE_CELLS)):
+            sample = sample_tanaka_case(
+                assignment(cell_index, attempt_index=700 + cell_index)
+            )
+            directions.update(crest.direction for crest in sample.crests)
+            record = sample.to_json_record()
+            self.assertEqual(
+                record["seed_words"],
+                list(sample.assignment.case_key.seed_words),
+            )
+            self.assertEqual(record["crest_count"], len(sample.crests))
+            self.assertEqual(
+                record["right_moving_count"],
+                sample.cell.right_moving_count,
+            )
+            json.dumps(record, sort_keys=True, allow_nan=False)
+
+        mixed_assignments: set[tuple[int, ...]] = set()
+        for attempt_index in range(256):
+            sample = sample_tanaka_case(
+                assignment(6, attempt_index=1000 + attempt_index)
+            )
+            directions.update(crest.direction for crest in sample.crests)
+            mixed_assignments.add(
+                tuple(crest.direction for crest in sample.crests)
+            )
+        self.assertEqual(directions, {-1, 1})
+        self.assertEqual(
+            mixed_assignments,
+            {
+                (1, -1, -1),
+                (-1, 1, -1),
+                (-1, -1, 1),
+            },
+        )
+
+    def test_revision_3_boundary_corruption_fails_below_and_passes_above(
+        self,
+    ) -> None:
+        sample = sample_tanaka_case(
+            assignment(
+                0,
+                revision_id=TANAKA_SAMPLING_REVISION_V3,
+                attempt_index=812,
+            )
+        )
+        lower = sample.conditional_depth_lower_bound
+        below = replace(sample, depth=lower * (1.0 - 1.0e-8))
+        boundary = replace(sample, depth=lower)
+        above = replace(sample, depth=lower * (1.0 + 1.0e-8))
+
+        self.assertLess(
+            tanaka_resolution_ratio(
+                alpha=below.maximum_dimensionless_crest_amplitude,
+                depth=below.depth,
+            ),
+            TANAKA_MINIMUM_RESOLUTION_RATIO,
+        )
+        self.assertIn(
+            "depth is below the profile-resolution support",
+            tanaka_support_violations(below),
+        )
+        self.assertIn(
+            "profile resolution ratio is below the required minimum",
+            tanaka_support_violations(below),
+        )
+        self.assertEqual(tanaka_support_violations(boundary), ())
+        self.assertEqual(tanaka_support_violations(above), ())
+        self.assertGreater(
+            tanaka_resolution_ratio(
+                alpha=above.maximum_dimensionless_crest_amplitude,
+                depth=above.depth,
+            ),
+            TANAKA_MINIMUM_RESOLUTION_RATIO,
+        )
+
+    def test_unknown_revision_fails_closed(self) -> None:
+        for revision_id in (1, 4):
+            with self.subTest(revision_id=revision_id):
+                attempted = assignment(0, revision_id=revision_id)
+                with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
+                    sample_tanaka_case(attempted)
+
+                valid = sample_tanaka_case(
+                    assignment(
+                        0,
+                        revision_id=TANAKA_SAMPLING_REVISION_V2,
+                    )
+                )
+                corrupt = replace(valid, assignment=attempted)
+                self.assertIn(
+                    "unsupported Tanaka sampling revision",
+                    tanaka_support_violations(corrupt),
+                )
+                with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
+                    corrupt.to_json_record()
+
+    def test_resolution_helpers_fail_closed_on_invalid_inputs(self) -> None:
+        self.assertEqual(
+            tanaka_inverse_width(alpha=0.25, depth=0.5),
+            math.sqrt(0.75),
+        )
+        for alpha, depth in (
+            (0.0, 0.2),
+            (-0.1, 0.2),
+            (math.nan, 0.2),
+            (0.2, 0.0),
+            (0.2, math.inf),
+        ):
+            with self.subTest(alpha=alpha, depth=depth):
+                with self.assertRaisesRegex(ValueError, "positive and finite"):
+                    tanaka_inverse_width(alpha=alpha, depth=depth)
+        with self.assertRaisesRegex(ValueError, "one value per crest"):
+            tanaka_conditional_depth_bounds(
+                TANAKA_SAMPLE_CELLS[2],
+                (0.2,),
+            )
+        with self.assertRaisesRegex(ValueError, "no admissible depth"):
+            tanaka_conditional_depth_bounds(
+                TANAKA_SAMPLE_CELLS[0],
+                (100.0,),
+            )
+
+    def test_invalid_records_and_impossible_geometry_fail_closed(self) -> None:
+        with self.assertRaisesRegex(TypeError, "must be an integer"):
+            TanakaSampleCell(
+                "bad_m",
+                "main",
+                1.0,  # type: ignore[arg-type]
+                1,
+            )
+        with self.assertRaisesRegex(TypeError, "must be an integer"):
+            TanakaSampleCell("bad_m", "main", True, 1)
+        with self.assertRaisesRegex(TypeError, "must be an integer"):
+            TanakaSampleCell("bad_q", "main", 2, 1.5)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(TypeError, "must be an integer"):
+            TanakaSampleCell("bad_q", "main", 2, True)
+        with self.assertRaisesRegex(ValueError, "between zero and crest_count"):
+            TanakaSampleCell("bad_q", "main", 2, 3)
+
+        sample = sample_tanaka_case(assignment(3))
+        corrupt = replace(
+            sample,
+            crests=(
+                TanakaCrest(
+                    alpha=sample.crests[0].alpha,
+                    center=sample.crests[0].center,
+                    direction=0,
+                ),
+                sample.crests[1],
+            ),
+        )
+        self.assertIn(
+            "every crest direction must equal -1 or +1",
+            tanaka_support_violations(corrupt),
+        )
+        wrong_composition = replace(
+            sample,
+            crests=tuple(
+                replace(crest, direction=-1) for crest in sample.crests
+            ),
+        )
+        self.assertIn(
+            "number of right-moving crests does not match the parameter category",
+            tanaka_support_violations(wrong_composition),
+        )
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            sample_tanaka_case(assignment(0), domain_length=np.nan)
+        with self.assertRaisesRegex(ValueError, "do not fit"):
+            sample_tanaka_case(assignment(5), domain_length=0.01)
+
+
+if __name__ == "__main__":
+    unittest.main()

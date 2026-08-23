@@ -35,11 +35,11 @@ from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
     scan_quota_run,
 )
 from solver.gen_data.pipeline.reference import DiscreteDnoTarget  # noqa: E402
-from solver.gen_data.stokes_population import (  # noqa: E402
+from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_POPULATION_CELLS,
-    StokesPopulationSample,
-    sample_stokes_population,
+    STOKES_SAMPLE_CELLS,
+    StokesSample,
+    sample_stokes_case,
 )
 from solver.gen_data.stokes_quota_executor import (  # noqa: E402
     StaticStokesQuotaExecutor,
@@ -108,7 +108,7 @@ def _proposal_contains(root: Path, case_id: int) -> bool:
 
 
 def _zero_state(
-    sample: StokesPopulationSample,
+    sample: StokesSample,
     contract: StaticStokesContract,
 ) -> tuple[jax.Array, jax.Array]:
     del sample
@@ -137,8 +137,8 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        finite_cell = STOKES_POPULATION_CELLS[0].cell_id
-        deep_cell = STOKES_POPULATION_CELLS[2].cell_id
+        finite_cell = STOKES_SAMPLE_CELLS[0].cell_id
+        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
         spec = _run_spec(
             self.root,
             contract,
@@ -155,14 +155,14 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             domain_length: float,
             gravity: float,
             maximum_ursell_redraws: int,
-        ) -> StokesPopulationSample:
+        ) -> StokesSample:
             sampled_attempts.append(assignment.case_key.attempt_index)
             forced_ursell = 27.0 if assignment.case_key.attempt_index == 0 else 1.0
             with patch(
-                "solver.gen_data.stokes_population._evaluate_finite_depth_ursell",
+                "solver.gen_data.stokes_sampling._evaluate_finite_depth_ursell",
                 return_value=forced_ursell,
             ):
-                return sample_stokes_population(
+                return sample_stokes_case(
                     assignment,
                     domain_length=domain_length,
                     gravity=gravity,
@@ -170,7 +170,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
                 )
 
         def checked_constructor(
-            sample: StokesPopulationSample,
+            sample: StokesSample,
             active_contract: StaticStokesContract,
         ) -> tuple[jax.Array, jax.Array]:
             self.assertTrue(
@@ -265,7 +265,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
 
     def test_proposal_only_interruption_resamples_exactly_on_replay(self) -> None:
         contract = _contract()
-        deep_cell = STOKES_POPULATION_CELLS[2].cell_id
+        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
         spec = _run_spec(
             self.root,
             contract,
@@ -282,8 +282,8 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
                 domain_length: float,
                 gravity: float,
                 maximum_ursell_redraws: int,
-            ) -> StokesPopulationSample:
-                value = sample_stokes_population(
+            ) -> StokesSample:
+                value = sample_stokes_case(
                     assignment,
                     domain_length=domain_length,
                     gravity=gravity,
@@ -295,7 +295,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             return sample
 
         def interrupt_after_proposal(
-            sample: StokesPopulationSample,
+            sample: StokesSample,
             active_contract: StaticStokesContract,
         ) -> tuple[jax.Array, jax.Array]:
             del active_contract
@@ -351,7 +351,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        deep_cell = STOKES_POPULATION_CELLS[2].cell_id
+        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
         wrong_contract_spec = AcceptedQuotaRunSpec(
             root=self.root / "contract",
             family_name="stokes",
@@ -394,7 +394,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
 
     def test_paper_role_rejects_injected_implementation_hooks(self) -> None:
         contract = PAPER_STATIC_STOKES_CONTRACT
-        deep_cell = STOKES_POPULATION_CELLS[2].cell_id
+        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
         spec = _run_spec(
             self.root,
             contract,
@@ -407,13 +407,13 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             run_spec=spec,
             contract=contract,
         )
-        with self.assertRaisesRegex(ValueError, "paper-corpus execution"):
+        with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             StaticStokesQuotaExecutor(
                 run_spec=spec,
                 contract=contract,
                 state_constructor=_zero_state,
             )
-        with self.assertRaisesRegex(ValueError, "paper-corpus execution"):
+        with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             StaticStokesQuotaExecutor(
                 run_spec=spec,
                 contract=contract,
@@ -427,7 +427,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             maximum_ursell_redraws=0,
             batch_size=1,
         )
-        with self.assertRaisesRegex(ValueError, "paper-corpus execution"):
+        with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             StaticStokesQuotaExecutor(
                 run_spec=zero_redraw_spec,
                 contract=contract,

@@ -1,4 +1,4 @@
-"""Paper-corpus support, trajectory, and refinement decisions."""
+"""Paper-dataset support, trajectory, and refinement decisions."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,6 +47,195 @@ class TemporalRefinementMetrics:
     xi_error: float
     gxi_error: float
     maximum_error: float
+
+
+@dataclass(frozen=True)
+class HamiltonianDriftMetrics:
+    """Hamiltonian drift computed on every supplied trajectory frame."""
+
+    initial_hamiltonian: float | None
+    maximum_relative_drift: float | None
+    threshold: float
+
+
+@dataclass(frozen=True)
+class InternalTrajectoryMetrics:
+    """Dense diagnostics computed before projecting a trajectory for storage."""
+
+    state_finite: bool
+    dno_finite: bool
+    minimum_water_column: float | None
+    initial_hamiltonian: float | None
+    maximum_relative_hamiltonian_drift: float | None
+    hamiltonian_drift_threshold: float
+
+
+def evaluate_internal_trajectory_health(
+    hamiltonian: FloatArray,
+    state_finite: NDArray[np.bool_],
+    dno_finite: NDArray[np.bool_],
+    minimum_water_column: FloatArray,
+    *,
+    hamiltonian_drift_threshold: float,
+    tiny: float = np.finfo(np.float64).tiny,
+) -> tuple[InternalTrajectoryMetrics, QualityDecision]:
+    """Require dense internal finiteness, clearance, and Hamiltonian accuracy."""
+
+    hamiltonian_array = np.asarray(hamiltonian, dtype=np.float64)
+    state_finite_array = np.asarray(state_finite, dtype=np.bool_)
+    dno_finite_array = np.asarray(dno_finite, dtype=np.bool_)
+    water_column_array = np.asarray(
+        minimum_water_column,
+        dtype=np.float64,
+    )
+    arrays = (
+        hamiltonian_array,
+        state_finite_array,
+        dno_finite_array,
+        water_column_array,
+    )
+    if any(array.ndim != 1 for array in arrays):
+        raise ValueError("internal trajectory telemetry arrays must be one-dimensional")
+    if hamiltonian_array.size == 0:
+        raise ValueError("internal trajectory telemetry cannot be empty")
+    if any(array.shape != hamiltonian_array.shape for array in arrays[1:]):
+        raise ValueError("internal trajectory telemetry arrays must have one shape")
+    if (
+        not np.isfinite(hamiltonian_drift_threshold)
+        or hamiltonian_drift_threshold < 0.0
+    ):
+        raise ValueError(
+            "hamiltonian_drift_threshold must be finite and nonnegative"
+        )
+    if not np.isfinite(tiny) or tiny <= 0.0:
+        raise ValueError("tiny must be finite and positive")
+
+    required = (
+        QualityReason.NONFINITE_STATE
+        | QualityReason.NONFINITE_TARGET
+        | QualityReason.BOTTOM_CLEARANCE
+        | QualityReason.HAMILTONIAN_DRIFT
+    )
+    failed = QualityReason.NONE
+    all_state_finite = bool(np.all(state_finite_array))
+    all_dno_finite = bool(np.all(dno_finite_array))
+    if not all_state_finite:
+        failed |= QualityReason.NONFINITE_STATE
+    if not all_dno_finite:
+        failed |= QualityReason.NONFINITE_TARGET
+
+    minimum_water: float | None = None
+    if np.isfinite(water_column_array).all():
+        minimum_water = float(np.min(water_column_array))
+    if minimum_water is None or minimum_water <= 0.0:
+        failed |= QualityReason.BOTTOM_CLEARANCE
+
+    initial_hamiltonian: float | None = None
+    maximum_drift: float | None = None
+    if np.isfinite(hamiltonian_array).all():
+        initial_hamiltonian = float(hamiltonian_array[0])
+        denominator = max(abs(initial_hamiltonian), tiny)
+        maximum_drift = float(
+            np.max(
+                np.abs(hamiltonian_array - initial_hamiltonian)
+                / denominator
+            )
+        )
+    if (
+        maximum_drift is None
+        or not np.isfinite(maximum_drift)
+        or maximum_drift > hamiltonian_drift_threshold
+    ):
+        failed |= QualityReason.HAMILTONIAN_DRIFT
+
+    return (
+        InternalTrajectoryMetrics(
+            state_finite=all_state_finite,
+            dno_finite=all_dno_finite,
+            minimum_water_column=minimum_water,
+            initial_hamiltonian=initial_hamiltonian,
+            maximum_relative_hamiltonian_drift=maximum_drift,
+            hamiltonian_drift_threshold=float(
+                hamiltonian_drift_threshold
+            ),
+        ),
+        QualityDecision(
+            scope=QualityScope.TRAJECTORY,
+            required=required,
+            evaluated=required,
+            failed=failed,
+        ),
+    )
+
+
+def evaluate_hamiltonian_drift(
+    eta: FloatArray,
+    xi: FloatArray,
+    gxi: FloatArray,
+    *,
+    gravity: float,
+    dx: float,
+    threshold: float = 1.0e-3,
+    tiny: float = np.finfo(np.float64).tiny,
+) -> tuple[HamiltonianDriftMetrics, QualityDecision]:
+    """Require Hamiltonian drift at every supplied frame to be at most the limit."""
+
+    eta_array = np.asarray(eta, dtype=np.float64)
+    xi_array = np.asarray(xi, dtype=np.float64)
+    gxi_array = np.asarray(gxi, dtype=np.float64)
+    if eta_array.ndim != 2:
+        raise ValueError(f"eta must have shape (time, space), got {eta_array.shape}")
+    if xi_array.shape != eta_array.shape or gxi_array.shape != eta_array.shape:
+        raise ValueError("eta, xi, and gxi must have identical shapes")
+    if eta_array.shape[0] == 0 or eta_array.shape[1] == 0:
+        raise ValueError("a trajectory cannot be empty")
+    for value, name in (
+        (gravity, "gravity"),
+        (dx, "dx"),
+        (tiny, "tiny"),
+    ):
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    if not np.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("threshold must be finite and nonnegative")
+
+    reason = QualityReason.HAMILTONIAN_DRIFT
+    initial_hamiltonian: float | None = None
+    maximum_relative_drift: float | None = None
+    failed = reason
+    if (
+        np.isfinite(eta_array).all()
+        and np.isfinite(xi_array).all()
+        and np.isfinite(gxi_array).all()
+    ):
+        hamiltonian = 0.5 * dx * np.sum(
+            xi_array * gxi_array + gravity * eta_array**2,
+            axis=1,
+        )
+        initial_hamiltonian = float(hamiltonian[0])
+        denominator = max(abs(initial_hamiltonian), tiny)
+        maximum_relative_drift = float(
+            np.max(np.abs((hamiltonian - initial_hamiltonian) / denominator))
+        )
+        if (
+            np.isfinite(maximum_relative_drift)
+            and maximum_relative_drift <= threshold
+        ):
+            failed = QualityReason.NONE
+
+    return (
+        HamiltonianDriftMetrics(
+            initial_hamiltonian=initial_hamiltonian,
+            maximum_relative_drift=maximum_relative_drift,
+            threshold=float(threshold),
+        ),
+        QualityDecision(
+            scope=QualityScope.TRAJECTORY,
+            required=reason,
+            evaluated=reason,
+            failed=failed,
+        ),
+    )
 
 
 def evaluate_finite_stokes_support(

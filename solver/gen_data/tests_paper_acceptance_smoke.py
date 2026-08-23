@@ -18,7 +18,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.data.stokes_truth_jax import (  # noqa: E402
+from solver.reference_solutions.stokes_wave import (  # noqa: E402
     finite_depth_eta_harmonics,
     finite_depth_stokes_in_ursell_support,
     finite_depth_stokes_wave_height,
@@ -95,7 +95,7 @@ def _rollout_pair(saved_spacing: float) -> tuple[
     return _as_refinement_trajectory(coarse), _as_refinement_trajectory(fine)
 
 
-class PaperCorpusAcceptanceSmokeTest(unittest.TestCase):
+class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
     def test_finite_stokes_constructor_support(self) -> None:
         length = 164.0
         k0 = 2.0 * np.pi * 14 / length

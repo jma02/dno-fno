@@ -14,7 +14,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .modified_tanaka import make_default_tanaka_template, solve_modified_tanaka_batched
+from .modified_tanaka import (
+    DEFAULT_OUTER_ITERATIONS,
+    DEFAULT_QC_UPPER,
+    make_default_tanaka_template,
+    solve_modified_tanaka_batched,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.01)
     parser.add_argument("--transform_power", type=int, default=5)
     parser.add_argument("--qc_lower", type=float, default=0.2)
-    parser.add_argument("--qc_upper", type=float, default=0.999)
-    parser.add_argument("--outer_iterations", type=int, default=24)
+    parser.add_argument("--qc_upper", type=float, default=DEFAULT_QC_UPPER)
+    parser.add_argument(
+        "--outer_iterations",
+        type=int,
+        default=DEFAULT_OUTER_ITERATIONS,
+    )
     parser.add_argument("--fixed_point_iterations", type=int, default=80)
     parser.add_argument("--f2_tolerance", type=float, default=1e-10)
     parser.add_argument("--sample_count", type=int, default=8)

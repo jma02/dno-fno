@@ -2,7 +2,7 @@
 
 ## Decision
 
-The paper-corpus training path applies the localized translation-tangent
+The paper-dataset training path applies the localized translation-tangent
 objective to every nonflat training and validation row. It no longer selects
 Tanaka rows or assigns a family-specific weight. The configured coefficient
 remains `10`.
@@ -31,6 +31,6 @@ identifier is consumed by the trainer or regularizer.
 The repository contains Tanaka-only versus tangent-deletion evidence, but no
 completed Tanaka-only versus all-family ablation. Before promoting the changed
 scope, report the unweighted and weighted tangent contribution on the new
-corpus and evaluate matched long rollouts for all four families. In particular,
+dataset and evaluate matched long rollouts for all four families. In particular,
 check that Benjamin--Feir and JONSWAP/TMA losses do not dominate solely because
 their slope-energy distributions differ from Tanaka.

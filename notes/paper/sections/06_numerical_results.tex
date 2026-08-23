@@ -1,0 +1,499 @@
+\section{Numerical results}
+\label{sec:results}
+
+\subsection{Evaluation protocol}
+
+Truth and surrogate are compared in a float64 rollout harness using the same
+integrating-factor Gauss--Legendre method, dealiased Zakharov products, spectral
+projection, output times, and initial conditions. Only the DNO evaluation is
+replaced in an unguarded comparison; guarded comparisons additionally apply
+the conditional spectral viscosity in \cref{sec:soliton-guard} to the
+surrogate trajectory. The primary metric is final-time relative surface error
+\begin{equation}
+  e_\eta(T)=
+  \frac{\norm{\eta_\theta(T)-\eta_\star(T)}_2}
+       {\norm{\eta_\star(T)}_2}.
+  \label{eq:rollout-metric}
+\end{equation}
+We report its median and 95th percentile together with the numbers of
+nonfinite and finite-but-divergent trajectories; a finite trajectory is called
+divergent when $e_\eta(T)>1$. Truth trajectories with a nonfinite state or
+relative Hamiltonian drift above $10^{-3}$ are excluded before scoring.  We
+report separately the number of attempted rollouts and the number with a
+valid reference trajectory.
+
+The full C16 evaluation contains 32 initial conditions from each of ten panels
+spanning five physical wave families, for 320 trajectories total.  Historical
+archive names append \texttt{g0}, \texttt{g1}, or \texttt{modal} to some
+panels.  These suffixes mark independent generation shards, not different DNO
+orders or physical regimes.  We therefore call them replicates A--C below.  The
+evaluation uses no runtime cap, hard
+learned-output cutoff, adaptive damping, or case-specific intervention.
+Thus its finiteness result does not rely on rollout-time post-processing. The guarded C18
+experiment is reported separately because the conditional spectral viscosity
+of \cref{sec:soliton-guard} is an intentional numerical intervention. Both
+experiments otherwise use the same float64 harness and cached truth.
+
+The linear and two Stokes panels originate from a legacy archive with
+$L_{\mathrm{old}}=164$.  Before rollout we apply the fixed-gravity change of
+variables derived in \cref{app:rescaling}, with $a=164/(2\pi)$, and then
+regenerate the truth trajectory on the canonical $L=2\pi$ grid.  Thus
+$h_{\mathrm{old}}=1$ becomes
+$h^\sharp\approx0.0383121$ for the linear and finite-depth Stokes panels, while
+$h_{\mathrm{old}}=1000$ becomes $h^\sharp\approx38.3121$ for the deep-water
+Stokes panel.  No reported rollout directly deploys the learned operator on a
+noncanonical period.
+
+\subsection{Baseline accuracy and the rollout discrepancy}
+
+The original CS-DNO, which learned all nonlinear corrections on top of
+$\G_0$, reached a best single-step validation loss of
+$9.28\times10^{-4}$ on the v3 data. A 13.1-million-parameter FNO reached
+$3.69\times10^{-3}$ under a matched loss and data split, despite twice as many
+epochs. Thus the Craig--Sulem factorization improved one-step accuracy by a
+factor of four with approximately 11.6 times fewer parameters.
+
+This advantage did not eliminate long-time failures.  To distinguish value
+error from sensitivity to rollout displacement, write
+$z_n^\star=(\eta_n^\star,\xi_n^\star)$ for a truth state,
+$z_n=(\eta_n,\xi_n)$ for the corresponding surrogate state, and
+$\mathcal Q_\theta(z)=\Gtheta(\eta;h)\xi$.  Let
+$\mathcal Q^\star$ denote the order-six reference evaluation used by the
+rollout harness.  Define
+\begin{equation}
+  b_n=\mathcal Q_\theta(z_n^\star)-\mathcal Q^\star(z_n^\star),
+  \qquad
+  i_n=\mathcal Q_\theta(z_n)-\mathcal Q_\theta(z_n^\star),
+  \qquad
+  \Gamma_n=\frac{\norm{i_n}_2}{\norm{z_n-z_n^\star}_2}.
+  \label{eq:rollout-secant-diagnostic}
+\end{equation}
+These diagnostics use the nondimensional variables of the evaluation and the
+equal-weight product norm
+$\norm{(\delta\eta,\delta\xi)}_2
+=(\norm{\delta\eta}_2^2+\norm{\delta\xi}_2^2)^{1/2}$.
+Thus $\Gamma_n$ is a within-protocol secant diagnostic, not a
+coordinate-invariant operator norm.
+Frame-aligned archives showed median relative DNO errors on the truth states of
+$1.87\times10^{-4}$ and $1.72\times10^{-4}$ for two eventual Tanaka failures.
+Near their last finite frames, $\Gamma_n$ reached $8.11$ and $8.42$, while
+$\norm{i_n}_2/\norm{b_n}_2$ reached $2.64\times10^4$ and
+$2.41\times10^4$.  At the earlier pre-cascade frames, the induced response was
+concentrated in $k=32,\ldots,64$ and subsequently spread through
+$k=64,\ldots,128$.
+
+The Hadamard defect separated stable and unstable behavior more clearly than
+the value error. The order-six reference passed the discrete identity at
+roughly $10^{-5}$ or below. Earlier learned models exhibited order-one or
+larger relative defects on pre-cascade failing states, even while retaining
+small pointwise operator error. A transfer-kernel probe further identified a
+spurious same-sign coupling from $k_{\mathrm{in}}=117$ to
+$k_{\mathrm{out}}=115$, the type of first-order interaction canceled exactly by
+\eqref{eq:g1-kernel}.
+
+\subsection{Ablations and rejected remedies}
+\label{sec:rejected-remedies}
+
+Several interventions helped local symptoms without resolving the mechanism.
+Fourfold time-step refinement changed failure times only weakly and
+nonmonotonically. Two-times dealiasing of the Zakharov right-hand side was
+negligible on healthy trajectories but delayed terminal failure by only
+approximately $0.05$--$0.08$ time units on representative failing states.
+Hard high-band caps reduced some NaNs but produced bounded, inaccurate
+trajectories and worsened tail error. Soft high-band penalties and stronger
+stage-gain penalties did not remove the failing mode.
+
+\paragraph{Rejected GL2 stage-tangent experiment.}
+For completeness, we define the stage-gain penalty used in these earlier
+experiments.  Let $\mathcal T_\vartheta$ be one Picard update of the two-stage
+system \eqref{eq:gl2-stages}, where $\vartheta=\theta$ uses the learned DNO and
+$\vartheta=\star$ uses the order-six reference DNO.  Starting from
+$Y^{(0)}=(v_n,v_n)$, we formed the stopped reference predictor
+$\overline Y=\operatorname{stopgrad}(\mathcal T_\star(Y^{(0)}))$.
+For a small random physical perturbation $p$, inserted identically into the
+two stages as $\boldsymbol p=(p,p)$, and finite-secant length $\epsilon$,
+define
+\begin{equation}
+  w_{\vartheta,s}
+  =
+  \frac{
+    \mathcal T_\vartheta(\overline Y+\epsilon p)_s
+    -\mathcal T_\vartheta(\overline Y)_s
+  }{\epsilon},
+  \qquad s\in\{1,2\}.
+  \label{eq:stage-secant}
+\end{equation}
+The perturbations were normalized in the linear Hamiltonian norm
+\begin{equation}
+  \norm{(\delta\eta,\delta\xi)}_{E,h}^{2}
+  =
+  g\norm{\delta\eta}_2^2
+  +\ip{\delta\xi}{\G_0(h)\delta\xi}.
+  \label{eq:linear-energy-norm}
+\end{equation}
+Let $P_B$ be the smooth Fourier projector onto the tested band.  The
+corresponding gain of stage $s$ was
+\begin{equation}
+  r_{\vartheta,s}
+  =
+  \frac{\norm{P_Bw_{\vartheta,s}}_{E,h}}
+       {\norm{p}_{E,h}+\epsilon_{\mathrm{norm}}},
+\end{equation}
+and the penalty was the squared hinge
+\begin{equation}
+  \mathcal L_{\mathrm{stage\text{-}gain}}
+  =
+  \mathbb E\!\left[
+    \frac12\sum_{s=1}^2
+    \left[
+      r_{\theta,s}-r_{\star,s}
+      -\left(\mu r_{\star,s}+\nu\right)
+    \right]_+^2
+  \right],
+  \qquad [a]_+=\max\{a,0\}.
+  \label{eq:stage-gain-loss}
+\end{equation}
+The expectation averages over training states and random low-to-mid and
+mid-to-mid perturbations.  Each $p$ has unit energy norm,
+$\epsilon$ is log-uniform on $[10^{-6},10^{-3}]$, and
+$\epsilon_{\mathrm{norm}}=10^{-12}$.  A companion response-matching term compared
+$P_Bw_{\theta,s}$ directly with $P_Bw_{\star,s}$.  The decisive C8 and C10
+runs used $\mu=\nu=0$, so any learned gain above the reference gain was
+penalized.  This construction did not assert
+$r_{\theta,s}<1$ and therefore did not impose contraction of the Picard map;
+it only limited excess gain relative to the discrete reference map.  C8 left
+the Tanaka nonfinite count at $3/32$ and worsened both Tanaka and
+Benjamin--Feir median errors.  Restricting the test to $64\leq|k|\leq128$ in
+C10 reduced the count to $2/32$, but retained adverse finite-error tradeoffs.
+We therefore did not include this penalty in
+\eqref{eq:combined-loss}.
+
+Fine-tuning on
+model-harvested pre-cascade states increased failures in both Tanaka and
+Benjamin--Feir tests; inspection showed that the harvested pack already
+contained the old model's high-frequency contamination.  A direct
+residual-only use of the fixed-$g$ variables from
+\eqref{eq:zakharov-rescaling} was also tested: it supplied the learned residual
+with $\eta/h$, $\xi/h^{3/2}$, $q/\sqrt h$, and $h|k|$, while leaving the exact
+physical $\G_0+\G_1$ backbone unchanged.  On the matched one-percent-data
+smoke, validation loss worsened from $0.0131081$ to $0.0142273$; on the shallow
+Tanaka case-27 probe, relative DNO error worsened from $0.005059$ to $0.010280$
+and relative speed bias from $0.0871\%$ to $0.7394\%$.  We therefore rejected
+that particular learned-residual parameterization.  This result does not
+contradict the exact continuum identity \eqref{eq:dno-rescaling}; it shows that
+imposing the scaling on only one component of a mixed physical/learned model
+did not improve optimization.  These tests did not support time-step
+refinement, output clipping, or contaminated-state fine-tuning as explanations
+or remedies for the observed failure.
+
+\subsection{C16 full-suite result}
+\label{sec:c16-full-suite}
+
+The clean C16 replay shares the exact $\G_0+\G_1+O(\eta^2)$ decomposition and
+self-adjoint structural constraints of \eqref{eq:current-model}, but uses the
+earlier 860,928-parameter capacity and a relative $H^1$ plus sparse-Hadamard
+objective. It predates the current $L^2$, mode, and localized-tangent objective
+\eqref{eq:combined-loss}. The
+best validation checkpoint occurs at
+cumulative epoch 39, with validation loss
+$6.736928\times10^{-3}$; epoch 40 is slightly worse at
+$6.737164\times10^{-3}$. The value is not directly comparable with the old v3
+loss because the dataset, architecture, normalization path, and auxiliary
+objective differ. Long-time rollout is the relevant test.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Clean C16 epoch-39 full-suite results with no rollout-time
+  intervention.  Each panel contains 32 attempted initial conditions.
+  Nonfinite counts use all attempts; divergences and error quantiles use only
+  the truth-valid cases shown in the second column.}
+  \label{tab:c16-results}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Evaluation panel & Truth-valid & Nonfinite & Divergent
+      & Median $e_\eta(T)$ & 95th percentile\\
+    \midrule
+    Tanaka, replicate A          & 32 & 0/32 & 1/32 & 0.08643 & 0.51111\\
+    Tanaka, replicate B          & 32 & 0/32 & 1/32 & 0.11541 & 0.66002\\
+    Benjamin--Feir, replicate A  & 32 & 0/32 & 0/32 & 0.01208 & 0.20452\\
+    Benjamin--Feir, replicate B  & 31 & 0/32 & 0/31 & 0.01773 & 0.06932\\
+    Benjamin--Feir, replicate C  & 31 & 0/32 & 0/31 & 0.01409 & 0.15342\\
+    Random sea, deep   & 32 & 0/32 & 0/32 & 0.00283 & 0.02066\\
+    Random sea, finite & 32 & 0/32 & 0/32 & 0.00542 & 0.04091\\
+    Linear             & 20 & 0/32 & 0/20 & 0.02707 & 0.08647\\
+    Stokes, deep       & 32 & 0/32 & 0/32 & 0.00044 & 0.00112\\
+    Stokes, finite     & 31 & 0/32 & 0/31 & 0.00343 & 0.02257\\
+    \midrule
+    Total              & 305 & 0/320 & 2/305 & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+No instance of the previously observed NaN mechanism occurs in the unguarded
+320-case C16 suite in \cref{tab:c16-results}. Because C16 changed the analytic
+backbone, residual structure, shape supervision, capacity, and solver path as a
+bundle, this observation does not isolate one of those ingredients as the
+cause. The two remaining threshold
+crossings are both finite Tanaka trajectories, but they do not have the same
+cause. Tanaka replicate-A case 27 is principally a translation: its final raw error is
+$1.167$, the crest is displaced by eight grid points, and translation
+alignment reduces the error to $0.0608$. The predicted and true final crest
+amplitudes are $0.003660$ and $0.003707$. Its initial translation-speed bias is
+approximately $-0.60\%$, which accumulates secularly while changing the
+Hamiltonian only weakly.
+
+The historical two-epoch C18 global-tangent fine-tune used
+\begin{equation}
+  c_b(q)=-\frac{\langle q,\eta_{b,x}\rangle}{\|\eta_{b,x}\|_2^2},
+  \qquad
+  \mathcal L_{\mathrm{tan,glob}}
+  =\frac1{|\mathcal I_{56}|}\sum_{b\in\mathcal I_{56}}
+  \left[
+  \frac{c_b(q^\theta)-c_b(q^\star)}
+       {\max\{|c_b(q^\star)|,10^{-3}\}}
+  \right]^2,
+  \label{eq:c18-global-tangent}
+\end{equation}
+where $\mathcal I_{56}$ contains source-5 and source-6 samples. This is a
+single rigid-wave speed fit and is distinct from the localized C27 term
+\eqref{eq:localized-tangent-loss}. It removes the C16 replicate-A divergence: its
+unguarded median and 95th percentile become $0.07963$ and
+$0.48205$, respectively, with 0/32 divergent trajectories. Benjamin--Feir
+replicate B
+is essentially unchanged (median $0.01653$, 95th percentile $0.07002$, 0/32
+divergent). Tanaka replicate B, however, retains one divergence and its 95th percentile
+worsens from $0.66002$ to $0.93169$. This failure of transfer motivates a
+separate analysis rather than a larger weight on the same scalar loss.
+
+\subsection{The Tanaka replicate-B case-14 mechanism}
+\label{sec:case14-diagnosis}
+
+Case 14 has depth $h=0.1776006$ and consists of two nearly equal left-going
+crests with dimensionless amplitudes $0.12514$ and $0.11280$, separated by
+$0.57896=3.26h$. This geometry is rare, but the orbit is not absent from the
+data: its initial $\eta$ is bit-identical to a source trajectory in the v9
+dataset, and 163 of that trajectory's 200 saved states occur in the row-wise
+training split.
+
+The failure is neither a pure phase error nor an isolated hallucination of the
+learned DNO\@. At $T=200$, translation alignment leaves relative surface errors
+$0.506$ for C16 and $0.587$ for C18. Their maximum slopes are $1.124$ and
+$1.532$, compared with $0.0777$ for truth, and learned-Hamiltonian drift peaks
+near 22--23\% around $t=176$. Yet teacher-forced DNO errors remain below
+$1.05\times10^{-3}$ for C16 and $1.17\times10^{-3}$ for C18 over all 251
+truth frames. Evaluating the exact order-six DNO on the \emph{predicted}
+states agrees with the learned output to roughly 1--7\% through $t=184$.
+Thus the dominant high-frequency DNO response is induced by an already
+contaminated state; pointwise accuracy on the truth orbit does not control the
+transverse numerical trajectory.
+
+The precursor is visible in \eqref{eq:guard-amplitude}. For case 14,
+$A(0)=4.5345\times10^{-9}$ and the truth remains at this scale. In contrast,
+the predicted amplitudes evolve as follows.
+
+\begin{table}[t]
+  \centering
+  \caption{Production-band amplitude $A(t)$ for Tanaka replicate-B case 14.}
+  \label{tab:case14-band-growth}
+  \begin{tabular}{rrr}
+    \toprule
+    $t$ & C16 & C18\\
+    \midrule
+     20 & $2.34\times10^{-7}$ & $1.94\times10^{-7}$\\
+     40 & $8.99\times10^{-7}$ & $7.58\times10^{-7}$\\
+    120 & $3.39\times10^{-6}$ & $3.04\times10^{-6}$\\
+    140 & $1.11\times10^{-5}$ & $1.04\times10^{-5}$\\
+    200 & $5.30\times10^{-5}$ & $7.54\times10^{-5}$\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The former absolute trigger $A>10^{-4}$ therefore never fired. The corrected
+threshold in \eqref{eq:guard-amplitude} begins its transition near $t=30$,
+while the relative surface error is still below $0.01$. The C18 scalar tangent
+loss is also poorly matched to this interaction: approximately 41\% of its
+selected source-5/6 rows contain mixed-direction multicrest states, and 99.2\%
+of the initial squared DNO error for case 14 is orthogonal to the global
+translation direction. Its initial scalar speed error is only
+$9.6\times10^{-5}$ relative. These observations explain why improving the
+global scalar diagnostic does not prevent this transverse cascade.
+
+\subsection{Causal guard test and guarded C18 result}
+\label{sec:guard-results}
+
+As a causal control, applying a relative-growth trigger and fixed
+$k_{\mathrm{eff}}=64$ to the original C16 Tanaka replicate-B evaluation changes its
+divergence count from 1/32 to 0/32, its median from $0.1154$ to $0.1046$, and
+its 95th percentile from $0.6600$ to $0.5809$. For case 14 specifically, the
+final error decreases from $1.1987$ to $0.09835$, maximum slope decreases from
+$1.124$ to $0.0790$, and final learned-Hamiltonian drift decreases from
+$7.23\%$ to $1.16\%$. This intervention changes the outcome without changing
+the checkpoint, which supports the spectral-cascade diagnosis.
+
+The production experiment combines C18 with the intrinsic selector and
+depth-scaled guard in \cref{sec:soliton-guard}. Its matched Tanaka results are
+shown in \cref{tab:c18-guard-results}.
+
+\begin{table}[t]
+  \centering
+  \caption{C18 Tanaka results before and after the soliton-selective spectral
+  guard. Each row contains 32 scored initial conditions; all remain finite.}
+  \label{tab:c18-guard-results}
+  \begin{tabular}{llrrr}
+    \toprule
+    Evaluation panel & Guard & Divergent & Median $e_\eta(T)$ & 95th percentile\\
+    \midrule
+    Tanaka, replicate A & off & 0/32 & 0.07963 & 0.48205\\
+    Tanaka, replicate A & on  & 0/32 & 0.05065 & 0.48206\\
+    Tanaka, replicate B & off & 1/32 & 0.11134 & 0.93169\\
+    Tanaka, replicate B & on  & 0/32 & 0.11135 & 0.78499\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+For case 14, the production guard reduces final error from $1.2875$ to
+$0.1573$ and maximum slope from $1.532$ to $0.0794$, close to the truth value
+$0.0777$. This is the first single-checkpoint/integrator configuration with no
+nonfinite or divergent trajectory in either 32-case Tanaka panel.
+
+Two limitations prevent a stronger claim. First, guarded Tanaka replicate-B case 24
+ends at $e_\eta(T)=0.996$, only narrowly below the declared divergence
+threshold; zero counted divergences therefore does not imply a comfortable
+tail margin. Second, although \eqref{eq:soliton-selector} makes the guard
+exactly inactive for the audited non-Tanaka initial conditions, C18 changes
+the model parameters. Benjamin--Feir replicate B has been rerun and remains
+stable, but the other seven non-Tanaka panels have not yet been evaluated with C18.
+Accordingly, the demonstrated claim is 0/64 divergent Tanaka rollouts, not
+0/320 for C18.
+
+\subsection{Current C27 result and isolated active-mode-loss ablation}
+\label{sec:mode-ablation}
+
+The subsequent C27 model retains the architecture
+\eqref{eq:current-model}, replaces the base $H^1$ objective by
+\eqref{eq:data-loss}, and uses the complete objective
+\eqref{eq:combined-loss}. Both C27 and C28 were evaluated with the same enabled
+soliton-selective spectral guard. The selector makes it exactly inactive for
+all 256 non-Tanaka initial conditions. At the saved output cadence, no C27
+Tanaka state reaches the nominal 50\%-activation trigger, although the archive
+cannot exclude activation at an unsaved integrator substep; C28 has not received
+the same inactivity audit. Finiteness statements in this subsection are
+therefore conditional on this common guarded protocol.
+
+The C27 final epoch-40 checkpoint was evaluated on 32
+initial conditions from each of the ten panels.  All saved predicted values
+of $\eta$, $\xi$, and $\Gtheta(\eta)\xi$ are finite in all 320 attempted
+rollouts.  The reference solver is valid in 305 cases.  On those cases, the
+raw terminal error has median, 95th percentile, mean, and maximum
+$0.002850$, $0.047694$, $0.011408$, and $0.534156$, respectively.  The numbers
+of raw errors above $0.25$, $0.50$, $0.75$, and $1$ are $1$, $1$, $0$, and
+$0$.
+
+To separate a displacement from a change of shape, define
+\begin{equation}
+  e_{\mathrm{align}}
+  =\min_{s\in\T_L}
+  \frac{\norm{\tau_s\eta_\theta(T)-\eta_\star(T)}_2}
+       {\norm{\eta_\star(T)}_2},
+  \qquad
+  e_{\mathrm{trans}}
+  =\sqrt{\max\{e_\eta(T)^2-e_{\mathrm{align}}^2,0\}},
+  \label{eq:aligned-errors}
+\end{equation}
+where $\tau_s f(x)=f(x-s)$.  The shift is obtained by exhaustive periodic
+cross-correlation followed by continuous Fourier refinement.  The second
+quantity is an alignment-removable diagnostic, not a claim that translation
+and deformation form globally orthogonal nonlinear coordinates.
+
+C28 is the isolated deletion test for \eqref{eq:mode-loss}.  It is a fresh
+40-epoch replica of C27 with the same initialization seed, data, architecture,
+optimizer, base $L^2$ term, localized tangent term, Hadamard term, and schedule.
+The serialized configurations differ only in
+$\lambda_{\mathrm{mode}}:6\mapsto0$.  Both comparisons use the final epoch-40
+checkpoint and byte-identical reference trajectories.  The principal results
+are shown in \cref{tab:mode-ablation}.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Exact C27/C28 deletion ablation. Pooled rollout rows use the same
+  305 truth-valid cases; the Tanaka replicate-B and pooled Benjamin--Feir rows contain
+  32 and 94 cases, respectively. Ratios larger than one favor C27.}
+  \label{tab:mode-ablation}
+  \begin{tabular}{lrrr}
+    \toprule
+    Quantity & C27: $\lambda_{\mathrm{mode}}=6$
+             & C28: $\lambda_{\mathrm{mode}}=0$ & C28/C27\\
+    \midrule
+    Validation $\mathcal L_2$       & $0.00092031$ & $0.00089679$ & $0.974$\\
+    Raw median                       & $0.002850$   & $0.003263$   & $1.145$\\
+    Raw 95th percentile              & $0.047694$   & $0.062459$   & $1.310$\\
+    Raw mean                         & $0.011408$   & $0.016560$   & $1.452$\\
+    Aligned 95th percentile          & $0.026263$   & $0.027802$   & $1.059$\\
+    Alignment-removable 95th percentile
+                                      & $0.031974$   & $0.050395$   & $1.576$\\
+    Tanaka replicate-B raw 95th percentile
+                                      & $0.055637$   & $0.229728$   & $4.129$\\
+    Benjamin--Feir raw 95th percentile
+                                      & $0.041526$   & $0.063113$   & $1.520$\\
+    Benjamin--Feir aligned 95th percentile
+                                      & $0.031766$   & $0.026753$   & $0.842$\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Removing the active-mode term improves the one-step base validation loss by
+$2.6\%$, but worsens the pooled raw 95th percentile by $31.0\%$, the raw mean
+by $45.2\%$, and the alignment-removable 95th percentile by $57.6\%$.  The
+raw threshold counts above $0.25/0.50/0.75/1$ change from $1/1/0/0$ to
+$3/1/1/1$.  The largest regressions are Tanaka replicate-A case 27
+($0.5342\mapsto1.1565$) and Tanaka replicate-B cases 24
+($0.03268\mapsto0.45041$) and 29 ($0.00636\mapsto0.35173$).  In the pooled
+Benjamin--Feir panel, raw 95th-percentile error increases by $52.0\%$ while
+translation-aligned error decreases by $15.8\%$. Because population quantiles
+need not be attained by the same cases, this sign difference does not show
+that any particular regression is a pure displacement.  It shows only that
+the raw and alignment-removable population tails worsen while this aligned
+Benjamin--Feir quantile improves.
+
+Every C28 trajectory remains finite under the shared guard, so
+\eqref{eq:mode-loss} is not required for finiteness in this matched guarded
+benchmark. The isolated conclusion
+is instead that, under this fixed training recipe, the term materially
+improves the long-time raw and alignment-removable tail that the lower one-step
+$\mathcal L_2$ value fails to predict. The pattern is consistent with the
+phase/translation mechanism and the
+phase-space and modal-rate interpretation in \cref{sec:mode-loss}; the deletion
+alone does not prove that weak sidebands are the unique mechanism.  It also
+compares one matched seed and coefficients 6 versus 0, so it does not establish
+that 6 is optimal.
+
+A separate tangent-off training run, C29, also completed 40 epochs with
+$\lambda_{\mathrm{tan}}:10\mapsto0$ as the only training-configuration
+change.  A post hoc reconstruction from its archived evaluations gives
+C29/C27 ratios of $1.526$ for pooled raw 95th-percentile error, $1.381$ for
+pooled raw mean error, and $1.329$ for aligned 95th-percentile error.  The
+pooled Tanaka and Benjamin--Feir raw 95th-percentile ratios are $2.873$ and
+$1.445$, respectively, and threshold counts above
+$0.25/0.50/0.75/1$ change from $1/1/0/0$ to $2/1/1/0$.  All C29 predictions
+are finite.  This comparison is not an exact deletion ablation: the recorded
+time-integrator source hash changed between the two evaluations, and their
+reference-$q$ and protocol hashes are not identical.  It is therefore
+secondary evidence for retaining the localized tangent term; a causal
+estimate requires replaying both checkpoints under one frozen evaluator and
+one reference cache.
+
+\subsection{Reproducibility safeguards}
+
+The C16 result is reported from the corrected replay only. An older
+epoch-34--40 continuation is excluded because a device-to-device replication
+bug restored the correct optimizer state on one GPU and zero or invalid state
+on the other. This made the periodic shape loss fire out of phase and yielded
+a nonphysical distributed optimizer trajectory. The clean replay verifies
+the full replicated state at startup and after each epoch; throughout the
+epoch-17--40 replay, the observed and expected shape-loss activation counts
+agree exactly. Both C18 fine-tuning epochs likewise record $373/373$
+activations. This distinction is important because the corrupted run happened
+to produce some superficially favorable metrics, but cannot support a
+scientific comparison.

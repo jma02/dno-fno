@@ -18,7 +18,6 @@ from solver.gen_data.pipeline.refinement import (
     RefinementExecution,
 )
 from solver.gen_data.pipeline.time_selection import (
-    select_benjamin_feir_times,
     select_tanaka_times,
     select_uniform_times,
 )
@@ -44,8 +43,6 @@ class StoredTimePolicy:
     tanaka_alpha: float = 0.5
     tanaka_sigma_steps: float = 50.0
     benjamin_feir_count: int = 200
-    benjamin_feir_alpha: float = 0.85
-    benjamin_feir_sigma_steps: float = 20.0
     random_sea_count: int = 16
 
     def __post_init__(self) -> None:
@@ -56,16 +53,10 @@ class StoredTimePolicy:
         ):
             if count < 2:
                 raise ValueError(f"{name} must be at least two")
-        for alpha, name in (
-            (self.tanaka_alpha, "tanaka_alpha"),
-            (self.benjamin_feir_alpha, "benjamin_feir_alpha"),
-        ):
+        for alpha, name in ((self.tanaka_alpha, "tanaka_alpha"),):
             if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
                 raise ValueError(f"{name} must lie in [0, 1]")
-        for sigma, name in (
-            (self.tanaka_sigma_steps, "tanaka_sigma_steps"),
-            (self.benjamin_feir_sigma_steps, "benjamin_feir_sigma_steps"),
-        ):
+        for sigma, name in ((self.tanaka_sigma_steps, "tanaka_sigma_steps"),):
             if not math.isfinite(sigma) or sigma < 0.0:
                 raise ValueError(f"{name} must be finite and nonnegative")
 
@@ -93,13 +84,10 @@ def _selected_indices(
             sigma_steps=policy.tanaka_sigma_steps,
         ).indices
     if family == "benjamin_feir":
-        return select_benjamin_feir_times(
-            trajectory.eta,
-            length=length,
+        return select_uniform_times(
+            trajectory.times.size,
             keep_samples=policy.benjamin_feir_count,
-            alpha=policy.benjamin_feir_alpha,
-            sigma_steps=policy.benjamin_feir_sigma_steps,
-        ).indices
+        )
     if family == "jonswap_tma":
         return select_uniform_times(
             trajectory.times.size,
@@ -112,6 +100,7 @@ def _production_case_metrics(
     case: ProductionCaseResult,
 ) -> dict[str, float | int | bool | None]:
     failed = case.decision.failed
+    internal = case.internal_metrics
     clearance_evaluated = bool(
         case.decision.evaluated & QualityReason.BOTTOM_CLEARANCE
     )
@@ -132,6 +121,29 @@ def _production_case_metrics(
             case.telemetry.maximum_stage_residual
         ),
         "production_dt": case.dt,
+        "internal_health_evaluated": internal is not None,
+        "internal_state_finite": (
+            internal.state_finite if internal is not None else None
+        ),
+        "internal_dno_finite": (
+            internal.dno_finite if internal is not None else None
+        ),
+        "minimum_internal_water_column": (
+            internal.minimum_water_column if internal is not None else None
+        ),
+        "initial_internal_hamiltonian": (
+            internal.initial_hamiltonian if internal is not None else None
+        ),
+        "maximum_internal_hamiltonian_drift": (
+            internal.maximum_relative_hamiltonian_drift
+            if internal is not None
+            else None
+        ),
+        "internal_hamiltonian_drift_threshold": (
+            internal.hamiltonian_drift_threshold
+            if internal is not None
+            else None
+        ),
     }
 
 

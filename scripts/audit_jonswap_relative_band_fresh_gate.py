@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from solver.gen_data.jonswap_tma_population import (  # noqa: E402
-    JONSWAP_TMA_POPULATION_CELLS,
-    JONSWAP_TMA_POPULATION_REVISION_V4,
+from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
+    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLING_REVISION_V4,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     file_sha256,
@@ -31,7 +31,7 @@ EXPECTED_ACCEPTED_PER_STREAM = 270
 EXPECTED_BATCH_SIZE = 32
 EXPECTED_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE = 4
 MAXIMUM_AGGREGATE_REJECTION_RATE = 0.02
-SUMMARY_NAME = "paper_corpus_jonswap_tma_validation.summary.json"
+SUMMARY_NAME = "paper_dataset_jonswap_tma_validation.summary.json"
 AGGREGATE_NAME = "jonswap_relative_band_fresh_gate.summary.json"
 
 
@@ -71,7 +71,7 @@ def _validate_stream(
     expected_identity = {
         "family_name": "jonswap_tma",
         "family_id": 4,
-        "revision_id": JONSWAP_TMA_POPULATION_REVISION_V4,
+        "revision_id": JONSWAP_TMA_SAMPLING_REVISION_V4,
         "split_id": "validation",
         "stream_id": stream_id,
         "batch_size": EXPECTED_BATCH_SIZE,
@@ -88,7 +88,7 @@ def _validate_stream(
         )
 
     expected_cells = tuple(
-        cell.cell_id for cell in JONSWAP_TMA_POPULATION_CELLS
+        cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS
     )
     expected_quotas = [
         {

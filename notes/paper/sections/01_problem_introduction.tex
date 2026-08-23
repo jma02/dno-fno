@@ -1,0 +1,88 @@
+\section{Problem introduction}
+\label{sec:introduction}
+
+We consider two-dimensional, inviscid, incompressible, irrotational gravity
+waves over a horizontal bed. The free surface is represented by
+$y=\eta(x,t)$, the undisturbed depth is $h>0$, and
+$\xi(x,t)=\phi(x,\eta(x,t),t)$ is the trace of the velocity potential on the
+free surface. Gravity acts with acceleration $g>0$. The horizontal coordinate
+is periodic, $x\in\T_L=\R/(L\mathbb Z)$, with period \(L>0\). The potential
+solves
+\begin{align}
+  \Delta\phi &= 0 && -h<y<\eta(x,t), \\
+  \partial_y\phi &= 0 && y=-h, \\
+  \phi &= \xi && y=\eta(x,t).
+\end{align}
+The Dirichlet--Neumann operator (DNO) maps the surface potential to the
+unnormalized upward normal derivative,
+\begin{equation}
+  \G(\eta;h)\xi
+  =\left(\partial_y\phi-\eta_x\partial_x\phi\right)_{y=\eta(x,t)}.
+  \label{eq:dno-definition}
+\end{equation}
+Eliminating the bulk potential gives Zakharov's canonical surface system
+\cite{zakharov1968,craig1993}:
+\begin{align}
+  \eta_t &= \G(\eta;h)\xi, \label{eq:zakharov-eta}\\
+  \xi_t &=-g\eta-\frac12\xi_x^2
+  +\frac{\left(\G(\eta;h)\xi+\eta_x\xi_x\right)^2}
+  {2(1+\eta_x^2)}. \label{eq:zakharov-xi}
+\end{align}
+The nonlocal elliptic solve is now isolated in $\G(\eta;h)\xi$, but it must be
+evaluated repeatedly at the internal stages of the time integrator. This is
+the dominant cost of the reference solver and is therefore a natural target
+for operator learning.
+
+The system is Hamiltonian in the canonical variables $(\eta,\xi)$, with
+\begin{equation}
+  H(\eta,\xi)
+  =\frac12\int_{\T_L}\left(g\eta^2+\xi\G(\eta;h)\xi\right)\dd x,
+  \qquad
+  \eta_t=\frac{\delta H}{\delta\xi},\quad
+  \xi_t=-\frac{\delta H}{\delta\eta}.
+  \label{eq:hamiltonian}
+\end{equation}
+This structure explains why an accurate static approximation
+$\Gtheta(\eta;h)\xi\approx\G(\eta;h)\xi$ is not automatically an accurate
+dynamical model. Varying the kinetic-energy term in \eqref{eq:hamiltonian}
+with respect to $\eta$ introduces the surface-shape derivative
+$\D_\eta\G$. If $\Gtheta$ is substituted into both
+\eqref{eq:zakharov-eta} and the geometric expression
+\eqref{eq:zakharov-xi}, the resulting equations arise from one learned
+Hamiltonian only when $\Gtheta$ obeys the corresponding shape-derivative
+identity.
+
+Our computational goal is consequently stronger than one-step regression:
+construct a surrogate that
+\begin{enumerate}
+  \item is linear and self-adjoint in $\xi$ for fixed $(\eta,h)$;
+  \item reproduces the exact linear dispersion relation and the leading
+        nonlinear Craig--Sulem correction;
+  \item is accurate over several wave families and depths; and
+  \item remains stable when evaluated thousands of times on states generated
+        by its own rollout.
+\end{enumerate}
+
+The main contribution is a Craig--Sulem-structured DNO (CS-DNO) whose exact
+backbone is $\G_0+\G_1$ and whose learned residual is constrained to be
+$O(\eta^2)$.  The training objective combines relative $L^2$ regression with
+an active-mode, phase-space-normalized complex loss, a localized
+translation-tangent loss, and a randomized finite-secant version of the
+Hadamard identity. Once a harmonic or sideband is reference-active, the modal
+normalization gives its relative complex error a weight comparable to that of
+a stronger carrier. The tangent term separately penalizes the local
+error component associated with translation, hence with propagation speed,
+on solitary-wave sources; the Hadamard term constrains the response to
+changes in surface shape. The design is motivated by a frame-by-frame failure
+analysis: the unstable models are accurate on exact trajectory states but
+respond too strongly to small perturbations transverse to the reference
+trajectory, creating same-sign sidebands in modes $k=32,\ldots,128$. The
+nonlinear equations and implicit stage iteration amplify this contamination
+but do not initiate it.
+
+Throughout, the principal test regimes are (i) Tanaka solitary waves and
+their interactions, which stress finite-depth nonlinearity and localized
+spectra, and (ii) Benjamin--Feir-modulated Stokes waves, which stress sideband
+growth and long-time phase accuracy. Unless stated otherwise, computations
+use $L=2\pi$, $N=1024$, $g=1$, and a retained Fourier subspace
+$|k|\leq128$.

@@ -1,4 +1,4 @@
-"""Transactional batch storage for the paper corpus.
+"""Transactional batch storage for the paper dataset.
 
 Each attempted batch is proposed before numerical work begins.  A result JSON
 is the commit marker; a shard without a result is therefore recoverable, while
@@ -526,7 +526,7 @@ def commit_batch(
             )
 
     payload: dict[str, object] = {
-        "schema": "paper_corpus_batch_result_v1",
+        "schema": "paper_dataset_batch_result_v1",
         "config_fingerprint": fingerprint,
         "proposal_sha256": proposal_sha256,
         "shard_sha256": shard_sha256,
@@ -559,7 +559,7 @@ def record_fatal_failure(
     if not phase or not exception_type:
         raise ValueError("phase and exception_type must be nonempty")
     payload: dict[str, object] = {
-        "schema": "paper_corpus_fatal_failure_v1",
+        "schema": "paper_dataset_fatal_failure_v1",
         "proposal_sha256": file_sha256(paths.proposal),
         "phase": phase,
         "exception_type": exception_type,

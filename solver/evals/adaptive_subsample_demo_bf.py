@@ -27,14 +27,12 @@ import matplotlib.pyplot as plt
 
 from solver.gen_data.adaptive_sampling import (
     adaptive_indices_from_signal,
+    envelope_peak,
+    surface_gradient_energy,
 )
 from solver.gen_data.benjamin_feir_jcp09 import (
     build_initial_conditions,
     deep_water_proxy_depth,
-)
-from solver.gen_data.generate_bf_dataset import (
-    _grad_energy_traj,
-    _envelope_peak_traj,
 )
 from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol
 from solver.solvers.time_integrator import (
@@ -57,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--side_offset", type=int, default=3)
     p.add_argument("--eps_carrier", type=float, default=0.11)
     p.add_argument("--eps_pert", type=float, default=0.1)
-    p.add_argument("--phase", type=float, default=-math.pi / 4.0)
+    p.add_argument("--translation", type=float, default=0.0)
     p.add_argument("--length", type=float, default=2.0 * math.pi)
     p.add_argument("--nx", type=int, default=1024)
     p.add_argument("--dt", type=float, default=0.08)
@@ -90,7 +88,7 @@ def main() -> None:
         "side_offset": np.array([args.side_offset], dtype=np.int32),
         "eps_carrier": np.array([args.eps_carrier], dtype=np.float64),
         "eps_pert": np.array([args.eps_pert], dtype=np.float64),
-        "phase": np.array([args.phase], dtype=np.float64),
+        "translation": np.array([args.translation], dtype=np.float64),
         "depth": np.array([depth], dtype=np.float64),
     }
 
@@ -126,12 +124,12 @@ def main() -> None:
     )
     jax.block_until_ready(payload["eta"])
 
-    eta_BTN = payload["eta"]  # (T, B=1, N)
+    eta_BTN = np.asarray(jax.device_get(payload["eta"]))  # (T, B=1, N)
     if args.signal == "envelope":
-        signal_BT = np.asarray(jax.device_get(_envelope_peak_traj(eta_BTN)))
+        signal_BT = envelope_peak(eta_BTN)
         signal_label = r"$\|\eta\|_\infty$"
     else:
-        signal_BT = np.asarray(jax.device_get(_grad_energy_traj(eta_BTN, float(args.length))))
+        signal_BT = surface_gradient_energy(eta_BTN, float(args.length))
         signal_label = r"$\|\eta_x\|^2$"
     s = signal_BT[0]
 
@@ -142,7 +140,7 @@ def main() -> None:
     )[0]
     idx_uniform = np.linspace(0, times.shape[0] - 1, args.keep_samples, dtype=np.int32)
 
-    eta_traj = np.asarray(jax.device_get(eta_BTN))[:, 0, :]
+    eta_traj = eta_BTN[:, 0, :]
     xi_traj = np.asarray(jax.device_get(payload["xi"]))[:, 0, :]
     vmax_eta = float(np.max(np.abs(eta_traj)))
 

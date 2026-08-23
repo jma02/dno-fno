@@ -1,4 +1,4 @@
-"""Deterministic post-acceptance time selection for the paper corpus."""
+"""Deterministic post-acceptance time selection for the paper dataset."""
 
 from __future__ import annotations
 
@@ -161,31 +161,6 @@ def select_tanaka_times(
     ).real
     energy = np.sum(derivative**2, axis=-1)
     activity = np.abs(np.gradient(energy)) / (energy + relative_floor)
-    return _selection_from_activity(
-        activity,
-        keep_samples=keep_samples,
-        alpha=alpha,
-        sigma_steps=sigma_steps,
-    )
-
-
-def select_benjamin_feir_times(
-    eta: FloatArray,
-    *,
-    length: float,
-    keep_samples: int = 200,
-    alpha: float = 0.85,
-    sigma_steps: float = 20.0,
-) -> TemporalSelection:
-    """Select times from fourth-power surface-envelope activity.
-
-    If ``S_j = max_x |eta(x,t_j)|``, the activity is
-    ``A_j = (S_j - min_r S_r)^4``.
-    """
-
-    surface = _validated_surface(eta, length)
-    envelope = np.max(np.abs(surface), axis=-1)
-    activity = (envelope - np.min(envelope)) ** 4
     return _selection_from_activity(
         activity,
         keep_samples=keep_samples,
