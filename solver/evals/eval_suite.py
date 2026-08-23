@@ -1,6 +1,6 @@
-"""Evaluate a trained surrogate on the released four-family paper corpus.
+"""Evaluate a trained surrogate on the released four-family paper dataset.
 
-The corpus stores adaptive, case-specific save times, so this evaluator uses
+The dataset stores adaptive, case-specific save times, so this evaluator uses
 authenticated test-split initial conditions and recomputes both f64 truth and
 surrogate trajectories on one fixed evaluation grid per physical family.
 
@@ -8,8 +8,8 @@ Typical use::
 
     uv run python -m solver.evals.eval_suite \
         --run_dir outputs/c27_rerun \
-        --dataset outputs/paper_corpus_literature_aligned_v1/combined/\
-c16384_v01024_t01024/paper_corpus_all_splits_c16384.dataset.json \
+        --dataset outputs/paper_dataset_literature_aligned_v1/combined/\
+c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json \
         --n_ics 16 --gpu
 """
 from __future__ import annotations
@@ -32,6 +32,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 
 from solver.evals.model_rollout import (  # noqa: E402
+    GL2_ITERATIONS,
     LoadedRun,
     build_predict_gxi_batched,
     load_run,
@@ -44,8 +45,8 @@ from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DATASET = (
     REPO_ROOT
-    / "outputs/paper_corpus_literature_aligned_v1/combined/c16384_v01024_t01024"
-    / "paper_corpus_all_splits_c16384.dataset.json"
+    / "outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024"
+    / "paper_dataset_all_splits_c16384.dataset.json"
 )
 RolloutPayload = dict[str, np.ndarray | float]
 TRUTH_DRIFT_TOL = 1e-3
@@ -67,7 +68,6 @@ class FamilyConfig:
     dt: float
     tmax: float
     substeps: int
-    implicit_iters: int = 4
     filter_fraction: float = 0.25
 
 
@@ -82,11 +82,8 @@ FAMILY_CONFIGS: dict[str, FamilyConfig] = {
 
 
 def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def _directory_sha256(path: Path) -> str:
@@ -125,7 +122,7 @@ def _require_sha256(path: Path, expected: object, label: str) -> str:
     return actual
 
 
-def _load_paper_corpus_ics(
+def _load_paper_dataset_ics(
     dataset_path: Path,
     family: str,
     n_ics: int,
@@ -136,9 +133,9 @@ def _load_paper_corpus_ics(
     if not isinstance(manifest, dict):
         raise ValueError(f"dataset manifest must contain a JSON object: {dataset_path}")
     if manifest.get("schema_version") != 2:
-        raise ValueError("eval_suite requires paper-corpus dataset schema version 2")
+        raise ValueError("eval_suite requires paper-dataset schema version 2")
     if manifest.get("requires_trajectory_map") is not True:
-        raise ValueError("paper-corpus manifest must require its trajectory map")
+        raise ValueError("paper-dataset manifest must require its trajectory map")
 
     grid = manifest.get("grid")
     if not isinstance(grid, dict):
@@ -146,7 +143,7 @@ def _load_paper_corpus_ics(
     nx = int(grid["nx"])
     length = float(grid["length"])
     if nx <= 0 or not np.isfinite(length) or length <= 0.0:
-        raise ValueError(f"invalid corpus grid: nx={nx}, length={length}")
+        raise ValueError(f"invalid dataset grid: nx={nx}, length={length}")
 
     trajectory_map_path = _resolve_manifest_path(
         dataset_path, manifest.get("trajectory_map_npz"), "trajectory_map_npz"
@@ -273,7 +270,7 @@ def _load_paper_corpus_ics(
         )
 
     source = {
-        "kind": "paper_corpus_test_split",
+        "kind": "paper_dataset_test_split",
         "family": family,
         "family_id": family_id,
         "split_id": 2,
@@ -311,7 +308,7 @@ def _truth_protocol(
         "dt": cfg.dt,
         "tmax": cfg.tmax,
         "substeps": cfg.substeps,
-        "implicit_iterations": cfg.implicit_iters,
+        "implicit_iterations": GL2_ITERATIONS,
         "filter_fraction": cfg.filter_fraction,
         "method": "gl2_if",
         "zero_mean_xi": True,
@@ -430,7 +427,7 @@ def truth_rollout_batched(
         save_gxi=True,
         substeps_per_interval=cfg.substeps,
         method="gl2_if",
-        implicit_iterations=cfg.implicit_iters,
+        implicit_iterations=GL2_ITERATIONS,
         zero_mean_xi=True,
     )
     jax.block_until_ready(result["eta"])
@@ -488,8 +485,6 @@ def surrogate_rollout_batched(
             params,
             predict,
             substeps=cfg.substeps,
-            zero_mean_xi=True,
-            gl2_iterations=cfg.implicit_iters,
         )
 
     started = time.perf_counter()
@@ -765,7 +760,7 @@ def compute_macro_summary(summaries: dict[str, dict[str, Any]]) -> dict[str, obj
     macro: dict[str, object] = {
         "n_families": len(items),
         "families": [name for name, _ in items],
-        "family_macro_definition": "equal weight for every physical corpus family",
+        "family_macro_definition": "equal weight for every physical dataset family",
         "n_ics_attempted_total": sum(
             int(summary["n_ics_attempted"]) for _, summary in items
         ),
@@ -851,7 +846,7 @@ def run_family(
     checkpoint_source: dict[str, object],
     rollout_batch_size: int | None,
 ) -> dict[str, Any]:
-    ics, source, nx, length = _load_paper_corpus_ics(
+    ics, source, nx, length = _load_paper_dataset_ics(
         dataset_path, family, n_ics
     )
     times_np = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
@@ -985,7 +980,7 @@ def run_family(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate a checkpoint on authenticated paper-corpus test ICs."
+        description="Evaluate a checkpoint on authenticated paper-dataset test ICs."
     )
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))

@@ -4,20 +4,20 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import orbax.checkpoint as ocp
 from flax.training import checkpoints
+
+jax.config.update("jax_enable_x64", True)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 for _directory in (
     REPO_ROOT,
     REPO_ROOT / "models" / "fno-jax",
     REPO_ROOT / "models" / "dno-net",
-    REPO_ROOT / "train-jax-10m",
 ):
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
@@ -35,6 +35,7 @@ Predictor = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 BatchedPredictor = Callable[
     [jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray
 ]
+GL2_ITERATIONS = 4
 
 
 class LoadedRun(NamedTuple):
@@ -49,26 +50,25 @@ class LoadedRun(NamedTuple):
 def load_run(
     run_dir: str | Path,
     *,
-    checkpoint: str = "best",
-    config_overrides: dict[str, object] | None = None,
+    checkpoint: Literal["best", "final"] = "best",
+    domain_length_override: float | None = None,
 ) -> LoadedRun:
     """Restore a JAX FNO or fixed CS-DNO training checkpoint."""
     run_dir = Path(run_dir).resolve()
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    if config_overrides:
-        config.update(config_overrides)
-    checkpoint_dir = run_dir / (
-        "best_val_ckpt" if checkpoint == "best" else "final_ckpt"
-    )
+    if domain_length_override is not None:
+        config["domain_length"] = float(domain_length_override)
+    checkpoint_dir = run_dir / {
+        "best": "best_val_ckpt",
+        "final": "final_ckpt",
+    }[checkpoint]
     metadata = json.loads(
         (checkpoint_dir / "metadata.json").read_text(encoding="utf-8")
     )
     stats = metadata["stats"]
-    norm_mode = str(config.get("norm", "minmax"))
+    norm_mode = str(config["norm"])
 
-    model_name = str(config.get("model", "fno"))
-    if model_name == "cs_dno" or config.get("precision") == "fp64":
-        jax.config.update("jax_enable_x64", True)
+    model_name = str(config["model"])
 
     restored = checkpoints.restore_checkpoint(
         ckpt_dir=checkpoint_dir,
@@ -82,42 +82,27 @@ def load_run(
         validate_fixed_craig_sulem_config(config)
         model = CraigSulemDNO(
             width=int(config["width"]),
-            n_blocks=int(config.get("n_blocks", 4)),
-            latent=int(config.get("latent", 64)),
-            n_polys=int(config.get("cs_n_polys", 3)),
-            use_first_deriv=bool(config.get("cs_use_first_deriv", True)),
-            use_second_deriv=bool(config.get("cs_use_second_deriv", True)),
-            use_half_deriv=bool(config.get("cs_use_half_deriv", True)),
-            use_hilbert=bool(config.get("cs_use_hilbert", True)),
-            mult_hidden=int(config.get("cs_mult_hidden", 32)),
-            domain_length=float(
-                config.get(
-                    "domain_length",
-                    stats.get("domain_length", 2.0 * np.pi),
-                )
-            ),
-            xi_scale=float(
-                config.get(
-                    "xi_scale",
-                    np.asarray(stats["feature_absmax"]).reshape(-1)[1],
-                )
-            ),
-            eta_scale=float(
-                config.get(
-                    "eta_scale",
-                    np.asarray(stats["feature_absmax"]).reshape(-1)[0],
-                )
-            ),
-            target_scale=float(config.get("target_scale", stats["target_absmax"])),
+            n_blocks=int(config["n_blocks"]),
+            latent=int(config["latent"]),
+            n_polys=int(config["cs_n_polys"]),
+            use_first_deriv=bool(config["cs_use_first_deriv"]),
+            use_second_deriv=bool(config["cs_use_second_deriv"]),
+            use_half_deriv=bool(config["cs_use_half_deriv"]),
+            use_hilbert=bool(config["cs_use_hilbert"]),
+            mult_hidden=int(config["cs_mult_hidden"]),
+            domain_length=float(config["domain_length"]),
+            xi_scale=float(config["xi_scale"]),
+            eta_scale=float(config["eta_scale"]),
+            target_scale=float(config["target_scale"]),
         )
     elif model_name == "fno":
         model = FNO1d(
             modes=int(config["modes"]),
             width=int(config["width"]),
-            n_blocks=int(config.get("n_blocks", 4)),
-            domain_length=float(stats.get("domain_length", 2.0 * np.pi)),
-            xi_scale=float(np.asarray(stats["feature_absmax"]).reshape(-1)[1]),
-            target_scale=float(stats["target_absmax"]),
+            n_blocks=int(config["n_blocks"]),
+            domain_length=float(config["domain_length"]),
+            xi_scale=float(config["xi_scale"]),
+            target_scale=float(config["target_scale"]),
             eta_features=bool(config.get("fno_eta_features", False)),
         )
     else:
@@ -139,11 +124,7 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
     ``eta`` and ``xi`` have shape ``(batch, nx)``. ``log_depth`` has shape
     ``(batch,)`` or ``(batch, 1)``. The returned field is mean-free per sample.
     """
-    model_dtype = (
-        jnp.float64
-        if loaded.config.get("precision") == "fp64"
-        else jnp.float32
-    )
+    model_dtype = jnp.float32
     if loaded.norm_mode == "scale":
         feature_absmax = jnp.asarray(
             loaded.stats["feature_absmax"], dtype=model_dtype
@@ -261,7 +242,6 @@ def _gl2_if_step_surrogate(
     dt: float | jnp.ndarray,
     params: ti.SolverParams,
     predict_gxi: Predictor,
-    iterations: int = 4,
 ) -> ti.State:
     sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
     c1 = 0.5 - sqrt3 / 6.0
@@ -321,7 +301,7 @@ def _gl2_if_step_surrogate(
 
     stage1, stage2 = jax.lax.fori_loop(
         0,
-        iterations,
+        GL2_ITERATIONS,
         body_fn,
         (initial_if_state, initial_if_state),
     )
@@ -364,16 +344,13 @@ def rollout_surrogate(
     predict_gxi: Predictor,
     *,
     substeps: int = 8,
-    zero_mean_xi: bool = True,
-    gl2_iterations: int = 4,
 ) -> dict[str, jnp.ndarray]:
     """Integrate a surrogate DNO action with the fixed hard-filtered GL2 scheme."""
     state = ti.State(
         eta=jnp.asarray(initial.eta),
         xi=jnp.asarray(initial.xi),
     )
-    if zero_mean_xi:
-        state = ti.project_zero_mean_xi(state)
+    state = ti.project_zero_mean_xi(state)
     initial_gxi = predict_gxi(state.eta, state.xi)
     if times.shape[0] == 1:
         return {
@@ -397,13 +374,8 @@ def rollout_surrogate(
                 substep_dt,
                 params,
                 predict_gxi,
-                iterations=gl2_iterations,
             )
-            return (
-                ti.project_zero_mean_xi(next_state)
-                if zero_mean_xi
-                else next_state
-            )
+            return ti.project_zero_mean_xi(next_state)
 
         next_state = jax.lax.fori_loop(0, substeps, body_fn, carry)
         saved_gxi = predict_gxi(next_state.eta, next_state.xi)

@@ -166,10 +166,11 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    config_overrides = {}
-    if args.domain_length is not None:
-        config_overrides["domain_length"] = float(args.domain_length)
-    loaded = load_run(args.run_dir, checkpoint="best", config_overrides=config_overrides or None)
+    loaded = load_run(
+        args.run_dir,
+        checkpoint="best",
+        domain_length_override=args.domain_length,
+    )
     predict_batched = build_predict_gxi_batched(loaded)
 
     def predict(
