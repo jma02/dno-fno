@@ -212,7 +212,7 @@ def relative_frequency_interval_fits(
     return bool(frequencies[1] >= relative_maximum * frequencies[0])
 
 
-def paper_support_violations(
+def find_jonswap_parameter_violations(
     parameters: JonswapTmaParameters,
     *,
     stratum: RandomSeaStratum,
@@ -312,7 +312,7 @@ def paper_support_violations(
     return tuple(violations)
 
 
-def is_in_paper_support(
+def jonswap_parameters_are_valid(
     parameters: JonswapTmaParameters,
     *,
     stratum: RandomSeaStratum,
@@ -320,7 +320,11 @@ def is_in_paper_support(
 ) -> bool:
     """Return whether parameters belong to the named paper-dataset stratum."""
 
-    return not paper_support_violations(parameters, stratum=stratum, length=length)
+    return not find_jonswap_parameter_violations(
+        parameters,
+        stratum=stratum,
+        length=length,
+    )
 
 
 def jonswap_tma_spectrum(
@@ -384,7 +388,7 @@ def jonswap_tma_spectrum(
                 gravity=gravity,
             )[0]
         )
-        if maximum_frequency < relative_maximum * peak_frequency:
+        if maximum_frequency < relative_frequency_interval[1] * peak_frequency:
             raise ValueError(
                 "relative JONSWAP/TMA frequency interval exceeds the resolved band"
             )
@@ -406,6 +410,7 @@ def jonswap_tma_spectrum(
     if relative_frequency_interval is None:
         window = resolved_band_window(cell_wavenumbers, band=band)
     else:
+        relative_minimum, relative_maximum = relative_frequency_interval
         relative_frequency = angular_frequency / peak_frequency
         window = np.asarray(
             (relative_frequency >= relative_minimum)

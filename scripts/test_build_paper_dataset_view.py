@@ -624,14 +624,14 @@ class CombinedPaperDatasetViewTests(unittest.TestCase):
             run_record = spec.to_json_record()
             configuration = run_record["configuration"]
             assert isinstance(configuration, dict)
-            policy = configuration["jonswap_horizon_bucketing"]
+            config = configuration[bucketed.BUCKETING_CONFIG_KEY]
             metadata = {
                 "family": "jonswap_tma",
                 "case_kind": "trajectory",
                 "trajectory_execution": configuration["trajectory_execution"],
                 "additional_metadata": {
                     "run_spec": run_record,
-                    "jonswap_horizon_bucketing": policy,
+                    bucketed.BUCKETING_CONFIG_KEY: config,
                 },
             }
             paths = BatchPaths.under(
@@ -662,7 +662,7 @@ class CombinedPaperDatasetViewTests(unittest.TestCase):
             changed_run = json.loads(json.dumps(run_record))
             changed_run["configuration"][  # type: ignore[index]
                 "jonswap_horizon_bucketing"
-            ]["schema"] = "not_the_current_policy"  # type: ignore[index]
+            ]["sort_rule"] = "different"  # type: ignore[index]
             changed_configuration = changed_run["configuration"]
             assert isinstance(changed_configuration, dict)
             changed_spec = replace(
@@ -679,7 +679,7 @@ class CombinedPaperDatasetViewTests(unittest.TestCase):
             write_proposal(changed_metadata)
             with self.assertRaisesRegex(
                 ValueError,
-                "exact current bucketing policy",
+                "exact current bucketing config",
             ):
                 _validate_committed_proposal_contract(
                     paths,

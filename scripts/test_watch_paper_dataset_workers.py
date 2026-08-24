@@ -664,7 +664,6 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
                 )
             elif plan.family == "jonswap_tma":
                 configuration["jonswap_horizon_bucketing"] = {
-                    "schema": "jonswap_horizon_bucketing_v2",
                     "outer_proposal_size": 32,
                     "solver_batch_size": 8,
                     "sort_rule": "stable_saved_time_count_then_proposal_index",

@@ -19,15 +19,10 @@ import numpy as np  # noqa: E402
 from scripts import run_paper_dataset_jonswap_bucketed as bucketed  # noqa: E402
 from scripts import run_paper_dataset_quota as base  # noqa: E402
 from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
-    ADJUSTMENT_BURN_PEAK_PERIODS,
-    ADJUSTMENT_FORMULA,
-    ADJUSTMENT_RAMP_ORDER,
-    ADJUSTMENT_RAMP_PEAK_PERIODS,
+    BUCKETING_CONFIG_KEY,
+    BucketingConfig,
     HorizonBucketedJonswapQuotaExecutor,
-    POLICY_KEY,
     horizon_sorted_groups,
-    policy_record,
-    restore_proposal_order,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLE_CELLS,
@@ -56,6 +51,7 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
 )
 from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
     CaseTimeGrid,
+    JONSWAP_ADJUSTMENT_FORMULA,
     PAPER_JONSWAP_ADJUSTMENT_POLICY,
     TrajectoryExecutionConfig,
     TrajectoryHorizonPolicy,
@@ -121,10 +117,10 @@ def _run_spec(
         first_attempt_index=0,
         configuration={
             "trajectory_execution": execution.to_json_record(),
-            POLICY_KEY: policy_record(
+            BUCKETING_CONFIG_KEY: BucketingConfig(
                 outer_proposal_size=outer_size,
                 solver_batch_size=solver_size,
-            ),
+            ).to_json_record(),
         },
     )
 
@@ -300,21 +296,12 @@ def _jonswap_record(
 
 
 class JonswapHorizonExecutorTests(unittest.TestCase):
-    def test_groups_are_stable_and_restore_proposal_order(self) -> None:
+    def test_groups_are_stable(self) -> None:
         grids = tuple(map(_grid, (9, 3, 8, 3, 10)))
 
         groups = horizon_sorted_groups(grids, solver_batch_size=2)
 
         self.assertEqual(groups, ((1, 3), (2, 0), (4,)))
-        restored = restore_proposal_order(
-            groups,
-            tuple(tuple(f"value-{index}" for index in group) for group in groups),
-            case_count=5,
-        )
-        self.assertEqual(
-            restored,
-            ("value-0", "value-1", "value-2", "value-3", "value-4"),
-        )
 
     def test_executor_preserves_base_decisions_rows_and_time_metrics(self) -> None:
         execution = _execution()
@@ -372,7 +359,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                call[3] == ADJUSTMENT_RAMP_ORDER
+                call[3] == PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_order
                 for call in adjustment_arms.calls
             )
         )
@@ -419,9 +406,9 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         np.testing.assert_allclose(handed_off, markers + realized)
         self.assertGreater(len(set(realized.tolist())), 1)
         expected_ramps = (
-            ADJUSTMENT_RAMP_PEAK_PERIODS
+            PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_time_peak_periods
             * realized
-            / ADJUSTMENT_BURN_PEAK_PERIODS
+            / PAPER_JONSWAP_ADJUSTMENT_POLICY.burn_peak_periods
         )
         np.testing.assert_allclose(
             adjustment_arms.calls[0][2],
@@ -686,23 +673,26 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             execution=TrajectoryExecutionConfig.paper("jonswap_tma"),
         )
         self.assertEqual(executor.solver_batch_size, 256)
-        policy = revised.configuration[POLICY_KEY]
+        config = revised.configuration[BUCKETING_CONFIG_KEY]
         self.assertEqual(
-            dict(policy),  # type: ignore[arg-type]
-            policy_record(
+            dict(config),  # type: ignore[arg-type]
+            BucketingConfig(
                 outer_proposal_size=1024,
                 solver_batch_size=256,
-            ),
+            ).to_json_record(),
         )
-        adjustment = policy["nonlinear_adjustment"]  # type: ignore[index]
-        self.assertEqual(adjustment["formula"], ADJUSTMENT_FORMULA)  # type: ignore[index]
+        adjustment = config["nonlinear_adjustment"]  # type: ignore[index]
+        self.assertEqual(  # type: ignore[index]
+            adjustment["formula"],
+            JONSWAP_ADJUSTMENT_FORMULA,
+        )
         self.assertEqual(  # type: ignore[index]
             adjustment["ramp_time_peak_periods"],
-            ADJUSTMENT_RAMP_PEAK_PERIODS,
+            PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_time_peak_periods,
         )
         self.assertEqual(  # type: ignore[index]
             adjustment["burn_peak_periods"],
-            ADJUSTMENT_BURN_PEAK_PERIODS,
+            PAPER_JONSWAP_ADJUSTMENT_POLICY.burn_peak_periods,
         )
         self.assertEqual(  # type: ignore[index]
             adjustment["autonomous_clock"],
@@ -744,9 +734,9 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             )
             configuration = valid.to_json_record()["configuration"]
             assert isinstance(configuration, dict)
-            policy = configuration[POLICY_KEY]
-            assert isinstance(policy, dict)
-            adjustment = policy["nonlinear_adjustment"]
+            config = configuration[BUCKETING_CONFIG_KEY]
+            assert isinstance(config, dict)
+            adjustment = config["nonlinear_adjustment"]
             assert isinstance(adjustment, dict)
             adjustment["formula"] = "different"
             invalid = AcceptedQuotaRunSpec(
@@ -766,7 +756,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 configuration=configuration,
             )
 
-            with self.assertRaisesRegex(ValueError, "policy is inconsistent"):
+            with self.assertRaisesRegex(ValueError, "config is inconsistent"):
                 HorizonBucketedJonswapQuotaExecutor(
                     run_spec=invalid,
                     execution=execution,

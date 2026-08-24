@@ -34,7 +34,7 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
     PAPER_RESOLVED_BAND_WINDOW,
     finite_depth_angular_frequency,
-    paper_support_violations,
+    find_jonswap_parameter_violations,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLING_REVISION_V4,
@@ -231,7 +231,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             right_moving_fraction=0.5,
         )
         self.assertEqual(
-            paper_support_violations(
+            find_jonswap_parameter_violations(
                 parameters,
                 stratum="shallow",
                 length=contract.length,

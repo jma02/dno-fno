@@ -24,7 +24,7 @@ from solver.gen_data.jonswap_tma import (
     JonswapTmaParameters,
     RandomSeaStratum,
     ResolvedBand,
-    paper_support_violations,
+    find_jonswap_parameter_violations,
     relative_frequency_interval_fits,
     sample_jonswap_tma_phases,
 )
@@ -48,12 +48,6 @@ SHALLOW_DEPTH_WAVENUMBER_BOUNDS = (0.2, 1.5)
 SHALLOW_RELATIVE_HEIGHT_BOUNDS = (0.03, 0.16)
 
 
-def _number_label(value: float) -> str:
-    """Return a stable, path-safe label for one discrete cell value."""
-
-    return f"{value:g}".replace(".", "p")
-
-
 @dataclass(frozen=True)
 class JonswapTmaSampleCell:
     """One fixed stratum, peak enhancement, and direction fraction."""
@@ -74,8 +68,8 @@ class JonswapTmaSampleCell:
     def cell_id(self) -> str:
         """Return the stable identifier used by ``AttemptAssignment``."""
 
-        gamma = _number_label(self.peak_enhancement)
-        direction = _number_label(self.right_moving_fraction)
+        gamma = f"{self.peak_enhancement:g}".replace(".", "p")
+        direction = f"{self.right_moving_fraction:g}".replace(".", "p")
         return f"{self.stratum}__gamma_{gamma}__right_{direction}"
 
 
@@ -127,15 +121,6 @@ class JonswapTmaSample:
         }
         json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return record
-
-
-def _require_sample_cell(cell_id: str) -> JonswapTmaSampleCell:
-    """Return the declared sample cell named by ``cell_id``."""
-
-    try:
-        return _CELL_BY_ID[cell_id]
-    except KeyError as error:
-        raise ValueError(f"unknown JONSWAP/TMA sample cell: {cell_id}") from error
 
 
 def _sample_shallow_parameters(
@@ -231,7 +216,7 @@ def sample_jonswap_tma_case(
     phase arrays and passes the paper-support predicate by construction.
     """
 
-    cell = _require_sample_cell(assignment.cell_id)
+    cell = _CELL_BY_ID[assignment.cell_id]
     rng = random_generator_for_case(assignment.case_key)
     relative_frequency_maximum = (
         PAPER_RELATIVE_FREQUENCY_MAXIMUM
@@ -255,7 +240,7 @@ def sample_jonswap_tma_case(
         )
     phase_right, phase_left = sample_jonswap_tma_phases(rng, band=band)
 
-    violations = paper_support_violations(
+    violations = find_jonswap_parameter_violations(
         parameters,
         stratum=cell.stratum,
         length=band.length,

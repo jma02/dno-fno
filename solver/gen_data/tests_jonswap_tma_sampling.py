@@ -14,7 +14,7 @@ from solver.gen_data.jonswap_tma import (
     PAPER_RIGHT_MOVING_FRACTIONS,
     PAPER_SHALLOW_PEAK_MODES,
     ResolvedBand,
-    paper_support_violations,
+    find_jonswap_parameter_violations,
     positive_mode_wavenumbers,
     relative_frequency_interval_fits,
 )
@@ -93,7 +93,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                     band=BAND,
                 )
                 self.assertEqual(
-                    paper_support_violations(
+                    find_jonswap_parameter_violations(
                         sample.parameters,
                         stratum=cell.stratum,
                         length=BAND.length,

@@ -1642,41 +1642,41 @@ def _execution_contract_parts(
     )
 
 
-def _validate_jonswap_bucketing_policy(
+def _validate_jonswap_bucketing_config(
     configuration: Mapping[str, Any],
     *,
     execution: Mapping[str, Any],
     batch_size: int,
 ) -> None:
-    """Mirror the builder's exact proposal-bucketing policy check."""
+    """Mirror the builder's exact proposal-bucketing config check."""
 
-    configured = _mapping(
+    config = _mapping(
         configuration.get("jonswap_horizon_bucketing"),
-        context="JONSWAP horizon bucketing policy",
+        context="JONSWAP horizon bucketing config",
     )
     solver_batch_size = _integer(
-        configured.get("solver_batch_size"),
+        config.get("solver_batch_size"),
         context="JONSWAP solver batch size",
         minimum=1,
     )
     if solver_batch_size != 8 or solver_batch_size > batch_size:
-        raise ValueError("JONSWAP solver batch size differs from the release policy")
+        raise ValueError("JONSWAP solver batch size differs from the release config")
     nonlinear_adjustment = _mapping(
         execution.get("jonswap_adjustment"),
         context="JONSWAP nonlinear adjustment policy",
     )
+    expected = {
+        "outer_proposal_size": batch_size,
+        "solver_batch_size": solver_batch_size,
+        "sort_rule": "stable_saved_time_count_then_proposal_index",
+        "commit_order": "durable_proposal_order",
+        "transaction_rule": "all_solver_groups_then_one_atomic_commit",
+        "nonlinear_adjustment": dict(nonlinear_adjustment),
+    }
     _require_exact_json(
-        configured,
-        {
-            "schema": "jonswap_horizon_bucketing_v2",
-            "outer_proposal_size": batch_size,
-            "solver_batch_size": solver_batch_size,
-            "sort_rule": "stable_saved_time_count_then_proposal_index",
-            "commit_order": "durable_proposal_order",
-            "transaction_rule": "all_solver_groups_then_one_atomic_commit",
-            "nonlinear_adjustment": dict(nonlinear_adjustment),
-        },
-        context="JONSWAP horizon bucketing policy",
+        {key: config.get(key) for key in expected},
+        expected,
+        context="JONSWAP horizon bucketing config",
     )
 
 
@@ -1856,7 +1856,7 @@ def _validate_source_summary(
         ):
             raise ValueError("Benjamin--Feir sampling support differs")
     elif plan.family == "jonswap_tma":
-        _validate_jonswap_bucketing_policy(
+        _validate_jonswap_bucketing_config(
             configuration,
             execution=execution,
             batch_size=batch_size,

@@ -1,7 +1,7 @@
 """Run adjusted JONSWAP/TMA quotas in horizon-sorted numerical microbatches.
 
 This launcher extends the current shared JONSWAP run identity with the
-horizon-bucketing policy and uses the adjustment-first executor. Each case
+horizon-bucketing configuration and uses the adjustment-first executor. Each case
 receives its fingerprinted nonlinear burn-in before the autonomous production
 trajectory begins from the full internal-band endpoint.
 """
@@ -21,9 +21,9 @@ if str(ROOT) not in sys.path:
 
 import scripts.run_paper_dataset_quota as base  # noqa: E402
 from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
+    BUCKETING_CONFIG_KEY,
+    BucketingConfig,
     HorizonBucketedJonswapQuotaExecutor,
-    POLICY_KEY,
-    policy_record,
 )
 from solver.gen_data.pipeline.archive import file_sha256  # noqa: E402
 from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
@@ -67,7 +67,7 @@ def build_bucketed_run_spec(
     solver_batch_size: int,
     execution: base.PaperExecution | None = None,
 ) -> AcceptedQuotaRunSpec:
-    """Extend the exact JONSWAP run identity with its bucketing policy."""
+    """Extend the exact JONSWAP run identity with its bucketing configuration."""
 
     if request.family != "jonswap_tma":
         raise ValueError("bucketed launcher supports only JONSWAP/TMA")
@@ -102,11 +102,11 @@ def build_bucketed_run_spec(
             for path in EXTRA_SOURCE_PATHS
         }
     )
-    configuration[POLICY_KEY] = policy_record(
+    configuration[BUCKETING_CONFIG_KEY] = BucketingConfig(
         outer_proposal_size=request.batch_size,
         solver_batch_size=solver_batch_size,
-        adjustment_policy=adjustment_policy,
-    )
+        adjustment=adjustment_policy,
+    ).to_json_record()
     return AcceptedQuotaRunSpec(
         root=baseline.root,
         family_name=baseline.family_name,

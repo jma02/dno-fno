@@ -23,9 +23,9 @@ from solver.gen_data.jonswap_tma import (
     build_jonswap_tma_initial_condition,
     finite_depth_angular_frequency,
     finite_depth_group_velocity,
-    is_in_paper_support,
+    jonswap_parameters_are_valid,
     jonswap_tma_spectrum,
-    paper_support_violations,
+    find_jonswap_parameter_violations,
     positive_mode_wavenumbers,
     relative_frequency_interval_fits,
     resolved_band_window,
@@ -220,9 +220,15 @@ class JonswapTmaSupportTest(unittest.TestCase):
         }
         for stratum, parameters in examples.items():
             with self.subTest(stratum=stratum):
-                self.assertTrue(is_in_paper_support(parameters, stratum=stratum))
+                self.assertTrue(
+                    jonswap_parameters_are_valid(parameters, stratum=stratum)
+                )
                 self.assertEqual(
-                    paper_support_violations(parameters, stratum=stratum), ()
+                    find_jonswap_parameter_violations(
+                        parameters,
+                        stratum=stratum,
+                    ),
+                    (),
                 )
 
     def test_global_peak_steepness_boundary_is_closed(self) -> None:
@@ -243,7 +249,7 @@ class JonswapTmaSupportTest(unittest.TestCase):
             )
             with self.subTest(stratum=stratum, side="inside"):
                 self.assertEqual(
-                    paper_support_violations(inside, stratum=stratum), ()
+                    find_jonswap_parameter_violations(inside, stratum=stratum), ()
                 )
             outside = JonswapTmaParameters(
                 template.depth,
@@ -255,7 +261,7 @@ class JonswapTmaSupportTest(unittest.TestCase):
             with self.subTest(stratum=stratum, side="outside"):
                 self.assertIn(
                     "JONSWAP/TMA k_p H_s/2 must not exceed 0.08",
-                    paper_support_violations(outside, stratum=stratum),
+                    find_jonswap_parameter_violations(outside, stratum=stratum),
                 )
 
     def test_support_rejects_unsupported_discrete_parameters(self) -> None:
@@ -264,7 +270,10 @@ class JonswapTmaSupportTest(unittest.TestCase):
 
         self.assertIn(
             "peak_enhancement must be one of {1, 3.3, 5}",
-            paper_support_violations(unsupported_gamma, stratum="finite"),
+            find_jonswap_parameter_violations(
+                unsupported_gamma,
+                stratum="finite",
+            ),
         )
 
     def test_relative_frequency_resolution_is_an_input_only_support_condition(
@@ -273,7 +282,7 @@ class JonswapTmaSupportTest(unittest.TestCase):
         unresolved = JonswapTmaParameters(1.5 / 24.0, 0.004, 24.0, 3.3, 0.5)
         self.assertIn(
             "JONSWAP/TMA relative upper frequency must fit in the resolved band",
-            paper_support_violations(
+            find_jonswap_parameter_violations(
                 unresolved,
                 stratum="shallow",
                 band=BAND,

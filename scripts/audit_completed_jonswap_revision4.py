@@ -47,8 +47,8 @@ from scripts.run_paper_dataset_quota import (  # noqa: E402
     source_hashes,
 )
 from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
-    POLICY_KEY,
-    policy_record,
+    BUCKETING_CONFIG_KEY,
+    BucketingConfig,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
     PAPER_PEAK_ENHANCEMENTS,
@@ -59,7 +59,7 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     PAPER_RIGHT_MOVING_FRACTIONS,
     PAPER_SHALLOW_PEAK_MODES,
     finite_depth_angular_frequency,
-    paper_support_violations,
+    find_jonswap_parameter_violations,
     positive_mode_wavenumbers,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
@@ -897,7 +897,7 @@ def _case_specifications(
             quadrature_order=int(CURRENT_JONSWAP_EXECUTION.jonswap_quadrature_order),
         )
         expected_sample = sampled.samples[0]
-        violations = paper_support_violations(
+        violations = find_jonswap_parameter_violations(
             expected_sample.parameters,
             stratum=expected_sample.cell.stratum,
             length=band.length,
@@ -1011,18 +1011,18 @@ def _validate_result_metadata(
         "configuration",
         context=f"{context}.run_spec",
     )
-    configured_policy = _required_mapping(
+    configured_config = _required_mapping(
         configuration,
-        POLICY_KEY,
+        BUCKETING_CONFIG_KEY,
         context=f"{context}.run_spec.configuration",
     )
-    result_policy = _required_mapping(
+    result_config = _required_mapping(
         additional,
-        POLICY_KEY,
+        BUCKETING_CONFIG_KEY,
         context=f"{context}.metadata.additional_metadata",
     )
-    if not _same_json(result_policy, configured_policy):
-        raise ValueError(f"{context} bucketing policy differs from its run spec")
+    if not _same_json(result_config, configured_config):
+        raise ValueError(f"{context} bucketing config differs from its run spec")
 
 
 def _floored_saved_count(intended: float, saved_dt: float) -> int:
@@ -2524,10 +2524,10 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
         )
     current_support = _current_support_record()
     support_fingerprint = canonical_json_sha256(current_support)
-    expected_policy = policy_record(
+    expected_config = BucketingConfig(
         outer_proposal_size=EXPECTED_BATCH_SIZE,
         solver_batch_size=EXPECTED_SOLVER_BATCH_SIZE,
-        adjustment_policy=CURRENT_JONSWAP_EXECUTION.jonswap_adjustment,
+        adjustment=CURRENT_JONSWAP_EXECUTION.jonswap_adjustment,
     )
     for chunk in chunks:
         summary = _strict_json_object(chunk.summary_path)
@@ -2544,13 +2544,13 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
             "configuration",
             context="summary.run_spec",
         )
-        configured_policy = _required_mapping(
+        configured_config = _required_mapping(
             configuration,
-            POLICY_KEY,
+            BUCKETING_CONFIG_KEY,
             context="summary.run_spec.configuration",
         )
-        if not _same_json(configured_policy, expected_policy):
-            raise ValueError("JONSWAP chunk has a noncurrent bucketing policy")
+        if not expected_config.matches_record(configured_config):
+            raise ValueError("JONSWAP chunk has a noncurrent bucketing config")
         ordered_cells = _required_list(
             configuration,
             "ordered_cell_ids",
@@ -2574,7 +2574,9 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
         "source_sha256_fingerprint": next(iter(source_fingerprints)),
         "sampling_support_fingerprint": support_fingerprint,
         "sampling_support": current_support,
-        "bucketing_policy_fingerprint": canonical_json_sha256(expected_policy),
+        "bucketing_config_fingerprint": canonical_json_sha256(
+            expected_config.to_json_record()
+        ),
         "current_support_source_sha256": current_support_hashes,
     }
 

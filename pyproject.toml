@@ -21,6 +21,7 @@ dependencies = [
     "pypdf>=6.9.2",
     "orbax-checkpoint>=0.11.6 ; python_full_version >= '3.11' and sys_platform == 'linux'",
     "ruff>=0.15.10",
+    "pyright[nodejs]>=1.1.411",
 ]
 
 [tool.setuptools]
@@ -28,3 +29,8 @@ packages = ["solver", "solver.solvers", "solver.reference_solutions", "solver.ta
 
 [tool.setuptools.package-dir]
 fno_jax = "models/fno-jax"
+
+[tool.pyright]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"

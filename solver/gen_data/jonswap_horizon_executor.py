@@ -9,9 +9,8 @@ order before the existing atomic batch commit.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
-from typing import Final, TypeVar, cast
 
 import numpy as np
 
@@ -27,11 +26,10 @@ from solver.gen_data.pipeline.refinement import (
     execute_variable_horizon_nonlinear_adjustment,
     run_nonlinear_adjustment_arm,
 )
-from solver.gen_data.pipeline.writer import CaseOutcome
+from solver.gen_data.pipeline.writer import CaseOutcome, JsonScalar
 from solver.gen_data.trajectory_family_adapters import TrajectoryInitialBatch
 from solver.gen_data.trajectory_quota_executor import (
     CaseTimeGrid,
-    JONSWAP_ADJUSTMENT_FORMULA,
     JONSWAP_ADJUSTMENT_SCHEMA,
     JonswapNonlinearAdjustmentPolicy,
     PAPER_JONSWAP_ADJUSTMENT_POLICY,
@@ -39,20 +37,7 @@ from solver.gen_data.trajectory_quota_executor import (
 )
 
 
-POLICY_KEY: Final = "jonswap_horizon_bucketing"
-POLICY_SCHEMA: Final = "jonswap_horizon_bucketing_v2"
-SORT_RULE: Final = "stable_saved_time_count_then_proposal_index"
-ADJUSTMENT_SCHEMA: Final = JONSWAP_ADJUSTMENT_SCHEMA
-ADJUSTMENT_FORMULA: Final = JONSWAP_ADJUSTMENT_FORMULA
-ADJUSTMENT_RAMP_ORDER: Final = PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_order
-ADJUSTMENT_RAMP_PEAK_PERIODS: Final = (
-    PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_time_peak_periods
-)
-ADJUSTMENT_BURN_PEAK_PERIODS: Final = (
-    PAPER_JONSWAP_ADJUSTMENT_POLICY.burn_peak_periods
-)
-
-ItemT = TypeVar("ItemT")
+BUCKETING_CONFIG_KEY = "jonswap_horizon_bucketing"
 
 
 def horizon_sorted_groups(
@@ -83,68 +68,45 @@ def horizon_sorted_groups(
     )
 
 
-def restore_proposal_order(
-    grouped_indices: Sequence[Sequence[int]],
-    grouped_values: Sequence[Sequence[ItemT]],
-    *,
-    case_count: int,
-) -> tuple[ItemT, ...]:
-    """Restore values from solver-group order to durable proposal order."""
+@dataclass(frozen=True)
+class BucketingConfig:
+    """Memory-safe grouping configuration for one durable proposal batch."""
 
-    if (
-        isinstance(case_count, bool)
-        or not isinstance(case_count, int)
-        or case_count <= 0
-    ):
-        raise ValueError("case_count must be a positive integer")
-    if len(grouped_indices) != len(grouped_values):
-        raise ValueError("indices and values must contain the same groups")
-
-    missing = object()
-    restored: list[ItemT | object] = [missing] * case_count
-    for indices, values in zip(grouped_indices, grouped_values):
-        if len(indices) != len(values):
-            raise ValueError("each index group must match its value group")
-        for index, value in zip(indices, values):
-            if not 0 <= index < case_count:
-                raise ValueError("group index lies outside proposal order")
-            if restored[index] is not missing:
-                raise ValueError("group indices must not repeat")
-            restored[index] = value
-    if any(value is missing for value in restored):
-        raise ValueError("group indices must cover every proposed case")
-    return cast(tuple[ItemT, ...], tuple(restored))
-
-
-def policy_record(
-    *,
-    outer_proposal_size: int,
-    solver_batch_size: int,
-    adjustment_policy: JonswapNonlinearAdjustmentPolicy = (
+    outer_proposal_size: int
+    solver_batch_size: int
+    adjustment: JonswapNonlinearAdjustmentPolicy = (
         PAPER_JONSWAP_ADJUSTMENT_POLICY
-    ),
-) -> dict[str, object]:
-    """Return the execution policy bound into the run fingerprint."""
+    )
 
-    for value, name in (
-        (outer_proposal_size, "outer_proposal_size"),
-        (solver_batch_size, "solver_batch_size"),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"{name} must be a positive integer")
-    if solver_batch_size > outer_proposal_size:
-        raise ValueError(
-            "solver_batch_size cannot exceed outer_proposal_size"
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.outer_proposal_size, "outer_proposal_size"),
+            (self.solver_batch_size, "solver_batch_size"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.solver_batch_size > self.outer_proposal_size:
+            raise ValueError(
+                "solver_batch_size cannot exceed outer_proposal_size"
+            )
+
+    def to_json_record(self) -> dict[str, object]:
+        return {
+            "outer_proposal_size": self.outer_proposal_size,
+            "solver_batch_size": self.solver_batch_size,
+            "sort_rule": "stable_saved_time_count_then_proposal_index",
+            "commit_order": "durable_proposal_order",
+            "transaction_rule": "all_solver_groups_then_one_atomic_commit",
+            "nonlinear_adjustment": self.adjustment.to_json_record(),
+        }
+
+    def matches_record(self, record: Mapping[str, object]) -> bool:
+        """Return whether a stored record has the configured execution fields."""
+
+        return all(
+            record.get(key) == value
+            for key, value in self.to_json_record().items()
         )
-    return {
-        "schema": POLICY_SCHEMA,
-        "outer_proposal_size": outer_proposal_size,
-        "solver_batch_size": solver_batch_size,
-        "sort_rule": SORT_RULE,
-        "commit_order": "durable_proposal_order",
-        "transaction_rule": "all_solver_groups_then_one_atomic_commit",
-        "nonlinear_adjustment": adjustment_policy.to_json_record(),
-    }
 
 
 def _select_initial_batch(
@@ -167,17 +129,34 @@ def _select_initial_batch(
     )
 
 
-def _positive_record_float(
-    record: Mapping[str, object],
-    key: str,
-) -> float:
-    value = record.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"JONSWAP specification {key} must be numeric")
-    result = float(value)
-    if not math.isfinite(result) or result <= 0.0:
-        raise ValueError(f"JONSWAP specification {key} must be finite and positive")
-    return result
+def _accepted_adjustment_batch(
+    initial: TrajectoryInitialBatch,
+    cases: Sequence[NonlinearAdjustmentCaseResult],
+) -> tuple[tuple[int, ...], TrajectoryInitialBatch | None]:
+    """Build the production batch from accepted full-band endpoints."""
+
+    accepted_indices = tuple(
+        index for index, case in enumerate(cases) if case.accepted
+    )
+    if not accepted_indices:
+        return (), None
+
+    endpoints: list[tuple[np.ndarray, np.ndarray]] = []
+    for index in accepted_indices:
+        eta = cases[index].terminal_eta
+        xi = cases[index].terminal_xi
+        if eta is None or xi is None:
+            raise RuntimeError(
+                "accepted nonlinear adjustment omitted a full-band endpoint"
+            )
+        endpoints.append((eta, xi))
+
+    selected = _select_initial_batch(initial, accepted_indices)
+    return accepted_indices, replace(
+        selected,
+        eta0=np.stack(tuple(eta for eta, _ in endpoints)),
+        xi0=np.stack(tuple(xi for _, xi in endpoints)),
+    )
 
 
 def _peak_periods(
@@ -188,19 +167,10 @@ def _peak_periods(
     """Compute each finite-depth peak period from its immutable proposal."""
 
     depths = np.asarray(initial.depths, dtype=np.float64)
-    peak_wavenumbers: list[float] = []
-    for depth, record in zip(depths, initial.specification_records):
-        if record.get("family_id") != 3 or record.get("revision_id") != 4:
-            raise ValueError("unrecognized JONSWAP sample identity")
-        recorded_depth = _positive_record_float(record, "depth")
-        if not math.isclose(
-            recorded_depth,
-            float(depth),
-            rel_tol=1.0e-13,
-            abs_tol=1.0e-15,
-        ):
-            raise ValueError("constructed depth differs from JONSWAP specification")
-        peak_wavenumbers.append(_positive_record_float(record, "peak_wavenumber"))
+    peak_wavenumbers = np.asarray(
+        [record["peak_wavenumber"] for record in initial.specification_records],
+        dtype=np.float64,
+    )
     angular_frequencies = np.asarray(
         [
             finite_depth_angular_frequency(
@@ -239,13 +209,6 @@ def _floored_time_grid(
     return saved_times
 
 
-def _finite_or_none(value: float | None) -> float | None:
-    if value is None:
-        return None
-    result = float(value)
-    return result if math.isfinite(result) else None
-
-
 def _adjustment_metrics(
     case: NonlinearAdjustmentCaseResult,
     *,
@@ -259,7 +222,7 @@ def _adjustment_metrics(
         case.decision.evaluated & QualityReason.BOTTOM_CLEARANCE
     )
     return {
-        "nonlinear_adjustment_schema": ADJUSTMENT_SCHEMA,
+        "nonlinear_adjustment_schema": JONSWAP_ADJUSTMENT_SCHEMA,
         "nonlinear_adjustment_accepted": case.accepted,
         "nonlinear_adjustment_complete_admissible_handoff": not bool(
             failed & QualityReason.INCOMPLETE_TRAJECTORY
@@ -275,12 +238,12 @@ def _adjustment_metrics(
         "nonlinear_adjustment_all_stages_solved": (
             case.telemetry.all_stages_solved
         ),
-        "nonlinear_adjustment_maximum_stage_residual": _finite_or_none(
+        "nonlinear_adjustment_maximum_stage_residual": (
             case.telemetry.maximum_stage_residual
+            if math.isfinite(case.telemetry.maximum_stage_residual)
+            else None
         ),
-        "nonlinear_adjustment_minimum_water_column": _finite_or_none(
-            case.minimum_water_column
-        ),
+        "nonlinear_adjustment_minimum_water_column": case.minimum_water_column,
         "nonlinear_adjustment_ramp_order": policy.ramp_order,
         "nonlinear_adjustment_ramp_time": (
             policy.ramp_time_peak_periods * peak_period
@@ -295,7 +258,7 @@ def _adjustment_metrics(
 def _failed_adjustment_outcome(
     case: NonlinearAdjustmentCaseResult,
     *,
-    construction_metrics: Mapping[str, object],
+    construction_metrics: Mapping[str, JsonScalar],
     peak_period: float,
     saved_times: np.ndarray,
     production_grid: CaseTimeGrid,
@@ -368,11 +331,10 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
             raise ValueError(
                 "horizon-bucketed JONSWAP execution requires an adjustment policy"
             )
-        raw_policy = self.run_spec.configuration.get(POLICY_KEY)
-        if not isinstance(raw_policy, Mapping):
-            raise ValueError("run configuration omits JONSWAP bucketing policy")
-        outer_size = raw_policy.get("outer_proposal_size")
-        solver_size = raw_policy.get("solver_batch_size")
+        raw_config = self.run_spec.configuration.get(BUCKETING_CONFIG_KEY)
+        if not isinstance(raw_config, Mapping):
+            raise ValueError("run configuration omits JONSWAP bucketing config")
+        solver_size = raw_config.get("solver_batch_size")
         if (
             isinstance(solver_size, bool)
             or not isinstance(solver_size, int)
@@ -381,13 +343,13 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
             raise ValueError(
                 "configured solver_batch_size must be a positive integer"
             )
-        expected = policy_record(
+        expected = BucketingConfig(
             outer_proposal_size=self.run_spec.batch_size,
             solver_batch_size=solver_size,
-            adjustment_policy=adjustment_policy,
+            adjustment=adjustment_policy,
         )
-        if dict(raw_policy) != expected or outer_size != self.run_spec.batch_size:
-            raise ValueError("configured JONSWAP bucketing policy is inconsistent")
+        if not expected.matches_record(raw_config):
+            raise ValueError("configured JONSWAP bucketing config is inconsistent")
         if (
             self.execution.role == "paper_dataset"
             and self.adjustment_arm_executor is not run_nonlinear_adjustment_arm
@@ -400,7 +362,7 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
         metadata["launcher"] = (
             "scripts/run_paper_dataset_jonswap_bucketed.py"
         )
-        metadata[POLICY_KEY] = expected
+        metadata[BUCKETING_CONFIG_KEY] = expected.to_json_record()
         object.__setattr__(self, "metadata", metadata)
         super().__post_init__()
 
@@ -413,13 +375,84 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
 
     @property
     def solver_batch_size(self) -> int:
-        """Return the numerical rollout width recorded in the run policy."""
+        """Return the numerical rollout width recorded in the bucketing config."""
 
-        raw_policy = self.run_spec.configuration[POLICY_KEY]
-        assert isinstance(raw_policy, Mapping)
-        value = raw_policy["solver_batch_size"]
-        assert isinstance(value, int) and not isinstance(value, bool)
-        return value
+        raw_config = self.run_spec.configuration[BUCKETING_CONFIG_KEY]
+        if not isinstance(raw_config, Mapping):
+            raise RuntimeError("validated JONSWAP bucketing config is missing")
+        solver_batch_size = raw_config.get("solver_batch_size")
+        if (
+            isinstance(solver_batch_size, bool)
+            or not isinstance(solver_batch_size, int)
+            or solver_batch_size <= 0
+        ):
+            raise RuntimeError("validated solver_batch_size is invalid")
+        return solver_batch_size
+
+    def _produce_adjusted_group(
+        self,
+        initial: TrajectoryInitialBatch,
+        grids: tuple[CaseTimeGrid, ...],
+        policy: JonswapNonlinearAdjustmentPolicy,
+    ) -> tuple[CaseOutcome, ...]:
+        """Adjust one horizon-near group, then run accepted cases."""
+
+        peak_periods = _peak_periods(
+            initial,
+            gravity=self.execution.numerical.gravity,
+        )
+        adjustment_grids = tuple(
+            _floored_time_grid(
+                policy.burn_peak_periods * peak_period,
+                saved_dt=self.execution.numerical.saved_dt,
+            )
+            for peak_period in peak_periods
+        )
+        adjustment = execute_variable_horizon_nonlinear_adjustment(
+            initial.eta0,
+            initial.xi0,
+            initial.depths,
+            adjustment_grids,
+            nonlinear_ramp_times=policy.ramp_time_peak_periods * peak_periods,
+            nonlinear_ramp_order=policy.ramp_order,
+            contract=self.execution.numerical,
+            arm_executor=self.adjustment_arm_executor,
+        )
+        accepted_indices, adjusted_initial = _accepted_adjustment_batch(
+            initial,
+            adjustment.cases,
+        )
+        production_by_index: dict[int, CaseOutcome] = {}
+        if adjusted_initial is not None:
+            production = super()._produce_jonswap(
+                adjusted_initial,
+                tuple(grids[index] for index in accepted_indices),
+            )
+            production_by_index = dict(zip(accepted_indices, production))
+
+        return tuple(
+            _with_adjustment_metrics(
+                production_by_index[index],
+                case,
+                peak_period=float(peak_periods[index]),
+                saved_times=adjustment_grids[index],
+                policy=policy,
+            )
+            if case.accepted
+            else _failed_adjustment_outcome(
+                case,
+                construction_metrics=(
+                    initial.construction_metrics[index]
+                    if initial.construction_metrics
+                    else {}
+                ),
+                peak_period=float(peak_periods[index]),
+                saved_times=adjustment_grids[index],
+                production_grid=grids[index],
+                policy=policy,
+            )
+            for index, case in enumerate(adjustment.cases)
+        )
 
     def _produce_jonswap(
         self,
@@ -442,113 +475,17 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
             grids,
             solver_batch_size=self.solver_batch_size,
         )
-        grouped_outcomes: list[tuple[CaseOutcome, ...]] = []
+        ordered_outcomes: list[CaseOutcome | None] = [None] * len(grids)
         for indices in groups:
-            selected_initial = _select_initial_batch(initial, indices)
-            selected_grids = tuple(grids[index] for index in indices)
-            peak_periods = _peak_periods(
-                selected_initial,
-                gravity=self.execution.numerical.gravity,
+            outcomes = self._produce_adjusted_group(
+                _select_initial_batch(initial, indices),
+                tuple(grids[index] for index in indices),
+                adjustment_policy,
             )
-            adjustment_grids = tuple(
-                _floored_time_grid(
-                    adjustment_policy.burn_peak_periods * peak_period,
-                    saved_dt=self.execution.numerical.saved_dt,
-                )
-                for peak_period in peak_periods
-            )
-            adjustment = execute_variable_horizon_nonlinear_adjustment(
-                selected_initial.eta0,
-                selected_initial.xi0,
-                selected_initial.depths,
-                adjustment_grids,
-                nonlinear_ramp_times=(
-                    adjustment_policy.ramp_time_peak_periods * peak_periods
-                ),
-                nonlinear_ramp_order=adjustment_policy.ramp_order,
-                contract=self.execution.numerical,
-                arm_executor=self.adjustment_arm_executor,
-            )
-            accepted_indices = tuple(
-                index
-                for index, case in enumerate(adjustment.cases)
-                if case.accepted
-            )
-            production_by_index: dict[int, CaseOutcome] = {}
-            if accepted_indices:
-                accepted_cases = tuple(
-                    adjustment.cases[index] for index in accepted_indices
-                )
-                if any(
-                    case.terminal_eta is None or case.terminal_xi is None
-                    for case in accepted_cases
-                ):
-                    raise RuntimeError(
-                        "accepted nonlinear adjustment omitted a full-band endpoint"
-                    )
-                adjusted_initial = TrajectoryInitialBatch(
-                    eta0=np.stack(
-                        tuple(
-                            cast(np.ndarray, case.terminal_eta)
-                            for case in accepted_cases
-                        )
-                    ),
-                    xi0=np.stack(
-                        tuple(
-                            cast(np.ndarray, case.terminal_xi)
-                            for case in accepted_cases
-                        )
-                    ),
-                    depths=np.take(
-                        selected_initial.depths,
-                        np.asarray(accepted_indices, dtype=np.int64),
-                        axis=0,
-                    ),
-                    specification_records=tuple(
-                        selected_initial.specification_records[index]
-                        for index in accepted_indices
-                    ),
-                    construction_metrics=(
-                        tuple(
-                            selected_initial.construction_metrics[index]
-                            for index in accepted_indices
-                        )
-                        if selected_initial.construction_metrics
-                        else ()
-                    ),
-                )
-                production = super()._produce_jonswap(
-                    adjusted_initial,
-                    tuple(selected_grids[index] for index in accepted_indices),
-                )
-                production_by_index = dict(zip(accepted_indices, production))
-
-            group_outcomes = tuple(
-                _with_adjustment_metrics(
-                    production_by_index[index],
-                    case,
-                    peak_period=float(peak_periods[index]),
-                    saved_times=adjustment_grids[index],
-                    policy=adjustment_policy,
-                )
-                if case.accepted
-                else _failed_adjustment_outcome(
-                    case,
-                    construction_metrics=(
-                        selected_initial.construction_metrics[index]
-                        if selected_initial.construction_metrics
-                        else {}
-                    ),
-                    peak_period=float(peak_periods[index]),
-                    saved_times=adjustment_grids[index],
-                    production_grid=selected_grids[index],
-                    policy=adjustment_policy,
-                )
-                for index, case in enumerate(adjustment.cases)
-            )
-            grouped_outcomes.append(group_outcomes)
-        return restore_proposal_order(
-            groups,
-            grouped_outcomes,
-            case_count=len(grids),
+            for index, outcome in zip(indices, outcomes):
+                ordered_outcomes[index] = outcome
+        if any(outcome is None for outcome in ordered_outcomes):
+            raise RuntimeError("every JONSWAP case must produce an outcome")
+        return tuple(
+            outcome for outcome in ordered_outcomes if outcome is not None
         )

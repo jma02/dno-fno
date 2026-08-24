@@ -65,6 +65,7 @@ from solver.gen_data.pipeline.production import AttemptAssignment
 from solver.gen_data.pipeline.reference import project_fixed_band
 from solver.gen_data.pipeline.refinement import ResidualControlledGL2Contract
 from solver.gen_data.pipeline.writer import (
+    JsonScalar,
     batch_paths_for_assignments,
     build_proposal_arrays,
 )
@@ -78,6 +79,7 @@ from solver.tanaka_ICs.modified_tanaka import make_default_tanaka_template
 
 FloatArray: TypeAlias = NDArray[np.float64]
 SpecificationRecord: TypeAlias = Mapping[str, object]
+MetricsRecord: TypeAlias = Mapping[str, JsonScalar]
 ProposalArrays: TypeAlias = Mapping[str, NDArray[Any]]
 SampleT = TypeVar("SampleT")
 _CONSTRUCTIBLE_BATCH_STATUSES = frozenset(
@@ -148,7 +150,7 @@ class TrajectoryInitialBatch:
     xi0: FloatArray
     depths: FloatArray
     specification_records: tuple[SpecificationRecord, ...]
-    construction_metrics: tuple[SpecificationRecord, ...] = ()
+    construction_metrics: tuple[MetricsRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if self.eta0.dtype != np.float64 or self.xi0.dtype != np.float64:
@@ -201,7 +203,7 @@ def _jonswap_initial_metrics(
     significant_height: float,
     length: float,
     gravity: float,
-) -> SpecificationRecord:
+) -> MetricsRecord:
     """Return elementary diagnostics of one constructed random-sea state."""
 
     eta_rms = float(np.sqrt(np.mean((eta - np.mean(eta)) ** 2)))
@@ -269,7 +271,7 @@ def resolved_band_for_contract(
 def _require_assignments(
     assignments: Sequence[AttemptAssignment],
 ) -> tuple[AttemptAssignment, ...]:
-    if not jax.config.x64_enabled:
+    if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("trajectory constructors require JAX float64 mode")
     values = tuple(assignments)
     if not values:

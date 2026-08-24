@@ -50,7 +50,10 @@ from solver.gen_data.pipeline.quota_driver import (
     canonical_json_sha256,
     scan_quota_run,
 )
-from solver.gen_data.jonswap_horizon_executor import policy_record
+from solver.gen_data.jonswap_horizon_executor import (
+    BUCKETING_CONFIG_KEY,
+    BucketingConfig,
+)
 from solver.gen_data.stokes_static_pipeline import PAPER_STATIC_STOKES_CONTRACT
 from solver.gen_data.trajectory_quota_executor import TrajectoryExecutionConfig
 
@@ -389,12 +392,12 @@ def _validate_committed_proposal_contract(
     if not _same_json_value(proposal_run_spec, spec.to_json_record()):
         raise ValueError("proposal run_spec differs from its completion summary")
     if family == "jonswap_tma":
-        configured_policy = _required_mapping(
+        configured_config = _required_mapping(
             spec.configuration,
-            "jonswap_horizon_bucketing",
+            BUCKETING_CONFIG_KEY,
         )
         solver_batch_size = _required_integer(
-            configured_policy,
+            configured_config,
             "solver_batch_size",
             minimum=1,
         )
@@ -406,25 +409,25 @@ def _validate_committed_proposal_contract(
             "jonswap_tma"
         ).jonswap_adjustment
         assert adjustment_policy is not None
-        expected_policy = policy_record(
+        expected_config = BucketingConfig(
             outer_proposal_size=spec.batch_size,
             solver_batch_size=solver_batch_size,
-            adjustment_policy=adjustment_policy,
+            adjustment=adjustment_policy,
         )
-        if not _same_json_value(configured_policy, expected_policy):
+        if not expected_config.matches_record(configured_config):
             raise ValueError(
-                "JONSWAP run does not use the exact current bucketing policy"
+                "JONSWAP run does not use the exact current bucketing config"
             )
-        proposal_policy = _required_mapping(
+        proposal_config = _required_mapping(
             additional,
-            "jonswap_horizon_bucketing",
+            BUCKETING_CONFIG_KEY,
         )
-        if not _same_json_value(proposal_policy, configured_policy):
+        if not _same_json_value(proposal_config, configured_config):
             raise ValueError(
-                "JONSWAP proposal adjustment policy differs from its run spec"
+                "JONSWAP proposal bucketing config differs from its run spec"
             )
         adjustment = _required_mapping(
-            configured_policy,
+            configured_config,
             "nonlinear_adjustment",
         )
         if not _same_json_value(
@@ -432,7 +435,7 @@ def _validate_committed_proposal_contract(
             expected_execution["jonswap_adjustment"],
         ):
             raise ValueError(
-                "JONSWAP bucketing policy differs from the paper adjustment contract"
+                "JONSWAP bucketing config differs from the paper adjustment contract"
             )
 
 

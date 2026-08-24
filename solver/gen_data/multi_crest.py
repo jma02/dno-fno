@@ -4,6 +4,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -12,6 +13,7 @@ from ..solvers.dno_series_jax import build_grid, dno_series_eval
 from ..tanaka_ICs.modified_tanaka import (
     DEFAULT_OUTER_ITERATIONS,
     DEFAULT_QC_UPPER,
+    ModifiedTanakaParams,
     make_default_tanaka_template,
     solve_modified_tanaka_batched,
 )
@@ -26,14 +28,6 @@ class CrestSpec:
     amplitude: float
     center: float
     direction: int
-
-
-def serialize_specs(specs: list[CrestSpec]) -> list[dict[str, float | int]]:
-    return [asdict(spec) for spec in specs]
-
-
-def serialize_case_specs(case_specs: list[list[CrestSpec]]) -> list[list[dict[str, float | int]]]:
-    return [serialize_specs(specs) for specs in case_specs]
 
 
 def periodic_distance(a: float, b: float, length: float) -> float:
@@ -304,6 +298,8 @@ def save_multi_crest_initial_condition(
 ) -> Path:
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    specs = cast(list[CrestSpec], payload["specs"])
+    tanaka_params = cast(ModifiedTanakaParams, payload["tanaka_params"])
 
     np.savez(
         output,
@@ -319,8 +315,8 @@ def save_multi_crest_initial_condition(
         component_qc=np.asarray(payload["component_qc"]),
         component_froude=np.asarray(payload["component_froude"]),
         component_speed=np.asarray(payload["component_speed"]),
-        spec_json=np.asarray(json.dumps(serialize_specs(payload["specs"]))),
-        tanaka_params_json=np.asarray(json.dumps(asdict(payload["tanaka_params"]))),
+        spec_json=np.asarray(json.dumps([asdict(spec) for spec in specs])),
+        tanaka_params_json=np.asarray(json.dumps(asdict(tanaka_params))),
         nx=np.asarray(payload["nx"]),
         length=np.asarray(payload["length"]),
         depth=np.asarray(payload["depth"]),
@@ -332,13 +328,12 @@ def save_multi_crest_initial_condition(
 
 
 def _load_specs(spec_json: str | None, spec_file: str | None) -> list[CrestSpec]:
-    if spec_json is None and spec_file is None:
-        raise ValueError("Provide --spec_json or --spec_file.")
-
     if spec_json is not None:
         raw_specs = json.loads(spec_json)
-    else:
+    elif spec_file is not None:
         raw_specs = json.loads(Path(spec_file).expanduser().read_text(encoding="utf-8"))
+    else:
+        raise ValueError("Provide --spec_json or --spec_file.")
 
     return [CrestSpec(**raw_spec) for raw_spec in raw_specs]
 
