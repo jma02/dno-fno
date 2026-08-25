@@ -103,7 +103,7 @@ def save_checkpoint(
         async_manager=async_manager,
         orbax_checkpointer=ocp.PyTreeCheckpointer(),
     )
-    # Do not advertise an epoch until its Orbax payload is durable.  Keeping the
+    # Do not advertise an epoch until its Orbax files have been written. Keeping
     # previous payload and restoring the exact metadata epoch makes interruption
     # during this wait recoverable instead of silently mixing epochs.
     async_manager.wait_previous_save()

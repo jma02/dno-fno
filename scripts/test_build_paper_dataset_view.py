@@ -12,7 +12,7 @@ import unittest
 
 import numpy as np
 
-from scripts import run_paper_dataset_jonswap_bucketed as bucketed
+from scripts import generate_paper_dataset_jonswap as bucketed
 from scripts.build_paper_dataset_view import (
     CombinedDatasetPlan,
     CompletedChunk,
@@ -37,7 +37,7 @@ from scripts.build_paper_dataset_view import (
     load_completed_chunk,
     validate_combined_plan,
 )
-from scripts.run_paper_dataset_quota import (
+from scripts.generate_paper_dataset import (
     GenerationRequest,
     build_run_spec,
     source_hashes,
@@ -53,7 +53,7 @@ from solver.gen_data.pipeline.manifest import (
     TRAJECTORY_MAP_SCHEMA_VERSION,
     DatasetViewPaths,
 )
-from solver.gen_data.pipeline.quota_driver import canonical_json_sha256
+from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 
 def _chunk(
@@ -662,7 +662,7 @@ class CombinedPaperDatasetViewTests(unittest.TestCase):
             changed_run = json.loads(json.dumps(run_record))
             changed_run["configuration"][  # type: ignore[index]
                 "jonswap_horizon_bucketing"
-            ]["sort_rule"] = "different"  # type: ignore[index]
+            ]["outer_proposal_size"] = 2  # type: ignore[index]
             changed_configuration = changed_run["configuration"]
             assert isinstance(changed_configuration, dict)
             changed_spec = replace(

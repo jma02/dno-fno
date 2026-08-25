@@ -1,4 +1,4 @@
-"""CPU tests for accepted-quota rollout-family execution."""
+"""CPU tests for rollout-family batch execution."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
     sample_benjamin_feir_case,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
@@ -30,7 +30,7 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     BatchStatus,
@@ -40,15 +40,16 @@ from solver.gen_data.pipeline.archive import (  # noqa: E402
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
+    paper_dataset_revision_id,
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
-    AcceptedQuotaRunSpec,
-    run_accepted_quotas,
-    scan_quota_run,
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
+    DatasetGenerationSpec,
+    generate_valid_cases,
+    scan_dataset_generation,
 )
 from solver.gen_data.pipeline.refinement import (  # noqa: E402
     PAPER_BENJAMIN_FEIR_GL2_CONTRACT,
@@ -60,9 +61,9 @@ from solver.gen_data.pipeline.refinement import (  # noqa: E402
 from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
     StoredTimePolicy,
 )
-from solver.gen_data.multi_crest import CrestSpec  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLE_CELL_IDS,
+    TanakaCrest,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     JonswapInitialStateDomainError,
@@ -72,13 +73,13 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     persist_sampled_trajectory_proposal,
     sample_tanaka_trajectory_cases,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TRAJECTORY_REQUIRED_CHECKS,
     DeclaredConstructionFailure,
     DeclaredTrajectoryFatalError,
     TrajectoryExecutionConfig,
     TrajectoryHorizonPolicy,
-    TrajectoryQuotaExecutor,
+    TrajectoryBatchExecutor,
     _benjamin_feir_time_grid,
     _jonswap_time_grid,
     classify_jonswap_construction_failure,
@@ -149,8 +150,8 @@ def _run_spec(
     targets: tuple[int, ...],
     batch_size: int = 2,
     execution_record: dict[str, object] | None = None,
-) -> AcceptedQuotaRunSpec:
-    return AcceptedQuotaRunSpec(
+) -> DatasetGenerationSpec:
+    return DatasetGenerationSpec(
         root=root,
         family_name=execution.family,
         family_id={
@@ -158,11 +159,18 @@ def _run_spec(
             "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
             "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
         }[execution.family],
-        revision_id=3 if execution.family == "tanaka" else 1,
+        revision_id=paper_dataset_revision_id(
+            {
+                "tanaka": PhysicalFamilyId.TANAKA,
+                "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
+                "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
+            }[execution.family]
+        ),
         split_id=SplitId.TEST,
         stream_id=13,
-        quotas=tuple(
-            CellQuota(cell_id, target) for cell_id, target in zip(cell_ids, targets)
+        case_targets=tuple(
+            ValidCaseTarget(cell_id, target)
+            for cell_id, target in zip(cell_ids, targets)
         ),
         cell_codes={cell_id: index for index, cell_id in enumerate(cell_ids)},
         batch_size=batch_size,
@@ -209,7 +217,7 @@ def _tanaka_failure_component(
 
 
 class MarkerConstructor:
-    """Construct constant markers after checking the durable proposal."""
+    """Construct constant markers after checking the saved proposal."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, ...]] = []
@@ -282,8 +290,7 @@ class JonswapRejectingConstructor:
             position
             for position, original_index in enumerate(selected)
             if (
-                proposed.sampled.assignments[original_index].case_key.attempt_index
-                == 0
+                proposed.sampled.assignments[original_index].case_key.attempt_index == 0
             )
         )
         if invalid_positions:
@@ -378,7 +385,7 @@ def _declared_classifier(
     )
 
 
-class TrajectoryQuotaExecutorTests(unittest.TestCase):
+class TrajectoryBatchExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -388,7 +395,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -396,17 +403,15 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             targets=(2,),
         )
         constructor = MarkerConstructor()
-        arms = FastArmExecutor(
-            incomplete_production_markers=frozenset({1})
-        )
-        executor = TrajectoryQuotaExecutor(
+        arms = FastArmExecutor(incomplete_production_markers=frozenset({1}))
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             constructor=constructor,
             arm_executor=arms,
         )
 
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
 
         self.assertTrue(state.complete)
         self.assertEqual(dict(state.accepted_by_cell), {cell_id: 2})
@@ -441,7 +446,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
 
     def test_declared_tanaka_failure_rejects_only_named_case(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELLS[0].cell_id
+        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root / "declared",
             execution,
@@ -483,14 +488,14 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 selected_local_indices=selected,
             )
 
-        executor = TrajectoryQuotaExecutor(
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             constructor=declared_constructor,
             construction_failure_classifier=_declared_classifier,
             arm_executor=FastArmExecutor(),
         )
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
 
         self.assertTrue(state.complete)
         self.assertEqual(state.next_attempt_index, 3)
@@ -534,7 +539,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             del proposed, selected_local_indices
             raise ValueError("unclassified constructor bug")
 
-        unexpected = TrajectoryQuotaExecutor(
+        unexpected = TrajectoryBatchExecutor(
             run_spec=unexpected_spec,
             execution=execution,
             constructor=unexpected_constructor,
@@ -542,8 +547,8 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             arm_executor=FastArmExecutor(),
         )
         with self.assertRaisesRegex(ValueError, "unclassified"):
-            run_accepted_quotas(unexpected_spec, unexpected)
-        pending = scan_quota_run(unexpected_spec).pending
+            generate_valid_cases(unexpected_spec, unexpected)
+        pending = scan_dataset_generation(unexpected_spec).pending
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.PROPOSED)
@@ -553,7 +558,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("jonswap_tma")
-        cell_id = "shallow__gamma_1__right_0p5"
+        cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[9]
 
         def run(root: Path) -> tuple[object, JonswapRejectingConstructor]:
             spec = _run_spec(
@@ -563,9 +568,9 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 targets=(2,),
             )
             constructor = JonswapRejectingConstructor()
-            state = run_accepted_quotas(
+            state = generate_valid_cases(
                 spec,
-                TrajectoryQuotaExecutor(
+                TrajectoryBatchExecutor(
                     run_spec=spec,
                     execution=execution,
                     constructor=constructor,
@@ -578,9 +583,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         self.assertTrue(state.complete)
         self.assertEqual(state.next_attempt_index, 3)
         self.assertEqual(constructor.calls, [(0, 1), (1,), (0,)])
-        first_result = json.loads(
-            state.committed[0].result.read_text(encoding="utf-8")
-        )
+        first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
         self.assertEqual(
             [case["accepted"] for case in first_result["cases"]],
             [False, True],
@@ -591,9 +594,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             | QualityReason.NONFINITE_STATE
             | QualityReason.BOTTOM_CLEARANCE
         )
-        expected_failed = (
-            QualityReason.OUTSIDE_SUPPORT | QualityReason.BOTTOM_CLEARANCE
-        )
+        expected_failed = QualityReason.OUTSIDE_SUPPORT | QualityReason.BOTTOM_CLEARANCE
         self.assertEqual(rejected["required_bits"], int(TRAJECTORY_REQUIRED_CHECKS))
         self.assertEqual(rejected["evaluated_bits"], int(expected_evaluated))
         self.assertEqual(rejected["failed_bits"], int(expected_failed))
@@ -753,7 +754,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
 
     def test_malformed_tanaka_diagnostic_remains_pending(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELLS[0].cell_id
+        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -779,15 +780,15 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 }
             )
 
-        executor = TrajectoryQuotaExecutor(
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             constructor=malformed_constructor,
             arm_executor=FastArmExecutor(),
         )
         with self.assertRaisesRegex(ValueError, "speed fields"):
-            run_accepted_quotas(spec, executor)
-        pending = scan_quota_run(spec).pending
+            generate_valid_cases(spec, executor)
+        pending = scan_dataset_generation(spec).pending
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.PROPOSED)
@@ -802,7 +803,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                 speed_per_crest=np.asarray((1.0,), dtype=np.float64),
                 case_h_ref=np.asarray((0.2,), dtype=np.float64),
-                flat_specs=[CrestSpec(0.2, 0.3, 1)],
+                flat_specs=[TanakaCrest(0.2, 0.3, 1)],
                 crest_case_ids=np.asarray((0,), dtype=np.int32),
                 components_within_case=(0,),
             )
@@ -824,7 +825,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                     x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                     speed_per_crest=np.asarray((speed,), dtype=np.float64),
                     case_h_ref=np.asarray((0.2,), dtype=np.float64),
-                    flat_specs=[CrestSpec(0.2, 0.3, 1)],
+                    flat_specs=[TanakaCrest(0.2, 0.3, 1)],
                     crest_case_ids=np.asarray((0,), dtype=np.int32),
                     components_within_case=(0,),
                 )
@@ -840,17 +841,15 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                 speed_per_crest=np.asarray((1.0,), dtype=np.float64),
                 case_h_ref=np.asarray((0.2,), dtype=np.float64),
-                flat_specs=[CrestSpec(0.2, 0.3, 1)],
+                flat_specs=[TanakaCrest(0.2, 0.3, 1)],
                 crest_case_ids=np.asarray((0,), dtype=np.int32),
                 components_within_case=(0,),
             )
-        self.assertIsNone(
-            classify_tanaka_construction_failure(caught.exception)
-        )
+        self.assertIsNone(classify_tanaka_construction_failure(caught.exception))
 
     def test_two_round_tanaka_rejections_archive_original_indices(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELLS[0].cell_id
+        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -888,9 +887,9 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 selected_local_indices=selected,
             )
 
-        state = run_accepted_quotas(
+        state = generate_valid_cases(
             spec,
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 constructor=rejecting_constructor,
@@ -925,7 +924,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
 
     def test_explicit_fatal_error_writes_terminal_sidecar(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -946,9 +945,9 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 telemetry={"test_code": 17},
             )
 
-        state = run_accepted_quotas(
+        state = generate_valid_cases(
             spec,
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 constructor=fatal_constructor,
@@ -970,7 +969,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELLS[0].cell_id
+        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         assignments = tuple(
             AttemptAssignment(
                 case_key=CaseKey(
@@ -1037,8 +1036,8 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
     def test_jonswap_cases_use_distinct_per_case_peak_period_grids(self) -> None:
         execution = _execution("jonswap_tma")
         cell_ids = (
-            JONSWAP_TMA_SAMPLE_CELLS[9].cell_id,
-            JONSWAP_TMA_SAMPLE_CELLS[18].cell_id,
+            JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            JONSWAP_TMA_SAMPLE_CELL_IDS[18],
         )
         spec = _run_spec(
             self.root,
@@ -1047,12 +1046,12 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             targets=(1, 1),
         )
         arms = FastArmExecutor()
-        executor = TrajectoryQuotaExecutor(
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             arm_executor=arms,
         )
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
         self.assertTrue(state.complete)
 
         with np.load(state.committed[0].proposal, allow_pickle=False) as proposal:
@@ -1104,8 +1103,8 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
     def test_benjamin_feir_cases_use_distinct_carrier_period_grids(self) -> None:
         execution = _execution("benjamin_feir")
         cell_ids = (
-            BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id,
-            BENJAMIN_FEIR_SAMPLE_CELLS[-1].cell_id,
+            BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
+            BENJAMIN_FEIR_SAMPLE_CELL_IDS[-1],
         )
         spec = _run_spec(
             self.root,
@@ -1114,13 +1113,13 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             targets=(1, 1),
         )
         arms = FastArmExecutor()
-        executor = TrajectoryQuotaExecutor(
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             constructor=MarkerConstructor(),
             arm_executor=arms,
         )
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
         self.assertTrue(state.complete)
 
         with np.load(state.committed[0].proposal, allow_pickle=False) as proposal:
@@ -1129,8 +1128,10 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         expected_terminal_times = []
         for record in records:
             carrier_wavenumber = float(record["carrier_wavenumber"])
-            intended = 2.0 * math.pi / math.sqrt(
-                execution.numerical.gravity * carrier_wavenumber
+            intended = (
+                2.0
+                * math.pi
+                / math.sqrt(execution.numerical.gravity * carrier_wavenumber)
             )
             expected_terminal_times.append(
                 math.floor(intended / execution.numerical.saved_dt)
@@ -1166,7 +1167,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             )
         )
         with mock.patch(
-            "solver.gen_data.trajectory_quota_executor.finite_depth_angular_frequency",
+            "solver.gen_data.trajectory_batch_executor.finite_depth_angular_frequency",
             return_value=np.asarray([angular_frequency], dtype=np.float64),
         ):
             grid = _jonswap_time_grid(sample, execution)  # type: ignore[arg-type]
@@ -1186,25 +1187,27 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
                 AttemptAssignment(
                     case_key=CaseKey(
                         family_id=3,
-                        revision_id=3,
+                        revision_id=4,
                         split_id=SplitId.TEST,
                         stream_id=19,
                         attempt_index=index,
                     ),
-                    cell_id=cell.cell_id,
+                    cell_id=cell_id,
                 )
             )
-            for index, cell in enumerate(
+            for index, cell_id in enumerate(
                 (
-                    BENJAMIN_FEIR_SAMPLE_CELLS[0],
-                    BENJAMIN_FEIR_SAMPLE_CELLS[-1],
+                    BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
+                    BENJAMIN_FEIR_SAMPLE_CELL_IDS[-1],
                 )
             )
         )
         for sample in samples:
             grid = _benjamin_feir_time_grid(sample, execution)
-            carrier_period = 2.0 * math.pi / math.sqrt(
-                execution.numerical.gravity * sample.carrier_wavenumber
+            carrier_period = (
+                2.0
+                * math.pi
+                / math.sqrt(execution.numerical.gravity * sample.carrier_wavenumber)
             )
             intended = 100.0 * carrier_period
             self.assertEqual(grid.intended_terminal_time, intended)
@@ -1226,7 +1229,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
 
     def test_proposed_and_shard_written_batches_resume_exactly(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELLS[1].cell_id
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[1]
 
         proposal_spec = _run_spec(
             self.root / "proposal",
@@ -1245,21 +1248,21 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             MarkerConstructor.assert_proposed(proposed)
             raise InjectedInterruption("after proposal")
 
-        interrupted = TrajectoryQuotaExecutor(
+        interrupted = TrajectoryBatchExecutor(
             run_spec=proposal_spec,
             execution=execution,
             constructor=interrupt_constructor,
             arm_executor=FastArmExecutor(),
         )
         with self.assertRaisesRegex(InjectedInterruption, "after proposal"):
-            run_accepted_quotas(proposal_spec, interrupted)
-        proposal_pending = scan_quota_run(proposal_spec).pending
+            generate_valid_cases(proposal_spec, interrupted)
+        proposal_pending = scan_dataset_generation(proposal_spec).pending
         self.assertIsNotNone(proposal_pending)
         assert proposal_pending is not None
         proposal_hash = file_sha256(proposal_pending.paths.proposal)
-        proposal_state = run_accepted_quotas(
+        proposal_state = generate_valid_cases(
             proposal_spec,
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=proposal_spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
@@ -1279,7 +1282,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             targets=(1,),
             batch_size=1,
         )
-        shard_executor = TrajectoryQuotaExecutor(
+        shard_executor = TrajectoryBatchExecutor(
             run_spec=shard_spec,
             execution=execution,
             constructor=MarkerConstructor(),
@@ -1292,19 +1295,19 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(InjectedInterruption, "after shard"),
         ):
-            run_accepted_quotas(shard_spec, shard_executor)
-        shard_pending = scan_quota_run(shard_spec).pending
+            generate_valid_cases(shard_spec, shard_executor)
+        shard_pending = scan_dataset_generation(shard_spec).pending
         self.assertIsNotNone(shard_pending)
         assert shard_pending is not None
         self.assertEqual(shard_pending.status, BatchStatus.SHARD_WRITTEN)
         shard_hash = file_sha256(shard_pending.paths.shard)
-        shard_state = run_accepted_quotas(shard_spec, shard_executor)
+        shard_state = generate_valid_cases(shard_spec, shard_executor)
         self.assertTrue(shard_state.complete)
         self.assertEqual(file_sha256(shard_pending.paths.shard), shard_hash)
 
     def test_execution_configuration_must_match_fingerprint_record(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         changed_record = execution.to_json_record()
         changed_record["horizon"] = {
             **changed_record["horizon"],
@@ -1319,7 +1322,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             execution_record=changed_record,
         )
         with self.assertRaisesRegex(ValueError, "configuration differs"):
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
@@ -1365,18 +1368,14 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         self.assertEqual(tanaka.hou_li_coefficient, 36.0)
         self.assertEqual(tanaka.hou_li_power, 36)
 
-        benjamin_feir = TrajectoryExecutionConfig.paper(
-            "benjamin_feir"
-        ).numerical
+        benjamin_feir = TrajectoryExecutionConfig.paper("benjamin_feir").numerical
         self.assertEqual(benjamin_feir, PAPER_BENJAMIN_FEIR_GL2_CONTRACT)
         self.assertEqual(benjamin_feir.nx, 1024)
         self.assertIsNone(benjamin_feir.target_nx)
         self.assertEqual(benjamin_feir.maximum_wavenumber, 256.0)
         self.assertEqual(benjamin_feir.target_definition.nx, 1024)
 
-        jonswap_numerical = TrajectoryExecutionConfig.paper(
-            "jonswap_tma"
-        ).numerical
+        jonswap_numerical = TrajectoryExecutionConfig.paper("jonswap_tma").numerical
         self.assertEqual(jonswap_numerical, PAPER_JONSWAP_GL2_CONTRACT)
         self.assertEqual(jonswap_numerical.nx, 2048)
         self.assertEqual(jonswap_numerical.target_nx, 1024)
@@ -1403,20 +1402,16 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             jonswap.jonswap_adjustment.to_json_record(),  # type: ignore[union-attr]
         )
         self.assertIsNone(
-            TrajectoryExecutionConfig.paper(
-                "benjamin_feir"
-            ).jonswap_adjustment
+            TrajectoryExecutionConfig.paper("benjamin_feir").jonswap_adjustment
         )
         self.assertNotIn(
             "jonswap_adjustment",
-            TrajectoryExecutionConfig.paper(
-                "benjamin_feir"
-            ).to_json_record(),
+            TrajectoryExecutionConfig.paper("benjamin_feir").to_json_record(),
         )
 
     def test_paper_role_rejects_injected_numerical_hooks(self) -> None:
         execution = TrajectoryExecutionConfig.paper("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -1424,18 +1419,18 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
             targets=(1,),
             batch_size=1,
         )
-        TrajectoryQuotaExecutor(
+        TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
         )
         with self.assertRaisesRegex(ValueError, "production constructor"):
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
             )
         with self.assertRaisesRegex(ValueError, "production constructor"):
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=FastArmExecutor(),
@@ -1443,7 +1438,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
 
     def test_paper_jonswap_requires_adjustment_executor(self) -> None:
         execution = TrajectoryExecutionConfig.paper("jonswap_tma")
-        cell_id = JONSWAP_TMA_SAMPLE_CELLS[0].cell_id
+        cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
@@ -1453,7 +1448,7 @@ class TrajectoryQuotaExecutorTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "nonlinear-adjustment executor"):
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
             )

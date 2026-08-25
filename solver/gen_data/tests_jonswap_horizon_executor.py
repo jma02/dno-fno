@@ -16,25 +16,26 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import numpy as np  # noqa: E402
 
-from scripts import run_paper_dataset_jonswap_bucketed as bucketed  # noqa: E402
-from scripts import run_paper_dataset_quota as base  # noqa: E402
+from scripts import generate_paper_dataset_jonswap as bucketed  # noqa: E402
+from scripts import generate_paper_dataset as base  # noqa: E402
 from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
     BUCKETING_CONFIG_KEY,
     BucketingConfig,
-    HorizonBucketedJonswapQuotaExecutor,
+    HorizonBucketedJonswapBatchExecutor,
     horizon_sorted_groups,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLING_REVISION_V4,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
-    AcceptedQuotaRunSpec,
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
+    DatasetGenerationSpec,
 )
 from solver.gen_data.pipeline.refinement import (  # noqa: E402
     InternalTrajectoryTelemetry,
@@ -49,7 +50,7 @@ from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     TrajectoryInitialBatch,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     CaseTimeGrid,
     JONSWAP_ADJUSTMENT_FORMULA,
     PAPER_JONSWAP_ADJUSTMENT_POLICY,
@@ -102,16 +103,16 @@ def _run_spec(
     *,
     outer_size: int,
     solver_size: int,
-) -> AcceptedQuotaRunSpec:
-    cell_id = JONSWAP_TMA_SAMPLE_CELLS[0].cell_id
-    return AcceptedQuotaRunSpec(
+) -> DatasetGenerationSpec:
+    cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[0]
+    return DatasetGenerationSpec(
         root=root,
         family_name="jonswap_tma",
         family_id=PhysicalFamilyId.JONSWAP_TMA,
-        revision_id=1,
+        revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
         split_id=SplitId.TEST,
         stream_id=13,
-        quotas=(CellQuota(cell_id, outer_size),),
+        case_targets=(ValidCaseTarget(cell_id, outer_size),),
         cell_codes={cell_id: 0},
         batch_size=outer_size,
         first_attempt_index=0,
@@ -158,9 +159,7 @@ class RecordingArmExecutor:
         batch_size, internal_nx = eta0.shape
         self.calls.append((batch_size, saved_times.size))
         self.initial_eta.append(np.asarray(eta0, dtype=np.float64).copy())
-        self.saved_times.append(
-            np.asarray(saved_times, dtype=np.float64).copy()
-        )
+        self.saved_times.append(np.asarray(saved_times, dtype=np.float64).copy())
         saved_count = saved_times.size
         delivered_nx = contract.delivered_nx
         if delivered_nx == internal_nx:
@@ -314,7 +313,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             )
             arms = RecordingArmExecutor()
             adjustment_arms = RecordingAdjustmentArmExecutor()
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=arms,
@@ -367,12 +366,10 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
     def test_mixed_burn_horizons_use_each_cases_own_endpoint(self) -> None:
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), execution, outer_size=3, solver_size=3
-            )
+            spec = _run_spec(Path(directory), execution, outer_size=3, solver_size=3)
             production_arms = RecordingArmExecutor()
             adjustment_arms = RecordingAdjustmentArmExecutor()
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=production_arms,
@@ -425,11 +422,9 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
         high_mode = 0.001 * np.cos(600.0 * x)
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), execution, outer_size=1, solver_size=1
-            )
+            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
             production_arms = RecordingArmExecutor(hamiltonian_drift=0.0)
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=production_arms,
@@ -457,14 +452,12 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
     def test_burn_failure_skips_production_and_restores_proposal_order(self) -> None:
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), execution, outer_size=5, solver_size=2
-            )
+            spec = _run_spec(Path(directory), execution, outer_size=5, solver_size=2)
             production_arms = RecordingArmExecutor()
             adjustment_arms = RecordingAdjustmentArmExecutor(
                 failing_markers=(0.02, 0.05)
             )
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=production_arms,
@@ -498,23 +491,21 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             outcomes[1].metrics["production_status"],
             "not_run_adjustment_failed",
         )
-        self.assertTrue(
-            outcomes[1].decision.failed & QualityReason.GL2_STAGE_RESIDUAL
-        )
+        self.assertTrue(outcomes[1].decision.failed & QualityReason.GL2_STAGE_RESIDUAL)
         self.assertEqual(outcomes[1].metrics["construction_marker"], 1)
         self.assertEqual(outcomes[4].metrics["construction_marker"], 4)
-        self.assertEqual(sum(batch.shape[0] for batch in production_arms.initial_eta), 3)
+        self.assertEqual(
+            sum(batch.shape[0] for batch in production_arms.initial_eta), 3
+        )
 
     def test_burn_hamiltonian_is_not_an_acceptance_check_and_production_is_unramped(
         self,
     ) -> None:
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), execution, outer_size=1, solver_size=1
-            )
+            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
             production_arms = RecordingArmExecutor()
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=production_arms,
@@ -545,10 +536,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         )
         execution = _execution(contract)
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), execution, outer_size=1, solver_size=1
-            )
-            executor = HorizonBucketedJonswapQuotaExecutor(
+            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
+            executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
                 arm_executor=RecordingArmExecutor(hamiltonian_drift=1.0e-2),
@@ -565,12 +554,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
 
         self.assertFalse(outcome.decision.accepted)
         self.assertIsNone(outcome.rows)
-        self.assertTrue(
-            outcome.decision.failed & QualityReason.HAMILTONIAN_DRIFT
-        )
-        self.assertTrue(
-            outcome.decision.failed & QualityReason.INCOMPLETE_TRAJECTORY
-        )
+        self.assertTrue(outcome.decision.failed & QualityReason.HAMILTONIAN_DRIFT)
+        self.assertTrue(outcome.decision.failed & QualityReason.INCOMPLETE_TRAJECTORY)
         self.assertTrue(outcome.metrics["nonlinear_adjustment_accepted"])
         self.assertEqual(outcome.metrics["production_status"], "completed")
         self.assertAlmostEqual(
@@ -606,16 +591,13 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             revised.configuration["source_sha256"]  # type: ignore[arg-type]
         )
         self.assertEqual(
-            {
-                path: revised_sources[path]
-                for path in baseline_sources
-            },
+            {path: revised_sources[path] for path in baseline_sources},
             baseline_sources,
         )
         self.assertEqual(
             set(revised_sources).difference(baseline_sources),
             {
-                "scripts/run_paper_dataset_jonswap_bucketed.py",
+                "scripts/generate_paper_dataset_jonswap.py",
                 "solver/gen_data/jonswap_horizon_executor.py",
             },
         )
@@ -668,7 +650,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 configuration=changed_configuration,
             ).config_fingerprint,
         )
-        executor = HorizonBucketedJonswapQuotaExecutor(
+        executor = HorizonBucketedJonswapBatchExecutor(
             run_spec=revised,
             execution=TrajectoryExecutionConfig.paper("jonswap_tma"),
         )
@@ -729,9 +711,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
     def test_executor_rejects_adjustment_policy_mismatch(self) -> None:
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
-            valid = _run_spec(
-                Path(directory), execution, outer_size=1, solver_size=1
-            )
+            valid = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
             configuration = valid.to_json_record()["configuration"]
             assert isinstance(configuration, dict)
             config = configuration[BUCKETING_CONFIG_KEY]
@@ -739,14 +719,14 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             adjustment = config["nonlinear_adjustment"]
             assert isinstance(adjustment, dict)
             adjustment["formula"] = "different"
-            invalid = AcceptedQuotaRunSpec(
+            invalid = DatasetGenerationSpec(
                 root=valid.root,
                 family_name=valid.family_name,
                 family_id=valid.family_id,
                 revision_id=valid.revision_id,
                 split_id=valid.split_id,
                 stream_id=valid.stream_id,
-                quotas=valid.quotas,
+                case_targets=valid.case_targets,
                 cell_codes=valid.cell_codes,
                 batch_size=valid.batch_size,
                 first_attempt_index=valid.first_attempt_index,
@@ -757,7 +737,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "config is inconsistent"):
-                HorizonBucketedJonswapQuotaExecutor(
+                HorizonBucketedJonswapBatchExecutor(
                     run_spec=invalid,
                     execution=execution,
                     arm_executor=RecordingArmExecutor(),

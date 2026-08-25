@@ -308,7 +308,7 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
     def test_default_timeouts_exceed_observed_successful_batch_durations(self) -> None:
         args = parse_args([])
 
-        # Revision-4 has a durable successful 4.218-hour transaction, while
+        # Revision 4 has a successful 4.218-hour batch recorded on disk, while
         # the longest comparable Tanaka transaction observed is 2.370 hours.
         self.assertEqual(args.jonswap_stale_seconds, 6.0 * 60.0 * 60.0)
         self.assertGreater(args.jonswap_stale_seconds, 4.218 * 60.0 * 60.0)
@@ -538,11 +538,11 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
         self._write_json(summary_path, summary)
 
     def _canonical_final_fixture(self) -> tuple[Path, dict[str, object]]:
-        from scripts import run_paper_dataset_quota as quota_module
+        from scripts import generate_paper_dataset as generation_module
         from solver.gen_data.stokes_static_pipeline import (
             PAPER_STATIC_STOKES_CONTRACT,
         )
-        from solver.gen_data.trajectory_quota_executor import (
+        from solver.gen_data.trajectory_batch_executor import (
             TrajectoryExecutionConfig,
         )
 
@@ -553,7 +553,7 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
         output_root = summary_path.parent
         output_root.mkdir(parents=True, exist_ok=True)
         plans = watchdog_module._final_chunk_plans(self.checkout)
-        dependency_environment = quota_module.dependency_environment()
+        dependency_environment = generation_module.dependency_environment()
         dependency_fingerprint = watchdog_module._canonical_json_sha256(
             dependency_environment
         )
@@ -562,7 +562,7 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
             watchdog_module.FINAL_DEPENDENCY_FINGERPRINT,
         )
         family_sources = {
-            family: quota_module.source_hashes(family)
+            family: generation_module.source_hashes(family)
             for family in watchdog_module.FINAL_FAMILY_ORDER
         }
         family_sources["stokes"].update(
@@ -623,7 +623,7 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
 
         for plan in plans:
             execution = copy.deepcopy(current_executions[plan.family])
-            cell_ids = quota_module.FAMILY_CELL_IDS[plan.family]
+            cell_ids = generation_module.FAMILY_CELL_IDS[plan.family]
             before_quotient, before_remainder = divmod(
                 plan.accepted_before, len(cell_ids)
             )
@@ -660,15 +660,12 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
                 configuration["sampler"] = {"maximum_ursell_redraws": 1_000}
             elif plan.family == "benjamin_feir":
                 configuration["sampling_support"] = (
-                    quota_module._benjamin_feir_sampling_support_record()
+                    generation_module._benjamin_feir_sampling_support_record()
                 )
             elif plan.family == "jonswap_tma":
                 configuration["jonswap_horizon_bucketing"] = {
                     "outer_proposal_size": 32,
                     "solver_batch_size": 8,
-                    "sort_rule": "stable_saved_time_count_then_proposal_index",
-                    "commit_order": "durable_proposal_order",
-                    "transaction_rule": ("all_solver_groups_then_one_atomic_commit"),
                     "nonlinear_adjustment": copy.deepcopy(
                         execution["jonswap_adjustment"]
                     ),
@@ -1733,9 +1730,9 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
                     for quota in quotas:
                         assert isinstance(quota, dict)
                         cell_id = quota["cell_id"]
-                        durable = attempted_by_cell[cell_id]
-                        quota["durable_attempted"] = durable
-                        quota["remaining_attempt_capacity"] -= durable
+                        recorded_attempts = attempted_by_cell[cell_id]
+                        quota["durable_attempted"] = recorded_attempts
+                        quota["remaining_attempt_capacity"] -= recorded_attempts
                 elif mutation == "wrong_committed_distribution":
                     initial = resume["initial"]
                     assert isinstance(initial, dict)
@@ -1756,9 +1753,9 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
                     for quota in quotas:
                         assert isinstance(quota, dict)
                         cell_id = quota["cell_id"]
-                        durable = attempted_by_cell[cell_id]
-                        quota["durable_attempted"] = durable
-                        quota["remaining_attempt_capacity"] -= durable
+                        recorded_attempts = attempted_by_cell[cell_id]
+                        quota["durable_attempted"] = recorded_attempts
+                        quota["remaining_attempt_capacity"] -= recorded_attempts
                 else:
                     initial = copy.deepcopy(final_state)
                     committed_batches = initial["committed_batches"]
@@ -1776,10 +1773,10 @@ class DatasetWorkerWatchdogTest(unittest.TestCase):
                     for quota in quotas:
                         assert isinstance(quota, dict)
                         cell_id = quota["cell_id"]
-                        durable = attempted_by_cell[cell_id]
-                        quota["durable_attempted"] = durable
+                        recorded_attempts = attempted_by_cell[cell_id]
+                        quota["durable_attempted"] = recorded_attempts
                         quota["remaining_attempt_capacity"] = (
-                            quota["attempt_ceiling"] - durable
+                            quota["attempt_ceiling"] - recorded_attempts
                         )
                 preflight["resume_state"] = copy.deepcopy(resume["initial"])
                 with self.assertRaises(ValueError):

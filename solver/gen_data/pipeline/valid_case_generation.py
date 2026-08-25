@@ -1,9 +1,8 @@
-"""Durable accepted-quota orchestration for paper-dataset families.
+"""Generate a target number of valid cases for each dataset category.
 
-The numerical executor remains family-specific.  This module owns only the
-outer transaction loop: recover committed counts, replay an interrupted batch,
-schedule replacements in cells whose accepted quota is still short, and stop
-only after every accepted-case quota is met or a terminal failure is present.
+The numerical executor remains family-specific. This module recovers saved
+counts, resumes an interrupted batch, schedules replacements for categories
+that remain short, and stops when every target is met or the run fails.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from solver.gen_data.pipeline.archive import (
 from solver.gen_data.pipeline.production import (
     AttemptAssignment,
     CaseKey,
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
     schedule_attempt_batch,
@@ -46,7 +45,7 @@ _CASE_VECTOR_DTYPES = {
     "stream_id": np.dtype(np.uint32),
     "attempt_index": np.dtype(np.uint64),
 }
-DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE = 4
+DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE = 4
 
 
 def _strict_json_loads(text: str) -> object:
@@ -94,8 +93,8 @@ def _strict_json_copy(
 
 
 @dataclass(frozen=True)
-class AcceptedQuotaRunSpec:
-    """Immutable identity, quota, and configuration of one production run."""
+class DatasetGenerationSpec:
+    """Immutable identity, valid-case targets, and numerical configuration."""
 
     root: Path
     family_name: str
@@ -103,24 +102,24 @@ class AcceptedQuotaRunSpec:
     revision_id: int
     split_id: SplitId
     stream_id: int
-    quotas: tuple[CellQuota, ...]
+    case_targets: tuple[ValidCaseTarget, ...]
     cell_codes: Mapping[str, int]
     batch_size: int
     configuration: Mapping[str, object]
     first_attempt_index: int = 0
     maximum_attempts_per_accepted_case: int = (
-        DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE
+        DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE
     )
     _configuration_json: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         root = Path(self.root)
-        quotas = tuple(self.quotas)
-        if not quotas:
-            raise ValueError("quotas must not be empty")
-        cell_ids = tuple(quota.cell_id for quota in quotas)
+        case_targets = tuple(self.case_targets)
+        if not case_targets:
+            raise ValueError("case_targets must not be empty")
+        cell_ids = tuple(target.cell_id for target in case_targets)
         if len(set(cell_ids)) != len(cell_ids):
-            raise ValueError("quota cell_ids must be unique")
+            raise ValueError("case target cell_ids must be unique")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if (
@@ -163,7 +162,7 @@ class AcceptedQuotaRunSpec:
             attempt_index=self.first_attempt_index,
         )
         maximum_attempt_count = self.maximum_attempts_per_accepted_case * sum(
-            quota.target_accepted for quota in quotas
+            target.case_count for target in case_targets
         )
         if maximum_attempt_count:
             CaseKey(
@@ -178,7 +177,7 @@ class AcceptedQuotaRunSpec:
 
         codes = dict(self.cell_codes)
         if set(codes) != set(cell_ids):
-            raise ValueError("cell_codes must contain exactly the quota cells")
+            raise ValueError("cell_codes must contain exactly the target cells")
         if any(
             isinstance(code, bool) or not isinstance(code, int)
             for code in codes.values()
@@ -190,7 +189,7 @@ class AcceptedQuotaRunSpec:
             raise ValueError("cell codes must be unique")
 
         object.__setattr__(self, "root", root)
-        object.__setattr__(self, "quotas", quotas)
+        object.__setattr__(self, "case_targets", case_targets)
         object.__setattr__(self, "cell_codes", MappingProxyType(codes))
         configuration, configuration_json = _strict_json_copy(self.configuration)
         object.__setattr__(self, "configuration", configuration)
@@ -213,13 +212,14 @@ class AcceptedQuotaRunSpec:
             "batch_size": self.batch_size,
             "quotas": [
                 {
-                    "cell_id": quota.cell_id,
-                    "target_accepted": quota.target_accepted,
+                    "cell_id": target.cell_id,
+                    "target_accepted": target.case_count,
                 }
-                for quota in self.quotas
+                for target in self.case_targets
             ],
             "cell_codes": {
-                quota.cell_id: self.cell_codes[quota.cell_id] for quota in self.quotas
+                target.cell_id: self.cell_codes[target.cell_id]
+                for target in self.case_targets
             },
             "configuration": configuration,
         }
@@ -235,8 +235,8 @@ class AcceptedQuotaRunSpec:
         multiplier = self.maximum_attempts_per_accepted_case
         return MappingProxyType(
             {
-                quota.cell_id: multiplier * quota.target_accepted
-                for quota in self.quotas
+                target.cell_id: multiplier * target.case_count
+                for target in self.case_targets
             }
         )
 
@@ -249,7 +249,7 @@ class AcceptedQuotaRunSpec:
 
 @dataclass(frozen=True)
 class PendingBatch:
-    """A durable nonterminal batch that must be replayed unchanged."""
+    """An incomplete saved batch that must be replayed unchanged."""
 
     batch_id: int
     paths: BatchPaths
@@ -276,8 +276,8 @@ class AttemptLimitFailure:
 
 
 @dataclass(frozen=True)
-class QuotaRunState:
-    """State reconstructed exclusively from validated durable artifacts."""
+class DatasetGenerationState:
+    """Run state reconstructed from validated batch files."""
 
     accepted_by_cell: Mapping[str, int]
     attempted_by_cell: Mapping[str, int]
@@ -326,7 +326,7 @@ def _read_json_object(path: Path) -> dict[str, object]:
 
 
 def _artifact_directories(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
 ) -> tuple[tuple[str, Path], ...]:
     template = BatchPaths.under(
         spec.root,
@@ -342,7 +342,7 @@ def _artifact_directories(
     )
 
 
-def _discover_batch_ids(spec: AcceptedQuotaRunSpec) -> tuple[int, ...]:
+def _discover_batch_ids(spec: DatasetGenerationSpec) -> tuple[int, ...]:
     batch_ids: set[int] = set()
     for artifact_name, directory in _artifact_directories(spec):
         if not directory.exists():
@@ -393,7 +393,7 @@ def _required_case_vector(
 
 
 def _proposal_assignments(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
     paths: BatchPaths,
     *,
     batch_id: int,
@@ -542,7 +542,7 @@ def _accepted_cells(
 
 
 def _expected_assignments(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
     accepted_by_cell: Mapping[str, int],
     attempted_by_cell: Mapping[str, int],
     *,
@@ -550,28 +550,28 @@ def _expected_assignments(
 ) -> tuple[AttemptAssignment, ...]:
     ceilings = spec.attempt_ceiling_by_cell
     over_limit = tuple(
-        quota.cell_id
-        for quota in spec.quotas
-        if attempted_by_cell[quota.cell_id] > ceilings[quota.cell_id]
+        target.cell_id
+        for target in spec.case_targets
+        if attempted_by_cell[target.cell_id] > ceilings[target.cell_id]
     )
     if over_limit:
         raise RuntimeError(
             "attempted-case count exceeds its immutable per-cell ceiling for "
             + ", ".join(over_limit)
         )
-    effective_quotas = tuple(
-        CellQuota(
-            quota.cell_id,
-            accepted_by_cell[quota.cell_id]
+    effective_targets = tuple(
+        ValidCaseTarget(
+            target.cell_id,
+            accepted_by_cell[target.cell_id]
             + min(
-                quota.target_accepted - accepted_by_cell[quota.cell_id],
-                ceilings[quota.cell_id] - attempted_by_cell[quota.cell_id],
+                target.case_count - accepted_by_cell[target.cell_id],
+                ceilings[target.cell_id] - attempted_by_cell[target.cell_id],
             ),
         )
-        for quota in spec.quotas
+        for target in spec.case_targets
     )
     return schedule_attempt_batch(
-        effective_quotas,
+        effective_targets,
         accepted_by_cell,
         family_id=int(spec.family_id),
         revision_id=spec.revision_id,
@@ -586,7 +586,7 @@ def _add_attempts(
     attempted_by_cell: Mapping[str, int],
     assignments: Sequence[AttemptAssignment],
 ) -> dict[str, int]:
-    """Return attempted counts after assigning one durable batch."""
+    """Return attempted counts after assigning one batch."""
 
     updated = dict(attempted_by_cell)
     for assignment in assignments:
@@ -595,7 +595,7 @@ def _add_attempts(
 
 
 def _attempt_limit_failure(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
     accepted_by_cell: Mapping[str, int],
     attempted_by_cell: Mapping[str, int],
     *,
@@ -610,9 +610,9 @@ def _attempt_limit_failure(
         return None
 
     over_limit = tuple(
-        quota.cell_id
-        for quota in spec.quotas
-        if attempted_by_cell[quota.cell_id] > ceilings[quota.cell_id]
+        target.cell_id
+        for target in spec.case_targets
+        if attempted_by_cell[target.cell_id] > ceilings[target.cell_id]
     )
     if over_limit:
         raise RuntimeError(
@@ -621,17 +621,17 @@ def _attempt_limit_failure(
         )
 
     exhausted = tuple(
-        quota.cell_id
-        for quota in spec.quotas
+        target.cell_id
+        for target in spec.case_targets
         if (
-            accepted_by_cell[quota.cell_id] < quota.target_accepted
-            and attempted_by_cell[quota.cell_id] == ceilings[quota.cell_id]
+            accepted_by_cell[target.cell_id] < target.case_count
+            and attempted_by_cell[target.cell_id] == ceilings[target.cell_id]
         )
     )
     if not exhausted:
         return None
 
-    targets = {quota.cell_id: quota.target_accepted for quota in spec.quotas}
+    targets = {target.cell_id: target.case_count for target in spec.case_targets}
     details = "; ".join(
         (
             f"{cell_id}: attempted={attempted_by_cell[cell_id]}, "
@@ -644,17 +644,17 @@ def _attempt_limit_failure(
     return AttemptLimitFailure(
         exhausted_cells=exhausted,
         message=(
-            "per-cell attempted-case ceiling reached before the accepted "
-            f"quota; {details}"
+            "per-cell attempted-case ceiling reached before its valid-case "
+            f"target; {details}"
         ),
     )
 
 
-def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
-    """Validate all run artifacts and reconstruct the next durable action."""
+def scan_dataset_generation(spec: DatasetGenerationSpec) -> DatasetGenerationState:
+    """Validate the saved batches and determine what the run should do next."""
 
-    accepted_by_cell = {quota.cell_id: 0 for quota in spec.quotas}
-    attempted_by_cell = {quota.cell_id: 0 for quota in spec.quotas}
+    accepted_by_cell = {target.cell_id: 0 for target in spec.case_targets}
+    attempted_by_cell = {target.cell_id: 0 for target in spec.case_targets}
     committed: list[BatchPaths] = []
     pending: PendingBatch | None = None
     terminal_failure: BatchPaths | None = None
@@ -663,8 +663,8 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
 
     for position, batch_id in enumerate(batch_ids):
         prefix_complete = all(
-            accepted_by_cell[quota.cell_id] == quota.target_accepted
-            for quota in spec.quotas
+            accepted_by_cell[target.cell_id] == target.case_count
+            for target in spec.case_targets
         )
         prefix_attempt_failure = _attempt_limit_failure(
             spec,
@@ -675,7 +675,7 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
             complete=prefix_complete,
         )
         if prefix_complete:
-            raise RuntimeError("batch artifact exists after quota completion")
+            raise RuntimeError("batch artifact exists after all targets were met")
         if prefix_attempt_failure is not None:
             raise RuntimeError(
                 "batch artifact exists after attempted-case ceiling exhaustion"
@@ -692,7 +692,7 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
             expected_fingerprint=spec.config_fingerprint,
         )
         if inspection.status is BatchStatus.EMPTY:
-            raise RuntimeError("discovered batch has no durable artifacts")
+            raise RuntimeError("discovered batch has no saved files")
 
         assignments = _proposal_assignments(
             spec,
@@ -707,7 +707,7 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
         )
         if assignments != expected:
             raise RuntimeError(
-                "proposal assignments differ from the deterministic quota schedule"
+                "proposal assignments differ from the deterministic case schedule"
             )
         next_attempt_index += len(assignments)
         attempted_by_cell = _add_attempts(
@@ -726,10 +726,11 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
         if inspection.status is BatchStatus.COMMITTED:
             for cell_id in _accepted_cells(paths, assignments):
                 accepted_by_cell[cell_id] += 1
-            for quota in spec.quotas:
-                if accepted_by_cell[quota.cell_id] > quota.target_accepted:
+            for target in spec.case_targets:
+                if accepted_by_cell[target.cell_id] > target.case_count:
                     raise RuntimeError(
-                        f"accepted count exceeds quota for cell {quota.cell_id!r}"
+                        "accepted count exceeds target for cell "
+                        f"{target.cell_id!r}"
                     )
             committed.append(paths)
             continue
@@ -754,8 +755,8 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
         pending is None
         and terminal_failure is None
         and all(
-            accepted_by_cell[quota.cell_id] == quota.target_accepted
-            for quota in spec.quotas
+            accepted_by_cell[target.cell_id] == target.case_count
+            for target in spec.case_targets
         )
     )
     attempt_limit_failure = _attempt_limit_failure(
@@ -766,7 +767,7 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
         terminal_failure=terminal_failure,
         complete=complete,
     )
-    return QuotaRunState(
+    return DatasetGenerationState(
         accepted_by_cell=accepted_by_cell,
         attempted_by_cell=attempted_by_cell,
         next_batch_id=(batch_ids[-1] + 1) if batch_ids else 0,
@@ -779,12 +780,12 @@ def scan_quota_run(spec: AcceptedQuotaRunSpec) -> QuotaRunState:
     )
 
 
-def _lock_path(spec: AcceptedQuotaRunSpec) -> Path:
+def _lock_path(spec: DatasetGenerationSpec) -> Path:
     return spec.root / ".locks" / spec.family_name / f"{spec.split_id.value}.lock"
 
 
 @contextmanager
-def quota_run_lock(spec: AcceptedQuotaRunSpec) -> Iterator[None]:
+def dataset_generation_lock(spec: DatasetGenerationSpec) -> Iterator[None]:
     """Acquire a nonblocking single-writer lock for one family and split."""
 
     path = _lock_path(spec)
@@ -794,7 +795,9 @@ def quota_run_lock(spec: AcceptedQuotaRunSpec) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeError(f"another accepted-quota writer holds {path}") from error
+            raise RuntimeError(
+                f"another dataset-generation process holds {path}"
+            ) from error
         os.ftruncate(descriptor, 0)
         os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
         os.fsync(descriptor)
@@ -805,21 +808,20 @@ def quota_run_lock(spec: AcceptedQuotaRunSpec) -> Iterator[None]:
 
 
 def _advance_terminal_batch(
-    spec: AcceptedQuotaRunSpec,
-    state: QuotaRunState,
+    spec: DatasetGenerationSpec,
+    state: DatasetGenerationState,
     paths: BatchPaths,
     assignments: tuple[AttemptAssignment, ...],
     *,
     batch_id: int,
     status: BatchStatus,
-) -> QuotaRunState:
-    """Advance one validated in-memory state after a terminal batch commit.
+) -> DatasetGenerationState:
+    """Update the in-memory run state after saving a batch result.
 
-    The initial ``scan_quota_run`` establishes the durable prefix under the
-    single-writer lock.  Every later assignment is constructed from that state,
-    and this function validates the newly persisted proposal before extending
-    the prefix.  A process interruption still leaves the batch to be recovered
-    by a complete scan on the next invocation.
+    The initial ``scan_dataset_generation`` reconstructs the saved batch history under
+    the single-writer lock. Every later assignment is built from that state,
+    and this function validates each newly saved proposal before updating it.
+    After an interruption, the next invocation reconstructs the state again.
     """
 
     persisted_assignments = _proposal_assignments(
@@ -843,7 +845,7 @@ def _advance_terminal_batch(
     next_batch_id = max(state.next_batch_id, batch_id + 1)
 
     if status is BatchStatus.FAILED:
-        return QuotaRunState(
+        return DatasetGenerationState(
             accepted_by_cell=state.accepted_by_cell,
             attempted_by_cell=attempted_by_cell,
             next_batch_id=next_batch_id,
@@ -860,14 +862,14 @@ def _advance_terminal_batch(
     accepted_by_cell = dict(state.accepted_by_cell)
     for cell_id in _accepted_cells(paths, assignments):
         accepted_by_cell[cell_id] += 1
-    for quota in spec.quotas:
-        if accepted_by_cell[quota.cell_id] > quota.target_accepted:
+    for target in spec.case_targets:
+        if accepted_by_cell[target.cell_id] > target.case_count:
             raise RuntimeError(
-                f"accepted count exceeds quota for cell {quota.cell_id!r}"
+                f"accepted count exceeds target for cell {target.cell_id!r}"
             )
     complete = all(
-        accepted_by_cell[quota.cell_id] == quota.target_accepted
-        for quota in spec.quotas
+        accepted_by_cell[target.cell_id] == target.case_count
+        for target in spec.case_targets
     )
     attempt_limit_failure = _attempt_limit_failure(
         spec,
@@ -877,7 +879,7 @@ def _advance_terminal_batch(
         terminal_failure=None,
         complete=complete,
     )
-    return QuotaRunState(
+    return DatasetGenerationState(
         accepted_by_cell=accepted_by_cell,
         attempted_by_cell=attempted_by_cell,
         next_batch_id=next_batch_id,
@@ -890,11 +892,11 @@ def _advance_terminal_batch(
     )
 
 
-def run_accepted_quotas(
-    spec: AcceptedQuotaRunSpec,
+def generate_valid_cases(
+    spec: DatasetGenerationSpec,
     executor: BatchExecutor,
-) -> QuotaRunState:
-    """Replay or execute batches until quotas are met or a failure is terminal.
+) -> DatasetGenerationState:
+    """Replay or execute batches until every valid-case target is met.
 
     The executor must durably resolve the supplied batch as either ``COMMITTED``
     or ``FAILED`` and return its standard paths.  If it raises after writing a
@@ -902,8 +904,8 @@ def run_accepted_quotas(
     replay on the next invocation.
     """
 
-    with quota_run_lock(spec):
-        state = scan_quota_run(spec)
+    with dataset_generation_lock(spec):
+        state = scan_dataset_generation(spec)
         while True:
             if (
                 state.complete
@@ -926,7 +928,7 @@ def run_accepted_quotas(
                 )
                 if not assignments:
                     raise RuntimeError(
-                        "quota schedule is empty before the run is complete"
+                        "case schedule is empty before the run is complete"
                     )
                 expected_paths = BatchPaths.under(
                     spec.root,

@@ -4,8 +4,8 @@ The required production order is encoded by the public API:
 
 1. ``sample_*_trajectory_cases`` draws complete specifications.
 2. ``persist_sampled_trajectory_proposal`` writes those specifications.
-3. ``construct_*_trajectory_batch`` accepts only the resulting durable
-   proposal token and performs numerical construction.
+3. ``construct_*_trajectory_batch`` accepts only that saved proposal and
+   performs numerical construction.
 
 There is deliberately no function that samples and constructs in one call.
 Every constructor verifies that its unchanged specification is already on
@@ -43,17 +43,14 @@ from solver.gen_data.jonswap_tma import (
     PAPER_RELATIVE_FREQUENCY_MINIMUM,
     PAPER_RELATIVE_FREQUENCY_WINDOW,
     PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
-    PAPER_RESOLVED_BAND_WINDOW,
     ResolvedBand,
     JonswapTmaState,
     build_jonswap_tma_initial_condition,
 )
 from solver.gen_data.jonswap_tma_sampling import (
-    JONSWAP_TMA_SAMPLING_REVISION_V4,
     JonswapTmaSample,
     sample_jonswap_tma_case,
 )
-from solver.gen_data.multi_crest import CrestSpec
 from solver.gen_data.pipeline.archive import (
     BatchPaths,
     BatchStatus,
@@ -210,13 +207,15 @@ def _jonswap_initial_metrics(
     xi_rms = float(np.sqrt(np.mean((xi - np.mean(xi)) ** 2)))
     maximum_cell_energy = float(np.max(state.spectrum.energy_fractions))
     half_maximum_cells = int(
-        np.count_nonzero(
-            state.spectrum.energy_fractions >= 0.5 * maximum_cell_energy
-        )
+        np.count_nonzero(state.spectrum.energy_fractions >= 0.5 * maximum_cell_energy)
     )
-    flat_wavenumbers = 2.0 * np.pi * np.fft.rfftfreq(
-        eta.size,
-        d=length / eta.size,
+    flat_wavenumbers = (
+        2.0
+        * np.pi
+        * np.fft.rfftfreq(
+            eta.size,
+            d=length / eta.size,
+        )
     )
     flat_symbol = flat_wavenumbers * np.tanh(flat_wavenumbers * depth)
     flat_dno_xi = np.fft.irfft(
@@ -226,14 +225,10 @@ def _jonswap_initial_metrics(
     realized_linear_hamiltonian = float(
         0.5 * length * np.mean(xi * flat_dno_xi + gravity * eta**2)
     )
-    expected_linear_hamiltonian = (
-        gravity * length * (significant_height / 4.0) ** 2
-    )
+    expected_linear_hamiltonian = gravity * length * (significant_height / 4.0) ** 2
     return {
         "initial_discrete_peak_wavenumber": float(
-            state.spectrum.wavenumbers[
-                int(np.argmax(state.spectrum.energy_fractions))
-            ]
+            state.spectrum.wavenumbers[int(np.argmax(state.spectrum.energy_fractions))]
         ),
         "initial_half_maximum_spectral_cell_count": half_maximum_cells,
         "initial_eta_rms": eta_rms,
@@ -261,8 +256,7 @@ def resolved_band_for_contract(
         length=contract.length,
         maximum_wavenumber=maximum_wavenumber,
         transition_wavenumber=(
-            PAPER_RESOLVED_BAND_TRANSITION_FRACTION
-            * maximum_wavenumber
+            PAPER_RESOLVED_BAND_TRANSITION_FRACTION * maximum_wavenumber
         ),
         quadrature_order=quadrature_order,
     )
@@ -286,9 +280,7 @@ def _strict_record(
     contract: ResidualControlledGL2Contract,
     constructor_settings: Mapping[str, object] | None = None,
 ) -> SpecificationRecord:
-    initial_maximum_wavenumber = (
-        contract.target_definition.maximum_wavenumber
-    )
+    initial_maximum_wavenumber = contract.target_definition.maximum_wavenumber
     record = {
         **sample_record,
         "initial_condition_constructor": constructor,
@@ -378,7 +370,7 @@ def _verify_preconstruction_proposal(
     )
     _require_constructible_batch_status(inspection.status)
     if inspection.proposal_sha256 != proposed.proposal_sha256:
-        raise RuntimeError("proposal changed after its durable token was created")
+        raise RuntimeError("proposal changed after it was saved")
     if file_sha256(proposed.paths.proposal) != proposed.proposal_sha256:
         raise RuntimeError("proposal file hash changed before construction")
     if expected_records != proposed.sampled.specification_records:
@@ -535,17 +527,7 @@ def construct_tanaka_trajectory_batch(
         [sample.depth for sample in selected_samples],
         dtype=np.float64,
     )
-    case_specs = [
-        [
-            CrestSpec(
-                amplitude=crest.alpha,
-                center=crest.center,
-                direction=crest.direction,
-            )
-            for crest in sample.crests
-        ]
-        for sample in selected_samples
-    ]
+    case_specs = [list(sample.crests) for sample in selected_samples]
     template = make_default_tanaka_template(
         depth=1.0,
         gravity=contract.gravity,
@@ -608,7 +590,7 @@ def sample_benjamin_feir_trajectory_cases(
 def construct_benjamin_feir_trajectory_batch(
     proposed: PersistedTrajectoryProposal[BenjaminFeirSample],
 ) -> TrajectoryInitialBatch:
-    """Construct Benjamin--Feir states after their durable proposal."""
+    """Construct Benjamin--Feir states after saving their proposal."""
 
     sampled = proposed.sampled
     samples = sampled.samples
@@ -666,25 +648,16 @@ def sample_jonswap_tma_trajectory_cases(
         contract,
         quadrature_order=quadrature_order,
     )
-    revision_id = attempted[0].case_key.revision_id
     samples = tuple(
         sample_jonswap_tma_case(assignment, band=band) for assignment in attempted
     )
-    if revision_id == JONSWAP_TMA_SAMPLING_REVISION_V4:
-        constructor = "relative_frequency_jonswap_tma_linear_state_v2"
-        settings: SpecificationRecord = {
-            "density_window": PAPER_RELATIVE_FREQUENCY_WINDOW,
-            "relative_frequency_minimum": PAPER_RELATIVE_FREQUENCY_MINIMUM,
-            "relative_frequency_maximum": PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-            "quadrature_order": band.quadrature_order,
-        }
-    else:
-        constructor = "resolved_band_jonswap_tma_linear_state_v1"
-        settings = {
-            "density_window": PAPER_RESOLVED_BAND_WINDOW,
-            "transition_wavenumber": band.transition_wavenumber,
-            "quadrature_order": band.quadrature_order,
-        }
+    constructor = "relative_frequency_jonswap_tma_linear_state_v2"
+    settings: SpecificationRecord = {
+        "density_window": PAPER_RELATIVE_FREQUENCY_WINDOW,
+        "relative_frequency_minimum": PAPER_RELATIVE_FREQUENCY_MINIMUM,
+        "relative_frequency_maximum": PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+        "quadrature_order": band.quadrature_order,
+    }
     records = tuple(
         _strict_record(
             sample.to_json_record(),
@@ -708,37 +681,29 @@ def construct_jonswap_tma_trajectory_batch(
     *,
     selected_local_indices: Sequence[int] | None = None,
 ) -> TrajectoryInitialBatch:
-    """Construct selected resolved-band states after the full durable proposal."""
+    """Construct selected resolved-band states after saving the full proposal."""
 
     sampled = proposed.sampled
     samples = sampled.samples
     if not all(isinstance(sample, JonswapTmaSample) for sample in samples):
         raise TypeError("JONSWAP/TMA construction requires JONSWAP/TMA samples")
     density_window = sampled.construction_settings.get("density_window")
-    if density_window == PAPER_RESOLVED_BAND_WINDOW:
-        constructor = "resolved_band_jonswap_tma_linear_state_v1"
-        relative_frequency_interval = None
-    elif density_window == PAPER_RELATIVE_FREQUENCY_WINDOW:
-        relative_minimum = sampled.construction_settings.get(
-            "relative_frequency_minimum"
-        )
-        relative_maximum = sampled.construction_settings.get(
-            "relative_frequency_maximum"
-        )
-        if (
-            relative_minimum != PAPER_RELATIVE_FREQUENCY_MINIMUM
-            or relative_maximum != PAPER_RELATIVE_FREQUENCY_MAXIMUM
-        ):
-            raise ValueError(
-                "JONSWAP/TMA relative frequency interval does not match the contract"
-            )
-        constructor = "relative_frequency_jonswap_tma_linear_state_v2"
-        relative_frequency_interval = (
-            PAPER_RELATIVE_FREQUENCY_MINIMUM,
-            PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-        )
-    else:
+    if density_window != PAPER_RELATIVE_FREQUENCY_WINDOW:
         raise ValueError("JONSWAP/TMA density window does not match the contract")
+    relative_minimum = sampled.construction_settings.get("relative_frequency_minimum")
+    relative_maximum = sampled.construction_settings.get("relative_frequency_maximum")
+    if (
+        relative_minimum != PAPER_RELATIVE_FREQUENCY_MINIMUM
+        or relative_maximum != PAPER_RELATIVE_FREQUENCY_MAXIMUM
+    ):
+        raise ValueError(
+            "JONSWAP/TMA relative frequency interval does not match the contract"
+        )
+    constructor = "relative_frequency_jonswap_tma_linear_state_v2"
+    relative_frequency_interval = (
+        PAPER_RELATIVE_FREQUENCY_MINIMUM,
+        PAPER_RELATIVE_FREQUENCY_MAXIMUM,
+    )
     quadrature_order = sampled.construction_settings.get("quadrature_order")
     if not isinstance(quadrature_order, int) or isinstance(quadrature_order, bool):
         raise TypeError("JONSWAP/TMA quadrature_order must be an integer")
@@ -808,7 +773,8 @@ def construct_jonswap_tma_trajectory_batch(
     for index in np.flatnonzero(state_finite):
         minimum_water_columns[index] = np.min(depths[index] + eta0[index])
     invalid = np.flatnonzero(
-        ~state_finite | ~np.isfinite(minimum_water_columns)
+        ~state_finite
+        | ~np.isfinite(minimum_water_columns)
         | (minimum_water_columns <= 0.0)
     )
     if invalid.size:
@@ -826,9 +792,7 @@ def construct_jonswap_tma_trajectory_batch(
                     ),
                     "state_finite": finite,
                     "minimum_water_column": (
-                        float(minimum_water_columns[local_index])
-                        if finite
-                        else None
+                        float(minimum_water_columns[local_index]) if finite else None
                     ),
                 }
             )
@@ -862,8 +826,6 @@ def construct_jonswap_tma_trajectory_batch(
                 length=contract.length,
                 gravity=contract.gravity,
             )
-            for index, (sample, state) in enumerate(
-                zip(selected_samples, states)
-            )
+            for index, (sample, state) in enumerate(zip(selected_samples, states))
         ),
     )

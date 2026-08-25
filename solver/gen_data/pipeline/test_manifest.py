@@ -22,7 +22,7 @@ from solver.gen_data.pipeline.manifest import (
     GenerationCompatibilityVariant,
     build_dataset_view,
 )
-from solver.gen_data.pipeline.quota_driver import canonical_json_sha256
+from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 
 FINGERPRINT = "c" * 64

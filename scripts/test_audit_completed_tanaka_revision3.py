@@ -43,13 +43,13 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLE_CELL_IDS,
     sample_tanaka_case,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     sample_tanaka_trajectory_cases,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
 )
 from solver.tanaka_ICs import modified_tanaka as tanaka_solver  # noqa: E402
@@ -78,7 +78,7 @@ def _assignment() -> AttemptAssignment:
             stream_id=0,
             attempt_index=0,
         ),
-        TANAKA_SAMPLE_CELLS[0].cell_id,
+        TANAKA_SAMPLE_CELL_IDS[0],
     )
 
 

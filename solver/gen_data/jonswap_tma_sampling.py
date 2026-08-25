@@ -9,7 +9,6 @@ Each attempted case owns one PCG64 stream determined by its complete
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from typing import TypeAlias
 
 import numpy as np
@@ -48,42 +47,17 @@ SHALLOW_DEPTH_WAVENUMBER_BOUNDS = (0.2, 1.5)
 SHALLOW_RELATIVE_HEIGHT_BOUNDS = (0.03, 0.16)
 
 
-@dataclass(frozen=True)
-class JonswapTmaSampleCell:
-    """One fixed stratum, peak enhancement, and direction fraction."""
-
-    stratum: RandomSeaStratum
-    peak_enhancement: float
-    right_moving_fraction: float
-
-    def __post_init__(self) -> None:
-        if self.stratum not in ("shallow", "finite", "deep"):
-            raise ValueError(f"unknown JONSWAP/TMA stratum: {self.stratum}")
-        if self.peak_enhancement not in PAPER_PEAK_ENHANCEMENTS:
-            raise ValueError("peak_enhancement is not a declared cell value")
-        if self.right_moving_fraction not in PAPER_RIGHT_MOVING_FRACTIONS:
-            raise ValueError("right_moving_fraction is not a declared cell value")
-
-    @property
-    def cell_id(self) -> str:
-        """Return the stable identifier used by ``AttemptAssignment``."""
-
-        gamma = f"{self.peak_enhancement:g}".replace(".", "p")
-        direction = f"{self.right_moving_fraction:g}".replace(".", "p")
-        return f"{self.stratum}__gamma_{gamma}__right_{direction}"
-
-
-JONSWAP_TMA_SAMPLE_CELLS = tuple(
-    JonswapTmaSampleCell(
-        stratum=stratum,
-        peak_enhancement=peak_enhancement,
-        right_moving_fraction=right_moving_fraction,
-    )
+JonswapTmaCell: TypeAlias = tuple[RandomSeaStratum, float, float]
+JONSWAP_TMA_SAMPLE_CELLS: dict[str, JonswapTmaCell] = {
+    (
+        f"{stratum}__gamma_{format(peak_enhancement, 'g').replace('.', 'p')}"
+        f"__right_{format(right_moving_fraction, 'g').replace('.', 'p')}"
+    ): (stratum, peak_enhancement, right_moving_fraction)
     for stratum in ("shallow", "finite", "deep")
     for peak_enhancement in PAPER_PEAK_ENHANCEMENTS
     for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
-)
-_CELL_BY_ID = {cell.cell_id: cell for cell in JONSWAP_TMA_SAMPLE_CELLS}
+}
+JONSWAP_TMA_SAMPLE_CELL_IDS = tuple(JONSWAP_TMA_SAMPLE_CELLS)
 
 
 @dataclass(frozen=True)
@@ -91,7 +65,7 @@ class JonswapTmaSample:
     """One sampled parameter specification and its two explicit phase arrays."""
 
     assignment: AttemptAssignment
-    cell: JonswapTmaSampleCell
+    stratum: RandomSeaStratum
     parameters: JonswapTmaParameters
     phase_right: FloatArray
     phase_left: FloatArray
@@ -99,18 +73,9 @@ class JonswapTmaSample:
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
-        key = self.assignment.case_key
         record: JsonRecord = {
-            "case_id": key.case_id,
-            "family_id": key.family_id,
-            "revision_id": key.revision_id,
-            "split_id": key.split_id.value,
-            "root_seed": key.root_seed,
-            "stream_id": key.stream_id,
-            "attempt_index": key.attempt_index,
-            "seed_words": list(key.seed_words),
-            "cell_id": self.cell.cell_id,
-            "stratum": self.cell.stratum,
+            **self.assignment.to_json_record(),
+            "stratum": self.stratum,
             "depth": self.parameters.depth,
             "significant_height": self.parameters.significant_height,
             "peak_wavenumber": self.parameters.peak_wavenumber,
@@ -119,17 +84,16 @@ class JonswapTmaSample:
             "phase_right": self.phase_right.tolist(),
             "phase_left": self.phase_left.tolist(),
         }
-        json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return record
 
 
 def _sample_shallow_parameters(
     rng: np.random.Generator,
     *,
-    cell: JonswapTmaSampleCell,
+    peak_enhancement: float,
+    right_moving_fraction: float,
     length: float,
     band: ResolvedBand,
-    relative_frequency_maximum: float | None,
 ) -> JonswapTmaParameters:
     """Draw uniformly from the declared shallow admissible set."""
 
@@ -143,58 +107,52 @@ def _sample_shallow_parameters(
             depth=depth,
             significant_height=2.0 * depth * relative_height,
             peak_wavenumber=peak_wavenumber,
-            peak_enhancement=cell.peak_enhancement,
-            right_moving_fraction=cell.right_moving_fraction,
+            peak_enhancement=peak_enhancement,
+            right_moving_fraction=right_moving_fraction,
         )
-        frequency_resolved = (
-            relative_frequency_maximum is None
-            or relative_frequency_interval_fits(
-                candidate,
-                band=band,
-                relative_maximum=relative_frequency_maximum,
-            )
+        frequency_resolved = relative_frequency_interval_fits(
+            candidate,
+            band=band,
+            relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
         )
         if (
-            depth_wavenumber * relative_height
-            <= PAPER_PEAK_STEEPNESS_MAXIMUM
+            depth_wavenumber * relative_height <= PAPER_PEAK_STEEPNESS_MAXIMUM
             and frequency_resolved
         ):
             return candidate
 
 
-def _sample_rectangular_parameters(
+def _sample_finite_or_deep_parameters(
     rng: np.random.Generator,
     *,
-    cell: JonswapTmaSampleCell,
+    stratum: RandomSeaStratum,
+    peak_enhancement: float,
+    right_moving_fraction: float,
     band: ResolvedBand,
-    relative_frequency_maximum: float | None,
 ) -> JonswapTmaParameters:
     """Draw independent uniform variables in a finite- or deep-water cell."""
 
-    if cell.stratum == "finite":
+    if stratum == "finite":
         peak_bounds = FINITE_PEAK_WAVENUMBER_BOUNDS
         depth_bounds = FINITE_DEPTH_BOUNDS
-    elif cell.stratum == "deep":
+    elif stratum == "deep":
         peak_bounds = DEEP_PEAK_WAVENUMBER_BOUNDS
         depth_bounds = DEEP_DEPTH_BOUNDS
     else:
-        raise ValueError("rectangular sampling requires a finite or deep cell")
+        raise ValueError("parameter sampling requires a finite or deep cell")
 
     while True:
         candidate = JonswapTmaParameters(
             depth=float(rng.uniform(*depth_bounds)),
             significant_height=float(rng.uniform(*SIGNIFICANT_HEIGHT_BOUNDS)),
             peak_wavenumber=float(rng.uniform(*peak_bounds)),
-            peak_enhancement=cell.peak_enhancement,
-            right_moving_fraction=cell.right_moving_fraction,
+            peak_enhancement=peak_enhancement,
+            right_moving_fraction=right_moving_fraction,
         )
-        frequency_resolved = (
-            relative_frequency_maximum is None
-            or relative_frequency_interval_fits(
-                candidate,
-                band=band,
-                relative_maximum=relative_frequency_maximum,
-            )
+        frequency_resolved = relative_frequency_interval_fits(
+            candidate,
+            band=band,
+            relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
         )
         if (
             candidate.peak_wavenumber * candidate.significant_height / 2.0
@@ -216,36 +174,44 @@ def sample_jonswap_tma_case(
     phase arrays and passes the paper-support predicate by construction.
     """
 
-    cell = _CELL_BY_ID[assignment.cell_id]
+    if assignment.case_key.revision_id != JONSWAP_TMA_SAMPLING_REVISION_V4:
+        raise ValueError(
+            "JONSWAP/TMA sampling requires the current revision "
+            f"{JONSWAP_TMA_SAMPLING_REVISION_V4}"
+        )
+    try:
+        stratum, peak_enhancement, right_moving_fraction = JONSWAP_TMA_SAMPLE_CELLS[
+            assignment.cell_id
+        ]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown JONSWAP/TMA sample cell: {assignment.cell_id}"
+        ) from error
     rng = random_generator_for_case(assignment.case_key)
-    relative_frequency_maximum = (
-        PAPER_RELATIVE_FREQUENCY_MAXIMUM
-        if assignment.case_key.revision_id == JONSWAP_TMA_SAMPLING_REVISION_V4
-        else None
-    )
-    if cell.stratum == "shallow":
+    if stratum == "shallow":
         parameters = _sample_shallow_parameters(
             rng,
-            cell=cell,
+            peak_enhancement=peak_enhancement,
+            right_moving_fraction=right_moving_fraction,
             length=band.length,
             band=band,
-            relative_frequency_maximum=relative_frequency_maximum,
         )
     else:
-        parameters = _sample_rectangular_parameters(
+        parameters = _sample_finite_or_deep_parameters(
             rng,
-            cell=cell,
+            stratum=stratum,
+            peak_enhancement=peak_enhancement,
+            right_moving_fraction=right_moving_fraction,
             band=band,
-            relative_frequency_maximum=relative_frequency_maximum,
         )
     phase_right, phase_left = sample_jonswap_tma_phases(rng, band=band)
 
     violations = find_jonswap_parameter_violations(
         parameters,
-        stratum=cell.stratum,
+        stratum=stratum,
         length=band.length,
-        band=band if relative_frequency_maximum is not None else None,
-        relative_frequency_maximum=relative_frequency_maximum,
+        band=band,
+        relative_frequency_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
     )
     if violations:
         raise RuntimeError(
@@ -254,7 +220,7 @@ def sample_jonswap_tma_case(
         )
     return JonswapTmaSample(
         assignment=assignment,
-        cell=cell,
+        stratum=stratum,
         parameters=parameters,
         phase_right=phase_right,
         phase_left=phase_left,

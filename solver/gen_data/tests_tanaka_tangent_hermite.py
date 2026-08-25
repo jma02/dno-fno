@@ -29,7 +29,7 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     place_tanaka_profile_periodic,
     tanaka_periodic_image_radius,
 )
-from solver.gen_data.multi_crest import CrestSpec  # noqa: E402
+from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
 from solver.solvers.dno_series_jax import (  # noqa: E402
     build_grid,
     dno_series_eval,
@@ -60,13 +60,13 @@ NX = 1024
 FILTER_FRACTION = 0.25
 CASE31_DEPTH = 0.26861433760407505
 CASE31_SPECS = [
-    CrestSpec(
-        amplitude=0.05548354495289499,
+    TanakaCrest(
+        alpha=0.05548354495289499,
         center=3.5548496920089176,
         direction=-1,
     ),
-    CrestSpec(
-        amplitude=0.053531413616445936,
+    TanakaCrest(
+        alpha=0.053531413616445936,
         center=5.032703928715591,
         direction=1,
     ),
@@ -110,8 +110,8 @@ def build_fixture() -> TanakaFixture:
     direction_center = 0.731
     case_specs = [
         CASE31_SPECS,
-        [CrestSpec(0.10, direction_center, 1)],
-        [CrestSpec(0.10, direction_center, -1)],
+        [TanakaCrest(0.10, direction_center, 1)],
+        [TanakaCrest(0.10, direction_center, -1)],
     ]
     eta, xi = build_per_case_initial_conditions(
         template_params=template,

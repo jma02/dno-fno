@@ -56,8 +56,7 @@ STATIC_STOKES_REQUIRED_CHECKS = (
     | QualityReason.NONFINITE_TARGET
 )
 STOKES_CELL_CODES = {
-    cell.cell_id: index
-    for index, cell in enumerate(STOKES_SAMPLE_CELLS)
+    cell_id: index for index, cell_id in enumerate(STOKES_SAMPLE_CELLS)
 }
 
 
@@ -82,8 +81,7 @@ class StaticStokesContract:
             )
         ):
             raise ValueError(
-                "a reduced target must be labeled "
-                "'reduced_wiring_evidence_only'"
+                "a reduced target must be labeled 'reduced_wiring_evidence_only'"
             )
         if self.role not in (
             "paper_dataset",
@@ -139,12 +137,12 @@ class StaticDnoEvaluator(Protocol):
 
     def __call__(
         self,
-        eta: Array,
-        xi: Array,
-        depth: float | Array,
+        eta: jax.Array,
+        xi: jax.Array,
+        depth: float | jax.Array,
         *,
         definition: DiscreteDnoTarget,
-    ) -> tuple[Array, Array, Array]: ...
+    ) -> tuple[jax.Array, jax.Array, jax.Array]: ...
 
 
 @dataclass(frozen=True)
@@ -185,7 +183,7 @@ def construct_stokes_state(
         length=sample.domain_length,
         depth=sample.depth,
         gravity=sample.gravity,
-        ichoi=1 if sample.cell.branch == "finite" else 0,
+        ichoi=1 if sample.branch == "finite" else 0,
     )
 
 
@@ -262,11 +260,7 @@ def evaluate_static_stokes_sample(
 
     support_violations = stokes_support_violations(sample)
     evaluated = QualityReason.OUTSIDE_SUPPORT
-    failed = (
-        QualityReason.OUTSIDE_SUPPORT
-        if support_violations
-        else QualityReason.NONE
-    )
+    failed = QualityReason.OUTSIDE_SUPPORT if support_violations else QualityReason.NONE
     metrics: dict[str, JsonScalar] = {
         "contract_role": contract.role,
         "support_violation_count": len(support_violations),
@@ -300,9 +294,7 @@ def evaluate_static_stokes_sample(
     xi_host = np.asarray(jax.device_get(xi_input), dtype=np.float64)
 
     evaluated |= QualityReason.NONFINITE_STATE
-    state_finite = bool(
-        np.isfinite(eta_host).all() and np.isfinite(xi_host).all()
-    )
+    state_finite = bool(np.isfinite(eta_host).all() and np.isfinite(xi_host).all())
     metrics["state_finite"] = state_finite
     metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(eta_host)
     metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(xi_host)
@@ -352,22 +344,15 @@ def evaluate_static_stokes_sample(
 
     evaluated |= QualityReason.NONFINITE_TARGET
     delivered_state_finite = bool(
-        np.isfinite(target_eta_host).all()
-        and np.isfinite(target_xi_host).all()
+        np.isfinite(target_eta_host).all() and np.isfinite(target_xi_host).all()
     )
     target_finite = bool(np.isfinite(q_ref_host).all())
     metrics["state_finite"] = delivered_state_finite
     metrics["target_finite"] = target_finite
-    metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(
-        target_eta_host
-    )
-    metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(
-        target_xi_host
-    )
+    metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(target_eta_host)
+    metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(target_xi_host)
     metrics["maximum_absolute_q_ref"] = _maximum_absolute_or_none(q_ref_host)
-    metrics["xi_input_mean"] = _finite_or_none(
-        float(np.mean(target_xi_host))
-    )
+    metrics["xi_input_mean"] = _finite_or_none(float(np.mean(target_xi_host)))
     metrics["q_ref_mean"] = _finite_or_none(float(np.mean(q_ref_host)))
     if not delivered_state_finite:
         failed |= QualityReason.NONFINITE_STATE
@@ -446,7 +431,7 @@ def write_static_stokes_batch(
         batch_id=batch_id,
     )
 
-    # The durable proposal precedes state construction and target evaluation.
+    # Write the proposal before constructing states or evaluating targets.
     ensure_proposal(paths, proposal_arrays)
     outcomes = tuple(
         evaluate_static_stokes_sample(
@@ -466,9 +451,7 @@ def write_static_stokes_batch(
             "case_kind": "static",
             "contract": contract_record,
             "attempted_cases": len(outcomes),
-            "accepted_cases": sum(
-                outcome.decision.accepted for outcome in outcomes
-            ),
+            "accepted_cases": sum(outcome.decision.accepted for outcome in outcomes),
             "additional_metadata": dict(metadata or {}),
         },
     )

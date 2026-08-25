@@ -15,7 +15,6 @@ it raises an exception carrying a strict-JSON-ready failure record.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import math
 from typing import Literal, TypeAlias
 
@@ -52,57 +51,15 @@ DEEP_DEPTH_WAVENUMBER_MINIMUM = 5.0
 DEFAULT_MAXIMUM_URSELL_REDRAWS = 1000
 
 
-@dataclass(frozen=True)
-class StokesSampleCell:
-    """One fixed Stokes branch and steepness interval."""
-
-    cell_id: str
-    branch: StokesBranch
-    steepness_cell_index: int
-
-    def __post_init__(self) -> None:
-        if not self.cell_id:
-            raise ValueError("cell_id must not be empty")
-        if self.branch not in ("finite", "deep"):
-            raise ValueError(f"unknown Stokes branch: {self.branch}")
-        if not 0 <= self.steepness_cell_index < len(
-            PAPER_STOKES_STEEPNESS_CELLS
-        ):
-            raise ValueError("steepness_cell_index is out of range")
-
-    @property
-    def steepness_bounds(self) -> tuple[float, float]:
-        """Return the lower and upper ``ka`` bounds of this cell."""
-
-        bounds = PAPER_STOKES_STEEPNESS_CELLS[
-            self.steepness_cell_index
-        ]
-        return float(bounds[0]), float(bounds[1])
-
-    @property
-    def upper_steepness_is_inclusive(self) -> bool:
-        """Return whether the mathematical support includes its upper bound."""
-
-        return self.steepness_cell_index == 1
-
-
-STOKES_SAMPLE_CELLS = (
-    StokesSampleCell("finite_low", "finite", 0),
-    StokesSampleCell("finite_moderate", "finite", 1),
-    StokesSampleCell("deep_low", "deep", 0),
-    StokesSampleCell("deep_moderate", "deep", 1),
-)
-_CELL_BY_ID = {cell.cell_id: cell for cell in STOKES_SAMPLE_CELLS}
-
-
-@dataclass(frozen=True)
-class StokesAmplitudeAttempt:
-    """One amplitude proposal and its finite-depth support result."""
-
-    attempt_index: int
-    amplitude: float
-    ursell_upper_bound: float | None
-    accepted: bool
+StokesCell: TypeAlias = tuple[StokesBranch, int]
+AmplitudeAttempt: TypeAlias = tuple[float, float | None]
+STOKES_SAMPLE_CELLS: dict[str, StokesCell] = {
+    "finite_low": ("finite", 0),
+    "finite_moderate": ("finite", 1),
+    "deep_low": ("deep", 0),
+    "deep_moderate": ("deep", 1),
+}
+STOKES_SAMPLE_CELL_IDS = tuple(STOKES_SAMPLE_CELLS)
 
 
 @dataclass(frozen=True)
@@ -110,7 +67,8 @@ class StokesSample:
     """One complete accepted Stokes parameter specification."""
 
     assignment: AttemptAssignment
-    cell: StokesSampleCell
+    branch: StokesBranch
+    steepness_cell_index: int
     domain_length: float
     gravity: float
     carrier_mode: int
@@ -119,7 +77,14 @@ class StokesSample:
     depth_draw_bounds: tuple[float, float]
     phase: float
     amplitude_draw_bounds: tuple[float, float]
-    amplitude_attempts: tuple[StokesAmplitudeAttempt, ...]
+    amplitude_attempts: tuple[AmplitudeAttempt, ...]
+
+    @property
+    def steepness_bounds(self) -> tuple[float, float]:
+        """Return the lower and upper ``ka`` bounds of this sample's cell."""
+
+        bounds = PAPER_STOKES_STEEPNESS_CELLS[self.steepness_cell_index]
+        return float(bounds[0]), float(bounds[1])
 
     @property
     def wavenumber(self) -> float:
@@ -131,7 +96,7 @@ class StokesSample:
     def amplitude(self) -> float:
         """Return the accepted amplitude."""
 
-        return self.amplitude_attempts[-1].amplitude
+        return self.amplitude_attempts[-1][0]
 
     @property
     def steepness(self) -> float:
@@ -149,23 +114,20 @@ class StokesSample:
     def ursell_upper_bound(self) -> float | None:
         """Return the accepted finite-depth ``Ur_+``, or ``None`` in deep water."""
 
-        return self.amplitude_attempts[-1].ursell_upper_bound
+        return self.amplitude_attempts[-1][1]
 
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
         record = {
-            **_assignment_record(self.assignment),
+            **self.assignment.to_json_record(),
             "status": "accepted",
             "constructor": "project_fifth_order_stokes_fixed_phase_v1",
-            "cell_id": self.cell.cell_id,
-            "branch": self.cell.branch,
-            "steepness_cell_index": self.cell.steepness_cell_index,
-            "steepness_cell_lower": self.cell.steepness_bounds[0],
-            "steepness_cell_upper": self.cell.steepness_bounds[1],
-            "steepness_cell_upper_inclusive": (
-                self.cell.upper_steepness_is_inclusive
-            ),
+            "branch": self.branch,
+            "steepness_cell_index": self.steepness_cell_index,
+            "steepness_cell_lower": self.steepness_bounds[0],
+            "steepness_cell_upper": self.steepness_bounds[1],
+            "steepness_cell_upper_inclusive": self.steepness_cell_index == 1,
             "domain_length": self.domain_length,
             "gravity": self.gravity,
             "carrier_mode": self.carrier_mode,
@@ -180,106 +142,39 @@ class StokesSample:
             "amplitude_draw_lower": self.amplitude_draw_bounds[0],
             "amplitude_draw_upper": self.amplitude_draw_bounds[1],
             "finite_depth_ursell_limit": (
-                FINITE_DEPTH_STOKES_URSELL_LIMIT
-                if self.cell.branch == "finite"
-                else None
+                FINITE_DEPTH_STOKES_URSELL_LIMIT if self.branch == "finite" else None
             ),
             "support_resampling_count": self.support_resampling_count,
-            "amplitude_attempts": _attempt_records(
-                self.amplitude_attempts,
-                wavenumber=self.wavenumber,
-                ursell_was_evaluated=self.cell.branch == "finite",
-            ),
+            "amplitude_attempts": [
+                {
+                    "attempt_index": index,
+                    "amplitude": amplitude,
+                    "steepness": self.wavenumber * amplitude,
+                    "ursell_was_evaluated": self.branch == "finite",
+                    "ursell_upper_bound": (
+                        ursell if ursell is not None and math.isfinite(ursell) else None
+                    ),
+                    "ursell_upper_bound_was_finite": (
+                        ursell is not None and math.isfinite(ursell)
+                    ),
+                    "accepted": index == len(self.amplitude_attempts) - 1,
+                }
+                for index, (amplitude, ursell) in enumerate(self.amplitude_attempts)
+            ],
         }
-        _check_strict_json(record)
         return record
 
 
-class StokesSamplingError(ValueError):
-    """A fixed finite-depth attempt exhausted its same-cell redraws."""
+class UrsellRedrawLimitReached(ValueError):
+    """All amplitude draws for one finite-depth attempt failed support."""
 
-    def __init__(self, message: str, *, failure_record: JsonRecord) -> None:
-        super().__init__(message)
-        _check_strict_json(failure_record)
+    def __init__(self, failure_record: JsonRecord) -> None:
+        super().__init__("finite-depth Ursell redraw limit reached")
         self.failure_record = failure_record
 
 
-def _require_sample_cell(cell_id: str) -> StokesSampleCell:
-    """Return the declared Stokes sample cell named by ``cell_id``."""
-
-    try:
-        return _CELL_BY_ID[cell_id]
-    except KeyError as error:
-        raise ValueError(f"unknown Stokes sample cell: {cell_id}") from error
-
-
-def _assignment_record(assignment: AttemptAssignment) -> JsonRecord:
-    """Return the common identity fields for success and failure records."""
-
-    key = assignment.case_key
-    return {
-        "case_id": key.case_id,
-        "family_id": key.family_id,
-        "revision_id": key.revision_id,
-        "split_id": key.split_id.value,
-        "root_seed": key.root_seed,
-        "stream_id": key.stream_id,
-        "attempt_index": key.attempt_index,
-        "seed_words": list(key.seed_words),
-    }
-
-
-def _check_strict_json(record: JsonRecord) -> None:
-    """Raise if a record cannot be serialized without nonstandard numbers."""
-
-    json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def _finite_json_number(value: float | None) -> float | None:
-    """Represent a finite scalar exactly and a nonfinite scalar as JSON null."""
-
-    if value is None or not math.isfinite(value):
-        return None
-    return value
-
-
-def _attempt_records(
-    attempts: tuple[StokesAmplitudeAttempt, ...],
-    *,
-    wavenumber: float,
-    ursell_was_evaluated: bool,
-) -> list[JsonRecord]:
-    """Return strict-JSON records for every amplitude proposal."""
-
-    return [
-        {
-            "attempt_index": attempt.attempt_index,
-            "amplitude": attempt.amplitude,
-            "steepness": wavenumber * attempt.amplitude,
-            "ursell_was_evaluated": ursell_was_evaluated,
-            "ursell_upper_bound": _finite_json_number(
-                attempt.ursell_upper_bound
-            ),
-            "ursell_upper_bound_was_finite": (
-                attempt.ursell_upper_bound is not None
-                and math.isfinite(attempt.ursell_upper_bound)
-            ),
-            "accepted": attempt.accepted,
-        }
-        for attempt in attempts
-    ]
-
-
-def _carrier_mode_bounds(branch: StokesBranch) -> tuple[int, int]:
-    """Return the inclusive carrier-mode bounds for one branch."""
-
-    if branch == "finite":
-        return FINITE_CARRIER_MODE_BOUNDS
-    return DEEP_CARRIER_MODE_BOUNDS
-
-
 def effective_amplitude_bounds(
-    cell: StokesSampleCell,
+    steepness_cell_index: int,
     *,
     wavenumber: float,
 ) -> tuple[float, float]:
@@ -287,7 +182,11 @@ def effective_amplitude_bounds(
 
     if not math.isfinite(wavenumber) or wavenumber <= 0.0:
         raise ValueError("wavenumber must be positive and finite")
-    steepness_lower, steepness_upper = cell.steepness_bounds
+    if not 0 <= steepness_cell_index < len(PAPER_STOKES_STEEPNESS_CELLS):
+        raise ValueError("steepness_cell_index is out of range")
+    steepness_lower, steepness_upper = PAPER_STOKES_STEEPNESS_CELLS[
+        steepness_cell_index
+    ]
     return (
         max(PAPER_AMPLITUDE_BOUNDS[0], steepness_lower / wavenumber),
         min(PAPER_AMPLITUDE_BOUNDS[1], steepness_upper / wavenumber),
@@ -295,7 +194,7 @@ def effective_amplitude_bounds(
 
 
 def effective_depth_bounds(
-    cell: StokesSampleCell,
+    branch: StokesBranch,
     *,
     wavenumber: float,
 ) -> tuple[float, float]:
@@ -303,7 +202,7 @@ def effective_depth_bounds(
 
     if not math.isfinite(wavenumber) or wavenumber <= 0.0:
         raise ValueError("wavenumber must be positive and finite")
-    if cell.branch == "finite":
+    if branch == "finite":
         return (
             max(
                 FINITE_DEPTH_BOUNDS[0],
@@ -314,17 +213,20 @@ def effective_depth_bounds(
                 FINITE_DEPTH_WAVENUMBER_BOUNDS[1] / wavenumber,
             ),
         )
-    return (
-        max(
-            DEEP_DEPTH_BOUNDS[0],
-            DEEP_DEPTH_WAVENUMBER_MINIMUM / wavenumber,
-        ),
-        DEEP_DEPTH_BOUNDS[1],
-    )
+    if branch == "deep":
+        return (
+            max(
+                DEEP_DEPTH_BOUNDS[0],
+                DEEP_DEPTH_WAVENUMBER_MINIMUM / wavenumber,
+            ),
+            DEEP_DEPTH_BOUNDS[1],
+        )
+    raise ValueError(f"unknown Stokes branch: {branch}")
 
 
 def feasible_carrier_modes(
-    cell: StokesSampleCell,
+    branch: StokesBranch,
+    steepness_cell_index: int,
     *,
     domain_length: float = PAPER_DOMAIN_LENGTH,
 ) -> tuple[int, ...]:
@@ -332,33 +234,25 @@ def feasible_carrier_modes(
 
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be positive and finite")
-    first_mode, last_mode = _carrier_mode_bounds(cell.branch)
+    if branch not in ("finite", "deep"):
+        raise ValueError(f"unknown Stokes branch: {branch}")
+    first_mode, last_mode = (
+        FINITE_CARRIER_MODE_BOUNDS if branch == "finite" else DEEP_CARRIER_MODE_BOUNDS
+    )
 
     def is_feasible(carrier_mode: int) -> bool:
         wavenumber = 2.0 * math.pi * carrier_mode / domain_length
         amplitude_lower, amplitude_upper = effective_amplitude_bounds(
-            cell,
+            steepness_cell_index,
             wavenumber=wavenumber,
         )
         depth_lower, depth_upper = effective_depth_bounds(
-            cell,
+            branch,
             wavenumber=wavenumber,
         )
         return amplitude_lower < amplitude_upper and depth_lower <= depth_upper
 
     return tuple(filter(is_feasible, range(first_mode, last_mode + 1)))
-
-
-def _sample_log_uniform(
-    rng: np.random.Generator,
-    bounds: tuple[float, float],
-) -> float:
-    """Draw a positive variable uniformly in its logarithm."""
-
-    lower, upper = bounds
-    if lower == upper:
-        return lower
-    return float(np.exp(rng.uniform(np.log(lower), np.log(upper))))
 
 
 @jax.jit
@@ -398,26 +292,28 @@ def _evaluate_finite_depth_ursell(
 
 
 def _amplitude_is_in_cell(
-    cell: StokesSampleCell,
+    steepness_cell_index: int,
     *,
     wavenumber: float,
     amplitude: float,
 ) -> bool:
     """Return whether an amplitude obeys global and cell support."""
 
-    if not math.isfinite(amplitude):
+    if not math.isfinite(amplitude) or not 0 <= steepness_cell_index < len(
+        PAPER_STOKES_STEEPNESS_CELLS
+    ):
         return False
     steepness = wavenumber * amplitude
-    steepness_lower, steepness_upper = cell.steepness_bounds
+    steepness_lower, steepness_upper = PAPER_STOKES_STEEPNESS_CELLS[
+        steepness_cell_index
+    ]
     upper_ok = (
         steepness <= steepness_upper
-        if cell.upper_steepness_is_inclusive
+        if steepness_cell_index == 1
         else steepness < steepness_upper
     )
     return (
-        PAPER_AMPLITUDE_BOUNDS[0]
-        <= amplitude
-        <= PAPER_AMPLITUDE_BOUNDS[1]
+        PAPER_AMPLITUDE_BOUNDS[0] <= amplitude <= PAPER_AMPLITUDE_BOUNDS[1]
         and steepness_lower <= steepness
         and upper_ok
     )
@@ -429,10 +325,11 @@ def stokes_support_violations(
     """Return every violation of the declared Stokes sampling support."""
 
     violations: list[str] = []
-    if _CELL_BY_ID.get(sample.cell.cell_id) != sample.cell:
-        violations.append("sample cell is not a declared canonical cell")
-    if sample.assignment.cell_id != sample.cell.cell_id:
-        violations.append("assignment cell_id does not match sample cell")
+    if STOKES_SAMPLE_CELLS.get(sample.assignment.cell_id) != (
+        sample.branch,
+        sample.steepness_cell_index,
+    ):
+        violations.append("sample parameters do not match the assigned cell")
     if not math.isfinite(sample.domain_length) or sample.domain_length <= 0.0:
         violations.append("domain_length must be positive and finite")
     if not math.isfinite(sample.gravity) or sample.gravity <= 0.0:
@@ -440,7 +337,8 @@ def stokes_support_violations(
 
     try:
         expected_modes = feasible_carrier_modes(
-            sample.cell,
+            sample.branch,
+            sample.steepness_cell_index,
             domain_length=sample.domain_length,
         )
     except ValueError:
@@ -452,11 +350,11 @@ def stokes_support_violations(
 
     if expected_modes and sample.carrier_mode in expected_modes:
         expected_depth_bounds = effective_depth_bounds(
-            sample.cell,
+            sample.branch,
             wavenumber=sample.wavenumber,
         )
         expected_amplitude_bounds = effective_amplitude_bounds(
-            sample.cell,
+            sample.steepness_cell_index,
             wavenumber=sample.wavenumber,
         )
         if sample.depth_draw_bounds != expected_depth_bounds:
@@ -464,9 +362,7 @@ def stokes_support_violations(
         if sample.amplitude_draw_bounds != expected_amplitude_bounds:
             violations.append("stored amplitude-draw bounds are inconsistent")
         if not math.isfinite(sample.depth) or not (
-            expected_depth_bounds[0]
-            <= sample.depth
-            <= expected_depth_bounds[1]
+            expected_depth_bounds[0] <= sample.depth <= expected_depth_bounds[1]
         ):
             violations.append("depth lies outside the branch support")
 
@@ -476,38 +372,25 @@ def stokes_support_violations(
         violations.append("at least one amplitude attempt is required")
         return tuple(violations)
 
-    expected_attempt_indices = tuple(range(len(sample.amplitude_attempts)))
-    observed_attempt_indices = tuple(
-        attempt.attempt_index for attempt in sample.amplitude_attempts
-    )
-    if observed_attempt_indices != expected_attempt_indices:
-        violations.append("amplitude attempt indices must be consecutive")
-    if any(attempt.accepted for attempt in sample.amplitude_attempts[:-1]):
-        violations.append("a rejected prefix attempt is marked accepted")
-    if not sample.amplitude_attempts[-1].accepted:
-        violations.append("the final amplitude attempt must be accepted")
-
-    for attempt in sample.amplitude_attempts:
+    for amplitude, _ in sample.amplitude_attempts:
         if not _amplitude_is_in_cell(
-            sample.cell,
+            sample.steepness_cell_index,
             wavenumber=sample.wavenumber,
-            amplitude=attempt.amplitude,
+            amplitude=amplitude,
         ):
             violations.append("amplitude attempt lies outside its assigned cell")
             break
 
-    if sample.cell.branch == "finite":
-        for attempt in sample.amplitude_attempts[:-1]:
-            ursell = attempt.ursell_upper_bound
+    if sample.branch == "finite":
+        for _, ursell in sample.amplitude_attempts[:-1]:
             if ursell is None or (
-                math.isfinite(ursell)
-                and ursell <= FINITE_DEPTH_STOKES_URSELL_LIMIT
+                math.isfinite(ursell) and ursell <= FINITE_DEPTH_STOKES_URSELL_LIMIT
             ):
                 violations.append(
                     "a rejected amplitude satisfies the finite-depth support"
                 )
                 break
-        accepted_ursell = sample.amplitude_attempts[-1].ursell_upper_bound
+        accepted_ursell = sample.amplitude_attempts[-1][1]
         if (
             accepted_ursell is None
             or not math.isfinite(accepted_ursell)
@@ -518,7 +401,7 @@ def stokes_support_violations(
             )
     elif len(sample.amplitude_attempts) != 1:
         violations.append("deep-water sampling must use exactly one amplitude")
-    elif sample.amplitude_attempts[0].ursell_upper_bound is not None:
+    elif sample.amplitude_attempts[0][1] is not None:
         violations.append("deep-water sampling must not evaluate an Ursell number")
 
     return tuple(violations)
@@ -527,7 +410,8 @@ def stokes_support_violations(
 def _failure_record(
     *,
     assignment: AttemptAssignment,
-    cell: StokesSampleCell,
+    branch: StokesBranch,
+    steepness_cell_index: int,
     domain_length: float,
     gravity: float,
     carrier_mode: int,
@@ -536,23 +420,23 @@ def _failure_record(
     depth_draw_bounds: tuple[float, float],
     phase: float,
     amplitude_draw_bounds: tuple[float, float],
-    attempts: tuple[StokesAmplitudeAttempt, ...],
+    attempts: tuple[AmplitudeAttempt, ...],
 ) -> JsonRecord:
     """Build the complete strict-JSON record for an exhausted attempt."""
 
     wavenumber = 2.0 * math.pi * carrier_mode / domain_length
+    steepness_lower, steepness_upper = PAPER_STOKES_STEEPNESS_CELLS[
+        steepness_cell_index
+    ]
     record = {
-        **_assignment_record(assignment),
+        **assignment.to_json_record(),
         "status": "failed_ursell_redraw_limit",
         "constructor": "project_fifth_order_stokes_fixed_phase_v1",
-        "cell_id": cell.cell_id,
-        "branch": cell.branch,
-        "steepness_cell_index": cell.steepness_cell_index,
-        "steepness_cell_lower": cell.steepness_bounds[0],
-        "steepness_cell_upper": cell.steepness_bounds[1],
-        "steepness_cell_upper_inclusive": (
-            cell.upper_steepness_is_inclusive
-        ),
+        "branch": branch,
+        "steepness_cell_index": steepness_cell_index,
+        "steepness_cell_lower": float(steepness_lower),
+        "steepness_cell_upper": float(steepness_upper),
+        "steepness_cell_upper_inclusive": steepness_cell_index == 1,
         "domain_length": domain_length,
         "gravity": gravity,
         "carrier_mode": carrier_mode,
@@ -562,19 +446,29 @@ def _failure_record(
         "depth_draw_lower": depth_draw_bounds[0],
         "depth_draw_upper": depth_draw_bounds[1],
         "phase": phase,
-        "amplitude": attempts[-1].amplitude,
-        "steepness": wavenumber * attempts[-1].amplitude,
+        "amplitude": attempts[-1][0],
+        "steepness": wavenumber * attempts[-1][0],
         "amplitude_draw_lower": amplitude_draw_bounds[0],
         "amplitude_draw_upper": amplitude_draw_bounds[1],
         "finite_depth_ursell_limit": FINITE_DEPTH_STOKES_URSELL_LIMIT,
         "support_resampling_count": len(attempts) - 1,
-        "amplitude_attempts": _attempt_records(
-            attempts,
-            wavenumber=wavenumber,
-            ursell_was_evaluated=True,
-        ),
+        "amplitude_attempts": [
+            {
+                "attempt_index": index,
+                "amplitude": amplitude,
+                "steepness": wavenumber * amplitude,
+                "ursell_was_evaluated": True,
+                "ursell_upper_bound": (
+                    ursell if ursell is not None and math.isfinite(ursell) else None
+                ),
+                "ursell_upper_bound_was_finite": (
+                    ursell is not None and math.isfinite(ursell)
+                ),
+                "accepted": False,
+            }
+            for index, (amplitude, ursell) in enumerate(attempts)
+        ],
     }
-    _check_strict_json(record)
     return record
 
 
@@ -604,32 +498,39 @@ def sample_stokes_case(
     if maximum_ursell_redraws < 0:
         raise ValueError("maximum_ursell_redraws must be nonnegative")
 
-    cell = _require_sample_cell(assignment.cell_id)
+    cell = STOKES_SAMPLE_CELLS.get(assignment.cell_id)
+    if cell is None:
+        raise ValueError(f"unknown Stokes sample cell: {assignment.cell_id}")
+    branch, steepness_cell_index = cell
     carrier_mode_support = feasible_carrier_modes(
-        cell,
+        branch,
+        steepness_cell_index,
         domain_length=domain_length,
     )
     if not carrier_mode_support:
         raise ValueError("the assigned Stokes cell has no feasible carrier mode")
 
     rng = random_generator_for_case(assignment.case_key)
-    carrier_mode = carrier_mode_support[
-        int(rng.integers(0, len(carrier_mode_support)))
-    ]
+    carrier_mode = carrier_mode_support[int(rng.integers(0, len(carrier_mode_support)))]
     wavenumber = 2.0 * math.pi * carrier_mode / domain_length
     depth_draw_bounds = effective_depth_bounds(
-        cell,
+        branch,
         wavenumber=wavenumber,
     )
     amplitude_draw_bounds = effective_amplitude_bounds(
-        cell,
+        steepness_cell_index,
         wavenumber=wavenumber,
     )
-    depth = _sample_log_uniform(rng, depth_draw_bounds)
+    depth_lower, depth_upper = depth_draw_bounds
+    depth = (
+        depth_lower
+        if depth_lower == depth_upper
+        else float(np.exp(rng.uniform(np.log(depth_lower), np.log(depth_upper))))
+    )
     phase = float(rng.uniform(0.0, 2.0 * math.pi))
 
-    attempts: list[StokesAmplitudeAttempt] = []
-    for amplitude_attempt_index in range(maximum_ursell_redraws + 1):
+    attempts: list[AmplitudeAttempt] = []
+    for _ in range(maximum_ursell_redraws + 1):
         amplitude = float(rng.uniform(*amplitude_draw_bounds))
         ursell_upper_bound = (
             _evaluate_finite_depth_ursell(
@@ -638,26 +539,20 @@ def sample_stokes_case(
                 gravity=gravity,
                 amplitude=amplitude,
             )
-            if cell.branch == "finite"
+            if branch == "finite"
             else None
         )
-        accepted = cell.branch == "deep" or (
+        accepted = branch == "deep" or (
             ursell_upper_bound is not None
             and math.isfinite(ursell_upper_bound)
             and ursell_upper_bound <= FINITE_DEPTH_STOKES_URSELL_LIMIT
         )
-        attempts.append(
-            StokesAmplitudeAttempt(
-                attempt_index=amplitude_attempt_index,
-                amplitude=amplitude,
-                ursell_upper_bound=ursell_upper_bound,
-                accepted=accepted,
-            )
-        )
+        attempts.append((amplitude, ursell_upper_bound))
         if accepted:
             sample = StokesSample(
                 assignment=assignment,
-                cell=cell,
+                branch=branch,
+                steepness_cell_index=steepness_cell_index,
                 domain_length=float(domain_length),
                 gravity=float(gravity),
                 carrier_mode=carrier_mode,
@@ -678,7 +573,8 @@ def sample_stokes_case(
 
     failure_record = _failure_record(
         assignment=assignment,
-        cell=cell,
+        branch=branch,
+        steepness_cell_index=steepness_cell_index,
         domain_length=float(domain_length),
         gravity=float(gravity),
         carrier_mode=carrier_mode,
@@ -689,7 +585,4 @@ def sample_stokes_case(
         amplitude_draw_bounds=amplitude_draw_bounds,
         attempts=tuple(attempts),
     )
-    raise StokesSamplingError(
-        "finite-depth Stokes attempt exhausted same-cell amplitude redraws",
-        failure_record=failure_record,
-    )
+    raise UrsellRedrawLimitReached(failure_record)

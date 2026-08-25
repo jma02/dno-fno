@@ -9,11 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from solver.gen_data.multi_crest import (
-    CrestSpec,
-    flatten_case_specs,
-    specs_to_jax_arrays,
-)
+from solver.gen_data.tanaka_sampling import TanakaCrest
 from solver.solvers.dno_series_jax import build_grid, myfft, myifft
 from solver.solvers.time_integrator import spectral_dx
 from solver.tanaka_ICs.modified_tanaka import (
@@ -42,6 +38,29 @@ class TanakaPotentialRadicandError(ValueError):
         )
         self.failure_record: dict[str, object] = json.loads(serialized)
         super().__init__(serialized)
+
+
+def _flatten_case_crests(
+    case_crests: list[list[TanakaCrest]],
+) -> tuple[list[TanakaCrest], np.ndarray]:
+    flat_crests: list[TanakaCrest] = []
+    crest_case_ids: list[int] = []
+    for case_index, crests in enumerate(case_crests):
+        flat_crests.extend(crests)
+        crest_case_ids.extend([case_index] * len(crests))
+    return flat_crests, np.asarray(crest_case_ids, dtype=np.int32)
+
+
+def _crests_to_jax_arrays(
+    crests: list[TanakaCrest],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    alphas = jnp.asarray([crest.alpha for crest in crests], dtype=jnp.float64)
+    centers = jnp.asarray([crest.center for crest in crests], dtype=jnp.float64)
+    directions = jnp.asarray(
+        [crest.direction for crest in crests],
+        dtype=jnp.float64,
+    )
+    return alphas, centers, directions
 
 
 def cubic_hermite_zero_exterior(
@@ -210,7 +229,7 @@ def _tanaka_radicand_component_record(
     global_component_index: int,
     component_within_case: int,
     case_index: int,
-    spec: CrestSpec,
+    spec: TanakaCrest,
     depth: float,
     unsigned_speed: float,
     speed_squared: float,
@@ -247,7 +266,7 @@ def _tanaka_radicand_component_record(
         "local_case_index": case_index,
         "component_within_case": component_within_case,
         "global_component_index": global_component_index,
-        "alpha": _finite_or_none(float(spec.amplitude)),
+        "alpha": _finite_or_none(float(spec.alpha)),
         "center": _finite_or_none(float(spec.center)),
         "direction": int(spec.direction),
         "depth": _finite_or_none(depth),
@@ -270,7 +289,7 @@ def _validate_tanaka_surface_potential_radicand(
     x_grid: jax.Array | np.ndarray,
     speed_per_crest: jax.Array | np.ndarray,
     case_h_ref: np.ndarray,
-    flat_specs: list[CrestSpec],
+    flat_specs: list[TanakaCrest],
     crest_case_ids: np.ndarray,
     components_within_case: tuple[int, ...],
 ) -> None:
@@ -357,14 +376,14 @@ def build_per_case_initial_conditions(
     *,
     template_params: ModifiedTanakaParams,
     case_h_ref: np.ndarray,
-    case_specs: list[list[CrestSpec]],
+    case_specs: list[list[TanakaCrest]],
     length: float,
     nx: int,
     gravity: float,
 ) -> tuple[jax.Array, jax.Array]:
     """Generate per-case tangent-Hermite Tanaka multicrest initial conditions."""
-    flat_specs, crest_case_ids = flatten_case_specs(case_specs)
-    flat_steepness, flat_centers, flat_directions = specs_to_jax_arrays(
+    flat_specs, crest_case_ids = _flatten_case_crests(case_specs)
+    flat_steepness, flat_centers, flat_directions = _crests_to_jax_arrays(
         flat_specs
     )
     crest_case_ids_array = jnp.asarray(crest_case_ids)

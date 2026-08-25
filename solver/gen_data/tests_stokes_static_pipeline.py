@@ -28,7 +28,7 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
 from solver.gen_data.pipeline.reference import DiscreteDnoTarget  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
-    STOKES_SAMPLE_CELLS,
+    STOKES_SAMPLE_CELL_IDS,
     StokesSample,
     sample_stokes_case,
 )
@@ -62,7 +62,7 @@ def assignment(
             stream_id=9,
             attempt_index=attempt_index,
         ),
-        cell_id=STOKES_SAMPLE_CELLS[cell_index].cell_id,
+        cell_id=STOKES_SAMPLE_CELL_IDS[cell_index],
     )
 
 
@@ -110,19 +110,14 @@ class StokesStaticPipelineTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            expected_proposal = (
-                root
-                / "proposals/stokes/validation/batch_000003.npz"
-            )
+            expected_proposal = root / "proposals/stokes/validation/batch_000003.npz"
             proposal_existed_during_construction: list[bool] = []
 
             def injected_constructor(
                 sample: StokesSample,
                 active_contract: StaticStokesContract,
             ) -> tuple[jax.Array, jax.Array]:
-                proposal_existed_during_construction.append(
-                    expected_proposal.exists()
-                )
+                proposal_existed_during_construction.append(expected_proposal.exists())
                 eta, xi = construct_stokes_state(sample, active_contract)
                 if sample.assignment.case_key.attempt_index == 12:
                     eta = eta.at[0].set(jnp.nan)
@@ -153,12 +148,10 @@ class StokesStaticPipelineTest(unittest.TestCase):
                 [True, True, False, False],
             )
             self.assertTrue(
-                result.outcomes[2].decision.failed
-                & QualityReason.NONFINITE_STATE
+                result.outcomes[2].decision.failed & QualityReason.NONFINITE_STATE
             )
             self.assertTrue(
-                result.outcomes[3].decision.failed
-                & QualityReason.BOTTOM_CLEARANCE
+                result.outcomes[3].decision.failed & QualityReason.BOTTOM_CLEARANCE
             )
 
             with np.load(
@@ -168,10 +161,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                 np.testing.assert_array_equal(
                     proposal["case_id"],
                     np.asarray(
-                        [
-                            sample.assignment.case_key.case_id
-                            for sample in samples
-                        ],
+                        [sample.assignment.case_key.case_id for sample in samples],
                         dtype=np.int64,
                     ),
                 )
@@ -180,8 +170,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     np.full(4, 2026072204, dtype=np.uint64),
                 )
                 specifications = [
-                    json.loads(value)
-                    for value in proposal["case_spec_json"]
+                    json.loads(value) for value in proposal["case_spec_json"]
                 ]
                 self.assertEqual(
                     specifications,
@@ -191,9 +180,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     "amplitude_attempts",
                     specifications[0],
                 )
-                proposal_metadata = json.loads(
-                    str(proposal["metadata_json"])
-                )
+                proposal_metadata = json.loads(str(proposal["metadata_json"]))
                 self.assertEqual(
                     proposal_metadata["contract"]["role"],
                     "reduced_wiring_evidence_only",
@@ -226,9 +213,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     1.0e-8,
                 )
 
-            result_payload = json.loads(
-                result.paths.result.read_text(encoding="utf-8")
-            )
+            result_payload = json.loads(result.paths.result.read_text(encoding="utf-8"))
             self.assertEqual(
                 [case["row_count"] for case in result_payload["cases"]],
                 [1, 1, 0, 0],
@@ -239,8 +224,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    case["required_bits"]
-                    == int(STATIC_STOKES_REQUIRED_CHECKS)
+                    case["required_bits"] == int(STATIC_STOKES_REQUIRED_CHECKS)
                     for case in result_payload["cases"]
                 )
             )
@@ -301,9 +285,7 @@ class StokesStaticPipelineTest(unittest.TestCase):
         )
         self.assertFalse(outcome.decision.accepted)
         self.assertIsNone(outcome.rows)
-        self.assertTrue(
-            outcome.decision.failed & QualityReason.NONFINITE_TARGET
-        )
+        self.assertTrue(outcome.decision.failed & QualityReason.NONFINITE_TARGET)
         self.assertEqual(outcome.metrics["target_finite"], False)
 
     def test_constructor_and_target_exceptions_propagate(self) -> None:

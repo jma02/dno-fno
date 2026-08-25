@@ -345,7 +345,7 @@ class ContractAndBindingTests(unittest.TestCase):
                 for code, cell_id in enumerate(EXPECTED_CELL_IDS["stokes"])
             }
             summary["run_spec"]["quotas"] = list(
-                figure_builder._expected_incremental_quotas(
+                figure_builder._expected_incremental_valid_case_targets(
                     "stokes",
                     accepted_before=0,
                     accepted_after=1,
@@ -370,7 +370,7 @@ class ContractAndBindingTests(unittest.TestCase):
             )
             summary["run_spec"]["quotas"][0]["target_accepted"] = 2
             _write_json(summary_path, summary)
-            with self.assertRaisesRegex(ValueError, "balanced cell quotas"):
+            with self.assertRaisesRegex(ValueError, "balanced valid-case targets"):
                 _validate_chunk_taxonomy(chunk)
 
     def test_wrong_source_revision_fails_closed(self) -> None:

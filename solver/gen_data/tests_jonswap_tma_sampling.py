@@ -20,6 +20,7 @@ from solver.gen_data.jonswap_tma import (
 )
 from solver.gen_data.jonswap_tma_sampling import (
     JONSWAP_TMA_SAMPLING_REVISION_V4,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
     JONSWAP_TMA_SAMPLE_CELLS,
     sample_jonswap_tma_case,
 )
@@ -42,7 +43,7 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 4,
-    revision_id: int = 1,
+    revision_id: int = JONSWAP_TMA_SAMPLING_REVISION_V4,
     split_id: SplitId = SplitId.TRAIN,
     stream_id: int = 0,
     attempt_index: int | None = None,
@@ -58,36 +59,30 @@ def assignment(
             stream_id=stream_id,
             attempt_index=attempt,
         ),
-        cell_id=JONSWAP_TMA_SAMPLE_CELLS[cell_index].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[cell_index],
     )
 
 
 class JonswapTmaSamplingTest(unittest.TestCase):
     def test_cells_are_exact_cartesian_product(self) -> None:
-        coordinates = {
-            (
-                cell.stratum,
-                cell.peak_enhancement,
-                cell.right_moving_fraction,
-            )
-            for cell in JONSWAP_TMA_SAMPLE_CELLS
-        }
+        coordinates = set(JONSWAP_TMA_SAMPLE_CELLS.values())
         expected = {
             (stratum, gamma, direction)
             for stratum in ("shallow", "finite", "deep")
             for gamma in PAPER_PEAK_ENHANCEMENTS
             for direction in PAPER_RIGHT_MOVING_FRACTIONS
         }
-        self.assertEqual(len(JONSWAP_TMA_SAMPLE_CELLS), 27)
+        self.assertEqual(len(JONSWAP_TMA_SAMPLE_CELL_IDS), 27)
         self.assertEqual(coordinates, expected)
         self.assertEqual(
-            len({cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS}),
+            len(JONSWAP_TMA_SAMPLE_CELL_IDS),
             27,
         )
 
     def test_every_cell_samples_inside_declared_support(self) -> None:
-        for index, cell in enumerate(JONSWAP_TMA_SAMPLE_CELLS):
-            with self.subTest(cell=cell.cell_id):
+        for index, (cell_id, cell) in enumerate(JONSWAP_TMA_SAMPLE_CELLS.items()):
+            stratum, peak_enhancement, right_moving_fraction = cell
+            with self.subTest(cell=cell_id):
                 sample = sample_jonswap_tma_case(
                     assignment(index),
                     band=BAND,
@@ -95,18 +90,18 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 self.assertEqual(
                     find_jonswap_parameter_violations(
                         sample.parameters,
-                        stratum=cell.stratum,
+                        stratum=stratum,
                         length=BAND.length,
                     ),
                     (),
                 )
                 self.assertEqual(
                     sample.parameters.peak_enhancement,
-                    cell.peak_enhancement,
+                    peak_enhancement,
                 )
                 self.assertEqual(
                     sample.parameters.right_moving_fraction,
-                    cell.right_moving_fraction,
+                    right_moving_fraction,
                 )
 
     def test_replay_is_bitwise_deterministic(self) -> None:
@@ -129,15 +124,13 @@ class JonswapTmaSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            CaseKey(5, 1, SplitId.TRAIN, 0, 41),
-            CaseKey(4, 2, SplitId.TRAIN, 0, 41),
-            CaseKey(4, 1, SplitId.VALIDATION, 0, 41),
-            CaseKey(4, 1, SplitId.TRAIN, 1, 41),
-            CaseKey(4, 1, SplitId.TRAIN, 0, 42),
+            CaseKey(5, 4, SplitId.TRAIN, 0, 41),
+            CaseKey(4, 5, SplitId.TRAIN, 0, 41),
+            CaseKey(4, 4, SplitId.VALIDATION, 0, 41),
+            CaseKey(4, 4, SplitId.TRAIN, 1, 41),
+            CaseKey(4, 4, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {
-            tuple(random_generator_for_case(key).random(8)) for key in keys
-        }
+        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
         self.assertEqual(len(first_draws), len(keys))
 
     def test_phases_are_explicit_independent_and_json_ready(self) -> None:
@@ -186,7 +179,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         self,
     ) -> None:
         for attempt_index in range(512):
-            cell_index = attempt_index % len(JONSWAP_TMA_SAMPLE_CELLS)
+            cell_index = attempt_index % len(JONSWAP_TMA_SAMPLE_CELL_IDS)
             sample = sample_jonswap_tma_case(
                 assignment(
                     cell_index,
@@ -202,6 +195,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                     relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
                 )
             )
+
 
 if __name__ == "__main__":
     unittest.main()

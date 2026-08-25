@@ -257,7 +257,6 @@ BF_EXPECTED_GENERATION_SOURCE_PATHS: Final = frozenset(
 TANAKA_EXPECTED_GENERATION_SOURCE_PATHS: Final = frozenset(
     {
         "scripts/run_paper_dataset_quota.py",
-        "solver/gen_data/multi_crest.py",
         "solver/gen_data/pipeline/acceptance.py",
         "solver/gen_data/pipeline/archive.py",
         "solver/gen_data/pipeline/manifest.py",

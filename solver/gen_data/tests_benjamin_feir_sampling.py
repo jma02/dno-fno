@@ -23,10 +23,10 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     PERTURBATION_RATIO_MIN,
 )
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
     BENJAMIN_FEIR_SAMPLE_CELLS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
-    BenjaminFeirSampleCell,
     find_benjamin_feir_sample_violations,
     sample_benjamin_feir_case,
 )
@@ -34,7 +34,7 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     random_generator_for_case,
     schedule_attempt_batch,
 )
@@ -47,7 +47,7 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 3,
-    revision_id: int = 1,
+    revision_id: int = 4,
     split_id: SplitId = SplitId.TRAIN,
     stream_id: int = 0,
     attempt_index: int | None = None,
@@ -63,7 +63,7 @@ def assignment(
             stream_id=stream_id,
             attempt_index=attempt,
         ),
-        cell_id=BENJAMIN_FEIR_SAMPLE_CELLS[cell_index].cell_id,
+        cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[cell_index],
     )
 
 
@@ -76,24 +76,19 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             if sideband_offset / carrier_mode
             < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
         )
-        realized = tuple(
-            (cell.carrier_mode, cell.sideband_offset)
-            for cell in BENJAMIN_FEIR_SAMPLE_CELLS
-        )
+        realized = tuple(BENJAMIN_FEIR_SAMPLE_CELLS.values())
         self.assertEqual(len(realized), 66)
         self.assertEqual(realized, expected)
         self.assertEqual(
-            len({cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS}),
+            len(BENJAMIN_FEIR_SAMPLE_CELL_IDS),
             66,
         )
 
     def test_common_scheduler_balances_the_pair_cells_exactly(self) -> None:
-        cell_ids = tuple(
-            cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS
-        )
-        quotas = balanced_cell_quotas(cell_ids, accepted_case_count=20_000)
+        cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
+        targets = balanced_valid_case_targets(cell_ids, case_count=20_000)
         scheduled = schedule_attempt_batch(
-            quotas,
+            targets,
             {},
             family_id=3,
             revision_id=1,
@@ -112,12 +107,8 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         )
 
     def test_replay_is_bitwise_deterministic_and_constructor_ready(self) -> None:
-        first = sample_benjamin_feir_case(
-            assignment(37, attempt_index=91)
-        )
-        second = sample_benjamin_feir_case(
-            assignment(37, attempt_index=91)
-        )
+        first = sample_benjamin_feir_case(assignment(37, attempt_index=91))
+        second = sample_benjamin_feir_case(assignment(37, attempt_index=91))
         self.assertEqual(first, second)
         self.assertEqual(first.to_json_record(), second.to_json_record())
         first_arrays = first.to_parameter_arrays()
@@ -137,19 +128,19 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            CaseKey(4, 1, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 2, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 1, SplitId.VALIDATION, 0, 41),
-            CaseKey(3, 1, SplitId.TRAIN, 1, 41),
-            CaseKey(3, 1, SplitId.TRAIN, 0, 42),
+            CaseKey(4, 4, SplitId.TRAIN, 0, 41),
+            CaseKey(3, 5, SplitId.TRAIN, 0, 41),
+            CaseKey(3, 4, SplitId.VALIDATION, 0, 41),
+            CaseKey(3, 4, SplitId.TRAIN, 1, 41),
+            CaseKey(3, 4, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {
-            tuple(random_generator_for_case(key).random(8)) for key in keys
-        }
+        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
         self.assertEqual(len(first_draws), len(keys))
 
     def test_all_cells_remain_in_support_under_many_attempts(self) -> None:
-        for cell_index, cell in enumerate(BENJAMIN_FEIR_SAMPLE_CELLS):
+        for cell_index, (carrier_mode, sideband_offset) in enumerate(
+            BENJAMIN_FEIR_SAMPLE_CELLS.values()
+        ):
             for local_attempt in range(128):
                 sample = sample_benjamin_feir_case(
                     assignment(
@@ -158,14 +149,16 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
                     )
                 )
                 self.assertEqual(find_benjamin_feir_sample_violations(sample), ())
-                self.assertEqual(sample.cell, cell)
+                self.assertEqual(sample.carrier_mode, carrier_mode)
+                self.assertEqual(sample.sideband_offset, sideband_offset)
+                steepness_lower, steepness_upper = sample.conditional_steepness_bounds
                 self.assertGreater(
                     sample.carrier_steepness,
-                    cell.conditional_steepness_lower_bound,
+                    steepness_lower,
                 )
                 self.assertLessEqual(
                     sample.carrier_steepness,
-                    cell.conditional_steepness_upper_bound,
+                    steepness_upper,
                 )
                 self.assertGreaterEqual(
                     sample.perturbation_ratio,
@@ -186,13 +179,15 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
     def test_every_cell_has_a_nonempty_closed_form_focused_interval(
         self,
     ) -> None:
-        for cell in BENJAMIN_FEIR_SAMPLE_CELLS:
+        for cell_index in range(len(BENJAMIN_FEIR_SAMPLE_CELL_IDS)):
+            sample = sample_benjamin_feir_case(assignment(cell_index))
+            lower, upper = sample.conditional_steepness_bounds
             self.assertLess(
-                cell.conditional_steepness_lower_bound,
-                cell.conditional_steepness_upper_bound,
+                lower,
+                upper,
             )
             self.assertLessEqual(
-                cell.conditional_steepness_upper_bound,
+                upper,
                 CARRIER_STEEPNESS_MAX,
             )
 
@@ -218,10 +213,10 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         self.assertEqual(record["stream_id"], 29)
         self.assertEqual(record["attempt_index"], 123_456)
         self.assertEqual(record["seed_words"], list(key.seed_words))
-        self.assertEqual(record["carrier_mode"], sample.cell.carrier_mode)
+        self.assertEqual(record["carrier_mode"], sample.carrier_mode)
         self.assertEqual(
             record["sideband_offset"],
-            sample.cell.sideband_offset,
+            sample.sideband_offset,
         )
         self.assertEqual(record["translation"], sample.translation)
         self.assertEqual(record["carrier_phase_in_translated_frame"], 0.0)
@@ -260,18 +255,12 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
                 assignment(0),
                 domain_length=math.nan,
             )
-        with self.assertRaisesRegex(ValueError, "focused support"):
-            BenjaminFeirSampleCell(
-                carrier_mode=4,
-                sideband_offset=2,
-            )
-        with self.assertRaisesRegex(ValueError, "declared support"):
-            BenjaminFeirSampleCell(
-                carrier_mode=21,
-                sideband_offset=1,
-            )
-
         sample = sample_benjamin_feir_case(assignment(0))
+        wrong_cell = replace(sample, carrier_mode=21)
+        self.assertIn(
+            "sample parameters do not match the assigned cell",
+            find_benjamin_feir_sample_violations(wrong_cell),
+        )
         corrupt = replace(sample, carrier_steepness=math.nan)
         self.assertIn(
             "carrier_steepness is outside its conditional support",

@@ -1,4 +1,4 @@
-"""CPU tests for durable accepted-quota orchestration."""
+"""CPU tests for restartable valid-case generation."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from solver.gen_data.pipeline.archive import (
 from solver.gen_data.pipeline.production import (
     AttemptAssignment,
     CaseKey,
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
 )
@@ -32,12 +32,12 @@ from solver.gen_data.pipeline.quality import (
     QualityReason,
     QualityScope,
 )
-from solver.gen_data.pipeline.quota_driver import (
-    AcceptedQuotaRunSpec,
+from solver.gen_data.pipeline.valid_case_generation import (
+    DatasetGenerationSpec,
     canonical_json_sha256,
-    quota_run_lock,
-    run_accepted_quotas,
-    scan_quota_run,
+    dataset_generation_lock,
+    generate_valid_cases,
+    scan_dataset_generation,
 )
 from solver.gen_data.pipeline.writer import (
     AcceptedCaseRows,
@@ -55,24 +55,26 @@ class InjectedInterruption(RuntimeError):
 def _run_spec(
     root: Path,
     *,
-    quotas: tuple[CellQuota, ...] | None = None,
+    case_targets: tuple[ValidCaseTarget, ...] | None = None,
     batch_size: int = 2,
     maximum_attempts_per_accepted_case: int = 4,
     configuration: Mapping[str, object] | None = None,
-) -> AcceptedQuotaRunSpec:
-    quota_values = quotas or (
-        CellQuota("low", 2),
-        CellQuota("moderate", 2),
+) -> DatasetGenerationSpec:
+    target_values = case_targets or (
+        ValidCaseTarget("low", 2),
+        ValidCaseTarget("moderate", 2),
     )
-    return AcceptedQuotaRunSpec(
+    return DatasetGenerationSpec(
         root=root,
         family_name="tanaka",
         family_id=PhysicalFamilyId.TANAKA,
         revision_id=1,
         split_id=SplitId.TRAIN,
         stream_id=3,
-        quotas=quota_values,
-        cell_codes={quota.cell_id: index for index, quota in enumerate(quota_values)},
+        case_targets=target_values,
+        cell_codes={
+            target.cell_id: index for index, target in enumerate(target_values)
+        },
         batch_size=batch_size,
         first_attempt_index=0,
         maximum_attempts_per_accepted_case=(
@@ -91,7 +93,7 @@ def _run_spec(
 
 
 def _proposal_arrays(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
     assignments: Sequence[AttemptAssignment],
     *,
     batch_id: int,
@@ -153,7 +155,7 @@ class FakeExecutor:
 
     def __init__(
         self,
-        spec: AcceptedQuotaRunSpec,
+        spec: DatasetGenerationSpec,
         *,
         rejected_attempts: frozenset[int] = frozenset(),
     ) -> None:
@@ -200,7 +202,7 @@ class FakeExecutor:
         return paths
 
 
-class QuotaDriverTests(unittest.TestCase):
+class ValidCaseGenerationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -213,10 +215,10 @@ class QuotaDriverTests(unittest.TestCase):
         executor = FakeExecutor(spec, rejected_attempts=frozenset({1}))
 
         with mock.patch(
-            "solver.gen_data.pipeline.quota_driver.scan_quota_run",
-            wraps=scan_quota_run,
+            "solver.gen_data.pipeline.valid_case_generation.scan_dataset_generation",
+            wraps=scan_dataset_generation,
         ) as scanner:
-            state = run_accepted_quotas(spec, executor)
+            state = generate_valid_cases(spec, executor)
             self.assertEqual(scanner.call_count, 1)
 
         self.assertTrue(state.complete)
@@ -240,7 +242,7 @@ class QuotaDriverTests(unittest.TestCase):
             [len(assignments) for _, assignments in executor.calls],
             [2, 2, 1],
         )
-        self.assertEqual(state, scan_quota_run(spec))
+        self.assertEqual(state, scan_dataset_generation(spec))
 
         class MustNotRun:
             def __call__(
@@ -251,7 +253,7 @@ class QuotaDriverTests(unittest.TestCase):
             ) -> BatchPaths:
                 raise AssertionError((assignments, batch_id))
 
-        replay = run_accepted_quotas(spec, MustNotRun())
+        replay = generate_valid_cases(spec, MustNotRun())
         self.assertTrue(replay.complete)
         self.assertEqual(replay.next_attempt_index, 5)
 
@@ -260,7 +262,7 @@ class QuotaDriverTests(unittest.TestCase):
     ) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 4),),
+            case_targets=(ValidCaseTarget("low", 4),),
             batch_size=3,
             maximum_attempts_per_accepted_case=2,
         )
@@ -269,7 +271,7 @@ class QuotaDriverTests(unittest.TestCase):
             rejected_attempts=frozenset({0, 1, 2, 4, 5, 6, 7}),
         )
 
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
 
         self.assertFalse(state.complete)
         self.assertIsNone(state.pending)
@@ -298,7 +300,7 @@ class QuotaDriverTests(unittest.TestCase):
                 batch_id=3,
             ).proposal.exists()
         )
-        self.assertEqual(state, scan_quota_run(spec))
+        self.assertEqual(state, scan_dataset_generation(spec))
 
         class MustNotRun:
             def __call__(
@@ -309,13 +311,13 @@ class QuotaDriverTests(unittest.TestCase):
             ) -> BatchPaths:
                 raise AssertionError((assignments, batch_id))
 
-        restarted = run_accepted_quotas(spec, MustNotRun())
+        restarted = generate_valid_cases(spec, MustNotRun())
         self.assertEqual(restarted, state)
 
     def test_pending_final_attempt_replays_before_cap_exhaustion(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1),),
+            case_targets=(ValidCaseTarget("low", 1),),
             batch_size=1,
             maximum_attempts_per_accepted_case=1,
         )
@@ -339,15 +341,15 @@ class QuotaDriverTests(unittest.TestCase):
             InjectedInterruption,
             "after final allowed proposal",
         ):
-            run_accepted_quotas(spec, interrupt_after_proposal)
+            generate_valid_cases(spec, interrupt_after_proposal)
 
-        pending = scan_quota_run(spec)
+        pending = scan_dataset_generation(spec)
         self.assertIsNotNone(pending.pending)
         self.assertIsNone(pending.attempt_limit_failure)
         self.assertEqual(dict(pending.attempted_by_cell), {"low": 1})
 
         executor = FakeExecutor(spec)
-        completed = run_accepted_quotas(spec, executor)
+        completed = generate_valid_cases(spec, executor)
         self.assertTrue(completed.complete)
         self.assertIsNone(completed.attempt_limit_failure)
         self.assertEqual(len(executor.calls), 1)
@@ -356,7 +358,7 @@ class QuotaDriverTests(unittest.TestCase):
     def test_proposal_only_interruption_replays_exact_assignments(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1), CellQuota("moderate", 1)),
+            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
         )
         interrupted_calls: list[tuple[AttemptAssignment, ...]] = []
 
@@ -377,9 +379,9 @@ class QuotaDriverTests(unittest.TestCase):
             raise InjectedInterruption("after proposal")
 
         with self.assertRaisesRegex(InjectedInterruption, "after proposal"):
-            run_accepted_quotas(spec, interrupt_after_proposal)
+            generate_valid_cases(spec, interrupt_after_proposal)
 
-        pending = scan_quota_run(spec).pending
+        pending = scan_dataset_generation(spec).pending
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.PROPOSED)
@@ -387,19 +389,19 @@ class QuotaDriverTests(unittest.TestCase):
 
         resumed_executor = FakeExecutor(spec)
         with mock.patch(
-            "solver.gen_data.pipeline.quota_driver.scan_quota_run",
-            wraps=scan_quota_run,
+            "solver.gen_data.pipeline.valid_case_generation.scan_dataset_generation",
+            wraps=scan_dataset_generation,
         ) as scanner:
-            state = run_accepted_quotas(spec, resumed_executor)
+            state = generate_valid_cases(spec, resumed_executor)
             self.assertEqual(scanner.call_count, 1)
         self.assertTrue(state.complete)
         self.assertEqual(resumed_executor.calls[0][1], interrupted_calls[0])
-        self.assertEqual(state, scan_quota_run(spec))
+        self.assertEqual(state, scan_dataset_generation(spec))
 
     def test_shard_interruption_replays_without_replacing_the_shard(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1), CellQuota("moderate", 1)),
+            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
         )
         interrupted_executor = FakeExecutor(spec)
         with (
@@ -409,28 +411,28 @@ class QuotaDriverTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(InjectedInterruption, "after shard"),
         ):
-            run_accepted_quotas(spec, interrupted_executor)
+            generate_valid_cases(spec, interrupted_executor)
 
-        pending = scan_quota_run(spec).pending
+        pending = scan_dataset_generation(spec).pending
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.SHARD_WRITTEN)
         shard_hash = file_sha256(pending.paths.shard)
 
         with mock.patch(
-            "solver.gen_data.pipeline.quota_driver.scan_quota_run",
-            wraps=scan_quota_run,
+            "solver.gen_data.pipeline.valid_case_generation.scan_dataset_generation",
+            wraps=scan_dataset_generation,
         ) as scanner:
-            state = run_accepted_quotas(spec, FakeExecutor(spec))
+            state = generate_valid_cases(spec, FakeExecutor(spec))
             self.assertEqual(scanner.call_count, 1)
         self.assertTrue(state.complete)
         self.assertEqual(file_sha256(pending.paths.shard), shard_hash)
-        self.assertEqual(state, scan_quota_run(spec))
+        self.assertEqual(state, scan_dataset_generation(spec))
 
     def test_terminal_failure_stops_without_scheduling_a_later_batch(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1), CellQuota("moderate", 1)),
+            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
         )
         calls = 0
 
@@ -458,13 +460,13 @@ class QuotaDriverTests(unittest.TestCase):
             )
             return paths
 
-        state = run_accepted_quotas(spec, fail_batch)
+        state = generate_valid_cases(spec, fail_batch)
         self.assertFalse(state.complete)
         self.assertIsNotNone(state.terminal_failure)
         self.assertEqual(calls, 1)
-        self.assertEqual(state, scan_quota_run(spec))
+        self.assertEqual(state, scan_dataset_generation(spec))
 
-        replay = run_accepted_quotas(spec, fail_batch)
+        replay = generate_valid_cases(spec, fail_batch)
         self.assertIsNotNone(replay.terminal_failure)
         self.assertEqual(calls, 1)
         self.assertFalse(
@@ -479,7 +481,7 @@ class QuotaDriverTests(unittest.TestCase):
     def test_incremental_state_validates_the_persisted_assignments(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1), CellQuota("moderate", 1)),
+            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
             batch_size=1,
         )
 
@@ -512,18 +514,18 @@ class QuotaDriverTests(unittest.TestCase):
             RuntimeError,
             "persisted proposal assignments differ",
         ):
-            run_accepted_quotas(spec, persist_a_different_cell)
+            generate_valid_cases(spec, persist_a_different_cell)
         with self.assertRaisesRegex(
             RuntimeError,
-            "deterministic quota schedule",
+            "deterministic case schedule",
         ):
-            scan_quota_run(spec)
+            scan_dataset_generation(spec)
 
     def test_scanner_rejects_batch_gaps_and_wrong_stream(self) -> None:
         gap_root = self.root / "gap"
         gap_spec = _run_spec(
             gap_root,
-            quotas=(CellQuota("low", 1), CellQuota("moderate", 1)),
+            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
         )
         assignments = (
             AttemptAssignment(
@@ -548,12 +550,12 @@ class QuotaDriverTests(unittest.TestCase):
             _proposal_arrays(gap_spec, assignments, batch_id=1),
         )
         with self.assertRaisesRegex(RuntimeError, "contiguous"):
-            scan_quota_run(gap_spec)
+            scan_dataset_generation(gap_spec)
 
         stream_root = self.root / "stream"
         stream_spec = _run_spec(
             stream_root,
-            quotas=(CellQuota("low", 1),),
+            case_targets=(ValidCaseTarget("low", 1),),
             batch_size=1,
         )
         wrong_assignment = AttemptAssignment(
@@ -582,15 +584,15 @@ class QuotaDriverTests(unittest.TestCase):
         )
         ensure_proposal(wrong_paths, wrong_proposal)
         with self.assertRaisesRegex(RuntimeError, "stream_id"):
-            scan_quota_run(stream_spec)
+            scan_dataset_generation(stream_spec)
 
     def test_scanner_does_not_trust_tampered_result_acceptance(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1),),
+            case_targets=(ValidCaseTarget("low", 1),),
             batch_size=1,
         )
-        state = run_accepted_quotas(spec, FakeExecutor(spec))
+        state = generate_valid_cases(spec, FakeExecutor(spec))
         result_path = state.committed[0].result
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         payload["cases"][0]["accepted"] = False
@@ -600,7 +602,7 @@ class QuotaDriverTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "quality masks"):
-            scan_quota_run(spec)
+            scan_dataset_generation(spec)
 
     def test_configuration_fingerprint_is_canonical_and_complete(self) -> None:
         self.assertEqual(
@@ -615,7 +617,7 @@ class QuotaDriverTests(unittest.TestCase):
         changed = _run_spec(self.root / "changed", configuration={"nx": 128})
         changed_quota = _run_spec(
             self.root / "changed_quota",
-            quotas=(CellQuota("low", 3), CellQuota("moderate", 2)),
+            case_targets=(ValidCaseTarget("low", 3), ValidCaseTarget("moderate", 2)),
             configuration={"nx": 64},
         )
         changed_attempt_limit = replace(
@@ -674,11 +676,11 @@ class QuotaDriverTests(unittest.TestCase):
 
     def test_single_writer_lock_fails_fast(self) -> None:
         spec = _run_spec(self.root)
-        with quota_run_lock(spec):
+        with dataset_generation_lock(spec):
             with self.assertRaisesRegex(RuntimeError, "another"):
-                run_accepted_quotas(spec, FakeExecutor(spec))
+                generate_valid_cases(spec, FakeExecutor(spec))
 
-        state = scan_quota_run(spec)
+        state = scan_dataset_generation(spec)
         self.assertFalse(state.complete)
         self.assertEqual(state.next_batch_id, 0)
         self.assertEqual(state.next_attempt_index, 0)
@@ -686,7 +688,7 @@ class QuotaDriverTests(unittest.TestCase):
     def test_executor_must_return_standard_terminal_paths(self) -> None:
         spec = _run_spec(
             self.root,
-            quotas=(CellQuota("low", 1),),
+            case_targets=(ValidCaseTarget("low", 1),),
             batch_size=1,
         )
 
@@ -706,7 +708,7 @@ class QuotaDriverTests(unittest.TestCase):
             return paths
 
         with self.assertRaisesRegex(RuntimeError, "terminal batch record"):
-            run_accepted_quotas(spec, proposal_only)
+            generate_valid_cases(spec, proposal_only)
         self.assertEqual(
             inspect_batch(
                 BatchPaths.under(

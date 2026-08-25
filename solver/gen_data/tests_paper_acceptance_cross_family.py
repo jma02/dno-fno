@@ -30,7 +30,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     build_per_case_initial_conditions,
 )
-from solver.gen_data.multi_crest import CrestSpec  # noqa: E402
+from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
     RefinementTrajectory,
     evaluate_temporal_refinement,
@@ -102,8 +102,8 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
         case_h_ref=np.asarray([tanaka_depth], dtype=np.float64),
         case_specs=[
             [
-                CrestSpec(
-                    amplitude=0.10,
+                TanakaCrest(
+                    alpha=0.10,
                     center=np.pi,
                     direction=1,
                 )

@@ -29,7 +29,7 @@ from solver.gen_data.pipeline.archive import (
 )
 from solver.gen_data.pipeline.manifest import build_dataset_view
 from solver.gen_data.pipeline.production import SplitId, split_code
-from solver.gen_data.pipeline.quota_driver import canonical_json_sha256
+from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 from scripts.audit_paper_dataset_training_handoff import (
     AUDIT_SCHEMA,

@@ -15,8 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
     JONSWAP_TMA_SAMPLING_REVISION_V4,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     file_sha256,
@@ -79,17 +79,13 @@ def _validate_stream(
             EXPECTED_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE
         ),
     }
-    observed_identity = {
-        key: run_spec.get(key) for key in expected_identity
-    }
+    observed_identity = {key: run_spec.get(key) for key in expected_identity}
     if observed_identity != expected_identity:
         raise ValueError(
             f"stream {stream_id} run identity differs from the frozen gate"
         )
 
-    expected_cells = tuple(
-        cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS
-    )
+    expected_cells = JONSWAP_TMA_SAMPLE_CELL_IDS
     expected_quotas = [
         {
             "cell_id": cell_id,
@@ -128,9 +124,7 @@ def _validate_stream(
         )
         if cell_accepted != ACCEPTED_PER_CELL_PER_STREAM or target != cell_accepted:
             raise ValueError(f"stream {stream_id} did not fill cell {cell_id}")
-        if cell_attempted > (
-            EXPECTED_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE * target
-        ):
+        if cell_attempted > (EXPECTED_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE * target):
             raise ValueError(f"stream {stream_id} exhausted cell {cell_id}")
 
     raw_reasons = _mapping(

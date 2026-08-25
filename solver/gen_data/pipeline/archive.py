@@ -54,7 +54,7 @@ _SHARD_STRING_FIELDS = {
 
 
 class BatchStatus(str, Enum):
-    """State inferred from durable batch files."""
+    """State inferred from the files saved for a batch."""
 
     EMPTY = "empty"
     PROPOSED = "proposed"
@@ -65,7 +65,7 @@ class BatchStatus(str, Enum):
 
 @dataclass(frozen=True)
 class BatchPaths:
-    """All durable paths belonging to one family/split/batch transaction."""
+    """Files belonging to one family, split, and batch."""
 
     proposal: Path
     shard: Path
@@ -137,7 +137,7 @@ class CaseCommitRecord:
 
 @dataclass(frozen=True)
 class BatchInspection:
-    """Validated durable state of one batch."""
+    """Validated state reconstructed from one batch's files."""
 
     status: BatchStatus
     proposal_sha256: str | None

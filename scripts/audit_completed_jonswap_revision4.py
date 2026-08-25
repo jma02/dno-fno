@@ -39,10 +39,10 @@ from scripts.build_paper_dataset_view import (  # noqa: E402
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_dataset_jonswap_bucketed import (  # noqa: E402
+from scripts.generate_paper_dataset_jonswap import (  # noqa: E402
     EXTRA_SOURCE_PATHS,
 )
-from scripts.run_paper_dataset_quota import (  # noqa: E402
+from scripts.generate_paper_dataset import (  # noqa: E402
     dependency_environment,
     source_hashes,
 )
@@ -67,6 +67,7 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     DEEP_PEAK_WAVENUMBER_BOUNDS,
     FINITE_DEPTH_BOUNDS,
     FINITE_PEAK_WAVENUMBER_BOUNDS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
     JONSWAP_TMA_SAMPLE_CELLS,
     SHALLOW_DEPTH_WAVENUMBER_BOUNDS,
     SHALLOW_RELATIVE_HEIGHT_BOUNDS,
@@ -88,10 +89,10 @@ from solver.gen_data.pipeline.quality import (  # noqa: E402
     QualityScope,
     reasons_from_bits,
 )
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     canonical_json_sha256,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -707,7 +708,7 @@ def _population_conditioning_record(
 
     if min(attempted, accepted, rejected) < 0 or attempted != accepted + rejected:
         raise ValueError("dataset attempted/accepted/rejected counts do not close")
-    cell_ids = tuple(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS)
+    cell_ids = JONSWAP_TMA_SAMPLE_CELL_IDS
     expected_cells = set(cell_ids)
     aggregate = {
         cell_id: {
@@ -899,7 +900,7 @@ def _case_specifications(
         expected_sample = sampled.samples[0]
         violations = find_jonswap_parameter_violations(
             expected_sample.parameters,
-            stratum=expected_sample.cell.stratum,
+            stratum=expected_sample.stratum,
             length=band.length,
             band=band,
             relative_frequency_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
@@ -2312,7 +2313,7 @@ def _audit_chunk(
             context="run_spec quota",
             minimum=0,
         )
-    if set(expected_by_cell) != {cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS}:
+    if set(expected_by_cell) != set(JONSWAP_TMA_SAMPLE_CELL_IDS):
         raise ValueError("run specification does not contain the exact 27 cells")
     if dict(accepted_by_cell) != {
         cell_id: count for cell_id, count in expected_by_cell.items() if count
@@ -2394,7 +2395,9 @@ def _load_exact_chunks(root: Path) -> tuple[CompletedChunk, ...]:
     }
     discovered_paths = {
         path.resolve()
-        for path in root.glob("*/jonswap_tma/*/paper_dataset_jonswap_tma_*.summary.json")
+        for path in root.glob(
+            "*/jonswap_tma/*/paper_dataset_jonswap_tma_*.summary.json"
+        )
     }
     if discovered_paths != expected_paths:
         missing = sorted(map(str, expected_paths - discovered_paths))
@@ -2444,12 +2447,16 @@ def _current_support_record() -> dict[str, object]:
         "schema": "paper_jonswap_tma_sampling_support_v4",
         "allocation_cells": [
             {
-                "cell_id": cell.cell_id,
-                "stratum": cell.stratum,
-                "peak_enhancement": cell.peak_enhancement,
-                "right_moving_fraction": cell.right_moving_fraction,
+                "cell_id": cell_id,
+                "stratum": stratum,
+                "peak_enhancement": peak_enhancement,
+                "right_moving_fraction": right_moving_fraction,
             }
-            for cell in JONSWAP_TMA_SAMPLE_CELLS
+            for cell_id, (
+                stratum,
+                peak_enhancement,
+                right_moving_fraction,
+            ) in JONSWAP_TMA_SAMPLE_CELLS.items()
         ],
         "finite": {
             "peak_wavenumber_uniform_bounds": list(FINITE_PEAK_WAVENUMBER_BOUNDS),
@@ -2556,7 +2563,7 @@ def _identity_record(chunks: Sequence[CompletedChunk]) -> dict[str, object]:
             "ordered_cell_ids",
             context="summary.run_spec.configuration",
         )
-        if ordered_cells != [cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS]:
+        if ordered_cells != list(JONSWAP_TMA_SAMPLE_CELL_IDS):
             raise ValueError("JONSWAP chunk has a noncurrent 27-cell ordering")
     current_support_hashes = {
         path: current_sources[path]
@@ -2663,7 +2670,7 @@ def audit(root: Path) -> dict[str, object]:
         raise ValueError("not every JONSWAP proposal specification was replayed")
     if totals.retained_rows != EXPECTED_ACCEPTED * ROWS_PER_ACCEPTED_CASE:
         raise ValueError("JONSWAP retained-row total is incorrect")
-    if len(JONSWAP_TMA_SAMPLE_CELLS) != 27:
+    if len(JONSWAP_TMA_SAMPLE_CELL_IDS) != 27:
         raise ValueError("current JONSWAP support no longer has 27 allocation cells")
     if totals.stored_case_blocks_checked != totals.accepted:
         raise ValueError("not every accepted JONSWAP trajectory owns one row block")
@@ -2720,7 +2727,7 @@ def audit(root: Path) -> dict[str, object]:
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "population_conditioning": population_conditioning,
         "support": {
-            "allocation_cell_count": len(JONSWAP_TMA_SAMPLE_CELLS),
+            "allocation_cell_count": len(JONSWAP_TMA_SAMPLE_CELL_IDS),
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },

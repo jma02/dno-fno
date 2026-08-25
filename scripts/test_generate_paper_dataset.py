@@ -1,4 +1,4 @@
-"""No-rollout tests for the exact paper-dataset quota launcher."""
+"""No-rollout tests for the paper-dataset generation launcher."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ import unittest
 
 import numpy as np
 
-from scripts.run_paper_dataset_quota import (
+from scripts.generate_paper_dataset import (
     BOOTSTRAP_PLATFORM,
     FAMILY_CELL_IDS,
     GenerationRequest,
     build_run_spec,
-    incremental_cell_quotas,
+    incremental_valid_case_targets,
     parse_args,
     preflight,
     request_from_args,
@@ -22,11 +22,11 @@ from scripts.run_paper_dataset_quota import (
 from solver.gen_data.pipeline.archive import ensure_proposal
 from solver.gen_data.pipeline.production import (
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     schedule_attempt_batch,
 )
-from solver.gen_data.pipeline.quota_driver import (
-    DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE,
+from solver.gen_data.pipeline.valid_case_generation import (
+    DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
 )
 from solver.gen_data.pipeline.writer import (
     batch_paths_for_assignments,
@@ -36,12 +36,12 @@ from solver.gen_data.stokes_sampling import DEFAULT_MAXIMUM_URSELL_REDRAWS
 from solver.gen_data.stokes_static_pipeline import (
     PAPER_STATIC_STOKES_CONTRACT,
 )
-from solver.gen_data.trajectory_quota_executor import (
+from solver.gen_data.trajectory_batch_executor import (
     TrajectoryExecutionConfig,
 )
 
 
-class PaperDatasetQuotaLauncherTests(unittest.TestCase):
+class PaperDatasetGenerationTests(unittest.TestCase):
     def test_learning_curve_chunks_are_nested_and_cumulatively_balanced(
         self,
     ) -> None:
@@ -52,22 +52,22 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
                 cumulative = {cell_id: 0 for cell_id in cells}
                 previous = 0
                 for endpoint in endpoints:
-                    chunk = incremental_cell_quotas(
+                    chunk = incremental_valid_case_targets(
                         cells,
                         accepted_cases_before=previous,
-                        accepted_case_count=endpoint - previous,
+                        case_count=endpoint - previous,
                     )
-                    for quota in chunk:
-                        cumulative[quota.cell_id] += quota.target_accepted
-                    expected = balanced_cell_quotas(
+                    for target in chunk:
+                        cumulative[target.cell_id] += target.case_count
+                    expected = balanced_valid_case_targets(
                         cells,
-                        accepted_case_count=endpoint,
+                        case_count=endpoint,
                     )
                     self.assertEqual(
                         cumulative,
                         {
-                            quota.cell_id: quota.target_accepted
-                            for quota in expected
+                            target.cell_id: target.case_count
+                            for target in expected
                         },
                     )
                     values = tuple(cumulative.values())
@@ -104,14 +104,14 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
                         expected_revision_by_family[family],
                     )
                     targets = tuple(
-                        quota.target_accepted for quota in spec.quotas
+                        target.case_count for target in spec.case_targets
                     )
                     self.assertEqual(sum(targets), accepted_cases)
                     self.assertLessEqual(max(targets) - min(targets), 1)
                     if family == "tanaka":
                         self.assertEqual(targets, (1,) * 11)
                     self.assertEqual(
-                        tuple(quota.cell_id for quota in spec.quotas),
+                        tuple(target.cell_id for target in spec.case_targets),
                         FAMILY_CELL_IDS[family],  # type: ignore[index]
                     )
                     self.assertEqual(
@@ -146,7 +146,7 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
                     )
                     sources = spec.configuration["source_sha256"]
                     self.assertIn(
-                        "scripts/run_paper_dataset_quota.py",
+                        "scripts/generate_paper_dataset.py",
                         sources,
                     )
                     if family == "stokes":
@@ -163,11 +163,11 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
                             },
                         )
                         self.assertIn(
-                            "solver/gen_data/stokes_quota_executor.py",
+                            "solver/gen_data/stokes_batch_executor.py",
                             sources,
                         )
                         self.assertNotIn(
-                            "solver/gen_data/trajectory_quota_executor.py",
+                            "solver/gen_data/trajectory_batch_executor.py",
                             sources,
                         )
                         continue
@@ -299,7 +299,7 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
             self.assertEqual(args.platform, "cpu")
             self.assertEqual(
                 args.maximum_attempts_per_accepted_case,
-                DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE,
+                DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
             )
             overridden_args = parse_args(
                 (
@@ -372,7 +372,7 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeError,
-                "run_paper_dataset_jonswap_bucketed.py",
+                "generate_paper_dataset_jonswap.py",
             ):
                 preflight(request)
 
@@ -391,7 +391,7 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
             self.assertFalse(state.complete)
             self.assertEqual(execution, PAPER_STATIC_STOKES_CONTRACT)
             self.assertEqual(
-                [quota.target_accepted for quota in spec.quotas],
+                [target.case_count for target in spec.case_targets],
                 [2, 2, 2, 2],
             )
             expected = plan["expected_output"]
@@ -415,7 +415,7 @@ class PaperDatasetQuotaLauncherTests(unittest.TestCase):
             )
             spec = build_run_spec(request)
             assignments = schedule_attempt_batch(
-                spec.quotas,
+                spec.case_targets,
                 {},
                 family_id=int(spec.family_id),
                 revision_id=spec.revision_id,

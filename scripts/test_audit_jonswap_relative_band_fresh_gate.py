@@ -11,12 +11,12 @@ from scripts.audit_jonswap_relative_band_fresh_gate import (
     audit,
 )
 from solver.gen_data.jonswap_tma_sampling import (
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 
 
 def _summary(stream_id: int, *, rejected: int) -> dict[str, object]:
-    cells = tuple(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS)
+    cells = JONSWAP_TMA_SAMPLE_CELL_IDS
     by_cell = {
         cell_id: {
             "accepted": 10,
@@ -38,8 +38,7 @@ def _summary(stream_id: int, *, rejected: int) -> dict[str, object]:
             "batch_size": 32,
             "maximum_attempts_per_accepted_case": 4,
             "quotas": [
-                {"cell_id": cell_id, "target_accepted": 10}
-                for cell_id in cells
+                {"cell_id": cell_id, "target_accepted": 10} for cell_id in cells
             ],
         },
         "counts": {
@@ -47,9 +46,7 @@ def _summary(stream_id: int, *, rejected: int) -> dict[str, object]:
             "attempted": 270 + rejected,
             "rejected": rejected,
             "by_cell": by_cell,
-            "rejection_reasons": (
-                {"GL2_STAGE_RESIDUAL": rejected} if rejected else {}
-            ),
+            "rejection_reasons": ({"GL2_STAGE_RESIDUAL": rejected} if rejected else {}),
         },
     }
 

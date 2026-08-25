@@ -13,15 +13,12 @@ constructed from every word in ``CaseKey.seed_words``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import math
 from typing import Final, TypeAlias
 
 import numpy as np
 
 from solver.gen_data.benjamin_feir_jcp09 import (
-    CARRIER_MODE_MAX,
-    CARRIER_MODE_MIN,
     CARRIER_STEEPNESS_MAX,
     CARRIER_STEEPNESS_MIN,
     PERTURBATION_RATIO_MIN,
@@ -40,76 +37,44 @@ from solver.gen_data.pipeline.production import (
 
 
 JsonRecord: TypeAlias = dict[str, object]
-PAPER_FOCUSED_STEEPNESS_LIMIT: Final[float] = (
-    1.0 + math.sqrt(2.0)
-) / 10.0
+PAPER_FOCUSED_STEEPNESS_LIMIT: Final[float] = (1.0 + math.sqrt(2.0)) / 10.0
 PAPER_PERTURBATION_RATIO_MAX: Final[float] = 0.10
 
 
-@dataclass(frozen=True)
-class BenjaminFeirSampleCell:
-    """One fixed carrier mode and symmetric sideband separation."""
+BenjaminFeirCell: TypeAlias = tuple[int, int]
 
-    carrier_mode: int
-    sideband_offset: int
 
-    def __post_init__(self) -> None:
-        if not CARRIER_MODE_MIN <= self.carrier_mode <= CARRIER_MODE_MAX:
-            raise ValueError("carrier_mode is outside the declared support")
-        if not 1 <= self.sideband_offset < self.carrier_mode:
-            raise ValueError(
-                "sideband_offset must be positive and below carrier_mode"
-            )
-        if (
-            self.conditional_steepness_lower_bound
-            >= self.conditional_steepness_upper_bound
-        ):
-            raise ValueError(
-                "cell does not intersect the declared focused support"
-            )
+def _conditional_steepness_bounds(
+    carrier_mode: int,
+    sideband_offset: int,
+) -> tuple[float, float]:
+    """Return the admissible carrier-steepness interval for one mode pair."""
 
-    @property
-    def cell_id(self) -> str:
-        """Return the stable identifier used by ``AttemptAssignment``."""
-
-        return (
-            f"n_c_{self.carrier_mode:02d}"
-            f"__delta_n_{self.sideband_offset:02d}"
-        )
-
-    @property
-    def conditional_steepness_lower_bound(self) -> float:
-        """Return the excluded lower endpoint for carrier steepness."""
-
-        instability_threshold = self.sideband_offset / (
-            2.0 * math.sqrt(2.0) * self.carrier_mode
-        )
-        return max(CARRIER_STEEPNESS_MIN, instability_threshold)
-
-    @property
-    def conditional_steepness_upper_bound(self) -> float:
-        """Return the included focused-support endpoint for steepness."""
-
-        focused_upper = float(
+    lower = max(
+        CARRIER_STEEPNESS_MIN,
+        sideband_offset / (2.0 * math.sqrt(2.0) * carrier_mode),
+    )
+    upper = min(
+        CARRIER_STEEPNESS_MAX,
+        float(
             focused_steepness_carrier_upper_bound(
-                self.carrier_mode,
-                self.sideband_offset,
+                carrier_mode,
+                sideband_offset,
                 focused_steepness_limit=PAPER_FOCUSED_STEEPNESS_LIMIT,
             )
-        )
-        return min(CARRIER_STEEPNESS_MAX, focused_upper)
+        ),
+    )
+    return lower, upper
 
 
-BENJAMIN_FEIR_SAMPLE_CELLS = tuple(
-    BenjaminFeirSampleCell(
-        carrier_mode=int(carrier_mode),
-        sideband_offset=int(sideband_offset),
+BENJAMIN_FEIR_SAMPLE_CELLS: dict[str, BenjaminFeirCell] = {
+    f"n_c_{int(carrier_mode):02d}__delta_n_{int(sideband_offset):02d}": (
+        int(carrier_mode),
+        int(sideband_offset),
     )
     for carrier_mode, sideband_offset in feasible_mode_pairs().tolist()
-)
-_CELL_BY_ID = {
-    cell.cell_id: cell for cell in BENJAMIN_FEIR_SAMPLE_CELLS
 }
+BENJAMIN_FEIR_SAMPLE_CELL_IDS = tuple(BENJAMIN_FEIR_SAMPLE_CELLS)
 
 
 @dataclass(frozen=True)
@@ -117,23 +82,33 @@ class BenjaminFeirSample:
     """One complete sampled Benjamin--Feir parameter specification."""
 
     assignment: AttemptAssignment
-    cell: BenjaminFeirSampleCell
     domain_length: float
+    carrier_mode: int
+    sideband_offset: int
     carrier_steepness: float
     perturbation_ratio: float
     translation: float
 
     @property
+    def conditional_steepness_bounds(self) -> tuple[float, float]:
+        """Return this mode pair's admissible carrier-steepness interval."""
+
+        return _conditional_steepness_bounds(
+            self.carrier_mode,
+            self.sideband_offset,
+        )
+
+    @property
     def left_mode(self) -> int:
         """Return the lower sideband mode ``n_c - Delta n``."""
 
-        return self.cell.carrier_mode - self.cell.sideband_offset
+        return self.carrier_mode - self.sideband_offset
 
     @property
     def right_mode(self) -> int:
         """Return the upper sideband mode ``n_c + Delta n``."""
 
-        return self.cell.carrier_mode + self.cell.sideband_offset
+        return self.carrier_mode + self.sideband_offset
 
     @property
     def depth(self) -> float:
@@ -151,7 +126,7 @@ class BenjaminFeirSample:
     def carrier_wavenumber(self) -> float:
         """Return the carrier wavenumber."""
 
-        return self.cell.carrier_mode * self.fundamental_wavenumber
+        return self.carrier_mode * self.fundamental_wavenumber
 
     @property
     def carrier_amplitude(self) -> float:
@@ -165,8 +140,8 @@ class BenjaminFeirSample:
 
         return float(
             instability_band_fraction(
-                self.cell.carrier_mode,
-                self.cell.sideband_offset,
+                self.carrier_mode,
+                self.sideband_offset,
                 self.carrier_steepness,
             )
         )
@@ -177,8 +152,8 @@ class BenjaminFeirSample:
 
         return float(
             focused_steepness_proxy(
-                self.cell.carrier_mode,
-                self.cell.sideband_offset,
+                self.carrier_mode,
+                self.sideband_offset,
                 self.carrier_steepness,
             )
         )
@@ -187,9 +162,9 @@ class BenjaminFeirSample:
         """Return a one-case batch for ``build_initial_conditions``."""
 
         return {
-            "n_carr": np.asarray([self.cell.carrier_mode], dtype=np.int32),
+            "n_carr": np.asarray([self.carrier_mode], dtype=np.int32),
             "side_offset": np.asarray(
-                [self.cell.sideband_offset],
+                [self.sideband_offset],
                 dtype=np.int32,
             ),
             "n_l": np.asarray([self.left_mode], dtype=np.int32),
@@ -219,22 +194,13 @@ class BenjaminFeirSample:
                 + "; ".join(violations)
             )
 
-        key = self.assignment.case_key
         fundamental = self.fundamental_wavenumber
         record: JsonRecord = {
-            "case_id": key.case_id,
-            "family_id": key.family_id,
-            "revision_id": key.revision_id,
-            "split_id": key.split_id.value,
-            "root_seed": key.root_seed,
-            "stream_id": key.stream_id,
-            "attempt_index": key.attempt_index,
-            "seed_words": list(key.seed_words),
-            "cell_id": self.cell.cell_id,
+            **self.assignment.to_json_record(),
             "domain_length": self.domain_length,
             "depth": self.depth,
-            "carrier_mode": self.cell.carrier_mode,
-            "sideband_offset": self.cell.sideband_offset,
+            "carrier_mode": self.carrier_mode,
+            "sideband_offset": self.sideband_offset,
             "left_mode": self.left_mode,
             "right_mode": self.right_mode,
             "first_harmonic_carrier_steepness": self.carrier_steepness,
@@ -247,46 +213,12 @@ class BenjaminFeirSample:
             "left_wavenumber": self.left_mode * fundamental,
             "right_wavenumber": self.right_mode * fundamental,
             "carrier_amplitude": self.carrier_amplitude,
-            "sideband_amplitude": (
-                self.perturbation_ratio * self.carrier_amplitude
-            ),
+            "sideband_amplitude": (self.perturbation_ratio * self.carrier_amplitude),
             "instability_band_fraction": self.band_fraction,
             "focused_steepness": self.focused_steepness,
             "focused_steepness_limit": PAPER_FOCUSED_STEEPNESS_LIMIT,
         }
-        json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return record
-
-
-def _require_sample_cell(cell_id: str) -> BenjaminFeirSampleCell:
-    """Return the declared Benjamin--Feir cell named by ``cell_id``."""
-
-    try:
-        return _CELL_BY_ID[cell_id]
-    except KeyError as error:
-        raise ValueError(
-            f"unknown Benjamin--Feir sample cell: {cell_id}"
-        ) from error
-
-
-def _sample_open_closed_uniform(
-    rng: np.random.Generator,
-    *,
-    lower: float,
-    upper: float,
-) -> float:
-    """Sample the half-open interval ``(lower, upper]``."""
-
-    if (
-        not math.isfinite(lower)
-        or not math.isfinite(upper)
-        or lower >= upper
-    ):
-        raise ValueError("uniform bounds must be finite and increasing")
-    value = upper - (upper - lower) * float(rng.random())
-    if value <= lower:
-        value = float(np.nextafter(lower, upper))
-    return value
 
 
 def find_benjamin_feir_sample_violations(
@@ -295,22 +227,18 @@ def find_benjamin_feir_sample_violations(
     """Return every violation of the declared sampling law."""
 
     violations: list[str] = []
-    if sample.assignment.cell_id != sample.cell.cell_id:
-        violations.append("assignment and sample cells differ")
-    if _CELL_BY_ID.get(sample.cell.cell_id) != sample.cell:
-        violations.append("sample cell is not one of the 66 declared pairs")
+    expected_cell = BENJAMIN_FEIR_SAMPLE_CELLS.get(sample.assignment.cell_id)
+    if expected_cell != (sample.carrier_mode, sample.sideband_offset):
+        violations.append("sample parameters do not match the assigned cell")
     if not math.isfinite(sample.domain_length) or sample.domain_length <= 0.0:
         violations.append("domain_length must be finite and positive")
+    steepness_lower, steepness_upper = sample.conditional_steepness_bounds
     if (
         not math.isfinite(sample.carrier_steepness)
-        or sample.carrier_steepness
-        <= sample.cell.conditional_steepness_lower_bound
-        or sample.carrier_steepness
-        > sample.cell.conditional_steepness_upper_bound
+        or sample.carrier_steepness <= steepness_lower
+        or sample.carrier_steepness > steepness_upper
     ):
-        violations.append(
-            "carrier_steepness is outside its conditional support"
-        )
+        violations.append("carrier_steepness is outside its conditional support")
     if (
         not math.isfinite(sample.perturbation_ratio)
         or sample.perturbation_ratio < PERTURBATION_RATIO_MIN
@@ -326,9 +254,7 @@ def find_benjamin_feir_sample_violations(
     if math.isfinite(sample.carrier_steepness):
         band_fraction = sample.band_fraction
         if not math.isfinite(band_fraction) or not 0.0 < band_fraction < 1.0:
-            violations.append(
-                "carrier and sidebands are outside the instability band"
-            )
+            violations.append("carrier and sidebands are outside the instability band")
     return tuple(violations)
 
 
@@ -342,21 +268,29 @@ def sample_benjamin_feir_case(
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be finite and positive")
 
-    cell = _require_sample_cell(assignment.cell_id)
+    cell = BENJAMIN_FEIR_SAMPLE_CELLS.get(assignment.cell_id)
+    if cell is None:
+        raise ValueError(f"unknown Benjamin--Feir sample cell: {assignment.cell_id}")
+    carrier_mode, sideband_offset = cell
     rng = random_generator_for_case(assignment.case_key)
-    carrier_steepness = _sample_open_closed_uniform(
-        rng,
-        lower=cell.conditional_steepness_lower_bound,
-        upper=cell.conditional_steepness_upper_bound,
+    steepness_lower, steepness_upper = _conditional_steepness_bounds(
+        carrier_mode,
+        sideband_offset,
     )
+    carrier_steepness = steepness_upper - (steepness_upper - steepness_lower) * float(
+        rng.random()
+    )
+    if carrier_steepness <= steepness_lower:
+        carrier_steepness = float(np.nextafter(steepness_lower, steepness_upper))
     perturbation_ratio = float(
         rng.uniform(PERTURBATION_RATIO_MIN, PAPER_PERTURBATION_RATIO_MAX)
     )
     translation = float(rng.uniform(0.0, domain_length))
     sample = BenjaminFeirSample(
         assignment=assignment,
-        cell=cell,
         domain_length=domain_length,
+        carrier_mode=carrier_mode,
+        sideband_offset=sideband_offset,
         carrier_steepness=carrier_steepness,
         perturbation_ratio=perturbation_ratio,
         translation=translation,

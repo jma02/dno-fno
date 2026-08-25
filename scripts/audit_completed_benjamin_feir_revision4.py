@@ -38,12 +38,12 @@ from scripts.build_paper_dataset_view import (  # noqa: E402
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_dataset_quota import (  # noqa: E402
+from scripts.generate_paper_dataset import (  # noqa: E402
     _benjamin_feir_sampling_support_record,
     dependency_environment,
 )
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     find_benjamin_feir_sample_violations,
     sample_benjamin_feir_case,
@@ -57,7 +57,7 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
     CaseKey,
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
 )
 from solver.gen_data.pipeline.quality import (  # noqa: E402
     QualityDecision,
@@ -65,13 +65,13 @@ from solver.gen_data.pipeline.quality import (  # noqa: E402
     QualityScope,
     reasons_from_bits,
 )
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     canonical_json_sha256,
 )
 from solver.gen_data.pipeline.time_selection import (  # noqa: E402
     select_uniform_times,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -175,6 +175,15 @@ EXPECTED_GENERATION_SOURCE_PATHS = frozenset(
         "solver/solvers/time_integrator.py",
     }
 )
+CURRENT_SOURCE_PATH_BY_GENERATION_PATH = {
+    "scripts/run_paper_dataset_quota.py": "scripts/generate_paper_dataset.py",
+    "solver/gen_data/pipeline/quota_driver.py": (
+        "solver/gen_data/pipeline/valid_case_generation.py"
+    ),
+    "solver/gen_data/trajectory_quota_executor.py": (
+        "solver/gen_data/trajectory_batch_executor.py"
+    ),
+}
 EXPECTED_METRIC_KEYS = frozenset(
     {
         "accepted",
@@ -1219,7 +1228,7 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
     """Require the exact current ordered 66-cell BF taxonomy."""
 
     raw_codes = _required_mapping(run_spec, "cell_codes", context="run_spec")
-    expected_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
+    expected_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
     if tuple(raw_codes) != expected_ids:
         raise ValueError("BF run cell order is not the current 66-cell taxonomy")
     mapping = {
@@ -1244,19 +1253,17 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
 
 
 def _expected_chunk_quotas(expected: ExpectedChunk) -> dict[str, int]:
-    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
-    before = balanced_cell_quotas(
+    cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
+    before = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=expected.accepted_before,
+        case_count=expected.accepted_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=expected.accepted_before + expected.accepted_count,
+        case_count=expected.accepted_before + expected.accepted_count,
     )
     return {
-        after_quota.cell_id: (
-            after_quota.target_accepted - before_quota.target_accepted
-        )
+        after_quota.cell_id: (after_quota.case_count - before_quota.case_count)
         for before_quota, after_quota in zip(before, after)
     }
 
@@ -1693,7 +1700,10 @@ def _nonhistorical_generation_source_record(
     for repository_path, expected_digest in sorted(first_sources.items()):
         if repository_path in historical_paths:
             continue
-        relative_path = Path(repository_path)
+        current_repository_path = CURRENT_SOURCE_PATH_BY_GENERATION_PATH.get(
+            repository_path, repository_path
+        )
+        relative_path = Path(current_repository_path)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError(
                 f"BF source path escapes the repository: {repository_path}"
@@ -1722,6 +1732,7 @@ def _nonhistorical_generation_source_record(
             )
         bindings[repository_path] = {
             "path": str(resolved_source),
+            "current_repository_path": current_repository_path,
             "bytes": resolved_source.stat().st_size,
             "sha256": observed_digest,
         }
@@ -1808,7 +1819,7 @@ def _accepted_cell_totals_by_split(
 ) -> dict[str, dict[str, int]]:
     """Require the frozen split totals to balance all 66 current cells."""
 
-    cell_ids = tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS)
+    cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
     expected_totals = {
         SplitId.TRAIN: EXPECTED_TRAIN_ACCEPTED,
         SplitId.VALIDATION: EXPECTED_VALIDATION_ACCEPTED,
@@ -1827,10 +1838,10 @@ def _accepted_cell_totals_by_split(
                 {str(cell_id): int(count) for cell_id, count in raw_counts.items()}
             )
         expected = {
-            quota.cell_id: quota.target_accepted
-            for quota in balanced_cell_quotas(
+            quota.cell_id: quota.case_count
+            for quota in balanced_valid_case_targets(
                 cell_ids,
-                accepted_case_count=accepted_total,
+                case_count=accepted_total,
             )
         }
         if dict(observed) != expected:
@@ -1914,7 +1925,7 @@ def audit(root: Path) -> dict[str, object]:
         raise ValueError("not every BF proposal specification was replayed")
     if totals.retained_rows != EXPECTED_ACCEPTED * ROWS_PER_ACCEPTED_CASE:
         raise ValueError("BF retained-row total is incorrect")
-    if len(BENJAMIN_FEIR_SAMPLE_CELLS) != 66:
+    if len(BENJAMIN_FEIR_SAMPLE_CELL_IDS) != 66:
         raise ValueError("current BF support no longer has 66 allocation cells")
     accepted_cells = _accepted_cell_totals_by_split(chunk_records)
 
@@ -1939,7 +1950,7 @@ def audit(root: Path) -> dict[str, object]:
         "accepted_by_split_and_cell": accepted_cells,
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "support": {
-            "allocation_cell_count": len(BENJAMIN_FEIR_SAMPLE_CELLS),
+            "allocation_cell_count": len(BENJAMIN_FEIR_SAMPLE_CELL_IDS),
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },

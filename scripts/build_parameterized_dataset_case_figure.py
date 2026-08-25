@@ -62,10 +62,10 @@ from scripts.build_paper_dataset_view import (  # noqa: E402
     validate_combined_plan,
 )
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.manifest import (  # noqa: E402
     TRAJECTORY_MAP_SCHEMA_VERSION,
@@ -74,14 +74,14 @@ from solver.gen_data.pipeline.manifest import (  # noqa: E402
 from solver.gen_data.pipeline.production import (  # noqa: E402
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     split_code,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
-    STOKES_SAMPLE_CELLS,
+    STOKES_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLE_CELL_IDS,
 )
 
 
@@ -171,10 +171,10 @@ CENTRAL_VALIDATION_CATEGORIES: Final = {
     "jonswap_tma": "finite__gamma_3p3__right_0p5",
 }
 EXPECTED_CELL_IDS: Final = {
-    "stokes": tuple(cell.cell_id for cell in STOKES_SAMPLE_CELLS),
-    "tanaka": tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS),
-    "benjamin_feir": tuple(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS),
-    "jonswap_tma": tuple(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS),
+    "stokes": STOKES_SAMPLE_CELL_IDS,
+    "tanaka": TANAKA_SAMPLE_CELL_IDS,
+    "benjamin_feir": BENJAMIN_FEIR_SAMPLE_CELL_IDS,
+    "jonswap_tma": JONSWAP_TMA_SAMPLE_CELL_IDS,
 }
 EXPECTED_SOURCE_COUNT_BY_FAMILY: Final = {
     "stokes": 6,
@@ -465,7 +465,7 @@ def _bound_combined_artifact(
 def load_combined_view_identity(
     binding: CombinedSummaryBinding,
 ) -> CombinedViewIdentity:
-    """Authenticate the durable view named by the completed summary."""
+    """Validate the saved view named by the completed summary."""
 
     summary = read_json(binding.path)
     view = _mapping(summary.get("dataset_view"), context="combined dataset_view")
@@ -538,7 +538,7 @@ def _expected_chunk_layout() -> tuple[ExpectedChunkLayout, ...]:
     return train + held_out
 
 
-def _expected_incremental_quotas(
+def _expected_incremental_valid_case_targets(
     family: str,
     *,
     accepted_before: int,
@@ -547,27 +547,25 @@ def _expected_incremental_quotas(
     """Return exact balanced-cell increments for one cumulative interval."""
 
     cells = EXPECTED_CELL_IDS[family]
-    before = balanced_cell_quotas(
+    before = balanced_valid_case_targets(
         cells,
-        accepted_case_count=accepted_before,
+        case_count=accepted_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         cells,
-        accepted_case_count=accepted_after,
+        case_count=accepted_after,
     )
     return tuple(
         {
-            "cell_id": after_quota.cell_id,
-            "target_accepted": (
-                after_quota.target_accepted - before_quota.target_accepted
-            ),
+            "cell_id": after_target.cell_id,
+            "target_accepted": (after_target.case_count - before_target.case_count),
         }
-        for before_quota, after_quota in zip(before, after)
+        for before_target, after_target in zip(before, after)
     )
 
 
 def _validate_chunk_taxonomy(chunk: CompletedChunk) -> None:
-    """Require the current full ordered cell map and exact balanced quotas."""
+    """Require the current cell map and exact balanced valid-case targets."""
 
     summary = read_json(chunk.summary_path)
     run_spec = _mapping(summary.get("run_spec"), context="source run_spec")
@@ -584,14 +582,16 @@ def _validate_chunk_taxonomy(chunk: CompletedChunk) -> None:
     }
     if run_spec.get("cell_codes") != expected_codes:
         raise ValueError(f"{chunk.family} source has the wrong cell-code map")
-    expected_quotas = _expected_incremental_quotas(
+    expected_targets = _expected_incremental_valid_case_targets(
         chunk.family,
         accepted_before=chunk.accepted_before,
         accepted_after=chunk.accepted_after,
     )
-    raw_quotas = run_spec.get("quotas")
-    if not isinstance(raw_quotas, list) or tuple(raw_quotas) != expected_quotas:
-        raise ValueError(f"{chunk.family} source has the wrong balanced cell quotas")
+    raw_targets = run_spec.get("quotas")
+    if not isinstance(raw_targets, list) or tuple(raw_targets) != expected_targets:
+        raise ValueError(
+            f"{chunk.family} source has the wrong balanced valid-case targets"
+        )
     interval = {
         "accepted_case_count": chunk.accepted_count,
         "accepted_cases_before": chunk.accepted_before,

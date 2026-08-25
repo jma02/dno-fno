@@ -42,7 +42,7 @@ from solver.gen_data.pipeline.archive import (  # noqa: E402
 from solver.gen_data.pipeline.production import (  # noqa: E402
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
 )
 
 
@@ -393,16 +393,16 @@ def _validate_chunk_plan(chunks: Sequence[CompletedChunk]) -> None:
 
 
 def _expected_chunk_cell_counts(expected: ExpectedChunk) -> dict[str, int]:
-    before = balanced_cell_quotas(
+    before = balanced_valid_case_targets(
         EXPECTED_CELL_IDS,
-        accepted_case_count=expected.accepted_before,
+        case_count=expected.accepted_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         EXPECTED_CELL_IDS,
-        accepted_case_count=expected.accepted_after,
+        case_count=expected.accepted_after,
     )
     return {
-        after_quota.cell_id: after_quota.target_accepted - before_quota.target_accepted
+        after_quota.cell_id: after_quota.case_count - before_quota.case_count
         for before_quota, after_quota in zip(before, after)
     }
 

@@ -82,7 +82,7 @@ build_chunk() {
     PREFLIGHT="$OUTPUT_BASE/logs/tanaka_${LABEL}.preflight.json"
     LOG="$OUTPUT_BASE/logs/tanaka_${LABEL}.log"
     COMMAND=(
-        "$PYTHON" scripts/run_paper_dataset_quota.py
+        "$PYTHON" scripts/generate_paper_dataset.py
         --family tanaka --split "$SPLIT"
         --accepted-cases "$COUNT" --accepted-cases-before "$BEFORE"
         --stream-id "$STREAM" --first-attempt-index 0

@@ -6,7 +6,7 @@ flowchart TD
 
     B -->|Single solitary wave| C[modified_tanaka.py]
     B -->|Uniform amplitude branch| D[build_amplitude_dataset.py]
-    B -->|Multi-crest initial condition| E[gen_data/multi_crest.py]
+    B -->|Multi-crest dataset initial condition| E[gen_data/tanaka_initial_conditions.py]
     B -->|IC comparison against provided data| F[plot_ic_comparisons.py]
 
     C --> C1[Build transformed phi grid]
@@ -22,12 +22,12 @@ flowchart TD
     D2 --> D3[Batched Tanaka solves]
     D3 --> D4[Save canonical branch .npz]
 
-    E --> E1[Load custom crest specs]
-    E1 --> E2[Batched Tanaka solves for all crests]
-    E2 --> E3[Sum component eta and xi]
-    E3 --> E4[Optionally zero-mean xi]
-    E4 --> E5[Recompute composite Geta_xi with DNO]
-    E5 --> E6[Multi-crest initial condition payload]
+    E --> E1[Receive sampled Tanaka crests]
+    E1 --> E2[Batched normalized Tanaka solves]
+    E2 --> E3[Place periodic tangent-Hermite profiles]
+    E3 --> E4[Validate surface-potential radicands]
+    E4 --> E5[Sum crest components per case]
+    E5 --> E6[Per-case eta and xi initial conditions]
 
     F --> F1[Load initial frame from provided soliton file]
     F1 --> F2{Case family}
@@ -42,5 +42,4 @@ flowchart TD
     E6 --> G[time_integrator.py rollout]
     G --> H[evals/render_random_tanaka_multicrest_rollouts.py]
 
-    D4 --> E1
 ```

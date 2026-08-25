@@ -24,7 +24,6 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     _validate_tanaka_surface_potential_radicand,
     build_per_case_initial_conditions,
 )
-from solver.gen_data.multi_crest import CrestSpec  # noqa: E402
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
@@ -34,7 +33,8 @@ from solver.gen_data.pipeline.refinement import (  # noqa: E402
     ResidualControlledGL2Contract,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLE_CELL_IDS,
+    TanakaCrest,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
@@ -55,7 +55,7 @@ def validate(
     *,
     speeds: np.ndarray,
     depths: np.ndarray,
-    specs: list[CrestSpec],
+    specs: list[TanakaCrest],
     case_ids: np.ndarray,
     components_within_case: tuple[int, ...],
 ) -> None:
@@ -77,7 +77,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             np.asarray(((1.0, 0.0, -0.0, 4.0),), dtype=np.float64),
             speeds=np.asarray((2.0,), dtype=np.float64),
             depths=np.asarray((0.2,), dtype=np.float64),
-            specs=[CrestSpec(0.25, 0.5, 1)],
+            specs=[TanakaCrest(0.25, 0.5, 1)],
             case_ids=np.asarray((0,), dtype=np.int32),
             components_within_case=(0,),
         )
@@ -92,7 +92,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 ),
                 speeds=np.asarray((2.0,), dtype=np.float64),
                 depths=np.asarray((0.2,), dtype=np.float64),
-                specs=[CrestSpec(0.25, 0.5, -1)],
+                specs=[TanakaCrest(0.25, 0.5, -1)],
                 case_ids=np.asarray((0,), dtype=np.int32),
                 components_within_case=(0,),
             )
@@ -111,9 +111,9 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
 
     def test_nonfinite_values_and_mixed_crests_have_strict_records(self) -> None:
         specifications = [
-            CrestSpec(0.10, 0.1, 1),
-            CrestSpec(0.20, 0.2, -1),
-            CrestSpec(0.30, 0.3, 1),
+            TanakaCrest(0.10, 0.1, 1),
+            TanakaCrest(0.20, 0.2, -1),
+            TanakaCrest(0.30, 0.3, 1),
         ]
         radical = np.asarray(
             (
@@ -154,10 +154,10 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             ],
             [(0, 1), (1, 0)],
         )
-        self.assertEqual(components[0]["alpha"], specifications[1].amplitude)
+        self.assertEqual(components[0]["alpha"], specifications[1].alpha)
         self.assertEqual(components[0]["depth"], 0.15)
         self.assertEqual(components[0]["speed_squared"], 4.0)
-        self.assertEqual(components[1]["alpha"], specifications[2].amplitude)
+        self.assertEqual(components[1]["alpha"], specifications[2].alpha)
         self.assertEqual(components[1]["negative_count"], 0)
         self.assertEqual(components[1]["nonfinite_count"], 3)
         self.assertEqual(components[1]["first_nonfinite_grid_index"], 1)
@@ -177,9 +177,9 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 speeds=np.asarray((0.0, np.nan, np.inf), dtype=np.float64),
                 depths=np.asarray((0.1, 0.2), dtype=np.float64),
                 specs=[
-                    CrestSpec(0.1, 0.1, 1),
-                    CrestSpec(0.2, 0.2, 1),
-                    CrestSpec(0.3, 0.3, -1),
+                    TanakaCrest(0.1, 0.1, 1),
+                    TanakaCrest(0.2, 0.2, 1),
+                    TanakaCrest(0.3, 0.3, -1),
                 ],
                 case_ids=np.asarray((0, 0, 1), dtype=np.int32),
                 components_within_case=(0, 1, 0),
@@ -219,9 +219,9 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             template_params=template,
             case_h_ref=np.asarray((0.35, 0.35, 0.35), dtype=np.float64),
             case_specs=[
-                [CrestSpec(0.45, 0.0, 1)],
-                [CrestSpec(0.45, LENGTH / 2.0, 1)],
-                [CrestSpec(0.45, 0.0, -1)],
+                [TanakaCrest(0.45, 0.0, 1)],
+                [TanakaCrest(0.45, LENGTH / 2.0, 1)],
+                [TanakaCrest(0.45, 0.0, -1)],
             ],
             length=LENGTH,
             nx=nx,
@@ -272,7 +272,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             relative_floor=1.0e-12,
             target_time_chunk_size=2,
         )
-        cell = TANAKA_SAMPLE_CELLS[0]
+        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         attempted = AttemptAssignment(
             case_key=CaseKey(
                 family_id=2,
@@ -281,7 +281,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
                 stream_id=7,
                 attempt_index=53,
             ),
-            cell_id=cell.cell_id,
+            cell_id=cell_id,
         )
         sampled = sample_tanaka_trajectory_cases(
             (attempted,),
@@ -301,7 +301,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="tanaka",
                 batch_id=0,
-                cell_codes={cell.cell_id: 0},
+                cell_codes={cell_id: 0},
                 config_fingerprint="b" * 64,
                 metadata={"test_scope": "durable_proposal_before_domain_check"},
             )

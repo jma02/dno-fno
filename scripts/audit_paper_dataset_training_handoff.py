@@ -40,7 +40,7 @@ from solver.gen_data.pipeline.production import (
     SplitId,
     split_code,
 )
-from solver.gen_data.pipeline.quota_driver import canonical_json_sha256
+from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 
 AUDIT_SCHEMA = "paper_dataset_training_handoff_audit_v1"

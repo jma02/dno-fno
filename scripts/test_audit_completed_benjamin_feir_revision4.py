@@ -26,6 +26,7 @@ from scripts.audit_completed_benjamin_feir_revision4 import (  # noqa: E402
     EXPECTED_GENERATION_SOURCE_PATHS,
     EXPECTED_MAP_ARRAYS,
     EXPECTED_REQUIRED_BITS,
+    CURRENT_SOURCE_PATH_BY_GENERATION_PATH,
     HISTORICAL_SHARED_SOURCE_SNAPSHOTS,
     ProposedCase,
     _accepted_cell_totals_by_split,
@@ -42,7 +43,7 @@ from scripts.audit_completed_benjamin_feir_revision4 import (  # noqa: E402
 )
 from scripts.build_paper_dataset_view import TRAJECTORY_MAP_DTYPES  # noqa: E402
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
@@ -53,7 +54,7 @@ from solver.gen_data.pipeline.archive import file_sha256  # noqa: E402
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     sample_benjamin_feir_trajectory_cases,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
 )
 from solver.gen_data.pipeline.time_selection import select_uniform_times  # noqa: E402
@@ -65,7 +66,10 @@ def _frozen_source_mapping() -> dict[str, str]:
         for path, (_name, digest) in HISTORICAL_SHARED_SOURCE_SNAPSHOTS.items()
     }
     return {
-        path: historical.get(path, file_sha256(ROOT / path))
+        path: historical.get(
+            path,
+            file_sha256(ROOT / CURRENT_SOURCE_PATH_BY_GENERATION_PATH.get(path, path)),
+        )
         for path in EXPECTED_GENERATION_SOURCE_PATHS
     }
 
@@ -114,7 +118,7 @@ def _proposed_case() -> ProposedCase:
         case_id=7,
         attempt_index=0,
         cell_code=0,
-        cell_id=BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id,
+        cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
         depth=5.0,
         carrier_wavenumber=4.0,
         intended_terminal_time=intended,
@@ -158,7 +162,7 @@ def _accepted_case(proposed: ProposedCase | None = None) -> dict[str, object]:
 
 class BenjaminFeirCompletionAuditTests(unittest.TestCase):
     def test_exact_support_replay_rejects_parameter_mutation(self) -> None:
-        cell = BENJAMIN_FEIR_SAMPLE_CELLS[0]
+        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         key = CaseKey(
             family_id=3,
             revision_id=4,
@@ -166,7 +170,7 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
             stream_id=0,
             attempt_index=0,
         )
-        assignment = AttemptAssignment(key, cell.cell_id)
+        assignment = AttemptAssignment(key, cell_id)
         sampled = sample_benjamin_feir_trajectory_cases(
             (assignment,),
             contract=TrajectoryExecutionConfig.paper("benjamin_feir").numerical,
@@ -206,7 +210,7 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
                 batch_id=0,
                 configuration_fingerprint="fingerprint",
                 saved_dt=0.08,
-                cell_ids_by_code={0: cell.cell_id},
+                cell_ids_by_code={0: cell_id},
                 support_extrema=_support_extrema(),
                 totals=totals,
             )
@@ -222,7 +226,7 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
                     batch_id=0,
                     configuration_fingerprint="fingerprint",
                     saved_dt=0.08,
-                    cell_ids_by_code={0: cell.cell_id},
+                    cell_ids_by_code={0: cell_id},
                     support_extrema=_support_extrema(),
                     totals=AuditTotals(),
                 )
@@ -399,7 +403,7 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
 
     def test_exact_taxonomy_and_incremental_quotas_fail_closed(self) -> None:
         expected = EXPECTED_CHUNKS[0]
-        cell_ids = [cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS]
+        cell_ids = list(BENJAMIN_FEIR_SAMPLE_CELL_IDS)
         quotas = _expected_chunk_quotas(expected)
         run_spec: dict[str, object] = {
             "cell_codes": {cell_id: index for index, cell_id in enumerate(cell_ids)},
@@ -441,7 +445,7 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
             for expected in EXPECTED_CHUNKS
         ]
         totals = _accepted_cell_totals_by_split(records)
-        first_cell = BENJAMIN_FEIR_SAMPLE_CELLS[0].cell_id
+        first_cell = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
         self.assertEqual(totals["train"][first_cell], 249)
         self.assertEqual(totals["validation"][first_cell], 16)
 
@@ -629,9 +633,12 @@ class BenjaminFeirCompletionAuditTests(unittest.TestCase):
             for repository_path in EXPECTED_GENERATION_SOURCE_PATHS - set(
                 HISTORICAL_SHARED_SOURCE_SNAPSHOTS
             ):
-                destination = copied_repository / repository_path
+                current_repository_path = CURRENT_SOURCE_PATH_BY_GENERATION_PATH.get(
+                    repository_path, repository_path
+                )
+                destination = copied_repository / current_repository_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / repository_path, destination)
+                shutil.copy2(ROOT / current_repository_path, destination)
             _nonhistorical_generation_source_record(
                 source_mappings, repository_root=copied_repository
             )

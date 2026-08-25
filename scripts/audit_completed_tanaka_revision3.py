@@ -7,7 +7,7 @@ the current corrected amplitude-inversion construction, numerical-health and
 terminal-time checks, stored-field finiteness, and an independent audit of
 each loader-facing manifest and trajectory map.
 
-The durable format stores every requested crest but not the constructor's
+The saved artifacts contain every requested crest but not the constructor's
 per-component achieved height.  Generation nevertheless cannot return from
 the frozen constructor unless ``validate_solved_amplitudes`` passes.  This
 audit proves that call path and its tolerances from the exact current source
@@ -50,7 +50,7 @@ from scripts.build_paper_dataset_view import (  # noqa: E402
     TRAJECTORY_MAP_DTYPES,
     load_completed_chunk,
 )
-from scripts.run_paper_dataset_quota import (  # noqa: E402
+from scripts.generate_paper_dataset import (  # noqa: E402
     dependency_environment,
     source_hashes,
 )
@@ -71,7 +71,7 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
     CaseKey,
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
 )
 from solver.gen_data.pipeline.quality import (  # noqa: E402
     QualityDecision,
@@ -79,7 +79,7 @@ from solver.gen_data.pipeline.quality import (  # noqa: E402
     QualityScope,
     reasons_from_bits,
 )
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     canonical_json_sha256,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
@@ -90,6 +90,7 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
     STEEP_DEPTH_BOUNDS,
     TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
     TANAKA_MINIMUM_RESOLUTION_RATIO,
+    TANAKA_SAMPLE_CELL_IDS,
     TANAKA_SAMPLE_CELLS,
     TANAKA_SAMPLING_REVISION_V3,
     TanakaSample,
@@ -100,7 +101,7 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
     sample_tanaka_trajectory_cases,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
     classify_tanaka_construction_failure,
 )
@@ -663,7 +664,17 @@ def _support_record() -> dict[str, object]:
     return {
         "schema": "paper_tanaka_sampling_support_revision3_v1",
         "revision_id": EXPECTED_REVISION_ID,
-        "cells": [asdict(cell) for cell in TANAKA_SAMPLE_CELLS],
+        "cells": [
+            {
+                "cell_id": cell_id,
+                "regime": regime,
+                "crest_count": crest_count,
+                "right_moving_count": right_moving_count,
+            }
+            for cell_id, (regime, crest_count, right_moving_count) in (
+                TANAKA_SAMPLE_CELLS.items()
+            )
+        ],
         "main_depth_bounds": list(MAIN_DEPTH_BOUNDS),
         "main_total_alpha_bounds": list(MAIN_TOTAL_ALPHA_BOUNDS),
         "steep_depth_bounds": list(STEEP_DEPTH_BOUNDS),
@@ -775,7 +786,7 @@ def _proposal_cases(
             "crests",
             context="Tanaka case specification",
         )
-        if len(crests) != expected_sample.cell.crest_count:
+        if len(crests) != expected_sample.crest_count:
             raise ValueError("Tanaka proposal has the wrong requested crest count")
         for raw_crest, crest in zip(crests, expected_sample.crests):
             if not isinstance(raw_crest, Mapping):
@@ -1658,7 +1669,7 @@ def _validate_dataset_view(
 
 def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
     raw_codes = _required_mapping(run_spec, "cell_codes", context="run_spec")
-    expected_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
+    expected_ids = TANAKA_SAMPLE_CELL_IDS
     if tuple(raw_codes) != expected_ids:
         raise ValueError("Tanaka run cell order is not the current eleven cells")
     mapping = {
@@ -1675,19 +1686,17 @@ def _cell_code_mapping(run_spec: Mapping[str, object]) -> dict[int, str]:
 
 
 def _expected_chunk_quotas(expected: ExpectedChunk) -> dict[str, int]:
-    cell_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
-    before = balanced_cell_quotas(
+    cell_ids = TANAKA_SAMPLE_CELL_IDS
+    before = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=expected.accepted_before,
+        case_count=expected.accepted_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=expected.accepted_before + expected.accepted_count,
+        case_count=expected.accepted_before + expected.accepted_count,
     )
     return {
-        after_quota.cell_id: (
-            after_quota.target_accepted - before_quota.target_accepted
-        )
+        after_quota.cell_id: (after_quota.case_count - before_quota.case_count)
         for before_quota, after_quota in zip(before, after)
     }
 
@@ -2095,7 +2104,7 @@ def _accepted_cell_totals_by_split(
 ) -> dict[str, dict[str, int]]:
     """Require the final accepted population to balance all eleven cells."""
 
-    cell_ids = tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS)
+    cell_ids = TANAKA_SAMPLE_CELL_IDS
     expected_totals = {
         SplitId.TRAIN: EXPECTED_TRAIN_ACCEPTED,
         SplitId.VALIDATION: EXPECTED_VALIDATION_ACCEPTED,
@@ -2114,10 +2123,10 @@ def _accepted_cell_totals_by_split(
                 {str(cell_id): int(count) for cell_id, count in raw_counts.items()}
             )
         expected = {
-            quota.cell_id: quota.target_accepted
-            for quota in balanced_cell_quotas(
+            quota.cell_id: quota.case_count
+            for quota in balanced_valid_case_targets(
                 cell_ids,
-                accepted_case_count=accepted_total,
+                case_count=accepted_total,
             )
         }
         if dict(observed) != expected:
@@ -2209,7 +2218,17 @@ def audit(root: Path) -> dict[str, object]:
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "support": {
             "cell_count": len(TANAKA_SAMPLE_CELLS),
-            "direction_aware_cells": [asdict(cell) for cell in TANAKA_SAMPLE_CELLS],
+            "direction_aware_cells": [
+                {
+                    "cell_id": cell_id,
+                    "regime": regime,
+                    "crest_count": crest_count,
+                    "right_moving_count": right_moving_count,
+                }
+                for cell_id, (regime, crest_count, right_moving_count) in (
+                    TANAKA_SAMPLE_CELLS.items()
+                )
+            ],
             "extrema": {
                 name: extrema.record() for name, extrema in support_extrema.items()
             },

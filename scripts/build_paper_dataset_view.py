@@ -1,6 +1,6 @@
-"""Preflight or build one four-family view from completed quota chunks.
+"""Preflight or build one four-family view from completed generation chunks.
 
-Inputs are the completion summaries written by ``run_paper_dataset_quota.py``.
+Inputs are the completion summaries written by ``generate_paper_dataset.py``.
 The default mode is read-only.  ``--execute`` builds a schema-v2 view only
 after every chunk is complete, each family's cumulative intervals are nested
 without gaps or overlap, all four families have the same accepted-case count
@@ -38,24 +38,24 @@ from solver.gen_data.pipeline.manifest import (
     build_dataset_view,
 )
 from solver.gen_data.pipeline.production import (
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     paper_dataset_revision_id,
     split_code,
 )
-from solver.gen_data.pipeline.quota_driver import (
-    AcceptedQuotaRunSpec,
+from solver.gen_data.pipeline.valid_case_generation import (
+    DatasetGenerationSpec,
     canonical_json_sha256,
-    scan_quota_run,
+    scan_dataset_generation,
 )
 from solver.gen_data.jonswap_horizon_executor import (
     BUCKETING_CONFIG_KEY,
     BucketingConfig,
 )
 from solver.gen_data.stokes_static_pipeline import PAPER_STATIC_STOKES_CONTRACT
-from solver.gen_data.trajectory_quota_executor import TrajectoryExecutionConfig
+from solver.gen_data.trajectory_batch_executor import TrajectoryExecutionConfig
 
 
 FAMILY_ORDER = (
@@ -167,7 +167,7 @@ def _plain_json_value(value: object) -> object:
 
 @dataclass(frozen=True)
 class CompletedChunk:
-    """Validated identity and durable batches from one completed quota run."""
+    """Validated identity and batch files from one completed generation run."""
 
     summary_path: Path
     summary_sha256: str
@@ -220,7 +220,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         action="append",
         required=True,
-        help="Completed quota summary; repeat once for every additive chunk.",
+        help="Completed generation summary; repeat for every additive chunk.",
     )
     parser.add_argument(
         "--output-root",
@@ -371,7 +371,7 @@ def _proposal_metadata(path: Path) -> Mapping[str, object]:
 def _validate_committed_proposal_contract(
     paths: BatchPaths,
     *,
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
 ) -> None:
     """Bind proposal metadata to the exact summary/run execution contract."""
 
@@ -471,7 +471,7 @@ def _ordered_cell_ids(
 
 
 def _configuration_record(
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
 ) -> Mapping[str, object]:
     """Return the strict JSON form of an immutable run configuration."""
 
@@ -482,7 +482,7 @@ def _reconstruct_spec(
     summary: Mapping[str, object],
     *,
     root: Path,
-) -> AcceptedQuotaRunSpec:
+) -> DatasetGenerationSpec:
     record = _required_mapping(summary, "run_spec")
     family = _required_string(record, "family_name")
     if family not in FAMILY_IDS:
@@ -491,32 +491,32 @@ def _reconstruct_spec(
     if family_id is not FAMILY_IDS[family]:
         raise ValueError("run summary family name and ID disagree")
     split = SplitId(_required_string(record, "split_id"))
-    raw_quotas = record.get("quotas")
-    if not isinstance(raw_quotas, list) or not raw_quotas:
-        raise TypeError("run_spec quotas must be a nonempty list")
-    quotas = tuple(
-        CellQuota(
-            cell_id=_required_string(quota, "cell_id"),
-            target_accepted=_required_integer(quota, "target_accepted"),
+    raw_targets = record.get("quotas")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise TypeError("run_spec valid-case targets must be a nonempty list")
+    targets = tuple(
+        ValidCaseTarget(
+            cell_id=_required_string(target, "cell_id"),
+            case_count=_required_integer(target, "target_accepted"),
         )
-        for quota in raw_quotas
-        if isinstance(quota, Mapping)
+        for target in raw_targets
+        if isinstance(target, Mapping)
     )
-    if len(quotas) != len(raw_quotas):
-        raise TypeError("every run_spec quota must be a JSON object")
+    if len(targets) != len(raw_targets):
+        raise TypeError("every run_spec valid-case target must be a JSON object")
     raw_codes = _required_mapping(record, "cell_codes")
     cell_codes = {
         str(cell_id): _required_integer(raw_codes, str(cell_id))
         for cell_id in raw_codes
     }
-    return AcceptedQuotaRunSpec(
+    return DatasetGenerationSpec(
         root=root,
         family_name=family,
         family_id=family_id,
         revision_id=_required_integer(record, "revision_id"),
         split_id=split,
         stream_id=_required_integer(record, "stream_id"),
-        quotas=quotas,
+        case_targets=targets,
         cell_codes=cell_codes,
         batch_size=_required_integer(record, "batch_size", minimum=1),
         first_attempt_index=_required_integer(record, "first_attempt_index"),
@@ -539,9 +539,9 @@ def load_completed_chunk(
     path = Path(summary_path).expanduser().resolve()
     summary = _read_json_object(path)
     if summary.get("schema") != "paper_dataset_quota_summary_v1":
-        raise ValueError(f"{path} is not a paper-dataset quota summary")
+        raise ValueError(f"{path} is not a paper-dataset generation summary")
     if summary.get("status") != "complete":
-        raise RuntimeError(f"{path} does not describe a completed quota run")
+        raise RuntimeError(f"{path} does not describe completed generation")
     root = Path(_required_string(summary, "output_root")).expanduser().resolve()
     if path.parent != root:
         raise ValueError("chunk summary must live directly in its output root")
@@ -599,32 +599,32 @@ def load_completed_chunk(
     )
 
     ordered_cells = _ordered_cell_ids(configuration)
-    before = balanced_cell_quotas(
+    before = balanced_valid_case_targets(
         ordered_cells,
-        accepted_case_count=accepted_before,
+        case_count=accepted_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         ordered_cells,
-        accepted_case_count=accepted_after,
+        case_count=accepted_after,
     )
     expected_increment = tuple(
-        after_quota.target_accepted - before_quota.target_accepted
+        after_quota.case_count - before_quota.case_count
         for before_quota, after_quota in zip(before, after)
     )
-    actual_increment = tuple(quota.target_accepted for quota in spec.quotas)
-    if tuple(quota.cell_id for quota in spec.quotas) != tuple(ordered_cells):
-        raise ValueError("chunk quota order differs from ordered_cell_ids")
+    actual_increment = tuple(target.case_count for target in spec.case_targets)
+    if tuple(target.cell_id for target in spec.case_targets) != tuple(ordered_cells):
+        raise ValueError("chunk target order differs from ordered_cell_ids")
     if actual_increment != expected_increment:
-        raise ValueError("chunk quotas are not cumulative balanced differences")
+        raise ValueError("chunk targets are not cumulative balanced differences")
 
-    state = scan_quota_run(spec)
+    state = scan_dataset_generation(spec)
     if (
         not state.complete
         or state.pending is not None
         or state.terminal_failure is not None
         or state.attempt_limit_failure is not None
     ):
-        raise RuntimeError("chunk artifacts are not in a completed quota state")
+        raise RuntimeError("chunk artifacts are not in a completed generation state")
     if sum(state.accepted_by_cell.values()) != accepted_count:
         raise RuntimeError("chunk artifacts contain the wrong accepted count")
     for paths in state.committed:

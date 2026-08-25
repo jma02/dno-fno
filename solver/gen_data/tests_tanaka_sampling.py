@@ -23,11 +23,10 @@ from solver.gen_data.tanaka_sampling import (
     STEEP_DEPTH_BOUNDS,
     TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
     TANAKA_MINIMUM_RESOLUTION_RATIO,
+    TANAKA_SAMPLE_CELL_IDS,
     TANAKA_SAMPLE_CELLS,
-    TANAKA_SAMPLING_REVISION_V2,
     TANAKA_SAMPLING_REVISION_V3,
     TanakaCrest,
-    TanakaSampleCell,
     sample_tanaka_case,
     tanaka_conditional_depth_bounds,
     tanaka_inverse_width,
@@ -42,8 +41,8 @@ DOMAIN_LENGTH = 2.0 * np.pi
 def assignment(
     cell_index: int,
     *,
-    family_id: int = 1,
-    revision_id: int = TANAKA_SAMPLING_REVISION_V2,
+    family_id: int = 2,
+    revision_id: int = TANAKA_SAMPLING_REVISION_V3,
     split_id: SplitId = SplitId.TRAIN,
     stream_id: int = 0,
     attempt_index: int | None = None,
@@ -59,7 +58,7 @@ def assignment(
             stream_id=stream_id,
             attempt_index=attempt,
         ),
-        cell_id=TANAKA_SAMPLE_CELLS[cell_index].cell_id,
+        cell_id=TANAKA_SAMPLE_CELL_IDS[cell_index],
     )
 
 
@@ -79,12 +78,14 @@ class TanakaSamplingTest(unittest.TestCase):
     def test_cells_are_exactly_the_declared_eleven(self) -> None:
         coordinates = tuple(
             (
-                cell.cell_id,
-                cell.regime,
-                cell.crest_count,
-                cell.right_moving_count,
+                cell_id,
+                regime,
+                crest_count,
+                right_moving_count,
             )
-            for cell in TANAKA_SAMPLE_CELLS
+            for cell_id, (regime, crest_count, right_moving_count) in (
+                TANAKA_SAMPLE_CELLS.items()
+            )
         )
         self.assertEqual(
             coordinates,
@@ -103,58 +104,9 @@ class TanakaSamplingTest(unittest.TestCase):
             ),
         )
 
-    def test_revision_2_replay_is_bitwise_deterministic(self) -> None:
-        for cell_index in range(len(TANAKA_SAMPLE_CELLS)):
-            with self.subTest(cell=TANAKA_SAMPLE_CELLS[cell_index].cell_id):
-                first = sample_tanaka_case(
-                    assignment(cell_index, attempt_index=91)
-                )
-                second = sample_tanaka_case(
-                    assignment(cell_index, attempt_index=91)
-                )
-                self.assertEqual(first, second)
-                self.assertEqual(first.to_json_record(), second.to_json_record())
-                self.assertNotIn("schema", first.to_json_record())
-
-    def test_revision_2_canonical_json_is_byte_locked(self) -> None:
-        cases = (
-            (
-                0,
-                91,
-                "49f24050146acbb9712c1d952b2f760a4ecd8e5672a370348dc8c69cda83abda",
-            ),
-            (
-                6,
-                97,
-                "b372d681afcf3ab18a615b17710f540058495ffac0ae14a7696f374615257673",
-            ),
-            (
-                10,
-                103,
-                "f50ea60f1cd601b8f656a4079ef665f045166cd21d660a9fb1800db50a753800",
-            ),
-        )
-        for cell_index, attempt_index, expected in cases:
-            with self.subTest(
-                cell=TANAKA_SAMPLE_CELLS[cell_index].cell_id,
-                attempt=attempt_index,
-            ):
-                sample = sample_tanaka_case(
-                    assignment(
-                        cell_index,
-                        family_id=2,
-                        revision_id=TANAKA_SAMPLING_REVISION_V2,
-                        attempt_index=attempt_index,
-                    )
-                )
-                self.assertEqual(
-                    canonical_json_sha256(sample.to_json_record()),
-                    expected,
-                )
-
     def test_revision_3_replay_is_bitwise_deterministic(self) -> None:
-        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
-            with self.subTest(cell=cell.cell_id):
+        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
+            with self.subTest(cell=cell_id):
                 attempted = assignment(
                     cell_index,
                     revision_id=TANAKA_SAMPLING_REVISION_V3,
@@ -165,6 +117,27 @@ class TanakaSamplingTest(unittest.TestCase):
                 self.assertEqual(first, second)
                 self.assertEqual(first.to_json_record(), second.to_json_record())
                 self.assertNotIn("schema", first.to_json_record())
+
+    def test_current_records_are_byte_locked(self) -> None:
+        expected_by_case = {
+            (
+                0,
+                4000,
+            ): "159afbf068df6325a1a8d8a6f5872ac08d12bc11828986704ba1bb02c0b7c47d",
+            (
+                6,
+                4006,
+            ): "0b0f85b7dd9ced1cd967cb3741d89a9d9411fdac656edaaf614bbb08868fbb49",
+            (
+                10,
+                4010,
+            ): "56fcf063ec0bee8b1d752323548a72b8bffa47ce7eaedf1f0463d59b31418f36",
+        }
+        for (cell_index, attempt_index), expected in expected_by_case.items():
+            sample = sample_tanaka_case(
+                assignment(cell_index, attempt_index=attempt_index)
+            )
+            self.assertEqual(canonical_json_sha256(sample.to_json_record()), expected)
 
     def test_pcg64_uses_all_case_key_seed_words(self) -> None:
         base = assignment(0, attempt_index=41).case_key
@@ -177,53 +150,45 @@ class TanakaSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            CaseKey(2, 1, SplitId.TRAIN, 0, 41),
             CaseKey(1, 3, SplitId.TRAIN, 0, 41),
-            CaseKey(1, 1, SplitId.VALIDATION, 0, 41),
-            CaseKey(1, 1, SplitId.TRAIN, 1, 41),
-            CaseKey(1, 1, SplitId.TRAIN, 0, 42),
+            CaseKey(2, 4, SplitId.TRAIN, 0, 41),
+            CaseKey(2, 3, SplitId.VALIDATION, 0, 41),
+            CaseKey(2, 3, SplitId.TRAIN, 1, 41),
+            CaseKey(2, 3, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {
-            tuple(random_generator_for_case(key).random(8)) for key in keys
-        }
+        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
         self.assertEqual(len(first_draws), len(keys))
 
     def test_support_sums_and_separation_over_many_attempts(self) -> None:
-        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
+        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
+            regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[cell_id]
             for attempt_index in range(512):
                 sample = sample_tanaka_case(
                     assignment(cell_index, attempt_index=attempt_index)
                 )
                 self.assertEqual(tanaka_support_violations(sample), ())
-                self.assertEqual(len(sample.crests), cell.crest_count)
+                self.assertEqual(len(sample.crests), crest_count)
                 self.assertEqual(
                     sum(crest.direction == 1 for crest in sample.crests),
-                    cell.right_moving_count,
+                    right_moving_count,
                 )
                 self.assertEqual(
                     sample.total_dimensionless_amplitude,
                     sum(crest.alpha for crest in sample.crests),
                 )
+                self.assertTrue(all(crest.alpha > 0.0 for crest in sample.crests))
                 self.assertTrue(
-                    all(crest.alpha > 0.0 for crest in sample.crests)
+                    all(0.0 <= crest.center < DOMAIN_LENGTH for crest in sample.crests)
                 )
-                self.assertTrue(
-                    all(
-                        0.0 <= crest.center < DOMAIN_LENGTH
-                        for crest in sample.crests
-                    )
-                )
-                if cell.crest_count > 1:
+                if crest_count > 1:
                     self.assertGreaterEqual(
                         sample.achieved_minimum_separation,
                         sample.required_minimum_separation,
                     )
 
-                if cell.regime == "main":
+                if regime == "main":
                     self.assertTrue(
-                        MAIN_DEPTH_BOUNDS[0]
-                        <= sample.depth
-                        <= MAIN_DEPTH_BOUNDS[1]
+                        MAIN_DEPTH_BOUNDS[0] <= sample.depth <= MAIN_DEPTH_BOUNDS[1]
                     )
                     self.assertTrue(
                         MAIN_TOTAL_ALPHA_BOUNDS[0]
@@ -232,9 +197,7 @@ class TanakaSamplingTest(unittest.TestCase):
                     )
                 else:
                     self.assertTrue(
-                        STEEP_DEPTH_BOUNDS[0]
-                        <= sample.depth
-                        <= STEEP_DEPTH_BOUNDS[1]
+                        STEEP_DEPTH_BOUNDS[0] <= sample.depth <= STEEP_DEPTH_BOUNDS[1]
                     )
                     self.assertTrue(
                         STEEP_ALPHA_BOUNDS[0]
@@ -245,7 +208,8 @@ class TanakaSamplingTest(unittest.TestCase):
     def test_revision_3_direct_sampling_satisfies_conditional_support(
         self,
     ) -> None:
-        for cell_index, cell in enumerate(TANAKA_SAMPLE_CELLS):
+        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
+            regime, _, _ = TANAKA_SAMPLE_CELLS[cell_id]
             for attempt_index in range(512):
                 sample = sample_tanaka_case(
                     assignment(
@@ -255,16 +219,10 @@ class TanakaSamplingTest(unittest.TestCase):
                     )
                 )
                 alpha_max = max(crest.alpha for crest in sample.crests)
-                inverse_width = math.sqrt(3.0 * alpha_max) / (
-                    2.0 * sample.depth
-                )
-                resolution_ratio = (
-                    TANAKA_DELIVERED_MAXIMUM_WAVENUMBER / inverse_width
-                )
+                inverse_width = math.sqrt(3.0 * alpha_max) / (2.0 * sample.depth)
+                resolution_ratio = TANAKA_DELIVERED_MAXIMUM_WAVENUMBER / inverse_width
                 base_bounds = (
-                    MAIN_DEPTH_BOUNDS
-                    if cell.regime == "main"
-                    else STEEP_DEPTH_BOUNDS
+                    MAIN_DEPTH_BOUNDS if regime == "main" else STEEP_DEPTH_BOUNDS
                 )
                 expected_lower = max(
                     base_bounds[0],
@@ -315,17 +273,17 @@ class TanakaSamplingTest(unittest.TestCase):
             revision_id=TANAKA_SAMPLING_REVISION_V3,
             attempt_index=314,
         )
-        cell = TANAKA_SAMPLE_CELLS[cell_index]
+        regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[
+            TANAKA_SAMPLE_CELL_IDS[cell_index]
+        ]
         rng = random_generator_for_case(attempted.case_key)
 
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
-        weights = rng.dirichlet(
-            np.ones(cell.crest_count, dtype=np.float64)
-        )
+        weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
         alpha_values = [float(total_alpha * weight) for weight in weights]
         alpha_values[-1] = total_alpha - sum(alpha_values[:-1])
         alphas = tuple(alpha_values)
-        depth_bounds = tanaka_conditional_depth_bounds(cell, alphas)
+        depth_bounds = tanaka_conditional_depth_bounds(regime, alphas)
         depth = float(
             np.exp(
                 rng.uniform(
@@ -336,26 +294,21 @@ class TanakaSamplingTest(unittest.TestCase):
         )
 
         minimum_separation = 3.0 * depth
-        slack = DOMAIN_LENGTH - cell.crest_count * minimum_separation
-        gap_weights = rng.dirichlet(
-            np.ones(cell.crest_count, dtype=np.float64)
-        )
+        slack = DOMAIN_LENGTH - crest_count * minimum_separation
+        gap_weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
         gaps = minimum_separation + slack * gap_weights
         origin = float(rng.uniform(0.0, DOMAIN_LENGTH))
-        offsets = np.concatenate(
-            (np.zeros(1, dtype=np.float64), np.cumsum(gaps[:-1]))
-        )
+        offsets = np.concatenate((np.zeros(1, dtype=np.float64), np.cumsum(gaps[:-1])))
         centers = tuple(
-            float(center)
-            for center in np.mod(origin + offsets, DOMAIN_LENGTH)
+            float(center) for center in np.mod(origin + offsets, DOMAIN_LENGTH)
         )
         direction_multiset = np.concatenate(
             (
                 -np.ones(
-                    cell.crest_count - cell.right_moving_count,
+                    crest_count - right_moving_count,
                     dtype=np.int8,
                 ),
-                np.ones(cell.right_moving_count, dtype=np.int8),
+                np.ones(right_moving_count, dtype=np.int8),
             )
         )
         directions = tuple(
@@ -376,7 +329,7 @@ class TanakaSamplingTest(unittest.TestCase):
 
     def test_direction_compositions_and_json_are_exact(self) -> None:
         directions: set[int] = set()
-        for cell_index in range(len(TANAKA_SAMPLE_CELLS)):
+        for cell_index in range(len(TANAKA_SAMPLE_CELL_IDS)):
             sample = sample_tanaka_case(
                 assignment(cell_index, attempt_index=700 + cell_index)
             )
@@ -389,7 +342,7 @@ class TanakaSamplingTest(unittest.TestCase):
             self.assertEqual(record["crest_count"], len(sample.crests))
             self.assertEqual(
                 record["right_moving_count"],
-                sample.cell.right_moving_count,
+                sample.right_moving_count,
             )
             json.dumps(record, sort_keys=True, allow_nan=False)
 
@@ -399,9 +352,7 @@ class TanakaSamplingTest(unittest.TestCase):
                 assignment(6, attempt_index=1000 + attempt_index)
             )
             directions.update(crest.direction for crest in sample.crests)
-            mixed_assignments.add(
-                tuple(crest.direction for crest in sample.crests)
-            )
+            mixed_assignments.add(tuple(crest.direction for crest in sample.crests))
         self.assertEqual(directions, {-1, 1})
         self.assertEqual(
             mixed_assignments,
@@ -459,12 +410,7 @@ class TanakaSamplingTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
                     sample_tanaka_case(attempted)
 
-                valid = sample_tanaka_case(
-                    assignment(
-                        0,
-                        revision_id=TANAKA_SAMPLING_REVISION_V2,
-                    )
-                )
+                valid = sample_tanaka_case(assignment(0))
                 corrupt = replace(valid, assignment=attempted)
                 self.assertIn(
                     "unsupported Tanaka sampling revision",
@@ -488,35 +434,18 @@ class TanakaSamplingTest(unittest.TestCase):
             with self.subTest(alpha=alpha, depth=depth):
                 with self.assertRaisesRegex(ValueError, "positive and finite"):
                     tanaka_inverse_width(alpha=alpha, depth=depth)
-        with self.assertRaisesRegex(ValueError, "one value per crest"):
-            tanaka_conditional_depth_bounds(
-                TANAKA_SAMPLE_CELLS[2],
-                (0.2,),
-            )
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            tanaka_conditional_depth_bounds("main", ())
         with self.assertRaisesRegex(ValueError, "no admissible depth"):
-            tanaka_conditional_depth_bounds(
-                TANAKA_SAMPLE_CELLS[0],
-                (100.0,),
-            )
+            tanaka_conditional_depth_bounds("main", (100.0,))
 
     def test_invalid_records_and_impossible_geometry_fail_closed(self) -> None:
-        with self.assertRaisesRegex(TypeError, "must be an integer"):
-            TanakaSampleCell(
-                "bad_m",
-                "main",
-                1.0,  # type: ignore[arg-type]
-                1,
-            )
-        with self.assertRaisesRegex(TypeError, "must be an integer"):
-            TanakaSampleCell("bad_m", "main", True, 1)
-        with self.assertRaisesRegex(TypeError, "must be an integer"):
-            TanakaSampleCell("bad_q", "main", 2, 1.5)  # type: ignore[arg-type]
-        with self.assertRaisesRegex(TypeError, "must be an integer"):
-            TanakaSampleCell("bad_q", "main", 2, True)
-        with self.assertRaisesRegex(ValueError, "between zero and crest_count"):
-            TanakaSampleCell("bad_q", "main", 2, 3)
-
         sample = sample_tanaka_case(assignment(3))
+        mismatched_cell = replace(sample, right_moving_count=0)
+        self.assertIn(
+            "sample parameters do not match the assigned cell",
+            tanaka_support_violations(mismatched_cell),
+        )
         corrupt = replace(
             sample,
             crests=(
@@ -534,9 +463,7 @@ class TanakaSamplingTest(unittest.TestCase):
         )
         wrong_composition = replace(
             sample,
-            crests=tuple(
-                replace(crest, direction=-1) for crest in sample.crests
-            ),
+            crests=tuple(replace(crest, direction=-1) for crest in sample.crests),
         )
         self.assertIn(
             "number of right-moving crests does not match the parameter category",

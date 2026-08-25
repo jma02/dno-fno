@@ -15,7 +15,7 @@ Five terms are used consistently here:
 - a **constructor** maps one stored case specification to its periodic initial
   state;
 - a **parameter category** is a predeclared part of one family's parameter
-  range with its own accepted-case quota (the code stores its name as
+  range with its own valid-case target (the code stores its name as
   `cell_id`);
 - a **validation panel** is a small, predeclared set of cases used to test a
   numerical contract and does not produce training data;
@@ -119,7 +119,7 @@ low-discrepancy sampler.  If the initial same-category amplitude draw and all
 1000 allowed redraws fail, the sampler raises an exception whose strict record
 contains the fixed parameters and every rejected amplitude and
 \(\mathrm{Ur}_+\) value.  This is a declared case rejection, not a fatal batch
-error: `stokes_quota_executor.py` puts that record in the proposal, commits a
+error: `stokes_batch_executor.py` puts that record in the proposal, commits a
 zero-row `OUTSIDE_SUPPORT` decision, keeps valid siblings, and schedules a
 replacement in the same category.  An unclassified sampler error propagates
 and is not relabeled as a physical rejection.  The analytic deep-water branch
@@ -171,12 +171,12 @@ denoting rightward travel, and let
 \((m,q)\), \(q=0,\ldots,m\), define \(2+3+4=9\) parameter categories.
 The steep one-crest branch adds the two categories \(q=0,1\).  Conditional
 on \(q\), the sampler chooses uniformly which \(q\) of the \(m\) exchangeable
-crest labels move right.  Accepted quotas are divided as evenly as possible
+crest labels move right.  Valid-case targets are divided as evenly as possible
 across all eleven categories, so their counts differ by at most one.  The
 possible direction compositions receive equal coverage in the ideal category
 law.  The quotient--remainder
-assignment can introduce a one-case direction imbalance for a finite quota;
-with the fixed category order, a quota of 1024 has one extra left-moving
+assignment can introduce a one-case direction imbalance for a finite target;
+with the fixed category order, a target of 1024 has one extra left-moving
 one-crest case.  This replaces the old four-group independent-sign mixture
 and deliberately gives more aggregate weight to two- and three-crest cases.
 
@@ -244,7 +244,7 @@ The exact revision-3 path is therefore \(P_{128}\) construction, zero-filled
 lift to the \(K=256\) evolution band, this Hou--Li multiplier on both state
 fields after every GL2 step, and \(P_{128}\) delivery to the dataset.
 
-For the revision-4 Benjamin--Feir accepted-quota population, let \(n_c\) be
+For the revision-4 Benjamin--Feir dataset sampler, let \(n_c\) be
 the carrier mode, \(\Delta n\) the symmetric sideband offset,
 \(\varepsilon_c\) the carrier steepness, and \(\rho\) the sideband-to-carrier
 amplitude ratio.  Define
@@ -276,7 +276,7 @@ The implementation draws
 (\varepsilon_{\min},\varepsilon_{\max}]\),
 \(\rho\sim\operatorname{Unif}[0.05,0.10)\), and
 \(x_0\sim\operatorname{Unif}[0,L)\), with fixed relative sideband phase
-\(-\pi/4\).  Each feasible pair is an accepted-quota category, and a rejected
+\(-\pi/4\).  Each feasible pair is an sampling category, and a rejected
 attempt is replaced in the same pair.  This population sampler is distinct
 from the generic standalone Benjamin--Feir archive helper described below.
 
@@ -343,7 +343,7 @@ A nonfinite field, nonfinite target, unsolved stage, loss of the graph domain,
 or a required Hamiltonian-conservation failure is a recorded cause of that
 single failure condition.  These are not empirical shape filters.  A rejected
 trajectory owns zero rows; no finite prefix or isolated frame is kept.  The
-accepted-quota scheduler replaces it deterministically in the same parameter
+valid-case scheduler replaces it deterministically in the same parameter
 category.
 
 Time-step comparison remains a method-level validation calculation.  It is
@@ -458,7 +458,7 @@ consistently normalized Fourier coefficients on the fixed band
 \(|m|\leq12\).  It validates the retained reference formulas; it does not
 reject individual samples.
 
-Accepted-quota proposals use the population-record schema
+Paper-dataset proposals use the population-record schema
 `benjamin_feir_sample_spec_v3`; standalone archive members use the
 parameter-record schema `bf_jcp09_parameter_spec_v2`.  Both use the constructor
 identifier `jcp09_equation_33_with_project_fifth_order_carrier_v2`.  These
@@ -468,7 +468,7 @@ Modal shard is not resumable or mergeable into v2 output.  The standalone path
 binds its constructor, support, random stream, grid, solver, time selection,
 storage, and run plan to immutable fingerprints.  It also reconciles mutable
 progress with the exact member inventory and per-member SHA-256 digests before
-continuing.  The accepted-quota paper path has its own stronger revision and
+continuing.  The paper-dataset path has its own stronger revision and
 source-bound transaction contract described below.
 
 The revision-4 random-sea paper constructor is `jonswap_tma.py`.  Let
@@ -515,7 +515,7 @@ and minimum water column as diagnostics rather than thresholds.
 For JONSWAP/TMA specifically, these uniform parameter and phase laws govern
 attempted specifications.  Its complete-case acceptance event includes
 initial construction and graph validity, nonlinear adjustment, and autonomous
-trajectory acceptance.  Accepted-case quotas preserve the category counts,
+trajectory acceptance. Valid-case targets preserve the category counts,
 not the unconditioned continuous density inside a category.  This conditioning
 is a consequence of the declared case decision, not an additional gate or a
 retrospective parameter cutoff; every rejected proposal remains recorded.
@@ -614,11 +614,11 @@ trajectory is admissible.  A rejected case retains its quality masks and GL2
 telemetry but cannot expose a numerical prefix.
 
 Paper-dataset JONSWAP/TMA generation is available only through
-`scripts/run_paper_dataset_jonswap_bucketed.py`.  That launcher records the
+`scripts/generate_paper_dataset_jonswap.py`.  That launcher records the
 adjustment both in the trajectory-execution record and in the complete
 horizon-sorted numerical-batch policy, and binds both records into the run
-fingerprint.  It uses `HorizonBucketedJonswapQuotaExecutor`.  The general
-`scripts/run_paper_dataset_quota.py` path fails closed for JONSWAP/TMA, so a
+fingerprint. It uses `HorizonBucketedJonswapBatchExecutor`. The general
+`scripts/generate_paper_dataset.py` path fails closed for JONSWAP/TMA, so a
 paper run cannot silently omit the adjustment.  The combined-view preflight
 requires the current execution record in the summary and every proposal, and
 requires the complete current bucketing policy.  Benjamin--Feir continues to
@@ -677,7 +677,7 @@ trajectory_first_row, trajectory_row_count
 The manifest records every proposal, result, and immutable shard path and
 SHA-256 digest.  Each batch retains its run-configuration fingerprint; these
 fingerprints normally differ across families and splits because they bind the
-quota, random stream, and split assignment.  A separate dataset-contract
+valid-case targets, random stream, and split assignment. A separate dataset-contract
 fingerprint binds the common DNO target and stored dtypes.  Numerical and
 source contracts are compared within each `(family, revision)` pair, so a
 revision-3 trajectory rollout need not equal its revision-2 predecessor.  The
@@ -696,11 +696,11 @@ Within a preassigned category,
 `released_case_law = proposal_conditioned_on_complete_case_acceptance_within_preassigned_cell`:
 the loader-visible law is the proposal conditioned on the declared family
 complete-case acceptance event within that category.  The event is frozen by
-family and revision.  Accepted quotas fix the category marginals; they do not
+family and revision.  Valid-case targets fix the category marginals; they do not
 restore the unconditioned within-category proposal density.  This is the
-common quota/executor semantics, not a post-hoc parameter gate.
+common generation semantics, not a post-hoc parameter gate.
 
-The family-independent quota, transaction, view, and loader checks are
+The family-independent generation, transaction, view, and loader checks are
 reproduced by
 
 ```bash
@@ -710,7 +710,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
     solver.gen_data.pipeline.test_archive \
     solver.gen_data.pipeline.test_manifest \
     solver.gen_data.pipeline.test_writer \
-    solver.gen_data.pipeline.test_quota_driver \
+    solver.gen_data.pipeline.test_valid_case_generation \
     solver.gen_data.pipeline.test_refinement \
     solver.gen_data.pipeline.test_time_selection \
     solver.gen_data.pipeline.test_trajectory_writer
@@ -720,7 +720,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
 ```
 
 These are tests of the common storage and sampling foundation.  The common
-accepted-quota driver reconstructs exact per-category counts from committed
+valid-case generator reconstructs exact per-category counts from committed
 artifacts, replays proposal-only and proposal-plus-shard interruptions, and
 uses a nonblocking single-writer lock.  A rejected attempt does not advance
 its accepted-category count.  The source-authenticated release is complete at
@@ -739,7 +739,7 @@ The completed Benjamin--Feir family is independently certified by
 `outputs/paper_dataset_bf_revision4_jonswap_revision3_literature_aligned_v1/benjamin_feir_completion_audit.json`
 (SHA-256
 `c155b35276d0cfef6844f6b0db3e91da3ce15579ad8b0f0ca482f44cc912753c`).
-That full-dataset audit binds the exact 66-category taxonomy and split quotas,
+That full-dataset audit binds the exact 66-category taxonomy and split targets,
 reconstructed attempted/accepted/rejected counts in every category, proposal
 replay, transaction and array hashes, accepted and rejected row ownership, the
 200 endpoint-pinned, approximately uniform selections from each saved grid,
@@ -782,12 +782,12 @@ sample complete specifications
 -> construct initial fields
 ```
 
-A constructor accepts only a durable proposal token and rechecks the proposal
-state, file hash, case identities, and stored specifications before numerical
-construction.  The shared executor, time selector, and whole-case writer
-enforce the remaining integration, selection, and commit operations.
-`trajectory_quota_executor.py` connects those operations to accepted
-per-category quotas and replay.  A corrected real-GL2 CPU smoke at
+A constructor accepts only a proposal that has been written to disk and
+rechecks its state, file hash, case identities, and stored specifications
+before numerical construction. The shared executor, time selector, and
+whole-case writer handle integration, selection, and output.
+`trajectory_batch_executor.py` performs those operations for one proposed
+batch and supports exact replay after an interruption. A corrected real-GL2 CPU smoke at
 \((N,M,p,K)=(64,0,1,16)\) took one Tanaka, one Benjamin--Feir, and one
 JONSWAP/TMA case through proposal, the then-current paired validation path,
 selection, whole-case
@@ -799,16 +799,16 @@ described above as a zero-row `OUTSIDE_SUPPORT` case.  Its classifier verifies
 the recorded identities \(c^2=|c|^2\) and \(R_{\min}/c^2\), and verifies that
 the negative-entry count agrees with the sign of the finite minimum.  A
 nonfinite, malformed, or otherwise unclassified construction failure leaves
-the durable transaction pending for replay, while only an explicit
+the saved proposal pending for replay, while only an explicit
 `DeclaredTrajectoryFatalError` writes a fatal sidecar.  These reduced
 calculations establish software wiring only; they are not spatial,
 full-horizon, or population validation.
 
 Exact-contract generation is launched one family and split at a time.  Stokes,
-Tanaka, and Benjamin--Feir use `scripts/run_paper_dataset_quota.py`;
+Tanaka, and Benjamin--Feir use `scripts/generate_paper_dataset.py`;
 JONSWAP/TMA uses the dedicated adjusted launcher named above.  The default
-action is a read-only preflight: it prints the ordered parameter-category
-quotas, exact numerical contract, expected retained-row count, source and
+action is a read-only preflight: it prints the ordered per-category valid-case
+targets, exact numerical contract, expected retained-row count, source and
 dependency hashes, output namespace, and any resumable state.  Numerical work
 requires the explicit `--execute` flag.
 
@@ -879,20 +879,20 @@ retained all 18432 attempts, stored 3686400 rows, and shares no historical
 Tanaka shard with the release.
 
 CPU is the fail-safe default.  `--platform gpu` selects the accelerator path
-before JAX initializes.  Platform, quota, batch size, stream coordinates,
+before JAX initializes. Platform, valid-case targets, batch size, stream coordinates,
 attempt ceiling, paper contract, family-specific source hashes,
 Python/JAX/JAXLIB/NumPy versions, and the `pyproject.toml` and `uv.lock`
 hashes are all bound by the configuration fingerprint.  Consequently a
 resume must use the same command-defining values and dependency environment.
-Use a different output root for a pilot and a later larger quota; an accepted
-quota cannot be enlarged in place.  The general launcher accepts
+Use a different output root for a pilot and a later larger target; a completed
+target cannot be enlarged in place. The general launcher accepts
 `--family stokes`, `--family tanaka`, and `--family benjamin_feir`, but refuses
 paper-dataset JONSWAP/TMA.  Stokes uses the static one-row transaction; the
 other three families use their declared whole-trajectory integration and
 time-selection contracts.
 
-Learning-curve corpora are additive chunks, not enlargements of an existing
-run.  Let \(B_i(C)\) be the balanced quota of category \(i\) after \(C\) accepted
+Learning-curve datasets are additive chunks, not enlargements of an existing
+run. Let \(B_i(C)\) be the balanced target of category \(i\) after \(C\) accepted
 cases.  A chunk beginning at cumulative count \(C_0\) and containing \(A\)
 new accepted cases receives
 
@@ -916,15 +916,15 @@ favor the first remainder categories.  The frozen nested learning curve is:
 Stokes, corrected Tanaka, and Benjamin--Feir use these four execution shards
 directly.  To balance the two remaining GPU lanes, the last JONSWAP/TMA
 increment is physically divided into `[8192,12288)`, `[12288,14336)`, and
-`[14336,16384)` with streams 3, 4, and 5.  The additive quota differences
+`[14336,16384)` with streams 3, 4, and 5. The additive target differences
 preserve exactly the same final per-category allocation; an execution-shard
 boundary is not a new population category or learning-curve checkpoint.
 
 Every chunk must use a distinct output root and stream ID.  The output root
 is the transaction namespace; the stream ID is part of every case identity
 and random seed.  `--first-attempt-index` normally remains zero within each
-new stream.  The preflight prints the cumulative before, chunk, and
-cumulative after quota for every category so this assignment can be checked
+new stream. The preflight prints the cumulative before, chunk, and cumulative
+after target for every category so this assignment can be checked
 without constructing a field.
 
 Batch size changes transaction and memory granularity, not the population
@@ -935,9 +935,9 @@ whose numerical solves are sorted by horizon and executed in groups of eight.
 Both choices are part of their run fingerprints and do not set another
 family's batch size.
 
-The accepted-quota loop is also bounded.  If a category requires \(Q_i\) accepted
+Valid-case generation is also bounded. If a category requires \(Q_i\) valid
 cases, the default `--maximum-attempts-per-accepted-case 4` permits at most
-\(4Q_i\) durable case proposals in that category.  A pending proposal already
+\(4Q_i\) recorded case proposals in that category. A pending proposal already
 owns one of those attempt slots and is replayed rather than counted twice.  If
 its result leaves the category short at the ceiling, the run stops with the
 accepted, attempted, target, and ceiling counts instead of drawing forever.
@@ -949,7 +949,7 @@ immutable within an output root.
 The long-running replacement queue is supervised by
 `scripts/launch_tanaka_after_revision4_jonswap.sh`.  It exact-resumes a
 missing JONSWAP or Tanaka generator only within a fixed retry budget.  After
-each family closes its lightweight quota gate, it runs the corresponding
+each family reaches its lightweight generation target, it runs the corresponding
 CPU-only source-bound completion audit,
 `scripts/audit_completed_jonswap_revision4.py` or
 `scripts/audit_completed_tanaka_revision3.py`.  The final builder is not
@@ -1034,14 +1034,14 @@ source-identity map.
 Static Stokes is connected end to end by `stokes_static_pipeline.py`: it
 writes the proposal before construction, evaluates the common target, stores
 exactly one \(t=0\) row for an accepted case, and gives a rejected attempt
-zero rows.  `stokes_quota_executor.py` connects that transaction to the
-accepted-quota driver.  If the finite-depth sampler exhausts its declared
+zero rows. `stokes_batch_executor.py` performs that work one batch at a time.
+If the finite-depth sampler exhausts its declared
 same-category amplitude redraws, the executor stores the complete draw ledger as
 a zero-row `OUTSIDE_SUPPORT` attempt, keeps valid siblings in the batch, and
 schedules a replacement only in the missing category.  Its production default is
 the frozen paper target.  A reduced target must be labeled
 `reduced_wiring_evidence_only`.  The historical exact-target pilot ran the
-accepted-quota path with one validation case in each of the four Stokes
+valid-case generation path with one validation case in each of the four Stokes
 categories at \((N,M,p,K)=(1024,6,8,128)\).  The 2026-07-25 run accepted all
 four cases and wrote a proposal, shard, result, manifest, and trajectory map
 with recorded SHA-256 hashes; the training loader returned four finite one-row
@@ -1050,22 +1050,21 @@ repository history.  The current generator-revision-2 run on 2026-07-27 again
 accepted all four cases, with `failed_bits=0`; it is stored at
 `outputs/static_stokes_exact_target_pilot_revision2_20260727`.
 
-The four declared population laws and both quota executors are checked by:
+The four declared sampling laws and both batch executors are checked by:
 
 ```bash
 uv run python -m unittest \
   solver.gen_data.tests_stokes_sampling \
   solver.gen_data.tests_stokes_static_pipeline \
-  solver.gen_data.tests_stokes_quota_executor \
+  solver.gen_data.tests_stokes_batch_executor \
   solver.gen_data.tests_tanaka_sampling \
   solver.gen_data.tests_tanaka_potential_radicand \
   solver.gen_data.tests_benjamin_feir_sampling \
   solver.gen_data.tests_jonswap_tma_sampling \
   solver.gen_data.tests_trajectory_family_adapters \
-  solver.gen_data.tests_trajectory_quota_executor \
-  scripts.test_run_paper_dataset_quota \
-  scripts.test_build_paper_dataset_view \
-  scripts.test_run_trajectory_quota_real_gl2_smoke
+  solver.gen_data.tests_trajectory_batch_executor \
+  scripts.test_generate_paper_dataset \
+  scripts.test_build_paper_dataset_view
 ```
 
 ## Legacy v9

@@ -33,10 +33,10 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     FINITE_DEPTH_BOUNDS,
     FINITE_DEPTH_WAVENUMBER_BOUNDS,
     PAPER_AMPLITUDE_BOUNDS,
+    PAPER_STOKES_STEEPNESS_CELLS,
+    STOKES_SAMPLE_CELL_IDS,
     STOKES_SAMPLE_CELLS,
-    StokesAmplitudeAttempt,
-    StokesSampleCell,
-    StokesSamplingError,
+    UrsellRedrawLimitReached,
     effective_amplitude_bounds,
     effective_depth_bounds,
     feasible_carrier_modes,
@@ -48,8 +48,8 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
 def assignment(
     cell_index: int,
     *,
-    family_id: int = 3,
-    revision_id: int = 1,
+    family_id: int = 1,
+    revision_id: int = 2,
     split_id: SplitId = SplitId.TRAIN,
     stream_id: int = 0,
     attempt_index: int | None = None,
@@ -65,7 +65,7 @@ def assignment(
             stream_id=stream_id,
             attempt_index=attempt,
         ),
-        cell_id=STOKES_SAMPLE_CELLS[cell_index].cell_id,
+        cell_id=STOKES_SAMPLE_CELL_IDS[cell_index],
     )
 
 
@@ -73,13 +73,13 @@ class StokesSamplingTest(unittest.TestCase):
     def test_cells_are_exactly_branch_by_steepness_product(self) -> None:
         coordinates = tuple(
             (
-                cell.cell_id,
-                cell.branch,
-                cell.steepness_cell_index,
-                cell.steepness_bounds,
-                cell.upper_steepness_is_inclusive,
+                cell_id,
+                branch,
+                steepness_cell_index,
+                tuple(PAPER_STOKES_STEEPNESS_CELLS[steepness_cell_index]),
+                steepness_cell_index == 1,
             )
-            for cell in STOKES_SAMPLE_CELLS
+            for cell_id, (branch, steepness_cell_index) in (STOKES_SAMPLE_CELLS.items())
         )
         self.assertEqual(
             coordinates,
@@ -92,8 +92,8 @@ class StokesSamplingTest(unittest.TestCase):
         )
 
     def test_replay_is_bitwise_deterministic(self) -> None:
-        for cell_index, cell in enumerate(STOKES_SAMPLE_CELLS):
-            with self.subTest(cell=cell.cell_id):
+        for cell_index, cell_id in enumerate(STOKES_SAMPLE_CELL_IDS):
+            with self.subTest(cell=cell_id):
                 first = sample_stokes_case(
                     assignment(cell_index, attempt_index=90 + cell_index)
                 )
@@ -114,61 +114,57 @@ class StokesSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            CaseKey(4, 1, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 2, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 1, SplitId.VALIDATION, 0, 41),
-            CaseKey(3, 1, SplitId.TRAIN, 1, 41),
-            CaseKey(3, 1, SplitId.TRAIN, 0, 42),
+            CaseKey(2, 2, SplitId.TRAIN, 0, 41),
+            CaseKey(1, 3, SplitId.TRAIN, 0, 41),
+            CaseKey(1, 2, SplitId.VALIDATION, 0, 41),
+            CaseKey(1, 2, SplitId.TRAIN, 1, 41),
+            CaseKey(1, 2, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {
-            tuple(random_generator_for_case(key).random(8)) for key in keys
-        }
+        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
         self.assertEqual(len(first_draws), len(keys))
 
     def test_feasible_modes_and_conditional_bounds_are_exact(self) -> None:
-        finite_low, finite_moderate, deep_low, deep_moderate = (
-            STOKES_SAMPLE_CELLS
-        )
         self.assertEqual(
-            feasible_carrier_modes(finite_low),
+            feasible_carrier_modes("finite", 0),
             tuple(range(FINITE_CARRIER_MODE_BOUNDS[0], 27)),
         )
         self.assertEqual(
-            feasible_carrier_modes(finite_moderate),
+            feasible_carrier_modes("finite", 1),
             tuple(range(FINITE_CARRIER_MODE_BOUNDS[0], 27)),
         )
         self.assertEqual(
-            feasible_carrier_modes(deep_low),
+            feasible_carrier_modes("deep", 0),
             tuple(range(DEEP_CARRIER_MODE_BOUNDS[0], 21)),
         )
         self.assertEqual(
-            feasible_carrier_modes(deep_moderate),
+            feasible_carrier_modes("deep", 1),
             tuple(range(3, 21)),
         )
 
         self.assertEqual(
-            effective_depth_bounds(finite_low, wavenumber=14.0),
+            effective_depth_bounds("finite", wavenumber=14.0),
             (0.5 / 14.0, 5.0 / 14.0),
         )
         self.assertEqual(
-            effective_depth_bounds(deep_low, wavenumber=1.0),
+            effective_depth_bounds("deep", wavenumber=1.0),
             (5.0, DEEP_DEPTH_BOUNDS[1]),
         )
         self.assertEqual(
-            effective_amplitude_bounds(deep_moderate, wavenumber=3.0),
+            effective_amplitude_bounds(1, wavenumber=3.0),
             (0.01, PAPER_AMPLITUDE_BOUNDS[1]),
         )
 
     def test_many_draws_obey_branch_cell_and_ursell_support(self) -> None:
-        accepted_by_cell = [0] * len(STOKES_SAMPLE_CELLS)
-        failures_by_cell = [0] * len(STOKES_SAMPLE_CELLS)
-        for cell_index, cell in enumerate(STOKES_SAMPLE_CELLS):
+        accepted_by_cell = [0] * len(STOKES_SAMPLE_CELL_IDS)
+        failures_by_cell = [0] * len(STOKES_SAMPLE_CELL_IDS)
+        for cell_index, cell_id in enumerate(STOKES_SAMPLE_CELL_IDS):
+            branch, steepness_cell_index = STOKES_SAMPLE_CELLS[cell_id]
             for attempt_index in range(96):
                 try:
                     sample = sample_stokes_case(
                         assignment(cell_index, attempt_index=attempt_index),
                     )
-                except StokesSamplingError as error:
+                except UrsellRedrawLimitReached as error:
                     failures_by_cell[cell_index] += 1
                     json.dumps(
                         error.failure_record,
@@ -185,19 +181,17 @@ class StokesSamplingTest(unittest.TestCase):
                     <= sample.amplitude
                     <= PAPER_AMPLITUDE_BOUNDS[1]
                 )
-                lower_ka, upper_ka = cell.steepness_bounds
+                lower_ka, upper_ka = sample.steepness_bounds
                 self.assertGreaterEqual(sample.steepness, lower_ka)
-                if cell.upper_steepness_is_inclusive:
+                if steepness_cell_index == 1:
                     self.assertLessEqual(sample.steepness, upper_ka)
                 else:
                     self.assertLess(sample.steepness, upper_ka)
 
                 depth_wavenumber = sample.depth * sample.wavenumber
-                if cell.branch == "finite":
+                if branch == "finite":
                     self.assertTrue(
-                        FINITE_DEPTH_BOUNDS[0]
-                        <= sample.depth
-                        <= FINITE_DEPTH_BOUNDS[1]
+                        FINITE_DEPTH_BOUNDS[0] <= sample.depth <= FINITE_DEPTH_BOUNDS[1]
                     )
                     self.assertTrue(
                         FINITE_DEPTH_WAVENUMBER_BOUNDS[0]
@@ -226,9 +220,7 @@ class StokesSamplingTest(unittest.TestCase):
                     )
                 else:
                     self.assertTrue(
-                        DEEP_DEPTH_BOUNDS[0]
-                        <= sample.depth
-                        <= DEEP_DEPTH_BOUNDS[1]
+                        DEEP_DEPTH_BOUNDS[0] <= sample.depth <= DEEP_DEPTH_BOUNDS[1]
                     )
                     self.assertGreaterEqual(
                         depth_wavenumber,
@@ -241,30 +233,21 @@ class StokesSamplingTest(unittest.TestCase):
 
     def test_cell_and_depth_boundaries_fail_closed(self) -> None:
         deep_low = sample_stokes_case(assignment(2, attempt_index=400))
-        low_upper = deep_low.cell.steepness_bounds[1] / deep_low.wavenumber
+        low_upper = deep_low.steepness_bounds[1] / deep_low.wavenumber
         outside_low = replace(
             deep_low,
-            amplitude_attempts=(
-                StokesAmplitudeAttempt(0, low_upper, None, True),
-            ),
+            amplitude_attempts=((low_upper, None),),
         )
         self.assertIn(
             "amplitude attempt lies outside its assigned cell",
             stokes_support_violations(outside_low),
         )
 
-        deep_moderate = sample_stokes_case(
-            assignment(3, attempt_index=401)
-        )
-        lower_moderate = (
-            deep_moderate.cell.steepness_bounds[0]
-            / deep_moderate.wavenumber
-        )
+        deep_moderate = sample_stokes_case(assignment(3, attempt_index=401))
+        lower_moderate = deep_moderate.steepness_bounds[0] / deep_moderate.wavenumber
         at_lower_moderate = replace(
             deep_moderate,
-            amplitude_attempts=(
-                StokesAmplitudeAttempt(0, lower_moderate, None, True),
-            ),
+            amplitude_attempts=((lower_moderate, None),),
         )
         self.assertEqual(stokes_support_violations(at_lower_moderate), ())
 
@@ -272,9 +255,7 @@ class StokesSamplingTest(unittest.TestCase):
             sample
             for index in range(700, 800)
             if (
-                sample := sample_stokes_case(
-                    assignment(2, attempt_index=index)
-                )
+                sample := sample_stokes_case(assignment(2, attempt_index=index))
             ).carrier_mode
             == 1
         )
@@ -285,10 +266,7 @@ class StokesSamplingTest(unittest.TestCase):
         self.assertEqual(stokes_support_violations(at_deep_boundary), ())
         below_deep_boundary = replace(
             at_deep_boundary,
-            depth=(
-                DEEP_DEPTH_WAVENUMBER_MINIMUM - 1e-12
-            )
-            / mode_one.wavenumber,
+            depth=(DEEP_DEPTH_WAVENUMBER_MINIMUM - 1e-12) / mode_one.wavenumber,
         )
         self.assertIn(
             "depth lies outside the branch support",
@@ -298,8 +276,7 @@ class StokesSamplingTest(unittest.TestCase):
     def test_success_record_is_strict_and_contains_every_attempt(self) -> None:
         values = iter((27.0, 25.0))
         with patch(
-            "solver.gen_data.stokes_sampling."
-            "_evaluate_finite_depth_ursell",
+            "solver.gen_data.stokes_sampling._evaluate_finite_depth_ursell",
             side_effect=lambda **_: next(values),
         ):
             sample = sample_stokes_case(
@@ -311,10 +288,7 @@ class StokesSamplingTest(unittest.TestCase):
         self.assertEqual(record["support_resampling_count"], 1)
         self.assertEqual(len(record["amplitude_attempts"]), 2)
         self.assertEqual(
-            [
-                attempt["ursell_upper_bound"]
-                for attempt in record["amplitude_attempts"]
-            ],
+            [attempt["ursell_upper_bound"] for attempt in record["amplitude_attempts"]],
             [27.0, 25.0],
         )
         self.assertEqual(
@@ -327,11 +301,10 @@ class StokesSamplingTest(unittest.TestCase):
         values = iter((np.inf, 28.0, 27.0))
         with (
             patch(
-                "solver.gen_data.stokes_sampling."
-                "_evaluate_finite_depth_ursell",
+                "solver.gen_data.stokes_sampling._evaluate_finite_depth_ursell",
                 side_effect=lambda **_: next(values),
             ),
-            self.assertRaises(StokesSamplingError) as caught,
+            self.assertRaises(UrsellRedrawLimitReached) as caught,
         ):
             sample_stokes_case(
                 assignment(1, attempt_index=501),
@@ -348,10 +321,7 @@ class StokesSamplingTest(unittest.TestCase):
             [None, 28.0, 27.0],
         )
         self.assertEqual(
-            [
-                attempt["ursell_upper_bound_was_finite"]
-                for attempt in attempts
-            ],
+            [attempt["ursell_upper_bound_was_finite"] for attempt in attempts],
             [False, True, True],
         )
         self.assertTrue(
@@ -366,9 +336,7 @@ class StokesSamplingTest(unittest.TestCase):
 
     def test_invalid_inputs_and_corrupt_histories_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown Stokes"):
-            sample_stokes_case(
-                replace(assignment(0), cell_id="unknown")
-            )
+            sample_stokes_case(replace(assignment(0), cell_id="unknown"))
         with self.assertRaisesRegex(ValueError, "positive and finite"):
             sample_stokes_case(assignment(0), domain_length=np.nan)
         with self.assertRaisesRegex(ValueError, "nonnegative"):
@@ -380,14 +348,7 @@ class StokesSamplingTest(unittest.TestCase):
         sample = sample_stokes_case(assignment(2, attempt_index=600))
         corrupt = replace(
             sample,
-            amplitude_attempts=(
-                StokesAmplitudeAttempt(
-                    attempt_index=0,
-                    amplitude=np.nan,
-                    ursell_upper_bound=None,
-                    accepted=True,
-                ),
-            ),
+            amplitude_attempts=((np.nan, None),),
         )
         self.assertIn(
             "amplitude attempt lies outside its assigned cell",
@@ -398,14 +359,10 @@ class StokesSamplingTest(unittest.TestCase):
         sample = sample_stokes_case(assignment(2, attempt_index=601))
         forged = replace(
             sample,
-            cell=StokesSampleCell(
-                cell_id=sample.cell.cell_id,
-                branch="finite",
-                steepness_cell_index=0,
-            ),
+            branch="finite",
         )
         self.assertIn(
-            "sample cell is not a declared canonical cell",
+            "sample parameters do not match the assigned cell",
             stokes_support_violations(forged),
         )
 

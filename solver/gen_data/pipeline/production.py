@@ -97,9 +97,7 @@ class CaseKey:
         if not 0 <= self.stream_id < 1 << _STREAM_ID_BITS:
             raise ValueError(f"stream_id must fit in {_STREAM_ID_BITS} bits")
         if not 0 <= self.attempt_index < 1 << _ATTEMPT_INDEX_BITS:
-            raise ValueError(
-                f"attempt_index must fit in {_ATTEMPT_INDEX_BITS} bits"
-            )
+            raise ValueError(f"attempt_index must fit in {_ATTEMPT_INDEX_BITS} bits")
 
     @property
     def root_seed(self) -> int:
@@ -145,17 +143,17 @@ def random_generator_for_case(case_key: CaseKey) -> np.random.Generator:
 
 
 @dataclass(frozen=True)
-class CellQuota:
-    """Required accepted-case count for one declared parameter cell."""
+class ValidCaseTarget:
+    """Number of valid cases requested from one sampling cell."""
 
     cell_id: str
-    target_accepted: int
+    case_count: int
 
     def __post_init__(self) -> None:
         if not self.cell_id:
             raise ValueError("cell_id must not be empty")
-        if self.target_accepted < 0:
-            raise ValueError("target_accepted must be nonnegative")
+        if self.case_count < 0:
+            raise ValueError("case_count must be nonnegative")
 
 
 @dataclass(frozen=True)
@@ -169,21 +167,37 @@ class AttemptAssignment:
         if not self.cell_id:
             raise ValueError("cell_id must not be empty")
 
+    def to_json_record(self) -> dict[str, object]:
+        """Return the persisted identity of this sampling attempt."""
 
-def balanced_cell_quotas(
+        key = self.case_key
+        return {
+            "case_id": key.case_id,
+            "family_id": key.family_id,
+            "revision_id": key.revision_id,
+            "split_id": key.split_id.value,
+            "root_seed": key.root_seed,
+            "stream_id": key.stream_id,
+            "attempt_index": key.attempt_index,
+            "seed_words": list(key.seed_words),
+            "cell_id": self.cell_id,
+        }
+
+
+def balanced_valid_case_targets(
     cell_ids: Sequence[str],
     *,
-    accepted_case_count: int,
-) -> tuple[CellQuota, ...]:
-    """Divide an accepted-case total across cells by quotient and remainder.
+    case_count: int,
+) -> tuple[ValidCaseTarget, ...]:
+    """Divide a requested valid-case count evenly across sampling cells.
 
-    If ``accepted_case_count = q * len(cell_ids) + r``, the first ``r`` cells
+    If ``case_count = q * len(cell_ids) + r``, the first ``r`` cells
     receive ``q + 1`` cases and every other cell receives ``q``.  The caller's
     cell order is therefore part of the reproducible dataset specification.
     """
 
-    if accepted_case_count < 0:
-        raise ValueError("accepted_case_count must be nonnegative")
+    if case_count < 0:
+        raise ValueError("case_count must be nonnegative")
     if not cell_ids:
         raise ValueError("cell_ids must not be empty")
     if any(not cell_id for cell_id in cell_ids):
@@ -191,18 +205,18 @@ def balanced_cell_quotas(
     if len(set(cell_ids)) != len(cell_ids):
         raise ValueError("cell_ids must be unique")
 
-    quotient, remainder = divmod(accepted_case_count, len(cell_ids))
+    quotient, remainder = divmod(case_count, len(cell_ids))
     return tuple(
-        CellQuota(
+        ValidCaseTarget(
             cell_id=cell_id,
-            target_accepted=quotient + int(index < remainder),
+            case_count=quotient + int(index < remainder),
         )
         for index, cell_id in enumerate(cell_ids)
     )
 
 
 def schedule_attempt_batch(
-    quotas: Sequence[CellQuota],
+    targets: Sequence[ValidCaseTarget],
     accepted_by_cell: Mapping[str, int],
     *,
     family_id: int,
@@ -212,17 +226,17 @@ def schedule_attempt_batch(
     first_attempt_index: int,
     batch_size: int,
 ) -> tuple[AttemptAssignment, ...]:
-    """Schedule at most ``batch_size`` whole cases against remaining quotas.
+    """Schedule cases against the valid-case targets that remain unmet.
 
     The function is called only after the preceding batch has resolved.  A
     rejected attempt does not increase ``accepted_by_cell``; consequently its
     original cell retains that place in the next batch.  Planned assignments
-    never exceed a cell's remaining accepted quota, so the last batch can be
+    never exceed a cell's remaining target, so the last batch can be
     shorter than ``batch_size`` without truncating a case.
     """
 
-    if not quotas:
-        raise ValueError("quotas must not be empty")
+    if not targets:
+        raise ValueError("targets must not be empty")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if stream_id < 0:
@@ -230,9 +244,9 @@ def schedule_attempt_batch(
     if first_attempt_index < 0:
         raise ValueError("first_attempt_index must be nonnegative")
 
-    cell_ids = tuple(quota.cell_id for quota in quotas)
+    cell_ids = tuple(target.cell_id for target in targets)
     if len(set(cell_ids)) != len(cell_ids):
-        raise ValueError("quota cell_ids must be unique")
+        raise ValueError("target cell_ids must be unique")
 
     unknown_cells = set(accepted_by_cell).difference(cell_ids)
     if unknown_cells:
@@ -240,27 +254,29 @@ def schedule_attempt_batch(
         raise ValueError(f"accepted_by_cell contains unknown cells: {names}")
 
     remaining_by_cell: dict[str, int] = {}
-    for quota in quotas:
-        accepted = accepted_by_cell.get(quota.cell_id, 0)
+    for target in targets:
+        accepted = accepted_by_cell.get(target.cell_id, 0)
         if accepted < 0:
             raise ValueError("accepted case counts must be nonnegative")
-        if accepted > quota.target_accepted:
-            raise ValueError(f"accepted count exceeds quota for cell {quota.cell_id!r}")
-        remaining_by_cell[quota.cell_id] = quota.target_accepted - accepted
+        if accepted > target.case_count:
+            raise ValueError(
+                f"accepted count exceeds target for cell {target.cell_id!r}"
+            )
+        remaining_by_cell[target.cell_id] = target.case_count - accepted
 
     accepted_to_skip = {
-        quota.cell_id: quota.target_accepted - remaining_by_cell[quota.cell_id]
-        for quota in quotas
+        target.cell_id: target.case_count - remaining_by_cell[target.cell_id]
+        for target in targets
     }
     scheduled_cells: list[str] = []
-    for quota_level in range(max(quota.target_accepted for quota in quotas)):
-        for quota in quotas:
-            if quota.target_accepted <= quota_level:
+    for target_level in range(max(target.case_count for target in targets)):
+        for target in targets:
+            if target.case_count <= target_level:
                 continue
-            if accepted_to_skip[quota.cell_id] > 0:
-                accepted_to_skip[quota.cell_id] -= 1
+            if accepted_to_skip[target.cell_id] > 0:
+                accepted_to_skip[target.cell_id] -= 1
                 continue
-            scheduled_cells.append(quota.cell_id)
+            scheduled_cells.append(target.cell_id)
             if len(scheduled_cells) == batch_size:
                 break
         if len(scheduled_cells) == batch_size:

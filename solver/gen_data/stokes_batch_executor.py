@@ -1,12 +1,9 @@
-"""Thin static-Stokes executor for the durable accepted-quota driver."""
+"""Generate and validate one batch of static Stokes cases."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import json
-import math
-from types import MappingProxyType
 from typing import Protocol, TypeAlias
 
 from solver.gen_data.pipeline.archive import BatchPaths, ensure_proposal
@@ -19,7 +16,7 @@ from solver.gen_data.pipeline.quality import (
     QualityReason,
     QualityScope,
 )
-from solver.gen_data.pipeline.quota_driver import AcceptedQuotaRunSpec
+from solver.gen_data.pipeline.valid_case_generation import DatasetGenerationSpec
 from solver.gen_data.pipeline.writer import (
     CaseOutcome,
     batch_paths_for_assignments,
@@ -30,7 +27,7 @@ from solver.gen_data.stokes_sampling import (
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
     STOKES_SAMPLE_CELLS,
     StokesSample,
-    StokesSamplingError,
+    UrsellRedrawLimitReached,
     sample_stokes_case,
 )
 from solver.gen_data.stokes_static_pipeline import (
@@ -45,8 +42,7 @@ from solver.gen_data.pipeline.reference import evaluate_discrete_dno_target
 
 
 JsonRecord: TypeAlias = Mapping[str, object]
-JsonScalar: TypeAlias = str | int | float | bool | None
-_STOKES_CELL_IDS = frozenset(cell.cell_id for cell in STOKES_SAMPLE_CELLS)
+_STOKES_CELL_IDS = frozenset(STOKES_SAMPLE_CELLS)
 
 
 class StokesSampler(Protocol):
@@ -62,112 +58,35 @@ class StokesSampler(Protocol):
     ) -> StokesSample: ...
 
 
-@dataclass(frozen=True)
-class _ResolvedStokesAttempt:
-    assignment: AttemptAssignment
-    specification: JsonRecord
-    sample: StokesSample | None
-    preconstruction_outcome: CaseOutcome | None
-
-    def __post_init__(self) -> None:
-        if (self.sample is None) == (self.preconstruction_outcome is None):
-            raise ValueError(
-                "a resolved attempt must contain exactly one sample or rejection"
-            )
-
-
-def _strict_metadata_copy(
-    metadata: Mapping[str, object],
-) -> Mapping[str, object]:
-    encoded = json.dumps(
-        dict(metadata),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    value = json.loads(encoded)
-    if not isinstance(value, dict):
-        raise TypeError("metadata must encode a JSON object")
-    return MappingProxyType(value)
-
-
-def _require_failure_identity(
-    assignment: AttemptAssignment,
-    record: Mapping[str, object],
-) -> None:
-    key = assignment.case_key
-    expected: dict[str, object] = {
-        "status": "failed_ursell_redraw_limit",
-        "case_id": key.case_id,
-        "family_id": key.family_id,
-        "revision_id": key.revision_id,
-        "split_id": key.split_id.value,
-        "root_seed": key.root_seed,
-        "stream_id": key.stream_id,
-        "attempt_index": key.attempt_index,
-        "cell_id": assignment.cell_id,
-    }
-    for name, expected_value in expected.items():
-        if record.get(name) != expected_value:
-            raise RuntimeError(f"Stokes exhaustion record has incorrect {name!r}")
-
-
-def _exhaustion_outcome(
-    record: Mapping[str, object],
-    *,
+def _ursell_redraw_failure_outcome(
     contract: StaticStokesContract,
 ) -> CaseOutcome:
-    attempts = record.get("amplitude_attempts")
-    if not isinstance(attempts, list) or not attempts:
-        raise RuntimeError("Stokes exhaustion record must contain amplitude attempts")
-    support_resampling_count = record.get("support_resampling_count")
-    if (
-        isinstance(support_resampling_count, bool)
-        or not isinstance(support_resampling_count, int)
-        or support_resampling_count != len(attempts) - 1
-    ):
-        raise RuntimeError("Stokes exhaustion record has inconsistent resampling count")
-    last_attempt = attempts[-1]
-    if not isinstance(last_attempt, dict):
-        raise RuntimeError("Stokes amplitude attempt must be a JSON object")
-    ursell = last_attempt.get("ursell_upper_bound")
-    if ursell is not None and (
-        isinstance(ursell, bool)
-        or not isinstance(ursell, (int, float))
-        or not math.isfinite(float(ursell))
-    ):
-        raise RuntimeError("persisted Ursell diagnostic must be finite or null")
-
     reason = QualityReason.OUTSIDE_SUPPORT
-    decision = QualityDecision(
-        scope=QualityScope.SAMPLE,
-        required=STATIC_STOKES_REQUIRED_CHECKS,
-        evaluated=reason,
-        failed=reason,
-    )
-    metrics: dict[str, JsonScalar] = {
-        "contract_role": contract.role,
-        "sampling_status": "failed_ursell_redraw_limit",
-        "support_violation_count": 1,
-        "support_violations": (
-            "finite-depth Stokes attempt exhausted same-cell amplitude redraws"
+    return CaseOutcome(
+        decision=QualityDecision(
+            scope=QualityScope.SAMPLE,
+            required=STATIC_STOKES_REQUIRED_CHECKS,
+            evaluated=reason,
+            failed=reason,
         ),
-        "support_resampling_count": support_resampling_count,
-        "amplitude_attempt_count": len(attempts),
-        "last_ursell_upper_bound": (float(ursell) if ursell is not None else None),
-        "state_finite": None,
-        "minimum_water_column": None,
-        "target_finite": None,
-        "numerical_error": "",
-    }
-    return CaseOutcome(decision=decision, rows=None, metrics=metrics)
+        rows=None,
+        metrics={
+            "contract_role": contract.role,
+            "support_violation_count": 1,
+            "support_violations": "finite-depth Ursell redraw limit reached",
+            "state_finite": None,
+            "minimum_water_column": None,
+            "target_finite": None,
+            "numerical_error": "",
+        },
+    )
 
 
 @dataclass(frozen=True)
-class StaticStokesQuotaExecutor:
+class StaticStokesBatchExecutor:
     """Sample, propose, evaluate, and commit one static Stokes attempt batch."""
 
-    run_spec: AcceptedQuotaRunSpec
+    run_spec: DatasetGenerationSpec
     contract: StaticStokesContract
     maximum_ursell_redraws: int = DEFAULT_MAXIMUM_URSELL_REDRAWS
     metadata: Mapping[str, object] | None = None
@@ -177,12 +96,12 @@ class StaticStokesQuotaExecutor:
 
     def __post_init__(self) -> None:
         if self.run_spec.family_name != "stokes":
-            raise ValueError("static Stokes quota runs must use family_name='stokes'")
+            raise ValueError("static Stokes generation must use family_name='stokes'")
         if self.run_spec.family_id is not PhysicalFamilyId.STOKES:
-            raise ValueError("static Stokes quota runs require the Stokes family ID")
+            raise ValueError("static Stokes generation requires the Stokes family ID")
         unknown_cells = set(self.run_spec.cell_codes).difference(_STOKES_CELL_IDS)
         if unknown_cells:
-            raise ValueError(f"unknown Stokes quota cells: {sorted(unknown_cells)}")
+            raise ValueError(f"unknown Stokes sampling cells: {sorted(unknown_cells)}")
         if (
             isinstance(self.maximum_ursell_redraws, bool)
             or not isinstance(self.maximum_ursell_redraws, int)
@@ -219,16 +138,11 @@ class StaticStokesQuotaExecutor:
                 "paper-dataset execution requires the production redraw limit, "
                 "sampler, state constructor, and target evaluator"
             )
-        object.__setattr__(
-            self,
-            "metadata",
-            _strict_metadata_copy(self.metadata or {}),
-        )
 
     def _resolve(
         self,
         assignment: AttemptAssignment,
-    ) -> _ResolvedStokesAttempt:
+    ) -> tuple[JsonRecord, StokesSample | CaseOutcome]:
         try:
             sample = self.sampler(
                 assignment,
@@ -236,35 +150,21 @@ class StaticStokesQuotaExecutor:
                 gravity=self.contract.gravity,
                 maximum_ursell_redraws=self.maximum_ursell_redraws,
             )
-        except StokesSamplingError as error:
-            record = dict(error.failure_record)
-            _require_failure_identity(assignment, record)
-            return _ResolvedStokesAttempt(
-                assignment=assignment,
-                specification=record,
-                sample=None,
-                preconstruction_outcome=_exhaustion_outcome(
-                    record,
-                    contract=self.contract,
-                ),
+        except UrsellRedrawLimitReached as error:
+            return (
+                dict(error.failure_record),
+                _ursell_redraw_failure_outcome(self.contract),
             )
 
         if sample.assignment != assignment:
             raise RuntimeError("Stokes sampler returned a different assignment")
-        return _ResolvedStokesAttempt(
-            assignment=assignment,
-            specification=sample.to_json_record(),
-            sample=sample,
-            preconstruction_outcome=None,
-        )
+        return sample.to_json_record(), sample
 
-    def _evaluate(self, attempt: _ResolvedStokesAttempt) -> CaseOutcome:
-        if attempt.preconstruction_outcome is not None:
-            return attempt.preconstruction_outcome
-        if attempt.sample is None:
-            raise RuntimeError("a successful Stokes attempt has no sample")
+    def _evaluate(self, result: StokesSample | CaseOutcome) -> CaseOutcome:
+        if isinstance(result, CaseOutcome):
+            return result
         return evaluate_static_stokes_sample(
-            attempt.sample,
+            result,
             contract=self.contract,
             state_constructor=self.state_constructor,
             target_evaluator=self.target_evaluator,
@@ -285,7 +185,7 @@ class StaticStokesQuotaExecutor:
         additional_metadata = dict(self.metadata or {})
         proposal_arrays = build_proposal_arrays(
             assignments,
-            tuple(attempt.specification for attempt in resolved),
+            tuple(specification for specification, _ in resolved),
             cell_codes=self.run_spec.cell_codes,
             batch_id=batch_id,
             config_fingerprint=self.run_spec.config_fingerprint,
@@ -310,7 +210,7 @@ class StaticStokesQuotaExecutor:
 
         # No state construction or target evaluation occurs before this write.
         ensure_proposal(paths, proposal_arrays)
-        complete_outcomes = tuple(map(self._evaluate, resolved))
+        complete_outcomes = tuple(self._evaluate(result) for _, result in resolved)
         commit_case_outcomes(
             paths,
             proposal_arrays,
@@ -327,7 +227,7 @@ class StaticStokesQuotaExecutor:
                     outcome.decision.accepted for outcome in complete_outcomes
                 ),
                 "sampling_exhaustions": sum(
-                    attempt.sample is None for attempt in resolved
+                    isinstance(result, CaseOutcome) for _, result in resolved
                 ),
                 "additional_metadata": additional_metadata,
             },

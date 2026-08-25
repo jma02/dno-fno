@@ -1,8 +1,8 @@
-"""Preflight, run, or resume one exact-contract paper-dataset family quota.
+"""Preflight, generate, or resume one paper-dataset family.
 
 The default mode is a read-only preflight.  Numerical generation begins only
 when ``--execute`` is supplied.  A run is identified by its output root,
-family, split, stream, accepted-case quota, batch size, exact paper contract,
+family, split, stream, valid-case targets, batch size, exact paper contract,
 execution platform, and source hashes.  Changing any of those values makes an
 existing run fail closed instead of silently mixing artifacts.
 """
@@ -50,6 +50,7 @@ import jaxlib  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
+    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
     BENJAMIN_FEIR_SAMPLE_CELLS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
@@ -60,7 +61,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     PERTURBATION_RATIO_MIN,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.archive import (  # noqa: E402
     file_sha256,
@@ -72,39 +73,39 @@ from solver.gen_data.pipeline.manifest import (  # noqa: E402
     build_dataset_view,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     paper_dataset_revision_id,
 )
 from solver.gen_data.pipeline.quality import (  # noqa: E402
     reasons_from_bits,
 )
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
-    DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE,
-    AcceptedQuotaRunSpec,
-    QuotaRunState,
-    run_accepted_quotas,
-    scan_quota_run,
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
+    DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
+    DatasetGenerationSpec,
+    DatasetGenerationState,
+    generate_valid_cases,
+    scan_dataset_generation,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_SAMPLE_CELLS,
+    STOKES_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.stokes_quota_executor import (  # noqa: E402
-    StaticStokesQuotaExecutor,
+from solver.gen_data.stokes_batch_executor import (  # noqa: E402
+    StaticStokesBatchExecutor,
 )
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     PAPER_STATIC_STOKES_CONTRACT,
     StaticStokesContract,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELLS,
+    TANAKA_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
-    TrajectoryQuotaExecutor,
+    TrajectoryBatchExecutor,
 )
 
 
@@ -125,14 +126,14 @@ COMMON_SOURCE_PATHS = (
     ROOT / "solver/gen_data/pipeline/manifest.py",
     ROOT / "solver/gen_data/pipeline/production.py",
     ROOT / "solver/gen_data/pipeline/quality.py",
-    ROOT / "solver/gen_data/pipeline/quota_driver.py",
+    ROOT / "solver/gen_data/pipeline/valid_case_generation.py",
     ROOT / "solver/gen_data/pipeline/reference.py",
     ROOT / "solver/gen_data/pipeline/writer.py",
     ROOT / "solver/solvers/dno_series_jax.py",
 )
 TRAJECTORY_SOURCE_PATHS = (
     ROOT / "solver/gen_data/trajectory_family_adapters.py",
-    ROOT / "solver/gen_data/trajectory_quota_executor.py",
+    ROOT / "solver/gen_data/trajectory_batch_executor.py",
     ROOT / "solver/gen_data/pipeline/acceptance.py",
     ROOT / "solver/gen_data/pipeline/refinement.py",
     ROOT / "solver/gen_data/pipeline/time_selection.py",
@@ -143,12 +144,11 @@ FAMILY_SOURCE_PATHS: dict[PaperFamily, tuple[Path, ...]] = {
     "stokes": (
         ROOT / "solver/reference_solutions/stokes_wave.py",
         ROOT / "solver/gen_data/stokes_sampling.py",
-        ROOT / "solver/gen_data/stokes_quota_executor.py",
+        ROOT / "solver/gen_data/stokes_batch_executor.py",
         ROOT / "solver/gen_data/stokes_static_pipeline.py",
     ),
     "tanaka": (
         *TRAJECTORY_SOURCE_PATHS,
-        ROOT / "solver/gen_data/multi_crest.py",
         ROOT / "solver/gen_data/tanaka_initial_conditions.py",
         ROOT / "solver/gen_data/tanaka_sampling.py",
         ROOT / "solver/tanaka_ICs/modified_tanaka.py",
@@ -176,20 +176,16 @@ FAMILY_IDS: dict[PaperFamily, PhysicalFamilyId] = {
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
 FAMILY_CELL_IDS: dict[PaperFamily, tuple[str, ...]] = {
-    "stokes": tuple(cell.cell_id for cell in STOKES_SAMPLE_CELLS),
-    "tanaka": tuple(cell.cell_id for cell in TANAKA_SAMPLE_CELLS),
-    "benjamin_feir": tuple(
-        cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS
-    ),
-    "jonswap_tma": tuple(
-        cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS
-    ),
+    "stokes": STOKES_SAMPLE_CELL_IDS,
+    "tanaka": TANAKA_SAMPLE_CELL_IDS,
+    "benjamin_feir": BENJAMIN_FEIR_SAMPLE_CELL_IDS,
+    "jonswap_tma": JONSWAP_TMA_SAMPLE_CELL_IDS,
 }
 
 
 @dataclass(frozen=True)
 class GenerationRequest:
-    """User-visible identity and allocation choices for one quota run."""
+    """User-visible identity and allocation choices for one generation run."""
 
     output_root: Path
     family: PaperFamily
@@ -200,9 +196,7 @@ class GenerationRequest:
     platform: Platform = "cpu"
     stream_id: int = 0
     first_attempt_index: int = 0
-    maximum_attempts_per_accepted_case: int = (
-        DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE
-    )
+    maximum_attempts_per_accepted_case: int = DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE
 
     def __post_init__(self) -> None:
         if self.family not in FAMILY_IDS:
@@ -241,7 +235,7 @@ class GenerationRunResult:
 
     summary_path: Path
     view: DatasetViewPaths
-    state: QuotaRunState
+    state: DatasetGenerationState
     summary: dict[str, object]
 
 
@@ -277,13 +271,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--accepted-cases",
         type=_positive_integer,
         required=True,
-        help="Total accepted-case quota, balanced over the ordered family cells.",
+        help="Number of valid cases to generate, balanced across sampling cells.",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
         required=True,
-        help="Root containing durable proposals, shards, results, and views.",
+        help="Root containing saved proposals, shards, results, and views.",
     )
     parser.add_argument(
         "--batch-size",
@@ -321,11 +315,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--maximum-attempts-per-accepted-case",
         type=_positive_integer,
-        default=DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE,
+        default=DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
         help=(
             "Per-cell attempted-case ceiling multiplier; a cell with target "
-            "Q stops the run after this value times Q durable attempts "
-            f"(default: {DEFAULT_MAXIMUM_ATTEMPTS_PER_ACCEPTED_CASE})."
+            "Q stops the run after this value times Q recorded attempts "
+            f"(default: {DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE})."
         ),
     )
     mode = parser.add_mutually_exclusive_group()
@@ -353,9 +347,7 @@ def request_from_args(args: argparse.Namespace) -> GenerationRequest:
         platform=args.platform,
         stream_id=args.stream_id,
         first_attempt_index=args.first_attempt_index,
-        maximum_attempts_per_accepted_case=(
-            args.maximum_attempts_per_accepted_case
-        ),
+        maximum_attempts_per_accepted_case=(args.maximum_attempts_per_accepted_case),
     )
 
 
@@ -370,13 +362,9 @@ def source_hashes(family: PaperFamily) -> dict[str, str]:
     missing = tuple(path for path in paths if not path.is_file())
     if missing:
         raise FileNotFoundError(
-            "generation source path does not exist: "
-            + ", ".join(map(str, missing))
+            "generation source path does not exist: " + ", ".join(map(str, missing))
         )
-    return {
-        _relative(path, ROOT): file_sha256(path)
-        for path in paths
-    }
+    return {_relative(path, ROOT): file_sha256(path) for path in paths}
 
 
 def dependency_environment() -> dict[str, object]:
@@ -399,8 +387,7 @@ def dependency_environment() -> dict[str, object]:
             "numpy": np.__version__,
         },
         "files_sha256": {
-            _relative(path, ROOT): file_sha256(path)
-            for path in DEPENDENCY_FILES
+            _relative(path, ROOT): file_sha256(path) for path in DEPENDENCY_FILES
         },
     }
 
@@ -422,11 +409,14 @@ def _benjamin_feir_sampling_support_record() -> dict[str, object]:
         "schema": "paper_benjamin_feir_sampling_support_v1",
         "mode_pair_cells": [
             {
-                "cell_id": cell.cell_id,
-                "carrier_mode": cell.carrier_mode,
-                "sideband_offset": cell.sideband_offset,
+                "cell_id": cell_id,
+                "carrier_mode": carrier_mode,
+                "sideband_offset": sideband_offset,
             }
-            for cell in BENJAMIN_FEIR_SAMPLE_CELLS
+            for cell_id, (
+                carrier_mode,
+                sideband_offset,
+            ) in BENJAMIN_FEIR_SAMPLE_CELLS.items()
         ],
         "conditional_carrier_steepness": {
             "law": "uniform",
@@ -454,53 +444,51 @@ def _benjamin_feir_sampling_support_record() -> dict[str, object]:
     }
 
 
-def incremental_cell_quotas(
+def incremental_valid_case_targets(
     cell_ids: Sequence[str],
     *,
     accepted_cases_before: int,
-    accepted_case_count: int,
-) -> tuple[CellQuota, ...]:
-    """Return the balanced cumulative-quota increment for one chunk."""
+    case_count: int,
+) -> tuple[ValidCaseTarget, ...]:
+    """Return this chunk's balanced valid-case targets."""
 
-    before = balanced_cell_quotas(
+    before = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=accepted_cases_before,
+        case_count=accepted_cases_before,
     )
-    after = balanced_cell_quotas(
+    after = balanced_valid_case_targets(
         cell_ids,
-        accepted_case_count=accepted_cases_before + accepted_case_count,
+        case_count=accepted_cases_before + case_count,
     )
-    quotas = tuple(
-        CellQuota(
-            cell_id=after_quota.cell_id,
-            target_accepted=(
-                after_quota.target_accepted - before_quota.target_accepted
-            ),
+    targets = tuple(
+        ValidCaseTarget(
+            cell_id=after_target.cell_id,
+            case_count=(after_target.case_count - before_target.case_count),
         )
-        for before_quota, after_quota in zip(before, after)
+        for before_target, after_target in zip(before, after)
     )
-    if any(quota.target_accepted < 0 for quota in quotas):
-        raise RuntimeError("balanced cumulative quotas must be monotone")
-    if sum(quota.target_accepted for quota in quotas) != accepted_case_count:
-        raise RuntimeError("incremental cell quotas do not sum to the chunk size")
-    return quotas
+    if any(target.case_count < 0 for target in targets):
+        raise RuntimeError("balanced cumulative targets must be monotone")
+    if sum(target.case_count for target in targets) != case_count:
+        raise RuntimeError("valid-case targets do not sum to the chunk size")
+    return targets
 
 
 def build_run_spec(
     request: GenerationRequest,
     *,
     execution: PaperExecution | None = None,
-) -> AcceptedQuotaRunSpec:
+) -> DatasetGenerationSpec:
     """Build the immutable exact-contract allocation for ``request``."""
 
     selected_execution = execution or _paper_execution(request.family)
     if selected_execution != _paper_execution(request.family):
         raise ValueError("the paper-dataset launcher requires the exact contract")
     cells = FAMILY_CELL_IDS[request.family]
-    quotas = incremental_cell_quotas(
+    case_targets = incremental_valid_case_targets(
         cells,
         accepted_cases_before=request.accepted_cases_before,
-        accepted_case_count=request.accepted_cases,
+        case_count=request.accepted_cases,
     )
     common_configuration: dict[str, object] = {
         "schema": "paper_dataset_quota_configuration_v1",
@@ -533,22 +521,18 @@ def build_run_spec(
             family_configuration["sampling_support"] = (
                 _benjamin_feir_sampling_support_record()
             )
-    return AcceptedQuotaRunSpec(
+    return DatasetGenerationSpec(
         root=request.output_root,
         family_name=request.family,
         family_id=FAMILY_IDS[request.family],
         revision_id=paper_dataset_revision_id(FAMILY_IDS[request.family]),
         split_id=request.split,
         stream_id=request.stream_id,
-        quotas=quotas,
-        cell_codes={
-            cell_id: cell_code for cell_code, cell_id in enumerate(cells)
-        },
+        case_targets=case_targets,
+        cell_codes={cell_id: cell_code for cell_code, cell_id in enumerate(cells)},
         batch_size=request.batch_size,
         first_attempt_index=request.first_attempt_index,
-        maximum_attempts_per_accepted_case=(
-            request.maximum_attempts_per_accepted_case
-        ),
+        maximum_attempts_per_accepted_case=(request.maximum_attempts_per_accepted_case),
         configuration={
             **common_configuration,
             **family_configuration,
@@ -566,7 +550,7 @@ def _stored_rows_per_case(execution: PaperExecution) -> int:
     }[execution.family]
 
 
-def _state_record(state: QuotaRunState) -> dict[str, object]:
+def _state_record(state: DatasetGenerationState) -> dict[str, object]:
     return {
         "complete": state.complete,
         "accepted_by_cell": dict(state.accepted_by_cell),
@@ -637,10 +621,12 @@ def _require_runtime(request: GenerationRequest) -> dict[str, object]:
     return runtime
 
 
-def preflight(request: GenerationRequest) -> tuple[
-    AcceptedQuotaRunSpec,
+def preflight(
+    request: GenerationRequest,
+) -> tuple[
+    DatasetGenerationSpec,
     PaperExecution,
-    QuotaRunState,
+    DatasetGenerationState,
     dict[str, object],
 ]:
     """Perform a read-only compatibility scan and return its complete plan."""
@@ -650,48 +636,46 @@ def preflight(request: GenerationRequest) -> tuple[
     if request.family == "jonswap_tma":
         assert isinstance(execution, TrajectoryExecutionConfig)
         try:
-            TrajectoryQuotaExecutor(
+            TrajectoryBatchExecutor(
                 run_spec=spec,
                 execution=execution,
             )
         except ValueError as error:
             raise RuntimeError(
                 "paper-dataset JONSWAP/TMA must use "
-                "scripts/run_paper_dataset_jonswap_bucketed.py so the "
+                "scripts/generate_paper_dataset_jonswap.py so the "
                 "fingerprinted nonlinear adjustment cannot be bypassed"
             ) from error
-    state = scan_quota_run(spec)
-    cumulative_before = balanced_cell_quotas(
+    state = scan_dataset_generation(spec)
+    cumulative_before = balanced_valid_case_targets(
         FAMILY_CELL_IDS[request.family],
-        accepted_case_count=request.accepted_cases_before,
+        case_count=request.accepted_cases_before,
     )
-    cumulative_after = balanced_cell_quotas(
+    cumulative_after = balanced_valid_case_targets(
         FAMILY_CELL_IDS[request.family],
-        accepted_case_count=(
-            request.accepted_cases_before + request.accepted_cases
-        ),
+        case_count=(request.accepted_cases_before + request.accepted_cases),
     )
     attempt_ceilings = spec.attempt_ceiling_by_cell
-    quotas = [
+    case_targets = [
         {
-            "cell_id": quota.cell_id,
-            "accepted_before": before.target_accepted,
-            "chunk_target_accepted": quota.target_accepted,
-            "accepted_after": after.target_accepted,
-            "attempt_ceiling": attempt_ceilings[quota.cell_id],
-            "durable_attempted": state.attempted_by_cell[quota.cell_id],
+            "cell_id": target.cell_id,
+            "accepted_before": before.case_count,
+            "chunk_target_accepted": target.case_count,
+            "accepted_after": after.case_count,
+            "attempt_ceiling": attempt_ceilings[target.cell_id],
+            "durable_attempted": state.attempted_by_cell[target.cell_id],
             "remaining_attempt_capacity": (
-                attempt_ceilings[quota.cell_id]
-                - state.attempted_by_cell[quota.cell_id]
+                attempt_ceilings[target.cell_id]
+                - state.attempted_by_cell[target.cell_id]
             ),
         }
-        for before, quota, after in zip(
+        for before, target, after in zip(
             cumulative_before,
-            spec.quotas,
+            spec.case_targets,
             cumulative_after,
         )
     ]
-    nonzero_cells = sum(quota.target_accepted > 0 for quota in spec.quotas)
+    nonzero_cells = sum(target.case_count > 0 for target in spec.case_targets)
     stored_rows_per_case = _stored_rows_per_case(execution)
     plan: dict[str, object] = {
         "schema": "paper_dataset_quota_preflight_v1",
@@ -714,25 +698,20 @@ def preflight(request: GenerationRequest) -> tuple[
             "accepted_cases_after": (
                 request.accepted_cases_before + request.accepted_cases
             ),
-            "cell_count": len(spec.quotas),
+            "cell_count": len(spec.case_targets),
             "nonzero_quota_cell_count": nonzero_cells,
-            "quota_minimum": min(
-                quota.target_accepted for quota in spec.quotas
-            ),
-            "quota_maximum": max(
-                quota.target_accepted for quota in spec.quotas
-            ),
+            "quota_minimum": min(target.case_count for target in spec.case_targets),
+            "quota_maximum": max(target.case_count for target in spec.case_targets),
             "maximum_attempts_per_accepted_case": (
                 spec.maximum_attempts_per_accepted_case
             ),
-            "quotas": quotas,
+            "quotas": case_targets,
             "chunk_identity": {
                 "stream_id": request.stream_id,
                 "first_attempt_index": request.first_attempt_index,
                 "output_root": str(request.output_root),
                 "rule": (
-                    "use a distinct stream_id and output_root for every "
-                    "additive chunk"
+                    "use a distinct stream_id and output_root for every additive chunk"
                 ),
             },
         },
@@ -787,12 +766,12 @@ def _artifact_record(path: Path, *, root: Path) -> dict[str, object]:
 
 
 def _summarize_committed_cases(
-    state: QuotaRunState,
-    spec: AcceptedQuotaRunSpec,
+    state: DatasetGenerationState,
+    spec: DatasetGenerationSpec,
 ) -> dict[str, object]:
     code_to_cell = {code: cell for cell, code in spec.cell_codes.items()}
-    attempted = Counter({quota.cell_id: 0 for quota in spec.quotas})
-    accepted = Counter({quota.cell_id: 0 for quota in spec.quotas})
+    attempted = Counter({target.cell_id: 0 for target in spec.case_targets})
+    accepted = Counter({target.cell_id: 0 for target in spec.case_targets})
     rejection_reasons: Counter[str] = Counter()
 
     for paths in state.committed:
@@ -817,17 +796,17 @@ def _summarize_committed_cases(
             rejection_reasons["+".join(names) if names else "missing_check"] += 1
 
     if dict(accepted) != dict(state.accepted_by_cell):
-        raise RuntimeError("summary counts disagree with quota-driver state")
+        raise RuntimeError("summary counts disagree with generation state")
     if dict(attempted) != dict(state.attempted_by_cell):
-        raise RuntimeError("summary attempts disagree with quota-driver state")
+        raise RuntimeError("summary attempts disagree with generation state")
     by_cell = {
-        quota.cell_id: {
-            "target_accepted": quota.target_accepted,
-            "attempted": attempted[quota.cell_id],
-            "accepted": accepted[quota.cell_id],
-            "rejected": attempted[quota.cell_id] - accepted[quota.cell_id],
+        target.cell_id: {
+            "target_accepted": target.case_count,
+            "attempted": attempted[target.cell_id],
+            "accepted": accepted[target.cell_id],
+            "rejected": attempted[target.cell_id] - accepted[target.cell_id],
         }
-        for quota in spec.quotas
+        for target in spec.case_targets
     }
     attempted_total = sum(attempted.values())
     accepted_total = sum(accepted.values())
@@ -844,7 +823,7 @@ def _validate_view(
     view: DatasetViewPaths,
     *,
     request: GenerationRequest,
-    spec: AcceptedQuotaRunSpec,
+    spec: DatasetGenerationSpec,
     execution: PaperExecution,
     attempted_cases: int,
 ) -> dict[str, object]:
@@ -880,9 +859,7 @@ def _validate_view(
         }
     )
     if grid != expected_grid:
-        raise RuntimeError(
-            f"dataset view grid is {grid!r}, expected {expected_grid!r}"
-        )
+        raise RuntimeError(f"dataset view grid is {grid!r}, expected {expected_grid!r}")
     return {
         **expected_values,
         "grid": expected_grid,
@@ -895,13 +872,13 @@ def _validate_view(
 
 
 def run_generation(request: GenerationRequest) -> GenerationRunResult:
-    """Run or resume the exact quota, then build and validate its dataset view."""
+    """Generate the requested valid cases, then validate the dataset view."""
 
     spec, execution, initial_state, plan = preflight(request)
     runtime = _require_runtime(request)
     if initial_state.terminal_failure is not None:
         raise RuntimeError(
-            f"quota run already terminated at {initial_state.terminal_failure.failure}"
+            f"generation already terminated at {initial_state.terminal_failure.failure}"
         )
     if initial_state.attempt_limit_failure is not None:
         raise RuntimeError(initial_state.attempt_limit_failure.message)
@@ -909,11 +886,11 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
     invocation_started_at = datetime.now().astimezone()
     total_started = perf_counter()
     metadata = {
-        "launcher": "scripts/run_paper_dataset_quota.py",
+        "launcher": "scripts/generate_paper_dataset.py",
         "run_spec": spec.to_json_record(),
     }
     if isinstance(execution, StaticStokesContract):
-        executor = StaticStokesQuotaExecutor(
+        executor = StaticStokesBatchExecutor(
             run_spec=spec,
             contract=execution,
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
@@ -921,23 +898,21 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         )
         length = execution.target.length
     else:
-        executor = TrajectoryQuotaExecutor(
+        executor = TrajectoryBatchExecutor(
             run_spec=spec,
             execution=execution,
             metadata=metadata,
         )
         length = execution.numerical.length
-    quota_started = perf_counter()
-    state = run_accepted_quotas(spec, executor)
-    quota_seconds = perf_counter() - quota_started
+    generation_started = perf_counter()
+    state = generate_valid_cases(spec, executor)
+    generation_seconds = perf_counter() - generation_started
     if state.terminal_failure is not None:
-        raise RuntimeError(
-            f"quota run terminated at {state.terminal_failure.failure}"
-        )
+        raise RuntimeError(f"generation terminated at {state.terminal_failure.failure}")
     if state.attempt_limit_failure is not None:
         raise RuntimeError(state.attempt_limit_failure.message)
     if not state.complete:
-        raise RuntimeError("quota run returned before meeting every accepted quota")
+        raise RuntimeError("generation stopped before every valid-case target was met")
 
     view_started = perf_counter()
     view = build_dataset_view(
@@ -978,7 +953,7 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         "counts": counts,
         "dataset_view": view_record,
         "timing_seconds": {
-            "quota_driver": quota_seconds,
+            "quota_driver": generation_seconds,
             "dataset_view": view_seconds,
             "validation": validation_seconds,
             "total": perf_counter() - total_started,
@@ -1005,9 +980,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "mode": "execute",
             "status": result.summary["status"],
             "summary_path": str(result.summary_path),
-            "configuration_fingerprint": result.summary[
-                "configuration_fingerprint"
-            ],
+            "configuration_fingerprint": result.summary["configuration_fingerprint"],
             "counts": result.summary["counts"],
             "dataset_view": result.summary["dataset_view"],
             "timing_seconds": result.summary["timing_seconds"],

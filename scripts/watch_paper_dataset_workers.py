@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Watch the exact long-running paper-dataset workers for durable progress.
+"""Watch progress recorded by the long-running paper-dataset workers.
 
-The numerical generators commit immutable proposal, shard, and result files.
-This process watches those transaction boundaries without importing or changing
+The numerical generators write proposal, shard, and result files once.
+This process watches for those files without importing or changing
 the source-fingerprinted generator.  Only exact commands from the current
 revision-4 JONSWAP and revision-3 Tanaka launch plans, owned by the current
 user and rooted in this checkout, are eligible for a signal.
@@ -318,7 +318,7 @@ class AuthenticatedFile:
 
 @dataclass(frozen=True)
 class HeartbeatToken:
-    """Newest durable proposal, result, and shard for one active chunk."""
+    """Newest saved proposal, result, and shard for one active chunk."""
 
     proposal: FileToken | None
     result: FileToken | None
@@ -376,7 +376,7 @@ def _jonswap_argv(
 ) -> tuple[str, ...]:
     return (
         str(python),
-        "scripts/run_paper_dataset_jonswap_bucketed.py",
+        "scripts/generate_paper_dataset_jonswap.py",
         "--solver-batch-size",
         "8",
         "--family",
@@ -414,7 +414,7 @@ def _tanaka_argv(
 ) -> tuple[str, ...]:
     return (
         str(python),
-        "scripts/run_paper_dataset_quota.py",
+        "scripts/generate_paper_dataset.py",
         "--family",
         "tanaka",
         "--split",
@@ -1497,7 +1497,7 @@ def _validate_quota_state(
         or attempted_total > next_batch_id * batch_size
         or accepted_total > committed_batches * batch_size
     ):
-        raise ValueError(f"{context} counts exceed its durable batch prefix")
+        raise ValueError(f"{context} counts exceed its validated batch prefix")
     complete = state.get("complete")
     expected_complete = pending_batch_id is None and all(
         accepted_by_cell[cell_id] == target for cell_id, target in quota_targets.items()
@@ -1505,7 +1505,7 @@ def _validate_quota_state(
     if pending_batch_id is not None and all(
         accepted_by_cell[cell_id] == target for cell_id, target in quota_targets.items()
     ):
-        raise ValueError(f"{context} has a pending batch after quota completion")
+        raise ValueError(f"{context} has a pending batch after all targets were met")
     if complete is not expected_complete:
         raise ValueError(f"{context} completion flag differs from quota state")
     if (
@@ -1538,7 +1538,7 @@ def _scheduled_cell_counts(
     *,
     batch_size: int,
 ) -> Mapping[str, int]:
-    """Mirror the deterministic quota scheduler for one pending batch."""
+    """Reconstruct the deterministic assignments for one pending batch."""
 
     scheduled = {cell_id: 0 for cell_id in quota_targets}
     accepted_to_skip = dict(accepted_by_cell)
@@ -1560,7 +1560,7 @@ def _scheduled_cell_counts(
             if sum(scheduled.values()) == target_size:
                 return scheduled
     if target_size:
-        raise ValueError("source pending quota schedule is incomplete")
+        raise ValueError("source pending case schedule is incomplete")
     return scheduled
 
 
@@ -1668,9 +1668,6 @@ def _validate_jonswap_bucketing_config(
     expected = {
         "outer_proposal_size": batch_size,
         "solver_batch_size": solver_batch_size,
-        "sort_rule": "stable_saved_time_count_then_proposal_index",
-        "commit_order": "durable_proposal_order",
-        "transaction_rule": "all_solver_groups_then_one_atomic_commit",
         "nonlinear_adjustment": dict(nonlinear_adjustment),
     }
     _require_exact_json(
@@ -1930,7 +1927,7 @@ def _validate_source_summary(
             "source ordered cell taxonomy differs from the canonical family"
         )
     if not quotas:
-        raise ValueError("source quotas are empty")
+        raise ValueError("source valid-case targets are empty")
     quota_total = 0
     quota_cells: list[str] = []
     quota_targets: list[int] = []
@@ -1943,12 +1940,12 @@ def _validate_source_summary(
         if not isinstance(cell_id, str) or not cell_id:
             raise ValueError("source quota has an empty cell ID")
         quota_cells.append(cell_id)
-        target_accepted = _integer(
+        case_count = _integer(
             quota.get("target_accepted"),
-            context="source quota target",
+            context="source valid-case target",
         )
-        quota_targets.append(target_accepted)
-        quota_total += target_accepted
+        quota_targets.append(case_count)
+        quota_total += case_count
     before_quotient, before_remainder = divmod(
         plan.accepted_before, len(ordered_cell_ids)
     )
@@ -1969,7 +1966,7 @@ def _validate_source_summary(
         or set(cell_codes) != set(quota_cells)
         or quota_total != plan.accepted_count
     ):
-        raise ValueError("source quota cells or accepted total differ")
+        raise ValueError("source target cells or accepted total differ")
     cell_code_values = [
         _integer(cell_codes[cell], context=f"source code for {cell}")
         for cell in quota_cells
@@ -1992,7 +1989,7 @@ def _validate_source_summary(
         raise ValueError("source accepted/attempted/rejected counts differ")
     by_cell = _mapping(counts.get("by_cell"), context="source counts by cell")
     if set(by_cell) != set(quota_cells):
-        raise ValueError("source per-cell counts differ from its quota cells")
+        raise ValueError("source per-cell counts differ from its target cells")
     by_cell_accepted = 0
     by_cell_attempted = 0
     accepted_by_cell: dict[str, int] = {}
@@ -2165,7 +2162,7 @@ def _validate_source_summary(
         committed_attempted_by_cell[cell_id] < initial_accepted_by_cell[cell_id]
         for cell_id in quota_cells
     ):
-        raise ValueError("source pending assignments differ from the quota scheduler")
+        raise ValueError("source pending assignments differ from the case scheduler")
     if initial_committed_batches and any(
         committed_attempted_by_cell[cell_id] < first_batch_count
         for cell_id, first_batch_count in _scheduled_cell_counts(

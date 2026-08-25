@@ -24,9 +24,9 @@ SUFFIX_BY_KIND: Final = {
     "text": ".md",
 }
 REQUIRED_PUBLICATION_IMPORTS: Final = {
-    "scripts/run_paper_dataset_quota.py": (
-        "solver.gen_data.stokes_quota_executor",
-        "solver/gen_data/stokes_quota_executor.py",
+    "scripts/generate_paper_dataset.py": (
+        "solver.gen_data.stokes_batch_executor",
+        "solver/gen_data/stokes_batch_executor.py",
     ),
 }
 REQUIRED_EAGER_SOLVER_PACKAGE_PATHS: Final = frozenset(
@@ -127,7 +127,7 @@ class PaperDatasetReleaseFileManifestTest(unittest.TestCase):
             "notes/paper_dataset_generation_readiness_20260726.md.",
         )
         self.assertIs(type(count), int)
-        self.assertEqual(count, 133)
+        self.assertEqual(count, 130)
         self.assertEqual(
             serialization,
             "Sort paths by Unicode code point, encode each path as UTF-8, and "
@@ -135,7 +135,7 @@ class PaperDatasetReleaseFileManifestTest(unittest.TestCase):
         )
         self.assertEqual(
             expected_sha256,
-            "6b9a5f14463ac0059e360a0bb1cdeca04fbeca4fbf57bd353b6daa794862cec2",
+            "e25c18ca85367ee7c10c295d728452575ffaa148a768b589a00284c35cbcabaa",
         )
         self.assertIsInstance(paths, list)
         assert isinstance(count, int)

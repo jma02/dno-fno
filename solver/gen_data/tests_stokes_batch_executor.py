@@ -1,4 +1,4 @@
-"""CPU tests for the static Stokes accepted-quota executor."""
+"""CPU tests for the static Stokes batch executor."""
 
 from __future__ import annotations
 
@@ -24,25 +24,25 @@ from solver.gen_data.pipeline.archive import (  # noqa: E402
     inspect_batch,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
-    CellQuota,
+    ValidCaseTarget,
     PhysicalFamilyId,
     SplitId,
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
-    AcceptedQuotaRunSpec,
-    run_accepted_quotas,
-    scan_quota_run,
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
+    DatasetGenerationSpec,
+    generate_valid_cases,
+    scan_dataset_generation,
 )
 from solver.gen_data.pipeline.reference import DiscreteDnoTarget  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_SAMPLE_CELLS,
+    STOKES_SAMPLE_CELL_IDS,
     StokesSample,
     sample_stokes_case,
 )
-from solver.gen_data.stokes_quota_executor import (  # noqa: E402
-    StaticStokesQuotaExecutor,
+from solver.gen_data.stokes_batch_executor import (  # noqa: E402
+    StaticStokesBatchExecutor,
 )
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     PAPER_STATIC_STOKES_CONTRACT,
@@ -76,16 +76,17 @@ def _run_spec(
     targets: tuple[int, ...],
     maximum_ursell_redraws: int = 0,
     batch_size: int = 2,
-) -> AcceptedQuotaRunSpec:
-    return AcceptedQuotaRunSpec(
+) -> DatasetGenerationSpec:
+    return DatasetGenerationSpec(
         root=root,
         family_name="stokes",
         family_id=PhysicalFamilyId.STOKES,
         revision_id=1,
         split_id=SplitId.TEST,
         stream_id=11,
-        quotas=tuple(
-            CellQuota(cell_id, target) for cell_id, target in zip(cell_ids, targets)
+        case_targets=tuple(
+            ValidCaseTarget(cell_id, target)
+            for cell_id, target in zip(cell_ids, targets)
         ),
         cell_codes={cell_id: index for index, cell_id in enumerate(cell_ids)},
         batch_size=batch_size,
@@ -127,7 +128,7 @@ def _identity_target(
     return eta, xi, jnp.zeros_like(eta)
 
 
-class StaticStokesQuotaExecutorTests(unittest.TestCase):
+class StaticStokesBatchExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -137,8 +138,8 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        finite_cell = STOKES_SAMPLE_CELLS[0].cell_id
-        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
+        finite_cell = STOKES_SAMPLE_CELL_IDS[0]
+        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
@@ -198,7 +199,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
                 definition=definition,
             )
 
-        executor = StaticStokesQuotaExecutor(
+        executor = StaticStokesBatchExecutor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -207,7 +208,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             state_constructor=checked_constructor,
             target_evaluator=checked_target,
         )
-        state = run_accepted_quotas(spec, executor)
+        state = generate_valid_cases(spec, executor)
 
         self.assertTrue(state.complete)
         self.assertEqual(
@@ -259,13 +260,13 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         self.assertEqual(replacement["attempt_index"], 2)
 
         prior_sample_count = len(sampled_attempts)
-        replay = run_accepted_quotas(spec, executor)
+        replay = generate_valid_cases(spec, executor)
         self.assertTrue(replay.complete)
         self.assertEqual(len(sampled_attempts), prior_sample_count)
 
     def test_proposal_only_interruption_resamples_exactly_on_replay(self) -> None:
         contract = _contract()
-        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
+        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
@@ -305,9 +306,9 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
                     sample.assignment.case_key.case_id,
                 )
             )
-            raise InjectedInterruption("after durable proposal")
+            raise InjectedInterruption("after proposal write")
 
-        interrupted = StaticStokesQuotaExecutor(
+        interrupted = StaticStokesBatchExecutor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -317,17 +318,17 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             InjectedInterruption,
-            "after durable proposal",
+            "after proposal write",
         ):
-            run_accepted_quotas(spec, interrupted)
+            generate_valid_cases(spec, interrupted)
 
-        pending = scan_quota_run(spec).pending
+        pending = scan_dataset_generation(spec).pending
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.PROPOSED)
         proposal_hash = file_sha256(pending.paths.proposal)
 
-        resumed = StaticStokesQuotaExecutor(
+        resumed = StaticStokesBatchExecutor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -335,7 +336,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             state_constructor=_zero_state,
             target_evaluator=_identity_target,
         )
-        state = run_accepted_quotas(spec, resumed)
+        state = generate_valid_cases(spec, resumed)
         self.assertTrue(state.complete)
         self.assertEqual(first_records, replay_records)
         self.assertEqual(file_sha256(pending.paths.proposal), proposal_hash)
@@ -351,15 +352,15 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
-        wrong_contract_spec = AcceptedQuotaRunSpec(
+        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
+        wrong_contract_spec = DatasetGenerationSpec(
             root=self.root / "contract",
             family_name="stokes",
             family_id=PhysicalFamilyId.STOKES,
             revision_id=1,
             split_id=SplitId.TEST,
             stream_id=11,
-            quotas=(CellQuota(deep_cell, 1),),
+            case_targets=(ValidCaseTarget(deep_cell, 1),),
             cell_codes={deep_cell: 0},
             batch_size=1,
             configuration={
@@ -371,7 +372,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             },
         )
         with self.assertRaisesRegex(ValueError, "contract differs"):
-            StaticStokesQuotaExecutor(
+            StaticStokesBatchExecutor(
                 run_spec=wrong_contract_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
@@ -386,7 +387,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         with self.assertRaisesRegex(ValueError, "redraw limit differs"):
-            StaticStokesQuotaExecutor(
+            StaticStokesBatchExecutor(
                 run_spec=wrong_sampler_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
@@ -394,7 +395,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
 
     def test_paper_role_rejects_injected_implementation_hooks(self) -> None:
         contract = PAPER_STATIC_STOKES_CONTRACT
-        deep_cell = STOKES_SAMPLE_CELLS[2].cell_id
+        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
@@ -403,18 +404,18 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             batch_size=1,
         )
-        StaticStokesQuotaExecutor(
+        StaticStokesBatchExecutor(
             run_spec=spec,
             contract=contract,
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesQuotaExecutor(
+            StaticStokesBatchExecutor(
                 run_spec=spec,
                 contract=contract,
                 state_constructor=_zero_state,
             )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesQuotaExecutor(
+            StaticStokesBatchExecutor(
                 run_spec=spec,
                 contract=contract,
                 target_evaluator=_identity_target,
@@ -428,7 +429,7 @@ class StaticStokesQuotaExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesQuotaExecutor(
+            StaticStokesBatchExecutor(
                 run_spec=zero_redraw_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,

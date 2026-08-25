@@ -1,4 +1,4 @@
-"""Thin accepted-quota executor for the three rollout-data families."""
+"""Generate and validate one trajectory batch for each rollout family."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from solver.gen_data.pipeline.quality import (
     QualityReason,
     QualityScope,
 )
-from solver.gen_data.pipeline.quota_driver import AcceptedQuotaRunSpec
+from solver.gen_data.pipeline.valid_case_generation import DatasetGenerationSpec
 from solver.gen_data.pipeline.refinement import (
     PAPER_BENJAMIN_FEIR_GL2_CONTRACT,
     PAPER_JONSWAP_GL2_CONTRACT,
@@ -118,9 +118,9 @@ _FAMILY_IDS = {
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
 _FAMILY_CELLS = {
-    "tanaka": frozenset(cell.cell_id for cell in TANAKA_SAMPLE_CELLS),
-    "benjamin_feir": frozenset(cell.cell_id for cell in BENJAMIN_FEIR_SAMPLE_CELLS),
-    "jonswap_tma": frozenset(cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS),
+    "tanaka": frozenset(TANAKA_SAMPLE_CELLS),
+    "benjamin_feir": frozenset(BENJAMIN_FEIR_SAMPLE_CELLS),
+    "jonswap_tma": frozenset(JONSWAP_TMA_SAMPLE_CELLS),
 }
 
 
@@ -241,13 +241,9 @@ class JonswapNonlinearAdjustmentPolicy:
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
             for value in values
         ):
-            raise ValueError(
-                "JONSWAP nonlinear-adjustment integers must be positive"
-            )
+            raise ValueError("JONSWAP nonlinear-adjustment integers must be positive")
         if self.burn_peak_periods < self.ramp_time_peak_periods:
-            raise ValueError(
-                "JONSWAP adjustment burn must cover the ramp time"
-            )
+            raise ValueError("JONSWAP adjustment burn must cover the ramp time")
 
     def to_json_record(self) -> dict[str, object]:
         return {
@@ -304,10 +300,7 @@ class TrajectoryExecutionConfig:
         elif self.family == "benjamin_feir":
             if self.jonswap_quadrature_order is not None:
                 raise ValueError("only JONSWAP/TMA may set a quadrature order")
-            if (
-                self.horizon.kind
-                != "benjamin_feir_carrier_periods_floor_saved_grid"
-            ):
+            if self.horizon.kind != "benjamin_feir_carrier_periods_floor_saved_grid":
                 raise ValueError(
                     "Benjamin--Feir requires a per-case carrier-period horizon"
                 )
@@ -373,9 +366,7 @@ class TrajectoryExecutionConfig:
             stored_time_policy=PAPER_STORED_TIME_POLICY,
             jonswap_quadrature_order=16 if family == "jonswap_tma" else None,
             jonswap_adjustment=(
-                PAPER_JONSWAP_ADJUSTMENT_POLICY
-                if family == "jonswap_tma"
-                else None
+                PAPER_JONSWAP_ADJUSTMENT_POLICY if family == "jonswap_tma" else None
             ),
         )
 
@@ -404,9 +395,7 @@ class TrajectoryExecutionConfig:
             "jonswap_quadrature_order": self.jonswap_quadrature_order,
         }
         if self.jonswap_adjustment is not None:
-            record["jonswap_adjustment"] = (
-                self.jonswap_adjustment.to_json_record()
-            )
+            record["jonswap_adjustment"] = self.jonswap_adjustment.to_json_record()
         return record
 
 
@@ -443,7 +432,7 @@ class ConstructionFailureClassifier(Protocol):
 
 @dataclass(frozen=True)
 class DeclaredFatalFailure:
-    """Explicit terminal failure information for a durable proposal."""
+    """Explicit terminal failure information for a saved proposal."""
 
     phase: str
     telemetry: Mapping[str, object]
@@ -746,10 +735,7 @@ def classify_tanaka_construction_failure(
                 raise ValueError(
                     "Tanaka invalid-speed diagnostics contain a scaled minimum"
                 )
-        if (
-            minimum is not None
-            and (minimum < 0.0) != (negative_count > 0)
-        ):
+        if minimum is not None and (minimum < 0.0) != (negative_count > 0):
             raise ValueError(
                 "Tanaka negative-radicand count disagrees with its minimum"
             )
@@ -953,9 +939,7 @@ def _benjamin_feir_time_grid(
     saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
     realized = float(saved_times[-1])
     if not (realized <= intended and intended - realized < saved_dt):
-        raise RuntimeError(
-            "Benjamin--Feir saved-grid horizon was not strictly floored"
-        )
+        raise RuntimeError("Benjamin--Feir saved-grid horizon was not strictly floored")
     return CaseTimeGrid(
         intended_terminal_time=intended,
         realized_terminal_time=realized,
@@ -1051,7 +1035,7 @@ def _with_time_grid(
 
 def _with_construction_metrics(
     outcome: CaseOutcome,
-    metrics: Mapping[str, object],
+    metrics: Mapping[str, JsonScalar],
 ) -> CaseOutcome:
     return CaseOutcome(
         decision=outcome.decision,
@@ -1061,10 +1045,10 @@ def _with_construction_metrics(
 
 
 @dataclass(frozen=True)
-class TrajectoryQuotaExecutor:
-    """Execute one durable attempted batch for a rollout-data family."""
+class TrajectoryBatchExecutor:
+    """Execute one saved proposal batch for a rollout-data family."""
 
-    run_spec: AcceptedQuotaRunSpec
+    run_spec: DatasetGenerationSpec
     execution: TrajectoryExecutionConfig
     metadata: Mapping[str, object] | None = None
     arm_executor: ArmExecutor = run_residual_controlled_arm
@@ -1170,17 +1154,14 @@ class TrajectoryQuotaExecutor:
             return tuple(grid for _ in sampled.samples)
         if self.execution.family == "benjamin_feir":
             if not all(
-                isinstance(sample, BenjaminFeirSample)
-                for sample in sampled.samples
+                isinstance(sample, BenjaminFeirSample) for sample in sampled.samples
             ):
                 raise TypeError("Benjamin--Feir sampler returned an unexpected sample")
             return tuple(
                 _benjamin_feir_time_grid(sample, self.execution)
                 for sample in sampled.samples
             )
-        if not all(
-            isinstance(sample, JonswapTmaSample) for sample in sampled.samples
-        ):
+        if not all(isinstance(sample, JonswapTmaSample) for sample in sampled.samples):
             raise TypeError("JONSWAP/TMA sampler returned an unexpected sample")
         return tuple(
             _jonswap_time_grid(sample, self.execution) for sample in sampled.samples
@@ -1492,13 +1473,15 @@ class TrajectoryQuotaExecutor:
                 ),
                 grid,
             )
-            for index, outcome in enumerate(outcomes_from_production(
-                execution,
-                initial.depths,
-                family=family,
-                length=self.execution.numerical.length,
-                policy=self.execution.stored_time_policy,
-            ))
+            for index, outcome in enumerate(
+                outcomes_from_production(
+                    execution,
+                    initial.depths,
+                    family=family,
+                    length=self.execution.numerical.length,
+                    policy=self.execution.stored_time_policy,
+                )
+            )
         )
 
     def _produce_variable_horizons(
@@ -1509,9 +1492,7 @@ class TrajectoryQuotaExecutor:
         family: Literal["benjamin_feir", "jonswap_tma"],
     ) -> tuple[CaseOutcome, ...]:
         if len(grids) != initial.eta0.shape[0]:
-            raise ValueError(
-                f"{family} requires one time grid per initial condition"
-            )
+            raise ValueError(f"{family} requires one time grid per initial condition")
         minimum_stored = {
             "benjamin_feir": self.execution.stored_time_policy.benjamin_feir_count,
             "jonswap_tma": self.execution.stored_time_policy.random_sea_count,

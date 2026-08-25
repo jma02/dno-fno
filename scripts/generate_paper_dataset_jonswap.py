@@ -1,4 +1,4 @@
-"""Run adjusted JONSWAP/TMA quotas in horizon-sorted numerical microbatches.
+"""Generate JONSWAP/TMA cases in horizon-sorted numerical microbatches.
 
 This launcher extends the current shared JONSWAP run identity with the
 horizon-bucketing configuration and uses the adjustment-first executor. Each case
@@ -19,17 +19,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import scripts.run_paper_dataset_quota as base  # noqa: E402
+import scripts.generate_paper_dataset as base  # noqa: E402
 from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
     BUCKETING_CONFIG_KEY,
     BucketingConfig,
-    HorizonBucketedJonswapQuotaExecutor,
+    HorizonBucketedJonswapBatchExecutor,
 )
 from solver.gen_data.pipeline.archive import file_sha256  # noqa: E402
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
-    AcceptedQuotaRunSpec,
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
+    DatasetGenerationSpec,
 )
-from solver.gen_data.trajectory_quota_executor import (  # noqa: E402
+from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
 )
 
@@ -66,7 +66,7 @@ def build_bucketed_run_spec(
     *,
     solver_batch_size: int,
     execution: base.PaperExecution | None = None,
-) -> AcceptedQuotaRunSpec:
+) -> DatasetGenerationSpec:
     """Extend the exact JONSWAP run identity with its bucketing configuration."""
 
     if request.family != "jonswap_tma":
@@ -107,14 +107,14 @@ def build_bucketed_run_spec(
         solver_batch_size=solver_batch_size,
         adjustment=adjustment_policy,
     ).to_json_record()
-    return AcceptedQuotaRunSpec(
+    return DatasetGenerationSpec(
         root=baseline.root,
         family_name=baseline.family_name,
         family_id=baseline.family_id,
         revision_id=baseline.revision_id,
         split_id=baseline.split_id,
         stream_id=baseline.stream_id,
-        quotas=baseline.quotas,
+        case_targets=baseline.case_targets,
         cell_codes=baseline.cell_codes,
         batch_size=baseline.batch_size,
         first_attempt_index=baseline.first_attempt_index,
@@ -130,13 +130,13 @@ def _bucketed_runtime(solver_batch_size: int) -> Iterator[None]:
     """Install the JONSWAP-only spec and executor in the shared runner."""
 
     original_builder = base.build_run_spec
-    original_executor = base.TrajectoryQuotaExecutor
+    original_executor = base.TrajectoryBatchExecutor
 
     def builder(
         request: base.GenerationRequest,
         *,
         execution: base.PaperExecution | None = None,
-    ) -> AcceptedQuotaRunSpec:
+    ) -> DatasetGenerationSpec:
         return build_bucketed_run_spec(
             request,
             solver_batch_size=solver_batch_size,
@@ -144,12 +144,12 @@ def _bucketed_runtime(solver_batch_size: int) -> Iterator[None]:
         )
 
     base.build_run_spec = builder
-    base.TrajectoryQuotaExecutor = HorizonBucketedJonswapQuotaExecutor
+    base.TrajectoryBatchExecutor = HorizonBucketedJonswapBatchExecutor
     try:
         yield
     finally:
         base.build_run_spec = original_builder
-        base.TrajectoryQuotaExecutor = original_executor
+        base.TrajectoryBatchExecutor = original_executor
 
 
 _BASE_BUILD_RUN_SPEC = base.build_run_spec

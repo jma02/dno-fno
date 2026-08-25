@@ -45,7 +45,7 @@ from scripts.audit_completed_jonswap_revision4 import (  # noqa: E402
 )
 from scripts.build_paper_dataset_view import CompletedChunk  # noqa: E402
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.pipeline.production import (  # noqa: E402
     AttemptAssignment,
@@ -53,7 +53,7 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
     SplitId,
 )
 from solver.gen_data.pipeline.archive import BatchPaths, file_sha256  # noqa: E402
-from solver.gen_data.pipeline.quota_driver import (  # noqa: E402
+from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     canonical_json_sha256,
 )
 from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
@@ -110,9 +110,9 @@ def _attempted_extrema() -> dict[str, Extrema]:
 
 def _conditioning_chunk(*, rejected_cell_index: int | None = None) -> dict[str, object]:
     cells: dict[str, object] = {}
-    for index, cell in enumerate(JONSWAP_TMA_SAMPLE_CELLS):
+    for index, cell_id in enumerate(JONSWAP_TMA_SAMPLE_CELL_IDS):
         rejected = int(index == rejected_cell_index)
-        cells[cell.cell_id] = {
+        cells[cell_id] = {
             "target_accepted": 1,
             "attempted": 1 + rejected,
             "accepted": 1,
@@ -132,7 +132,7 @@ def _sampled_specification() -> tuple[CaseKey, dict[str, object]]:
     )
     assignment = AttemptAssignment(
         case_key=key,
-        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[0],
     )
     sampled = sample_jonswap_tma_trajectory_cases(
         (assignment,),
@@ -223,7 +223,7 @@ def _replayed(specification: dict[str, object]) -> ReplayedSpecification:
         case_id=key.case_id,
         attempt_index=0,
         cell_code=0,
-        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[0],
         record=specification,
     )
 
@@ -327,7 +327,7 @@ def _view_fixture(root: Path) -> _ViewFixture:
         case_id=key.case_id,
         attempt_index=0,
         cell_code=0,
-        cell_id=JONSWAP_TMA_SAMPLE_CELLS[0].cell_id,
+        cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[0],
         record=specification_record,
     )
     case = AuditedCase(
@@ -521,10 +521,8 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         self.assertIs(record["posthoc_parameter_gate"], False)
         cells = record["cells"]
         assert isinstance(cells, dict)
-        self.assertEqual(
-            set(cells), {cell.cell_id for cell in JONSWAP_TMA_SAMPLE_CELLS}
-        )
-        first = cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
+        self.assertEqual(set(cells), set(JONSWAP_TMA_SAMPLE_CELL_IDS))
+        first = cells[JONSWAP_TMA_SAMPLE_CELL_IDS[0]]
         self.assertEqual(
             first,
             {
@@ -539,7 +537,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        malformed_cells.pop(JONSWAP_TMA_SAMPLE_CELLS[-1].cell_id)
+        malformed_cells.pop(JONSWAP_TMA_SAMPLE_CELL_IDS[-1])
         with self.assertRaisesRegex(ValueError, "exact 27 JONSWAP cells"):
             _population_conditioning_record(
                 (malformed,),
@@ -551,7 +549,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
+        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELL_IDS[0]]
         assert isinstance(first, dict)
         first["attempted"] = 2
         with self.assertRaisesRegex(ValueError, "counts do not close"):
@@ -565,7 +563,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
         malformed = _conditioning_chunk()
         malformed_cells = malformed["cell_counts"]
         assert isinstance(malformed_cells, dict)
-        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELLS[0].cell_id]
+        first = malformed_cells[JONSWAP_TMA_SAMPLE_CELL_IDS[0]]
         assert isinstance(first, dict)
         first["target_accepted"] = 2
         with self.assertRaisesRegex(ValueError, "does not meet its quota"):
@@ -638,7 +636,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                 path,
                 split=SplitId.TRAIN,
                 stream_id=0,
-                cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
+                cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELL_IDS[0]},
                 support_extrema=_support_extrema(),
                 totals=totals,
             )
@@ -655,7 +653,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                     path,
                     split=SplitId.TRAIN,
                     stream_id=0,
-                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
+                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELL_IDS[0]},
                     support_extrema=_support_extrema(),
                     totals=AuditTotals(),
                 )
@@ -670,7 +668,7 @@ class JonswapCompletionAuditTests(unittest.TestCase):
                     path,
                     split=SplitId.TRAIN,
                     stream_id=0,
-                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELLS[0].cell_id},
+                    cell_ids_by_code={0: JONSWAP_TMA_SAMPLE_CELL_IDS[0]},
                     support_extrema=_support_extrema(),
                     totals=AuditTotals(),
                 )

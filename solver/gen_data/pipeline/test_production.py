@@ -9,7 +9,7 @@ from solver.gen_data.pipeline.production import (
     CaseKey,
     PhysicalFamilyId,
     SplitId,
-    balanced_cell_quotas,
+    balanced_valid_case_targets,
     paper_dataset_revision_id,
     schedule_attempt_batch,
     split_code,
@@ -50,40 +50,40 @@ class FamilyIdentityTest(unittest.TestCase):
             paper_dataset_revision_id(1)  # type: ignore[arg-type]
 
 
-class BalancedCellQuotasTest(unittest.TestCase):
+class BalancedValidCaseTargetsTest(unittest.TestCase):
     def test_uses_exact_quotient_and_remainder_balance(self) -> None:
-        quotas = balanced_cell_quotas(
+        targets = balanced_valid_case_targets(
             ("shallow", "finite", "deep"),
-            accepted_case_count=8,
+            case_count=8,
         )
 
         self.assertEqual(
-            [(quota.cell_id, quota.target_accepted) for quota in quotas],
+            [(target.cell_id, target.case_count) for target in targets],
             [("shallow", 3), ("finite", 3), ("deep", 2)],
         )
-        self.assertEqual(sum(quota.target_accepted for quota in quotas), 8)
+        self.assertEqual(sum(target.case_count for target in targets), 8)
 
     def test_total_smaller_than_cell_count_is_deterministic(self) -> None:
-        quotas = balanced_cell_quotas(
+        targets = balanced_valid_case_targets(
             ("a", "b", "c", "d"),
-            accepted_case_count=2,
+            case_count=2,
         )
 
         self.assertEqual(
-            [quota.target_accepted for quota in quotas],
+            [target.case_count for target in targets],
             [1, 1, 0, 0],
         )
 
     def test_rejects_duplicate_cells(self) -> None:
         with self.assertRaisesRegex(ValueError, "unique"):
-            balanced_cell_quotas(("same", "same"), accepted_case_count=2)
+            balanced_valid_case_targets(("same", "same"), case_count=2)
 
 
 class AttemptScheduleTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.quotas = balanced_cell_quotas(
+        self.targets = balanced_valid_case_targets(
             ("low", "moderate"),
-            accepted_case_count=4,
+            case_count=4,
         )
 
     def test_replay_has_identical_assignments_and_seed_words(self) -> None:
@@ -96,8 +96,8 @@ class AttemptScheduleTest(unittest.TestCase):
             "batch_size": 3,
         }
 
-        first = schedule_attempt_batch(self.quotas, {}, **arguments)
-        replay = schedule_attempt_batch(self.quotas, {}, **arguments)
+        first = schedule_attempt_batch(self.targets, {}, **arguments)
+        replay = schedule_attempt_batch(self.targets, {}, **arguments)
 
         self.assertEqual(first, replay)
         self.assertEqual(
@@ -142,9 +142,9 @@ class AttemptScheduleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "attempt_index"):
             CaseKey(2, 1, SplitId.TRAIN, 0, 1 << 40)
 
-    def test_rejection_leaves_quota_in_its_original_cell(self) -> None:
+    def test_rejection_leaves_the_target_unmet_in_its_original_cell(self) -> None:
         first = schedule_attempt_batch(
-            self.quotas,
+            self.targets,
             {},
             family_id=2,
             revision_id=1,
@@ -160,7 +160,7 @@ class AttemptScheduleTest(unittest.TestCase):
 
         # The low-cell attempt passed; the moderate-cell attempt failed.
         replacement = schedule_attempt_batch(
-            self.quotas,
+            self.targets,
             {"low": 1, "moderate": 0},
             family_id=2,
             revision_id=1,
@@ -175,7 +175,7 @@ class AttemptScheduleTest(unittest.TestCase):
 
     def test_split_is_fixed_on_every_pre_outcome_assignment(self) -> None:
         assignments = schedule_attempt_batch(
-            self.quotas,
+            self.targets,
             {},
             family_id=2,
             revision_id=1,
@@ -200,7 +200,7 @@ class AttemptScheduleTest(unittest.TestCase):
 
     def test_final_batch_is_partial_and_contains_only_whole_cases(self) -> None:
         assignments = schedule_attempt_batch(
-            self.quotas,
+            self.targets,
             {"low": 2, "moderate": 1},
             family_id=2,
             revision_id=1,
@@ -223,9 +223,9 @@ class AttemptScheduleTest(unittest.TestCase):
             ),
         )
 
-    def test_complete_quotas_schedule_no_more_attempts(self) -> None:
+    def test_met_targets_schedule_no_more_attempts(self) -> None:
         assignments = schedule_attempt_batch(
-            self.quotas,
+            self.targets,
             {"low": 2, "moderate": 2},
             family_id=2,
             revision_id=1,
@@ -240,7 +240,7 @@ class AttemptScheduleTest(unittest.TestCase):
     def test_rejects_unknown_or_overfilled_cell_counts(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown"):
             schedule_attempt_batch(
-                self.quotas,
+                self.targets,
                 {"other": 1},
                 family_id=2,
                 revision_id=1,
@@ -251,7 +251,7 @@ class AttemptScheduleTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "exceeds"):
             schedule_attempt_batch(
-                self.quotas,
+                self.targets,
                 {"low": 3},
                 family_id=2,
                 revision_id=1,

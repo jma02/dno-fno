@@ -228,8 +228,8 @@ class PaperDatasetReleaseLayoutContractTest(unittest.TestCase):
             "tanaka": tanaka_source,
         }
         expected_runners = {
-            "jonswap_tma": "scripts/run_paper_dataset_jonswap_bucketed.py",
-            "tanaka": "scripts/run_paper_dataset_quota.py",
+            "jonswap_tma": "scripts/generate_paper_dataset_jonswap.py",
+            "tanaka": "scripts/generate_paper_dataset.py",
         }
         launcher_chunks = {
             family: _launcher_chunks(source)

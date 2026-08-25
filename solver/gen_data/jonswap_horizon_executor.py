@@ -1,9 +1,8 @@
-"""Horizon-bucketed JONSWAP/TMA quota execution.
+"""Run JONSWAP cases in small batches grouped by rollout length.
 
-The durable quota driver may propose more cases than fit in one numerical
-rollout.  This executor sorts those proposed cases by their declared saved-time
-count, executes memory-safe groups of nearby horizons, and restores proposal
-order before the existing atomic batch commit.
+A proposal may contain more cases than fit in GPU memory. Sort its cases by
+saved timestep count, solve them in smaller groups, then restore the original
+proposal order.
 """
 
 from __future__ import annotations
@@ -28,12 +27,12 @@ from solver.gen_data.pipeline.refinement import (
 )
 from solver.gen_data.pipeline.writer import CaseOutcome, JsonScalar
 from solver.gen_data.trajectory_family_adapters import TrajectoryInitialBatch
-from solver.gen_data.trajectory_quota_executor import (
+from solver.gen_data.trajectory_batch_executor import (
     CaseTimeGrid,
     JONSWAP_ADJUSTMENT_SCHEMA,
     JonswapNonlinearAdjustmentPolicy,
     PAPER_JONSWAP_ADJUSTMENT_POLICY,
-    TrajectoryQuotaExecutor,
+    TrajectoryBatchExecutor,
 )
 
 
@@ -70,7 +69,7 @@ def horizon_sorted_groups(
 
 @dataclass(frozen=True)
 class BucketingConfig:
-    """Memory-safe grouping configuration for one durable proposal batch."""
+    """Batch sizes used to solve one proposal without exhausting GPU memory."""
 
     outer_proposal_size: int
     solver_batch_size: int
@@ -94,9 +93,6 @@ class BucketingConfig:
         return {
             "outer_proposal_size": self.outer_proposal_size,
             "solver_batch_size": self.solver_batch_size,
-            "sort_rule": "stable_saved_time_count_then_proposal_index",
-            "commit_order": "durable_proposal_order",
-            "transaction_rule": "all_solver_groups_then_one_atomic_commit",
             "nonlinear_adjustment": self.adjustment.to_json_record(),
         }
 
@@ -314,8 +310,8 @@ def _with_adjustment_metrics(
 
 
 @dataclass(frozen=True)
-class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
-    """Execute one durable JONSWAP proposal in horizon-near solver groups."""
+class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
+    """Solve one JONSWAP proposal in groups with similar rollout lengths."""
 
     adjustment_arm_executor: NonlinearAdjustmentArmExecutor = (
         run_nonlinear_adjustment_arm
@@ -360,7 +356,7 @@ class HorizonBucketedJonswapQuotaExecutor(TrajectoryQuotaExecutor):
 
         metadata = dict(self.metadata or {})
         metadata["launcher"] = (
-            "scripts/run_paper_dataset_jonswap_bucketed.py"
+            "scripts/generate_paper_dataset_jonswap.py"
         )
         metadata[BUCKETING_CONFIG_KEY] = expected.to_json_record()
         object.__setattr__(self, "metadata", metadata)

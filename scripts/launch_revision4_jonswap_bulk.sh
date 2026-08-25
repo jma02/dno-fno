@@ -49,7 +49,7 @@ build_chunk() {
     PREFLIGHT="$OUTPUT_BASE/logs/jonswap_${LABEL}.preflight.json"
     LOG="$OUTPUT_BASE/logs/jonswap_${LABEL}.log"
     COMMAND=(
-        "$PYTHON" scripts/run_paper_dataset_jonswap_bucketed.py
+        "$PYTHON" scripts/generate_paper_dataset_jonswap.py
         --solver-batch-size 8
         --family jonswap_tma --split "$SPLIT"
         --accepted-cases "$COUNT" --accepted-cases-before "$BEFORE"

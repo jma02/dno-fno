@@ -605,7 +605,7 @@ def _scan_chunk(
     chunk_root = summary_path.parent
     summary = _strict_json_object(summary_path)
     if summary.get("status") != "complete":
-        raise ValueError("quota summary is not complete")
+        raise ValueError("generation summary is not complete")
     dataset_view = _mapping(summary.get("dataset_view"), context="summary.dataset_view")
     manifest_record = _mapping(
         dataset_view.get("manifest"), context="summary.dataset_view.manifest"

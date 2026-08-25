@@ -21,7 +21,7 @@ from solver.gen_data.pipeline.archive import (
     write_json_atomic,
     write_npz_atomic,
 )
-from solver.gen_data.pipeline.quota_driver import canonical_json_sha256
+from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 
 DATASET_VIEW_SCHEMA_VERSION = 2
