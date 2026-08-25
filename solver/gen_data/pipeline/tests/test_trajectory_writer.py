@@ -19,7 +19,6 @@ import numpy as np  # noqa: E402
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
     InternalTrajectoryMetrics,
     RefinementTrajectory,
-    evaluate_hamiltonian_drift,
 )
 from solver.gen_data.pipeline.archive import ensure_proposal  # noqa: E402
 from solver.gen_data.pipeline.manifest import build_dataset_view  # noqa: E402
@@ -227,21 +226,6 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                     retained_trajectory=trajectory,
                 ),
             ),
-        )
-
-        drift_metrics, drift_decision = evaluate_hamiltonian_drift(
-            eta,
-            xi,
-            gxi,
-            gravity=1.0,
-            dx=2.0 * math.pi / eta.shape[-1],
-            threshold=1.0e-3,
-        )
-        self.assertFalse(drift_decision.accepted)
-        assert drift_metrics.maximum_relative_drift is not None
-        self.assertGreater(
-            drift_metrics.maximum_relative_drift,
-            1.0e-3,
         )
 
         outcome = outcomes_from_production(

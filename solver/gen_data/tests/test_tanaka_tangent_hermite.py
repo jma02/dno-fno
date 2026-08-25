@@ -3,7 +3,7 @@
 Run directly; pytest is not required:
 
     JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' JAX_ENABLE_X64=True \
-      uv run python solver/gen_data/tests_tanaka_tangent_hermite.py
+      uv run python solver/gen_data/tests/test_tanaka_tangent_hermite.py
 """
 from __future__ import annotations
 

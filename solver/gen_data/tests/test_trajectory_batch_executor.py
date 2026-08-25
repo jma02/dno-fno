@@ -111,8 +111,6 @@ def _contract() -> ResidualControlledGL2Contract:
         saved_dt=0.08,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=2,
-        refinement_tolerance=1.0e-3,
-        relative_floor=1.0e-12,
         target_time_chunk_size=2,
     )
 

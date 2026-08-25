@@ -423,7 +423,7 @@ GL2 refinement pairs as method-level validation:
 
 ```bash
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_paper_acceptance_smoke
+  uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_smoke
 ```
 
 This older smoke verifies the refinement-audit decision layer.  It does not
@@ -435,10 +435,10 @@ per-trajectory acceptance:
 
 ```bash
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_paper_acceptance_cross_family
+  uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_cross_family
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_stokes_spatial_smoke
+  uv run python -m unittest solver.gen_data.tests.test_stokes_spatial_smoke
 ```
 
 The first checks constructor finiteness, graph validity, band limitation,
@@ -601,10 +601,7 @@ The replay was accepted, solved every stage, had maximum residual
 wall time was 197.355 seconds.  This verifies the source-to-artifact handoff;
 it is not a substitute for the 27-category GPU smoke.
 
-The executable method-level pair/retry utility is
-`pipeline.refinement.execute_residual_controlled_refinement`.  It is used for
-the predeclared validation panel, not for routine dataset generation.  The
-fixed- and variable-horizon production entry points are
+The fixed- and variable-horizon production entry points are
 `pipeline.refinement.execute_production_trajectory` and
 `pipeline.refinement.execute_variable_horizon_production_trajectory`.
 They take one residual-controlled GL2 rollout with actual step \(0.01\),
@@ -706,14 +703,14 @@ reproduced by
 ```bash
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
-    solver.gen_data.pipeline.test_production \
-    solver.gen_data.pipeline.test_archive \
-    solver.gen_data.pipeline.test_manifest \
-    solver.gen_data.pipeline.test_writer \
-    solver.gen_data.pipeline.test_valid_case_generation \
-    solver.gen_data.pipeline.test_refinement \
-    solver.gen_data.pipeline.test_time_selection \
-    solver.gen_data.pipeline.test_trajectory_writer
+    solver.gen_data.pipeline.tests.test_production \
+    solver.gen_data.pipeline.tests.test_archive \
+    solver.gen_data.pipeline.tests.test_manifest \
+    solver.gen_data.pipeline.tests.test_writer \
+    solver.gen_data.pipeline.tests.test_valid_case_generation \
+    solver.gen_data.pipeline.tests.test_refinement \
+    solver.gen_data.pipeline.tests.test_time_selection \
+    solver.gen_data.pipeline.tests.test_trajectory_writer
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python train-jax-10m/tests_paper_dataset_view.py
@@ -1054,15 +1051,15 @@ The four declared sampling laws and both batch executors are checked by:
 
 ```bash
 uv run python -m unittest \
-  solver.gen_data.tests_stokes_sampling \
-  solver.gen_data.tests_stokes_static_pipeline \
-  solver.gen_data.tests_stokes_batch_executor \
-  solver.gen_data.tests_tanaka_sampling \
-  solver.gen_data.tests_tanaka_potential_radicand \
-  solver.gen_data.tests_benjamin_feir_sampling \
-  solver.gen_data.tests_jonswap_tma_sampling \
-  solver.gen_data.tests_trajectory_family_adapters \
-  solver.gen_data.tests_trajectory_batch_executor \
+  solver.gen_data.tests.test_stokes_sampling \
+  solver.gen_data.tests.test_stokes_static_pipeline \
+  solver.gen_data.tests.test_stokes_batch_executor \
+  solver.gen_data.tests.test_tanaka_sampling \
+  solver.gen_data.tests.test_tanaka_potential_radicand \
+  solver.gen_data.tests.test_benjamin_feir_sampling \
+  solver.gen_data.tests.test_jonswap_tma_sampling \
+  solver.gen_data.tests.test_trajectory_family_adapters \
+  solver.gen_data.tests.test_trajectory_batch_executor \
   scripts.test_generate_paper_dataset \
   scripts.test_build_paper_dataset_view
 ```

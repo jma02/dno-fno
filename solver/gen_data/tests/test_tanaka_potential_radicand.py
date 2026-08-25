@@ -268,8 +268,6 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             saved_dt=0.02,
             gl2_residual_tolerance=1.0e-8,
             gl2_iteration_cap=8,
-            refinement_tolerance=1.0e-3,
-            relative_floor=1.0e-12,
             target_time_chunk_size=2,
         )
         cell_id = TANAKA_SAMPLE_CELL_IDS[0]

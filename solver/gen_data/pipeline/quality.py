@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, IntFlag
 from operator import index
-from typing import Iterable, SupportsIndex, Tuple
+from typing import SupportsIndex, Tuple
 
 
 class QualityScope(str, Enum):
@@ -55,17 +55,6 @@ def _reason_mask_from_bits(
     if unknown:
         raise ValueError(f"{field_name} contains unknown quality bits: {unknown:#x}")
     return QualityReason(value)
-
-
-def mask_from_reasons(reasons: Iterable[QualityReason]) -> QualityReason:
-    """Combine individual reason flags into one persistable mask."""
-
-    mask = QualityReason.NONE
-    for reason in reasons:
-        if not isinstance(reason, QualityReason):
-            raise TypeError("reasons must contain only QualityReason values")
-        mask |= reason
-    return mask
 
 
 def reasons_from_bits(bits: SupportsIndex) -> Tuple[QualityReason, ...]:

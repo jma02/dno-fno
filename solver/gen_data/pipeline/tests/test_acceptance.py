@@ -9,32 +9,10 @@ import numpy as np
 from solver.gen_data.pipeline.acceptance import (
     RefinementTrajectory,
     evaluate_complete_numerical_trajectory,
-    evaluate_finite_stokes_support,
-    evaluate_hamiltonian_drift,
     evaluate_internal_trajectory_health,
     evaluate_temporal_refinement,
 )
 from solver.gen_data.pipeline.quality import QualityReason
-
-
-STOKES_CASE_98_HARMONICS = np.asarray(
-    [
-        0.2474963451001154,
-        0.13520417407096738,
-        0.07006262814091847,
-        0.05461649162577016,
-        0.032900266559519276,
-    ],
-    dtype=np.float64,
-)
-def wave_height(elevation_harmonics: np.ndarray) -> float:
-    phases = np.linspace(0.0, 2.0 * np.pi, 16384, endpoint=False)
-    modes = np.arange(1, 6, dtype=np.float64)
-    elevation = np.sum(
-        elevation_harmonics[:, None] * np.cos(modes[:, None] * phases),
-        axis=0,
-    )
-    return float(np.max(elevation) - np.min(elevation))
 
 
 def make_refinement_pair(
@@ -55,33 +33,6 @@ def make_refinement_pair(
         gxi=gxi * fine_scale,
     )
     return coarse, fine
-
-
-class FiniteStokesSupportSmokeTest(unittest.TestCase):
-    def test_case_below_ursell_limit_passes(self) -> None:
-        metrics, decision = evaluate_finite_stokes_support(
-            wave_height_upper_bound=0.18,
-            wavelength=10.0,
-            depth=1.0,
-        )
-
-        self.assertTrue(decision.accepted)
-        self.assertAlmostEqual(metrics.ursell_upper_bound, 18.0)
-
-    def test_audited_case_98_is_outside_support(self) -> None:
-        metrics, decision = evaluate_finite_stokes_support(
-            wave_height_upper_bound=wave_height(STOKES_CASE_98_HARMONICS),
-            wavelength=164.0 / 14.0,
-            depth=1.0,
-        )
-
-        self.assertFalse(decision.accepted)
-        self.assertTrue(decision.failed & QualityReason.OUTSIDE_SUPPORT)
-        self.assertAlmostEqual(
-            metrics.ursell_upper_bound,
-            96.87204675,
-            places=5,
-        )
 
 
 class CompleteNumericalTrajectoryTest(unittest.TestCase):
@@ -124,57 +75,6 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
         self.assertTrue(decision.failed & QualityReason.INCOMPLETE_TRAJECTORY)
         self.assertTrue(decision.failed & QualityReason.NONFINITE_TARGET)
         self.assertTrue(decision.failed & QualityReason.GL2_STAGE_RESIDUAL)
-
-
-class HamiltonianDriftTest(unittest.TestCase):
-    def test_exact_threshold_passes_and_larger_drift_fails(self) -> None:
-        threshold = 1.0 / 1024.0
-        eta = np.zeros((2, 1), dtype=np.float64)
-        xi = np.ones_like(eta)
-        boundary_gxi = np.asarray(
-            [[2.0], [2.0 * (1.0 + threshold)]],
-            dtype=np.float64,
-        )
-
-        metrics, boundary = evaluate_hamiltonian_drift(
-            eta,
-            xi,
-            boundary_gxi,
-            gravity=1.0,
-            dx=1.0,
-            threshold=threshold,
-        )
-        _, larger = evaluate_hamiltonian_drift(
-            eta,
-            xi,
-            np.asarray([[2.0], [2.0 * (1.0 + 2.0 * threshold)]]),
-            gravity=1.0,
-            dx=1.0,
-            threshold=threshold,
-        )
-
-        self.assertEqual(metrics.maximum_relative_drift, threshold)
-        self.assertTrue(boundary.accepted)
-        self.assertFalse(larger.accepted)
-        self.assertTrue(larger.failed & QualityReason.HAMILTONIAN_DRIFT)
-
-    def test_zero_initial_hamiltonian_uses_declared_tiny_denominator(self) -> None:
-        eta = np.asarray([[0.0], [1.0e-6]], dtype=np.float64)
-        xi = np.zeros_like(eta)
-        gxi = np.zeros_like(eta)
-
-        metrics, decision = evaluate_hamiltonian_drift(
-            eta,
-            xi,
-            gxi,
-            gravity=1.0,
-            dx=1.0,
-            threshold=1.0,
-            tiny=1.0e-6,
-        )
-
-        self.assertEqual(metrics.maximum_relative_drift, 5.0e-7)
-        self.assertTrue(decision.accepted)
 
 
 class InternalTrajectoryHealthTest(unittest.TestCase):

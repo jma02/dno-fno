@@ -1,9 +1,4 @@
-"""Single-arm GL2 production and separate time-refinement audit utilities.
-
-Paper-dataset production uses the previously validated GL2 step and runs each
-trajectory once.  The paired and single-halving executors remain available
-for method-level numerical audits; they do not govern production acceptance.
-"""
+"""Single-arm GL2 production and nonlinear-adjustment utilities."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,10 +14,8 @@ from numpy.typing import NDArray
 from solver.gen_data.pipeline.acceptance import (
     InternalTrajectoryMetrics,
     RefinementTrajectory,
-    TemporalRefinementMetrics,
     evaluate_complete_numerical_trajectory,
     evaluate_internal_trajectory_health,
-    evaluate_temporal_refinement,
 )
 from solver.gen_data.pipeline.quality import (
     QualityDecision,
@@ -62,8 +55,6 @@ class ResidualControlledGL2Contract:
     saved_dt: float = 0.08
     gl2_residual_tolerance: float = 1.0e-8
     gl2_iteration_cap: int = 4
-    refinement_tolerance: float = 1.0e-3
-    relative_floor: float = 1.0e-12
     target_time_chunk_size: int = 8
     dtype: str = "float64"
     post_step_state_filter: PostStepStateFilter = "sharp"
@@ -112,17 +103,16 @@ class ResidualControlledGL2Contract:
                 "target maximum_wavenumber must lie strictly below the "
                 "target-grid Nyquist"
             )
-        time_steps = (
-            self.production_dt,
-            self.audit_dt,
-            self.audit_retry_dt,
-        )
-        if not all(math.isfinite(dt) and dt > 0.0 for dt in time_steps):
-            raise ValueError("all time steps must be finite and positive")
+        if not math.isfinite(self.production_dt) or self.production_dt <= 0.0:
+            raise ValueError("production_dt must be finite and positive")
         if not math.isfinite(self.saved_dt) or self.saved_dt <= 0.0:
             raise ValueError("saved_dt must be finite and positive")
-        for dt in time_steps:
-            _integer_ratio(self.saved_dt, dt, "saved_dt", "time step")
+        _integer_ratio(
+            self.saved_dt,
+            self.production_dt,
+            "saved_dt",
+            "production_dt",
+        )
         if (
             not math.isfinite(self.gl2_residual_tolerance)
             or self.gl2_residual_tolerance <= 0.0
@@ -132,18 +122,6 @@ class ResidualControlledGL2Contract:
             )
         if self.gl2_iteration_cap < 0:
             raise ValueError("gl2_iteration_cap must be nonnegative")
-        if (
-            not math.isfinite(self.refinement_tolerance)
-            or self.refinement_tolerance < 0.0
-        ):
-            raise ValueError(
-                "refinement_tolerance must be finite and nonnegative"
-            )
-        if (
-            not math.isfinite(self.relative_floor)
-            or self.relative_floor <= 0.0
-        ):
-            raise ValueError("relative_floor must be finite and positive")
         if self.target_time_chunk_size < 1:
             raise ValueError("target_time_chunk_size must be positive")
         if self.dtype != "float64":
@@ -206,18 +184,6 @@ class ResidualControlledGL2Contract:
         )
         nyquist = math.pi * self.nx / self.length
         return maximum_wavenumber / nyquist
-
-    @property
-    def audit_dt(self) -> float:
-        """Half step used only by the time-refinement audit."""
-
-        return 0.5 * self.production_dt
-
-    @property
-    def audit_retry_dt(self) -> float:
-        """Quarter step retained by the bounded audit utility."""
-
-        return 0.25 * self.production_dt
 
     @property
     def target_definition(self) -> DiscreteDnoTarget:
@@ -330,62 +296,6 @@ class CaseGL2Telemetry:
     hit_iteration_cap: BoolArray
     all_stages_solved: bool
     maximum_stage_residual: float
-
-
-@dataclass(frozen=True)
-class RefinementAttempt:
-    """One consecutive time-step comparison for one case."""
-
-    coarse_dt: float
-    fine_dt: float
-    coarse_telemetry: CaseGL2Telemetry
-    fine_telemetry: CaseGL2Telemetry
-    metrics: TemporalRefinementMetrics
-    decision: QualityDecision
-
-
-@dataclass(frozen=True)
-class CaseRefinementResult:
-    """Final result for one input case after the bounded retry policy."""
-
-    case_index: int
-    primary: RefinementAttempt
-    retry_eligible: bool
-    retry_reason: str
-    retry: RefinementAttempt | None
-    accepted: bool
-    retained_dt: float | None
-    retained_trajectory: RefinementTrajectory | None
-
-    @property
-    def effective_decision(self) -> QualityDecision:
-        """Return the decision whose masks govern final acceptance."""
-
-        return self.retry.decision if self.retry is not None else self.primary.decision
-
-
-@dataclass(frozen=True)
-class RefinementExecution:
-    """Batch timings, retry routing, and ordered per-case results.
-
-    Rejected state arrays are deliberately absent. Their decision and GL2
-    telemetry remain available, but only an accepted case owns a retained
-    trajectory.
-    """
-
-    primary_coarse_timing: ArmTiming | None
-    primary_fine_timing: ArmTiming | None
-    retry_timing: ArmTiming | None
-    retry_case_indices: NDArray[np.int64]
-    cases: tuple[CaseRefinementResult, ...]
-
-    @property
-    def accepted_mask(self) -> BoolArray:
-        return np.asarray([case.accepted for case in self.cases], dtype=np.bool_)
-
-    @property
-    def retry_was_run(self) -> bool:
-        return bool(self.retry_case_indices.size)
 
 
 @dataclass(frozen=True)
@@ -1277,206 +1187,6 @@ def execute_production_trajectory(
     )
 
 
-def _evaluate_attempt(
-    coarse: ResidualControlledArm,
-    coarse_index: int,
-    fine: ResidualControlledArm,
-    fine_index: int,
-    depth: float,
-    contract: ResidualControlledGL2Contract,
-) -> RefinementAttempt:
-    coarse_telemetry = _case_telemetry(coarse, coarse_index, contract)
-    fine_telemetry = _case_telemetry(fine, fine_index, contract)
-    metrics, decision = evaluate_temporal_refinement(
-        _case_trajectory(coarse, coarse_index, coarse_telemetry),
-        _case_trajectory(fine, fine_index, fine_telemetry),
-        depth=depth,
-        gravity=contract.gravity,
-        length=contract.length,
-        maximum_wavenumber=contract.maximum_wavenumber,
-        tolerance=contract.refinement_tolerance,
-        relative_floor=contract.relative_floor,
-    )
-    return RefinementAttempt(
-        coarse_dt=coarse.dt,
-        fine_dt=fine.dt,
-        coarse_telemetry=coarse_telemetry,
-        fine_telemetry=fine_telemetry,
-        metrics=metrics,
-        decision=decision,
-    )
-
-
-def _retry_eligibility(
-    primary: RefinementAttempt,
-    fine: ResidualControlledArm,
-    case_index: int,
-    depth: float,
-) -> tuple[bool, str]:
-    if primary.decision.accepted:
-        return False, "primary pair accepted"
-    if not bool(fine.complete[case_index]):
-        return False, "fine arm is incomplete"
-    if not primary.fine_telemetry.all_stages_solved:
-        return False, "fine arm has an unsolved GL2 stage"
-    fields = (
-        fine.eta[:, case_index],
-        fine.xi[:, case_index],
-        fine.q_ref[:, case_index],
-    )
-    if not all(np.isfinite(field).all() for field in fields):
-        return False, "fine arm contains a nonfinite field"
-    if float(np.min(depth + fine.eta[:, case_index])) <= 0.0:
-        return False, "fine arm leaves the water-wave graph domain"
-    return True, "failed primary pair has a valid fine arm"
-
-
-def execute_residual_controlled_refinement(
-    eta0: FloatArray,
-    xi0: FloatArray,
-    depths: FloatArray,
-    saved_times: FloatArray,
-    *,
-    contract: ResidualControlledGL2Contract = PAPER_GL2_CONTRACT,
-    arm_executor: ArmExecutor = run_residual_controlled_arm,
-) -> RefinementExecution:
-    """Run the primary pair and the one permitted selective final halving.
-
-    A primary failure is retried only when its fine arm is complete, finite,
-    remains in the graph domain, and solved every implicit GL2 stage. Rejected
-    cases retain no trajectory prefix.
-    """
-
-    eta, xi, depth, times = _validated_inputs(
-        eta0, xi0, depths, saved_times, contract
-    )
-    coarse = arm_executor(
-        eta0=eta,
-        xi0=xi,
-        depths=depth,
-        saved_times=times,
-        contract=contract,
-        dt=contract.production_dt,
-    )
-    fine = arm_executor(
-        eta0=eta,
-        xi0=xi,
-        depths=depth,
-        saved_times=times,
-        contract=contract,
-        dt=contract.audit_dt,
-    )
-    _validate_arm(
-        coarse,
-        eta.shape[0],
-        contract.delivered_nx,
-        times,
-        contract.production_dt,
-    )
-    _validate_arm(
-        fine,
-        eta.shape[0],
-        contract.delivered_nx,
-        times,
-        contract.audit_dt,
-    )
-
-    primary = tuple(
-        _evaluate_attempt(coarse, index, fine, index, depth[index], contract)
-        for index in range(eta.shape[0])
-    )
-    eligibility = tuple(
-        _retry_eligibility(primary[index], fine, index, depth[index])
-        for index in range(eta.shape[0])
-    )
-    retry_indices = np.asarray(
-        [
-            index
-            for index, (eligible, _) in enumerate(eligibility)
-            if eligible
-        ],
-        dtype=np.int64,
-    )
-
-    retry_arm: ResidualControlledArm | None = None
-    retry_by_case: dict[int, RefinementAttempt] = {}
-    if retry_indices.size:
-        retry_arm = arm_executor(
-            eta0=np.take(eta, retry_indices, axis=0),
-            xi0=np.take(xi, retry_indices, axis=0),
-            depths=np.take(depth, retry_indices, axis=0),
-            saved_times=times,
-            contract=contract,
-            dt=contract.audit_retry_dt,
-        )
-        _validate_arm(
-            retry_arm,
-            retry_indices.size,
-            contract.delivered_nx,
-            times,
-            contract.audit_retry_dt,
-        )
-        retry_by_case = {
-            int(case_index): _evaluate_attempt(
-                fine,
-                int(case_index),
-                retry_arm,
-                retry_index,
-                depth[case_index],
-                contract,
-            )
-            for retry_index, case_index in enumerate(retry_indices)
-        }
-
-    cases: list[CaseRefinementResult] = []
-    for case_index, primary_attempt in enumerate(primary):
-        retry_attempt = retry_by_case.get(case_index)
-        effective = retry_attempt or primary_attempt
-        accepted = bool(effective.decision.accepted)
-        retained_arm = retry_arm if retry_attempt is not None else fine
-        retained_index = (
-            int(np.flatnonzero(retry_indices == case_index)[0])
-            if retry_attempt is not None
-            else case_index
-        )
-        retained_trajectory = None
-        retained_dt = None
-        if accepted:
-            retained_telemetry = (
-                effective.fine_telemetry
-                if retry_attempt is not None
-                else primary_attempt.fine_telemetry
-            )
-            assert retained_arm is not None
-            retained_trajectory = _case_trajectory(
-                retained_arm,
-                retained_index,
-                retained_telemetry,
-            )
-            retained_dt = retained_arm.dt
-        eligible, reason = eligibility[case_index]
-        cases.append(
-            CaseRefinementResult(
-                case_index=case_index,
-                primary=primary_attempt,
-                retry_eligible=eligible,
-                retry_reason=reason,
-                retry=retry_attempt,
-                accepted=accepted,
-                retained_dt=retained_dt,
-                retained_trajectory=retained_trajectory,
-            )
-        )
-
-    return RefinementExecution(
-        primary_coarse_timing=coarse.timing,
-        primary_fine_timing=fine.timing,
-        retry_timing=retry_arm.timing if retry_arm is not None else None,
-        retry_case_indices=retry_indices,
-        cases=tuple(cases),
-    )
-
-
 def _validated_variable_horizon_inputs(
     eta0: FloatArray,
     xi0: FloatArray,
@@ -1908,185 +1618,4 @@ def execute_variable_horizon_production_trajectory(
             )
             for case_index, case_arm in enumerate(case_arms)
         ),
-    )
-
-
-def execute_variable_horizon_residual_controlled_refinement(
-    eta0: FloatArray,
-    xi0: FloatArray,
-    depths: FloatArray,
-    case_saved_times: tuple[FloatArray, ...],
-    *,
-    contract: ResidualControlledGL2Contract = PAPER_GL2_CONTRACT,
-    arm_executor: ArmExecutor = run_residual_controlled_arm,
-) -> RefinementExecution:
-    """Run independent prefix horizons in one primary and one retry batch.
-
-    The numerical arms advance every case to the longest requested saved-time
-    grid. Each case is then restricted to its own grid, including its exact
-    GL2 substep telemetry, before refinement acceptance or retry routing.
-    Consequently, fields or stage failures after a case's declared horizon
-    cannot change that case's outcome.
-    """
-
-    eta, xi, depth, grids, longest = _validated_variable_horizon_inputs(
-        eta0,
-        xi0,
-        depths,
-        case_saved_times,
-        contract,
-    )
-    coarse = arm_executor(
-        eta0=eta,
-        xi0=xi,
-        depths=depth,
-        saved_times=longest,
-        contract=contract,
-        dt=contract.production_dt,
-    )
-    fine = arm_executor(
-        eta0=eta,
-        xi0=xi,
-        depths=depth,
-        saved_times=longest,
-        contract=contract,
-        dt=contract.audit_dt,
-    )
-    _validate_arm(
-        coarse,
-        eta.shape[0],
-        contract.delivered_nx,
-        longest,
-        contract.production_dt,
-    )
-    _validate_arm(
-        fine,
-        eta.shape[0],
-        contract.delivered_nx,
-        longest,
-        contract.audit_dt,
-    )
-    coarse_cases = tuple(
-        _single_case_prefix_arm(coarse, index, grid, contract)
-        for index, grid in enumerate(grids)
-    )
-    fine_cases = tuple(
-        _single_case_prefix_arm(fine, index, grid, contract)
-        for index, grid in enumerate(grids)
-    )
-    primary = tuple(
-        _evaluate_attempt(
-            coarse_cases[index],
-            0,
-            fine_cases[index],
-            0,
-            depth[index],
-            contract,
-        )
-        for index in range(eta.shape[0])
-    )
-    eligibility = tuple(
-        _retry_eligibility(
-            primary[index],
-            fine_cases[index],
-            0,
-            depth[index],
-        )
-        for index in range(eta.shape[0])
-    )
-    retry_indices = np.asarray(
-        [
-            index
-            for index, (eligible, _) in enumerate(eligibility)
-            if eligible
-        ],
-        dtype=np.int64,
-    )
-
-    retry_arm: ResidualControlledArm | None = None
-    retry_case_arms: dict[int, ResidualControlledArm] = {}
-    retry_by_case: dict[int, RefinementAttempt] = {}
-    if retry_indices.size:
-        retry_grids = tuple(grids[int(index)] for index in retry_indices)
-        retry_longest = max(retry_grids, key=lambda grid: grid.size)
-        retry_arm = arm_executor(
-            eta0=np.take(eta, retry_indices, axis=0),
-            xi0=np.take(xi, retry_indices, axis=0),
-            depths=np.take(depth, retry_indices, axis=0),
-            saved_times=retry_longest,
-            contract=contract,
-            dt=contract.audit_retry_dt,
-        )
-        _validate_arm(
-            retry_arm,
-            retry_indices.size,
-            contract.delivered_nx,
-            retry_longest,
-            contract.audit_retry_dt,
-        )
-        retry_case_arms = {
-            int(case_index): _single_case_prefix_arm(
-                retry_arm,
-                retry_index,
-                grids[int(case_index)],
-                contract,
-            )
-            for retry_index, case_index in enumerate(retry_indices)
-        }
-        retry_by_case = {
-            int(case_index): _evaluate_attempt(
-                fine_cases[int(case_index)],
-                0,
-                retry_case_arms[int(case_index)],
-                0,
-                depth[int(case_index)],
-                contract,
-            )
-            for case_index in retry_indices
-        }
-
-    cases: list[CaseRefinementResult] = []
-    for case_index, primary_attempt in enumerate(primary):
-        retry_attempt = retry_by_case.get(case_index)
-        effective = retry_attempt or primary_attempt
-        accepted = bool(effective.decision.accepted)
-        retained_arm = (
-            retry_case_arms[case_index]
-            if retry_attempt is not None
-            else fine_cases[case_index]
-        )
-        retained_trajectory = None
-        retained_dt = None
-        if accepted:
-            retained_telemetry = (
-                retry_attempt.fine_telemetry
-                if retry_attempt is not None
-                else primary_attempt.fine_telemetry
-            )
-            retained_trajectory = _case_trajectory(
-                retained_arm,
-                0,
-                retained_telemetry,
-            )
-            retained_dt = retained_arm.dt
-        eligible, reason = eligibility[case_index]
-        cases.append(
-            CaseRefinementResult(
-                case_index=case_index,
-                primary=primary_attempt,
-                retry_eligible=eligible,
-                retry_reason=reason,
-                retry=retry_attempt,
-                accepted=accepted,
-                retained_dt=retained_dt,
-                retained_trajectory=retained_trajectory,
-            )
-        )
-
-    return RefinementExecution(
-        primary_coarse_timing=coarse.timing,
-        primary_fine_timing=fine.timing,
-        retry_timing=retry_arm.timing if retry_arm is not None else None,
-        retry_case_indices=retry_indices,
-        cases=tuple(cases),
     )

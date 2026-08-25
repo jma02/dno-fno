@@ -17,17 +17,6 @@ FloatArray: TypeAlias = NDArray[np.float64]
 
 
 @dataclass(frozen=True)
-class StokesSupportMetrics:
-    """Quantities in the conservative finite-Stokes Ursell condition."""
-
-    wave_height_upper_bound: float
-    wavelength: float
-    depth: float
-    ursell_upper_bound: float
-    ursell_limit: float
-
-
-@dataclass(frozen=True)
 class RefinementTrajectory:
     """One trajectory restricted to the common saved comparison times."""
 
@@ -47,15 +36,6 @@ class TemporalRefinementMetrics:
     xi_error: float
     gxi_error: float
     maximum_error: float
-
-
-@dataclass(frozen=True)
-class HamiltonianDriftMetrics:
-    """Hamiltonian drift computed on every supplied trajectory frame."""
-
-    initial_hamiltonian: float | None
-    maximum_relative_drift: float | None
-    threshold: float
 
 
 @dataclass(frozen=True)
@@ -165,124 +145,6 @@ def evaluate_internal_trajectory_health(
             evaluated=required,
             failed=failed,
         ),
-    )
-
-
-def evaluate_hamiltonian_drift(
-    eta: FloatArray,
-    xi: FloatArray,
-    gxi: FloatArray,
-    *,
-    gravity: float,
-    dx: float,
-    threshold: float = 1.0e-3,
-    tiny: float = np.finfo(np.float64).tiny,
-) -> tuple[HamiltonianDriftMetrics, QualityDecision]:
-    """Require Hamiltonian drift at every supplied frame to be at most the limit."""
-
-    eta_array = np.asarray(eta, dtype=np.float64)
-    xi_array = np.asarray(xi, dtype=np.float64)
-    gxi_array = np.asarray(gxi, dtype=np.float64)
-    if eta_array.ndim != 2:
-        raise ValueError(f"eta must have shape (time, space), got {eta_array.shape}")
-    if xi_array.shape != eta_array.shape or gxi_array.shape != eta_array.shape:
-        raise ValueError("eta, xi, and gxi must have identical shapes")
-    if eta_array.shape[0] == 0 or eta_array.shape[1] == 0:
-        raise ValueError("a trajectory cannot be empty")
-    for value, name in (
-        (gravity, "gravity"),
-        (dx, "dx"),
-        (tiny, "tiny"),
-    ):
-        if not np.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{name} must be finite and positive")
-    if not np.isfinite(threshold) or threshold < 0.0:
-        raise ValueError("threshold must be finite and nonnegative")
-
-    reason = QualityReason.HAMILTONIAN_DRIFT
-    initial_hamiltonian: float | None = None
-    maximum_relative_drift: float | None = None
-    failed = reason
-    if (
-        np.isfinite(eta_array).all()
-        and np.isfinite(xi_array).all()
-        and np.isfinite(gxi_array).all()
-    ):
-        hamiltonian = 0.5 * dx * np.sum(
-            xi_array * gxi_array + gravity * eta_array**2,
-            axis=1,
-        )
-        initial_hamiltonian = float(hamiltonian[0])
-        denominator = max(abs(initial_hamiltonian), tiny)
-        maximum_relative_drift = float(
-            np.max(np.abs((hamiltonian - initial_hamiltonian) / denominator))
-        )
-        if (
-            np.isfinite(maximum_relative_drift)
-            and maximum_relative_drift <= threshold
-        ):
-            failed = QualityReason.NONE
-
-    return (
-        HamiltonianDriftMetrics(
-            initial_hamiltonian=initial_hamiltonian,
-            maximum_relative_drift=maximum_relative_drift,
-            threshold=float(threshold),
-        ),
-        QualityDecision(
-            scope=QualityScope.TRAJECTORY,
-            required=reason,
-            evaluated=reason,
-            failed=failed,
-        ),
-    )
-
-
-def evaluate_finite_stokes_support(
-    *,
-    wave_height_upper_bound: float,
-    wavelength: float,
-    depth: float,
-    ursell_limit: float = 26.0,
-) -> tuple[StokesSupportMetrics, QualityDecision]:
-    """Evaluate the sufficient condition ``H_+ lambda^2/h^3 <= 26``."""
-
-    values = np.asarray(
-        [wave_height_upper_bound, wavelength, depth, ursell_limit],
-        dtype=np.float64,
-    )
-    if wave_height_upper_bound < 0.0:
-        raise ValueError("wave_height_upper_bound must be nonnegative")
-    if wavelength <= 0.0:
-        raise ValueError("wavelength must be positive")
-    if depth <= 0.0:
-        raise ValueError("depth must be positive")
-    if ursell_limit <= 0.0:
-        raise ValueError("ursell_limit must be positive")
-
-    ursell_upper_bound = float(
-        wave_height_upper_bound * wavelength**2 / depth**3
-    )
-    in_support = bool(
-        np.isfinite(values).all() and ursell_upper_bound <= ursell_limit
-    )
-
-    reason = QualityReason.OUTSIDE_SUPPORT
-    decision = QualityDecision(
-        scope=QualityScope.SAMPLE,
-        required=reason,
-        evaluated=reason,
-        failed=QualityReason.NONE if in_support else reason,
-    )
-    return (
-        StokesSupportMetrics(
-            wave_height_upper_bound=float(wave_height_upper_bound),
-            wavelength=float(wavelength),
-            depth=float(depth),
-            ursell_upper_bound=ursell_upper_bound,
-            ursell_limit=float(ursell_limit),
-        ),
-        decision,
     )
 
 

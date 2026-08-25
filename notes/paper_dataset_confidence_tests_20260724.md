@@ -963,26 +963,26 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
     --overwrite
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_paper_acceptance_smoke
+  uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_smoke
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_paper_acceptance_cross_family
+  uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_cross_family
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_stokes_spatial_smoke
+  uv run python -m unittest solver.gen_data.tests.test_stokes_spatial_smoke
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python solver/gen_data/tests_tanaka_tangent_hermite.py
+  uv run python solver/gen_data/tests/test_tanaka_tangent_hermite.py
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python scripts/plot_paper_dataset_shape_stress.py
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
-    solver.gen_data.tests_benjamin_feir_jcp09 \
-    solver.gen_data.tests_jonswap_tma \
-    solver.gen_data.pipeline.test_reference \
-    solver.gen_data.pipeline.test_acceptance \
+    solver.gen_data.tests.test_benjamin_feir_jcp09 \
+    solver.gen_data.tests.test_jonswap_tma \
+    solver.gen_data.pipeline.tests.test_reference \
+    solver.gen_data.pipeline.tests.test_acceptance \
     solver.solvers.test_time_integrator_telemetry \
     solver.gen_data.tests_stokes_ursell_sampling \
     solver.gen_data.tests_stokes_archive_contract
@@ -1009,18 +1009,18 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
-    solver.gen_data.pipeline.test_production \
-    solver.gen_data.pipeline.test_archive \
-    solver.gen_data.pipeline.test_manifest
+    solver.gen_data.pipeline.tests.test_production \
+    solver.gen_data.pipeline.tests.test_archive \
+    solver.gen_data.pipeline.tests.test_manifest
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
     solver.gen_data.tests_stokes_population \
-    solver.gen_data.tests_stokes_static_pipeline \
+    solver.gen_data.tests.test_stokes_static_pipeline \
     solver.gen_data.tests_tanaka_population \
     solver.gen_data.tests_benjamin_feir_population \
     solver.gen_data.tests_jonswap_tma_population \
-    solver.gen_data.tests_trajectory_family_adapters
+    solver.gen_data.tests.test_trajectory_family_adapters
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python scripts/run_static_stokes_exact_target_pilot.py \

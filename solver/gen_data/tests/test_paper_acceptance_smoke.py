@@ -3,7 +3,7 @@
 Run with:
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-      uv run python -m unittest solver.gen_data.tests_paper_acceptance_smoke
+      uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_smoke
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
 )
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
     RefinementTrajectory,
-    evaluate_finite_stokes_support,
     evaluate_temporal_refinement,
 )
 from solver.solvers.time_integrator import (  # noqa: E402
@@ -99,25 +98,6 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
     def test_finite_stokes_constructor_support(self) -> None:
         length = 164.0
         k0 = 2.0 * np.pi * 14 / length
-        wavelength = 2.0 * np.pi / k0
-        rejected_height = finite_depth_stokes_wave_height(
-            k0, depth=1.0, gravity=1.0, a0=0.22543466384990768
-        )
-        accepted_height = finite_depth_stokes_wave_height(
-            k0, depth=1.0, gravity=1.0, a0=0.085
-        )
-        rejected_metrics, rejected_decision = evaluate_finite_stokes_support(
-            wave_height_upper_bound=float(rejected_height),
-            wavelength=float(wavelength),
-            depth=1.0,
-        )
-        accepted_metrics, accepted_decision = evaluate_finite_stokes_support(
-            wave_height_upper_bound=float(accepted_height),
-            wavelength=float(wavelength),
-            depth=1.0,
-        )
-
-        self.assertFalse(rejected_decision.accepted)
         self.assertFalse(
             bool(
                 finite_depth_stokes_in_ursell_support(
@@ -125,8 +105,6 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
                 )
             )
         )
-        self.assertGreater(rejected_metrics.ursell_upper_bound, 96.8)
-        self.assertTrue(accepted_decision.accepted)
         self.assertTrue(
             bool(
                 finite_depth_stokes_in_ursell_support(
@@ -134,7 +112,6 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
                 )
             )
         )
-        self.assertLess(accepted_metrics.ursell_upper_bound, 25.0)
 
     def test_finite_stokes_harmonics_vectorize_over_parameter_draws(self) -> None:
         k0 = 2.0 * np.pi * np.asarray([14.0, 14.0]) / 164.0

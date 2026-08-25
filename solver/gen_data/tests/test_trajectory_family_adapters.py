@@ -55,11 +55,11 @@ from solver.gen_data.pipeline.production import (  # noqa: E402
 from solver.gen_data.pipeline.refinement import (  # noqa: E402
     PAPER_JONSWAP_GL2_CONTRACT,
     ResidualControlledGL2Contract,
-    execute_residual_controlled_refinement,
+    execute_production_trajectory,
 )
 from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
     StoredTimePolicy,
-    outcomes_from_refinement,
+    outcomes_from_production,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
     commit_case_outcomes,
@@ -96,8 +96,6 @@ def wiring_contract() -> ResidualControlledGL2Contract:
         saved_dt=0.02,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=8,
-        refinement_tolerance=1.0e-3,
-        relative_floor=1.0e-12,
         target_time_chunk_size=2,
     )
 
@@ -801,7 +799,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 self.assertFalse(proposed.paths.shard.exists())
                 self.assertFalse(proposed.paths.result.exists())
                 initial = constructor(proposed)
-                execution = execute_residual_controlled_refinement(
+                execution = execute_production_trajectory(
                     initial.eta0,
                     initial.xi0,
                     initial.depths,
@@ -809,7 +807,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     contract=contract,
                 )
                 self.assertTrue(execution.cases[0].accepted)
-                outcomes = outcomes_from_refinement(
+                outcomes = outcomes_from_production(
                     execution,
                     initial.depths,
                     family=family,

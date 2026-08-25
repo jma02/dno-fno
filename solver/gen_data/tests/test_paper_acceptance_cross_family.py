@@ -6,7 +6,7 @@ current paper dataset.
 Run with:
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-      uv run python -m unittest solver.gen_data.tests_paper_acceptance_cross_family
+      uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_cross_family
 """
 from __future__ import annotations
 

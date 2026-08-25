@@ -63,7 +63,7 @@ different construction cannot be resumed, which prevents mixed datasets.
 ## Focused implementation tests
 
 The direct CPU test
-`solver/gen_data/tests_tanaka_tangent_hermite.py` checks:
+`solver/gen_data/tests/test_tanaka_tangent_hermite.py` checks:
 
 - exact interpolation of a cubic on nonuniform knots;
 - the prescribed derivative at every knot;

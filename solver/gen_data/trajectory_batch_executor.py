@@ -381,11 +381,6 @@ class TrajectoryExecutionConfig:
         ):
             if numerical[optional_field] is None:
                 numerical.pop(optional_field)
-        for audit_field in (
-            "refinement_tolerance",
-            "relative_floor",
-        ):
-            numerical.pop(audit_field)
         record: dict[str, object] = {
             "family": self.family,
             "role": self.role,

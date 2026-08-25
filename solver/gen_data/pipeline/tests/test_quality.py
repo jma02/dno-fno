@@ -1,15 +1,12 @@
-"""Focused tests for generated-data quality and identity contracts."""
+"""Focused tests for generated-data quality decisions."""
 from __future__ import annotations
 
 import unittest
 
-from solver.gen_data.pipeline import (
-    GeneratorRevisionRecord,
+from solver.gen_data.pipeline.quality import (
     QualityDecision,
     QualityReason,
     QualityScope,
-    SampleRecord,
-    TrajectoryRecord,
     reasons_from_bits,
 )
 
@@ -105,22 +102,6 @@ class QualityDecisionTest(unittest.TestCase):
         )
 
         self.assertTrue(decision.accepted)
-
-
-class GenerationRecordTest(unittest.TestCase):
-    def test_sample_retains_trajectory_and_generator_identity(self) -> None:
-        generator = GeneratorRevisionRecord("tanaka", "git:abc123")
-        trajectory = TrajectoryRecord(generator, "run-7:case-24")
-        sample = SampleRecord(trajectory, frame_index=19)
-
-        self.assertEqual(sample.trajectory.trajectory_id, "run-7:case-24")
-        self.assertEqual(sample.trajectory.generator_revision.family_id, "tanaka")
-
-    def test_negative_frame_index_is_invalid(self) -> None:
-        generator = GeneratorRevisionRecord("tanaka", "git:abc123")
-        trajectory = TrajectoryRecord(generator, "run-7:case-24")
-        with self.assertRaisesRegex(ValueError, "nonnegative"):
-            SampleRecord(trajectory, frame_index=-1)
 
 
 if __name__ == "__main__":

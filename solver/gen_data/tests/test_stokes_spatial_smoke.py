@@ -5,7 +5,7 @@ This is method-level validation, not a per-sample acceptance rule.
 Run with:
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-      uv run python -m unittest solver.gen_data.tests_stokes_spatial_smoke
+      uv run python -m unittest solver.gen_data.tests.test_stokes_spatial_smoke
 """
 from __future__ import annotations
 

@@ -706,7 +706,7 @@ sha256sum \
 
 ```bash
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
-  uv run python -m unittest solver.gen_data.tests_benjamin_feir_jcp09
+  uv run python -m unittest solver.gen_data.tests.test_benjamin_feir_jcp09
 ```
 
 The recorded result is six passing tests.

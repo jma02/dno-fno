@@ -135,7 +135,7 @@ class PaperDatasetReleaseFileManifestTest(unittest.TestCase):
         )
         self.assertEqual(
             expected_sha256,
-            "e25c18ca85367ee7c10c295d728452575ffaa148a768b589a00284c35cbcabaa",
+            "64ffff276b7f59e7c2984f94079c59f686e5dc71014016aa88aee60f2da41efd",
         )
         self.assertIsInstance(paths, list)
         assert isinstance(count, int)
