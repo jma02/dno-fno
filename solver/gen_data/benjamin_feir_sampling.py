@@ -19,13 +19,13 @@ from typing import Final, TypeAlias
 import numpy as np
 
 from solver.gen_data.benjamin_feir_jcp09 import (
+    BENJAMIN_FEIR_MODE_PAIRS,
     CARRIER_STEEPNESS_MAX,
     CARRIER_STEEPNESS_MIN,
     PERTURBATION_RATIO_MIN,
     JCP09_RELATIVE_SIDEBAND_PHASE,
     ParameterArrays,
     deep_water_proxy_depth,
-    feasible_mode_pairs,
     focused_steepness_carrier_upper_bound,
     focused_steepness_proxy,
     instability_band_fraction,
@@ -68,11 +68,11 @@ def _conditional_steepness_bounds(
 
 
 BENJAMIN_FEIR_SAMPLE_CELLS: dict[str, BenjaminFeirCell] = {
-    f"n_c_{int(carrier_mode):02d}__delta_n_{int(sideband_offset):02d}": (
-        int(carrier_mode),
-        int(sideband_offset),
+    f"n_c_{carrier_mode:02d}__delta_n_{sideband_offset:02d}": (
+        carrier_mode,
+        sideband_offset,
     )
-    for carrier_mode, sideband_offset in feasible_mode_pairs().tolist()
+    for carrier_mode, sideband_offset in BENJAMIN_FEIR_MODE_PAIRS
 }
 BENJAMIN_FEIR_SAMPLE_CELL_IDS = tuple(BENJAMIN_FEIR_SAMPLE_CELLS)
 

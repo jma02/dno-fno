@@ -26,26 +26,26 @@ CARRIER_MODE_MAX = 20
 CARRIER_STEEPNESS_MIN = 0.05
 CARRIER_STEEPNESS_MAX = 0.13
 PERTURBATION_RATIO_MIN = 0.05
-PERTURBATION_RATIO_MAX = 0.20
 DEEP_WATER_MINIMUM_KH = 5.0
 JCP09_RELATIVE_SIDEBAND_PHASE = -math.pi / 4.0
 BENJAMIN_FEIR_CONSTRUCTOR = (
     "jcp09_equation_33_with_project_fifth_order_carrier_v2"
 )
+BENJAMIN_FEIR_MODE_PAIRS = tuple(
+    (carrier_mode, sideband_offset)
+    for carrier_mode in range(CARRIER_MODE_MIN, CARRIER_MODE_MAX + 1)
+    for sideband_offset in range(1, carrier_mode)
+    if sideband_offset / carrier_mode
+    < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
+)
 
 
-def deep_water_proxy_depth(
-    length: float,
-    *,
-    minimum_kh: float = DEEP_WATER_MINIMUM_KH,
-) -> float:
-    """Return a depth for which the first Fourier mode has ``kh=minimum_kh``."""
+def deep_water_proxy_depth(length: float) -> float:
+    """Choose finite depth so every nonzero Fourier mode has ``kh >= 5``."""
 
     if not math.isfinite(length) or length <= 0.0:
         raise ValueError("length must be finite and positive")
-    if not math.isfinite(minimum_kh) or minimum_kh <= 0.0:
-        raise ValueError("minimum_kh must be finite and positive")
-    return minimum_kh * length / (2.0 * math.pi)
+    return DEEP_WATER_MINIMUM_KH * length / (2.0 * math.pi)
 
 
 def instability_band_fraction(
@@ -115,194 +115,6 @@ def focused_steepness_carrier_upper_bound(
             focused_steepness_limit**2 + 3.0 * instability_threshold**2
         )
     ) / 3.0
-
-
-def is_supported(
-    carrier_mode: int | np.ndarray,
-    sideband_offset: int | np.ndarray,
-    carrier_steepness: float | np.ndarray,
-    perturbation_ratio: float | np.ndarray,
-    *,
-    carrier_mode_min: int = CARRIER_MODE_MIN,
-    carrier_mode_max: int = CARRIER_MODE_MAX,
-    carrier_steepness_min: float = CARRIER_STEEPNESS_MIN,
-    carrier_steepness_max: float = CARRIER_STEEPNESS_MAX,
-    perturbation_ratio_min: float = PERTURBATION_RATIO_MIN,
-    perturbation_ratio_max: float = PERTURBATION_RATIO_MAX,
-) -> np.ndarray:
-    """Return whether parameters belong to the declared JCP09-style support."""
-
-    carrier = np.asarray(carrier_mode)
-    offset = np.asarray(sideband_offset)
-    steepness = np.asarray(carrier_steepness)
-    ratio = np.asarray(perturbation_ratio)
-    band_fraction = instability_band_fraction(carrier, offset, steepness)
-    return (
-        (carrier >= carrier_mode_min)
-        & (carrier <= carrier_mode_max)
-        & (offset >= 1)
-        & (offset < carrier)
-        & (steepness >= carrier_steepness_min)
-        & (steepness <= carrier_steepness_max)
-        & (ratio >= perturbation_ratio_min)
-        & (ratio <= perturbation_ratio_max)
-        & (band_fraction > 0.0)
-        & (band_fraction < 1.0)
-    )
-
-
-def feasible_mode_pairs(
-    *,
-    carrier_mode_min: int = CARRIER_MODE_MIN,
-    carrier_mode_max: int = CARRIER_MODE_MAX,
-    carrier_steepness_max: float = CARRIER_STEEPNESS_MAX,
-) -> np.ndarray:
-    """Enumerate ``(n_c, Delta n)`` pairs intersecting the instability band."""
-
-    if carrier_mode_min < 2 or carrier_mode_max < carrier_mode_min:
-        raise ValueError("carrier-mode bounds must satisfy 2 <= min <= max")
-    if not math.isfinite(carrier_steepness_max) or carrier_steepness_max <= 0.0:
-        raise ValueError("carrier_steepness_max must be finite and positive")
-    pairs = tuple(
-        (carrier, offset)
-        for carrier in range(carrier_mode_min, carrier_mode_max + 1)
-        for offset in range(1, carrier)
-        if offset / carrier < 2.0 * math.sqrt(2.0) * carrier_steepness_max
-    )
-    if not pairs:
-        raise ValueError("the requested bounds contain no unstable mode pair")
-    return np.asarray(pairs, dtype=np.int32)
-
-
-def sample_parameters(
-    rng: np.random.Generator,
-    *,
-    batch_size: int,
-    length: float,
-    carrier_mode_min: int = CARRIER_MODE_MIN,
-    carrier_mode_max: int = CARRIER_MODE_MAX,
-    carrier_steepness_min: float = CARRIER_STEEPNESS_MIN,
-    carrier_steepness_max: float = CARRIER_STEEPNESS_MAX,
-    perturbation_ratio_min: float = PERTURBATION_RATIO_MIN,
-    perturbation_ratio_max: float = PERTURBATION_RATIO_MAX,
-) -> ParameterArrays:
-    """Sample the declared support without outcome-dependent mode rewrites.
-
-    Feasible integer mode pairs are balanced uniformly.  Conditional on a
-    pair, steepness is uniform over the part of the declared interval inside
-    the leading instability band.
-    """
-
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    if (
-        not math.isfinite(carrier_steepness_min)
-        or not math.isfinite(carrier_steepness_max)
-        or not 0.0 < carrier_steepness_min <= carrier_steepness_max
-    ):
-        raise ValueError("invalid carrier-steepness bounds")
-    if (
-        not math.isfinite(perturbation_ratio_min)
-        or not math.isfinite(perturbation_ratio_max)
-        or not 0.0 < perturbation_ratio_min <= perturbation_ratio_max
-    ):
-        raise ValueError("invalid perturbation-ratio bounds")
-
-    pairs = feasible_mode_pairs(
-        carrier_mode_min=carrier_mode_min,
-        carrier_mode_max=carrier_mode_max,
-        carrier_steepness_max=carrier_steepness_max,
-    )
-    pair_indices = rng.integers(0, pairs.shape[0], size=batch_size)
-    carrier_mode = pairs[pair_indices, 0]
-    sideband_offset = pairs[pair_indices, 1]
-    instability_lower_bound = sideband_offset / (
-        2.0 * np.sqrt(2.0) * carrier_mode
-    )
-    steepness_lower_bound = np.maximum(
-        carrier_steepness_min,
-        np.nextafter(instability_lower_bound, np.inf),
-    )
-    carrier_steepness = rng.uniform(
-        steepness_lower_bound,
-        carrier_steepness_max,
-    ).astype(np.float64)
-    perturbation_ratio = rng.uniform(
-        perturbation_ratio_min,
-        perturbation_ratio_max,
-        size=batch_size,
-    ).astype(np.float64)
-    translation = rng.uniform(
-        0.0,
-        length,
-        size=batch_size,
-    ).astype(np.float64)
-    depth = np.full(
-        batch_size,
-        deep_water_proxy_depth(length),
-        dtype=np.float64,
-    )
-
-    parameters: ParameterArrays = {
-        "n_carr": carrier_mode.astype(np.int32),
-        "side_offset": sideband_offset.astype(np.int32),
-        "n_l": (carrier_mode - sideband_offset).astype(np.int32),
-        "n_r": (carrier_mode + sideband_offset).astype(np.int32),
-        "eps_carrier": carrier_steepness,
-        "eps_pert": perturbation_ratio,
-        "translation": translation,
-        "depth": depth,
-    }
-    if not np.all(
-        is_supported(
-            parameters["n_carr"],
-            parameters["side_offset"],
-            parameters["eps_carrier"],
-            parameters["eps_pert"],
-            carrier_mode_min=carrier_mode_min,
-            carrier_mode_max=carrier_mode_max,
-            carrier_steepness_min=carrier_steepness_min,
-            carrier_steepness_max=carrier_steepness_max,
-            perturbation_ratio_min=perturbation_ratio_min,
-            perturbation_ratio_max=perturbation_ratio_max,
-        )
-    ):
-        raise RuntimeError("internal error: sampler produced an unsupported case")
-    return parameters
-
-
-def serialize_parameters(
-    parameters: ParameterArrays,
-) -> list[dict[str, float | int | str]]:
-    """Convert a batch to complete JSON-compatible case specifications."""
-
-    count = int(parameters["n_carr"].shape[0])
-    return [
-        {
-            "n_carr": int(parameters["n_carr"][index]),
-            "side_offset": int(parameters["side_offset"][index]),
-            "n_l": int(parameters["n_l"][index]),
-            "n_r": int(parameters["n_r"][index]),
-            "first_harmonic_carrier_steepness": float(
-                parameters["eps_carrier"][index]
-            ),
-            "first_harmonic_sideband_ratio": float(
-                parameters["eps_pert"][index]
-            ),
-            "translation": float(parameters["translation"][index]),
-            "relative_sideband_phase": JCP09_RELATIVE_SIDEBAND_PHASE,
-            "carrier_phase_in_translated_frame": 0.0,
-            "depth": float(parameters["depth"][index]),
-            "instability_band_fraction": float(
-                instability_band_fraction(
-                    parameters["n_carr"][index],
-                    parameters["side_offset"][index],
-                    parameters["eps_carrier"][index],
-                )
-            ),
-        }
-        for index in range(count)
-    ]
 
 
 def _deep_stokes_carrier(

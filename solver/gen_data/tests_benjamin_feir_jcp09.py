@@ -20,16 +20,12 @@ import numpy as np  # noqa: E402
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi  # noqa: E402
 from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
-    PERTURBATION_RATIO_MAX,
+    BENJAMIN_FEIR_MODE_PAIRS,
     build_initial_conditions,
     deep_water_proxy_depth,
-    feasible_mode_pairs,
     focused_steepness_carrier_upper_bound,
     focused_steepness_proxy,
     instability_band_fraction,
-    is_supported,
-    sample_parameters,
-    serialize_parameters,
 )
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
     RefinementTrajectory,
@@ -125,20 +121,13 @@ def _fixed_band_relative_error(
 
 
 class BenjaminFeirJCP09Test(unittest.TestCase):
-    def test_support_is_exactly_the_declared_instability_band(self) -> None:
-        self.assertTrue(bool(is_supported(9, 2, 0.13, 0.10)))
-        self.assertTrue(bool(is_supported(10, 2, 0.10, 0.10)))
-        self.assertTrue(bool(is_supported(10, 2, 0.11, 0.10)))
-        self.assertTrue(bool(is_supported(10, 2, 0.10, 0.100001)))
-        self.assertFalse(bool(is_supported(9, 4, 0.13, 0.10)))
-        self.assertFalse(bool(is_supported(4, 4, 0.13, 0.10)))
-        self.assertEqual(PERTURBATION_RATIO_MAX, 0.20)
+    def test_mode_pairs_intersect_the_instability_band(self) -> None:
         self.assertAlmostEqual(
             float(instability_band_fraction(9, 2, 0.13)),
             0.6043647702,
             places=9,
         )
-        pairs = {tuple(pair) for pair in feasible_mode_pairs().tolist()}
+        pairs = set(BENJAMIN_FEIR_MODE_PAIRS)
         self.assertEqual(len(pairs), 66)
         self.assertIn((10, 2), pairs)
 
@@ -159,47 +148,6 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             ),
             0.10,
             places=15,
-        )
-
-    def test_sampler_never_rewrites_or_leaves_support(self) -> None:
-        parameters = sample_parameters(
-            np.random.default_rng(20260725),
-            batch_size=8192,
-            length=LENGTH,
-        )
-        supported = is_supported(
-            parameters["n_carr"],
-            parameters["side_offset"],
-            parameters["eps_carrier"],
-            parameters["eps_pert"],
-        )
-        self.assertTrue(np.all(supported))
-        self.assertTrue(
-            np.all(parameters["eps_pert"] <= PERTURBATION_RATIO_MAX)
-        )
-        self.assertTrue(np.all(parameters["n_l"] >= 1))
-        self.assertTrue(
-            np.all(parameters["n_r"] == parameters["n_carr"] + parameters["side_offset"])
-        )
-        self.assertTrue(
-            np.allclose(
-                parameters["depth"],
-                deep_water_proxy_depth(LENGTH),
-                rtol=0.0,
-                atol=0.0,
-            )
-        )
-        self.assertTrue(np.all(parameters["translation"] >= 0.0))
-        self.assertTrue(np.all(parameters["translation"] < 2.0 * np.pi))
-        self.assertIn(
-            (10, 2),
-            set(
-                zip(
-                    parameters["n_carr"].tolist(),
-                    parameters["side_offset"].tolist(),
-                    strict=True,
-                )
-            ),
         )
 
     def test_canonical_state_is_literal_equation_33(self) -> None:
@@ -243,10 +191,13 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
         nx = 256
         shift = 13
         x = jnp.asarray(LENGTH * np.arange(nx) / nx, dtype=jnp.float64)
-        parameters = sample_parameters(
-            np.random.default_rng(11),
-            batch_size=4,
-            length=LENGTH,
+        parameters = {
+            name: np.repeat(values, 4)
+            for name, values in _canonical_parameters().items()
+        }
+        parameters["translation"] = np.asarray(
+            [0.0, 0.4, 1.2, 2.7],
+            dtype=np.float64,
         )
         eta, xi = build_initial_conditions(
             x=x,
@@ -342,20 +293,6 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             rtol=0.0,
             atol=2e-13,
         )
-
-    def test_serialized_parameters_name_translation_and_harmonic_quantities(
-        self,
-    ) -> None:
-        record = serialize_parameters(_canonical_parameters())[0]
-        self.assertNotIn("schema", record)
-        self.assertEqual(record["translation"], 0.0)
-        self.assertEqual(record["relative_sideband_phase"], -np.pi / 4.0)
-        self.assertEqual(record["carrier_phase_in_translated_frame"], 0.0)
-        self.assertEqual(record["first_harmonic_carrier_steepness"], 0.13)
-        self.assertEqual(record["first_harmonic_sideband_ratio"], 0.10)
-        self.assertNotIn("phase", record)
-        self.assertNotIn("eps_carrier", record)
-        self.assertNotIn("eps_pert", record)
 
     def test_canonical_fixed_band_spatial_refinement(self) -> None:
         states: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []

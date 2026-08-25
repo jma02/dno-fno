@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypeAlias, cast
+
 import jax
 import jax.numpy as jnp
 
@@ -8,9 +10,15 @@ from ..solvers.dno_series_jax import build_grid, dno_series_eval
 
 FINITE_DEPTH_STOKES_URSELL_LIMIT = 26.0
 FINITE_DEPTH_STOKES_HEIGHT_PHASE_POINTS = 4096
+StokesScalar: TypeAlias = float | jax.Array
 
 
-def _finite_depth_coeffs(k0: float, depth: float, gravity: float, a0: float) -> dict[str, float]:
+def _finite_depth_coeffs(
+    k0: StokesScalar,
+    depth: StokesScalar,
+    gravity: StokesScalar,
+    a0: StokesScalar,
+) -> dict[str, StokesScalar]:
     eps = k0 * a0
     eps2 = eps**2
     eps3 = eps**3
@@ -315,7 +323,7 @@ def _finite_stokes_eta_xi_from_theta(
         * jnp.sin(5.0 * theta)
     )
     xi = a0 * coeffs["om0"] * xi / k0
-    return eta, xi
+    return cast(jax.Array, eta), xi
 
 
 def stokes_eta_xi_at_phase(
@@ -358,8 +366,8 @@ def stokes_eta_xi_at_phase(
 def stokes_eta_xi(
     x: jnp.ndarray,
     time: jnp.ndarray,
-    n0: int,
-    a0: float,
+    n0: int | jax.Array,
+    a0: float | jax.Array,
     length: float,
     depth: float,
     gravity: float,
