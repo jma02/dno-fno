@@ -153,7 +153,7 @@ class VariableHorizonArmExecutor:
         state_finite = np.ones(step_shape, dtype=np.bool_)
         internal_hamiltonian = np.ones((nt, batch), dtype=np.float64)
         internal_state_finite = np.ones((nt, batch), dtype=np.bool_)
-        internal_dno_finite = np.ones((nt, batch), dtype=np.bool_)
+        internal_dno_output_finite = np.ones((nt, batch), dtype=np.bool_)
         minimum_water_column = np.full((nt, batch), 9.0, dtype=np.float64)
         horizon_by_marker = {1: 0.04, 2: 0.06, 3: 0.08}
         for case_index, marker in enumerate(markers):
@@ -171,7 +171,7 @@ class VariableHorizonArmExecutor:
                 state_finite[steps_after, case_index] = False
                 internal_hamiltonian[saved_after, case_index] = np.nan
                 internal_state_finite[saved_after, case_index] = False
-                internal_dno_finite[saved_after, case_index] = False
+                internal_dno_output_finite[saved_after, case_index] = False
                 minimum_water_column[saved_after, case_index] = np.nan
 
         return ResidualControlledArm(
@@ -190,7 +190,7 @@ class VariableHorizonArmExecutor:
             internal_telemetry=InternalTrajectoryTelemetry(
                 hamiltonian=internal_hamiltonian,
                 state_finite=internal_state_finite,
-                dno_finite=internal_dno_finite,
+                dno_output_finite=internal_dno_output_finite,
                 minimum_water_column=minimum_water_column,
             ),
         )
@@ -221,8 +221,8 @@ class InternalHealthArmExecutor:
         hamiltonian[-1, 1] = 1.01
         state_finite = np.ones_like(hamiltonian, dtype=np.bool_)
         state_finite[-1, 2] = False
-        dno_finite = np.ones_like(hamiltonian, dtype=np.bool_)
-        dno_finite[-1, 3] = False
+        dno_output_finite = np.ones_like(hamiltonian, dtype=np.bool_)
+        dno_output_finite[-1, 3] = False
         minimum_water = np.ones_like(hamiltonian)
         minimum_water[-1, 4] = 0.0
         return ResidualControlledArm(
@@ -241,7 +241,7 @@ class InternalHealthArmExecutor:
             internal_telemetry=InternalTrajectoryTelemetry(
                 hamiltonian=hamiltonian,
                 state_finite=state_finite,
-                dno_finite=dno_finite,
+                dno_output_finite=dno_output_finite,
                 minimum_water_column=minimum_water,
             ),
         )

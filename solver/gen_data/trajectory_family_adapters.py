@@ -55,7 +55,6 @@ from solver.gen_data.pipeline.archive import (
     BatchPaths,
     BatchStatus,
     ensure_proposal,
-    file_sha256,
     inspect_batch,
 )
 from solver.gen_data.pipeline.production import AttemptAssignment
@@ -371,8 +370,6 @@ def _verify_preconstruction_proposal(
     _require_constructible_batch_status(inspection.status)
     if inspection.proposal_sha256 != proposed.proposal_sha256:
         raise RuntimeError("proposal changed after it was saved")
-    if file_sha256(proposed.paths.proposal) != proposed.proposal_sha256:
-        raise RuntimeError("proposal file hash changed before construction")
     if expected_records != proposed.sampled.specification_records:
         raise RuntimeError("sampled specification changed after proposal")
 

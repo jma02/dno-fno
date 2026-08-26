@@ -9,7 +9,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.acceptance import RefinementTrajectory
+from solver.gen_data.pipeline.acceptance import TrajectorySamples
 from solver.gen_data.pipeline.quality import QualityReason
 from solver.gen_data.pipeline.refinement import (
     ProductionCaseResult,
@@ -67,7 +67,7 @@ def _finite_or_none(value: float) -> float | None:
 
 
 def _selected_indices(
-    trajectory: RefinementTrajectory,
+    trajectory: TrajectorySamples,
     *,
     family: TrajectoryFamily,
     length: float,
@@ -124,7 +124,7 @@ def _production_case_metrics(
             internal.state_finite if internal is not None else None
         ),
         "internal_dno_finite": (
-            internal.dno_finite if internal is not None else None
+            internal.dno_output_finite if internal is not None else None
         ),
         "minimum_internal_water_column": (
             internal.minimum_water_column if internal is not None else None

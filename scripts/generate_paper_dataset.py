@@ -123,6 +123,7 @@ PaperExecution: TypeAlias = StaticStokesContract | TrajectoryExecutionConfig
 COMMON_SOURCE_PATHS = (
     Path(__file__).resolve(),
     ROOT / "solver/gen_data/pipeline/archive.py",
+    ROOT / "solver/gen_data/pipeline/batch_format.py",
     ROOT / "solver/gen_data/pipeline/manifest.py",
     ROOT / "solver/gen_data/pipeline/production.py",
     ROOT / "solver/gen_data/pipeline/quality.py",

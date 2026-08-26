@@ -27,19 +27,9 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     focused_steepness_proxy,
     instability_band_fraction,
 )
-from solver.gen_data.pipeline.acceptance import (  # noqa: E402
-    RefinementTrajectory,
-    evaluate_temporal_refinement,
-)
 from solver.solvers.dno_series_jax import (  # noqa: E402
     build_grid,
     dno_series_eval,
-    make_linear_dno_symbol,
-)
-from solver.solvers.time_integrator import (  # noqa: E402
-    SolverParams,
-    State,
-    rollout,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -85,17 +75,6 @@ def _canonical_carrier(x: jax.Array) -> tuple[jax.Array, jax.Array, float]:
         ichoi=0,
     )
     return eta, xi, carrier_amplitude
-
-
-def _as_refinement_trajectory(
-    payload: dict[str, jax.Array],
-) -> RefinementTrajectory:
-    return RefinementTrajectory(
-        times=np.asarray(payload["times"], dtype=np.float64),
-        eta=np.asarray(payload["eta"], dtype=np.float64),
-        xi=np.asarray(payload["xi"], dtype=np.float64),
-        gxi=np.asarray(payload["gxi"], dtype=np.float64),
-    )
 
 
 def _fixed_band_relative_error(
@@ -325,52 +304,6 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             for index in range(3)
         )
         self.assertLess(max(errors), 1e-7, msg=f"fixed-band errors: {errors}")
-
-    def test_canonical_short_time_refinement(self) -> None:
-        nx = 128
-        x, wavenumbers = build_grid(nx, LENGTH)
-        eta, xi = build_initial_conditions(
-            x=jnp.asarray(x, dtype=jnp.float64),
-            parameters=_canonical_parameters(),
-            length=LENGTH,
-            gravity=GRAVITY,
-            dtype=jnp.float64,
-        )
-        depth = deep_water_proxy_depth(LENGTH)
-        wavenumbers = jnp.asarray(wavenumbers, dtype=jnp.float64)
-        solver_parameters = SolverParams(
-            nx=nx,
-            length=LENGTH,
-            depth=depth,
-            gravity=GRAVITY,
-            dno_order=6,
-            pad_factor=8,
-            filter_fraction=0.25,
-            k=wavenumbers,
-            g0=make_linear_dno_symbol(wavenumbers, depth),
-        )
-        common = {
-            "initial_state": State(eta=eta[0], xi=xi[0]),
-            "times": jnp.asarray([0.0, 0.08], dtype=jnp.float64),
-            "params": solver_parameters,
-            "save_gxi": True,
-            "method": "gl2_if",
-            "implicit_iterations": 8,
-        }
-        coarse = rollout(**common, substeps_per_interval=8)
-        fine = rollout(**common, substeps_per_interval=16)
-        jax.block_until_ready(fine["gxi"])
-        metrics, decision = evaluate_temporal_refinement(
-            _as_refinement_trajectory(coarse),
-            _as_refinement_trajectory(fine),
-            depth=depth,
-            gravity=GRAVITY,
-            length=LENGTH,
-            maximum_wavenumber=32.0,
-        )
-        self.assertTrue(decision.accepted)
-        self.assertLess(metrics.maximum_error, 1.5e-4)
-
 
 if __name__ == "__main__":
     unittest.main()

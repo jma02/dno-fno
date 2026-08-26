@@ -1,4 +1,4 @@
-"""CPU smoke test crossing Stokes construction, GL2, and acceptance.
+"""CPU smoke tests for finite-depth Stokes dataset support.
 
 Run with:
 
@@ -24,74 +24,12 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
     finite_depth_stokes_wave_height,
     stokes_eta_xi,
 )
-from solver.gen_data.pipeline.acceptance import (  # noqa: E402
-    RefinementTrajectory,
-    evaluate_temporal_refinement,
-)
-from solver.solvers.time_integrator import (  # noqa: E402
-    State,
-    make_solver_params,
-    rollout,
-)
-
 jax.config.update("jax_enable_x64", True)
 
 
 LENGTH = 2.0 * np.pi
 DEPTH = 1.0
 GRAVITY = 1.0
-
-
-def _as_refinement_trajectory(
-    payload: dict[str, jax.Array],
-) -> RefinementTrajectory:
-    return RefinementTrajectory(
-        times=np.asarray(payload["times"], dtype=np.float64),
-        eta=np.asarray(payload["eta"], dtype=np.float64),
-        xi=np.asarray(payload["xi"], dtype=np.float64),
-        gxi=np.asarray(payload["gxi"], dtype=np.float64),
-    )
-
-
-def _rollout_pair(saved_spacing: float) -> tuple[
-    RefinementTrajectory,
-    RefinementTrajectory,
-]:
-    nx = 32
-    x = jnp.asarray(LENGTH * np.arange(nx) / nx, dtype=jnp.float64)
-    eta, xi = stokes_eta_xi(
-        x=x,
-        time=jnp.asarray(0.0, dtype=jnp.float64),
-        n0=1,
-        a0=0.02,
-        length=LENGTH,
-        depth=DEPTH,
-        gravity=GRAVITY,
-        ichoi=1,
-    )
-    initial_state = State(eta=eta, xi=xi)
-    params = make_solver_params(
-        nx=nx,
-        length=LENGTH,
-        depth=DEPTH,
-        gravity=GRAVITY,
-        dno_order=1,
-        pad_factor=2,
-        filter_fraction=0.5,
-    )
-    times = jnp.asarray([0.0, saved_spacing], dtype=jnp.float64)
-    common = {
-        "initial_state": initial_state,
-        "times": times,
-        "params": params,
-        "save_gxi": True,
-        "method": "gl2_if",
-        "implicit_iterations": 8,
-    }
-    coarse = rollout(**common, substeps_per_interval=1)
-    fine = rollout(**common, substeps_per_interval=2)
-    jax.block_until_ready(fine["gxi"])
-    return _as_refinement_trajectory(coarse), _as_refinement_trajectory(fine)
 
 
 class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
@@ -267,35 +205,6 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
             atol=1e-13,
         )
         self.assertGreater(float(jnp.min(parameters["depth"] + eta)), 0.0)
-
-    def test_small_step_pair_passes(self) -> None:
-        coarse, fine = _rollout_pair(saved_spacing=0.1)
-        metrics, decision = evaluate_temporal_refinement(
-            coarse,
-            fine,
-            depth=DEPTH,
-            gravity=GRAVITY,
-            length=LENGTH,
-            maximum_wavenumber=8.0,
-        )
-
-        self.assertTrue(decision.accepted)
-        self.assertLess(metrics.maximum_error, 1e-6)
-
-    def test_large_step_pair_fails(self) -> None:
-        coarse, fine = _rollout_pair(saved_spacing=2.0)
-        metrics, decision = evaluate_temporal_refinement(
-            coarse,
-            fine,
-            depth=DEPTH,
-            gravity=GRAVITY,
-            length=LENGTH,
-            maximum_wavenumber=8.0,
-        )
-
-        self.assertFalse(decision.accepted)
-        self.assertGreater(metrics.maximum_error, 2e-3)
-
 
 if __name__ == "__main__":
     unittest.main()

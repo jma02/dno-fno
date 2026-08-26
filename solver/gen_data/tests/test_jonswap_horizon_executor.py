@@ -183,7 +183,7 @@ class RecordingArmExecutor:
             internal_telemetry = InternalTrajectoryTelemetry(
                 hamiltonian=hamiltonian,
                 state_finite=np.ones_like(hamiltonian, dtype=np.bool_),
-                dno_finite=np.ones_like(hamiltonian, dtype=np.bool_),
+                dno_output_finite=np.ones_like(hamiltonian, dtype=np.bool_),
                 minimum_water_column=np.ones_like(
                     hamiltonian,
                     dtype=np.float64,

@@ -3,9 +3,9 @@
   "scope": "This inventory names the release integration surface and its focused tests. Curated numerical source-identity files are enumerated and source-bound by COMMON_SOURCE_PATHS and FAMILY_SOURCE_PATHS in scripts/generate_paper_dataset.py, with JONSWAP additions in EXTRA_SOURCE_PATHS in scripts/generate_paper_dataset_jonswap.py; they are intentionally not duplicated here. Those source maps are identity contracts, not a complete Python import-closure inventory.",
   "publication_closure": {
     "purpose": "Exact coherent code-repository publication closure: release integration files, current JONSWAP/Tanaka/Benjamin-Feir numerical source and dependency paths, recovered historical Stokes/Benjamin-Feir source bytes, and supplemental import, document, and test paths. It intentionally excludes the ignored private paper/ tree; its source refresh, figure installation, and compile verification are separately governed by notes/paper_dataset_generation_readiness_20260726.md.",
-    "count": 130,
+    "count": 131,
     "path_serialization": "Sort paths by Unicode code point, encode each path as UTF-8, and terminate every path, including the last, with LF.",
-    "sorted_path_set_sha256": "64ffff276b7f59e7c2984f94079c59f686e5dc71014016aa88aee60f2da41efd",
+    "sorted_path_set_sha256": "8fcc4db185436d7b1c890b3c95aac15986e6e2dbfbc11d2546cb4daebf4cf8dd",
     "paths": [
       "EXPERIMENTS.md",
       "jax_training_util.py",
@@ -87,6 +87,7 @@
       "solver/gen_data/pipeline/__init__.py",
       "solver/gen_data/pipeline/acceptance.py",
       "solver/gen_data/pipeline/archive.py",
+      "solver/gen_data/pipeline/batch_format.py",
       "solver/gen_data/pipeline/manifest.py",
       "solver/gen_data/pipeline/production.py",
       "solver/gen_data/pipeline/quality.py",

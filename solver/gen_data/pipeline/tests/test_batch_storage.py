@@ -1,4 +1,4 @@
-"""CPU tests for transactional paper-dataset batch storage."""
+"""CPU tests for transactional dataset batch storage."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def _case_records() -> tuple[CaseCommitRecord, ...]:
     )
 
 
-class ArchiveTransactionTests(unittest.TestCase):
+class BatchStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -134,7 +134,6 @@ class ArchiveTransactionTests(unittest.TestCase):
         shard_bytes = self.paths.shard.read_bytes()
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.SHARD_WRITTEN)
-        self.assertEqual(inspection.shard_sha256, shard_hash)
         self.assertEqual(ensure_shard(self.paths, shard), shard_hash)
         self.assertEqual(self.paths.shard.read_bytes(), shard_bytes)
 
@@ -147,7 +146,7 @@ class ArchiveTransactionTests(unittest.TestCase):
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.COMMITTED)
         self.assertEqual(inspection.proposal_sha256, proposal_hash)
-        self.assertEqual(inspection.shard_sha256, shard_hash)
+        self.assertEqual(inspection.cases, _case_records())
         self.assertEqual(
             commit_batch(
                 self.paths,

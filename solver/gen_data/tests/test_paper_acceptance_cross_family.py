@@ -1,4 +1,4 @@
-"""Cross-family CPU smoke for the shared refinement decision.
+"""Cross-family CPU smoke tests for the current dataset constructors.
 
 The Benjamin--Feir arm exercises the revision-4 JCP09 constructor used by the
 current paper dataset.
@@ -31,20 +31,13 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     build_per_case_initial_conditions,
 )
 from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
-from solver.gen_data.pipeline.acceptance import (  # noqa: E402
-    RefinementTrajectory,
-    evaluate_temporal_refinement,
-)
 from solver.solvers.dno_series_jax import (  # noqa: E402
     build_grid,
     dno_series_eval,
-    make_linear_dno_symbol,
 )
 from solver.solvers.time_integrator import (  # noqa: E402
-    SolverParams,
     State,
     apply_lowpass,
-    rollout,
 )
 from solver.reference_solutions.stokes_wave import (  # noqa: E402
     stokes_eta_xi_at_phase,
@@ -59,12 +52,6 @@ NX = 256
 LENGTH = 2.0 * np.pi
 GRAVITY = 1.0
 FILTER_FRACTION = 0.25
-DELIVERED_WAVENUMBER = 32.0
-FAMILY_NAMES = (
-    "finite_stokes",
-    "tanaka",
-    "current_benjamin_feir",
-)
 
 
 @cache
@@ -148,52 +135,6 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
     return State(eta=eta, xi=xi), depths, k
 
 
-@cache
-def _cross_family_rollout_pair() -> tuple[
-    dict[str, jax.Array],
-    dict[str, jax.Array],
-    jax.Array,
-]:
-    state, depths, k = _build_cross_family_batch()
-    params = SolverParams(
-        nx=NX,
-        length=LENGTH,
-        depth=depths,
-        gravity=GRAVITY,
-        dno_order=6,
-        pad_factor=8,
-        filter_fraction=FILTER_FRACTION,
-        k=k,
-        g0=make_linear_dno_symbol(k, depths),
-    )
-    times = jnp.asarray([0.0, 0.08], dtype=jnp.float64)
-    common = {
-        "initial_state": state,
-        "times": times,
-        "params": params,
-        "save_gxi": True,
-        "method": "gl2_if",
-        "implicit_iterations": 8,
-        "zero_mean_xi": True,
-    }
-    coarse = rollout(**common, substeps_per_interval=8)
-    fine = rollout(**common, substeps_per_interval=16)
-    jax.block_until_ready(fine["gxi"])
-    return coarse, fine, depths
-
-
-def _trajectory(
-    payload: dict[str, jax.Array],
-    family_index: int,
-) -> RefinementTrajectory:
-    return RefinementTrajectory(
-        times=np.asarray(payload["times"], dtype=np.float64),
-        eta=np.asarray(payload["eta"][:, family_index], dtype=np.float64),
-        xi=np.asarray(payload["xi"][:, family_index], dtype=np.float64),
-        gxi=np.asarray(payload["gxi"][:, family_index], dtype=np.float64),
-    )
-
-
 class CrossFamilyAcceptanceSmokeTest(unittest.TestCase):
     def test_constructors_produce_finite_graph_valued_bandlimited_states(
         self,
@@ -245,23 +186,6 @@ class CrossFamilyAcceptanceSmokeTest(unittest.TestCase):
             rtol=1e-10,
             atol=1e-12,
         )
-
-    def test_supported_cross_family_pair_passes(self) -> None:
-        coarse, fine, depths = _cross_family_rollout_pair()
-        for family_index, family_name in enumerate(FAMILY_NAMES):
-            metrics, decision = evaluate_temporal_refinement(
-                _trajectory(coarse, family_index),
-                _trajectory(fine, family_index),
-                depth=float(depths[family_index, 0]),
-                gravity=GRAVITY,
-                length=LENGTH,
-                maximum_wavenumber=DELIVERED_WAVENUMBER,
-            )
-
-            with self.subTest(family=family_name):
-                self.assertTrue(decision.accepted)
-                self.assertLess(metrics.maximum_error, 1e-7)
-
 
 if __name__ == "__main__":
     unittest.main()

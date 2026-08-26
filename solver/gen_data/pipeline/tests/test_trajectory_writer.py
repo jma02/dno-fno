@@ -17,8 +17,8 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.pipeline.acceptance import (  # noqa: E402
-    InternalTrajectoryMetrics,
-    RefinementTrajectory,
+    DenseTrajectoryHealthMetrics,
+    TrajectorySamples,
 )
 from solver.gen_data.pipeline.archive import ensure_proposal  # noqa: E402
 from solver.gen_data.pipeline.manifest import build_dataset_view  # noqa: E402
@@ -58,7 +58,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         times = 0.08 * np.arange(10, dtype=np.float64)
         x = 2.0 * np.pi * np.arange(8, dtype=np.float64) / 8
         eta = np.arange(1.0, 11.0)[:, None] * np.cos(x)[None, :]
-        trajectory = RefinementTrajectory(
+        trajectory = TrajectorySamples(
             times=times,
             eta=eta,
             xi=np.zeros_like(eta),
@@ -192,7 +192,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         xi = np.ones_like(eta)
         gxi = np.ones_like(eta)
         gxi[1] *= 10.0
-        trajectory = RefinementTrajectory(
+        trajectory = TrajectorySamples(
             times=times,
             eta=eta,
             xi=xi,
@@ -272,9 +272,9 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                     telemetry=telemetry,
                     decision=decision,
                     retained_trajectory=None,
-                    internal_metrics=InternalTrajectoryMetrics(
+                    internal_metrics=DenseTrajectoryHealthMetrics(
                         state_finite=True,
-                        dno_finite=True,
+                        dno_output_finite=True,
                         minimum_water_column=0.75,
                         initial_hamiltonian=2.5,
                         maximum_relative_hamiltonian_drift=2.0e-3,

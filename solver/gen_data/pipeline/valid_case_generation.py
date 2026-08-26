@@ -17,12 +17,13 @@ import os
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.archive import (
+    BatchInspection,
     BatchPaths,
     BatchStatus,
     inspect_batch,
@@ -107,9 +108,7 @@ class DatasetGenerationSpec:
     batch_size: int
     configuration: Mapping[str, object]
     first_attempt_index: int = 0
-    maximum_attempts_per_accepted_case: int = (
-        DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE
-    )
+    maximum_attempts_per_accepted_case: int = DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE
     _configuration_json: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -170,9 +169,7 @@ class DatasetGenerationSpec:
                 revision_id=self.revision_id,
                 split_id=self.split_id,
                 stream_id=self.stream_id,
-                attempt_index=(
-                    self.first_attempt_index + maximum_attempt_count - 1
-                ),
+                attempt_index=(self.first_attempt_index + maximum_attempt_count - 1),
             )
 
         codes = dict(self.cell_codes)
@@ -313,16 +310,9 @@ class BatchExecutor(Protocol):
     ) -> BatchPaths: ...
 
 
-def _read_npz(path: Path) -> dict[str, NDArray[object]]:
+def _read_npz(path: Path) -> dict[str, NDArray[Any]]:
     with np.load(path, allow_pickle=False) as archive:
         return {name: np.asarray(archive[name]) for name in archive.files}
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    value = _strict_json_loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return value
 
 
 def _artifact_directories(
@@ -374,10 +364,10 @@ def _discover_batch_ids(spec: DatasetGenerationSpec) -> tuple[int, ...]:
 
 
 def _required_case_vector(
-    proposal: Mapping[str, NDArray[object]],
+    proposal: Mapping[str, NDArray[Any]],
     name: str,
     case_count: int,
-) -> NDArray[object]:
+) -> NDArray[Any]:
     if name not in proposal:
         raise ValueError(f"proposal is missing required run coordinate {name!r}")
     values = proposal[name]
@@ -448,97 +438,16 @@ def _proposal_assignments(
     return assignments
 
 
-def _require_result_case(
-    value: object,
-    *,
-    expected_case_id: int,
-) -> tuple[bool, int, int]:
-    if not isinstance(value, dict):
-        raise TypeError("every result case must be a JSON object")
-    case_id = value.get("case_id")
-    if (
-        isinstance(case_id, bool)
-        or not isinstance(case_id, int)
-        or case_id != expected_case_id
-    ):
-        raise RuntimeError("result case identity differs from its proposal")
-    accepted = value.get("accepted")
-    if not isinstance(accepted, bool):
-        raise TypeError("result accepted field must be boolean")
-
-    integer_fields: dict[str, int] = {}
-    for name in (
-        "required_bits",
-        "evaluated_bits",
-        "failed_bits",
-        "first_row",
-        "row_count",
-    ):
-        field = value.get(name)
-        if isinstance(field, bool) or not isinstance(field, int):
-            raise TypeError(f"result {name} field must be an integer")
-        integer_fields[name] = field
-
-    required = integer_fields["required_bits"]
-    evaluated = integer_fields["evaluated_bits"]
-    failed = integer_fields["failed_bits"]
-    if any(not 0 <= bits < 1 << 32 for bits in (required, evaluated, failed)):
-        raise ValueError("result quality masks must fit in uint32")
-    if failed & ~evaluated:
-        raise ValueError("result failed_bits must be a subset of evaluated_bits")
-    mask_accepts = not (required & ~evaluated or required & failed)
-    if accepted != mask_accepts:
-        raise RuntimeError("result accepted field disagrees with quality masks")
-
-    first_row = integer_fields["first_row"]
-    row_count = integer_fields["row_count"]
-    if accepted:
-        if first_row < 0 or row_count <= 0:
-            raise RuntimeError("accepted result must own at least one shard row")
-    elif first_row != -1 or row_count != 0:
-        raise RuntimeError("rejected result cannot own shard rows")
-    return accepted, first_row, row_count
-
-
-def _shard_row_blocks(paths: BatchPaths) -> dict[int, tuple[int, int]]:
-    if not paths.shard.exists():
-        return {}
-    shard = _read_npz(paths.shard)
-    local_indices = np.asarray(shard["case_local_index"], dtype=np.int32)
-    return {
-        int(local_index): (
-            int(np.flatnonzero(local_indices == local_index)[0]),
-            int(np.count_nonzero(local_indices == local_index)),
-        )
-        for local_index in np.unique(local_indices)
-    }
-
-
 def _accepted_cells(
-    paths: BatchPaths,
     assignments: Sequence[AttemptAssignment],
+    inspection: BatchInspection,
 ) -> tuple[str, ...]:
-    result = _read_json_object(paths.result)
-    if result.get("schema") != "paper_dataset_batch_result_v1":
-        raise RuntimeError("result has an unknown schema")
-    values = result.get("cases")
-    if not isinstance(values, list) or len(values) != len(assignments):
-        raise RuntimeError("result must contain every proposed case")
-
-    blocks = _shard_row_blocks(paths)
-    accepted_cells: list[str] = []
-    for local_index, (assignment, value) in enumerate(zip(assignments, values)):
-        accepted, first_row, row_count = _require_result_case(
-            value,
-            expected_case_id=assignment.case_key.case_id,
-        )
-        expected_block = blocks.get(local_index)
-        observed_block = (first_row, row_count) if accepted else None
-        if observed_block != expected_block:
-            raise RuntimeError("result row ownership differs from its shard")
-        if accepted:
-            accepted_cells.append(assignment.cell_id)
-    return tuple(accepted_cells)
+    accepted = {case.case_id for case in inspection.cases if case.accepted}
+    return tuple(
+        assignment.cell_id
+        for assignment in assignments
+        if assignment.case_key.case_id in accepted
+    )
 
 
 def _expected_assignments(
@@ -724,13 +633,15 @@ def scan_dataset_generation(spec: DatasetGenerationSpec) -> DatasetGenerationSta
 
         is_last = position == len(batch_ids) - 1
         if inspection.status is BatchStatus.COMMITTED:
-            for cell_id in _accepted_cells(paths, assignments):
+            for cell_id in _accepted_cells(
+                assignments,
+                inspection,
+            ):
                 accepted_by_cell[cell_id] += 1
             for target in spec.case_targets:
                 if accepted_by_cell[target.cell_id] > target.case_count:
                     raise RuntimeError(
-                        "accepted count exceeds target for cell "
-                        f"{target.cell_id!r}"
+                        f"accepted count exceeds target for cell {target.cell_id!r}"
                     )
             committed.append(paths)
             continue
@@ -814,7 +725,7 @@ def _advance_terminal_batch(
     assignments: tuple[AttemptAssignment, ...],
     *,
     batch_id: int,
-    status: BatchStatus,
+    inspection: BatchInspection,
 ) -> DatasetGenerationState:
     """Update the in-memory run state after saving a batch result.
 
@@ -844,7 +755,7 @@ def _advance_terminal_batch(
         )
     next_batch_id = max(state.next_batch_id, batch_id + 1)
 
-    if status is BatchStatus.FAILED:
+    if inspection.status is BatchStatus.FAILED:
         return DatasetGenerationState(
             accepted_by_cell=state.accepted_by_cell,
             attempted_by_cell=attempted_by_cell,
@@ -856,11 +767,11 @@ def _advance_terminal_batch(
             attempt_limit_failure=None,
             complete=False,
         )
-    if status is not BatchStatus.COMMITTED:
+    if inspection.status is not BatchStatus.COMMITTED:
         raise ValueError("in-memory advancement requires a terminal batch")
 
     accepted_by_cell = dict(state.accepted_by_cell)
-    for cell_id in _accepted_cells(paths, assignments):
+    for cell_id in _accepted_cells(assignments, inspection):
         accepted_by_cell[cell_id] += 1
     for target in spec.case_targets:
         if accepted_by_cell[target.cell_id] > target.case_count:
@@ -957,5 +868,5 @@ def generate_valid_cases(
                 expected_paths,
                 assignments,
                 batch_id=batch_id,
-                status=inspection.status,
+                inspection=inspection,
             )

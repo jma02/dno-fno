@@ -1,4 +1,4 @@
-"""Transactional batch storage for the paper dataset.
+"""Store generated batches atomically and recover interrupted work.
 
 Each attempted batch is proposed before numerical work begins.  A result JSON
 is the commit marker; a shard without a result is therefore recoverable, while
@@ -20,37 +20,19 @@ import uuid
 import numpy as np
 from numpy.typing import NDArray
 
+from solver.gen_data.pipeline.batch_format import (
+    BATCH_RESULT_SCHEMA,
+    FATAL_FAILURE_SCHEMA,
+    CaseCommitRecord,
+    case_row_blocks as _case_row_blocks,
+    parse_case_commit_record as _parse_case_commit_record,
+    strict_json_loads as _strict_json_loads,
+    validate_proposal_arrays as _validate_proposal_arrays,
+    validate_sha256 as _validate_sha256,
+    validate_shard_arrays as _validate_shard_arrays,
+)
 
-_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
-
-_PROPOSAL_DTYPES = {
-    "family_id": np.dtype(np.int16),
-    "revision_id": np.dtype(np.int16),
-    "split_id": np.dtype(np.uint8),
-    "batch_id": np.dtype(np.int64),
-    "case_id": np.dtype(np.int64),
-    "cell_id": np.dtype(np.int32),
-}
-_PROPOSAL_STRING_FIELDS = {
-    "config_fingerprint",
-    "case_spec_json",
-    "metadata_json",
-}
-_SHARD_DTYPES = {
-    "eta": np.dtype(np.float32),
-    "xi": np.dtype(np.float32),
-    "gxi": np.dtype(np.float32),
-    "depth": np.dtype(np.float64),
-    "time": np.dtype(np.float64),
-    "case_local_index": np.dtype(np.int32),
-    "frame_index": np.dtype(np.int32),
-    "selected_dense_index": np.dtype(np.int32),
-}
-_SHARD_STRING_FIELDS = {
-    "config_fingerprint",
-    "proposal_sha256",
-}
 
 
 class BatchStatus(str, Enum):
@@ -100,48 +82,12 @@ class BatchPaths:
 
 
 @dataclass(frozen=True)
-class CaseCommitRecord:
-    """Row ownership and numerical decision for one attempted case."""
-
-    case_id: int
-    accepted: bool
-    required_bits: int
-    evaluated_bits: int
-    failed_bits: int
-    first_row: int
-    row_count: int
-    metrics: Mapping[str, float | int | bool | None]
-
-    def __post_init__(self) -> None:
-        for value, field_name in (
-            (self.required_bits, "required_bits"),
-            (self.evaluated_bits, "evaluated_bits"),
-            (self.failed_bits, "failed_bits"),
-        ):
-            if value < 0 or value >= 1 << 32:
-                raise ValueError(f"{field_name} must fit in uint32")
-        if self.failed_bits & ~self.evaluated_bits:
-            raise ValueError("failed_bits must be a subset of evaluated_bits")
-        missing_bits = self.required_bits & ~self.evaluated_bits
-        required_failures = self.required_bits & self.failed_bits
-        if self.accepted != (missing_bits == 0 and required_failures == 0):
-            raise ValueError(
-                "accepted must agree with the required, evaluated, and failed masks"
-            )
-        if self.accepted:
-            if self.first_row < 0 or self.row_count <= 0:
-                raise ValueError("accepted cases must own at least one row")
-        elif self.first_row != -1 or self.row_count != 0:
-            raise ValueError("rejected cases cannot own shard rows")
-
-
-@dataclass(frozen=True)
 class BatchInspection:
     """Validated state reconstructed from one batch's files."""
 
     status: BatchStatus
     proposal_sha256: str | None
-    shard_sha256: str | None
+    cases: tuple[CaseCommitRecord, ...] = ()
 
 
 def file_sha256(path: Path) -> str:
@@ -152,18 +98,6 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _validate_sha256(value: str, field_name: str) -> None:
-    if _SHA256_PATTERN.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-
-
-def _strict_json_loads(text: str) -> object:
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"nonfinite JSON constant {value!r}")
-
-    return json.loads(text, parse_constant=reject_constant)
 
 
 def _strict_json_bytes(payload: Mapping[str, object]) -> bytes:
@@ -195,17 +129,28 @@ def _replace_atomically(path: Path, writer: Callable[[Path], None]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _write_npz_atomic(path: Path, arrays: Mapping[str, NDArray[Any]]) -> None:
+def write_npz_atomic(
+    path: Path,
+    arrays: Mapping[str, NDArray[Any]],
+) -> None:
+    """Atomically write a pickle-free NPZ with deterministic member order."""
+
     ordered = {name: np.asarray(arrays[name]) for name in sorted(arrays)}
+    if any(array.dtype.kind == "O" for array in ordered.values()):
+        raise TypeError("atomic NPZ arrays cannot use object dtype")
 
     def writer(temporary: Path) -> None:
         with temporary.open("wb") as handle:
-            np.savez(handle, **ordered)
+            # NumPy's stub treats arbitrary NPZ member names as potential
+            # ``allow_pickle`` arguments even though object arrays are rejected above.
+            np.savez(handle, **ordered)  # pyright: ignore[reportArgumentType]
 
     _replace_atomically(path, writer)
 
 
-def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    """Atomically write a strict, key-sorted JSON object."""
+
     encoded = _strict_json_bytes(payload)
 
     def writer(temporary: Path) -> None:
@@ -215,22 +160,19 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     _replace_atomically(path, writer)
 
 
-def write_npz_atomic(
+def _write_json_once(
     path: Path,
-    arrays: Mapping[str, NDArray[Any]],
-) -> None:
-    """Atomically write a pickle-free NPZ with deterministic member order."""
-
-    normalized = {name: np.asarray(array) for name, array in arrays.items()}
-    if any(array.dtype.kind == "O" for array in normalized.values()):
-        raise TypeError("atomic NPZ arrays cannot use object dtype")
-    _write_npz_atomic(path, normalized)
-
-
-def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
-    """Atomically write a strict, key-sorted JSON object."""
-
-    _write_json_atomic(path, payload)
+    payload: Mapping[str, object],
+    *,
+    artifact_name: str,
+) -> str:
+    encoded = _strict_json_bytes(payload)
+    if path.exists():
+        if path.read_bytes() != encoded:
+            raise RuntimeError(f"existing {artifact_name} differs from replay")
+    else:
+        write_json_atomic(path, payload)
+    return file_sha256(path)
 
 
 def _load_npz(path: Path) -> dict[str, NDArray[Any]]:
@@ -242,97 +184,38 @@ def _arrays_equal(
     left: Mapping[str, NDArray[Any]],
     right: Mapping[str, NDArray[Any]],
 ) -> bool:
-    def equal(name: str) -> bool:
-        left_array = left[name]
-        right_array = right[name]
-        if left_array.dtype.kind in {"f", "c"}:
-            return bool(np.array_equal(left_array, right_array, equal_nan=True))
-        return bool(np.array_equal(left_array, right_array))
-
     return set(left) == set(right) and all(
         left[name].dtype == right[name].dtype
-        and left[name].shape == right[name].shape
-        and equal(name)
+        and bool(
+            np.array_equal(
+                left[name],
+                right[name],
+                equal_nan=left[name].dtype.kind in {"f", "c"},
+            )
+        )
         for name in left
     )
 
 
-def _scalar_string(array: NDArray[Any], field_name: str) -> str:
-    if array.ndim != 0 or array.dtype.kind not in {"U", "S"}:
-        raise TypeError(f"{field_name} must be a scalar string array")
-    return str(array.item())
-
-
-def _require_exact_dtype(
+def _ensure_npz(
+    path: Path,
     arrays: Mapping[str, NDArray[Any]],
-    expected: Mapping[str, np.dtype[Any]],
-) -> None:
-    for name, dtype in expected.items():
-        if name not in arrays:
-            raise ValueError(f"archive is missing required array {name!r}")
-        if arrays[name].dtype != dtype:
-            raise TypeError(
-                f"array {name!r} has dtype {arrays[name].dtype}; expected {dtype}"
+    *,
+    validate: Callable[[Mapping[str, NDArray[Any]]], object],
+    artifact_name: str,
+) -> str:
+    normalized = {name: np.asarray(array) for name, array in arrays.items()}
+    validate(normalized)
+    if path.exists():
+        existing = _load_npz(path)
+        validate(existing)
+        if not _arrays_equal(existing, normalized):
+            raise RuntimeError(
+                f"existing {artifact_name} differs from replayed {artifact_name}"
             )
-
-
-def validate_proposal_arrays(
-    arrays: Mapping[str, NDArray[Any]],
-) -> tuple[int, str]:
-    """Validate a proposal and return ``(number_of_cases, fingerprint)``."""
-
-    _require_exact_dtype(arrays, _PROPOSAL_DTYPES)
-    missing_strings = _PROPOSAL_STRING_FIELDS.difference(arrays)
-    if missing_strings:
-        raise ValueError(
-            f"proposal is missing required arrays {sorted(missing_strings)}"
-        )
-    if any(array.dtype.kind == "O" for array in arrays.values()):
-        raise TypeError("proposal arrays cannot use object dtype")
-
-    for name in ("family_id", "revision_id", "split_id", "batch_id"):
-        if arrays[name].ndim != 0:
-            raise ValueError(f"proposal field {name!r} must be scalar")
-
-    case_ids = arrays["case_id"]
-    cell_ids = arrays["cell_id"]
-    specifications = arrays["case_spec_json"]
-    if case_ids.ndim != 1 or case_ids.size == 0:
-        raise ValueError("case_id must be a nonempty one-dimensional array")
-    if cell_ids.shape != case_ids.shape:
-        raise ValueError("cell_id must have the same shape as case_id")
-    if specifications.ndim != 1 or specifications.shape != case_ids.shape:
-        raise ValueError("case_spec_json must have one string per case")
-    if specifications.dtype.kind not in {"U", "S"}:
-        raise TypeError("case_spec_json must have a string dtype")
-    if np.unique(case_ids).size != case_ids.size:
-        raise ValueError("case_id values must be unique within a proposal")
-
-    fingerprint = _scalar_string(
-        arrays["config_fingerprint"],
-        "config_fingerprint",
-    )
-    _validate_sha256(fingerprint, "config_fingerprint")
-    metadata = _scalar_string(arrays["metadata_json"], "metadata_json")
-    if not isinstance(_strict_json_loads(metadata), dict):
-        raise ValueError("metadata_json must encode a JSON object")
-    for specification in specifications:
-        if not isinstance(_strict_json_loads(str(specification)), dict):
-            raise ValueError("every case_spec_json entry must encode a JSON object")
-
-    scalar_or_case_length = {
-        name
-        for name, array in arrays.items()
-        if array.ndim == 0 or array.shape[0] == case_ids.size
-    }
-    if scalar_or_case_length != set(arrays):
-        raise ValueError(
-            "each optional proposal array must be scalar or have one entry per case"
-        )
-    for name, array in arrays.items():
-        if array.dtype.kind in {"f", "c"} and not np.isfinite(array).all():
-            raise ValueError(f"proposal array {name!r} contains nonfinite values")
-    return int(case_ids.size), fingerprint
+    else:
+        write_npz_atomic(path, normalized)
+    return file_sha256(path)
 
 
 def ensure_proposal(
@@ -341,97 +224,14 @@ def ensure_proposal(
 ) -> str:
     """Create a proposal or verify exact replay of an existing proposal."""
 
-    normalized = {name: np.asarray(array) for name, array in arrays.items()}
-    validate_proposal_arrays(normalized)
     if paths.result.exists() or paths.failure.exists():
         raise RuntimeError("cannot replace a terminal batch proposal")
-    if paths.proposal.exists():
-        existing = _load_npz(paths.proposal)
-        validate_proposal_arrays(existing)
-        if not _arrays_equal(existing, normalized):
-            raise RuntimeError("existing proposal differs from replayed proposal")
-        return file_sha256(paths.proposal)
-    _write_npz_atomic(paths.proposal, normalized)
-    return file_sha256(paths.proposal)
-
-
-def _validate_shard_arrays(
-    arrays: Mapping[str, NDArray[Any]],
-    *,
-    proposal_arrays: Mapping[str, NDArray[Any]],
-    proposal_sha256: str,
-) -> tuple[int, str]:
-    _require_exact_dtype(arrays, _SHARD_DTYPES)
-    missing_strings = _SHARD_STRING_FIELDS.difference(arrays)
-    if missing_strings:
-        raise ValueError(f"shard is missing required arrays {sorted(missing_strings)}")
-    if any(array.dtype.kind == "O" for array in arrays.values()):
-        raise TypeError("shard arrays cannot use object dtype")
-
-    eta = arrays["eta"]
-    if eta.ndim != 2 or eta.shape[0] == 0 or eta.shape[1] == 0:
-        raise ValueError("eta must have nonempty shape (row, space)")
-    for name in ("xi", "gxi"):
-        if arrays[name].shape != eta.shape:
-            raise ValueError(f"{name} must have the same shape as eta")
-    row_count = eta.shape[0]
-    for name in (
-        "depth",
-        "time",
-        "case_local_index",
-        "frame_index",
-        "selected_dense_index",
-    ):
-        if arrays[name].shape != (row_count,):
-            raise ValueError(f"{name} must have one entry per shard row")
-    for name in ("eta", "xi", "gxi", "depth", "time"):
-        if not np.isfinite(arrays[name]).all():
-            raise ValueError(f"shard array {name!r} contains nonfinite values")
-    if np.any(arrays["depth"] <= 0.0):
-        raise ValueError("every stored depth must be positive")
-
-    fingerprint = _scalar_string(
-        arrays["config_fingerprint"],
-        "config_fingerprint",
+    return _ensure_npz(
+        paths.proposal,
+        arrays,
+        validate=_validate_proposal_arrays,
+        artifact_name="proposal",
     )
-    proposal_fingerprint = _scalar_string(
-        proposal_arrays["config_fingerprint"],
-        "proposal config_fingerprint",
-    )
-    if fingerprint != proposal_fingerprint:
-        raise ValueError("shard and proposal configuration fingerprints differ")
-    stored_proposal_sha256 = _scalar_string(
-        arrays["proposal_sha256"],
-        "proposal_sha256",
-    )
-    if stored_proposal_sha256 != proposal_sha256:
-        raise ValueError("shard references a different proposal hash")
-
-    case_local_index = arrays["case_local_index"]
-    if np.any(case_local_index < 0):
-        raise ValueError("case_local_index must be nonnegative")
-    if int(np.max(case_local_index)) >= proposal_arrays["case_id"].size:
-        raise ValueError("case_local_index references a missing proposal case")
-    if np.any(np.diff(case_local_index) < 0):
-        raise ValueError("rows from each case must form one ordered block")
-
-    for case_index in np.unique(case_local_index):
-        selected = np.flatnonzero(case_local_index == case_index)
-        frame_index = arrays["frame_index"][selected]
-        dense_index = arrays["selected_dense_index"][selected]
-        times = arrays["time"][selected]
-        expected_frames = np.arange(selected.size, dtype=np.int32)
-        if not np.array_equal(frame_index, expected_frames):
-            raise ValueError("frame_index must start at zero within every case")
-        if np.any(np.diff(dense_index) <= 0):
-            raise ValueError(
-                "selected_dense_index must increase strictly within every case"
-            )
-        if np.any(np.diff(times) <= 0.0):
-            raise ValueError("stored times must increase strictly within every case")
-        if not np.all(arrays["depth"][selected] == arrays["depth"][selected[0]]):
-            raise ValueError("depth must remain constant within each case")
-    return row_count, fingerprint
 
 
 def ensure_shard(
@@ -445,41 +245,22 @@ def ensure_shard(
     if paths.result.exists() or paths.failure.exists():
         raise RuntimeError("cannot replace a shard after a terminal record")
     proposal_arrays = _load_npz(paths.proposal)
-    validate_proposal_arrays(proposal_arrays)
+    _validate_proposal_arrays(proposal_arrays)
     proposal_sha256 = file_sha256(paths.proposal)
-    normalized = {name: np.asarray(array) for name, array in arrays.items()}
-    _validate_shard_arrays(
-        normalized,
-        proposal_arrays=proposal_arrays,
-        proposal_sha256=proposal_sha256,
-    )
-    if paths.shard.exists():
-        existing = _load_npz(paths.shard)
+
+    def validate(candidate: Mapping[str, NDArray[Any]]) -> None:
         _validate_shard_arrays(
-            existing,
+            candidate,
             proposal_arrays=proposal_arrays,
             proposal_sha256=proposal_sha256,
         )
-        if not _arrays_equal(existing, normalized):
-            raise RuntimeError("existing shard differs from reproduced shard")
-        return file_sha256(paths.shard)
-    _write_npz_atomic(paths.shard, normalized)
-    return file_sha256(paths.shard)
 
-
-def _case_row_blocks(
-    shard_arrays: Mapping[str, NDArray[Any]] | None,
-) -> dict[int, tuple[int, int]]:
-    if shard_arrays is None:
-        return {}
-    case_local_index = shard_arrays["case_local_index"]
-    return {
-        int(case_index): (
-            int(np.flatnonzero(case_local_index == case_index)[0]),
-            int(np.count_nonzero(case_local_index == case_index)),
-        )
-        for case_index in np.unique(case_local_index)
-    }
+    return _ensure_npz(
+        paths.shard,
+        arrays,
+        validate=validate,
+        artifact_name="shard",
+    )
 
 
 def commit_batch(
@@ -495,7 +276,7 @@ def commit_batch(
     if paths.failure.exists():
         raise RuntimeError("a failed batch cannot be committed")
     proposal_arrays = _load_npz(paths.proposal)
-    _, fingerprint = validate_proposal_arrays(proposal_arrays)
+    fingerprint = _validate_proposal_arrays(proposal_arrays)
     proposal_sha256 = file_sha256(paths.proposal)
     proposed_case_ids = proposal_arrays["case_id"]
     if len(cases) != proposed_case_ids.size:
@@ -516,7 +297,14 @@ def commit_batch(
             proposal_sha256=proposal_sha256,
         )
         shard_sha256 = file_sha256(paths.shard)
-    blocks = _case_row_blocks(shard_arrays)
+    blocks = (
+        _case_row_blocks(
+            shard_arrays["case_local_index"],
+            number_of_cases=int(proposed_case_ids.size),
+        )
+        if shard_arrays is not None
+        else {}
+    )
     for local_index, case in enumerate(cases):
         expected = blocks.get(local_index)
         observed = (case.first_row, case.row_count) if case.accepted else None
@@ -526,20 +314,14 @@ def commit_batch(
             )
 
     payload: dict[str, object] = {
-        "schema": "paper_dataset_batch_result_v1",
+        "schema": BATCH_RESULT_SCHEMA,
         "config_fingerprint": fingerprint,
         "proposal_sha256": proposal_sha256,
         "shard_sha256": shard_sha256,
         "cases": [asdict(case) for case in cases],
         "metadata": dict(metadata),
     }
-    encoded = _strict_json_bytes(payload)
-    if paths.result.exists():
-        if paths.result.read_bytes() != encoded:
-            raise RuntimeError("existing result differs from replayed result")
-        return file_sha256(paths.result)
-    _write_json_atomic(paths.result, payload)
-    return file_sha256(paths.result)
+    return _write_json_once(paths.result, payload, artifact_name="result")
 
 
 def record_fatal_failure(
@@ -559,20 +341,14 @@ def record_fatal_failure(
     if not phase or not exception_type:
         raise ValueError("phase and exception_type must be nonempty")
     payload: dict[str, object] = {
-        "schema": "paper_dataset_fatal_failure_v1",
+        "schema": FATAL_FAILURE_SCHEMA,
         "proposal_sha256": file_sha256(paths.proposal),
         "phase": phase,
         "exception_type": exception_type,
         "message": message,
         "telemetry": dict(telemetry),
     }
-    encoded = _strict_json_bytes(payload)
-    if paths.failure.exists():
-        if paths.failure.read_bytes() != encoded:
-            raise RuntimeError("existing failure differs from replayed failure")
-        return file_sha256(paths.failure)
-    _write_json_atomic(paths.failure, payload)
-    return file_sha256(paths.failure)
+    return _write_json_once(paths.failure, payload, artifact_name="failure")
 
 
 def _load_json_object(path: Path) -> dict[str, object]:
@@ -591,27 +367,26 @@ def inspect_batch(
 
     if expected_fingerprint is not None:
         _validate_sha256(expected_fingerprint, "expected_fingerprint")
-    exists = {
-        "proposal": paths.proposal.exists(),
-        "shard": paths.shard.exists(),
-        "result": paths.result.exists(),
-        "failure": paths.failure.exists(),
-    }
-    if not any(exists.values()):
-        return BatchInspection(BatchStatus.EMPTY, None, None)
-    if not exists["proposal"]:
+    proposal_exists = paths.proposal.exists()
+    shard_exists = paths.shard.exists()
+    result_exists = paths.result.exists()
+    failure_exists = paths.failure.exists()
+    if not any((proposal_exists, shard_exists, result_exists, failure_exists)):
+        return BatchInspection(BatchStatus.EMPTY, None)
+    if not proposal_exists:
         raise RuntimeError("orphaned batch artifact exists without its proposal")
-    if exists["result"] and exists["failure"]:
+    if result_exists and failure_exists:
         raise RuntimeError("a batch cannot have both result and failure records")
 
     proposal_arrays = _load_npz(paths.proposal)
-    _, fingerprint = validate_proposal_arrays(proposal_arrays)
+    fingerprint = _validate_proposal_arrays(proposal_arrays)
     if expected_fingerprint is not None and fingerprint != expected_fingerprint:
         raise RuntimeError("proposal configuration fingerprint does not match")
     proposal_sha256 = file_sha256(paths.proposal)
 
+    shard_arrays: dict[str, NDArray[Any]] | None = None
     shard_sha256: str | None = None
-    if exists["shard"]:
+    if shard_exists:
         shard_arrays = _load_npz(paths.shard)
         _validate_shard_arrays(
             shard_arrays,
@@ -620,33 +395,58 @@ def inspect_batch(
         )
         shard_sha256 = file_sha256(paths.shard)
 
-    if exists["failure"]:
+    if failure_exists:
         failure = _load_json_object(paths.failure)
         if failure.get("proposal_sha256") != proposal_sha256:
             raise RuntimeError("failure record references a different proposal")
-        return BatchInspection(
-            BatchStatus.FAILED,
-            proposal_sha256,
-            shard_sha256,
-        )
-    if exists["result"]:
+        return BatchInspection(BatchStatus.FAILED, proposal_sha256)
+    if result_exists:
         result = _load_json_object(paths.result)
         if result.get("proposal_sha256") != proposal_sha256:
             raise RuntimeError("result references a different proposal")
         recorded_shard = result.get("shard_sha256")
         if recorded_shard is None:
-            if exists["shard"]:
+            if shard_exists:
                 raise RuntimeError("result omits an existing shard")
         elif not isinstance(recorded_shard, str):
             raise TypeError("result shard_sha256 must be a string or null")
-        elif not exists["shard"] or recorded_shard != shard_sha256:
+        elif not shard_exists or recorded_shard != shard_sha256:
             raise RuntimeError("result references a missing or different shard")
         if result.get("config_fingerprint") != fingerprint:
             raise RuntimeError("result configuration fingerprint does not match")
+        if result.get("schema") != BATCH_RESULT_SCHEMA:
+            raise RuntimeError("result has an unknown schema")
+        raw_cases = result.get("cases")
+        proposed_case_ids = proposal_arrays["case_id"]
+        if not isinstance(raw_cases, list) or len(raw_cases) != proposed_case_ids.size:
+            raise RuntimeError("result must contain every proposed case")
+        blocks = (
+            _case_row_blocks(
+                shard_arrays["case_local_index"],
+                number_of_cases=int(proposed_case_ids.size),
+            )
+            if shard_arrays is not None
+            else {}
+        )
+        cases: list[CaseCommitRecord] = []
+        for local_index, (case_id, raw_case) in enumerate(
+            zip(proposed_case_ids, raw_cases)
+        ):
+            try:
+                case = _parse_case_commit_record(
+                    raw_case,
+                    expected_case_id=int(case_id),
+                )
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
+            declared_block = (case.first_row, case.row_count) if case.accepted else None
+            if declared_block != blocks.get(local_index):
+                raise RuntimeError("result row ownership differs from its shard")
+            cases.append(case)
         return BatchInspection(
             BatchStatus.COMMITTED,
             proposal_sha256,
-            shard_sha256,
+            tuple(cases),
         )
-    status = BatchStatus.SHARD_WRITTEN if exists["shard"] else BatchStatus.PROPOSED
-    return BatchInspection(status, proposal_sha256, shard_sha256)
+    status = BatchStatus.SHARD_WRITTEN if shard_exists else BatchStatus.PROPOSED
+    return BatchInspection(status, proposal_sha256)

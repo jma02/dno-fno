@@ -12,10 +12,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.acceptance import (
-    InternalTrajectoryMetrics,
-    RefinementTrajectory,
-    evaluate_complete_numerical_trajectory,
-    evaluate_internal_trajectory_health,
+    DenseTrajectoryHealthMetrics,
+    TrajectorySamples,
+    evaluate_dense_trajectory_health,
+    evaluate_production_trajectory,
 )
 from solver.gen_data.pipeline.quality import (
     QualityDecision,
@@ -263,7 +263,7 @@ class InternalTrajectoryTelemetry:
 
     hamiltonian: FloatArray
     state_finite: BoolArray
-    dno_finite: BoolArray
+    dno_output_finite: BoolArray
     minimum_water_column: FloatArray
 
 
@@ -306,8 +306,8 @@ class ProductionCaseResult:
     dt: float
     telemetry: CaseGL2Telemetry
     decision: QualityDecision
-    retained_trajectory: RefinementTrajectory | None
-    internal_metrics: InternalTrajectoryMetrics | None = None
+    retained_trajectory: TrajectorySamples | None
+    internal_metrics: DenseTrajectoryHealthMetrics | None = None
 
     @property
     def accepted(self) -> bool:
@@ -556,7 +556,7 @@ def _evaluate_saved_target(
         if evaluate_internal_health
         else None
     )
-    internal_dno_finite = (
+    internal_dno_output_finite = (
         np.empty(telemetry_shape, dtype=np.bool_)
         if evaluate_internal_health
         else None
@@ -614,7 +614,7 @@ def _evaluate_saved_target(
                 jnp.isfinite(eta_chunk) & jnp.isfinite(xi_chunk),
                 axis=-1,
             )
-            dno_finite = jnp.all(jnp.isfinite(internal_q), axis=-1)
+            dno_output_finite = jnp.all(jnp.isfinite(internal_q), axis=-1)
             water_column = jnp.min(
                 eta_chunk + depths[None, :, None],
                 axis=-1,
@@ -631,19 +631,19 @@ def _evaluate_saved_target(
             (
                 hamiltonian_host,
                 state_finite_host,
-                dno_finite_host,
+                dno_output_finite_host,
                 water_column_host,
             ) = jax.device_get(
                 (
                     hamiltonian[:count],
                     state_finite[:count],
-                    dno_finite[:count],
+                    dno_output_finite[:count],
                     water_column[:count],
                 )
             )
             assert internal_hamiltonian is not None
             assert internal_state_finite is not None
-            assert internal_dno_finite is not None
+            assert internal_dno_output_finite is not None
             assert minimum_water_column is not None
             internal_hamiltonian[start:stop] = np.asarray(
                 hamiltonian_host,
@@ -653,8 +653,8 @@ def _evaluate_saved_target(
                 state_finite_host,
                 dtype=np.bool_,
             )
-            internal_dno_finite[start:stop] = np.asarray(
-                dno_finite_host,
+            internal_dno_output_finite[start:stop] = np.asarray(
+                dno_output_finite_host,
                 dtype=np.bool_,
             )
             minimum_water_column[start:stop] = np.asarray(
@@ -666,12 +666,12 @@ def _evaluate_saved_target(
     if evaluate_internal_health:
         assert internal_hamiltonian is not None
         assert internal_state_finite is not None
-        assert internal_dno_finite is not None
+        assert internal_dno_output_finite is not None
         assert minimum_water_column is not None
         internal_telemetry = InternalTrajectoryTelemetry(
             hamiltonian=internal_hamiltonian,
             state_finite=internal_state_finite,
-            dno_finite=internal_dno_finite,
+            dno_output_finite=internal_dno_output_finite,
             minimum_water_column=minimum_water_column,
         )
     return eta_result, xi_result, q_result, internal_telemetry
@@ -983,7 +983,7 @@ def _validate_arm(
         for name in (
             "hamiltonian",
             "state_finite",
-            "dno_finite",
+            "dno_output_finite",
             "minimum_water_column",
         ):
             if np.asarray(getattr(internal, name)).shape != internal_shape:
@@ -1079,13 +1079,13 @@ def _case_trajectory(
     arm: ResidualControlledArm,
     case_index: int,
     telemetry: CaseGL2Telemetry,
-) -> RefinementTrajectory:
-    return RefinementTrajectory(
+) -> TrajectorySamples:
+    return TrajectorySamples(
         times=np.asarray(arm.times, dtype=np.float64),
         eta=np.asarray(arm.eta[:, case_index], dtype=np.float64),
         xi=np.asarray(arm.xi[:, case_index], dtype=np.float64),
         gxi=np.asarray(arm.q_ref[:, case_index], dtype=np.float64),
-        complete=bool(arm.complete[case_index]),
+        reached_final_time=bool(arm.complete[case_index]),
         gl2_stages_solved=telemetry.all_stages_solved,
     )
 
@@ -1100,7 +1100,7 @@ def _evaluate_production_case(
 ) -> ProductionCaseResult:
     telemetry = _case_telemetry(arm, case_index, contract)
     trajectory = _case_trajectory(arm, case_index, telemetry)
-    decision = evaluate_complete_numerical_trajectory(
+    decision = evaluate_production_trajectory(
         trajectory,
         depth=depth,
     )
@@ -1113,10 +1113,10 @@ def _evaluate_production_case(
                 "the production contract requires internal telemetry"
             )
         internal_metrics, internal_decision = (
-            evaluate_internal_trajectory_health(
+            evaluate_dense_trajectory_health(
                 internal.hamiltonian[:, case_index],
                 internal.state_finite[:, case_index],
-                internal.dno_finite[:, case_index],
+                internal.dno_output_finite[:, case_index],
                 internal.minimum_water_column[:, case_index],
                 hamiltonian_drift_threshold=threshold,
             )
@@ -1495,8 +1495,8 @@ def _single_case_prefix_arm(
                 ],
                 dtype=np.bool_,
             ),
-            dno_finite=np.asarray(
-                internal.dno_finite[
+            dno_output_finite=np.asarray(
+                internal.dno_output_finite[
                     :saved_count,
                     case_index : case_index + 1,
                 ],

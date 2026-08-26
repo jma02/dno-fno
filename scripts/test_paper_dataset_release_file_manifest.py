@@ -127,7 +127,7 @@ class PaperDatasetReleaseFileManifestTest(unittest.TestCase):
             "notes/paper_dataset_generation_readiness_20260726.md.",
         )
         self.assertIs(type(count), int)
-        self.assertEqual(count, 130)
+        self.assertEqual(count, 131)
         self.assertEqual(
             serialization,
             "Sort paths by Unicode code point, encode each path as UTF-8, and "
@@ -135,7 +135,7 @@ class PaperDatasetReleaseFileManifestTest(unittest.TestCase):
         )
         self.assertEqual(
             expected_sha256,
-            "64ffff276b7f59e7c2984f94079c59f686e5dc71014016aa88aee60f2da41efd",
+            "8fcc4db185436d7b1c890b3c95aac15986e6e2dbfbc11d2546cb4daebf4cf8dd",
         )
         self.assertIsInstance(paths, list)
         assert isinstance(count, int)
