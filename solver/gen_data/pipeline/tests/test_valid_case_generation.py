@@ -12,29 +12,26 @@ from unittest import mock
 
 import numpy as np
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
     ensure_proposal,
-    file_sha256,
     inspect_batch,
     record_fatal_failure,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     CaseKey,
-    ValidCaseTarget,
+    SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
 )
-from solver.gen_data.pipeline.quality import (
-    QualityDecision,
-    QualityReason,
-    QualityScope,
+from solver.gen_data.pipeline.case_checks import (
+    CaseCheckResult,
+    CaseCheck,
 )
 from solver.gen_data.pipeline.valid_case_generation import (
     DatasetGenerationSpec,
-    canonical_json_sha256,
     dataset_generation_lock,
     generate_valid_cases,
     scan_dataset_generation,
@@ -55,14 +52,14 @@ class InjectedInterruption(RuntimeError):
 def _run_spec(
     root: Path,
     *,
-    case_targets: tuple[ValidCaseTarget, ...] | None = None,
+    case_targets: tuple[SampleCellTarget, ...] | None = None,
     batch_size: int = 2,
     maximum_attempts_per_accepted_case: int = 4,
     configuration: Mapping[str, object] | None = None,
 ) -> DatasetGenerationSpec:
     target_values = case_targets or (
-        ValidCaseTarget("low", 2),
-        ValidCaseTarget("moderate", 2),
+        SampleCellTarget("low", 2),
+        SampleCellTarget("moderate", 2),
     )
     return DatasetGenerationSpec(
         root=root,
@@ -77,9 +74,7 @@ def _run_spec(
         },
         batch_size=batch_size,
         first_attempt_index=0,
-        maximum_attempts_per_accepted_case=(
-            maximum_attempts_per_accepted_case
-        ),
+        maximum_attempts_per_accepted_case=(maximum_attempts_per_accepted_case),
         configuration=dict(
             configuration
             or {
@@ -111,18 +106,16 @@ def _proposal_arrays(
         ),
         cell_codes=spec.cell_codes,
         batch_id=batch_id,
-        config_fingerprint=spec.config_fingerprint,
         metadata={"run": spec.to_json_record()},
     )
 
 
-def _decision(*, accepted: bool) -> QualityDecision:
-    reason = QualityReason.OUTSIDE_SUPPORT
-    return QualityDecision(
-        scope=QualityScope.SAMPLE,
+def _decision(*, accepted: bool) -> CaseCheckResult:
+    reason = CaseCheck.OUTSIDE_SUPPORT
+    return CaseCheckResult(
         required=reason,
         evaluated=reason,
-        failed=QualityReason.NONE if accepted else reason,
+        failed=CaseCheck.NONE if accepted else reason,
     )
 
 
@@ -262,7 +255,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     ) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 4),),
+            case_targets=(SampleCellTarget("low", 4),),
             batch_size=3,
             maximum_attempts_per_accepted_case=2,
         )
@@ -293,7 +286,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
             [3, 3, 2],
         )
         self.assertFalse(
-            BatchPaths.under(
+            BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
                 split=spec.split_id.value,
@@ -317,7 +310,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_pending_final_attempt_replays_before_cap_exhaustion(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1),),
+            case_targets=(SampleCellTarget("low", 1),),
             batch_size=1,
             maximum_attempts_per_accepted_case=1,
         )
@@ -358,7 +351,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_proposal_only_interruption_replays_exact_assignments(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
+            case_targets=(SampleCellTarget("low", 1), SampleCellTarget("moderate", 1)),
         )
         interrupted_calls: list[tuple[AttemptAssignment, ...]] = []
 
@@ -401,7 +394,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_shard_interruption_replays_without_replacing_the_shard(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
+            case_targets=(SampleCellTarget("low", 1), SampleCellTarget("moderate", 1)),
         )
         interrupted_executor = FakeExecutor(spec)
         with (
@@ -417,7 +410,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.SHARD_WRITTEN)
-        shard_hash = file_sha256(pending.paths.shard)
+        shard_bytes = pending.paths.shard.read_bytes()
 
         with mock.patch(
             "solver.gen_data.pipeline.valid_case_generation.scan_dataset_generation",
@@ -426,13 +419,13 @@ class ValidCaseGenerationTests(unittest.TestCase):
             state = generate_valid_cases(spec, FakeExecutor(spec))
             self.assertEqual(scanner.call_count, 1)
         self.assertTrue(state.complete)
-        self.assertEqual(file_sha256(pending.paths.shard), shard_hash)
+        self.assertEqual(pending.paths.shard.read_bytes(), shard_bytes)
         self.assertEqual(state, scan_dataset_generation(spec))
 
     def test_terminal_failure_stops_without_scheduling_a_later_batch(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
+            case_targets=(SampleCellTarget("low", 1), SampleCellTarget("moderate", 1)),
         )
         calls = 0
 
@@ -470,7 +463,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
         self.assertIsNotNone(replay.terminal_failure)
         self.assertEqual(calls, 1)
         self.assertFalse(
-            BatchPaths.under(
+            BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
                 split=spec.split_id.value,
@@ -481,7 +474,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_incremental_state_validates_the_persisted_assignments(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
+            case_targets=(SampleCellTarget("low", 1), SampleCellTarget("moderate", 1)),
             batch_size=1,
         )
 
@@ -525,7 +518,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
         gap_root = self.root / "gap"
         gap_spec = _run_spec(
             gap_root,
-            case_targets=(ValidCaseTarget("low", 1), ValidCaseTarget("moderate", 1)),
+            case_targets=(SampleCellTarget("low", 1), SampleCellTarget("moderate", 1)),
         )
         assignments = (
             AttemptAssignment(
@@ -539,7 +532,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
                 cell_id="low",
             ),
         )
-        gap_paths = BatchPaths.under(
+        gap_paths = BatchPaths.for_batch(
             gap_spec.root,
             family=gap_spec.family_name,
             split=gap_spec.split_id.value,
@@ -555,7 +548,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
         stream_root = self.root / "stream"
         stream_spec = _run_spec(
             stream_root,
-            case_targets=(ValidCaseTarget("low", 1),),
+            case_targets=(SampleCellTarget("low", 1),),
             batch_size=1,
         )
         wrong_assignment = AttemptAssignment(
@@ -573,10 +566,9 @@ class ValidCaseGenerationTests(unittest.TestCase):
             ({"schema": "wrong_stream_v1"},),
             cell_codes=stream_spec.cell_codes,
             batch_id=0,
-            config_fingerprint=stream_spec.config_fingerprint,
             metadata={},
         )
-        wrong_paths = BatchPaths.under(
+        wrong_paths = BatchPaths.for_batch(
             stream_spec.root,
             family=stream_spec.family_name,
             split=stream_spec.split_id.value,
@@ -589,7 +581,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_scanner_does_not_trust_tampered_result_acceptance(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1),),
+            case_targets=(SampleCellTarget("low", 1),),
             batch_size=1,
         )
         state = generate_valid_cases(spec, FakeExecutor(spec))
@@ -604,37 +596,8 @@ class ValidCaseGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "quality masks"):
             scan_dataset_generation(spec)
 
-    def test_configuration_fingerprint_is_canonical_and_complete(self) -> None:
-        self.assertEqual(
-            canonical_json_sha256({"b": 2, "a": {"d": 4, "c": 3}}),
-            canonical_json_sha256({"a": {"c": 3, "d": 4}, "b": 2}),
-        )
-        with self.assertRaises(ValueError):
-            canonical_json_sha256({"bad": float("nan")})
-
+    def test_generation_spec_is_strict_and_immutable(self) -> None:
         first = _run_spec(self.root / "first", configuration={"nx": 64})
-        replay = _run_spec(self.root / "replay", configuration={"nx": 64})
-        changed = _run_spec(self.root / "changed", configuration={"nx": 128})
-        changed_quota = _run_spec(
-            self.root / "changed_quota",
-            case_targets=(ValidCaseTarget("low", 3), ValidCaseTarget("moderate", 2)),
-            configuration={"nx": 64},
-        )
-        changed_attempt_limit = replace(
-            first,
-            root=self.root / "changed_attempt_limit",
-            maximum_attempts_per_accepted_case=5,
-        )
-        self.assertEqual(first.config_fingerprint, replay.config_fingerprint)
-        self.assertNotEqual(first.config_fingerprint, changed.config_fingerprint)
-        self.assertNotEqual(
-            first.config_fingerprint,
-            changed_quota.config_fingerprint,
-        )
-        self.assertNotEqual(
-            first.config_fingerprint,
-            changed_attempt_limit.config_fingerprint,
-        )
         self.assertEqual(
             first.to_json_record()["maximum_attempts_per_accepted_case"],
             4,
@@ -665,12 +628,11 @@ class ValidCaseGenerationTests(unittest.TestCase):
             self.root / "immutable",
             configuration=source_configuration,
         )
-        immutable_fingerprint = immutable.config_fingerprint
         source_configuration["contract"]["nx"] = 128
-        self.assertEqual(immutable.config_fingerprint, immutable_fingerprint)
         frozen_contract = immutable.configuration["contract"]
         self.assertIsInstance(frozen_contract, Mapping)
         assert isinstance(frozen_contract, Mapping)
+        self.assertEqual(frozen_contract["nx"], 64)
         with self.assertRaises(TypeError):
             frozen_contract["nx"] = 128  # type: ignore[index]
 
@@ -688,7 +650,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
     def test_executor_must_return_standard_terminal_paths(self) -> None:
         spec = _run_spec(
             self.root,
-            case_targets=(ValidCaseTarget("low", 1),),
+            case_targets=(SampleCellTarget("low", 1),),
             batch_size=1,
         )
 
@@ -711,7 +673,7 @@ class ValidCaseGenerationTests(unittest.TestCase):
             generate_valid_cases(spec, proposal_only)
         self.assertEqual(
             inspect_batch(
-                BatchPaths.under(
+                BatchPaths.for_batch(
                     spec.root,
                     family=spec.family_name,
                     split=spec.split_id.value,

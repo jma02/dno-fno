@@ -20,33 +20,36 @@ from solver.gen_data.jonswap_tma_sampling import (
     JONSWAP_TMA_SAMPLE_CELLS,
     JonswapTmaSample,
 )
-from solver.gen_data.pipeline.archive import BatchPaths
-from solver.gen_data.pipeline.archive import record_fatal_failure
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.batch_storage import BatchPaths
+from solver.gen_data.pipeline.batch_storage import record_fatal_failure
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     PhysicalFamilyId,
 )
-from solver.gen_data.pipeline.quality import (
-    QualityDecision,
-    QualityReason,
-    QualityScope,
+from solver.gen_data.pipeline.case_checks import (
+    CaseCheckResult,
+    CaseCheck,
 )
 from solver.gen_data.pipeline.valid_case_generation import DatasetGenerationSpec
-from solver.gen_data.pipeline.refinement import (
-    PAPER_BENJAMIN_FEIR_GL2_CONTRACT,
-    PAPER_JONSWAP_GL2_CONTRACT,
-    PAPER_TANAKA_GL2_CONTRACT,
-    ArmExecutor,
-    ResidualControlledGL2Contract,
-    execute_production_trajectory,
-    execute_variable_horizon_production_trajectory,
-    run_residual_controlled_arm,
+from solver.gen_data.pipeline.trajectory_config import (
+    PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
+    PAPER_JONSWAP_ROLLOUT_CONFIG,
+    PAPER_TANAKA_ROLLOUT_CONFIG,
+    RolloutConfig,
+)
+from solver.gen_data.pipeline.trajectory_integration import (
+    BatchIntegrator,
+    integrate_batch,
+)
+from solver.gen_data.pipeline.trajectory_rollout import (
+    execute_trajectory_batch,
+    execute_variable_horizon_trajectory_batch,
 )
 from solver.gen_data.pipeline.trajectory_writer import (
     PAPER_STORED_TIME_POLICY,
     StoredTimePolicy,
     TrajectoryFamily,
-    outcomes_from_production,
+    outcomes_from_trajectories,
 )
 from solver.gen_data.pipeline.writer import (
     CaseOutcome,
@@ -81,9 +84,7 @@ HorizonKind: TypeAlias = Literal[
 JsonScalar: TypeAlias = str | int | float | bool | None
 JONSWAP_ADJUSTMENT_SCHEMA = "dommermuth_nonlinear_adjustment_v1"
 JONSWAP_ADJUSTMENT_FORMULA = "A(t)=1-exp(-(t/T_a)^n)"
-TRAJECTORY_REQUIRED_CHECKS = (
-    QualityReason.OUTSIDE_SUPPORT | QualityReason.INCOMPLETE_TRAJECTORY
-)
+TRAJECTORY_REQUIRED_CHECKS = CaseCheck.OUTSIDE_SUPPORT | CaseCheck.INCOMPLETE_TRAJECTORY
 _TANAKA_FAILURE_REASONS = frozenset(
     {
         "negative_or_nonfinite_surface_potential_radicand",
@@ -124,15 +125,15 @@ _FAMILY_CELLS = {
 }
 
 
-def _paper_numerical_contract(
+def _paper_rollout_config(
     family: TrajectoryFamily,
-) -> ResidualControlledGL2Contract:
-    """Return the exact production solver contract for one family."""
+) -> RolloutConfig:
+    """Return the production rollout settings for one family."""
 
     return {
-        "tanaka": PAPER_TANAKA_GL2_CONTRACT,
-        "benjamin_feir": PAPER_BENJAMIN_FEIR_GL2_CONTRACT,
-        "jonswap_tma": PAPER_JONSWAP_GL2_CONTRACT,
+        "tanaka": PAPER_TANAKA_ROLLOUT_CONFIG,
+        "benjamin_feir": PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
+        "jonswap_tma": PAPER_JONSWAP_ROLLOUT_CONFIG,
     }[family]
 
 
@@ -182,36 +183,6 @@ class TrajectoryHorizonPolicy:
         else:
             raise ValueError(f"unknown trajectory horizon kind: {self.kind}")
 
-    @classmethod
-    def fixed(cls, terminal_time: float) -> TrajectoryHorizonPolicy:
-        return cls(
-            kind="fixed_terminal_time",
-            fixed_terminal_time=terminal_time,
-            period_count=None,
-        )
-
-    @classmethod
-    def benjamin_feir_carrier_periods(
-        cls,
-        count: int = 100,
-    ) -> TrajectoryHorizonPolicy:
-        return cls(
-            kind="benjamin_feir_carrier_periods_floor_saved_grid",
-            fixed_terminal_time=None,
-            period_count=count,
-        )
-
-    @classmethod
-    def jonswap_peak_periods(
-        cls,
-        count: int = 16,
-    ) -> TrajectoryHorizonPolicy:
-        return cls(
-            kind="jonswap_peak_periods_floor_saved_grid",
-            fixed_terminal_time=None,
-            period_count=count,
-        )
-
     def to_json_record(self) -> dict[str, object]:
         return {
             "kind": self.kind,
@@ -221,6 +192,38 @@ class TrajectoryHorizonPolicy:
                 "exact" if self.kind == "fixed_terminal_time" else "floor"
             ),
         }
+
+
+def fixed_time_horizon(terminal_time: float) -> TrajectoryHorizonPolicy:
+    return TrajectoryHorizonPolicy(
+        kind="fixed_terminal_time",
+        fixed_terminal_time=terminal_time,
+        period_count=None,
+    )
+
+
+def benjamin_feir_horizon(period_count: int = 100) -> TrajectoryHorizonPolicy:
+    return TrajectoryHorizonPolicy(
+        kind="benjamin_feir_carrier_periods_floor_saved_grid",
+        fixed_terminal_time=None,
+        period_count=period_count,
+    )
+
+
+def jonswap_horizon(period_count: int = 16) -> TrajectoryHorizonPolicy:
+    return TrajectoryHorizonPolicy(
+        kind="jonswap_peak_periods_floor_saved_grid",
+        fixed_terminal_time=None,
+        period_count=period_count,
+    )
+
+
+def _paper_horizon(family: TrajectoryFamily) -> TrajectoryHorizonPolicy:
+    if family == "jonswap_tma":
+        return jonswap_horizon()
+    if family == "benjamin_feir":
+        return benjamin_feir_horizon()
+    return fixed_time_horizon(200.0)
 
 
 @dataclass(frozen=True)
@@ -274,7 +277,7 @@ class TrajectoryExecutionConfig:
 
     family: TrajectoryFamily
     role: ContractRole
-    numerical: ResidualControlledGL2Contract
+    numerical: RolloutConfig
     horizon: TrajectoryHorizonPolicy
     stored_time_policy: StoredTimePolicy
     jonswap_quadrature_order: int | None
@@ -319,19 +322,10 @@ class TrajectoryExecutionConfig:
                 )
 
         if self.role == "paper_dataset":
-            expected_horizon = (
-                TrajectoryHorizonPolicy.jonswap_peak_periods(16)
-                if self.family == "jonswap_tma"
-                else (
-                    TrajectoryHorizonPolicy.benjamin_feir_carrier_periods(100)
-                    if self.family == "benjamin_feir"
-                    else TrajectoryHorizonPolicy.fixed(200.0)
-                )
-            )
             expected_quadrature = 16 if self.family == "jonswap_tma" else None
             if (
-                self.numerical != _paper_numerical_contract(self.family)
-                or self.horizon != expected_horizon
+                self.numerical != _paper_rollout_config(self.family)
+                or self.horizon != _paper_horizon(self.family)
                 or self.stored_time_policy != PAPER_STORED_TIME_POLICY
                 or self.jonswap_quadrature_order != expected_quadrature
                 or self.jonswap_adjustment
@@ -346,41 +340,10 @@ class TrajectoryExecutionConfig:
                     "'reduced_wiring_evidence_only'"
                 )
 
-    @classmethod
-    def paper(cls, family: TrajectoryFamily) -> TrajectoryExecutionConfig:
-        """Construct the exact paper-dataset contract for one family."""
-
-        return cls(
-            family=family,
-            role="paper_dataset",
-            numerical=_paper_numerical_contract(family),
-            horizon=(
-                TrajectoryHorizonPolicy.jonswap_peak_periods(16)
-                if family == "jonswap_tma"
-                else (
-                    TrajectoryHorizonPolicy.benjamin_feir_carrier_periods(100)
-                    if family == "benjamin_feir"
-                    else TrajectoryHorizonPolicy.fixed(200.0)
-                )
-            ),
-            stored_time_policy=PAPER_STORED_TIME_POLICY,
-            jonswap_quadrature_order=16 if family == "jonswap_tma" else None,
-            jonswap_adjustment=(
-                PAPER_JONSWAP_ADJUSTMENT_POLICY if family == "jonswap_tma" else None
-            ),
-        )
-
     def to_json_record(self) -> dict[str, object]:
         numerical = asdict(self.numerical)
-        numerical["dt"] = numerical.pop("production_dt")
-        for optional_field in (
-            "target_nx",
-            "target_dno_order",
-            "target_maximum_wavenumber",
-            "internal_hamiltonian_drift_threshold",
-        ):
-            if numerical[optional_field] is None:
-                numerical.pop(optional_field)
+        if numerical["internal_hamiltonian_drift_threshold"] is None:
+            numerical.pop("internal_hamiltonian_drift_threshold")
         record: dict[str, object] = {
             "family": self.family,
             "role": self.role,
@@ -392,6 +355,24 @@ class TrajectoryExecutionConfig:
         if self.jonswap_adjustment is not None:
             record["jonswap_adjustment"] = self.jonswap_adjustment.to_json_record()
         return record
+
+
+def paper_trajectory_execution(
+    family: TrajectoryFamily,
+) -> TrajectoryExecutionConfig:
+    """Return the production settings for one trajectory family."""
+
+    return TrajectoryExecutionConfig(
+        family=family,
+        role="paper_dataset",
+        numerical=_paper_rollout_config(family),
+        horizon=_paper_horizon(family),
+        stored_time_policy=PAPER_STORED_TIME_POLICY,
+        jonswap_quadrature_order=16 if family == "jonswap_tma" else None,
+        jonswap_adjustment=(
+            PAPER_JONSWAP_ADJUSTMENT_POLICY if family == "jonswap_tma" else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -854,7 +835,7 @@ def classify_trajectory_construction_failure(
 
 def _fixed_time_grid(
     horizon: TrajectoryHorizonPolicy,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> CaseTimeGrid:
     assert horizon.fixed_terminal_time is not None
     terminal = horizon.fixed_terminal_time
@@ -947,8 +928,8 @@ def _construction_rejection(
     *,
     original_local_index: int,
 ) -> CaseOutcome:
-    evaluated = QualityReason.OUTSIDE_SUPPORT
-    failed = QualityReason.OUTSIDE_SUPPORT
+    evaluated = CaseCheck.OUTSIDE_SUPPORT
+    failed = CaseCheck.OUTSIDE_SUPPORT
     failure_reason = failure.record.get("reason")
     if failure.record.get("schema") == "jonswap_initial_state_domain_failure_v1":
         cases = failure.record.get("cases")
@@ -967,12 +948,12 @@ def _construction_rejection(
         state_finite = matching[0].get("state_finite")
         if not isinstance(state_finite, bool):
             raise TypeError("JONSWAP state_finite must be Boolean")
-        evaluated |= QualityReason.NONFINITE_STATE
+        evaluated |= CaseCheck.NONFINITE_STATE
         if state_finite:
-            evaluated |= QualityReason.BOTTOM_CLEARANCE
-            failed |= QualityReason.BOTTOM_CLEARANCE
+            evaluated |= CaseCheck.BOTTOM_CLEARANCE
+            failed |= CaseCheck.BOTTOM_CLEARANCE
         else:
-            failed |= QualityReason.NONFINITE_STATE
+            failed |= CaseCheck.NONFINITE_STATE
     metrics: dict[str, JsonScalar] = {
         "construction_status": "declared_outside_support",
         "construction_failure_reason": (
@@ -987,8 +968,7 @@ def _construction_rejection(
         ),
     }
     return CaseOutcome(
-        decision=QualityDecision(
-            scope=QualityScope.TRAJECTORY,
+        decision=CaseCheckResult(
             required=TRAJECTORY_REQUIRED_CHECKS,
             evaluated=evaluated,
             failed=failed,
@@ -1001,10 +981,9 @@ def _construction_rejection(
 def _with_support_evaluated(outcome: CaseOutcome) -> CaseOutcome:
     decision = outcome.decision
     return CaseOutcome(
-        decision=QualityDecision(
-            scope=QualityScope.TRAJECTORY,
-            required=decision.required | QualityReason.OUTSIDE_SUPPORT,
-            evaluated=decision.evaluated | QualityReason.OUTSIDE_SUPPORT,
+        decision=CaseCheckResult(
+            required=decision.required | CaseCheck.OUTSIDE_SUPPORT,
+            evaluated=decision.evaluated | CaseCheck.OUTSIDE_SUPPORT,
             failed=decision.failed,
         ),
         rows=outcome.rows,
@@ -1046,7 +1025,7 @@ class TrajectoryBatchExecutor:
     run_spec: DatasetGenerationSpec
     execution: TrajectoryExecutionConfig
     metadata: Mapping[str, object] | None = None
-    arm_executor: ArmExecutor = run_residual_controlled_arm
+    rollout_executor: BatchIntegrator = integrate_batch
     constructor: TrajectoryConstructor | None = None
     construction_failure_classifier: ConstructionFailureClassifier = (
         classify_trajectory_construction_failure
@@ -1073,8 +1052,7 @@ class TrajectoryBatchExecutor:
             != self.execution.jonswap_adjustment
         ):
             raise ValueError(
-                "paper-dataset JONSWAP/TMA requires the fingerprinted "
-                "nonlinear-adjustment executor"
+                "paper-dataset JONSWAP/TMA requires the nonlinear-adjustment executor"
             )
 
         run_configuration = self.run_spec.to_json_record()["configuration"]
@@ -1085,7 +1063,7 @@ class TrajectoryBatchExecutor:
                 "run configuration differs from the supplied trajectory execution"
             )
         if self.execution.role == "paper_dataset" and (
-            self.arm_executor is not run_residual_controlled_arm
+            self.rollout_executor is not integrate_batch
             or self.constructor is not None
             or (
                 self.construction_failure_classifier
@@ -1095,7 +1073,7 @@ class TrajectoryBatchExecutor:
         ):
             raise ValueError(
                 "paper-dataset execution requires the production constructor, "
-                "arm executor, and failure classifiers"
+                "rollout executor, and failure classifiers"
             )
         object.__setattr__(
             self,
@@ -1448,13 +1426,13 @@ class TrajectoryBatchExecutor:
             raise ValueError(
                 "trajectory horizon has fewer saved times than the storage policy"
             )
-        execution = execute_production_trajectory(
+        cases = execute_trajectory_batch(
             initial.eta0,
             initial.xi0,
             initial.depths,
             grid.saved_times,
-            contract=self.execution.numerical,
-            arm_executor=self.arm_executor,
+            config=self.execution.numerical,
+            rollout_executor=self.rollout_executor,
         )
         return tuple(
             _with_time_grid(
@@ -1469,11 +1447,12 @@ class TrajectoryBatchExecutor:
                 grid,
             )
             for index, outcome in enumerate(
-                outcomes_from_production(
-                    execution,
+                outcomes_from_trajectories(
+                    cases,
                     initial.depths,
                     family=family,
                     length=self.execution.numerical.length,
+                    integration_dt=self.execution.numerical.dt,
                     policy=self.execution.stored_time_policy,
                 )
             )
@@ -1496,19 +1475,20 @@ class TrajectoryBatchExecutor:
             raise ValueError(
                 "trajectory horizon has fewer saved times than the storage policy"
             )
-        execution = execute_variable_horizon_production_trajectory(
+        cases = execute_variable_horizon_trajectory_batch(
             initial.eta0,
             initial.xi0,
             initial.depths,
             tuple(grid.saved_times for grid in grids),
-            contract=self.execution.numerical,
-            arm_executor=self.arm_executor,
+            config=self.execution.numerical,
+            rollout_executor=self.rollout_executor,
         )
-        outcomes = outcomes_from_production(
-            execution,
+        outcomes = outcomes_from_trajectories(
+            cases,
             initial.depths,
             family=family,
             length=self.execution.numerical.length,
+            integration_dt=self.execution.numerical.dt,
             policy=self.execution.stored_time_policy,
         )
         return tuple(
@@ -1606,7 +1586,6 @@ class TrajectoryBatchExecutor:
             family_name=self.run_spec.family_name,
             batch_id=batch_id,
             cell_codes=self.run_spec.cell_codes,
-            config_fingerprint=self.run_spec.config_fingerprint,
             metadata={
                 "family": self.execution.family,
                 "case_kind": "trajectory",

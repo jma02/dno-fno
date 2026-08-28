@@ -1,4 +1,5 @@
 """Checkpoint loading and surrogate-driven rollout for JAX operator models."""
+
 from __future__ import annotations
 
 import json
@@ -22,19 +23,17 @@ for _directory in (
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 
-from dno_net_v2 import (  # noqa: E402
+from dno_net_v2 import (  # pyright: ignore[reportMissingImports]  # noqa: E402
     CraigSulemDNO,
     validate_fixed_craig_sulem_config,
 )
-from fno1d import FNO1d  # noqa: E402
+from fno1d import FNO1d  # pyright: ignore[reportMissingImports]  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import myfft, myifft  # noqa: E402
 
 
 Predictor = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
-BatchedPredictor = Callable[
-    [jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray
-]
+BatchedPredictor = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]
 GL2_ITERATIONS = 4
 
 
@@ -58,10 +57,13 @@ def load_run(
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     if domain_length_override is not None:
         config["domain_length"] = float(domain_length_override)
-    checkpoint_dir = run_dir / {
-        "best": "best_val_ckpt",
-        "final": "final_ckpt",
-    }[checkpoint]
+    checkpoint_dir = (
+        run_dir
+        / {
+            "best": "best_val_ckpt",
+            "final": "final_ckpt",
+        }[checkpoint]
+    )
     metadata = json.loads(
         (checkpoint_dir / "metadata.json").read_text(encoding="utf-8")
     )
@@ -152,19 +154,15 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
 
     if loaded.norm_mode != "minmax":
         raise ValueError(f"unsupported normalization mode: {loaded.norm_mode!r}")
-    feature_min = jnp.asarray(
-        loaded.stats["feature_min"], dtype=model_dtype
-    ).reshape(1, 1, 2)
-    feature_max = jnp.asarray(
-        loaded.stats["feature_max"], dtype=model_dtype
-    ).reshape(1, 1, 2)
+    feature_min = jnp.asarray(loaded.stats["feature_min"], dtype=model_dtype).reshape(
+        1, 1, 2
+    )
+    feature_max = jnp.asarray(loaded.stats["feature_max"], dtype=model_dtype).reshape(
+        1, 1, 2
+    )
     feature_range = feature_max - feature_min + 1e-8
     target_min = float(loaded.stats["target_min"])
-    target_range = (
-        float(loaded.stats["target_max"])
-        - target_min
-        + 1e-8
-    )
+    target_range = float(loaded.stats["target_max"]) - target_min + 1e-8
 
     @jax.jit
     def predict(
@@ -172,17 +170,11 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
         xi: jnp.ndarray,
         log_depth: jnp.ndarray,
     ) -> jnp.ndarray:
-        features = jnp.stack(
-            (eta.astype(model_dtype), xi.astype(model_dtype)), axis=-1
-        )
+        features = jnp.stack((eta.astype(model_dtype), xi.astype(model_dtype)), axis=-1)
         normalized = ((features - feature_min) / feature_range) * 2.0 - 1.0
         depth = jnp.asarray(log_depth, dtype=model_dtype).reshape(-1, 1)
-        output = loaded.model.apply(
-            {"params": loaded.params}, normalized, depth
-        )
-        denormalized = (
-            ((output[..., 0] + 1.0) * 0.5) * target_range + target_min
-        )
+        output = loaded.model.apply({"params": loaded.params}, normalized, depth)
+        denormalized = ((output[..., 0] + 1.0) * 0.5) * target_range + target_min
         gxi = denormalized.astype(eta.dtype)
         return gxi - gxi.mean(axis=-1, keepdims=True)
 
@@ -200,18 +192,8 @@ def _rhs_nonlinear_surrogate(
     eta_t = gxi - ti.linear_dno_action(state.xi, params.g0)
     xi_t = ti.dealiased_zakharov_xi_rhs(eta_x, xi_x, gxi)
     if params.filter_fraction < 1.0:
-        eta_t = ti.apply_filter(
-            eta_t,
-            params.k,
-            shape="hard",
-            filter_fraction=params.filter_fraction,
-        )
-        xi_t = ti.apply_filter(
-            xi_t,
-            params.k,
-            shape="hard",
-            filter_fraction=params.filter_fraction,
-        )
+        eta_t = ti.apply_lowpass(eta_t, params.k, params.filter_fraction)
+        xi_t = ti.apply_lowpass(xi_t, params.k, params.filter_fraction)
     return ti.State(eta=eta_t, xi=xi_t)
 
 
@@ -226,9 +208,7 @@ def _rhs_nonlinear_if_surrogate(
         eta=myifft(physical_hat.eta_hat),
         xi=myifft(physical_hat.xi_hat),
     )
-    nonlinear = _rhs_nonlinear_surrogate(
-        physical_state, params, predict_gxi
-    )
+    nonlinear = _rhs_nonlinear_surrogate(physical_state, params, predict_gxi)
     nonlinear_hat = ti.SpectralState(
         eta_hat=myfft(nonlinear.eta, params.nx),
         xi_hat=myfft(nonlinear.xi, params.nx),
@@ -255,9 +235,7 @@ def _gl2_if_step_surrogate(
         eta_hat=myfft(state.eta, params.nx),
         xi_hat=myfft(state.xi, params.nx),
     )
-    initial_if_state = ti.apply_linear_flow_hat(
-        state_hat, -time_value, params
-    )
+    initial_if_state = ti.apply_linear_flow_hat(state_hat, -time_value, params)
 
     def add(
         left: ti.SpectralState,
@@ -312,9 +290,7 @@ def _gl2_if_step_surrogate(
         stage2, time_value + c2 * dt, params, predict_gxi
     )
     next_if_state = add(initial_if_state, scale(add(rhs1, rhs2), 0.5 * dt))
-    next_hat = ti.apply_linear_flow_hat(
-        next_if_state, time_value + dt, params
-    )
+    next_hat = ti.apply_linear_flow_hat(next_if_state, time_value + dt, params)
     next_state = ti.State(
         eta=myifft(next_hat.eta_hat),
         xi=myifft(next_hat.xi_hat),
@@ -322,18 +298,8 @@ def _gl2_if_step_surrogate(
     if params.filter_fraction >= 1.0:
         return next_state
     return ti.State(
-        eta=ti.apply_filter(
-            next_state.eta,
-            params.k,
-            shape="hard",
-            filter_fraction=params.filter_fraction,
-        ),
-        xi=ti.apply_filter(
-            next_state.xi,
-            params.k,
-            shape="hard",
-            filter_fraction=params.filter_fraction,
-        ),
+        eta=ti.apply_lowpass(next_state.eta, params.k, params.filter_fraction),
+        xi=ti.apply_lowpass(next_state.xi, params.k, params.filter_fraction),
     )
 
 

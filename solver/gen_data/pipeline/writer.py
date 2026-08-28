@@ -6,23 +6,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     CaseCommitRecord,
     commit_batch,
     ensure_proposal,
     ensure_shard,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     split_code,
 )
-from solver.gen_data.pipeline.quality import QualityDecision
+from solver.gen_data.pipeline.case_checks import CaseCheckResult
 
 
 FloatArray: TypeAlias = NDArray[np.floating]
@@ -45,7 +45,7 @@ class AcceptedCaseRows:
 class CaseOutcome:
     """One complete quality decision and its optional retained rows."""
 
-    decision: QualityDecision
+    decision: CaseCheckResult
     rows: AcceptedCaseRows | None
     metrics: Mapping[str, JsonScalar]
 
@@ -71,9 +71,8 @@ def build_proposal_arrays(
     *,
     cell_codes: Mapping[str, int],
     batch_id: int,
-    config_fingerprint: str,
     metadata: Mapping[str, object],
-) -> dict[str, NDArray[object]]:
+) -> dict[str, NDArray[Any]]:
     """Build the exact proposal persisted before numerical construction."""
 
     if not assignments:
@@ -117,7 +116,6 @@ def build_proposal_arrays(
         raise ValueError("cell codes must be nonnegative")
 
     return {
-        "config_fingerprint": np.asarray(config_fingerprint),
         "family_id": np.asarray(first_key.family_id, dtype=np.int16),
         "revision_id": np.asarray(first_key.revision_id, dtype=np.int16),
         "split_id": np.asarray(split_code(first_key.split_id), dtype=np.uint8),
@@ -146,7 +144,9 @@ def build_proposal_arrays(
     }
 
 
-def _validated_rows(rows: AcceptedCaseRows) -> tuple[
+def _validated_rows(
+    rows: AcceptedCaseRows,
+) -> tuple[
     NDArray[np.float32],
     NDArray[np.float32],
     NDArray[np.float32],
@@ -179,16 +179,16 @@ def _validated_rows(rows: AcceptedCaseRows) -> tuple[
 
 def commit_case_outcomes(
     paths: BatchPaths,
-    proposal_arrays: Mapping[str, NDArray[object]],
+    proposal_arrays: Mapping[str, NDArray[Any]],
     outcomes: Sequence[CaseOutcome],
     *,
     metadata: Mapping[str, object],
-) -> str:
+) -> None:
     """Persist accepted whole-case rows and commit every attempted decision."""
 
     if len(outcomes) != int(np.asarray(proposal_arrays["case_id"]).size):
         raise ValueError("outcomes must contain every proposed case")
-    proposal_sha256 = ensure_proposal(paths, proposal_arrays)
+    ensure_proposal(paths, proposal_arrays)
 
     eta_parts: list[NDArray[np.float32]] = []
     xi_parts: list[NDArray[np.float32]] = []
@@ -213,13 +213,9 @@ def commit_case_outcomes(
             eta_parts.append(eta)
             xi_parts.append(xi)
             gxi_parts.append(gxi)
-            depth_parts.append(
-                np.full(row_count, outcome.rows.depth, dtype=np.float64)
-            )
+            depth_parts.append(np.full(row_count, outcome.rows.depth, dtype=np.float64))
             time_parts.append(time)
-            case_parts.append(
-                np.full(row_count, local_index, dtype=np.int32)
-            )
+            case_parts.append(np.full(row_count, local_index, dtype=np.int32))
             frame_parts.append(np.arange(row_count, dtype=np.int32))
             selected_parts.append(selected)
             first_row += row_count
@@ -228,9 +224,9 @@ def commit_case_outcomes(
             CaseCommitRecord(
                 case_id=int(case_id),
                 accepted=decision.accepted,
-                required_bits=decision.required_bits,
-                evaluated_bits=decision.evaluated_bits,
-                failed_bits=decision.failed_bits,
+                required_bits=int(decision.required),
+                evaluated_bits=int(decision.evaluated),
+                failed_bits=int(decision.failed),
                 first_row=case_first_row,
                 row_count=row_count,
                 metrics=dict(outcome.metrics),
@@ -249,13 +245,9 @@ def commit_case_outcomes(
                 "case_local_index": np.concatenate(case_parts),
                 "frame_index": np.concatenate(frame_parts),
                 "selected_dense_index": np.concatenate(selected_parts),
-                "config_fingerprint": np.asarray(
-                    proposal_arrays["config_fingerprint"]
-                ),
-                "proposal_sha256": np.asarray(proposal_sha256),
             },
         )
-    return commit_batch(paths, cases=records, metadata=metadata)
+    commit_batch(paths, cases=records, metadata=metadata)
 
 
 def batch_paths_for_assignments(
@@ -270,12 +262,9 @@ def batch_paths_for_assignments(
     if not assignments:
         raise ValueError("assignments must not be empty")
     split_id = assignments[0].case_key.split_id
-    if any(
-        assignment.case_key.split_id is not split_id
-        for assignment in assignments
-    ):
+    if any(assignment.case_key.split_id is not split_id for assignment in assignments):
         raise ValueError("one batch cannot mix data splits")
-    return BatchPaths.under(
+    return BatchPaths.for_batch(
         root,
         family=family_name,
         split=split_id.value,

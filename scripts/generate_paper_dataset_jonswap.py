@@ -2,8 +2,8 @@
 
 This launcher extends the current shared JONSWAP run identity with the
 horizon-bucketing configuration and uses the adjustment-first executor. Each case
-receives its fingerprinted nonlinear burn-in before the autonomous production
-trajectory begins from the full internal-band endpoint.
+receives a nonlinear burn-in before the autonomous production trajectory begins
+from the full internal-band endpoint.
 """
 
 from __future__ import annotations
@@ -25,18 +25,12 @@ from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
     BucketingConfig,
     HorizonBucketedJonswapBatchExecutor,
 )
-from solver.gen_data.pipeline.archive import file_sha256  # noqa: E402
 from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     DatasetGenerationSpec,
 )
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
-)
-
-
-EXTRA_SOURCE_PATHS = (
-    Path(__file__).resolve(),
-    ROOT / "solver/gen_data/jonswap_horizon_executor.py",
+    paper_trajectory_execution,
 )
 
 
@@ -81,7 +75,7 @@ def build_bucketed_run_spec(
         raise ValueError("solver batch size cannot exceed proposal batch size")
 
     selected_execution = (
-        TrajectoryExecutionConfig.paper("jonswap_tma")
+        paper_trajectory_execution("jonswap_tma")
         if execution is None
         else execution
     )
@@ -94,14 +88,6 @@ def build_bucketed_run_spec(
     record = baseline.to_json_record()
     configuration = record["configuration"]
     assert isinstance(configuration, dict)
-    source_sha256 = configuration["source_sha256"]
-    assert isinstance(source_sha256, dict)
-    source_sha256.update(
-        {
-            str(path.resolve().relative_to(ROOT)): file_sha256(path)
-            for path in EXTRA_SOURCE_PATHS
-        }
-    )
     configuration[BUCKETING_CONFIG_KEY] = BucketingConfig(
         outer_proposal_size=request.batch_size,
         solver_batch_size=solver_batch_size,
@@ -170,9 +156,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "mode": "execute",
                 "status": result.summary["status"],
                 "summary_path": str(result.summary_path),
-                "configuration_fingerprint": result.summary[
-                    "configuration_fingerprint"
-                ],
                 "counts": result.summary["counts"],
                 "dataset_view": result.summary["dataset_view"],
                 "timing_seconds": result.summary["timing_seconds"],

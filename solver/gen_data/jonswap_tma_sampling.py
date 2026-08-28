@@ -27,7 +27,7 @@ from solver.gen_data.jonswap_tma import (
     relative_frequency_interval_fits,
     sample_jonswap_tma_phases,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     random_generator_for_case,
 )

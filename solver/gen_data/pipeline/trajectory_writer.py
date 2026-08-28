@@ -9,11 +9,10 @@ from typing import Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.acceptance import TrajectorySamples
-from solver.gen_data.pipeline.quality import QualityReason
-from solver.gen_data.pipeline.refinement import (
-    ProductionCaseResult,
-    ProductionExecution,
+from solver.gen_data.pipeline.case_checks import CaseCheck
+from solver.gen_data.pipeline.trajectory_rollout import (
+    TrajectoryCaseResult,
+    TrajectorySamples,
 )
 from solver.gen_data.pipeline.time_selection import (
     select_tanaka_times,
@@ -94,31 +93,29 @@ def _selected_indices(
     raise ValueError(f"unknown trajectory family: {family}")
 
 
-def _production_case_metrics(
-    case: ProductionCaseResult,
+def _trajectory_case_metrics(
+    case: TrajectoryCaseResult,
+    *,
+    integration_dt: float,
 ) -> dict[str, float | int | bool | None]:
     failed = case.decision.failed
-    internal = case.internal_metrics
-    clearance_evaluated = bool(
-        case.decision.evaluated & QualityReason.BOTTOM_CLEARANCE
-    )
+    internal = case.health_metrics
+    clearance_evaluated = bool(case.decision.evaluated & CaseCheck.BOTTOM_CLEARANCE)
     return {
-        "accepted": case.accepted,
+        "accepted": case.decision.accepted,
         "complete_admissible_trajectory": not bool(
-            failed & QualityReason.INCOMPLETE_TRAJECTORY
+            failed & CaseCheck.INCOMPLETE_TRAJECTORY
         ),
-        "state_finite": not bool(failed & QualityReason.NONFINITE_STATE),
-        "target_finite": not bool(failed & QualityReason.NONFINITE_TARGET),
+        "state_finite": not bool(failed & CaseCheck.NONFINITE_STATE),
+        "target_finite": not bool(failed & CaseCheck.NONFINITE_TARGET),
         "positive_water_column": (
-            not bool(failed & QualityReason.BOTTOM_CLEARANCE)
+            not bool(failed & CaseCheck.BOTTOM_CLEARANCE)
             if clearance_evaluated
             else None
         ),
-        "all_stages_solved": case.telemetry.all_stages_solved,
-        "maximum_stage_residual": _finite_or_none(
-            case.telemetry.maximum_stage_residual
-        ),
-        "production_dt": case.dt,
+        "all_stages_solved": not bool(failed & CaseCheck.GL2_STAGE_RESIDUAL),
+        "maximum_stage_residual": _finite_or_none(case.maximum_gl2_stage_residual),
+        "integration_dt": integration_dt,
         "internal_health_evaluated": internal is not None,
         "internal_state_finite": (
             internal.state_finite if internal is not None else None
@@ -138,42 +135,39 @@ def _production_case_metrics(
             else None
         ),
         "internal_hamiltonian_drift_threshold": (
-            internal.hamiltonian_drift_threshold
-            if internal is not None
-            else None
+            internal.hamiltonian_drift_threshold if internal is not None else None
         ),
     }
 
 
-def outcomes_from_production(
-    execution: ProductionExecution,
+def outcomes_from_trajectories(
+    cases: tuple[TrajectoryCaseResult, ...],
     depths: FloatArray,
     *,
     family: TrajectoryFamily,
     length: float,
+    integration_dt: float,
     policy: StoredTimePolicy = PAPER_STORED_TIME_POLICY,
 ) -> tuple[CaseOutcome, ...]:
-    """Select frames from complete single-arm production trajectories."""
+    """Select stored frames from complete trajectories."""
 
     depth_values = np.asarray(depths, dtype=np.float64)
-    if depth_values.shape != (len(execution.cases),):
-        raise ValueError("depths must contain one value per production case")
+    if depth_values.shape != (len(cases),):
+        raise ValueError("depths must contain one value per trajectory case")
     if not np.isfinite(depth_values).all() or np.any(depth_values <= 0.0):
         raise ValueError("depths must be finite and positive")
     if not math.isfinite(length) or length <= 0.0:
         raise ValueError("length must be finite and positive")
-    if tuple(case.case_index for case in execution.cases) != tuple(
-        range(len(execution.cases))
-    ):
-        raise ValueError("production cases must be in input order")
+    if not math.isfinite(integration_dt) or integration_dt <= 0.0:
+        raise ValueError("integration_dt must be finite and positive")
 
     outcomes: list[CaseOutcome] = []
-    for case, depth in zip(execution.cases, depth_values):
+    for case, depth in zip(cases, depth_values):
         rows = None
-        trajectory = case.retained_trajectory
-        if case.accepted:
+        trajectory = case.trajectory
+        if case.decision.accepted:
             if trajectory is None:
-                raise RuntimeError("accepted production case has no trajectory")
+                raise RuntimeError("accepted trajectory case has no trajectory")
             indices = _selected_indices(
                 trajectory,
                 family=family,
@@ -189,12 +183,12 @@ def outcomes_from_production(
                 selected_dense_index=indices,
             )
         elif trajectory is not None:
-            raise RuntimeError("rejected production case retained a trajectory")
+            raise RuntimeError("rejected trajectory case retained a trajectory")
         outcomes.append(
             CaseOutcome(
                 decision=case.decision,
                 rows=rows,
-                metrics=_production_case_metrics(case),
+                metrics=_trajectory_case_metrics(case, integration_dt=integration_dt),
             )
         )
     return tuple(outcomes)

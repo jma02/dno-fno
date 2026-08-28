@@ -41,8 +41,8 @@ The intended order is stated in the
 explicitly says that the new dataset has not been generated
 ([plan, lines 77–115](parameterized_paper_dataset_plan_20260722.tex#L77-L115)).
 The shared numerical pieces already exist: the
-[frozen target](../solver/gen_data/pipeline/reference.py#L13-L106), the
-[single-arm GL2 kernel and separate refinement audit](../solver/gen_data/pipeline/refinement.py),
+[frozen target](../solver/gen_data/pipeline/dno_target.py#L13-L106), the
+[single-arm GL2 kernel and rollout audit](../solver/gen_data/pipeline/trajectory_rollout.py),
 and residual-controlled GL2
 ([time integrator, lines 860–980](../solver/solvers/time_integrator.py#L860-L980)).
 The full-horizon runner composes these pieces for twelve fixed stress cases
@@ -131,7 +131,7 @@ population evidence. No replacement training dataset has yet been generated.
 
 The first two family-independent pieces now exist:
 
-1. `pipeline/production.py` assigns the physical-family revision, data split,
+1. `pipeline/case_allocation.py` assigns the physical-family revision, data split,
    parameter cell, and deterministic random-stream key before construction.
    For a requested accepted-case count \(A\) and \(C\) ordered cells, write
    \(A=qC+r\), where \(0\leq r<C\). The first \(r\) cells receive quota
@@ -169,7 +169,7 @@ the family status table above or make any family production-ready.
 
 Seven additional pieces now exist.
 
-1. `pipeline/refinement.py` is the common float64 GL2 executor. It runs the
+1. `pipeline/trajectory_rollout.py` is the common float64 GL2 executor. It runs the
    single production arm at \(h=0.01\), evaluates the frozen target, and
    records every implicit-stage result. A production result contains a
    trajectory only when that one trajectory is complete and admissible. The

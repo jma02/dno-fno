@@ -10,5 +10,5 @@ Compile from this directory with:
 The manuscript source is split across `sections/`.  The numerical results and
 discussion distinguish matched ablations from bundled or post hoc evidence,
 and distinguish the historical v9 dataset used by the reported checkpoints
-from the completed, source-authenticated parameterized replacement dataset,
+from the completed, validated parameterized replacement dataset,
 which has not yet been used to train a reported model.

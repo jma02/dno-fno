@@ -981,7 +981,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
     solver.gen_data.tests.test_benjamin_feir_jcp09 \
     solver.gen_data.tests.test_jonswap_tma \
-    solver.gen_data.pipeline.tests.test_reference \
+    solver.gen_data.pipeline.tests.test_dno_target \
     solver.gen_data.pipeline.tests.test_acceptance \
     solver.solvers.test_time_integrator_telemetry \
     solver.gen_data.tests_stokes_ursell_sampling \
@@ -1009,9 +1009,9 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \
-    solver.gen_data.pipeline.tests.test_production \
+    solver.gen_data.pipeline.tests.test_case_allocation \
     solver.gen_data.pipeline.tests.test_archive \
-    solver.gen_data.pipeline.tests.test_manifest
+    solver.gen_data.pipeline.tests.test_build_dataset_view
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
   uv run python -m unittest \

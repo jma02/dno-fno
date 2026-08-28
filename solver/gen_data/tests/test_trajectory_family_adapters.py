@@ -35,7 +35,7 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLING_REVISION_V4,
     JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.pipeline.archive import (  # noqa: E402
+from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     BatchPaths,
     BatchStatus,
     CaseCommitRecord,
@@ -44,22 +44,24 @@ from solver.gen_data.pipeline.archive import (  # noqa: E402
     inspect_batch,
     record_fatal_failure,
 )
-from solver.gen_data.pipeline.manifest import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.production import (  # noqa: E402
+from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     PhysicalFamilyId,
     SplitId,
-    paper_dataset_revision_id,
+    DATASET_REVISION_BY_FAMILY,
 )
-from solver.gen_data.pipeline.refinement import (  # noqa: E402
-    PAPER_JONSWAP_GL2_CONTRACT,
-    ResidualControlledGL2Contract,
-    execute_production_trajectory,
+from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
+    PAPER_JONSWAP_ROLLOUT_CONFIG,
+    RolloutConfig,
+)
+from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
+    execute_trajectory_batch,
 )
 from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
     StoredTimePolicy,
-    outcomes_from_production,
+    outcomes_from_trajectories,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
     commit_case_outcomes,
@@ -82,17 +84,20 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
 jax.config.update("jax_enable_x64", True)
 
 
-def wiring_contract() -> ResidualControlledGL2Contract:
+def wiring_contract() -> RolloutConfig:
     """Return a deliberately reduced real-GL2 software-wiring contract."""
 
-    return ResidualControlledGL2Contract(
+    return RolloutConfig(
         nx=64,
+        target_nx=64,
         length=2.0 * math.pi,
         gravity=1.0,
         dno_order=0,
+        target_dno_order=0,
         pad_factor=1,
         maximum_wavenumber=16.0,
-        production_dt=0.02,
+        target_maximum_wavenumber=16.0,
+        dt=0.02,
         saved_dt=0.02,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=8,
@@ -110,7 +115,7 @@ def assignment(
     """Return one deterministic test-split attempt."""
 
     selected_revision = (
-        paper_dataset_revision_id(PhysicalFamilyId(family_id))
+        DATASET_REVISION_BY_FAMILY[PhysicalFamilyId(family_id)]
         if revision_id is None
         else revision_id
     )
@@ -130,7 +135,7 @@ def assert_valid_initial_batch(
     test: unittest.TestCase,
     batch: TrajectoryInitialBatch,
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> None:
     """Check dtype, graph, band, mean, and JSON invariants."""
 
@@ -167,8 +172,6 @@ def assert_valid_initial_batch(
 def write_single_row_shard(
     paths: BatchPaths,
     *,
-    proposal_sha256: str,
-    config_fingerprint: str,
     batch: TrajectoryInitialBatch,
 ) -> None:
     """Write one valid orphaned shard for adapter replay tests."""
@@ -184,8 +187,6 @@ def write_single_row_shard(
             "case_local_index": np.asarray([0], dtype=np.int32),
             "frame_index": np.asarray([0], dtype=np.int32),
             "selected_dense_index": np.asarray([0], dtype=np.int32),
-            "config_fingerprint": np.asarray(config_fingerprint),
-            "proposal_sha256": np.asarray(proposal_sha256),
         },
     )
 
@@ -194,7 +195,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
     def test_paper_jonswap_constructs_on_target_band_before_wide_evolution(
         self,
     ) -> None:
-        contract = PAPER_JONSWAP_GL2_CONTRACT
+        contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         attempted = assignment(
             family_id=4,
             revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
@@ -210,8 +211,8 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
         self.assertEqual(contract.nx, 2048)
         self.assertEqual(contract.maximum_wavenumber, 704.0)
-        self.assertEqual(contract.target_definition.nx, 1024)
-        self.assertEqual(contract.target_definition.maximum_wavenumber, 128.0)
+        self.assertEqual(contract.target_nx, 1024)
+        self.assertEqual(contract.target_maximum_wavenumber, 128.0)
         self.assertEqual(band.maximum_wavenumber, 128.0)
         self.assertEqual(band.transition_wavenumber, 96.0)
         self.assertEqual(len(record["phase_right"]), 128)
@@ -231,7 +232,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="9" * 64,
                 metadata={"test_scope": "paper_target_band_before_evolution"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
@@ -275,7 +275,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
     def test_revision_4_jonswap_uses_the_published_relative_frequency_band(
         self,
     ) -> None:
-        contract = PAPER_JONSWAP_GL2_CONTRACT
+        contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         attempted = assignment(
             family_id=4,
             revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
@@ -311,7 +311,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="4" * 64,
                 metadata={"test_scope": "revision_4_relative_frequency_band"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
@@ -340,77 +339,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             frequencies < 0.4 * peak_frequency
         )
         self.assertLess(float(np.max(np.abs(coefficients[far_outside]))), 1.0e-10)
-
-    def test_buffered_tanaka_reuses_the_exact_delivered_band_initial_state(
-        self,
-    ) -> None:
-        hard = wiring_contract()
-        buffered = replace(
-            hard,
-            maximum_wavenumber=24.0,
-            target_maximum_wavenumber=16.0,
-            post_step_state_filter="hou_li",
-            post_step_maximum_wavenumber=24.0,
-        )
-        attempted = assignment(
-            family_id=2,
-            cell_id=TANAKA_SAMPLE_CELL_IDS[0],
-            attempt_index=19,
-        )
-        hard_sampled = sample_tanaka_trajectory_cases(
-            (attempted,),
-            contract=hard,
-        )
-        buffered_sampled = sample_tanaka_trajectory_cases(
-            (attempted,),
-            contract=buffered,
-        )
-        self.assertEqual(
-            hard_sampled.specification_records,
-            buffered_sampled.specification_records,
-        )
-        self.assertEqual(
-            buffered_sampled.specification_records[0]["initial_projection"][
-                "maximum_wavenumber"
-            ],
-            16.0,
-        )
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            hard_proposal = persist_sampled_trajectory_proposal(
-                hard_sampled,
-                root=root / "hard",
-                family_name="tanaka",
-                batch_id=0,
-                cell_codes={attempted.cell_id: 0},
-                config_fingerprint="1" * 64,
-                metadata={"test_scope": "hard_initial_state"},
-            )
-            buffered_proposal = persist_sampled_trajectory_proposal(
-                buffered_sampled,
-                root=root / "buffered",
-                family_name="tanaka",
-                batch_id=0,
-                cell_codes={attempted.cell_id: 0},
-                config_fingerprint="2" * 64,
-                metadata={"test_scope": "buffered_initial_state"},
-            )
-            hard_initial = construct_tanaka_trajectory_batch(hard_proposal)
-            buffered_initial = construct_tanaka_trajectory_batch(buffered_proposal)
-
-        np.testing.assert_array_equal(
-            hard_initial.eta0,
-            buffered_initial.eta0,
-        )
-        np.testing.assert_array_equal(
-            hard_initial.xi0,
-            buffered_initial.xi0,
-        )
-        np.testing.assert_array_equal(
-            hard_initial.depths,
-            buffered_initial.depths,
-        )
 
     def test_all_families_construct_finite_graph_states_with_exact_replay(
         self,
@@ -480,7 +408,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                         family_name=family,
                         batch_id=batch_id,
                         cell_codes={attempted.cell_id: 0},
-                        config_fingerprint="5" * 64,
                         metadata={
                             "test_scope": "reduced_N64_M0_wiring_only",
                         },
@@ -532,7 +459,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="6" * 64,
                 metadata={"test_scope": "transaction_order"},
             )
             proposed.paths.proposal.unlink()
@@ -553,11 +479,8 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="6" * 64,
                 metadata={"test_scope": "transaction_order"},
             )
-            with self.assertRaisesRegex(RuntimeError, "hash differs"):
-                replace(proposed, proposal_sha256="0" * 64)
             replayed.samples[0].phase_right[0] += 0.125
             with self.assertRaisesRegex(
                 RuntimeError,
@@ -588,13 +511,12 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="7" * 64,
                 metadata={"test_scope": "density_window_contract"},
             )
             with self.assertRaisesRegex(ValueError, "density window"):
                 construct_jonswap_tma_trajectory_batch(proposed)
 
-    def test_shard_written_replay_rechecks_hash_and_specification(self) -> None:
+    def test_shard_written_replay_rechecks_specification(self) -> None:
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
@@ -612,14 +534,11 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={attempted.cell_id: 0},
-                config_fingerprint="8" * 64,
                 metadata={"test_scope": "shard_written_replay"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
             write_single_row_shard(
                 proposed.paths,
-                proposal_sha256=proposed.proposal_sha256,
-                config_fingerprint=proposed.config_fingerprint,
                 batch=initial,
             )
             self.assertEqual(
@@ -633,8 +552,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             np.testing.assert_array_equal(replayed.xi0, initial.xi0)
             np.testing.assert_array_equal(replayed.depths, initial.depths)
 
-            with self.assertRaisesRegex(RuntimeError, "hash differs"):
-                replace(proposed, proposal_sha256="0" * 64)
             original_phase = float(sampled.samples[0].phase_right[0])
             sampled.samples[0].phase_right[0] = original_phase + 0.125
             with self.assertRaisesRegex(
@@ -689,7 +606,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={cell_id: 0},
-                config_fingerprint="9" * 64,
                 metadata={"test_scope": "failed_status"},
             )
             record_fatal_failure(
@@ -724,23 +640,20 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 family_name="jonswap_tma",
                 batch_id=0,
                 cell_codes={cell_id: 0},
-                config_fingerprint="a" * 64,
                 metadata={"test_scope": "corrupt_status"},
             )
             initial = construct_jonswap_tma_trajectory_batch(corrupt)
             write_single_row_shard(
                 corrupt.paths,
-                proposal_sha256=corrupt.proposal_sha256,
-                config_fingerprint=corrupt.config_fingerprint,
                 batch=initial,
             )
             with np.load(corrupt.paths.shard, allow_pickle=False) as archive:
                 shard = {name: np.asarray(archive[name]) for name in archive.files}
-            shard["proposal_sha256"] = np.asarray("0" * 64)
+            shard["case_local_index"] = np.asarray([1], dtype=np.int32)
             np.savez(corrupt.paths.shard, **shard)
-            with self.assertRaisesRegex(ValueError, "different proposal hash"):
+            with self.assertRaisesRegex(ValueError, "missing proposal case"):
                 construct_jonswap_tma_trajectory_batch(corrupt)
-            with self.assertRaisesRegex(ValueError, "different proposal hash"):
+            with self.assertRaisesRegex(ValueError, "missing proposal case"):
                 replace(corrupt)
 
     def test_bf_and_jonswap_real_gl2_to_committed_manifest_wiring(
@@ -771,7 +684,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 construct_jonswap_tma_trajectory_batch,
             ),
         )
-        fingerprint = "7" * 64
         saved_times = np.asarray([0.0, 0.02, 0.04], dtype=np.float64)
         policy = StoredTimePolicy(
             tanaka_count=3,
@@ -790,7 +702,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     family_name=family,
                     batch_id=0,
                     cell_codes={attempted.cell_id: 0},
-                    config_fingerprint=fingerprint,
                     metadata={
                         "test_scope": "reduced_N64_M0_wiring_only",
                     },
@@ -799,19 +710,20 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 self.assertFalse(proposed.paths.shard.exists())
                 self.assertFalse(proposed.paths.result.exists())
                 initial = constructor(proposed)
-                execution = execute_production_trajectory(
+                execution = execute_trajectory_batch(
                     initial.eta0,
                     initial.xi0,
                     initial.depths,
                     saved_times,
-                    contract=contract,
+                    config=contract,
                 )
-                self.assertTrue(execution.cases[0].accepted)
-                outcomes = outcomes_from_production(
+                self.assertTrue(execution[0].decision.accepted)
+                outcomes = outcomes_from_trajectories(
                     execution,
                     initial.depths,
                     family=family,
                     length=contract.length,
+                    integration_dt=contract.dt,
                     policy=policy,
                 )
                 commit_case_outcomes(
@@ -829,7 +741,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 tuple(paths),
                 name="trajectory_family_adapter_smoke",
                 length=contract.length,
-                expected_fingerprint=fingerprint,
             )
             manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
             self.assertEqual(manifest["n_trajectories"], 2)

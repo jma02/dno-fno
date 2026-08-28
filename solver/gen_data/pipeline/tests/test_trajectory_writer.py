@@ -1,4 +1,4 @@
-"""CPU integration test from one GL2 production arm through a committed view."""
+"""CPU integration test from one GL2 rollout through a committed view."""
 
 from __future__ import annotations
 
@@ -16,33 +16,30 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.acceptance import (  # noqa: E402
-    DenseTrajectoryHealthMetrics,
-    TrajectorySamples,
+from solver.gen_data.pipeline.trajectory_checks import (  # noqa: E402
+    TrajectoryHealthMetrics,
 )
-from solver.gen_data.pipeline.archive import ensure_proposal  # noqa: E402
-from solver.gen_data.pipeline.manifest import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.production import (  # noqa: E402
+from solver.gen_data.pipeline.batch_storage import ensure_proposal  # noqa: E402
+from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
 )
-from solver.gen_data.pipeline.refinement import (  # noqa: E402
-    CaseGL2Telemetry,
-    ProductionCaseResult,
-    ProductionExecution,
-    ResidualControlledGL2Contract,
-    execute_production_trajectory,
+from solver.gen_data.pipeline.trajectory_config import RolloutConfig  # noqa: E402
+from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
+    TrajectoryCaseResult,
+    TrajectorySamples,
+    execute_trajectory_batch,
 )
-from solver.gen_data.pipeline.quality import (  # noqa: E402
-    QualityDecision,
-    QualityReason,
-    QualityScope,
+from solver.gen_data.pipeline.case_checks import (  # noqa: E402
+    CaseCheckResult,
+    CaseCheck,
 )
 from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
     StoredTimePolicy,
     _selected_indices,
-    outcomes_from_production,
+    outcomes_from_trajectories,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
     batch_paths_for_assignments,
@@ -75,23 +72,22 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             np.asarray([0, 3, 6, 9], dtype=np.int32),
         )
 
-    def test_actual_single_arm_time_selection_commit_and_view(self) -> None:
-        contract = ResidualControlledGL2Contract(
+    def test_actual_rollout_time_selection_commit_and_view(self) -> None:
+        contract = RolloutConfig(
             nx=16,
+            target_nx=16,
             dno_order=0,
+            target_dno_order=0,
             pad_factor=1,
             maximum_wavenumber=3.0,
-            production_dt=0.02,
+            target_maximum_wavenumber=3.0,
+            dt=0.02,
             saved_dt=0.02,
             target_time_chunk_size=2,
         )
         x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
-        eta0 = np.stack(
-            (0.001 * np.cos(x), 0.0015 * np.cos(2.0 * x))
-        )
-        xi0 = np.stack(
-            (0.002 * np.sin(2.0 * x), 0.001 * np.sin(x))
-        )
+        eta0 = np.stack((0.001 * np.cos(x), 0.0015 * np.cos(2.0 * x)))
+        xi0 = np.stack((0.002 * np.sin(2.0 * x), 0.001 * np.sin(x)))
         depths = np.asarray([1.0, 1.5])
         assignments = tuple(
             AttemptAssignment(
@@ -106,13 +102,11 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             )
             for index, cell in enumerate(("finite_a", "finite_b"))
         )
-        fingerprint = "a" * 64
         proposal = build_proposal_arrays(
             assignments,
             ({"amplitude": 0.001}, {"amplitude": 0.0015}),
             cell_codes={"finite_a": 0, "finite_b": 1},
             batch_id=0,
-            config_fingerprint=fingerprint,
             metadata={"smoke": True},
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -126,30 +120,29 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             ensure_proposal(paths, proposal)
             self.assertTrue(paths.proposal.exists())
 
-            execution = execute_production_trajectory(
+            execution = execute_trajectory_batch(
                 eta0,
                 xi0,
                 depths,
                 np.asarray([0.0, 0.02, 0.04]),
-                contract=contract,
+                config=contract,
             )
-            outcomes = outcomes_from_production(
+            outcomes = outcomes_from_trajectories(
                 execution,
                 depths,
                 family="jonswap_tma",
                 length=contract.length,
+                integration_dt=contract.dt,
                 policy=StoredTimePolicy(
                     tanaka_count=2,
                     benjamin_feir_count=2,
                     random_sea_count=3,
                 ),
             )
-            self.assertTrue(
-                all(outcome.decision.accepted for outcome in outcomes)
-            )
+            self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
             self.assertTrue(
                 all(
-                    outcome.metrics["production_dt"] == contract.production_dt
+                    outcome.metrics["integration_dt"] == contract.dt
                     for outcome in outcomes
                 )
             )
@@ -172,7 +165,6 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             view = build_dataset_view(
                 root,
                 (paths,),
-                expected_fingerprint=fingerprint,
             )
             with np.load(view.trajectory_map, allow_pickle=False) as mapping:
                 np.testing.assert_array_equal(
@@ -198,41 +190,26 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             xi=xi,
             gxi=gxi,
         )
-        reason = QualityReason.INCOMPLETE_TRAJECTORY
-        decision = QualityDecision(
-            scope=QualityScope.TRAJECTORY,
+        reason = CaseCheck.INCOMPLETE_TRAJECTORY
+        decision = CaseCheckResult(
             required=reason,
             evaluated=reason,
-            failed=QualityReason.NONE,
+            failed=CaseCheck.NONE,
         )
-        telemetry = CaseGL2Telemetry(
-            residual=np.zeros(2, dtype=np.float64),
-            iterations=np.ones(2, dtype=np.int32),
-            converged=np.ones(2, dtype=np.bool_),
-            stage_finite=np.ones(2, dtype=np.bool_),
-            state_finite=np.ones(2, dtype=np.bool_),
-            hit_iteration_cap=np.zeros(2, dtype=np.bool_),
-            all_stages_solved=True,
-            maximum_stage_residual=0.0,
-        )
-        execution = ProductionExecution(
-            timing=None,
-            cases=(
-                ProductionCaseResult(
-                    case_index=0,
-                    dt=0.01,
-                    telemetry=telemetry,
-                    decision=decision,
-                    retained_trajectory=trajectory,
-                ),
+        cases = (
+            TrajectoryCaseResult(
+                maximum_gl2_stage_residual=0.0,
+                decision=decision,
+                trajectory=trajectory,
             ),
         )
 
-        outcome = outcomes_from_production(
-            execution,
+        outcome = outcomes_from_trajectories(
+            cases,
             np.asarray([1.0]),
             family="tanaka",
             length=2.0 * math.pi,
+            integration_dt=0.01,
             policy=StoredTimePolicy(tanaka_count=2),
         )[0]
 
@@ -246,49 +223,34 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         self.assertNotIn("hamiltonian_drift_evaluated", outcome.metrics)
 
     def test_rejected_case_persists_finite_internal_health_metrics(self) -> None:
-        reason = QualityReason.HAMILTONIAN_DRIFT
-        decision = QualityDecision(
-            scope=QualityScope.TRAJECTORY,
+        reason = CaseCheck.HAMILTONIAN_DRIFT
+        decision = CaseCheckResult(
             required=reason,
             evaluated=reason,
             failed=reason,
         )
-        telemetry = CaseGL2Telemetry(
-            residual=np.zeros(2, dtype=np.float64),
-            iterations=np.ones(2, dtype=np.int32),
-            converged=np.ones(2, dtype=np.bool_),
-            stage_finite=np.ones(2, dtype=np.bool_),
-            state_finite=np.ones(2, dtype=np.bool_),
-            hit_iteration_cap=np.zeros(2, dtype=np.bool_),
-            all_stages_solved=True,
-            maximum_stage_residual=0.0,
-        )
-        execution = ProductionExecution(
-            timing=None,
-            cases=(
-                ProductionCaseResult(
-                    case_index=0,
-                    dt=0.01,
-                    telemetry=telemetry,
-                    decision=decision,
-                    retained_trajectory=None,
-                    internal_metrics=DenseTrajectoryHealthMetrics(
-                        state_finite=True,
-                        dno_output_finite=True,
-                        minimum_water_column=0.75,
-                        initial_hamiltonian=2.5,
-                        maximum_relative_hamiltonian_drift=2.0e-3,
-                        hamiltonian_drift_threshold=1.0e-3,
-                    ),
+        cases = (
+            TrajectoryCaseResult(
+                maximum_gl2_stage_residual=0.0,
+                decision=decision,
+                trajectory=None,
+                health_metrics=TrajectoryHealthMetrics(
+                    state_finite=True,
+                    dno_output_finite=True,
+                    minimum_water_column=0.75,
+                    initial_hamiltonian=2.5,
+                    maximum_relative_hamiltonian_drift=2.0e-3,
+                    hamiltonian_drift_threshold=1.0e-3,
                 ),
             ),
         )
 
-        outcome = outcomes_from_production(
-            execution,
+        outcome = outcomes_from_trajectories(
+            cases,
             np.asarray([1.0]),
             family="benjamin_feir",
             length=2.0 * math.pi,
+            integration_dt=0.01,
             policy=StoredTimePolicy(benjamin_feir_count=2),
         )[0]
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 DEFAULT_PAD_FACTOR = 8
@@ -19,7 +20,10 @@ def build_grid(nx: int, length: float) -> tuple[jnp.ndarray, jnp.ndarray]:
     return x, k
 
 
-def make_linear_dno_symbol(k: jnp.ndarray, depth: float) -> jnp.ndarray:
+def make_linear_dno_symbol(
+    k: jnp.ndarray,
+    depth: float | jax.Array,
+) -> jnp.ndarray:
     """Return the flat-surface DNO symbol G0(k) = k tanh(h k)."""
     return k * jnp.tanh(depth * k)
 
@@ -35,7 +39,9 @@ def myifft(fy: jnp.ndarray) -> jnp.ndarray:
     return jnp.real(jnp.fft.ifft(fy, axis=-1))
 
 
-def multiply(a: jnp.ndarray, b: jnp.ndarray, nx: int, pad_factor: int = DEFAULT_PAD_FACTOR) -> jnp.ndarray:
+def multiply(
+    a: jnp.ndarray, b: jnp.ndarray, nx: int, pad_factor: int = DEFAULT_PAD_FACTOR
+) -> jnp.ndarray:
     """Multiply in physical space after padded Fourier extension."""
     ny = pad_factor * nx
     fa = myfft(a, nx)
@@ -80,10 +86,14 @@ def compute_gm_term(
         tmp = multiply(etam[m], xi_x, nx, pad_factor=pad_factor)
         gm_term = -myifft(g0 * k ** (2 * (r - 1)) * (1j * k) * myfft(tmp, nx))
         for s in range(r):
-            tmp = multiply(etam[2 * (r - s)], gm_terms[2 * s], nx, pad_factor=pad_factor)
+            tmp = multiply(
+                etam[2 * (r - s)], gm_terms[2 * s], nx, pad_factor=pad_factor
+            )
             gm_term = gm_term - myifft(k ** (2 * (r - s)) * myfft(tmp, nx))
 
-            tmp = multiply(etam[2 * (r - s) - 1], gm_terms[2 * s + 1], nx, pad_factor=pad_factor)
+            tmp = multiply(
+                etam[2 * (r - s) - 1], gm_terms[2 * s + 1], nx, pad_factor=pad_factor
+            )
             gm_term = gm_term - myifft(g0 * k ** (2 * (r - s - 1)) * myfft(tmp, nx))
         return gm_term
 
@@ -91,10 +101,14 @@ def compute_gm_term(
     tmp = multiply(etam[m], xi_x, nx, pad_factor=pad_factor)
     gm_term = -myifft(k ** (2 * (r - 1)) * (1j * k) * myfft(tmp, nx))
     for s in range(r - 1):
-        tmp = multiply(etam[2 * (r - s) - 1], gm_terms[2 * s], nx, pad_factor=pad_factor)
+        tmp = multiply(
+            etam[2 * (r - s) - 1], gm_terms[2 * s], nx, pad_factor=pad_factor
+        )
         gm_term = gm_term - myifft(g0 * k ** (2 * (r - s - 1)) * myfft(tmp, nx))
 
-        tmp = multiply(etam[2 * (r - s - 1)], gm_terms[2 * s + 1], nx, pad_factor=pad_factor)
+        tmp = multiply(
+            etam[2 * (r - s - 1)], gm_terms[2 * s + 1], nx, pad_factor=pad_factor
+        )
         gm_term = gm_term - myifft(k ** (2 * (r - s - 1)) * myfft(tmp, nx))
 
     tmp = multiply(etam[1], gm_terms[2 * (r - 1)], nx, pad_factor=pad_factor)
@@ -106,7 +120,7 @@ def dno_series_eval(
     eta: jnp.ndarray,
     xi: jnp.ndarray,
     k: jnp.ndarray,
-    depth: float,
+    depth: float | jax.Array,
     order: int,
     pad_factor: int = DEFAULT_PAD_FACTOR,
 ) -> jnp.ndarray:
@@ -150,7 +164,7 @@ def batched_dno_series_eval(
     eta: jnp.ndarray,
     xi: jnp.ndarray,
     k: jnp.ndarray,
-    depth: float,
+    depth: float | jax.Array,
     order: int,
     pad_factor: int = DEFAULT_PAD_FACTOR,
 ) -> jnp.ndarray:

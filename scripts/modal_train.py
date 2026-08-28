@@ -1,7 +1,7 @@
 """Modal app to run the JAX DNO/FNO trainer on remote GPUs.
 
 Workflow:
-    # 0. Authenticate once:
+    # 0. Log in once:
     modal token new
 
     # 1. Upload a flat NPZ training dataset:

@@ -28,21 +28,24 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLING_REVISION_V4,
     JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.pipeline.production import (  # noqa: E402
-    ValidCaseTarget,
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+    SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
 )
-from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
+from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
 from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     DatasetGenerationSpec,
 )
-from solver.gen_data.pipeline.refinement import (  # noqa: E402
-    InternalTrajectoryTelemetry,
-    NonlinearAdjustmentArm,
-    PAPER_JONSWAP_GL2_CONTRACT,
-    ResidualControlledArm,
-    ResidualControlledGL2Contract,
+from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
+    PAPER_JONSWAP_ROLLOUT_CONFIG,
+    RolloutConfig,
+)
+from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
+    CompletedAdjustmentRollout,
+    IntegratedTrajectoryBatch,
+    GL2BatchTelemetry,
+    InternalHealthTelemetry,
 )
 from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
     StoredTimePolicy,
@@ -55,19 +58,23 @@ from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     JONSWAP_ADJUSTMENT_FORMULA,
     PAPER_JONSWAP_ADJUSTMENT_POLICY,
     TrajectoryExecutionConfig,
-    TrajectoryHorizonPolicy,
+    jonswap_horizon,
+    paper_trajectory_execution,
 )
 
 
-def _contract() -> ResidualControlledGL2Contract:
-    return ResidualControlledGL2Contract(
+def _contract() -> RolloutConfig:
+    return RolloutConfig(
         nx=64,
+        target_nx=64,
         length=2.0 * math.pi,
         gravity=1.0,
         dno_order=0,
+        target_dno_order=0,
         pad_factor=1,
         maximum_wavenumber=16.0,
-        production_dt=0.04,
+        target_maximum_wavenumber=16.0,
+        dt=0.04,
         saved_dt=0.08,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=2,
@@ -76,13 +83,13 @@ def _contract() -> ResidualControlledGL2Contract:
 
 
 def _execution(
-    contract: ResidualControlledGL2Contract | None = None,
+    contract: RolloutConfig | None = None,
 ) -> TrajectoryExecutionConfig:
     return TrajectoryExecutionConfig(
         family="jonswap_tma",
         role="reduced_wiring_evidence_only",
         numerical=_contract() if contract is None else contract,
-        horizon=TrajectoryHorizonPolicy.jonswap_peak_periods(16),
+        horizon=jonswap_horizon(16),
         stored_time_policy=StoredTimePolicy(
             tanaka_count=3,
             tanaka_alpha=0.5,
@@ -110,7 +117,7 @@ def _run_spec(
         revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
         split_id=SplitId.TEST,
         stream_id=13,
-        case_targets=(ValidCaseTarget(cell_id, outer_size),),
+        case_targets=(SampleCellTarget(cell_id, outer_size),),
         cell_codes={cell_id: 0},
         batch_size=outer_size,
         first_attempt_index=0,
@@ -134,7 +141,7 @@ def _grid(saved_count: int) -> CaseTimeGrid:
     )
 
 
-class RecordingArmExecutor:
+class RecordingRolloutExecutor:
     """Return exact constant trajectories and record numerical group shapes."""
 
     def __init__(self, *, hamiltonian_drift: float | None = None) -> None:
@@ -150,16 +157,15 @@ class RecordingArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
-    ) -> ResidualControlledArm:
+        config: RolloutConfig,
+    ) -> IntegratedTrajectoryBatch:
         del depths
         batch_size, internal_nx = eta0.shape
         self.calls.append((batch_size, saved_times.size))
         self.initial_eta.append(np.asarray(eta0, dtype=np.float64).copy())
         self.saved_times.append(np.asarray(saved_times, dtype=np.float64).copy())
         saved_count = saved_times.size
-        delivered_nx = contract.delivered_nx
+        delivered_nx = config.target_nx
         if delivered_nx == internal_nx:
             delivered_eta0 = eta0
             delivered_xi0 = xi0
@@ -174,13 +180,13 @@ class RecordingArmExecutor:
                 delivered_nx,
                 axis=1,
             )
-        substeps = int(round(contract.saved_dt / dt))
+        substeps = int(round(config.saved_dt / config.dt))
         telemetry_shape = ((saved_count - 1) * substeps, batch_size)
         internal_telemetry = None
         if self.hamiltonian_drift is not None:
             hamiltonian = np.ones((saved_count, batch_size), dtype=np.float64)
             hamiltonian[-1] += self.hamiltonian_drift
-            internal_telemetry = InternalTrajectoryTelemetry(
+            internal_telemetry = InternalHealthTelemetry(
                 hamiltonian=hamiltonian,
                 state_finite=np.ones_like(hamiltonian, dtype=np.bool_),
                 dno_output_finite=np.ones_like(hamiltonian, dtype=np.bool_),
@@ -189,27 +195,24 @@ class RecordingArmExecutor:
                     dtype=np.float64,
                 ),
             )
-        return ResidualControlledArm(
-            dt=dt,
-            times=np.asarray(saved_times, dtype=np.float64),
+        return IntegratedTrajectoryBatch(
             eta=np.repeat(delivered_eta0[None, :, :], saved_count, axis=0),
             xi=np.repeat(delivered_xi0[None, :, :], saved_count, axis=0),
-            q_ref=np.zeros(
+            gxi=np.zeros(
                 (saved_count, batch_size, delivered_nx),
                 dtype=np.float64,
             ),
-            complete=np.ones(batch_size, dtype=np.bool_),
-            gl2_stage_residual=np.zeros(telemetry_shape, dtype=np.float64),
-            gl2_iterations=np.ones(telemetry_shape, dtype=np.int32),
-            gl2_converged=np.ones(telemetry_shape, dtype=np.bool_),
-            gl2_stage_finite=np.ones(telemetry_shape, dtype=np.bool_),
-            gl2_state_finite=np.ones(telemetry_shape, dtype=np.bool_),
-            gl2_hit_iteration_cap=np.zeros(telemetry_shape, dtype=np.bool_),
+            gl2=GL2BatchTelemetry(
+                stage_residual=np.zeros(telemetry_shape, dtype=np.float64),
+                converged=np.ones(telemetry_shape, dtype=np.bool_),
+                stage_finite=np.ones(telemetry_shape, dtype=np.bool_),
+                state_finite=np.ones(telemetry_shape, dtype=np.bool_),
+            ),
             internal_telemetry=internal_telemetry,
         )
 
 
-class RecordingAdjustmentArmExecutor:
+class RecordingAdjustmentRolloutExecutor:
     """Return deterministic ramp endpoints and optionally fail named markers."""
 
     def __init__(
@@ -229,11 +232,10 @@ class RecordingAdjustmentArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
+        config: RolloutConfig,
         nonlinear_ramp_times: np.ndarray,
         nonlinear_ramp_order: int,
-    ) -> NonlinearAdjustmentArm:
+    ) -> CompletedAdjustmentRollout:
         del depths
         batch_size, nx = eta0.shape
         ramp_times = np.asarray(nonlinear_ramp_times, dtype=np.float64)
@@ -254,7 +256,7 @@ class RecordingAdjustmentArmExecutor:
                 raise ValueError("terminal_addition has the wrong spatial shape")
             eta[1:] += addition[None, None, :]
         xi = np.repeat(xi0[None, :, :], saved_count, axis=0)
-        substeps = int(round(contract.saved_dt / dt))
+        substeps = int(round(config.saved_dt / config.dt))
         telemetry_shape = ((saved_count - 1) * substeps, batch_size)
         residual = np.zeros(telemetry_shape, dtype=np.float64)
         converged = np.ones(telemetry_shape, dtype=np.bool_)
@@ -263,17 +265,15 @@ class RecordingAdjustmentArmExecutor:
             failed = np.isclose(markers, marker, rtol=0.0, atol=1.0e-14)
             residual[:, failed] = 1.0
             converged[:, failed] = False
-        return NonlinearAdjustmentArm(
-            dt=dt,
-            times=np.asarray(saved_times, dtype=np.float64),
+        return CompletedAdjustmentRollout(
             eta=eta,
             xi=xi,
-            gl2_stage_residual=residual,
-            gl2_iterations=np.ones(telemetry_shape, dtype=np.int32),
-            gl2_converged=converged,
-            gl2_stage_finite=np.ones(telemetry_shape, dtype=np.bool_),
-            gl2_state_finite=np.ones(telemetry_shape, dtype=np.bool_),
-            gl2_hit_iteration_cap=np.zeros(telemetry_shape, dtype=np.bool_),
+            gl2=GL2BatchTelemetry(
+                stage_residual=residual,
+                converged=converged,
+                stage_finite=np.ones(telemetry_shape, dtype=np.bool_),
+                state_finite=np.ones(telemetry_shape, dtype=np.bool_),
+            ),
         )
 
 
@@ -309,13 +309,13 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 outer_size=5,
                 solver_size=2,
             )
-            arms = RecordingArmExecutor()
-            adjustment_arms = RecordingAdjustmentArmExecutor()
+            rollouts = RecordingRolloutExecutor()
+            adjustment_rollouts = RecordingAdjustmentRolloutExecutor()
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=arms,
-                adjustment_arm_executor=adjustment_arms,
+                rollout_executor=rollouts,
+                adjustment_rollout_executor=adjustment_rollouts,
             )
             markers = np.arange(1, 6, dtype=np.float64) / 100.0
             initial = TrajectoryInitialBatch(
@@ -330,11 +330,11 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
 
             outcomes = executor._produce_jonswap(initial, grids)
 
-        self.assertEqual(arms.calls, [(2, 3), (2, 9), (1, 10)])
+        self.assertEqual(rollouts.calls, [(2, 3), (2, 9), (1, 10)])
         self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
         self.assertTrue(
             all(
-                outcome.decision.evaluated & QualityReason.OUTSIDE_SUPPORT
+                outcome.decision.evaluated & CaseCheck.OUTSIDE_SUPPORT
                 for outcome in outcomes
             )
         )
@@ -357,7 +357,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         self.assertTrue(
             all(
                 call[3] == PAPER_JONSWAP_ADJUSTMENT_POLICY.ramp_order
-                for call in adjustment_arms.calls
+                for call in adjustment_rollouts.calls
             )
         )
 
@@ -365,13 +365,13 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
             spec = _run_spec(Path(directory), execution, outer_size=3, solver_size=3)
-            production_arms = RecordingArmExecutor()
-            adjustment_arms = RecordingAdjustmentArmExecutor()
+            production_rollouts = RecordingRolloutExecutor()
+            adjustment_rollouts = RecordingAdjustmentRolloutExecutor()
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=production_arms,
-                adjustment_arm_executor=adjustment_arms,
+                rollout_executor=production_rollouts,
+                adjustment_rollout_executor=adjustment_rollouts,
             )
             markers = np.asarray((0.01, 0.02, 0.03), dtype=np.float64)
             peak_wavenumbers = (4.0, 9.0, 16.0)
@@ -390,7 +390,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 tuple(map(_grid, (5, 5, 5))),
             )
 
-        handed_off = production_arms.initial_eta[0][:, 0]
+        handed_off = production_rollouts.initial_eta[0][:, 0]
         realized = np.asarray(
             [
                 outcome.metrics["nonlinear_adjustment_realized_terminal_time"]
@@ -406,7 +406,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             / PAPER_JONSWAP_ADJUSTMENT_POLICY.burn_peak_periods
         )
         np.testing.assert_allclose(
-            adjustment_arms.calls[0][2],
+            adjustment_rollouts.calls[0][2],
             expected_ramps,
             rtol=0.0,
             atol=0.08,
@@ -415,18 +415,18 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
     def test_full_band_adjustment_endpoint_is_not_projected_before_production(
         self,
     ) -> None:
-        contract = PAPER_JONSWAP_GL2_CONTRACT
+        contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         execution = _execution(contract)
         x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
         high_mode = 0.001 * np.cos(600.0 * x)
         with tempfile.TemporaryDirectory() as directory:
             spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
-            production_arms = RecordingArmExecutor(hamiltonian_drift=0.0)
+            production_rollouts = RecordingRolloutExecutor(hamiltonian_drift=0.0)
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=production_arms,
-                adjustment_arm_executor=RecordingAdjustmentArmExecutor(
+                rollout_executor=production_rollouts,
+                adjustment_rollout_executor=RecordingAdjustmentRolloutExecutor(
                     terminal_addition=high_mode
                 ),
             )
@@ -439,7 +439,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
 
             outcomes = executor._produce_jonswap(initial, (_grid(5),))
 
-        handed_off = production_arms.initial_eta[0][0]
+        handed_off = production_rollouts.initial_eta[0][0]
         coefficient = np.fft.rfft(handed_off - np.mean(handed_off))[600]
         self.assertGreater(abs(coefficient), 0.4)
         self.assertEqual(handed_off.shape, (2048,))
@@ -451,15 +451,15 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
             spec = _run_spec(Path(directory), execution, outer_size=5, solver_size=2)
-            production_arms = RecordingArmExecutor()
-            adjustment_arms = RecordingAdjustmentArmExecutor(
+            production_rollouts = RecordingRolloutExecutor()
+            adjustment_rollouts = RecordingAdjustmentRolloutExecutor(
                 failing_markers=(0.02, 0.05)
             )
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=production_arms,
-                adjustment_arm_executor=adjustment_arms,
+                rollout_executor=production_rollouts,
+                adjustment_rollout_executor=adjustment_rollouts,
             )
             markers = np.arange(1, 6, dtype=np.float64) / 100.0
             initial = TrajectoryInitialBatch(
@@ -489,11 +489,11 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             outcomes[1].metrics["production_status"],
             "not_run_adjustment_failed",
         )
-        self.assertTrue(outcomes[1].decision.failed & QualityReason.GL2_STAGE_RESIDUAL)
+        self.assertTrue(outcomes[1].decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
         self.assertEqual(outcomes[1].metrics["construction_marker"], 1)
         self.assertEqual(outcomes[4].metrics["construction_marker"], 4)
         self.assertEqual(
-            sum(batch.shape[0] for batch in production_arms.initial_eta), 3
+            sum(batch.shape[0] for batch in production_rollouts.initial_eta), 3
         )
 
     def test_burn_hamiltonian_is_not_an_acceptance_check_and_production_is_unramped(
@@ -502,12 +502,12 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         execution = _execution()
         with tempfile.TemporaryDirectory() as directory:
             spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
-            production_arms = RecordingArmExecutor()
+            production_rollouts = RecordingRolloutExecutor()
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=production_arms,
-                adjustment_arm_executor=RecordingAdjustmentArmExecutor(),
+                rollout_executor=production_rollouts,
+                adjustment_rollout_executor=RecordingAdjustmentRolloutExecutor(),
             )
             initial = TrajectoryInitialBatch(
                 eta0=np.full((1, 64), 0.01, dtype=np.float64),
@@ -524,8 +524,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             outcome.metrics["nonlinear_adjustment_production_ramp"],
             "disabled",
         )
-        self.assertEqual(len(production_arms.calls), 1)
-        self.assertEqual(float(production_arms.saved_times[0][0]), 0.0)
+        self.assertEqual(len(production_rollouts.calls), 1)
+        self.assertEqual(float(production_rollouts.saved_times[0][0]), 0.0)
 
     def test_autonomous_hamiltonian_gate_rejects_after_accepted_burn(self) -> None:
         contract = replace(
@@ -538,8 +538,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             executor = HorizonBucketedJonswapBatchExecutor(
                 run_spec=spec,
                 execution=execution,
-                arm_executor=RecordingArmExecutor(hamiltonian_drift=1.0e-2),
-                adjustment_arm_executor=RecordingAdjustmentArmExecutor(),
+                rollout_executor=RecordingRolloutExecutor(hamiltonian_drift=1.0e-2),
+                adjustment_rollout_executor=RecordingAdjustmentRolloutExecutor(),
             )
             initial = TrajectoryInitialBatch(
                 eta0=np.full((1, 64), 0.01, dtype=np.float64),
@@ -552,8 +552,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
 
         self.assertFalse(outcome.decision.accepted)
         self.assertIsNone(outcome.rows)
-        self.assertTrue(outcome.decision.failed & QualityReason.HAMILTONIAN_DRIFT)
-        self.assertTrue(outcome.decision.failed & QualityReason.INCOMPLETE_TRAJECTORY)
+        self.assertTrue(outcome.decision.failed & CaseCheck.HAMILTONIAN_DRIFT)
+        self.assertTrue(outcome.decision.failed & CaseCheck.INCOMPLETE_TRAJECTORY)
         self.assertTrue(outcome.metrics["nonlinear_adjustment_accepted"])
         self.assertEqual(outcome.metrics["production_status"], "completed")
         self.assertAlmostEqual(
@@ -582,27 +582,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             with bucketed._bucketed_runtime(256):
                 _, _, _, preflight = base.preflight(request)
 
-        baseline_sources = dict(
-            baseline.configuration["source_sha256"]  # type: ignore[arg-type]
-        )
-        revised_sources = dict(
-            revised.configuration["source_sha256"]  # type: ignore[arg-type]
-        )
-        self.assertEqual(
-            {path: revised_sources[path] for path in baseline_sources},
-            baseline_sources,
-        )
-        self.assertEqual(
-            set(revised_sources).difference(baseline_sources),
-            {
-                "scripts/generate_paper_dataset_jonswap.py",
-                "solver/gen_data/jonswap_horizon_executor.py",
-            },
-        )
-        self.assertNotEqual(
-            baseline.config_fingerprint,
-            revised.config_fingerprint,
-        )
+        self.assertNotIn(BUCKETING_CONFIG_KEY, baseline.configuration)
+        self.assertIn(BUCKETING_CONFIG_KEY, revised.configuration)
         numerical = revised.configuration["trajectory_execution"][  # type: ignore[index]
             "numerical"
         ]
@@ -642,15 +623,15 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
         changed_execution["numerical"] = changed_numerical
         changed_configuration["trajectory_execution"] = changed_execution
         self.assertNotEqual(
-            revised.config_fingerprint,
+            revised.configuration,
             replace(
                 revised,
                 configuration=changed_configuration,
-            ).config_fingerprint,
+            ).configuration,
         )
         executor = HorizonBucketedJonswapBatchExecutor(
             run_spec=revised,
-            execution=TrajectoryExecutionConfig.paper("jonswap_tma"),
+            execution=paper_trajectory_execution("jonswap_tma"),
         )
         self.assertEqual(executor.solver_batch_size, 256)
         config = revised.configuration[BUCKETING_CONFIG_KEY]
@@ -738,8 +719,8 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 HorizonBucketedJonswapBatchExecutor(
                     run_spec=invalid,
                     execution=execution,
-                    arm_executor=RecordingArmExecutor(),
-                    adjustment_arm_executor=RecordingAdjustmentArmExecutor(),
+                    rollout_executor=RecordingRolloutExecutor(),
+                    adjustment_rollout_executor=RecordingAdjustmentRolloutExecutor(),
                 )
 
 

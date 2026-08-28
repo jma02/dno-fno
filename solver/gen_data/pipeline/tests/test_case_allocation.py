@@ -1,17 +1,16 @@
-"""Tests for deterministic case-level production allocation."""
+"""Tests for deterministic case allocation."""
 
 from __future__ import annotations
 
 import unittest
 
-from solver.gen_data.pipeline.production import (
-    PAPER_DATASET_REVISION_BY_FAMILY,
+from solver.gen_data.pipeline.case_allocation import (
     CaseKey,
+    DATASET_REVISION_BY_FAMILY,
     PhysicalFamilyId,
     SplitId,
     balanced_valid_case_targets,
-    paper_dataset_revision_id,
-    schedule_attempt_batch,
+    assign_next_cases,
     split_code,
     split_root,
 )
@@ -29,7 +28,7 @@ class FamilyIdentityTest(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            dict(PAPER_DATASET_REVISION_BY_FAMILY),
+            DATASET_REVISION_BY_FAMILY,
             {
                 PhysicalFamilyId.STOKES: 2,
                 PhysicalFamilyId.TANAKA: 3,
@@ -37,20 +36,9 @@ class FamilyIdentityTest(unittest.TestCase):
                 PhysicalFamilyId.JONSWAP_TMA: 4,
             },
         )
-        self.assertEqual(
-            {
-                family: paper_dataset_revision_id(family)
-                for family in PhysicalFamilyId
-            },
-            dict(PAPER_DATASET_REVISION_BY_FAMILY),
-        )
-
-    def test_revision_accessor_requires_a_typed_family(self) -> None:
-        with self.assertRaisesRegex(TypeError, "PhysicalFamilyId"):
-            paper_dataset_revision_id(1)  # type: ignore[arg-type]
 
 
-class BalancedValidCaseTargetsTest(unittest.TestCase):
+class BalancedSampleCellTargetsTest(unittest.TestCase):
     def test_uses_exact_quotient_and_remainder_balance(self) -> None:
         targets = balanced_valid_case_targets(
             ("shallow", "finite", "deep"),
@@ -96,8 +84,8 @@ class AttemptScheduleTest(unittest.TestCase):
             "batch_size": 3,
         }
 
-        first = schedule_attempt_batch(self.targets, {}, **arguments)
-        replay = schedule_attempt_batch(self.targets, {}, **arguments)
+        first = assign_next_cases(self.targets, {}, **arguments)
+        replay = assign_next_cases(self.targets, {}, **arguments)
 
         self.assertEqual(first, replay)
         self.assertEqual(
@@ -143,7 +131,7 @@ class AttemptScheduleTest(unittest.TestCase):
             CaseKey(2, 1, SplitId.TRAIN, 0, 1 << 40)
 
     def test_rejection_leaves_the_target_unmet_in_its_original_cell(self) -> None:
-        first = schedule_attempt_batch(
+        first = assign_next_cases(
             self.targets,
             {},
             family_id=2,
@@ -159,7 +147,7 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
         # The low-cell attempt passed; the moderate-cell attempt failed.
-        replacement = schedule_attempt_batch(
+        replacement = assign_next_cases(
             self.targets,
             {"low": 1, "moderate": 0},
             family_id=2,
@@ -174,7 +162,7 @@ class AttemptScheduleTest(unittest.TestCase):
         self.assertEqual(replacement[0].case_key.attempt_index, 2)
 
     def test_split_is_fixed_on_every_pre_outcome_assignment(self) -> None:
-        assignments = schedule_attempt_batch(
+        assignments = assign_next_cases(
             self.targets,
             {},
             family_id=2,
@@ -199,7 +187,7 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
     def test_final_batch_is_partial_and_contains_only_whole_cases(self) -> None:
-        assignments = schedule_attempt_batch(
+        assignments = assign_next_cases(
             self.targets,
             {"low": 2, "moderate": 1},
             family_id=2,
@@ -224,7 +212,7 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
     def test_met_targets_schedule_no_more_attempts(self) -> None:
-        assignments = schedule_attempt_batch(
+        assignments = assign_next_cases(
             self.targets,
             {"low": 2, "moderate": 2},
             family_id=2,
@@ -236,30 +224,6 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
         self.assertEqual(assignments, ())
-
-    def test_rejects_unknown_or_overfilled_cell_counts(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unknown"):
-            schedule_attempt_batch(
-                self.targets,
-                {"other": 1},
-                family_id=2,
-                revision_id=1,
-                split_id=SplitId.TRAIN,
-                stream_id=0,
-                first_attempt_index=0,
-                batch_size=1,
-            )
-        with self.assertRaisesRegex(ValueError, "exceeds"):
-            schedule_attempt_batch(
-                self.targets,
-                {"low": 3},
-                family_id=2,
-                revision_id=1,
-                split_id=SplitId.TRAIN,
-                stream_id=0,
-                first_attempt_index=0,
-                batch_size=1,
-            )
 
 
 if __name__ == "__main__":

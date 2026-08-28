@@ -19,7 +19,7 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
     FINITE_DEPTH_STOKES_URSELL_LIMIT,
     finite_depth_stokes_ursell_upper_bound,
 )
-from solver.gen_data.pipeline.production import (  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
@@ -336,7 +336,8 @@ class StokesSamplingTest(unittest.TestCase):
 
     def test_invalid_inputs_and_corrupt_histories_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown Stokes"):
-            sample_stokes_case(replace(assignment(0), cell_id="unknown"))
+            valid_assignment = assignment(0)
+            sample_stokes_case(AttemptAssignment(valid_assignment.case_key, "unknown"))
         with self.assertRaisesRegex(ValueError, "positive and finite"):
             sample_stokes_case(assignment(0), domain_length=np.nan)
         with self.assertRaisesRegex(ValueError, "nonnegative"):

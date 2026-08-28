@@ -1,4 +1,5 @@
-"""CPU tests for production GL2 execution and nonlinear adjustment."""
+"""CPU tests for trajectory integration and nonlinear warm-up."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -15,27 +16,28 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
-from solver.gen_data.pipeline.reference import (  # noqa: E402
-    evaluate_discrete_dno_target,
+from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
+from solver.gen_data.pipeline.dno_target import (  # noqa: E402
+    compute_dno_target,
 )
-from solver.gen_data.pipeline.refinement import (  # noqa: E402
-    PAPER_BENJAMIN_FEIR_GL2_CONTRACT,
-    PAPER_GL2_CONTRACT,
-    PAPER_JONSWAP_GL2_CONTRACT,
-    PAPER_TANAKA_GL2_CONTRACT,
-    TANAKA_BUFFERED_HOU_LI_GL2_CONTRACT,
-    TANAKA_HOU_LI_GL2_CONTRACT,
-    _evaluate_saved_target,
-    _project_fixed_band_to_target_grid,
-    InternalTrajectoryTelemetry,
-    NonlinearAdjustmentArm,
-    PostStepStateFilter,
-    ResidualControlledArm,
-    ResidualControlledGL2Contract,
-    execute_production_trajectory,
-    execute_variable_horizon_nonlinear_adjustment,
-    execute_variable_horizon_production_trajectory,
+from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
+    PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
+    PAPER_JONSWAP_ROLLOUT_CONFIG,
+    PAPER_TANAKA_ROLLOUT_CONFIG,
+    RolloutConfig,
+)
+from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
+    compute_saved_targets,
+    resample_to_target_grid,
+    GL2BatchTelemetry,
+    InternalHealthTelemetry,
+    CompletedAdjustmentRollout,
+    IntegratedTrajectoryBatch,
+)
+from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
+    execute_trajectory_batch,
+    execute_variable_horizon_adjustment,
+    execute_variable_horizon_trajectory_batch,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -46,35 +48,38 @@ def cheap_contract(
     nx: int = 16,
     target_nx: int | None = None,
     maximum_wavenumber: float = 3.0,
-    post_step_state_filter: PostStepStateFilter = "sharp",
     target_dno_order: int | None = None,
     target_maximum_wavenumber: float | None = None,
     internal_hamiltonian_drift_threshold: float | None = None,
-) -> ResidualControlledGL2Contract:
-    return ResidualControlledGL2Contract(
+) -> RolloutConfig:
+    resolved_target_nx = nx if target_nx is None else target_nx
+    resolved_target_dno_order = 0 if target_dno_order is None else target_dno_order
+    resolved_target_maximum_wavenumber = (
+        maximum_wavenumber
+        if target_maximum_wavenumber is None
+        else target_maximum_wavenumber
+    )
+    return RolloutConfig(
         nx=nx,
-        target_nx=target_nx,
+        target_nx=resolved_target_nx,
         length=2.0 * math.pi,
         gravity=1.0,
         dno_order=0,
-        target_dno_order=target_dno_order,
+        target_dno_order=resolved_target_dno_order,
         pad_factor=1,
         maximum_wavenumber=maximum_wavenumber,
-        target_maximum_wavenumber=target_maximum_wavenumber,
-        production_dt=0.02,
+        target_maximum_wavenumber=resolved_target_maximum_wavenumber,
+        dt=0.02,
         saved_dt=0.02,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=8,
         target_time_chunk_size=2,
-        post_step_state_filter=post_step_state_filter,
-        internal_hamiltonian_drift_threshold=(
-            internal_hamiltonian_drift_threshold
-        ),
+        internal_hamiltonian_drift_threshold=(internal_hamiltonian_drift_threshold),
     )
 
 
-class InjectedArmExecutor:
-    """Return deterministic finite production arms."""
+class InjectedRolloutExecutor:
+    """Return deterministic finite trajectory batches."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[float, np.ndarray]] = []
@@ -86,36 +91,30 @@ class InjectedArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
-    ) -> ResidualControlledArm:
+        config: RolloutConfig,
+    ) -> IntegratedTrajectoryBatch:
         del xi0, depths
-        self.calls.append((dt, eta0[:, 0].copy()))
+        self.calls.append((config.dt, eta0[:, 0].copy()))
         nt = saved_times.size
         batch, nx = eta0.shape
         eta = np.broadcast_to(eta0, (nt, batch, nx)).copy()
-        complete = np.ones(batch, dtype=np.bool_)
         step_shape = (1, batch)
-        q_ref = np.zeros_like(eta)
         converged = np.ones(step_shape, dtype=np.bool_)
         residual = np.zeros(step_shape, dtype=np.float64)
-        return ResidualControlledArm(
-            dt=dt,
-            times=saved_times.copy(),
+        return IntegratedTrajectoryBatch(
             eta=eta,
             xi=np.zeros_like(eta),
-            q_ref=q_ref,
-            complete=complete,
-            gl2_stage_residual=residual,
-            gl2_iterations=np.ones(step_shape, dtype=np.int32),
-            gl2_converged=converged,
-            gl2_stage_finite=np.ones(step_shape, dtype=np.bool_),
-            gl2_state_finite=np.ones(step_shape, dtype=np.bool_),
-            gl2_hit_iteration_cap=np.zeros(step_shape, dtype=np.bool_),
+            gxi=np.zeros_like(eta),
+            gl2=GL2BatchTelemetry(
+                stage_residual=residual,
+                converged=converged,
+                stage_finite=np.ones(step_shape, dtype=np.bool_),
+                state_finite=np.ones(step_shape, dtype=np.bool_),
+            ),
         )
 
 
-class VariableHorizonArmExecutor:
+class VariableHorizonRolloutExecutor:
     """Independent synthetic cases with deliberate post-horizon failures."""
 
     def __init__(self) -> None:
@@ -129,12 +128,11 @@ class VariableHorizonArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
-    ) -> ResidualControlledArm:
+        config: RolloutConfig,
+    ) -> IntegratedTrajectoryBatch:
         del xi0, depths
         markers = np.rint(eta0[:, 0]).astype(int)
-        self.calls.append((dt, tuple(markers.tolist()), float(saved_times[-1])))
+        self.calls.append((config.dt, tuple(markers.tolist()), float(saved_times[-1])))
         nt = saved_times.size
         batch, nx = eta0.shape
         eta = np.broadcast_to(eta0, (nt, batch, nx)).copy()
@@ -143,9 +141,9 @@ class VariableHorizonArmExecutor:
         xi = np.zeros_like(eta)
         q_ref = np.zeros_like(eta)
 
-        substeps = int(round(contract.saved_dt / dt))
+        substeps = int(round(config.saved_dt / config.dt))
         step_count = (nt - 1) * substeps
-        step_times = dt * np.arange(step_count, dtype=np.float64)
+        step_times = config.dt * np.arange(step_count, dtype=np.float64)
         step_shape = (step_count, batch)
         residual = np.zeros(step_shape, dtype=np.float64)
         converged = np.ones(step_shape, dtype=np.bool_)
@@ -161,7 +159,7 @@ class VariableHorizonArmExecutor:
             saved_after = saved_times > horizon + 1.0e-14
             steps_after = step_times >= horizon - 1.0e-14
             if np.any(saved_after):
-                self.poisoned.append((dt, int(marker)))
+                self.poisoned.append((config.dt, int(marker)))
                 eta[saved_after, case_index] = np.nan
                 xi[saved_after, case_index] = np.nan
                 q_ref[saved_after, case_index] = np.nan
@@ -174,20 +172,17 @@ class VariableHorizonArmExecutor:
                 internal_dno_output_finite[saved_after, case_index] = False
                 minimum_water_column[saved_after, case_index] = np.nan
 
-        return ResidualControlledArm(
-            dt=dt,
-            times=saved_times.copy(),
+        return IntegratedTrajectoryBatch(
             eta=eta,
             xi=xi,
-            q_ref=q_ref,
-            complete=np.ones(batch, dtype=np.bool_),
-            gl2_stage_residual=residual,
-            gl2_iterations=np.ones(step_shape, dtype=np.int32),
-            gl2_converged=converged,
-            gl2_stage_finite=stage_finite,
-            gl2_state_finite=state_finite,
-            gl2_hit_iteration_cap=np.zeros(step_shape, dtype=np.bool_),
-            internal_telemetry=InternalTrajectoryTelemetry(
+            gxi=q_ref,
+            gl2=GL2BatchTelemetry(
+                stage_residual=residual,
+                converged=converged,
+                stage_finite=stage_finite,
+                state_finite=state_finite,
+            ),
+            internal_telemetry=InternalHealthTelemetry(
                 hamiltonian=internal_hamiltonian,
                 state_finite=internal_state_finite,
                 dno_output_finite=internal_dno_output_finite,
@@ -196,7 +191,7 @@ class VariableHorizonArmExecutor:
         )
 
 
-class InternalHealthArmExecutor:
+class InternalHealthRolloutExecutor:
     """Return five cases that isolate the four required internal gates."""
 
     def __call__(
@@ -206,15 +201,14 @@ class InternalHealthArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
-    ) -> ResidualControlledArm:
+        config: RolloutConfig,
+    ) -> IntegratedTrajectoryBatch:
         del xi0, depths
         saved_count = saved_times.size
         batch_size, nx = eta0.shape
         field_shape = (saved_count, batch_size, nx)
         step_shape = (
-            (saved_count - 1) * int(round(contract.saved_dt / dt)),
+            (saved_count - 1) * int(round(config.saved_dt / config.dt)),
             batch_size,
         )
         hamiltonian = np.ones((saved_count, batch_size), dtype=np.float64)
@@ -225,20 +219,17 @@ class InternalHealthArmExecutor:
         dno_output_finite[-1, 3] = False
         minimum_water = np.ones_like(hamiltonian)
         minimum_water[-1, 4] = 0.0
-        return ResidualControlledArm(
-            dt=dt,
-            times=saved_times.copy(),
+        return IntegratedTrajectoryBatch(
             eta=np.broadcast_to(eta0, field_shape).copy(),
             xi=np.zeros(field_shape, dtype=np.float64),
-            q_ref=np.zeros(field_shape, dtype=np.float64),
-            complete=np.ones(batch_size, dtype=np.bool_),
-            gl2_stage_residual=np.zeros(step_shape, dtype=np.float64),
-            gl2_iterations=np.ones(step_shape, dtype=np.int32),
-            gl2_converged=np.ones(step_shape, dtype=np.bool_),
-            gl2_stage_finite=np.ones(step_shape, dtype=np.bool_),
-            gl2_state_finite=np.ones(step_shape, dtype=np.bool_),
-            gl2_hit_iteration_cap=np.zeros(step_shape, dtype=np.bool_),
-            internal_telemetry=InternalTrajectoryTelemetry(
+            gxi=np.zeros(field_shape, dtype=np.float64),
+            gl2=GL2BatchTelemetry(
+                stage_residual=np.zeros(step_shape, dtype=np.float64),
+                converged=np.ones(step_shape, dtype=np.bool_),
+                stage_finite=np.ones(step_shape, dtype=np.bool_),
+                state_finite=np.ones(step_shape, dtype=np.bool_),
+            ),
+            internal_telemetry=InternalHealthTelemetry(
                 hamiltonian=hamiltonian,
                 state_finite=state_finite,
                 dno_output_finite=dno_output_finite,
@@ -247,7 +238,7 @@ class InternalHealthArmExecutor:
         )
 
 
-class InjectedAdjustmentArmExecutor:
+class InjectedAdjustmentRolloutExecutor:
     """Return per-case endpoints and one deliberate within-horizon failure."""
 
     def __init__(self) -> None:
@@ -260,11 +251,10 @@ class InjectedAdjustmentArmExecutor:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        contract: ResidualControlledGL2Contract,
-        dt: float,
+        config: RolloutConfig,
         nonlinear_ramp_times: np.ndarray,
         nonlinear_ramp_order: int,
-    ) -> NonlinearAdjustmentArm:
+    ) -> CompletedAdjustmentRollout:
         del depths
         self.calls.append((nonlinear_ramp_times.copy(), nonlinear_ramp_order))
         markers = np.rint(eta0[:, 0]).astype(int)
@@ -280,9 +270,9 @@ class InjectedAdjustmentArmExecutor:
         ).copy()
         eta += saved_times[:, None, None]
         xi -= saved_times[:, None, None]
-        substeps = int(round(contract.saved_dt / dt))
+        substeps = int(round(config.saved_dt / config.dt))
         step_shape = ((saved_count - 1) * substeps, batch_size)
-        step_times = dt * np.arange(step_shape[0], dtype=np.float64)
+        step_times = config.dt * np.arange(step_shape[0], dtype=np.float64)
         residual = np.zeros(step_shape, dtype=np.float64)
         converged = np.ones(step_shape, dtype=np.bool_)
         stage_finite = np.ones(step_shape, dtype=np.bool_)
@@ -298,112 +288,69 @@ class InjectedAdjustmentArmExecutor:
                 residual[steps_after, case_index] = np.inf
                 converged[steps_after, case_index] = False
             if marker == 3:
-                residual[0, case_index] = 2.0 * contract.gl2_residual_tolerance
+                residual[0, case_index] = 2.0 * config.gl2_residual_tolerance
                 converged[0, case_index] = False
-        return NonlinearAdjustmentArm(
-            dt=dt,
-            times=saved_times.copy(),
+        return CompletedAdjustmentRollout(
             eta=eta,
             xi=xi,
-            gl2_stage_residual=residual,
-            gl2_iterations=np.ones(step_shape, dtype=np.int32),
-            gl2_converged=converged,
-            gl2_stage_finite=stage_finite,
-            gl2_state_finite=state_finite,
-            gl2_hit_iteration_cap=np.zeros(step_shape, dtype=np.bool_),
-        )
-
-
-class ResidualControlledRefinementTest(unittest.TestCase):
-    def test_production_defaults_are_frozen(self) -> None:
-        contract = PAPER_GL2_CONTRACT
-        self.assertEqual(
-            (
-                contract.nx,
-                contract.dno_order,
-                contract.pad_factor,
-                contract.maximum_wavenumber,
-                contract.dtype,
+            gl2=GL2BatchTelemetry(
+                stage_residual=residual,
+                converged=converged,
+                stage_finite=stage_finite,
+                state_finite=state_finite,
             ),
-            (1024, 6, 8, 128.0, "float64"),
         )
-        self.assertEqual(contract.production_dt, 0.01)
-        self.assertEqual(contract.gl2_residual_tolerance, 1.0e-8)
-        self.assertEqual(contract.gl2_iteration_cap, 4)
-        self.assertEqual(contract.post_step_state_filter, "sharp")
-        self.assertIsNone(contract.post_step_maximum_wavenumber)
-        self.assertEqual(
-            contract.post_step_filter_fraction,
-            contract.filter_fraction,
-        )
-        self.assertEqual(
-            (
-                TANAKA_HOU_LI_GL2_CONTRACT.post_step_state_filter,
-                TANAKA_HOU_LI_GL2_CONTRACT.hou_li_coefficient,
-                TANAKA_HOU_LI_GL2_CONTRACT.hou_li_power,
-            ),
-            ("hou_li", 36.0, 36),
-        )
-        self.assertEqual(
-            TANAKA_HOU_LI_GL2_CONTRACT.target_definition,
-            PAPER_GL2_CONTRACT.target_definition,
-        )
-        buffered = TANAKA_BUFFERED_HOU_LI_GL2_CONTRACT
-        self.assertEqual(buffered.maximum_wavenumber, 224.0)
-        self.assertEqual(
-            buffered.target_definition.maximum_wavenumber,
-            128.0,
-        )
-        self.assertEqual(buffered.post_step_maximum_wavenumber, 224.0)
-        self.assertEqual(buffered.post_step_state_filter, "hou_li")
 
-        paper_tanaka = PAPER_TANAKA_GL2_CONTRACT
+
+class TrajectoryRolloutTest(unittest.TestCase):
+    def test_paper_family_settings_are_frozen(self) -> None:
+        paper_tanaka = PAPER_TANAKA_ROLLOUT_CONFIG
         self.assertEqual(
             (
+                paper_tanaka.nx,
+                paper_tanaka.target_nx,
+                paper_tanaka.dno_order,
+                paper_tanaka.target_dno_order,
                 paper_tanaka.maximum_wavenumber,
-                paper_tanaka.target_definition.maximum_wavenumber,
-                paper_tanaka.post_step_maximum_wavenumber,
-                paper_tanaka.post_step_state_filter,
-                paper_tanaka.hou_li_coefficient,
-                paper_tanaka.hou_li_power,
+                paper_tanaka.target_maximum_wavenumber,
+                paper_tanaka.gl2_iteration_cap,
+                paper_tanaka.internal_hamiltonian_drift_threshold,
             ),
-            (256.0, 128.0, 256.0, "hou_li", 36.0, 36),
+            (1024, 1024, 6, 6, 256.0, 128.0, 4, None),
         )
-        paper_bf = PAPER_BENJAMIN_FEIR_GL2_CONTRACT
+        paper_bf = PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG
         self.assertEqual(
             (
                 paper_bf.nx,
                 paper_bf.target_nx,
                 paper_bf.dno_order,
+                paper_bf.target_dno_order,
                 paper_bf.maximum_wavenumber,
-                paper_bf.target_definition.nx,
-                paper_bf.target_definition.dno_order,
-                paper_bf.target_definition.maximum_wavenumber,
+                paper_bf.target_maximum_wavenumber,
                 paper_bf.gl2_iteration_cap,
+                paper_bf.internal_hamiltonian_drift_threshold,
             ),
-            (1024, None, 4, 256.0, 1024, 6, 128.0, 4),
+            (1024, 1024, 4, 6, 256.0, 128.0, 4, 1.0e-3),
         )
-        paper_jonswap = PAPER_JONSWAP_GL2_CONTRACT
+        paper_jonswap = PAPER_JONSWAP_ROLLOUT_CONFIG
         self.assertEqual(
             (
                 paper_jonswap.nx,
                 paper_jonswap.target_nx,
                 paper_jonswap.dno_order,
+                paper_jonswap.target_dno_order,
                 paper_jonswap.maximum_wavenumber,
-                paper_jonswap.target_definition.nx,
-                paper_jonswap.target_definition.dno_order,
-                paper_jonswap.target_definition.maximum_wavenumber,
+                paper_jonswap.target_maximum_wavenumber,
                 paper_jonswap.gl2_iteration_cap,
-                paper_jonswap.post_step_state_filter,
                 paper_jonswap.internal_hamiltonian_drift_threshold,
             ),
-            (2048, 1024, 4, 704.0, 1024, 6, 128.0, 5, "sharp", 1.0e-3),
+            (2048, 1024, 4, 6, 704.0, 128.0, 5, 1.0e-3),
         )
 
     def test_dual_grid_delivery_preserves_mode_128_and_drops_higher_modes(
         self,
     ) -> None:
-        contract = PAPER_JONSWAP_GL2_CONTRACT
+        contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         x = contract.length * np.arange(contract.nx) / contract.nx
         field = (
             0.7 * np.cos(128.0 * x)
@@ -413,54 +360,52 @@ class ResidualControlledRefinementTest(unittest.TestCase):
         )
 
         delivered = np.asarray(
-            _project_fixed_band_to_target_grid(
+            resample_to_target_grid(
                 jnp.asarray(field, dtype=jnp.float64),
-                contract=contract,
+                config=contract,
             ),
             dtype=np.float64,
         )
 
-        coefficients = np.fft.rfft(delivered) / contract.delivered_nx
+        coefficients = np.fft.rfft(delivered) / contract.target_nx
         self.assertEqual(delivered.shape, (1024,))
         self.assertAlmostEqual(abs(coefficients[128]), math.hypot(0.7, 0.4) / 2.0)
         self.assertLess(float(np.max(np.abs(coefficients[129:]))), 1.0e-14)
 
     def test_canonical_q_is_recomputed_from_resampled_eta_and_xi(self) -> None:
         contract = replace(
-            PAPER_JONSWAP_GL2_CONTRACT,
+            PAPER_JONSWAP_ROLLOUT_CONFIG,
             target_time_chunk_size=1,
             internal_hamiltonian_drift_threshold=None,
         )
         x = contract.length * np.arange(contract.nx) / contract.nx
-        eta = (0.02 * np.cos(3.0 * x) + 0.001 * np.cos(129.0 * x))[
-            None, None, :
-        ]
-        xi = (0.03 * np.sin(2.0 * x) + 0.002 * np.sin(200.0 * x))[
-            None, None, :
-        ]
+        eta = (0.02 * np.cos(3.0 * x) + 0.001 * np.cos(129.0 * x))[None, None, :]
+        xi = (0.03 * np.sin(2.0 * x) + 0.002 * np.sin(200.0 * x))[None, None, :]
         depths = jnp.asarray([5.0], dtype=jnp.float64)
 
-        delivered_eta, delivered_xi, delivered_q, internal = (
-            _evaluate_saved_target(
-                jnp.asarray(eta),
-                jnp.asarray(xi),
-                depths,
-                contract,
-            )
-        )
-        target_eta = _project_fixed_band_to_target_grid(
+        delivered_eta, delivered_xi, delivered_q, internal = compute_saved_targets(
             jnp.asarray(eta),
-            contract=contract,
-        )
-        target_xi = _project_fixed_band_to_target_grid(
             jnp.asarray(xi),
-            contract=contract,
+            depths,
+            contract,
         )
-        expected_eta, expected_xi, expected_q = evaluate_discrete_dno_target(
+        target_eta = resample_to_target_grid(
+            jnp.asarray(eta),
+            config=contract,
+        )
+        target_xi = resample_to_target_grid(
+            jnp.asarray(xi),
+            config=contract,
+        )
+        expected_eta, expected_xi, expected_q = compute_dno_target(
             target_eta,
             target_xi,
             depths[:, None],
-            definition=contract.target_definition,
+            nx=contract.target_nx,
+            length=contract.length,
+            dno_order=contract.target_dno_order,
+            pad_factor=contract.pad_factor,
+            maximum_wavenumber=contract.target_maximum_wavenumber,
         )
 
         self.assertIsNone(internal)
@@ -474,7 +419,7 @@ class ResidualControlledRefinementTest(unittest.TestCase):
         self,
     ) -> None:
         contract = replace(
-            PAPER_JONSWAP_GL2_CONTRACT,
+            PAPER_JONSWAP_ROLLOUT_CONFIG,
             target_time_chunk_size=1,
         )
         eta = jnp.zeros((1, 1, contract.nx), dtype=jnp.float64)
@@ -486,19 +431,22 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             xi_value: jax.Array,
             depth_value: jax.Array,
             *,
-            definition: object,
+            nx: int,
+            length: float,
+            dno_order: int,
+            pad_factor: int,
+            maximum_wavenumber: float,
         ) -> tuple[jax.Array, jax.Array, jax.Array]:
-            del depth_value
-            nx = getattr(definition, "nx")
+            del depth_value, length, dno_order, pad_factor, maximum_wavenumber
             calls.append(nx)
-            marker = 7.0 if nx == contract.delivered_nx else 999.0
+            marker = 7.0 if nx == contract.target_nx else 999.0
             return eta_value, xi_value, jnp.full_like(eta_value, marker)
 
         with patch(
-            "solver.gen_data.pipeline.refinement.evaluate_discrete_dno_target",
+            "solver.gen_data.pipeline.trajectory_integration.compute_dno_target",
             side_effect=fake_target,
         ):
-            _, _, delivered_q, internal = _evaluate_saved_target(
+            _, _, delivered_q, internal = compute_saved_targets(
                 eta,
                 xi,
                 jnp.asarray([5.0], dtype=jnp.float64),
@@ -527,23 +475,31 @@ class ResidualControlledRefinementTest(unittest.TestCase):
         )[:, None, :]
         depths = jnp.asarray([2.0], dtype=jnp.float64)
 
-        _, _, delivered_q, internal = _evaluate_saved_target(
+        _, _, delivered_q, internal = compute_saved_targets(
             jnp.asarray(eta),
             jnp.asarray(xi),
             depths,
             contract,
         )
-        _, _, expected_target_q = evaluate_discrete_dno_target(
+        _, _, expected_target_q = compute_dno_target(
             jnp.asarray(eta),
             jnp.asarray(xi),
             depths[:, None],
-            definition=contract.target_definition,
+            nx=contract.target_nx,
+            length=contract.length,
+            dno_order=contract.target_dno_order,
+            pad_factor=contract.pad_factor,
+            maximum_wavenumber=contract.target_maximum_wavenumber,
         )
-        _, _, expected_internal_q = evaluate_discrete_dno_target(
+        _, _, expected_internal_q = compute_dno_target(
             jnp.asarray(eta),
             jnp.asarray(xi),
             depths[:, None],
-            definition=contract.internal_definition,
+            nx=contract.nx,
+            length=contract.length,
+            dno_order=contract.dno_order,
+            pad_factor=contract.pad_factor,
+            maximum_wavenumber=contract.maximum_wavenumber,
         )
 
         np.testing.assert_allclose(
@@ -559,8 +515,7 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             * contract.length
             / contract.nx
             * np.sum(
-                xi * np.asarray(expected_internal_q)
-                + contract.gravity * eta**2,
+                xi * np.asarray(expected_internal_q) + contract.gravity * eta**2,
                 axis=-1,
             )
         )
@@ -571,58 +526,54 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             atol=1.0e-13,
         )
         self.assertGreater(
-            float(
-                np.linalg.norm(
-                    delivered_q - np.asarray(expected_internal_q)
-                )
-            ),
+            float(np.linalg.norm(delivered_q - np.asarray(expected_internal_q))),
             1.0e-8,
         )
 
-    def test_production_requires_each_dense_internal_health_gate(self) -> None:
+    def test_trajectory_requires_each_dense_internal_health_gate(self) -> None:
         contract = cheap_contract(
             nx=8,
             maximum_wavenumber=2.0,
             internal_hamiltonian_drift_threshold=1.0e-3,
         )
-        execution = execute_production_trajectory(
+        execution = execute_trajectory_batch(
             np.zeros((5, contract.nx), dtype=np.float64),
             np.zeros((5, contract.nx), dtype=np.float64),
             np.ones(5, dtype=np.float64),
             np.asarray([0.0, contract.saved_dt]),
-            contract=contract,
-            arm_executor=InternalHealthArmExecutor(),
+            config=contract,
+            rollout_executor=InternalHealthRolloutExecutor(),
         )
 
-        np.testing.assert_array_equal(
-            execution.accepted_mask,
-            np.asarray([True, False, False, False, False]),
+        self.assertEqual(
+            tuple(case.decision.accepted for case in execution),
+            (True, False, False, False, False),
         )
         expected_failures = (
-            QualityReason.HAMILTONIAN_DRIFT,
-            QualityReason.NONFINITE_STATE,
-            QualityReason.NONFINITE_TARGET,
-            QualityReason.BOTTOM_CLEARANCE,
+            CaseCheck.HAMILTONIAN_DRIFT,
+            CaseCheck.NONFINITE_STATE,
+            CaseCheck.NONFINITE_TARGET,
+            CaseCheck.BOTTOM_CLEARANCE,
         )
-        for case, reason in zip(execution.cases[1:], expected_failures):
+        for case, reason in zip(execution[1:], expected_failures):
             self.assertTrue(case.decision.required & reason)
             self.assertTrue(case.decision.evaluated & reason)
             self.assertTrue(case.decision.failed & reason)
-            self.assertIsNone(case.retained_trajectory)
+            self.assertIsNone(case.trajectory)
 
-    def test_buffered_target_delivers_only_the_declared_lower_band(self) -> None:
-        contract = ResidualControlledGL2Contract(
+    def test_target_delivers_only_the_declared_lower_band(self) -> None:
+        contract = RolloutConfig(
             nx=16,
+            target_nx=16,
             length=2.0 * math.pi,
             dno_order=0,
+            target_dno_order=0,
             pad_factor=1,
             maximum_wavenumber=6.0,
             target_maximum_wavenumber=3.0,
-            production_dt=0.02,
+            dt=0.02,
             saved_dt=0.02,
             target_time_chunk_size=2,
-            post_step_state_filter="hou_li",
-            post_step_maximum_wavenumber=6.0,
         )
         x = 2.0 * math.pi * np.arange(16, dtype=np.float64) / 16.0
         eta = np.stack(
@@ -638,20 +589,14 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             )
         )[:, None, :]
 
-        delivered_eta, delivered_xi, delivered_q, internal = (
-            _evaluate_saved_target(
-                jax.numpy.asarray(eta),
-                jax.numpy.asarray(xi),
-                jax.numpy.asarray([2.0]),
-                contract,
-            )
+        delivered_eta, delivered_xi, delivered_q, internal = compute_saved_targets(
+            jax.numpy.asarray(eta),
+            jax.numpy.asarray(xi),
+            jax.numpy.asarray([2.0]),
+            contract,
         )
 
-        self.assertIsNotNone(delivered_eta)
-        self.assertIsNotNone(delivered_xi)
         self.assertIsNone(internal)
-        assert delivered_eta is not None
-        assert delivered_xi is not None
         modes = np.fft.fftfreq(16, d=1.0 / 16.0)
         outside = np.abs(modes) > 3.0
         for field in (delivered_eta, delivered_xi, delivered_q):
@@ -666,64 +611,34 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             ValueError,
             "target_maximum_wavenumber",
         ):
-            ResidualControlledGL2Contract(
+            RolloutConfig(
                 maximum_wavenumber=4.0,
                 target_maximum_wavenumber=5.0,
             )
 
-    def test_post_step_band_can_be_inside_evolution_band(self) -> None:
-        contract = ResidualControlledGL2Contract(
-            maximum_wavenumber=192.0,
-            post_step_maximum_wavenumber=172.0,
-        )
-
-        self.assertEqual(contract.filter_fraction, 192.0 / 512.0)
-        self.assertEqual(contract.post_step_filter_fraction, 172.0 / 512.0)
-        self.assertEqual(
-            contract.target_definition.maximum_wavenumber,
-            192.0,
-        )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "no larger than maximum_wavenumber",
-        ):
-            ResidualControlledGL2Contract(
-                maximum_wavenumber=192.0,
-                post_step_maximum_wavenumber=193.0,
-            )
-
-    def test_production_uses_only_the_validated_arm(self) -> None:
+    def test_trajectory_uses_only_the_validated_rollout(self) -> None:
         contract = cheap_contract(nx=8, maximum_wavenumber=2.0)
-        executor = InjectedArmExecutor()
-        eta0 = np.stack(
-            tuple(marker * np.ones(contract.nx) for marker in (0, 1))
-        )
+        executor = InjectedRolloutExecutor()
+        eta0 = np.stack(tuple(marker * np.ones(contract.nx) for marker in (0, 1)))
 
-        execution = execute_production_trajectory(
+        execution = execute_trajectory_batch(
             eta0,
             np.zeros_like(eta0),
             np.full(2, 10.0),
             np.asarray([0.0, 0.02]),
-            contract=contract,
-            arm_executor=executor,
+            config=contract,
+            rollout_executor=executor,
         )
 
         self.assertEqual(len(executor.calls), 1)
-        self.assertEqual(executor.calls[0][0], contract.production_dt)
-        np.testing.assert_array_equal(
-            execution.accepted_mask,
-            np.asarray([True, True]),
+        self.assertEqual(executor.calls[0][0], contract.dt)
+        self.assertEqual(
+            tuple(case.decision.accepted for case in execution),
+            (True, True),
         )
-        self.assertTrue(
-            all(
-                case.dt == contract.production_dt
-                and case.retained_trajectory is not None
-                for case in execution.cases
-            )
-        )
+        self.assertTrue(all(case.trajectory is not None for case in execution))
 
-    def test_variable_horizon_production_crops_post_horizon_failures(
+    def test_variable_horizon_trajectory_crops_post_horizon_failures(
         self,
     ) -> None:
         contract = cheap_contract(
@@ -731,45 +646,37 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             maximum_wavenumber=2.0,
             internal_hamiltonian_drift_threshold=1.0e-3,
         )
-        eta0 = np.stack(
-            tuple(marker * np.ones(contract.nx) for marker in (1, 2, 3))
-        )
+        eta0 = np.stack(tuple(marker * np.ones(contract.nx) for marker in (1, 2, 3)))
         grids = (
             np.arange(3, dtype=np.float64) * contract.saved_dt,
             np.arange(4, dtype=np.float64) * contract.saved_dt,
             np.arange(5, dtype=np.float64) * contract.saved_dt,
         )
-        executor = VariableHorizonArmExecutor()
+        executor = VariableHorizonRolloutExecutor()
 
-        execution = execute_variable_horizon_production_trajectory(
+        execution = execute_variable_horizon_trajectory_batch(
             eta0,
             np.zeros_like(eta0),
             np.full(3, 10.0),
             grids,
-            contract=contract,
-            arm_executor=executor,
+            config=contract,
+            rollout_executor=executor,
         )
 
         self.assertEqual(
             executor.calls,
-            [(contract.production_dt, (1, 2, 3), 0.08)],
-        )
-        np.testing.assert_array_equal(
-            execution.accepted_mask,
-            np.asarray([True, True, True]),
+            [(contract.dt, (1, 2, 3), 0.08)],
         )
         self.assertEqual(
-            tuple(case.case_index for case in execution.cases),
-            (0, 1, 2),
+            tuple(case.decision.accepted for case in execution),
+            (True, True, True),
         )
-        for case in execution.cases:
-            self.assertTrue(
-                case.decision.required & QualityReason.HAMILTONIAN_DRIFT
-            )
-            self.assertIsNotNone(case.internal_metrics)
-            assert case.internal_metrics is not None
+        for case in execution:
+            self.assertTrue(case.decision.required & CaseCheck.HAMILTONIAN_DRIFT)
+            self.assertIsNotNone(case.health_metrics)
+            assert case.health_metrics is not None
             self.assertEqual(
-                case.internal_metrics.maximum_relative_hamiltonian_drift,
+                case.health_metrics.maximum_relative_hamiltonian_drift,
                 0.0,
             )
 
@@ -777,9 +684,7 @@ class ResidualControlledRefinementTest(unittest.TestCase):
         self,
     ) -> None:
         contract = cheap_contract(nx=8, maximum_wavenumber=2.0)
-        eta0 = np.stack(
-            tuple(marker * np.ones(contract.nx) for marker in (1, 2, 3))
-        )
+        eta0 = np.stack(tuple(marker * np.ones(contract.nx) for marker in (1, 2, 3)))
         xi0 = np.zeros_like(eta0)
         grids = (
             np.arange(3, dtype=np.float64) * contract.saved_dt,
@@ -787,28 +692,28 @@ class ResidualControlledRefinementTest(unittest.TestCase):
             np.arange(5, dtype=np.float64) * contract.saved_dt,
         )
         ramp_times = np.asarray([0.4, 0.6, 0.8], dtype=np.float64)
-        arm_executor = InjectedAdjustmentArmExecutor()
+        rollout_executor = InjectedAdjustmentRolloutExecutor()
 
-        execution = execute_variable_horizon_nonlinear_adjustment(
+        execution = execute_variable_horizon_adjustment(
             eta0,
             xi0,
             np.full(3, 10.0),
             grids,
             nonlinear_ramp_times=ramp_times,
             nonlinear_ramp_order=4,
-            contract=contract,
-            arm_executor=arm_executor,
+            config=contract,
+            rollout_executor=rollout_executor,
         )
 
-        self.assertEqual(len(arm_executor.calls), 1)
-        np.testing.assert_array_equal(arm_executor.calls[0][0], ramp_times)
-        self.assertEqual(arm_executor.calls[0][1], 4)
-        np.testing.assert_array_equal(
-            execution.accepted_mask,
-            np.asarray([True, True, False]),
+        self.assertEqual(len(rollout_executor.calls), 1)
+        np.testing.assert_array_equal(rollout_executor.calls[0][0], ramp_times)
+        self.assertEqual(rollout_executor.calls[0][1], 4)
+        self.assertEqual(
+            tuple(case.decision.accepted for case in execution),
+            (True, True, False),
         )
         for index, expected_terminal in enumerate((1.04, 2.06)):
-            case = execution.cases[index]
+            case = execution[index]
             self.assertIsNotNone(case.terminal_eta)
             self.assertIsNotNone(case.terminal_xi)
             assert case.terminal_eta is not None
@@ -818,17 +723,13 @@ class ResidualControlledRefinementTest(unittest.TestCase):
                 case.terminal_xi,
                 -float(grids[index][-1]),
             )
-            self.assertTrue(case.telemetry.all_stages_solved)
-            self.assertEqual(case.telemetry.maximum_stage_residual, 0.0)
-        rejected = execution.cases[2]
+            self.assertFalse(case.decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
+            self.assertEqual(case.maximum_gl2_stage_residual, 0.0)
+        rejected = execution[2]
         self.assertIsNone(rejected.terminal_eta)
         self.assertIsNone(rejected.terminal_xi)
-        self.assertTrue(
-            rejected.decision.failed & QualityReason.GL2_STAGE_RESIDUAL
-        )
-        self.assertTrue(
-            rejected.decision.failed & QualityReason.INCOMPLETE_TRAJECTORY
-        )
+        self.assertTrue(rejected.decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
+        self.assertTrue(rejected.decision.failed & CaseCheck.INCOMPLETE_TRAJECTORY)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@ from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -37,7 +36,6 @@ SUMMARY_PATTERN = re.compile(
     r"^paper_dataset_(?P<family>.+)_(?P<split>train|validation|test)"
     r"\.summary\.json$"
 )
-SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 FIELD_NAMES = ("eta", "xi", "gxi")
 FIELD_TITLES = (r"$\eta(x)$", r"$\xi(x)$", r"$G(\eta)\xi(x)$")
 FAMILY_LABELS = {
@@ -56,8 +54,6 @@ GIF_LONG_FPS = 12
 GIF_DIMENSIONS = (1_250, 360)
 GIF_Y_LIMIT_PADDING_FRACTION = 0.06
 QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
-COMBINED_SUMMARY_SCHEMA = "paper_dataset_combined_view_summary_v1"
-COMBINED_PREFLIGHT_SCHEMA = "paper_dataset_combined_view_preflight_v1"
 FINAL_PAPER_DATASET_SOURCE_COUNT = 26
 FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES = {
     "train": 16_384,
@@ -67,18 +63,6 @@ FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES = {
 FINAL_PAPER_DATASET_ACCEPTED_CASES = 73_728
 FINAL_PAPER_DATASET_RETAINED_ROWS = 7_686_144
 DIAGNOSTIC_SCHEMA = "paper_dataset_all_family_diagnostic_tail_v3"
-IMPLEMENTATION_SCHEMA = "paper_dataset_renderer_implementation_v1"
-IMPLEMENTATION_FILES: Final = (
-    (
-        "scripts/render_paper_dataset_worst_cases.py",
-        "diagnostic_renderer_and_summary_producer",
-    ),
-)
-IMPLEMENTATION_RELATIONSHIP: Final = {
-    "scope": "direct_repository_implementation_bytes",
-    "external_runtime_is_not_transitively_authenticated": True,
-    "gif_runtime": "matplotlib PillowWriter with Pillow decode validation",
-}
 INTERPRETATION: Final = (
     "Descriptive full-trajectory ranking only. Every plotted case was accepted "
     "by the frozen dataset construction and trajectory checks. Morphology and "
@@ -158,20 +142,14 @@ def _count_thresholded_sign_changes(
         column_ids,
     ]
 
-    valid_next = np.arange(max_nonzero - 1)[None, :] < (
-        nonzero_counts[:, None] - 1
-    )
-    adjacent_changes = (
-        nonzero_signs[:, 1:] != nonzero_signs[:, :-1]
-    ) & valid_next
+    valid_next = np.arange(max_nonzero - 1)[None, :] < (nonzero_counts[:, None] - 1)
+    adjacent_changes = (nonzero_signs[:, 1:] != nonzero_signs[:, :-1]) & valid_next
     final_indices = np.maximum(nonzero_counts - 1, 0)
     wrap_changes = (nonzero_counts > 1) & (
         nonzero_signs[:, 0]
         != nonzero_signs[np.arange(differences.shape[0]), final_indices]
     )
-    return adjacent_changes.sum(axis=1).astype(np.int32) + wrap_changes.astype(
-        np.int32
-    )
+    return adjacent_changes.sum(axis=1).astype(np.int32) + wrap_changes.astype(np.int32)
 
 
 @dataclass(frozen=True)
@@ -203,13 +181,10 @@ class DatasetSource:
 
 @dataclass(frozen=True)
 class CombinedSummaryBinding:
-    """Canonical source population recorded by one completed combined view."""
+    """Source population recorded by one completed combined view."""
 
     path: Path
-    sha256: str
-    source_roots: tuple[Path, ...]
     source_summary_paths: tuple[Path, ...]
-    source_summary_sha256: tuple[str, ...]
     expected_source_count: int
     expected_accepted_cases: int
     expected_retained_rows: int
@@ -307,100 +282,6 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def sha256(path: Path) -> str:
-    """Return the SHA-256 digest of one file."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _canonical_sha256(value: object) -> str:
-    """Return the canonical JSON fingerprint of one proof payload."""
-
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def renderer_implementation_record(
-    repository_root: Path = ROOT,
-) -> dict[str, object]:
-    """Bind the exact direct repository implementation used by the renderer."""
-
-    root = repository_root.expanduser().resolve(strict=True)
-    files: list[dict[str, object]] = []
-    identities: list[tuple[Path, tuple[int, ...]]] = []
-    for relative, role in IMPLEMENTATION_FILES:
-        requested = root / relative
-        if requested.is_symlink():
-            raise ValueError(f"implementation file must not be a symlink: {requested}")
-        path = requested.resolve(strict=True)
-        if path != requested or not path.is_file() or not path.is_relative_to(root):
-            raise ValueError(f"implementation file is not canonical: {requested}")
-        before = path.stat()
-        digest = sha256(path)
-        after = path.stat()
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if before_identity != after_identity:
-            raise RuntimeError(f"implementation file changed while hashed: {relative}")
-        identities.append((path, after_identity))
-        files.append(
-            {
-                "path": relative,
-                "role": role,
-                "bytes": after.st_size,
-                "sha256": digest,
-            }
-        )
-    for (relative, _), (path, expected_identity) in zip(
-        IMPLEMENTATION_FILES, identities, strict=True
-    ):
-        current = path.stat()
-        current_identity = (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_mtime_ns,
-            current.st_ctime_ns,
-        )
-        if current_identity != expected_identity:
-            raise RuntimeError(f"implementation file changed after hashing: {relative}")
-    payload: dict[str, object] = {
-        "schema": IMPLEMENTATION_SCHEMA,
-        "files": files,
-        "semantic_relationship": dict(IMPLEMENTATION_RELATIONSHIP),
-    }
-    return {**payload, "fingerprint": _canonical_sha256(payload)}
-
-
-def _require_renderer_implementation_current(
-    expected: Mapping[str, object],
-) -> None:
-    if renderer_implementation_record() != dict(expected):
-        raise RuntimeError("renderer implementation changed during execution")
-
-
 def _mapping(value: object, *, context: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{context} must be a JSON object")
@@ -420,23 +301,18 @@ def _nonnegative_integer(value: object, *, context: str) -> int:
 
 
 def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
-    """Load and authenticate the exact chunk population of a completed view."""
+    """Load the chunk population recorded by a completed combined view."""
 
     resolved = path.expanduser().resolve(strict=True)
     summary = read_json(resolved)
-    if summary.get("schema") != COMBINED_SUMMARY_SCHEMA:
-        raise ValueError("combined summary has the wrong schema")
     if summary.get("status") != "complete":
         raise ValueError("combined summary is not complete")
     preflight = _mapping(summary.get("preflight"), context="combined preflight")
-    if preflight.get("schema") != COMBINED_PREFLIGHT_SCHEMA:
-        raise ValueError("combined preflight has the wrong schema")
     chunks = _sequence(preflight.get("chunks"), context="combined preflight chunks")
     if not chunks:
         raise ValueError("combined preflight contains no chunks")
 
     summary_paths: list[Path] = []
-    expected_hashes: list[str] = []
     for chunk_index, raw_chunk in enumerate(chunks):
         chunk = _mapping(raw_chunk, context=f"combined preflight chunk {chunk_index}")
         raw_summary_path = chunk.get("summary_path")
@@ -450,24 +326,10 @@ def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
                 f"combined preflight chunk {chunk_index} summary path is not absolute"
             )
         summary_path = summary_path.resolve(strict=True)
-        expected_sha256 = chunk.get("summary_sha256")
-        if (
-            not isinstance(expected_sha256, str)
-            or SHA256_PATTERN.fullmatch(expected_sha256) is None
-        ):
-            raise ValueError(
-                f"combined preflight chunk {chunk_index} has an invalid summary hash"
-            )
-        if sha256(summary_path) != expected_sha256:
-            raise ValueError(
-                f"combined preflight chunk {chunk_index} summary hash differs"
-            )
         summary_paths.append(summary_path)
-        expected_hashes.append(expected_sha256)
 
     if len(set(summary_paths)) != len(summary_paths):
         raise ValueError("combined preflight repeats a chunk summary")
-    source_roots = tuple(summary_path.parent for summary_path in summary_paths)
     expected_accepted_cases = _nonnegative_integer(
         preflight.get("accepted_cases_total"),
         context="combined preflight accepted_cases_total",
@@ -478,10 +340,7 @@ def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
     )
     return CombinedSummaryBinding(
         path=resolved,
-        sha256=sha256(resolved),
-        source_roots=source_roots,
         source_summary_paths=tuple(summary_paths),
-        source_summary_sha256=tuple(expected_hashes),
         expected_source_count=len(summary_paths),
         expected_accepted_cases=expected_accepted_cases,
         expected_retained_rows=expected_retained_rows,
@@ -501,9 +360,6 @@ def validate_bound_sources(
         raise ValueError(
             "scanned source order or identity differs from combined preflight"
         )
-    observed_hashes = tuple(sha256(path) for path in observed_paths)
-    if observed_hashes != binding.source_summary_sha256:
-        raise ValueError("scanned source summary hash differs from combined preflight")
 
 
 def validate_scanned_population(
@@ -513,7 +369,7 @@ def validate_scanned_population(
     accepted_cases: int,
     retained_rows: int,
 ) -> None:
-    """Bind final scan totals to the authenticated combined preflight."""
+    """Compare final scan totals with the combined-view plan."""
 
     observed = (source_count, accepted_cases, retained_rows)
     expected = (
@@ -565,7 +421,9 @@ def validate_final_paper_dataset_counts(
             f"expected={FINAL_PAPER_DATASET_RETAINED_ROWS}"
         )
     if mismatches:
-        raise ValueError("final paper-dataset contract failed: " + "; ".join(mismatches))
+        raise ValueError(
+            "final paper-dataset contract failed: " + "; ".join(mismatches)
+        )
 
 
 def validate_final_paper_dataset(
@@ -573,7 +431,7 @@ def validate_final_paper_dataset(
     *,
     retained_rows: int,
 ) -> None:
-    """Recover final contract counts from authenticated source trajectory maps."""
+    """Recover final contract counts from source trajectory maps."""
 
     family_split_counts: dict[tuple[str, str], int] = {}
     for source in sources:
@@ -640,7 +498,6 @@ def _artifact_record(
     return {
         "path": str((published_output_dir / relative_path).resolve()),
         "bytes": path.stat().st_size,
-        "sha256": sha256(path),
     }
 
 
@@ -662,31 +519,22 @@ def _artifact_path(root: Path, value: object, *, context: str) -> Path:
     return path
 
 
-def _authenticated_artifact(
+def _dataset_artifact(
     root: Path,
     record: Mapping[str, Any],
     *,
     context: str,
-) -> tuple[Path, str]:
-    """Authenticate one dataset-view artifact record against stored bytes."""
+) -> Path:
+    """Resolve one dataset-view artifact and check its recorded size."""
 
     path = _artifact_path(root, record.get("path"), context=context)
-    expected_sha256 = record.get("sha256")
-    if (
-        not isinstance(expected_sha256, str)
-        or SHA256_PATTERN.fullmatch(expected_sha256) is None
-    ):
-        raise ValueError(f"{context} has an invalid SHA-256 digest")
-    observed_sha256 = sha256(path)
-    if observed_sha256 != expected_sha256:
-        raise ValueError(f"{context} SHA-256 differs from its source summary")
     expected_bytes = _nonnegative_integer(
         record.get("bytes"),
         context=f"{context} bytes",
     )
     if path.stat().st_size != expected_bytes:
         raise ValueError(f"{context} byte count differs from its source summary")
-    return path, observed_sha256
+    return path
 
 
 def _trajectory_indices(
@@ -743,7 +591,7 @@ def _trajectory_indices(
 
 
 def load_source_summary(summary_path: Path) -> DatasetSource:
-    """Load one exact completed chunk summary and authenticate its view."""
+    """Load one completed chunk summary and its dataset view."""
 
     summary_path = summary_path.expanduser().resolve(strict=True)
     resolved = summary_path.parent
@@ -768,19 +616,17 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
         view.get("trajectory_map"),
         context="source dataset_view trajectory map",
     )
-    manifest_path, _ = _authenticated_artifact(
+    manifest_path = _dataset_artifact(
         resolved,
         manifest_record,
         context="source dataset manifest",
     )
-    map_path, map_sha256 = _authenticated_artifact(
+    map_path = _dataset_artifact(
         resolved,
         map_record,
         context="source trajectory map",
     )
     manifest = read_json(manifest_path)
-    if manifest.get("trajectory_map_sha256") != map_sha256:
-        raise RuntimeError("dataset manifest trajectory-map SHA-256 differs")
     manifest_map_path = _artifact_path(
         resolved,
         manifest.get("trajectory_map_npz"),
@@ -812,16 +658,6 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
             record.get("path"),
             context=f"dataset manifest shard {shard_index}",
         )
-        expected_sha256 = record.get("sha256")
-        if (
-            not isinstance(expected_sha256, str)
-            or SHA256_PATTERN.fullmatch(expected_sha256) is None
-        ):
-            raise ValueError(
-                f"dataset manifest shard {shard_index} has an invalid SHA-256 digest"
-            )
-        if sha256(shard_path) != expected_sha256:
-            raise RuntimeError(f"dataset manifest shard {shard_index} SHA-256 differs")
         # ``trajectory_map.shard_index`` is the dense ordinal in this list;
         # ``batch_index`` is source-batch metadata and may contain gaps.
         shard_paths[shard_index] = shard_path
@@ -1253,6 +1089,11 @@ def _render_rank_one_gif(
 
     record = animation_record(trajectory)
     frame_indices = np.asarray(record["frame_indices"], dtype=np.int32)
+    fps = (
+        GIF_SHORT_FPS
+        if frame_indices.size <= GIF_SHORT_FRAME_THRESHOLD
+        else GIF_LONG_FPS
+    )
     fields = (trajectory.eta, trajectory.xi, trajectory.gxi)
     x = np.linspace(0.0, 2.0 * np.pi, trajectory.eta.shape[1], endpoint=False)
     figure, axes = plt.subplots(
@@ -1310,7 +1151,7 @@ def _render_rank_one_gif(
 
         if frame_indices.size == 1:
             update(0)
-            writer = PillowWriter(fps=int(record["fps"]))
+            writer = PillowWriter(fps=fps)
             writer.setup(figure, output_path, dpi=100)
             writer.grab_frame()
             writer.finish()
@@ -1319,13 +1160,13 @@ def _render_rank_one_gif(
                 figure,
                 update,
                 frames=frame_indices.size,
-                interval=1_000.0 / int(record["fps"]),
+                interval=1_000.0 / fps,
                 blit=False,
                 repeat=True,
             )
             animation.save(
                 output_path,
-                writer=PillowWriter(fps=int(record["fps"])),
+                writer=PillowWriter(fps=fps),
                 dpi=100,
             )
     finally:
@@ -1432,9 +1273,8 @@ def _render_to_directory(
     sources: tuple[DatasetSource, ...],
     output_dir: Path,
     published_output_dir: Path,
-    implementation: Mapping[str, object],
 ) -> tuple[int, int, tuple[Path, ...], Path]:
-    """Audit authenticated sources and render into one owned directory."""
+    """Audit dataset sources and render into one owned directory."""
 
     tasks = []
     for source_index, source in enumerate(sources):
@@ -1627,16 +1467,14 @@ def _render_to_directory(
         )
     )
 
-    _require_renderer_implementation_current(implementation)
     record = {
         "schema": DIAGNOSTIC_SCHEMA,
         "status": "complete",
         "interpretation": INTERPRETATION,
-        "source_binding": (
+        "dataset": (
             {
                 "mode": "combined_summary",
                 "combined_summary_path": str(binding.path),
-                "combined_summary_sha256": binding.sha256,
                 "expected_sources": binding.expected_source_count,
                 "expected_accepted_cases": binding.expected_accepted_cases,
                 "expected_retained_rows": binding.expected_retained_rows,
@@ -1645,7 +1483,6 @@ def _render_to_directory(
             else {
                 "mode": "explicit_sources_development_fallback",
                 "combined_summary_path": None,
-                "combined_summary_sha256": None,
             }
         ),
         "parameters": {
@@ -1669,14 +1506,13 @@ def _render_to_directory(
                 "retained_rows": sum(
                     trajectory.row_count for trajectory in source.trajectories
                 ),
-                "summary_sha256": sha256(source.summary_path),
-                "manifest_sha256": sha256(source.manifest_path),
-                "trajectory_map_sha256": sha256(source.map_path),
+                "summary_path": str(source.summary_path),
+                "manifest_path": str(source.manifest_path),
+                "trajectory_map_path": str(source.map_path),
             }
             for source in sources
         ],
         "families": family_results,
-        "renderer_implementation": dict(implementation),
         "animations": animations,
         "artifacts": {
             path.name: _artifact_record(
@@ -1696,7 +1532,6 @@ def main() -> None:
     """Audit all sources and atomically publish diagnostic-tail figures."""
 
     args = parse_args()
-    implementation = renderer_implementation_record()
     binding = (
         load_combined_summary_binding(args.combined_summary)
         if args.combined_summary is not None
@@ -1740,7 +1575,6 @@ def main() -> None:
             sources=sources,
             output_dir=staging_output_dir,
             published_output_dir=final_output_dir,
-            implementation=implementation,
         )
         figure_relative_paths = tuple(
             path.relative_to(staging_output_dir) for path in figures

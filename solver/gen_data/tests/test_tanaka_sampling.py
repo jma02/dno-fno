@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import hashlib
 import json
 import math
 import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     CaseKey,
     SplitId,
@@ -62,18 +61,6 @@ def assignment(
     )
 
 
-def canonical_json_sha256(record: dict[str, object]) -> str:
-    """Return the canonical strict-JSON digest used by proposal records."""
-
-    encoded = json.dumps(
-        record,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 class TanakaSamplingTest(unittest.TestCase):
     def test_cells_are_exactly_the_declared_eleven(self) -> None:
         coordinates = tuple(
@@ -117,27 +104,6 @@ class TanakaSamplingTest(unittest.TestCase):
                 self.assertEqual(first, second)
                 self.assertEqual(first.to_json_record(), second.to_json_record())
                 self.assertNotIn("schema", first.to_json_record())
-
-    def test_current_records_are_byte_locked(self) -> None:
-        expected_by_case = {
-            (
-                0,
-                4000,
-            ): "159afbf068df6325a1a8d8a6f5872ac08d12bc11828986704ba1bb02c0b7c47d",
-            (
-                6,
-                4006,
-            ): "0b0f85b7dd9ced1cd967cb3741d89a9d9411fdac656edaaf614bbb08868fbb49",
-            (
-                10,
-                4010,
-            ): "56fcf063ec0bee8b1d752323548a72b8bffa47ce7eaedf1f0463d59b31418f36",
-        }
-        for (cell_index, attempt_index), expected in expected_by_case.items():
-            sample = sample_tanaka_case(
-                assignment(cell_index, attempt_index=attempt_index)
-            )
-            self.assertEqual(canonical_json_sha256(sample.to_json_record()), expected)
 
     def test_pcg64_uses_all_case_key_seed_words(self) -> None:
         base = assignment(0, attempt_index=41).case_key

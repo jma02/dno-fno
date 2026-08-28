@@ -24,7 +24,7 @@ from solver.gen_data.jonswap_tma_sampling import (
     JONSWAP_TMA_SAMPLE_CELLS,
     sample_jonswap_tma_case,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     CaseKey,
     SplitId,

@@ -19,11 +19,11 @@ from scripts.generate_paper_dataset import (
     preflight,
     request_from_args,
 )
-from solver.gen_data.pipeline.archive import ensure_proposal
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.batch_storage import ensure_proposal
+from solver.gen_data.pipeline.case_allocation import (
     SplitId,
     balanced_valid_case_targets,
-    schedule_attempt_batch,
+    assign_next_cases,
 )
 from solver.gen_data.pipeline.valid_case_generation import (
     DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
@@ -37,7 +37,7 @@ from solver.gen_data.stokes_static_pipeline import (
     PAPER_STATIC_STOKES_CONTRACT,
 )
 from solver.gen_data.trajectory_batch_executor import (
-    TrajectoryExecutionConfig,
+    paper_trajectory_execution,
 )
 
 
@@ -65,10 +65,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         cumulative,
-                        {
-                            target.cell_id: target.case_count
-                            for target in expected
-                        },
+                        {target.cell_id: target.case_count for target in expected},
                     )
                     values = tuple(cumulative.values())
                     self.assertLessEqual(max(values) - min(values), 1)
@@ -103,9 +100,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                         spec.revision_id,
                         expected_revision_by_family[family],
                     )
-                    targets = tuple(
-                        target.case_count for target in spec.case_targets
-                    )
+                    targets = tuple(target.case_count for target in spec.case_targets)
                     self.assertEqual(sum(targets), accepted_cases)
                     self.assertLessEqual(max(targets) - min(targets), 1)
                     if family == "tanaka":
@@ -130,25 +125,9 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                             (1.0 + np.sqrt(2.0)) / 10.0,
                         )
                         self.assertEqual(
-                            support["sideband_to_carrier_ratio"][
-                                "upper_inclusive"
-                            ],
+                            support["sideband_to_carrier_ratio"]["upper_inclusive"],
                             0.10,
                         )
-                    dependency = spec.configuration["dependency_environment"]
-                    self.assertEqual(
-                        set(dependency["packages"]),
-                        {"jax", "jaxlib", "numpy"},
-                    )
-                    self.assertEqual(
-                        set(dependency["files_sha256"]),
-                        {"pyproject.toml", "uv.lock"},
-                    )
-                    sources = spec.configuration["source_sha256"]
-                    self.assertIn(
-                        "scripts/generate_paper_dataset.py",
-                        sources,
-                    )
                     if family == "stokes":
                         self.assertEqual(
                             spec.configuration["contract"],
@@ -162,30 +141,18 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                                 )
                             },
                         )
-                        self.assertIn(
-                            "solver/gen_data/stokes_batch_executor.py",
-                            sources,
-                        )
-                        self.assertNotIn(
-                            "solver/gen_data/trajectory_batch_executor.py",
-                            sources,
-                        )
                         continue
 
                     execution = spec.configuration["trajectory_execution"]
                     self.assertEqual(
                         execution,
-                        TrajectoryExecutionConfig.paper(
+                        paper_trajectory_execution(
                             family  # type: ignore[arg-type]
                         ).to_json_record(),
                     )
                     numerical = execution["numerical"]
-                    expected_evolution_order = (
-                        6 if family == "tanaka" else 4
-                    )
-                    expected_internal_nx = (
-                        2048 if family == "jonswap_tma" else 1024
-                    )
+                    expected_evolution_order = 6 if family == "tanaka" else 4
+                    expected_internal_nx = 2048 if family == "jonswap_tma" else 1024
                     expected_internal_cutoff = (
                         704.0 if family == "jonswap_tma" else 256.0
                     )
@@ -203,39 +170,27 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                             expected_internal_cutoff,
                         ),
                     )
-                    if family == "jonswap_tma":
-                        self.assertEqual(numerical["target_nx"], 1024)
-                        self.assertEqual(numerical["gl2_iteration_cap"], 5)
-                    else:
-                        self.assertNotIn("target_nx", numerical)
+                    self.assertEqual(
+                        (
+                            numerical["target_nx"],
+                            numerical["target_dno_order"],
+                            numerical["target_maximum_wavenumber"],
+                        ),
+                        (1024, 6, 128.0),
+                    )
+                    self.assertEqual(
+                        numerical["gl2_iteration_cap"],
+                        5 if family == "jonswap_tma" else 4,
+                    )
                     if family == "tanaka":
-                        self.assertEqual(
-                            numerical["target_maximum_wavenumber"],
-                            128.0,
+                        self.assertNotIn(
+                            "internal_hamiltonian_drift_threshold",
+                            numerical,
                         )
-                        self.assertEqual(
-                            numerical["post_step_state_filter"],
-                            "hou_li",
-                        )
-                        self.assertEqual(
-                            numerical["post_step_maximum_wavenumber"],
-                            256.0,
-                        )
-                        self.assertEqual(numerical["hou_li_coefficient"], 36.0)
-                        self.assertEqual(numerical["hou_li_power"], 36)
                     else:
-                        self.assertEqual(numerical["target_dno_order"], 6)
-                        self.assertEqual(
-                            numerical["target_maximum_wavenumber"],
-                            128.0,
-                        )
                         self.assertEqual(
                             numerical["internal_hamiltonian_drift_threshold"],
                             1.0e-3,
-                        )
-                        self.assertEqual(
-                            numerical["post_step_state_filter"],
-                            "sharp",
                         )
                     self.assertEqual(numerical["dt"], 0.01)
                     self.assertNotIn("fine_dt", numerical)
@@ -318,9 +273,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                request_from_args(
-                    overridden_args
-                ).maximum_attempts_per_accepted_case,
+                request_from_args(overridden_args).maximum_attempts_per_accepted_case,
                 7,
             )
             request = request_from_args(args)
@@ -355,7 +308,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertEqual(expected["retained_rows"], 1_000)
             self.assertEqual(
                 execution,
-                TrajectoryExecutionConfig.paper("tanaka"),
+                paper_trajectory_execution("tanaka"),
             )
             json.dumps(plan, sort_keys=True, allow_nan=False)
 
@@ -400,7 +353,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertEqual(expected["spatial_points_per_row"], 1024)
             self.assertEqual(plan["execution"]["dno_order"], 6)
 
-    def test_pending_proposal_is_detected_and_changed_config_fails_closed(
+    def test_pending_proposal_is_detected_without_rewriting_it(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -414,7 +367,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 platform=BOOTSTRAP_PLATFORM,
             )
             spec = build_run_spec(request)
-            assignments = schedule_attempt_batch(
+            assignments = assign_next_cases(
                 spec.case_targets,
                 {},
                 family_id=int(spec.family_id),
@@ -445,7 +398,6 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     records,
                     cell_codes=spec.cell_codes,
                     batch_id=0,
-                    config_fingerprint=spec.config_fingerprint,
                     metadata={"test": "no_compute_resume_scan"},
                 ),
             )
@@ -454,42 +406,6 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertIsNotNone(state.pending)
             self.assertEqual(plan["resume_state"]["pending_batch_id"], 0)
             self.assertEqual(plan["resume_state"]["pending_status"], "proposed")
-
-            changed = GenerationRequest(
-                output_root=output,
-                family="tanaka",
-                split=SplitId.TEST,
-                accepted_cases=5,
-                batch_size=1,
-                platform=BOOTSTRAP_PLATFORM,
-            )
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "configuration fingerprint does not match",
-            ):
-                preflight(changed)
-
-            changed_attempt_limit = GenerationRequest(
-                output_root=output,
-                family="tanaka",
-                split=SplitId.TEST,
-                accepted_cases=4,
-                batch_size=1,
-                platform=BOOTSTRAP_PLATFORM,
-                maximum_attempts_per_accepted_case=5,
-            )
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "configuration fingerprint does not match",
-            ):
-                preflight(changed_attempt_limit)
-
-            with np.load(paths.proposal, allow_pickle=False) as archive:
-                self.assertEqual(
-                    str(archive["config_fingerprint"]),
-                    spec.config_fingerprint,
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

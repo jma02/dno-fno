@@ -10,10 +10,10 @@ held fixed.  On registered evaluation states this script compares
 All reported norms are projected to ``|k| <= 128``.  The script forces JAX's
 CPU backend before importing JAX so it can run alongside GPU training.
 """
+
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import time
@@ -134,11 +134,16 @@ def depth_stratified_indices(
 ) -> np.ndarray:
     """Choose one deterministic midpoint from each equal-count depth stratum."""
     if count <= 0 or count > depths.size:
-        raise ValueError(f"invalid state count {count} for archive of size {depths.size}")
+        raise ValueError(
+            f"invalid state count {count} for archive of size {depths.size}"
+        )
     order = np.lexsort((case_ids, depths))
     edges = np.linspace(0, depths.size, count + 1, dtype=np.int64)
     positions = np.asarray(
-        [(int(left) + int(right) - 1) // 2 for left, right in zip(edges[:-1], edges[1:])],
+        [
+            (int(left) + int(right) - 1) // 2
+            for left, right in zip(edges[:-1], edges[1:])
+        ],
         dtype=np.int64,
     )
     if np.unique(positions).size != count:
@@ -180,7 +185,9 @@ def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredS
         depth_parts.append(depths[selected])
         case_parts.append(case_ids[selected])
         archive_index_parts.append(selected)
-        family_index_parts.append(np.full(states_per_family, family_index, dtype=np.int64))
+        family_index_parts.append(
+            np.full(states_per_family, family_index, dtype=np.int64)
+        )
 
     family_indices = np.concatenate(family_index_parts)
     return RegisteredStates(
@@ -191,7 +198,9 @@ def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredS
         archive_indices=np.concatenate(archive_index_parts),
         family_indices=family_indices,
         family_names=np.asarray([FAMILY_NAMES[index] for index in family_indices]),
-        source_paths=tuple(str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES),
+        source_paths=tuple(
+            str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES
+        ),
     )
 
 
@@ -211,16 +220,22 @@ def validate_loaded_run(loaded: LoadedRun) -> None:
         if loaded.config.get(key) != value
     }
     if mismatches:
-        raise ValueError(f"checkpoint does not match C27 structural config: {mismatches}")
+        raise ValueError(
+            f"checkpoint does not match C27 structural config: {mismatches}"
+        )
     if loaded.epoch != 40:
-        raise ValueError(f"expected epoch-40 final checkpoint, got epoch {loaded.epoch}")
+        raise ValueError(
+            f"expected epoch-40 final checkpoint, got epoch {loaded.epoch}"
+        )
 
 
 def chunk_slices(size: int, chunk_size: int) -> tuple[slice, ...]:
     """Split a fixed-size array into equal chunks to avoid JAX recompilation."""
     if chunk_size <= 0 or size % chunk_size != 0:
         raise ValueError(f"chunk size {chunk_size} must divide state count {size}")
-    return tuple(slice(start, start + chunk_size) for start in range(0, size, chunk_size))
+    return tuple(
+        slice(start, start + chunk_size) for start in range(0, size, chunk_size)
+    )
 
 
 def make_reference_evaluator(
@@ -331,7 +346,9 @@ def projected_rms(fields: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return np.sqrt(energy) / fields.shape[-1]
 
 
-def fitted_slopes(values: np.ndarray, epsilons: np.ndarray, fit_mask: np.ndarray) -> np.ndarray:
+def fitted_slopes(
+    values: np.ndarray, epsilons: np.ndarray, fit_mask: np.ndarray
+) -> np.ndarray:
     """Fit one log-log slope per state for arrays shaped ``(epsilon, state)``."""
     selected = values[fit_mask]
     if np.any(selected <= 0.0) or not np.isfinite(selected).all():
@@ -356,11 +373,16 @@ def stratified_bootstrap_median_slope_ci(
 ) -> tuple[float, float, np.ndarray]:
     """Bootstrap the pooled median of per-state slopes within family strata."""
     rng = np.random.default_rng(seed)
-    family_members = tuple(np.flatnonzero(family_indices == index) for index in range(len(FAMILY_NAMES)))
+    family_members = tuple(
+        np.flatnonzero(family_indices == index) for index in range(len(FAMILY_NAMES))
+    )
     bootstrap_slopes = np.empty(samples, dtype=np.float64)
     for sample_index in range(samples):
         selected = np.concatenate(
-            [rng.choice(members, size=members.size, replace=True) for members in family_members]
+            [
+                rng.choice(members, size=members.size, replace=True)
+                for members in family_members
+            ]
         )
         bootstrap_slopes[sample_index] = np.median(state_slopes[selected])
     low, high = np.quantile(bootstrap_slopes, [0.025, 0.975])
@@ -406,7 +428,9 @@ def metric_summary(
     }
     family_median_curve_slopes = {
         family: curve_slope(
-            np.median(values[:, family_indices == family_index], axis=1), epsilons, fit_mask
+            np.median(values[:, family_indices == family_index], axis=1),
+            epsilons,
+            fit_mask,
         )
         for family_index, family in enumerate(FAMILY_NAMES)
     }
@@ -424,15 +448,6 @@ def metric_summary(
         },
         bootstrap_slopes,
     )
-
-
-def sha256_file(path: Path) -> str:
-    """Hash a small source-record file."""
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def write_figure(
@@ -502,7 +517,9 @@ def write_figure(
     offsets = np.linspace(-0.22, 0.22, len(FAMILY_NAMES))
     for metric_index, metric_name in enumerate(metric_names):
         family_slopes = summaries[metric_name]["family_median_state_slopes"]
-        values = np.asarray([family_slopes[family] for family in FAMILY_NAMES], dtype=np.float64)
+        values = np.asarray(
+            [family_slopes[family] for family in FAMILY_NAMES], dtype=np.float64
+        )
         axes[1].scatter(
             metric_index + offsets,
             values,
@@ -512,7 +529,9 @@ def write_figure(
             edgecolors="none",
         )
         center = float(summaries[metric_name]["pooled_state_slope_median"])
-        low, high = summaries[metric_name]["stratified_bootstrap_state_slope_median_ci95"]
+        low, high = summaries[metric_name][
+            "stratified_bootstrap_state_slope_median_ci95"
+        ]
         axes[1].errorbar(
             metric_index,
             center,
@@ -611,7 +630,14 @@ def main() -> int:
             for epsilon in EPSILONS
         ]
     )
-    computed = (q0, q1, model_zero, model_eta_derivative, reference_order6, model_outputs)
+    computed = (
+        q0,
+        q1,
+        model_zero,
+        model_eta_derivative,
+        reference_order6,
+        model_outputs,
+    )
     if not all(np.isfinite(array).all() for array in computed):
         raise FloatingPointError("a reference, model, or JVP output is nonfinite")
 
@@ -622,24 +648,35 @@ def main() -> int:
     denominator = np.maximum(q0_norm, np.finfo(np.float64).tiny)
     epsilon_fields = EPSILONS[:, None, None]
     reference_linear = q0[None, :, :] + epsilon_fields * q1[None, :, :]
-    model_taylor = model_zero[None, :, :] + epsilon_fields * model_eta_derivative[None, :, :]
+    model_taylor = (
+        model_zero[None, :, :] + epsilon_fields * model_eta_derivative[None, :, :]
+    )
     reference_remainder = reference_order6 - reference_linear
     model_remainder = model_outputs - model_taylor
-    remainder_error = projected_rms(model_remainder - reference_remainder, projection_mask) / denominator[
-        None, :
-    ]
-    raw_model_error = projected_rms(model_outputs - reference_order6, projection_mask) / denominator[
-        None, :
-    ]
+    remainder_error = (
+        projected_rms(model_remainder - reference_remainder, projection_mask)
+        / denominator[None, :]
+    )
+    raw_model_error = (
+        projected_rms(model_outputs - reference_order6, projection_mask)
+        / denominator[None, :]
+    )
 
     metrics: ArrayMap = {
-        "g0_truncation": projected_rms(reference_order6 - q0[None, :, :], projection_mask)
+        "g0_truncation": projected_rms(
+            reference_order6 - q0[None, :, :], projection_mask
+        )
         / denominator[None, :],
-        "g01_truncation": projected_rms(reference_remainder, projection_mask) / denominator[None, :],
-        "c27_taylor_remainder": projected_rms(model_remainder, projection_mask) / denominator[None, :],
+        "g01_truncation": projected_rms(reference_remainder, projection_mask)
+        / denominator[None, :],
+        "c27_taylor_remainder": projected_rms(model_remainder, projection_mask)
+        / denominator[None, :],
     }
     fit_mask = np.isin(EPSILONS, FIT_EPSILONS)
-    slopes = {name: fitted_slopes(values, EPSILONS, fit_mask) for name, values in metrics.items()}
+    slopes = {
+        name: fitted_slopes(values, EPSILONS, fit_mask)
+        for name, values in metrics.items()
+    }
 
     summaries: dict[str, dict[str, Any]] = {}
     bootstrap_slopes: ArrayMap = {}
@@ -657,13 +694,17 @@ def main() -> int:
         summaries[name] = summary
         bootstrap_slopes[name] = bootstrapped
 
-    flat_surface_relative_error = projected_rms(model_zero - q0, projection_mask) / denominator
+    flat_surface_relative_error = (
+        projected_rms(model_zero - q0, projection_mask) / denominator
+    )
     jvp_denominator = np.maximum(q1_norm, np.finfo(np.float64).tiny)
     jvp_absolute_error = projected_rms(model_eta_derivative - q1, projection_mask)
     jvp_relative_error = jvp_absolute_error / jvp_denominator
     jvp_error_relative_q0 = jvp_absolute_error / denominator
     raw_model_error_slopes = fitted_slopes(raw_model_error, EPSILONS, fit_mask)
-    parameter_count = sum(int(np.prod(leaf.shape)) for leaf in jax.tree.leaves(loaded.params))
+    parameter_count = sum(
+        int(np.prod(leaf.shape)) for leaf in jax.tree.leaves(loaded.params)
+    )
     if parameter_count != 1_342_400:
         raise ValueError(f"expected 1,342,400 C27 parameters, got {parameter_count:,}")
 
@@ -677,8 +718,6 @@ def main() -> int:
         for index in range(state_count)
     ]
     elapsed = time.perf_counter() - start
-    config_path = run_dir / "config.json"
-    checkpoint_metadata_path = run_dir / "final_ckpt" / "metadata.json"
     figure_base = output_dir / "c27_small_amplitude_order"
     write_figure(
         figure_base,
@@ -712,7 +751,9 @@ def main() -> int:
     }
     npz_payload.update({f"metric_{name}": values for name, values in metrics.items()})
     npz_payload.update({f"slope_{name}": values for name, values in slopes.items()})
-    npz_payload.update({f"bootstrap_slope_{name}": values for name, values in bootstrap_slopes.items()})
+    npz_payload.update(
+        {f"bootstrap_slope_{name}": values for name, values in bootstrap_slopes.items()}
+    )
     np.savez_compressed(output_dir / "c27_small_amplitude_order.npz", **npz_payload)
 
     payload: dict[str, Any] = {
@@ -722,8 +763,6 @@ def main() -> int:
             "run_dir": str(run_dir.relative_to(REPO_ROOT)),
             "checkpoint": "final",
             "epoch": loaded.epoch,
-            "config_sha256": sha256_file(config_path),
-            "checkpoint_metadata_sha256": sha256_file(checkpoint_metadata_path),
             "structural_config": {
                 "cs_use_g1_baseline": loaded.config["cs_use_g1_baseline"],
                 "cs_g1_k_cut": loaded.config["cs_g1_k_cut"],
@@ -762,8 +801,12 @@ def main() -> int:
             },
         },
         "checks": {
-            "flat_surface_Gtheta_vs_G0_relative_error": distribution_summary(flat_surface_relative_error),
-            "Deta_Gtheta_zero_vs_G1_relative_error": distribution_summary(jvp_relative_error),
+            "flat_surface_Gtheta_vs_G0_relative_error": distribution_summary(
+                flat_surface_relative_error
+            ),
+            "Deta_Gtheta_zero_vs_G1_relative_error": distribution_summary(
+                jvp_relative_error
+            ),
             "Deta_Gtheta_zero_vs_G1_error_relative_to_G0": distribution_summary(
                 jvp_error_relative_q0
             ),
@@ -802,7 +845,16 @@ def main() -> int:
     }
     strict_json_dump(payload, output_dir / "c27_small_amplitude_order.json")
 
-    print(json.dumps({"wall_seconds": elapsed, "metrics": summaries, "checks": payload["checks"]}, allow_nan=False))
+    print(
+        json.dumps(
+            {
+                "wall_seconds": elapsed,
+                "metrics": summaries,
+                "checks": payload["checks"],
+            },
+            allow_nan=False,
+        )
+    )
     return 0
 
 

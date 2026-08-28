@@ -46,7 +46,7 @@ def _gaussian_smooth(activity: FloatArray, sigma_steps: float) -> FloatArray:
     kernel = np.exp(-0.5 * (offsets / sigma_steps) ** 2)
     kernel /= np.sum(kernel)
     padded = np.pad(values, (radius, radius), mode="edge")
-    return np.convolve(padded, kernel, mode="valid")
+    return np.asarray(np.convolve(padded, kernel, mode="valid"), dtype=np.float64)
 
 
 def _selection_density(
@@ -181,9 +181,7 @@ def select_uniform_times(
     if not 2 <= keep_samples <= number_of_times:
         raise ValueError("keep_samples must lie between two and the time count")
     numerator = np.arange(keep_samples, dtype=np.int64) * (number_of_times - 1)
-    indices = np.floor(
-        numerator / (keep_samples - 1) + 0.5
-    ).astype(np.int32)
+    indices = np.floor(numerator / (keep_samples - 1) + 0.5).astype(np.int32)
     if np.any(np.diff(indices) <= 0):
         raise RuntimeError("uniform time selection did not produce unique indices")
     return indices

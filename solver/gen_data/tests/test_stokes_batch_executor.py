@@ -18,23 +18,18 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.archive import (  # noqa: E402
-    BatchStatus,
-    file_sha256,
-    inspect_batch,
-)
-from solver.gen_data.pipeline.production import (  # noqa: E402
-    ValidCaseTarget,
+from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+    SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
 )
-from solver.gen_data.pipeline.quality import QualityReason  # noqa: E402
+from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
 from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     DatasetGenerationSpec,
     generate_valid_cases,
     scan_dataset_generation,
 )
-from solver.gen_data.pipeline.reference import DiscreteDnoTarget  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
     STOKES_SAMPLE_CELL_IDS,
@@ -42,7 +37,7 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     sample_stokes_case,
 )
 from solver.gen_data.stokes_batch_executor import (  # noqa: E402
-    StaticStokesBatchExecutor,
+    make_static_stokes_batch_executor,
 )
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     PAPER_STATIC_STOKES_CONTRACT,
@@ -57,14 +52,13 @@ class InjectedInterruption(OSError):
 
 
 def _contract() -> StaticStokesContract:
-    return StaticStokesContract.reduced_wiring_evidence(
-        DiscreteDnoTarget(
-            nx=64,
-            length=2.0 * math.pi,
-            dno_order=2,
-            pad_factor=2,
-            maximum_wavenumber=24.0,
-        )
+    return StaticStokesContract(
+        nx=64,
+        length=2.0 * math.pi,
+        dno_order=2,
+        pad_factor=2,
+        maximum_wavenumber=24.0,
+        role="reduced_wiring_evidence_only",
     )
 
 
@@ -85,7 +79,7 @@ def _run_spec(
         split_id=SplitId.TEST,
         stream_id=11,
         case_targets=tuple(
-            ValidCaseTarget(cell_id, target)
+            SampleCellTarget(cell_id, target)
             for cell_id, target in zip(cell_ids, targets)
         ),
         cell_codes={cell_id: index for index, cell_id in enumerate(cell_ids)},
@@ -113,7 +107,7 @@ def _zero_state(
     contract: StaticStokesContract,
 ) -> tuple[jax.Array, jax.Array]:
     del sample
-    zeros = jnp.zeros(contract.target.nx, dtype=jnp.float64)
+    zeros = jnp.zeros(contract.nx, dtype=jnp.float64)
     return zeros, zeros
 
 
@@ -122,13 +116,17 @@ def _identity_target(
     xi: jax.Array,
     depth: float | jax.Array,
     *,
-    definition: DiscreteDnoTarget,
+    nx: int,
+    length: float,
+    dno_order: int,
+    pad_factor: int,
+    maximum_wavenumber: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    del depth, definition
+    del depth, nx, length, dno_order, pad_factor, maximum_wavenumber
     return eta, xi, jnp.zeros_like(eta)
 
 
-class StaticStokesBatchExecutorTests(unittest.TestCase):
+class StaticStokesBatchExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -172,7 +170,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
 
         def checked_constructor(
             sample: StokesSample,
-            active_contract: StaticStokesContract,
+            contract: StaticStokesContract,
         ) -> tuple[jax.Array, jax.Array]:
             self.assertTrue(
                 _proposal_contains(
@@ -181,14 +179,18 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
                 )
             )
             constructed_attempts.append(sample.assignment.case_key.attempt_index)
-            return _zero_state(sample, active_contract)
+            return _zero_state(sample, contract)
 
         def checked_target(
             eta: jax.Array,
             xi: jax.Array,
             depth: float | jax.Array,
             *,
-            definition: DiscreteDnoTarget,
+            nx: int,
+            length: float,
+            dno_order: int,
+            pad_factor: int,
+            maximum_wavenumber: float,
         ) -> tuple[jax.Array, jax.Array, jax.Array]:
             nonlocal target_calls
             target_calls += 1
@@ -196,10 +198,14 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
                 eta,
                 xi,
                 depth,
-                definition=definition,
+                nx=nx,
+                length=length,
+                dno_order=dno_order,
+                pad_factor=pad_factor,
+                maximum_wavenumber=maximum_wavenumber,
             )
 
-        executor = StaticStokesBatchExecutor(
+        executor = make_static_stokes_batch_executor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -241,7 +247,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             [False, True],
         )
         self.assertTrue(
-            first_result["cases"][0]["failed_bits"] & int(QualityReason.OUTSIDE_SUPPORT)
+            first_result["cases"][0]["failed_bits"] & int(CaseCheck.OUTSIDE_SUPPORT)
         )
         self.assertEqual(
             first_result["metadata"]["sampling_exhaustions"],
@@ -297,9 +303,9 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
 
         def interrupt_after_proposal(
             sample: StokesSample,
-            active_contract: StaticStokesContract,
+            contract: StaticStokesContract,
         ) -> tuple[jax.Array, jax.Array]:
-            del active_contract
+            del contract
             self.assertTrue(
                 _proposal_contains(
                     self.root,
@@ -308,7 +314,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             )
             raise InjectedInterruption("after proposal write")
 
-        interrupted = StaticStokesBatchExecutor(
+        interrupted = make_static_stokes_batch_executor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -326,9 +332,9 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status, BatchStatus.PROPOSED)
-        proposal_hash = file_sha256(pending.paths.proposal)
+        proposal_bytes = pending.paths.proposal.read_bytes()
 
-        resumed = StaticStokesBatchExecutor(
+        resumed = make_static_stokes_batch_executor(
             run_spec=spec,
             contract=contract,
             maximum_ursell_redraws=0,
@@ -339,12 +345,9 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
         state = generate_valid_cases(spec, resumed)
         self.assertTrue(state.complete)
         self.assertEqual(first_records, replay_records)
-        self.assertEqual(file_sha256(pending.paths.proposal), proposal_hash)
+        self.assertEqual(pending.paths.proposal.read_bytes(), proposal_bytes)
         self.assertEqual(
-            inspect_batch(
-                pending.paths,
-                expected_fingerprint=spec.config_fingerprint,
-            ).status,
+            inspect_batch(pending.paths).status,
             BatchStatus.COMMITTED,
         )
 
@@ -360,7 +363,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             revision_id=1,
             split_id=SplitId.TEST,
             stream_id=11,
-            case_targets=(ValidCaseTarget(deep_cell, 1),),
+            case_targets=(SampleCellTarget(deep_cell, 1),),
             cell_codes={deep_cell: 0},
             batch_size=1,
             configuration={
@@ -372,7 +375,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             },
         )
         with self.assertRaisesRegex(ValueError, "contract differs"):
-            StaticStokesBatchExecutor(
+            make_static_stokes_batch_executor(
                 run_spec=wrong_contract_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
@@ -387,7 +390,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         with self.assertRaisesRegex(ValueError, "redraw limit differs"):
-            StaticStokesBatchExecutor(
+            make_static_stokes_batch_executor(
                 run_spec=wrong_sampler_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
@@ -404,18 +407,18 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             batch_size=1,
         )
-        StaticStokesBatchExecutor(
+        make_static_stokes_batch_executor(
             run_spec=spec,
             contract=contract,
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesBatchExecutor(
+            make_static_stokes_batch_executor(
                 run_spec=spec,
                 contract=contract,
                 state_constructor=_zero_state,
             )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesBatchExecutor(
+            make_static_stokes_batch_executor(
                 run_spec=spec,
                 contract=contract,
                 target_evaluator=_identity_target,
@@ -429,7 +432,7 @@ class StaticStokesBatchExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
-            StaticStokesBatchExecutor(
+            make_static_stokes_batch_executor(
                 run_spec=zero_redraw_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,

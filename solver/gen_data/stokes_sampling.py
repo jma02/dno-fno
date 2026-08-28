@@ -26,7 +26,7 @@ from solver.reference_solutions.stokes_wave import (
     FINITE_DEPTH_STOKES_URSELL_LIMIT,
     finite_depth_stokes_ursell_upper_bound,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     random_generator_for_case,
 )

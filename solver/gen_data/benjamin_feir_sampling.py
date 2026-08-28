@@ -30,7 +30,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (
     focused_steepness_proxy,
     instability_band_fraction,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     random_generator_for_case,
 )

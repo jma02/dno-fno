@@ -9,28 +9,21 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
     CaseCommitRecord,
     commit_batch,
     ensure_proposal,
     ensure_shard,
-    file_sha256,
     inspect_batch,
     record_fatal_failure,
 )
-
-
-FINGERPRINT = "a" * 64
-
-
 def _proposal_arrays() -> dict[str, np.ndarray]:
     specifications = [
         json.dumps({"amplitude": value}, sort_keys=True) for value in (0.1, 0.2, 0.3)
     ]
     return {
-        "config_fingerprint": np.asarray(FINGERPRINT),
         "family_id": np.asarray(2, dtype=np.int16),
         "revision_id": np.asarray(1, dtype=np.int16),
         "split_id": np.asarray(0, dtype=np.uint8),
@@ -46,7 +39,7 @@ def _proposal_arrays() -> dict[str, np.ndarray]:
     }
 
 
-def _shard_arrays(proposal_sha256: str) -> dict[str, np.ndarray]:
+def _shard_arrays() -> dict[str, np.ndarray]:
     case_local_index = np.asarray([0, 0, 2, 2, 2], dtype=np.int32)
     frame_index = np.asarray([0, 1, 0, 1, 2], dtype=np.int32)
     selected_dense_index = np.asarray([0, 10, 0, 5, 10], dtype=np.int32)
@@ -61,8 +54,6 @@ def _shard_arrays(proposal_sha256: str) -> dict[str, np.ndarray]:
         "case_local_index": case_local_index,
         "frame_index": frame_index,
         "selected_dense_index": selected_dense_index,
-        "config_fingerprint": np.asarray(FINGERPRINT),
-        "proposal_sha256": np.asarray(proposal_sha256),
     }
 
 
@@ -106,7 +97,7 @@ class BatchStorageTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.paths = BatchPaths.under(
+        self.paths = BatchPaths.for_batch(
             self.root,
             family="tanaka",
             split="train",
@@ -117,27 +108,24 @@ class BatchStorageTests(unittest.TestCase):
         self.assertEqual(inspect_batch(self.paths).status, BatchStatus.EMPTY)
 
         proposal = _proposal_arrays()
-        proposal_hash = ensure_proposal(self.paths, proposal)
+        ensure_proposal(self.paths, proposal)
         proposal_bytes = self.paths.proposal.read_bytes()
         self.assertEqual(
-            inspect_batch(
-                self.paths,
-                expected_fingerprint=FINGERPRINT,
-            ).status,
+            inspect_batch(self.paths).status,
             BatchStatus.PROPOSED,
         )
-        self.assertEqual(ensure_proposal(self.paths, proposal), proposal_hash)
+        ensure_proposal(self.paths, proposal)
         self.assertEqual(self.paths.proposal.read_bytes(), proposal_bytes)
 
-        shard = _shard_arrays(proposal_hash)
-        shard_hash = ensure_shard(self.paths, shard)
+        shard = _shard_arrays()
+        ensure_shard(self.paths, shard)
         shard_bytes = self.paths.shard.read_bytes()
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.SHARD_WRITTEN)
-        self.assertEqual(ensure_shard(self.paths, shard), shard_hash)
+        ensure_shard(self.paths, shard)
         self.assertEqual(self.paths.shard.read_bytes(), shard_bytes)
 
-        result_hash = commit_batch(
+        commit_batch(
             self.paths,
             cases=_case_records(),
             metadata={"elapsed_seconds": 12.5},
@@ -145,21 +133,17 @@ class BatchStorageTests(unittest.TestCase):
         result_bytes = self.paths.result.read_bytes()
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.COMMITTED)
-        self.assertEqual(inspection.proposal_sha256, proposal_hash)
         self.assertEqual(inspection.cases, _case_records())
-        self.assertEqual(
-            commit_batch(
-                self.paths,
-                cases=_case_records(),
-                metadata={"elapsed_seconds": 12.5},
-            ),
-            result_hash,
+        commit_batch(
+            self.paths,
+            cases=_case_records(),
+            metadata={"elapsed_seconds": 12.5},
         )
         self.assertEqual(self.paths.result.read_bytes(), result_bytes)
 
     def test_rejected_cases_never_own_partial_rows(self) -> None:
-        proposal_hash = ensure_proposal(self.paths, _proposal_arrays())
-        ensure_shard(self.paths, _shard_arrays(proposal_hash))
+        ensure_proposal(self.paths, _proposal_arrays())
+        ensure_shard(self.paths, _shard_arrays())
 
         wrong = list(_case_records())
         wrong[1] = CaseCommitRecord(
@@ -175,12 +159,12 @@ class BatchStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "row ownership"):
             commit_batch(self.paths, cases=wrong, metadata={})
 
-        shard = _shard_arrays(proposal_hash)
+        shard = _shard_arrays()
         shard["case_local_index"] = np.asarray(
             [0, 2, 0, 2, 2],
             dtype=np.int32,
         )
-        different_paths = BatchPaths.under(
+        different_paths = BatchPaths.for_batch(
             self.root,
             family="tanaka",
             split="train",
@@ -188,8 +172,7 @@ class BatchStorageTests(unittest.TestCase):
         )
         proposal = _proposal_arrays()
         proposal["batch_id"] = np.asarray(8, dtype=np.int64)
-        next_hash = ensure_proposal(different_paths, proposal)
-        shard["proposal_sha256"] = np.asarray(next_hash)
+        ensure_proposal(different_paths, proposal)
         with self.assertRaisesRegex(ValueError, "ordered block"):
             ensure_shard(different_paths, shard)
 
@@ -214,49 +197,48 @@ class BatchStorageTests(unittest.TestCase):
 
     def test_existing_proposal_or_shard_must_replay_exactly(self) -> None:
         proposal = _proposal_arrays()
-        proposal_hash = ensure_proposal(self.paths, proposal)
+        ensure_proposal(self.paths, proposal)
         changed = _proposal_arrays()
         changed["cell_id"] = np.asarray([1, 1, 0], dtype=np.int32)
         with self.assertRaisesRegex(RuntimeError, "proposal differs"):
             ensure_proposal(self.paths, changed)
 
-        shard = _shard_arrays(proposal_hash)
+        shard = _shard_arrays()
         ensure_shard(self.paths, shard)
-        changed_shard = _shard_arrays(proposal_hash)
+        changed_shard = _shard_arrays()
         changed_shard["eta"] = changed_shard["eta"].copy()
         changed_shard["eta"][0, 0] += np.float32(1.0)
         with self.assertRaisesRegex(RuntimeError, "shard differs"):
             ensure_shard(self.paths, changed_shard)
 
-    def test_hash_and_orphan_corruption_are_detected(self) -> None:
+    def test_orphan_and_malformed_results_are_detected(self) -> None:
         self.paths.result.parent.mkdir(parents=True, exist_ok=True)
         self.paths.result.write_text("{}\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "without its proposal"):
             inspect_batch(self.paths)
 
         self.paths.result.unlink()
-        proposal_hash = ensure_proposal(self.paths, _proposal_arrays())
-        ensure_shard(self.paths, _shard_arrays(proposal_hash))
+        ensure_proposal(self.paths, _proposal_arrays())
+        ensure_shard(self.paths, _shard_arrays())
         commit_batch(self.paths, cases=_case_records(), metadata={})
         payload = json.loads(self.paths.result.read_text(encoding="utf-8"))
-        payload["shard_sha256"] = "b" * 64
+        payload["cases"] = payload["cases"][:-1]
         self.paths.result.write_text(
             json.dumps(payload, sort_keys=True),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(RuntimeError, "different shard"):
+        with self.assertRaisesRegex(RuntimeError, "every proposed case"):
             inspect_batch(self.paths)
 
     def test_fatal_failure_is_terminal_and_bound_to_proposal(self) -> None:
         ensure_proposal(self.paths, _proposal_arrays())
-        failure_hash = record_fatal_failure(
+        record_fatal_failure(
             self.paths,
             phase="integrate",
             exception_type="RuntimeError",
             message="injected",
             telemetry={"completed_steps": 3},
         )
-        self.assertEqual(failure_hash, file_sha256(self.paths.failure))
         self.assertEqual(inspect_batch(self.paths).status, BatchStatus.FAILED)
         with self.assertRaisesRegex(RuntimeError, "terminal"):
             ensure_proposal(self.paths, _proposal_arrays())
@@ -264,8 +246,8 @@ class BatchStorageTests(unittest.TestCase):
             commit_batch(self.paths, cases=_case_records(), metadata={})
 
     def test_nonfinite_json_and_invalid_selected_times_are_rejected(self) -> None:
-        proposal_hash = ensure_proposal(self.paths, _proposal_arrays())
-        shard = _shard_arrays(proposal_hash)
+        ensure_proposal(self.paths, _proposal_arrays())
+        shard = _shard_arrays()
         shard["selected_dense_index"] = np.asarray(
             [0, 0, 0, 5, 10],
             dtype=np.int32,

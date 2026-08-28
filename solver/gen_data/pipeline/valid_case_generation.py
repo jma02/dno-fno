@@ -11,7 +11,6 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,19 +21,20 @@ from typing import Any, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchInspection,
     BatchPaths,
     BatchStatus,
     inspect_batch,
 )
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.artifact_io import load_npz
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     CaseKey,
-    ValidCaseTarget,
+    SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
-    schedule_attempt_batch,
+    assign_next_cases,
     split_code,
     split_root,
 )
@@ -63,12 +63,6 @@ def _canonical_json_bytes(value: object) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-
-
-def canonical_json_sha256(value: object) -> str:
-    """Return the SHA-256 digest of one strict canonical JSON value."""
-
-    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
 
 def _freeze_json(value: object) -> object:
@@ -103,7 +97,7 @@ class DatasetGenerationSpec:
     revision_id: int
     split_id: SplitId
     stream_id: int
-    case_targets: tuple[ValidCaseTarget, ...]
+    case_targets: tuple[SampleCellTarget, ...]
     cell_codes: Mapping[str, int]
     batch_size: int
     configuration: Mapping[str, object]
@@ -117,8 +111,12 @@ class DatasetGenerationSpec:
         if not case_targets:
             raise ValueError("case_targets must not be empty")
         cell_ids = tuple(target.cell_id for target in case_targets)
+        if any(not cell_id for cell_id in cell_ids):
+            raise ValueError("case target cell_ids must not be empty")
         if len(set(cell_ids)) != len(cell_ids):
             raise ValueError("case target cell_ids must be unique")
+        if any(target.case_count < 0 for target in case_targets):
+            raise ValueError("case target counts must be nonnegative")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if (
@@ -147,7 +145,7 @@ class DatasetGenerationSpec:
             raise TypeError("first_attempt_index must be an integer")
 
         # Validate path components and all packed case-key coordinates.
-        BatchPaths.under(
+        BatchPaths.for_batch(
             root,
             family=self.family_name,
             split=self.split_id.value,
@@ -193,7 +191,7 @@ class DatasetGenerationSpec:
         object.__setattr__(self, "_configuration_json", configuration_json)
 
     def to_json_record(self) -> dict[str, object]:
-        """Return the complete run record bound by ``config_fingerprint``."""
+        """Return the complete run configuration."""
 
         configuration = _strict_json_loads(self._configuration_json)
         assert isinstance(configuration, dict)
@@ -236,13 +234,6 @@ class DatasetGenerationSpec:
                 for target in self.case_targets
             }
         )
-
-    @property
-    def config_fingerprint(self) -> str:
-        """Return the configuration digest required on every batch."""
-
-        return canonical_json_sha256(self.to_json_record())
-
 
 @dataclass(frozen=True)
 class PendingBatch:
@@ -310,15 +301,10 @@ class BatchExecutor(Protocol):
     ) -> BatchPaths: ...
 
 
-def _read_npz(path: Path) -> dict[str, NDArray[Any]]:
-    with np.load(path, allow_pickle=False) as archive:
-        return {name: np.asarray(archive[name]) for name in archive.files}
-
-
 def _artifact_directories(
     spec: DatasetGenerationSpec,
 ) -> tuple[tuple[str, Path], ...]:
-    template = BatchPaths.under(
+    template = BatchPaths.for_batch(
         spec.root,
         family=spec.family_name,
         split=spec.split_id.value,
@@ -345,7 +331,7 @@ def _discover_batch_ids(spec: DatasetGenerationSpec) -> tuple[int, ...]:
                 raise RuntimeError(f"invalid batch artifact name: {path}")
             batch_id = int(match.group(1))
             expected = getattr(
-                BatchPaths.under(
+                BatchPaths.for_batch(
                     spec.root,
                     family=spec.family_name,
                     split=spec.split_id.value,
@@ -388,7 +374,7 @@ def _proposal_assignments(
     *,
     batch_id: int,
 ) -> tuple[AttemptAssignment, ...]:
-    proposal = _read_npz(paths.proposal)
+    proposal = load_npz(paths.proposal)
     if int(np.asarray(proposal["batch_id"]).item()) != batch_id:
         raise RuntimeError("proposal batch_id differs from its artifact name")
     if int(np.asarray(proposal["family_id"]).item()) != int(spec.family_id):
@@ -469,7 +455,7 @@ def _expected_assignments(
             + ", ".join(over_limit)
         )
     effective_targets = tuple(
-        ValidCaseTarget(
+        SampleCellTarget(
             target.cell_id,
             accepted_by_cell[target.cell_id]
             + min(
@@ -479,7 +465,7 @@ def _expected_assignments(
         )
         for target in spec.case_targets
     )
-    return schedule_attempt_batch(
+    return assign_next_cases(
         effective_targets,
         accepted_by_cell,
         family_id=int(spec.family_id),
@@ -590,16 +576,13 @@ def scan_dataset_generation(spec: DatasetGenerationSpec) -> DatasetGenerationSta
                 "batch artifact exists after attempted-case ceiling exhaustion"
             )
 
-        paths = BatchPaths.under(
+        paths = BatchPaths.for_batch(
             spec.root,
             family=spec.family_name,
             split=spec.split_id.value,
             batch_id=batch_id,
         )
-        inspection = inspect_batch(
-            paths,
-            expected_fingerprint=spec.config_fingerprint,
-        )
+        inspection = inspect_batch(paths)
         if inspection.status is BatchStatus.EMPTY:
             raise RuntimeError("discovered batch has no saved files")
 
@@ -841,7 +824,7 @@ def generate_valid_cases(
                     raise RuntimeError(
                         "case schedule is empty before the run is complete"
                     )
-                expected_paths = BatchPaths.under(
+                expected_paths = BatchPaths.for_batch(
                     spec.root,
                     family=spec.family_name,
                     split=spec.split_id.value,
@@ -851,10 +834,7 @@ def generate_valid_cases(
             returned_paths = executor(assignments, batch_id=batch_id)
             if returned_paths != expected_paths:
                 raise RuntimeError("batch executor returned nonstandard paths")
-            inspection = inspect_batch(
-                expected_paths,
-                expected_fingerprint=spec.config_fingerprint,
-            )
+            inspection = inspect_batch(expected_paths)
             if inspection.status not in (
                 BatchStatus.COMMITTED,
                 BatchStatus.FAILED,

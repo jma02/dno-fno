@@ -4,7 +4,13 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-from .dno_series_jax import build_grid, dno_series_eval, make_linear_dno_symbol, myfft, myifft
+from .dno_series_jax import (
+    build_grid,
+    dno_series_eval,
+    make_linear_dno_symbol,
+    myfft,
+    myifft,
+)
 
 
 class State(NamedTuple):
@@ -48,17 +54,13 @@ class _GL2IterationCarry(NamedTuple):
 class SolverParams(NamedTuple):
     nx: int
     length: float
-    depth: float
+    depth: float | jax.Array
     gravity: float
     dno_order: int
     pad_factor: int
     filter_fraction: float
     k: jnp.ndarray
     g0: jnp.ndarray
-    gl2_post_step_houli: bool = False
-    gl2_post_step_houli_a: float = 36.0
-    gl2_post_step_houli_m: float = 18.0
-    gl2_post_step_filter_fraction: float | None = None
     nonlinear_ramp_time: float | jnp.ndarray | None = None
     nonlinear_ramp_order: int = 4
 
@@ -90,15 +92,11 @@ def make_normalized_rollout_settings() -> RolloutSettings:
 def make_solver_params(
     nx: int,
     length: float,
-    depth: float,
+    depth: float | jax.Array,
     gravity: float = 1.0,
     dno_order: int = 6,
     pad_factor: int = 8,
     filter_fraction: float = 1.0,
-    gl2_post_step_houli: bool = False,
-    gl2_post_step_houli_a: float = 36.0,
-    gl2_post_step_houli_m: float = 18.0,
-    gl2_post_step_filter_fraction: float | None = None,
     nonlinear_ramp_time: float | jnp.ndarray | None = None,
     nonlinear_ramp_order: int = 4,
 ) -> SolverParams:
@@ -114,10 +112,6 @@ def make_solver_params(
         filter_fraction=filter_fraction,
         k=k,
         g0=g0,
-        gl2_post_step_houli=gl2_post_step_houli,
-        gl2_post_step_houli_a=gl2_post_step_houli_a,
-        gl2_post_step_houli_m=gl2_post_step_houli_m,
-        gl2_post_step_filter_fraction=gl2_post_step_filter_fraction,
         nonlinear_ramp_time=nonlinear_ramp_time,
         nonlinear_ramp_order=nonlinear_ramp_order,
     )
@@ -141,10 +135,6 @@ def cast_solver_params_dtype(params: SolverParams, dtype: jnp.dtype) -> SolverPa
         filter_fraction=params.filter_fraction,
         k=jnp.asarray(params.k, dtype=dtype),
         g0=jnp.asarray(params.g0, dtype=dtype),
-        gl2_post_step_houli=params.gl2_post_step_houli,
-        gl2_post_step_houli_a=params.gl2_post_step_houli_a,
-        gl2_post_step_houli_m=params.gl2_post_step_houli_m,
-        gl2_post_step_filter_fraction=params.gl2_post_step_filter_fraction,
         nonlinear_ramp_time=(
             None
             if params.nonlinear_ramp_time is None
@@ -163,10 +153,7 @@ def _spectral_upsample_real(field: jnp.ndarray, output_nx: int) -> jnp.ndarray:
     input_nx = field.shape[-1]
     spectrum = jnp.fft.rfft(field, axis=-1)
     spectrum = spectrum.at[..., input_nx // 2].set(0)
-    return (
-        jnp.fft.irfft(spectrum, n=output_nx, axis=-1)
-        * (output_nx / input_nx)
-    )
+    return jnp.fft.irfft(spectrum, n=output_nx, axis=-1) * (output_nx / input_nx)
 
 
 def _spectral_truncate_real(field: jnp.ndarray, output_nx: int) -> jnp.ndarray:
@@ -174,10 +161,7 @@ def _spectral_truncate_real(field: jnp.ndarray, output_nx: int) -> jnp.ndarray:
     input_nx = field.shape[-1]
     spectrum = jnp.fft.rfft(field, axis=-1)[..., : output_nx // 2 + 1]
     spectrum = spectrum.at[..., output_nx // 2].set(0)
-    return (
-        jnp.fft.irfft(spectrum, n=output_nx, axis=-1)
-        * (output_nx / input_nx)
-    )
+    return jnp.fft.irfft(spectrum, n=output_nx, axis=-1) * (output_nx / input_nx)
 
 
 def dealiased_zakharov_xi_rhs(
@@ -199,10 +183,7 @@ def dealiased_zakharov_xi_rhs(
     gxi_padded = _spectral_upsample_real(gxi, padded_nx)
 
     numerator = gxi_padded + eta_x_padded * xi_x_padded
-    xi_t_padded = (
-        -0.5 * xi_x_padded**2
-        + 0.5 * numerator**2 / (1.0 + eta_x_padded**2)
-    )
+    xi_t_padded = -0.5 * xi_x_padded**2 + 0.5 * numerator**2 / (1.0 + eta_x_padded**2)
     return _spectral_truncate_real(xi_t_padded, nx)
 
 
@@ -210,7 +191,9 @@ def linear_dno_action(xi: jnp.ndarray, g0: jnp.ndarray) -> jnp.ndarray:
     return myifft(g0 * myfft(xi, xi.shape[-1]))
 
 
-def apply_lowpass(field: jnp.ndarray, k: jnp.ndarray, filter_fraction: float = 1.0) -> jnp.ndarray:
+def apply_lowpass(
+    field: jnp.ndarray, k: jnp.ndarray, filter_fraction: float = 1.0
+) -> jnp.ndarray:
     if filter_fraction >= 1.0:
         return field
 
@@ -218,61 +201,6 @@ def apply_lowpass(field: jnp.ndarray, k: jnp.ndarray, filter_fraction: float = 1
     cutoff = filter_fraction * k_max
     mask = (jnp.abs(k) <= cutoff).astype(myfft(field, field.shape[-1]).dtype)
     return myifft(mask * myfft(field, field.shape[-1]))
-
-
-def apply_houli(
-    field: jnp.ndarray,
-    k: jnp.ndarray,
-    a: float = 36.0,
-    m: float = 36.0,
-    filter_fraction: float = 1.0,
-) -> jnp.ndarray:
-    # Hou--Li filter c_k = exp(-a * (|k|/k_eff)^(2m)).  Thus m=18
-    # realizes the power 36 in JCP09 equation (29).  At |k|=k_eff the
-    # multiplier is exp(-a), not one half.
-    k_max = jnp.max(jnp.abs(k))
-    k_eff = jnp.maximum(filter_fraction * k_max, 1e-12)
-    c_k = jnp.exp(-a * (jnp.abs(k) / k_eff) ** (2.0 * m))
-    spec = myfft(field, field.shape[-1])
-    return myifft(c_k.astype(spec.dtype) * spec)
-
-
-def _apply_gl2_post_step_state_filter(
-    field: jnp.ndarray,
-    params: SolverParams,
-) -> jnp.ndarray:
-    """Apply the configured state filter after one completed GL2 step."""
-
-    filter_fraction = (
-        params.filter_fraction
-        if params.gl2_post_step_filter_fraction is None
-        else params.gl2_post_step_filter_fraction
-    )
-    if params.gl2_post_step_houli:
-        return apply_houli(
-            field,
-            params.k,
-            a=params.gl2_post_step_houli_a,
-            m=params.gl2_post_step_houli_m,
-            filter_fraction=filter_fraction,
-        )
-    return apply_lowpass(field, params.k, filter_fraction)
-
-
-def apply_filter(
-    field: jnp.ndarray,
-    k: jnp.ndarray,
-    shape: str = "hard",
-    filter_fraction: float = 1.0,
-    houli_a: float = 36.0,
-    houli_m: float = 36.0,
-) -> jnp.ndarray:
-    # Dispatch hard low-pass vs Hou-Li smooth filter. "hard" reproduces apply_lowpass exactly.
-    if shape == "hard":
-        return apply_lowpass(field, k, filter_fraction)
-    if shape == "houli":
-        return apply_houli(field, k, a=houli_a, m=houli_m, filter_fraction=filter_fraction)
-    raise ValueError(f"unknown filter shape {shape!r}; expected 'hard' or 'houli'")
 
 
 def _state_to_hat(state: State, nx: int) -> SpectralState:
@@ -365,16 +293,22 @@ def _state_finite(state: State) -> jnp.ndarray:
 
 
 def project_zero_mean_xi(state: State) -> State:
-    return State(eta=state.eta, xi=state.xi - jnp.mean(state.xi, axis=-1, keepdims=True))
+    return State(
+        eta=state.eta, xi=state.xi - jnp.mean(state.xi, axis=-1, keepdims=True)
+    )
 
 
-def apply_linear_flow_hat(state_hat: SpectralState, tau: float | jnp.ndarray, params: SolverParams) -> SpectralState:
+def apply_linear_flow_hat(
+    state_hat: SpectralState, tau: float | jnp.ndarray, params: SolverParams
+) -> SpectralState:
     omega = jnp.sqrt(params.gravity * params.g0)
     coswt = jnp.cos(omega * tau)
     sin_over_omega = jnp.where(omega > 0, jnp.sin(omega * tau) / omega, 0.0)
 
     eta_hat = coswt * state_hat.eta_hat + sin_over_omega * params.g0 * state_hat.xi_hat
-    xi_hat = coswt * state_hat.xi_hat - sin_over_omega * params.gravity * state_hat.eta_hat
+    xi_hat = (
+        coswt * state_hat.xi_hat - sin_over_omega * params.gravity * state_hat.eta_hat
+    )
     return SpectralState(eta_hat=eta_hat, xi_hat=xi_hat)
 
 
@@ -392,7 +326,11 @@ def rhs_full(state: State, params: SolverParams) -> State:
 
     eta_t = gxi
     numerator = gxi + eta_x * xi_x
-    xi_t = -params.gravity * state.eta - 0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    xi_t = (
+        -params.gravity * state.eta
+        - 0.5 * xi_x**2
+        + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    )
     return State(eta=eta_t, xi=xi_t)
 
 
@@ -436,11 +374,13 @@ def nonlinear_ramp_factor(
     if nonnegative_time.ndim > 0:
         nonnegative_time = nonnegative_time[..., jnp.newaxis]
     return 1.0 - jnp.exp(
-        -(nonnegative_time / ramp_time) ** params.nonlinear_ramp_order
+        -((nonnegative_time / ramp_time) ** params.nonlinear_ramp_order)
     )
 
 
-def rhs_nonlinear_if(v_hat: SpectralState, t: float | jnp.ndarray, params: SolverParams) -> SpectralState:
+def rhs_nonlinear_if(
+    v_hat: SpectralState, t: float | jnp.ndarray, params: SolverParams
+) -> SpectralState:
     physical_hat = apply_linear_flow_hat(v_hat, t, params)
     physical_state = _hat_to_state(physical_hat)
     nonlinear_state = rhs_nonlinear(physical_state, params)
@@ -498,7 +438,9 @@ def implicit_midpoint_if_step(
         candidate = _tree_axpy(v0, 0.5 * dt, rhs)
         if relaxation == 1.0:
             return candidate
-        return jax.tree_util.tree_map(lambda s, c: (1.0 - relaxation) * s + relaxation * c, stage, candidate)
+        return jax.tree_util.tree_map(
+            lambda s, c: (1.0 - relaxation) * s + relaxation * c, stage, candidate
+        )
 
     stage = jax.lax.fori_loop(0, iterations, body_fn, v0)
     v1 = jax.tree_util.tree_map(lambda mid, start: 2.0 * mid - start, stage, v0)
@@ -557,8 +499,8 @@ def _finish_gauss_legendre_2_step(
     next_state = _hat_to_state(apply_linear_flow_hat(v1, t + dt, params))
     if params.filter_fraction < 1.0:
         next_state = State(
-            eta=_apply_gl2_post_step_state_filter(next_state.eta, params),
-            xi=_apply_gl2_post_step_state_filter(next_state.xi, params),
+            eta=apply_lowpass(next_state.eta, params.k, params.filter_fraction),
+            xi=apply_lowpass(next_state.xi, params.k, params.filter_fraction),
         )
     return next_state
 
@@ -960,11 +902,11 @@ def rollout(
         if implicit_iterations < 0:
             raise ValueError("implicit_iterations must be nonnegative")
         if not 0.0 < implicit_residual_tolerance < float("inf"):
-            raise ValueError(
-                "implicit_residual_tolerance must be finite and positive"
-            )
+            raise ValueError("implicit_residual_tolerance must be finite and positive")
 
-    initial_state = State(eta=jnp.asarray(initial_state.eta), xi=jnp.asarray(initial_state.xi))
+    initial_state = State(
+        eta=jnp.asarray(initial_state.eta), xi=jnp.asarray(initial_state.xi)
+    )
     if zero_mean_xi:
         initial_state = project_zero_mean_xi(initial_state)
 
@@ -1108,8 +1050,12 @@ def rollout(
                 initial_state,
                 (times[:-1], dts),
             )
-        eta = jnp.concatenate((initial_state.eta[jnp.newaxis, :], saved_states.eta), axis=0)
-        xi = jnp.concatenate((initial_state.xi[jnp.newaxis, :], saved_states.xi), axis=0)
+        eta = jnp.concatenate(
+            (initial_state.eta[jnp.newaxis, :], saved_states.eta), axis=0
+        )
+        xi = jnp.concatenate(
+            (initial_state.xi[jnp.newaxis, :], saved_states.xi), axis=0
+        )
 
     payload: dict[str, jnp.ndarray] = {"times": times, "eta": eta, "xi": xi}
     if telemetry_enabled:

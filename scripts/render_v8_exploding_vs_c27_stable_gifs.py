@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,9 +18,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_V8_DIR = (
-    ROOT
-    / "outputs/cs_dno_w512b8_l256_v8_2gpu_20260619_024621"
-    / "eval_suite_f64h"
+    ROOT / "outputs/cs_dno_w512b8_l256_v8_2gpu_20260619_024621" / "eval_suite_f64h"
 )
 DEFAULT_C27_DIR = (
     ROOT
@@ -43,14 +40,6 @@ class RolloutArchive:
     pred_eta: np.ndarray
     pred_xi: np.ndarray
     pred_gxi: np.ndarray
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _load_archive(path: Path) -> RolloutArchive:
@@ -109,7 +98,9 @@ def _last_finite_index(archive: RolloutArchive, case_index: int) -> int:
     return int(indices[-1])
 
 
-def _frame_indices(frame_count: int, saved_count: int, required: list[int]) -> np.ndarray:
+def _frame_indices(
+    frame_count: int, saved_count: int, required: list[int]
+) -> np.ndarray:
     if frame_count < 2:
         raise ValueError("frame_count must be at least two")
     sampled = np.linspace(0, saved_count - 1, frame_count, dtype=np.int64)
@@ -296,13 +287,11 @@ def _render_case(
         "gif": {
             "bytes": gif_path.stat().st_size,
             "path": str(gif_path.resolve()),
-            "sha256": _sha256(gif_path),
         },
         "keyframes": [
             {
                 "bytes": path.stat().st_size,
                 "path": str(path.resolve()),
-                "sha256": _sha256(path),
             }
             for path in keyframe_paths
         ],
@@ -372,7 +361,6 @@ def main() -> None:
     sources = {
         str(archive.path): {
             "bytes": archive.path.stat().st_size,
-            "sha256": _sha256(archive.path),
         }
         for archive in archives.values()
     }

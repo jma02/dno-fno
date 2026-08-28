@@ -24,13 +24,13 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     _validate_tanaka_surface_potential_radicand,
     build_per_case_initial_conditions,
 )
-from solver.gen_data.pipeline.production import (  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
 )
-from solver.gen_data.pipeline.refinement import (  # noqa: E402
-    ResidualControlledGL2Contract,
+from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
+    RolloutConfig,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_SAMPLE_CELL_IDS,
@@ -257,14 +257,17 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
         )
 
     def test_durable_proposal_survives_constructor_domain_failure(self) -> None:
-        contract = ResidualControlledGL2Contract(
+        contract = RolloutConfig(
             nx=64,
+            target_nx=64,
             length=LENGTH,
             gravity=1.0,
             dno_order=0,
+            target_dno_order=0,
             pad_factor=1,
             maximum_wavenumber=16.0,
-            production_dt=0.02,
+            target_maximum_wavenumber=16.0,
+            dt=0.02,
             saved_dt=0.02,
             gl2_residual_tolerance=1.0e-8,
             gl2_iteration_cap=8,
@@ -300,7 +303,6 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
                 family_name="tanaka",
                 batch_id=0,
                 cell_codes={cell_id: 0},
-                config_fingerprint="b" * 64,
                 metadata={"test_scope": "durable_proposal_before_domain_check"},
             )
             with patch(

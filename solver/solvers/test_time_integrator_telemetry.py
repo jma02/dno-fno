@@ -1,4 +1,5 @@
 """CPU tests for convergence-controlled GL2 stage telemetry."""
+
 from __future__ import annotations
 
 import math
@@ -10,14 +11,11 @@ import numpy as np
 from solver.solvers.time_integrator import (
     SpectralState,
     State,
-    apply_houli,
-    apply_lowpass,
     gauss_legendre_2_if_step,
     gauss_legendre_2_if_step_with_telemetry,
     make_solver_params,
     nonlinear_ramp_factor,
     relative_implicit_stage_residual,
-    rhs_nonlinear,
     rollout,
 )
 
@@ -253,9 +251,7 @@ class GaussLegendreTelemetryTest(unittest.TestCase):
             result["gl2_first_failed_step"],
             np.asarray([-1, 0], dtype=np.int32),
         )
-        self.assertTrue(
-            bool(jnp.all(result["gl2_hit_iteration_cap"][:, 1]))
-        )
+        self.assertTrue(bool(jnp.all(result["gl2_hit_iteration_cap"][:, 1])))
 
     def test_legacy_fixed_iteration_output_is_unchanged(self) -> None:
         params = make_solver_params(
@@ -287,116 +283,6 @@ class GaussLegendreTelemetryTest(unittest.TestCase):
             rtol=2e-6,
             atol=1e-8,
         )
-
-    def test_hou_li_changes_only_the_completed_gl2_state_filter(self) -> None:
-        params = make_solver_params(
-            self.nx,
-            2.0 * math.pi,
-            1.0,
-            dno_order=0,
-            pad_factor=1,
-            filter_fraction=0.5,
-        )
-        hou_li_params = params._replace(
-            gl2_post_step_houli=True,
-            gl2_post_step_houli_a=36.0,
-            gl2_post_step_houli_m=18.0,
-        )
-        state = State(
-            eta=(
-                jnp.cos(2.0 * self.x)
-                + 0.3 * jnp.cos(3.0 * self.x)
-                + 0.2 * jnp.cos(4.0 * self.x)
-            ),
-            xi=jnp.sin(3.0 * self.x) + 0.1 * jnp.sin(4.0 * self.x),
-        )
-
-        sharp_rhs = rhs_nonlinear(state, params)
-        hou_li_rhs = rhs_nonlinear(state, hou_li_params)
-        np.testing.assert_array_equal(hou_li_rhs.eta, sharp_rhs.eta)
-        np.testing.assert_array_equal(hou_li_rhs.xi, sharp_rhs.xi)
-
-        sharp = gauss_legendre_2_if_step(
-            state,
-            0.0,
-            0.0,
-            params,
-            iterations=0,
-        )
-        hou_li = gauss_legendre_2_if_step(
-            state,
-            0.0,
-            0.0,
-            hou_li_params,
-            iterations=0,
-        )
-        np.testing.assert_allclose(
-            sharp.eta,
-            apply_lowpass(state.eta, params.k, params.filter_fraction),
-            rtol=0.0,
-            atol=1.0e-12,
-        )
-        np.testing.assert_allclose(
-            hou_li.eta,
-            apply_houli(
-                state.eta,
-                params.k,
-                a=36.0,
-                m=18.0,
-                filter_fraction=params.filter_fraction,
-            ),
-            rtol=0.0,
-            atol=1.0e-12,
-        )
-        initial_coefficients = np.fft.rfft(np.asarray(state.eta))
-        filtered_coefficients = np.fft.rfft(np.asarray(hou_li.eta))
-        np.testing.assert_allclose(
-            filtered_coefficients[2:4] / initial_coefficients[2:4],
-            np.exp(-36.0 * (np.arange(2, 4) / 4.0) ** 36),
-            rtol=1.0e-12,
-            atol=1.0e-12,
-        )
-        self.assertGreater(
-            float(jnp.linalg.norm(sharp.eta - hou_li.eta)),
-            1.0e-2,
-        )
-
-    def test_gl2_post_step_cutoff_can_be_inside_rhs_cutoff(self) -> None:
-        nx = 512
-        x = 2.0 * jnp.pi * jnp.arange(nx) / nx
-        params = make_solver_params(
-            nx,
-            2.0 * math.pi,
-            1.0,
-            dno_order=0,
-            pad_factor=1,
-            filter_fraction=192.0 / 256.0,
-            gl2_post_step_filter_fraction=172.0 / 256.0,
-        )
-        state = State(
-            eta=jnp.cos(128.0 * x) + 0.1 * jnp.cos(173.0 * x),
-            xi=jnp.sin(173.0 * x),
-        )
-        self.assertEqual(params.filter_fraction, 192.0 / 256.0)
-        self.assertEqual(
-            params.gl2_post_step_filter_fraction,
-            172.0 / 256.0,
-        )
-
-        completed = gauss_legendre_2_if_step(
-            state,
-            0.0,
-            0.0,
-            params,
-            iterations=0,
-        )
-        coefficients = np.fft.rfft(np.asarray(completed.eta))
-        self.assertAlmostEqual(
-            float(np.abs(coefficients[128])),
-            nx / 2.0,
-            places=9,
-        )
-        self.assertLess(float(np.abs(coefficients[173])), 1.0e-10)
 
 
 if __name__ == "__main__":

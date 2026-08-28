@@ -13,15 +13,16 @@ from typing import Any, Sequence, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
-    file_sha256,
     inspect_batch,
+)
+from solver.gen_data.pipeline.artifact_io import (
+    load_npz,
     write_json_atomic,
     write_npz_atomic,
 )
-from solver.gen_data.pipeline.valid_case_generation import canonical_json_sha256
 
 
 DATASET_VIEW_SCHEMA_VERSION = 2
@@ -33,7 +34,6 @@ _SHARED_TARGET_FIELDS = (
     "dno_order",
     "pad_factor",
     "maximum_wavenumber",
-    "dtype",
 )
 _STORED_DTYPES = {
     "eta": "float32",
@@ -47,8 +47,16 @@ _STORED_DTYPES = {
 def _same_json_value(left: object, right: object) -> bool:
     """Compare strict JSON values without Python's numeric coercions."""
 
-    return canonical_json_sha256(_plain_json_value(left)) == canonical_json_sha256(
-        _plain_json_value(right)
+    return json.dumps(
+        _plain_json_value(left),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) == json.dumps(
+        _plain_json_value(right),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
 
 
@@ -77,167 +85,6 @@ class _BatchContract:
     target: Mapping[str, object]
     family_execution: Mapping[str, object]
     trajectory_numerical: Mapping[str, object] | None
-
-
-@dataclass(frozen=True)
-class _GenerationCompatibility:
-    """Source and dependency identity recovered from a launcher run record."""
-
-    dependency_environment: Mapping[str, object]
-    source_sha256: Mapping[str, str]
-    execution_platform: str
-
-
-@dataclass(frozen=True)
-class GenerationCompatibilityVariant:
-    """One explicitly audited execution/source pair for a family revision."""
-
-    family_id: int
-    revision_id: int
-    execution_record_fingerprint: str
-    source_sha256_fingerprint: str
-    compatibility_id: str
-    canonical_execution_record: Mapping[str, object]
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.family_id, bool)
-            or not isinstance(self.family_id, int)
-            or self.family_id < 0
-        ):
-            raise ValueError("family_id must be a nonnegative integer")
-        if (
-            isinstance(self.revision_id, bool)
-            or not isinstance(self.revision_id, int)
-            or self.revision_id < 0
-        ):
-            raise ValueError("revision_id must be a nonnegative integer")
-        for name in (
-            "execution_record_fingerprint",
-            "source_sha256_fingerprint",
-            "compatibility_id",
-        ):
-            value = getattr(self, name)
-            if (
-                not isinstance(value, str)
-                or len(value) != 64
-                or any(character not in "0123456789abcdef" for character in value)
-            ):
-                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-        canonical = _plain_json_value(self.canonical_execution_record)
-        if not isinstance(canonical, dict):
-            raise TypeError("canonical_execution_record must be a JSON object")
-        object.__setattr__(self, "canonical_execution_record", canonical)
-        if canonical_json_sha256(canonical) != self.compatibility_id:
-            raise ValueError(
-                "compatibility_id must be the canonical execution-record fingerprint"
-            )
-
-
-@dataclass(frozen=True)
-class GenerationCompatibilityResolution:
-    """Canonical execution identity for one exact audited raw variant."""
-
-    compatibility_id: str
-    canonical_execution_record: Mapping[str, object]
-    execution_record_fingerprint: str
-    source_sha256_fingerprint: str
-
-
-class GenerationCompatibilityPolicy:
-    """Fail-closed lookup of explicitly audited generation variants.
-
-    The lookup key includes the family, revision, raw execution record, and
-    raw source mapping.  A policy has no effect outside the family revisions
-    named by its variants.  Within those scopes, an unknown pair is rejected.
-    """
-
-    def __init__(
-        self,
-        variants: Sequence[GenerationCompatibilityVariant],
-    ) -> None:
-        selected = tuple(variants)
-        if not selected:
-            raise ValueError("generation compatibility variants must not be empty")
-        by_key: dict[
-            tuple[int, int, str, str],
-            GenerationCompatibilityVariant,
-        ] = {}
-        canonical_by_id: dict[str, Mapping[str, object]] = {}
-        for variant in selected:
-            key = (
-                variant.family_id,
-                variant.revision_id,
-                variant.execution_record_fingerprint,
-                variant.source_sha256_fingerprint,
-            )
-            if key in by_key:
-                raise ValueError("generation compatibility variants must be unique")
-            previous = canonical_by_id.setdefault(
-                variant.compatibility_id,
-                variant.canonical_execution_record,
-            )
-            if previous != variant.canonical_execution_record:
-                raise ValueError(
-                    "one compatibility_id cannot name different canonical "
-                    "execution records"
-                )
-            by_key[key] = variant
-        self._variants = selected
-        self._by_key = by_key
-        self._scopes = frozenset(
-            (variant.family_id, variant.revision_id) for variant in selected
-        )
-
-    @property
-    def variants(self) -> tuple[GenerationCompatibilityVariant, ...]:
-        return self._variants
-
-    def applies_to(self, *, family_id: int, revision_id: int) -> bool:
-        return (family_id, revision_id) in self._scopes
-
-    def resolve(
-        self,
-        *,
-        family_id: int,
-        revision_id: int,
-        execution_record: Mapping[str, object],
-        source_sha256: Mapping[str, str],
-    ) -> GenerationCompatibilityResolution | None:
-        """Resolve one exact pair, or reject an unknown pair in policy scope."""
-
-        if not self.applies_to(
-            family_id=family_id,
-            revision_id=revision_id,
-        ):
-            return None
-        execution_fingerprint = canonical_json_sha256(
-            _plain_json_value(execution_record)
-        )
-        source_fingerprint = canonical_json_sha256(_plain_json_value(source_sha256))
-        variant = self._by_key.get(
-            (
-                family_id,
-                revision_id,
-                execution_fingerprint,
-                source_fingerprint,
-            )
-        )
-        if variant is None:
-            raise ValueError(
-                "generation record is not an explicitly audited compatibility variant"
-            )
-        return GenerationCompatibilityResolution(
-            compatibility_id=variant.compatibility_id,
-            canonical_execution_record=variant.canonical_execution_record,
-            execution_record_fingerprint=execution_fingerprint,
-            source_sha256_fingerprint=source_fingerprint,
-        )
-
-
-def _read_npz(path: Path) -> dict[str, NDArray[Any]]:
-    with np.load(path, allow_pickle=False) as archive:
-        return {name: np.asarray(archive[name]) for name in archive.files}
 
 
 def _metadata_object(proposal: Mapping[str, NDArray[Any]]) -> dict[str, object]:
@@ -332,9 +179,6 @@ def _shared_target(
         if raw_target_dno_order < 0:
             raise ValueError("target_dno_order must be nonnegative")
         target_dno_order = raw_target_dno_order
-    dtype = numerical["dtype"]
-    if not isinstance(dtype, str) or not dtype:
-        raise TypeError("shared target dtype must be a nonempty string")
     return {
         "role": role,
         "nx": target_nx,
@@ -343,7 +187,7 @@ def _shared_target(
         "dno_order": target_dno_order,
         "pad_factor": integer_values["pad_factor"],
         "maximum_wavenumber": target_maximum_wavenumber,
-        "dtype": dtype,
+        "dtype": "float64",
     }
 
 
@@ -382,79 +226,6 @@ def _batch_contract(
     return None
 
 
-def _generation_compatibility(
-    proposal: Mapping[str, NDArray[Any]],
-) -> _GenerationCompatibility | None:
-    metadata = _metadata_object(proposal)
-    additional = metadata.get("additional_metadata")
-    if additional is None:
-        return None
-    if not isinstance(additional, dict):
-        raise ValueError("proposal additional_metadata must be a JSON object")
-    run_spec = additional.get("run_spec")
-    if run_spec is None:
-        return None
-    if not isinstance(run_spec, dict):
-        raise ValueError("proposal run_spec must be a JSON object")
-    configuration = _object_field(
-        run_spec,
-        "configuration",
-        context="proposal run_spec",
-    )
-    if configuration.get("schema") != "paper_dataset_quota_configuration_v1":
-        return None
-    dependency_environment = _object_field(
-        configuration,
-        "dependency_environment",
-        context="proposal run configuration",
-    )
-    raw_sources = _object_field(
-        configuration,
-        "source_sha256",
-        context="proposal run configuration",
-    )
-    if not raw_sources:
-        raise ValueError("proposal source_sha256 must not be empty")
-    source_sha256: dict[str, str] = {}
-    for path, digest in raw_sources.items():
-        if not isinstance(path, str) or not path:
-            raise TypeError("proposal source paths must be nonempty strings")
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError(
-                "proposal source_sha256 values must be lowercase SHA-256 digests"
-            )
-        source_sha256[path] = digest
-    execution_platform = configuration.get("execution_platform")
-    if not isinstance(execution_platform, str) or not execution_platform:
-        raise ValueError("proposal execution_platform must be a nonempty string")
-    return _GenerationCompatibility(
-        dependency_environment=dependency_environment,
-        source_sha256=source_sha256,
-        execution_platform=execution_platform,
-    )
-
-
-def _validate_expected_fingerprints(
-    fingerprints: Sequence[str] | None,
-) -> frozenset[str] | None:
-    if fingerprints is None:
-        return None
-    expected = frozenset(fingerprints)
-    if not expected:
-        raise ValueError("expected_fingerprints must not be empty")
-    if any(
-        len(fingerprint) != 64
-        or any(character not in "0123456789abcdef" for character in fingerprint)
-        for fingerprint in expected
-    ):
-        raise ValueError("expected_fingerprints must contain lowercase SHA-256 digests")
-    return expected
-
-
 def _relative_path(path: Path, start: Path) -> str:
     return os.path.relpath(path.resolve(), start=start.resolve())
 
@@ -465,16 +236,12 @@ def build_dataset_view(
     *,
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
-    expected_fingerprint: str | None = None,
-    expected_fingerprints: Sequence[str] | None = None,
-    generation_compatibility_policy: (GenerationCompatibilityPolicy | None) = None,
 ) -> DatasetViewPaths:
-    """Write a schema-v2 manifest and attempted-case trajectory map.
+    """Write a training manifest and attempted-case trajectory map.
 
     ``batches`` defines the immutable shard order.  Every batch must already
     be committed, but a batch with no accepted cases may legitimately have no
-    shard.  ``expected_fingerprint`` retains the single-run check.  A combined
-    view may instead provide the complete set of ``expected_fingerprints``.
+    shard.
     """
 
     if not name or any(
@@ -487,12 +254,6 @@ def build_dataset_view(
         raise ValueError("length must be finite and positive")
     if not batches:
         raise ValueError("at least one committed batch is required")
-    if expected_fingerprint is not None and expected_fingerprints is not None:
-        raise ValueError(
-            "provide expected_fingerprint or expected_fingerprints, not both"
-        )
-    expected_fingerprint_set = _validate_expected_fingerprints(expected_fingerprints)
-
     output_paths = DatasetViewPaths(
         manifest=root / f"{name}.dataset.json",
         trajectory_map=root / f"{name}.trajectory_map.npz",
@@ -514,76 +275,31 @@ def build_dataset_view(
     row_counts: list[int] = []
     shard_records: list[dict[str, object]] = []
     batch_records: list[dict[str, object]] = []
-    fingerprints: set[str] = set()
     batch_contracts: list[_BatchContract | None] = []
-    generation_compatibilities: list[_GenerationCompatibility | None] = []
     family_execution_contracts: dict[
         tuple[int, int],
         Mapping[str, object],
-    ] = {}
-    family_generation_compatibilities: dict[
-        tuple[int, int],
-        _GenerationCompatibility,
-    ] = {}
-    family_generation_compatibility_ids: dict[
-        tuple[int, int],
-        str | None,
-    ] = {}
-    family_generation_variants: dict[
-        tuple[int, int],
-        dict[
-            tuple[str, str],
-            _GenerationCompatibility,
-        ],
     ] = {}
     family_trajectory_numerical: dict[
         tuple[int, int],
         Mapping[str, object],
     ] = {}
-    dependency_environment: Mapping[str, object] | None = None
     shared_target: Mapping[str, object] | None = None
     global_row_count = 0
     trajectory_offset = 0
     spatial_size: int | None = None
 
     for batch_index, batch in enumerate(batches):
-        inspection = inspect_batch(
-            batch,
-            expected_fingerprint=expected_fingerprint,
-        )
+        inspection = inspect_batch(batch)
         if inspection.status is not BatchStatus.COMMITTED:
             raise RuntimeError(
                 f"dataset views require committed batches, got {inspection.status.value}"
             )
-        proposal = _read_npz(batch.proposal)
-        fingerprint = str(proposal["config_fingerprint"].item())
-        fingerprints.add(fingerprint)
+        proposal = load_npz(batch.proposal)
         contract = _batch_contract(proposal)
         batch_contracts.append(contract)
-        generation_compatibility = _generation_compatibility(proposal)
-        generation_compatibilities.append(generation_compatibility)
         family_id = int(proposal["family_id"])
         revision_id = int(proposal["revision_id"])
-        generation_resolution: GenerationCompatibilityResolution | None = None
-        if (
-            generation_compatibility_policy is not None
-            and generation_compatibility_policy.applies_to(
-                family_id=family_id,
-                revision_id=revision_id,
-            )
-        ):
-            if contract is None or generation_compatibility is None:
-                raise ValueError(
-                    "an audited generation compatibility variant requires "
-                    "both execution and source records"
-                )
-            generation_resolution = generation_compatibility_policy.resolve(
-                family_id=family_id,
-                revision_id=revision_id,
-                execution_record=contract.family_execution,
-                source_sha256=generation_compatibility.source_sha256,
-            )
-            assert generation_resolution is not None
 
         proposed_case_ids = proposal["case_id"]
         number_of_cases = int(proposed_case_ids.size)
@@ -592,7 +308,7 @@ def build_dataset_view(
         shard_index: int | None = None
         shard_row_count = 0
         if batch.shard.exists():
-            shard = _read_npz(batch.shard)
+            shard = load_npz(batch.shard)
             current_spatial_size = int(shard["eta"].shape[1])
             if spatial_size is None:
                 spatial_size = current_spatial_size
@@ -603,10 +319,8 @@ def build_dataset_view(
             shard_records.append(
                 {
                     "path": _relative_path(batch.shard, output_paths.manifest.parent),
-                    "sha256": file_sha256(batch.shard),
                     "n_rows": shard_row_count,
                     "batch_index": batch_index,
-                    "configuration_fingerprint": fingerprint,
                 }
             )
             local_index = shard["case_local_index"]
@@ -649,14 +363,11 @@ def build_dataset_view(
                     batch.proposal,
                     output_paths.manifest.parent,
                 ),
-                "proposal_sha256": inspection.proposal_sha256,
                 "result_path": _relative_path(
                     batch.result,
                     output_paths.manifest.parent,
                 ),
-                "result_sha256": file_sha256(batch.result),
                 "shard_index": shard_index,
-                "configuration_fingerprint": fingerprint,
                 "family_id": family_id,
                 "revision_id": revision_id,
                 "split_id": split_id,
@@ -675,16 +386,11 @@ def build_dataset_view(
                     "all batches in one dataset view must share the DNO target contract"
                 )
             family_key = (family_id, revision_id)
-            effective_execution = (
-                generation_resolution.canonical_execution_record
-                if generation_resolution is not None
-                else contract.family_execution
-            )
             previous_execution = family_execution_contracts.setdefault(
                 family_key,
-                effective_execution,
+                contract.family_execution,
             )
-            if not _same_json_value(previous_execution, effective_execution):
+            if not _same_json_value(previous_execution, contract.family_execution):
                 raise ValueError("one family revision cannot mix execution contracts")
             if contract.trajectory_numerical is not None:
                 previous_numerical = family_trajectory_numerical.setdefault(
@@ -699,99 +405,14 @@ def build_dataset_view(
                         "one family revision cannot mix numerical integration contracts"
                     )
 
-        if generation_compatibility is not None:
-            if dependency_environment is None:
-                dependency_environment = generation_compatibility.dependency_environment
-            elif not _same_json_value(
-                generation_compatibility.dependency_environment,
-                dependency_environment,
-            ):
-                raise ValueError(
-                    "all generation runs in one dataset view must share the "
-                    "dependency environment"
-                )
-            family_key = (family_id, revision_id)
-            previous_generation = family_generation_compatibilities.setdefault(
-                family_key,
-                generation_compatibility,
-            )
-            compatibility_id = (
-                generation_resolution.compatibility_id
-                if generation_resolution is not None
-                else None
-            )
-            previous_compatibility_id = family_generation_compatibility_ids.setdefault(
-                family_key,
-                compatibility_id,
-            )
-            if previous_compatibility_id != compatibility_id:
-                raise ValueError(
-                    "one family revision cannot mix generation compatibility identities"
-                )
-            if (
-                previous_generation.source_sha256
-                != generation_compatibility.source_sha256
-                and compatibility_id is None
-            ):
-                raise ValueError("one family revision cannot mix source mappings")
-            if (
-                previous_generation.execution_platform
-                != generation_compatibility.execution_platform
-            ):
-                raise ValueError("one family revision cannot mix execution platforms")
-            execution_fingerprint = (
-                canonical_json_sha256(contract.family_execution)
-                if contract is not None
-                else ""
-            )
-            source_fingerprint = canonical_json_sha256(
-                generation_compatibility.source_sha256
-            )
-            family_generation_variants.setdefault(family_key, {})[
-                (execution_fingerprint, source_fingerprint)
-            ] = generation_compatibility
-
         if shard is not None:
             global_row_count += int(shard["eta"].shape[0])
         trajectory_offset += number_of_cases
 
-    if expected_fingerprint_set is not None and fingerprints != set(
-        expected_fingerprint_set
-    ):
-        raise RuntimeError(
-            "dataset configuration fingerprints do not match the expected set"
-        )
     has_contract = [contract is not None for contract in batch_contracts]
     if any(has_contract) and not all(has_contract):
         raise ValueError(
             "all batches must record execution contracts when any batch does"
-        )
-    has_generation_compatibility = [
-        compatibility is not None for compatibility in generation_compatibilities
-    ]
-    if any(has_generation_compatibility) and not all(has_generation_compatibility):
-        raise ValueError(
-            "all mixed generation runs must record dependency and source identity"
-        )
-    if generation_compatibility_policy is not None:
-        for (
-            family_id,
-            revision_id,
-        ), compatibility_id in family_generation_compatibility_ids.items():
-            if (
-                generation_compatibility_policy.applies_to(
-                    family_id=family_id,
-                    revision_id=revision_id,
-                )
-                and compatibility_id is None
-            ):
-                raise ValueError(
-                    "audited generation compatibility scope was not resolved"
-                )
-    if len(fingerprints) != 1 and not all(has_contract):
-        raise ValueError(
-            "mixed configuration fingerprints require shared execution-contract "
-            "metadata"
         )
     if spatial_size is None:
         raise ValueError("a dataset view must contain at least one accepted row")
@@ -863,7 +484,6 @@ def build_dataset_view(
             ("test", 2),
         )
     }
-    configuration_fingerprints = sorted(fingerprints)
     dataset_contract: dict[str, object] | None = None
     if shared_target is not None:
         trajectory_numerical_records = [
@@ -886,79 +506,19 @@ def build_dataset_view(
             )
             else None
         )
-        generation_identity: dict[str, object] | None = None
-        if all(has_generation_compatibility):
-            assert dependency_environment is not None
-            family_revision_records = []
-            for (
-                family_id,
-                revision_id,
-            ), compatibility in sorted(family_generation_compatibilities.items()):
-                raw_variants = family_generation_variants[(family_id, revision_id)]
-                variant_records = [
-                    {
-                        "execution_record_fingerprint": (execution_fingerprint),
-                        "source_sha256_fingerprint": source_fingerprint,
-                        "source_sha256": dict(
-                            sorted(raw_compatibility.source_sha256.items())
-                        ),
-                    }
-                    for (
-                        execution_fingerprint,
-                        source_fingerprint,
-                    ), raw_compatibility in sorted(raw_variants.items())
-                ]
-                record: dict[str, object] = {
-                    "family_id": family_id,
-                    "revision_id": revision_id,
-                    "execution_platform": compatibility.execution_platform,
-                    "generation_variants": variant_records,
-                }
-                compatibility_id = family_generation_compatibility_ids[
-                    (family_id, revision_id)
-                ]
-                if compatibility_id is not None:
-                    record["generation_compatibility_id"] = compatibility_id
-                if len(variant_records) == 1:
-                    record["source_sha256_fingerprint"] = variant_records[0][
-                        "source_sha256_fingerprint"
-                    ]
-                family_revision_records.append(record)
-            generation_identity = {
-                "dependency_environment_fingerprint": canonical_json_sha256(
-                    dependency_environment
-                ),
-                "family_revisions": family_revision_records,
-            }
-            generation_identity["compatibility_fingerprint"] = canonical_json_sha256(
-                generation_identity
-            )
         dataset_contract = {
             "target": dict(shared_target),
             "trajectory_numerical": common_trajectory_numerical,
             "trajectory_numerical_by_family_revision": (trajectory_numerical_records),
             "stored_dtypes": dict(_STORED_DTYPES),
             "whole_case_rows": True,
-            "generation_identity": generation_identity,
         }
     manifest: dict[str, object] = {
         "schema_version": DATASET_VIEW_SCHEMA_VERSION,
-        "configuration_fingerprint": (
-            configuration_fingerprints[0]
-            if len(configuration_fingerprints) == 1
-            else None
-        ),
-        "configuration_fingerprints": configuration_fingerprints,
         "dataset_contract": dataset_contract,
-        "dataset_contract_fingerprint": (
-            canonical_json_sha256(dataset_contract)
-            if dataset_contract is not None
-            else None
-        ),
         "dataset_batches": batch_records,
         "dataset_shards": shard_records,
         "trajectory_map_npz": output_paths.trajectory_map.name,
-        "trajectory_map_sha256": file_sha256(output_paths.trajectory_map),
         "requires_trajectory_map": True,
         "n_rows": global_row_count,
         "n_trajectories": trajectory_offset,

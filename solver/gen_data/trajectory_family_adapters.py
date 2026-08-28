@@ -51,15 +51,15 @@ from solver.gen_data.jonswap_tma_sampling import (
     JonswapTmaSample,
     sample_jonswap_tma_case,
 )
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
     ensure_proposal,
     inspect_batch,
 )
-from solver.gen_data.pipeline.production import AttemptAssignment
-from solver.gen_data.pipeline.reference import project_fixed_band
-from solver.gen_data.pipeline.refinement import ResidualControlledGL2Contract
+from solver.gen_data.pipeline.case_allocation import AttemptAssignment
+from solver.gen_data.pipeline.dno_target import project_fixed_band
+from solver.gen_data.pipeline.trajectory_config import RolloutConfig
 from solver.gen_data.pipeline.writer import (
     JsonScalar,
     batch_paths_for_assignments,
@@ -98,7 +98,7 @@ class SampledTrajectoryCases(Generic[SampleT]):
     assignments: tuple[AttemptAssignment, ...]
     samples: tuple[SampleT, ...]
     specification_records: tuple[SpecificationRecord, ...]
-    contract: ResidualControlledGL2Contract
+    contract: RolloutConfig
     construction_settings: SpecificationRecord
 
     def __post_init__(self) -> None:
@@ -125,17 +125,10 @@ class PersistedTrajectoryProposal(Generic[SampleT]):
     sampled: SampledTrajectoryCases[SampleT]
     paths: BatchPaths
     proposal_arrays: ProposalArrays
-    proposal_sha256: str
-    config_fingerprint: str
 
     def __post_init__(self) -> None:
-        inspection = inspect_batch(
-            self.paths,
-            expected_fingerprint=self.config_fingerprint,
-        )
+        inspection = inspect_batch(self.paths)
         _require_constructible_batch_status(inspection.status)
-        if inspection.proposal_sha256 != self.proposal_sha256:
-            raise RuntimeError("persisted proposal hash differs from its token")
 
 
 @dataclass(frozen=True)
@@ -244,13 +237,13 @@ def _jonswap_initial_metrics(
 
 
 def resolved_band_for_contract(
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
     *,
     quadrature_order: int = 16,
 ) -> ResolvedBand:
     """Return the delivered random-sea band with transition at ``3 K / 4``."""
 
-    maximum_wavenumber = contract.target_definition.maximum_wavenumber
+    maximum_wavenumber = contract.target_maximum_wavenumber
     return ResolvedBand(
         length=contract.length,
         maximum_wavenumber=maximum_wavenumber,
@@ -276,10 +269,10 @@ def _strict_record(
     sample_record: Mapping[str, object],
     *,
     constructor: str,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
     constructor_settings: Mapping[str, object] | None = None,
 ) -> SpecificationRecord:
-    initial_maximum_wavenumber = contract.target_definition.maximum_wavenumber
+    initial_maximum_wavenumber = contract.target_maximum_wavenumber
     record = {
         **sample_record,
         "initial_condition_constructor": constructor,
@@ -299,7 +292,7 @@ def _sampled_cases(
     samples: tuple[SampleT, ...],
     records: tuple[SpecificationRecord, ...],
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
     construction_settings: SpecificationRecord,
 ) -> SampledTrajectoryCases[SampleT]:
     return SampledTrajectoryCases(
@@ -318,7 +311,6 @@ def persist_sampled_trajectory_proposal(
     family_name: str,
     batch_id: int,
     cell_codes: Mapping[str, int],
-    config_fingerprint: str,
     metadata: Mapping[str, object],
 ) -> PersistedTrajectoryProposal[SampleT]:
     """Durably propose sampled cases before any numerical construction."""
@@ -328,7 +320,6 @@ def persist_sampled_trajectory_proposal(
         sampled.specification_records,
         cell_codes=cell_codes,
         batch_id=batch_id,
-        config_fingerprint=config_fingerprint,
         metadata=metadata,
     )
     paths = batch_paths_for_assignments(
@@ -337,13 +328,11 @@ def persist_sampled_trajectory_proposal(
         family_name=family_name,
         batch_id=batch_id,
     )
-    proposal_sha256 = ensure_proposal(paths, proposal_arrays)
+    ensure_proposal(paths, proposal_arrays)
     return PersistedTrajectoryProposal(
         sampled=sampled,
         paths=paths,
         proposal_arrays=proposal_arrays,
-        proposal_sha256=proposal_sha256,
-        config_fingerprint=config_fingerprint,
     )
 
 
@@ -363,13 +352,8 @@ def _verify_preconstruction_proposal(
 ) -> None:
     """Verify proposal state, identity, and unchanged sampled specifications."""
 
-    inspection = inspect_batch(
-        proposed.paths,
-        expected_fingerprint=proposed.config_fingerprint,
-    )
+    inspection = inspect_batch(proposed.paths)
     _require_constructible_batch_status(inspection.status)
-    if inspection.proposal_sha256 != proposed.proposal_sha256:
-        raise RuntimeError("proposal changed after it was saved")
     if expected_records != proposed.sampled.specification_records:
         raise RuntimeError("sampled specification changed after proposal")
 
@@ -390,7 +374,7 @@ def _project_once(
     eta0: FloatArray | jax.Array,
     xi0: FloatArray | jax.Array,
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> tuple[FloatArray, FloatArray]:
     """Apply the common fixed-band map, removing only the ``xi`` zero mode."""
 
@@ -400,7 +384,7 @@ def _project_once(
         raise ValueError(f"raw fields must have common shape (batch, {contract.nx})")
     _, wavenumbers = build_grid(contract.nx, contract.length)
     k = jnp.asarray(wavenumbers, dtype=jnp.float64)
-    maximum_wavenumber = contract.target_definition.maximum_wavenumber
+    maximum_wavenumber = contract.target_maximum_wavenumber
     projected_eta = project_fixed_band(
         eta,
         k,
@@ -425,7 +409,7 @@ def _batch(
     depths: FloatArray,
     specification_records: tuple[SpecificationRecord, ...],
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> TrajectoryInitialBatch:
     eta, xi = _project_once(eta0, xi0, contract=contract)
     return TrajectoryInitialBatch(
@@ -439,7 +423,7 @@ def _batch(
 def sample_tanaka_trajectory_cases(
     assignments: Sequence[AttemptAssignment],
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> SampledTrajectoryCases[TanakaSample]:
     """Sample complete Tanaka cases without running the Tanaka solver."""
 
@@ -555,7 +539,7 @@ def construct_tanaka_trajectory_batch(
 def sample_benjamin_feir_trajectory_cases(
     assignments: Sequence[AttemptAssignment],
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
 ) -> SampledTrajectoryCases[BenjaminFeirSample]:
     """Sample complete Benjamin--Feir cases without numerical construction."""
 
@@ -635,7 +619,7 @@ def construct_benjamin_feir_trajectory_batch(
 def sample_jonswap_tma_trajectory_cases(
     assignments: Sequence[AttemptAssignment],
     *,
-    contract: ResidualControlledGL2Contract,
+    contract: RolloutConfig,
     quadrature_order: int = 16,
 ) -> SampledTrajectoryCases[JonswapTmaSample]:
     """Sample complete JONSWAP/TMA cases and both phase arrays."""

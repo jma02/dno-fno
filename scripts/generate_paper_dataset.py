@@ -1,10 +1,8 @@
 """Preflight, generate, or resume one paper-dataset family.
 
 The default mode is a read-only preflight.  Numerical generation begins only
-when ``--execute`` is supplied.  A run is identified by its output root,
-family, split, stream, valid-case targets, batch size, exact paper contract,
-execution platform, and source hashes.  Changing any of those values makes an
-existing run fail closed instead of silently mixing artifacts.
+when ``--execute`` is supplied. Existing batches are resumed from their saved
+case assignments and validated numerical outputs.
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
-import platform as python_platform
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -46,7 +43,6 @@ if BOOTSTRAP_PLATFORM == "cpu":
 
 
 import jax  # noqa: E402
-import jaxlib  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
@@ -63,24 +59,21 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.pipeline.archive import (  # noqa: E402
-    file_sha256,
-    write_json_atomic,
-)
-from solver.gen_data.pipeline.manifest import (  # noqa: E402
+from solver.gen_data.pipeline.artifact_io import write_json_atomic  # noqa: E402
+from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
     DATASET_VIEW_SCHEMA_VERSION,
     DatasetViewPaths,
     build_dataset_view,
 )
-from solver.gen_data.pipeline.production import (  # noqa: E402
-    ValidCaseTarget,
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+    SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
     balanced_valid_case_targets,
-    paper_dataset_revision_id,
+    DATASET_REVISION_BY_FAMILY,
 )
-from solver.gen_data.pipeline.quality import (  # noqa: E402
-    reasons_from_bits,
+from solver.gen_data.pipeline.case_checks import (  # noqa: E402
+    checks_from_bits,
 )
 from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
     DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
@@ -94,7 +87,7 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     STOKES_SAMPLE_CELL_IDS,
 )
 from solver.gen_data.stokes_batch_executor import (  # noqa: E402
-    StaticStokesBatchExecutor,
+    make_static_stokes_batch_executor,
 )
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     PAPER_STATIC_STOKES_CONTRACT,
@@ -106,13 +99,13 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
     TrajectoryBatchExecutor,
+    paper_trajectory_execution,
 )
 
 
 jax.config.update("jax_enable_x64", True)
 
 
-ROOT = Path(__file__).resolve().parents[1]
 PaperFamily: TypeAlias = Literal[
     "stokes",
     "tanaka",
@@ -120,56 +113,6 @@ PaperFamily: TypeAlias = Literal[
     "jonswap_tma",
 ]
 PaperExecution: TypeAlias = StaticStokesContract | TrajectoryExecutionConfig
-COMMON_SOURCE_PATHS = (
-    Path(__file__).resolve(),
-    ROOT / "solver/gen_data/pipeline/archive.py",
-    ROOT / "solver/gen_data/pipeline/batch_format.py",
-    ROOT / "solver/gen_data/pipeline/manifest.py",
-    ROOT / "solver/gen_data/pipeline/production.py",
-    ROOT / "solver/gen_data/pipeline/quality.py",
-    ROOT / "solver/gen_data/pipeline/valid_case_generation.py",
-    ROOT / "solver/gen_data/pipeline/reference.py",
-    ROOT / "solver/gen_data/pipeline/writer.py",
-    ROOT / "solver/solvers/dno_series_jax.py",
-)
-TRAJECTORY_SOURCE_PATHS = (
-    ROOT / "solver/gen_data/trajectory_family_adapters.py",
-    ROOT / "solver/gen_data/trajectory_batch_executor.py",
-    ROOT / "solver/gen_data/pipeline/acceptance.py",
-    ROOT / "solver/gen_data/pipeline/refinement.py",
-    ROOT / "solver/gen_data/pipeline/time_selection.py",
-    ROOT / "solver/gen_data/pipeline/trajectory_writer.py",
-    ROOT / "solver/solvers/time_integrator.py",
-)
-FAMILY_SOURCE_PATHS: dict[PaperFamily, tuple[Path, ...]] = {
-    "stokes": (
-        ROOT / "solver/reference_solutions/stokes_wave.py",
-        ROOT / "solver/gen_data/stokes_sampling.py",
-        ROOT / "solver/gen_data/stokes_batch_executor.py",
-        ROOT / "solver/gen_data/stokes_static_pipeline.py",
-    ),
-    "tanaka": (
-        *TRAJECTORY_SOURCE_PATHS,
-        ROOT / "solver/gen_data/tanaka_initial_conditions.py",
-        ROOT / "solver/gen_data/tanaka_sampling.py",
-        ROOT / "solver/tanaka_ICs/modified_tanaka.py",
-    ),
-    "benjamin_feir": (
-        *TRAJECTORY_SOURCE_PATHS,
-        ROOT / "solver/reference_solutions/stokes_wave.py",
-        ROOT / "solver/gen_data/benjamin_feir_jcp09.py",
-        ROOT / "solver/gen_data/benjamin_feir_sampling.py",
-    ),
-    "jonswap_tma": (
-        *TRAJECTORY_SOURCE_PATHS,
-        ROOT / "solver/gen_data/jonswap_tma.py",
-        ROOT / "solver/gen_data/jonswap_tma_sampling.py",
-    ),
-}
-DEPENDENCY_FILES = (
-    ROOT / "pyproject.toml",
-    ROOT / "uv.lock",
-)
 FAMILY_IDS: dict[PaperFamily, PhysicalFamilyId] = {
     "stokes": PhysicalFamilyId.STOKES,
     "tanaka": PhysicalFamilyId.TANAKA,
@@ -352,51 +295,10 @@ def request_from_args(args: argparse.Namespace) -> GenerationRequest:
     )
 
 
-def _relative(path: Path, root: Path) -> str:
-    return str(path.resolve().relative_to(root.resolve()))
-
-
-def source_hashes(family: PaperFamily) -> dict[str, str]:
-    """Hash the actual implementation files used by ``family``."""
-
-    paths = tuple(dict.fromkeys((*COMMON_SOURCE_PATHS, *FAMILY_SOURCE_PATHS[family])))
-    missing = tuple(path for path in paths if not path.is_file())
-    if missing:
-        raise FileNotFoundError(
-            "generation source path does not exist: " + ", ".join(map(str, missing))
-        )
-    return {_relative(path, ROOT): file_sha256(path) for path in paths}
-
-
-def dependency_environment() -> dict[str, object]:
-    """Return the dependency identity bound into every generation run."""
-
-    missing = tuple(path for path in DEPENDENCY_FILES if not path.is_file())
-    if missing:
-        raise FileNotFoundError(
-            "dependency lock/configuration path does not exist: "
-            + ", ".join(map(str, missing))
-        )
-    return {
-        "python": {
-            "implementation": python_platform.python_implementation(),
-            "version": python_platform.python_version(),
-        },
-        "packages": {
-            "jax": jax.__version__,
-            "jaxlib": jaxlib.__version__,
-            "numpy": np.__version__,
-        },
-        "files_sha256": {
-            _relative(path, ROOT): file_sha256(path) for path in DEPENDENCY_FILES
-        },
-    }
-
-
 def _paper_execution(family: PaperFamily) -> PaperExecution:
     if family == "stokes":
         return PAPER_STATIC_STOKES_CONTRACT
-    return TrajectoryExecutionConfig.paper(family)
+    return paper_trajectory_execution(family)
 
 
 def _execution_record(execution: PaperExecution) -> dict[str, object]:
@@ -450,7 +352,7 @@ def incremental_valid_case_targets(
     *,
     accepted_cases_before: int,
     case_count: int,
-) -> tuple[ValidCaseTarget, ...]:
+) -> tuple[SampleCellTarget, ...]:
     """Return this chunk's balanced valid-case targets."""
 
     before = balanced_valid_case_targets(
@@ -462,7 +364,7 @@ def incremental_valid_case_targets(
         case_count=accepted_cases_before + case_count,
     )
     targets = tuple(
-        ValidCaseTarget(
+        SampleCellTarget(
             cell_id=after_target.cell_id,
             case_count=(after_target.case_count - before_target.case_count),
         )
@@ -502,8 +404,6 @@ def build_run_spec(
         ),
         "ordered_cell_ids": list(cells),
         "execution_platform": request.platform,
-        "dependency_environment": dependency_environment(),
-        "source_sha256": source_hashes(request.family),
     }
     if request.family == "stokes":
         assert isinstance(selected_execution, StaticStokesContract)
@@ -526,7 +426,7 @@ def build_run_spec(
         root=request.output_root,
         family_name=request.family,
         family_id=FAMILY_IDS[request.family],
-        revision_id=paper_dataset_revision_id(FAMILY_IDS[request.family]),
+        revision_id=DATASET_REVISION_BY_FAMILY[FAMILY_IDS[request.family]],
         split_id=request.split,
         stream_id=request.stream_id,
         case_targets=case_targets,
@@ -589,7 +489,7 @@ def _runtime_record() -> dict[str, object]:
         "requested_platform": BOOTSTRAP_PLATFORM,
         "jax_version": jax.__version__,
         "default_backend": jax.default_backend(),
-        "x64_enabled": bool(jax.config.x64_enabled),
+        "x64_enabled": bool(jax.config.read("jax_enable_x64")),
         "devices": [
             {
                 "id": int(device.id),
@@ -645,7 +545,7 @@ def preflight(
             raise RuntimeError(
                 "paper-dataset JONSWAP/TMA must use "
                 "scripts/generate_paper_dataset_jonswap.py so the "
-                "fingerprinted nonlinear adjustment cannot be bypassed"
+                "nonlinear adjustment cannot be bypassed"
             ) from error
     state = scan_dataset_generation(spec)
     cumulative_before = balanced_valid_case_targets(
@@ -690,7 +590,6 @@ def preflight(
             "view_name": _view_name(request),
             "summary_path": str(_summary_path(request)),
         },
-        "configuration_fingerprint": spec.config_fingerprint,
         "run_spec": spec.to_json_record(),
         "execution": _execution_record(execution),
         "allocation": {
@@ -720,15 +619,15 @@ def preflight(
             "stored_rows_per_accepted_case": stored_rows_per_case,
             "retained_rows": request.accepted_cases * stored_rows_per_case,
             "spatial_points_per_row": (
-                execution.target.nx
+                execution.nx
                 if isinstance(execution, StaticStokesContract)
-                else execution.numerical.delivered_nx
+                else execution.numerical.target_nx
             ),
             "field_values_per_row": 3
             * (
-                execution.target.nx
+                execution.nx
                 if isinstance(execution, StaticStokesContract)
-                else execution.numerical.delivered_nx
+                else execution.numerical.target_nx
             ),
         },
         "resume_state": _state_record(state),
@@ -762,7 +661,6 @@ def _artifact_record(path: Path, *, root: Path) -> dict[str, object]:
     return {
         "path": str(path.resolve().relative_to(root.resolve())),
         "bytes": path.stat().st_size,
-        "sha256": file_sha256(path),
     }
 
 
@@ -793,7 +691,10 @@ def _summarize_committed_cases(
             failed_bits = case.get("failed_bits")
             if isinstance(failed_bits, bool) or not isinstance(failed_bits, int):
                 raise TypeError("result failed_bits must be an integer")
-            names = tuple(reason.name for reason in reasons_from_bits(failed_bits))
+            names = tuple(
+                reason.name or str(reason.value)
+                for reason in checks_from_bits(failed_bits)
+            )
             rejection_reasons["+".join(names) if names else "missing_check"] += 1
 
     if dict(accepted) != dict(state.accepted_by_cell):
@@ -824,7 +725,6 @@ def _validate_view(
     view: DatasetViewPaths,
     *,
     request: GenerationRequest,
-    spec: DatasetGenerationSpec,
     execution: PaperExecution,
     attempted_cases: int,
 ) -> dict[str, object]:
@@ -832,7 +732,6 @@ def _validate_view(
     expected_rows = request.accepted_cases * _stored_rows_per_case(execution)
     expected_values = {
         "schema_version": DATASET_VIEW_SCHEMA_VERSION,
-        "configuration_fingerprint": spec.config_fingerprint,
         "n_rows": expected_rows,
         "n_trajectories": attempted_cases,
         "n_accepted_trajectories": request.accepted_cases,
@@ -843,20 +742,18 @@ def _validate_view(
             raise RuntimeError(
                 f"dataset view {name} is {manifest.get(name)!r}, expected {expected!r}"
             )
-    if manifest.get("trajectory_map_sha256") != file_sha256(view.trajectory_map):
-        raise RuntimeError("trajectory-map hash differs from its manifest")
     grid = manifest.get("grid")
     if not isinstance(grid, dict):
         raise TypeError("dataset view grid must be a JSON object")
     expected_grid = (
         {
-            "length": execution.target.length,
-            "nx": execution.target.nx,
+            "length": execution.length,
+            "nx": execution.nx,
         }
         if isinstance(execution, StaticStokesContract)
         else {
             "length": execution.numerical.length,
-            "nx": execution.numerical.delivered_nx,
+            "nx": execution.numerical.target_nx,
         }
     )
     if grid != expected_grid:
@@ -891,13 +788,13 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         "run_spec": spec.to_json_record(),
     }
     if isinstance(execution, StaticStokesContract):
-        executor = StaticStokesBatchExecutor(
+        executor = make_static_stokes_batch_executor(
             run_spec=spec,
             contract=execution,
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             metadata=metadata,
         )
-        length = execution.target.length
+        length = execution.length
     else:
         executor = TrajectoryBatchExecutor(
             run_spec=spec,
@@ -921,7 +818,6 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         state.committed,
         name=_view_name(request),
         length=length,
-        expected_fingerprint=spec.config_fingerprint,
     )
     view_seconds = perf_counter() - view_started
     validation_started = perf_counter()
@@ -932,7 +828,6 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
     view_record = _validate_view(
         view,
         request=request,
-        spec=spec,
         execution=execution,
         attempted_cases=attempted_cases,
     )
@@ -941,7 +836,6 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
     summary: dict[str, object] = {
         "schema": "paper_dataset_quota_summary_v1",
         "status": "complete",
-        "configuration_fingerprint": spec.config_fingerprint,
         "output_root": str(request.output_root),
         "run_spec": spec.to_json_record(),
         "execution": _execution_record(execution),
@@ -981,7 +875,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             "mode": "execute",
             "status": result.summary["status"],
             "summary_path": str(result.summary_path),
-            "configuration_fingerprint": result.summary["configuration_fingerprint"],
             "counts": result.summary["counts"],
             "dataset_view": result.summary["dataset_view"],
             "timing_seconds": result.summary["timing_seconds"],

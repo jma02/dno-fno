@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import queue
 import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence, cast
 
 import jax
 import jax.numpy as jnp
@@ -22,6 +21,7 @@ _TRAINING_MAP_DTYPES = {
     "trajectory_accepted": np.dtype(np.bool_),
     "trajectory_split_id": np.dtype(np.uint8),
 }
+
 
 @dataclass(frozen=True)
 class DatasetLocation:
@@ -60,13 +60,19 @@ def assert_pytree_replicated(tree: Any, *, name: str) -> None:
             raise RuntimeError(f"{name} leaf {path} has divergent device replicas")
 
 
-def require_jax_devices(*, allow_cpu: bool = False, min_device_count: int = 1) -> tuple[str, list[jax.Device]]:
+def require_jax_devices(
+    *,
+    allow_cpu: bool = False,
+    min_device_count: int = 1,
+) -> tuple[str, list[Any]]:
     backend = jax.default_backend()
     if backend != "gpu" and not allow_cpu:
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
     devices = list(jax.local_devices())
     if len(devices) < min_device_count:
-        raise RuntimeError(f"Expected at least {min_device_count} local JAX devices, found {len(devices)}.")
+        raise RuntimeError(
+            f"Expected at least {min_device_count} local JAX devices, found {len(devices)}."
+        )
     return backend, devices
 
 
@@ -74,8 +80,7 @@ def _resolve_dataset_location(dataset_path: Path) -> DatasetLocation:
     """Resolve a schema-v2 paper-dataset view."""
     if not dataset_path.name.endswith(".dataset.json"):
         raise ValueError(
-            "Training requires an authenticated schema-v2 *.dataset.json "
-            f"manifest, got {dataset_path}"
+            f"Training requires a schema-v2 *.dataset.json manifest, got {dataset_path}"
         )
 
     manifest_raw = json.loads(dataset_path.read_text(encoding="utf-8"))
@@ -156,10 +161,7 @@ def _load_trajectory_map_arrays(
                     f"Unsupported trajectory-map schema_version in {trajectory_map_path}; "
                     f"expected scalar {DATASET_VIEW_SCHEMA_VERSION}"
                 )
-        arrays = {
-            name: np.asarray(archive[name])
-            for name in _TRAINING_MAP_DTYPES
-        }
+        arrays = {name: np.asarray(archive[name]) for name in _TRAINING_MAP_DTYPES}
 
     for name, expected_dtype in _TRAINING_MAP_DTYPES.items():
         array = arrays[name]
@@ -182,11 +184,14 @@ def _load_trajectory_map_arrays(
     split_id = arrays["trajectory_split_id"]
     num_trajectories = accepted.shape[0]
     if split_id.shape[0] != num_trajectories:
-        raise ValueError("Trajectory acceptance and split tables must have equal lengths")
+        raise ValueError(
+            "Trajectory acceptance and split tables must have equal lengths"
+        )
     if num_examples and num_trajectories == 0:
         raise ValueError("Nonempty datasets require a nonempty trajectory table")
     if trajectory_index.size and (
-        int(trajectory_index.min()) < 0 or int(trajectory_index.max()) >= num_trajectories
+        int(trajectory_index.min()) < 0
+        or int(trajectory_index.max()) >= num_trajectories
     ):
         raise ValueError("trajectory_index contains an out-of-range table index")
     if np.any(split_id > 2):
@@ -202,14 +207,6 @@ def _zero_mean_xi(xi: np.ndarray) -> np.ndarray:
     # so projecting xi to zero-mean leaves gxi unchanged while keeping the model
     # input distribution consistent with eval/rollout, which both project too.
     return xi - xi.mean(axis=1, keepdims=True)
-
-
-def load_dataset_identity(dataset_path: Path) -> str:
-    """Return the manifest checksum recorded with one training run."""
-    resolved_path = dataset_path.resolve()
-    _resolve_dataset_location(resolved_path)
-    with resolved_path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _load_paper_dataset_shards(
@@ -242,15 +239,11 @@ def _load_paper_dataset_shards(
             missing = sorted(set(field_parts) - set(archive.files))
             if missing:
                 raise ValueError(f"Dataset shard {path} is missing {missing}")
-            arrays = {
-                name: np.asarray(archive[name])
-                for name in field_parts
-            }
+            arrays = {name: np.asarray(archive[name]) for name in field_parts}
         eta = arrays["eta"]
         if eta.ndim != 2 or eta.shape[1] != nx:
             raise ValueError(
-                f"Dataset shard {path} has eta shape {eta.shape}; "
-                f"expected (rows, {nx})"
+                f"Dataset shard {path} has eta shape {eta.shape}; expected (rows, {nx})"
             )
         row_count = eta.shape[0]
         if record.get("n_rows") != row_count:
@@ -262,9 +255,7 @@ def _load_paper_dataset_shards(
         ):
             raise ValueError(f"Dataset shard scalars have inconsistent shapes: {path}")
         for name, array in arrays.items():
-            field_parts[name].append(
-                np.asarray(array, dtype=np.float32)
-            )
+            field_parts[name].append(np.asarray(array, dtype=np.float32))
     eta = np.concatenate(field_parts["eta"], axis=0)
     dataset = {
         "eta": eta,
@@ -296,6 +287,7 @@ def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
     location = _resolve_dataset_location(dataset_path)
     return _load_paper_dataset_shards(location)
 
+
 def build_dataset_split_indices(
     dataset: dict[str, np.ndarray],
     seed: int,
@@ -314,21 +306,30 @@ def build_dataset_split_indices(
     if np.any(split_id > 2):
         raise ValueError("split_id values must be train=0, validation=1, or test=2")
     rng = np.random.default_rng(seed)
-    return tuple(
-        rng.permutation(np.flatnonzero(eligible & (split_id == value)))
-        for value in range(3)
+    return (
+        rng.permutation(np.flatnonzero(eligible & (split_id == 0))),
+        rng.permutation(np.flatnonzero(eligible & (split_id == 1))),
+        rng.permutation(np.flatnonzero(eligible & (split_id == 2))),
     )
 
 
 def _stats_valid(s: dict[str, object]) -> bool:
-    valid = False
-    with suppress(KeyError, TypeError):
-        valid = (
-            len(s["feature_min"]) == 2
-            and len(s["feature_max"]) == 2
-            and all(np.isfinite(v) for v in (*s["feature_min"], *s["feature_max"], s["target_min"], s["target_max"]))
-        )
-    return valid
+    feature_min = s.get("feature_min")
+    feature_max = s.get("feature_max")
+    if not (
+        isinstance(feature_min, (list, tuple))
+        and isinstance(feature_max, (list, tuple))
+        and len(feature_min) == 2
+        and len(feature_max) == 2
+    ):
+        return False
+    values = (*feature_min, *feature_max, s.get("target_min"), s.get("target_max"))
+    return all(
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and np.isfinite(value)
+        for value in values
+    )
 
 
 def _compute_selected_extrema(
@@ -361,14 +362,29 @@ def load_or_compute_stats(
     *,
     indices: np.ndarray | None = None,
 ) -> StatsDict:
-    dataset_identity = load_dataset_identity(dataset_path)
+    location = _resolve_dataset_location(dataset_path.resolve())
+    input_file_state: list[dict[str, int]] = []
+    for path in (
+        dataset_path.resolve(),
+        location.trajectory_map_path,
+        *location.dataset_shard_paths,
+    ):
+        state = path.stat()
+        input_file_state.append(
+            {
+                "size_bytes": state.st_size,
+                "modified_ns": state.st_mtime_ns,
+            }
+        )
     selection: dict[str, object] | None = None
     if indices is not None:
         indices = np.asarray(indices)
         if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
             raise TypeError("indices must be a one-dimensional integer array")
         if indices.size == 0:
-            raise ValueError("Cannot compute normalization statistics from an empty selection")
+            raise ValueError(
+                "Cannot compute normalization statistics from an empty selection"
+            )
         selection = {"count": int(indices.shape[0])}
 
     stats_path = dataset_path.with_suffix(".stats.json")
@@ -376,13 +392,9 @@ def load_or_compute_stats(
         cached: object = None
         with suppress(json.JSONDecodeError, OSError):
             cached = json.loads(stats_path.read_text(encoding="utf-8"))
-        cached_identity = cached.get("dataset_identity") if isinstance(cached, dict) else None
-        cached_manifest_checksum = (
-            cached_identity.get("manifest_sha256")
-            if isinstance(cached_identity, dict)
-            else cached_identity
+        cached_selection = (
+            cached.get("index_selection") if isinstance(cached, dict) else None
         )
-        cached_selection = cached.get("index_selection") if isinstance(cached, dict) else None
         selection_matches = (
             cached_selection is None
             if selection is None
@@ -395,12 +407,11 @@ def load_or_compute_stats(
             isinstance(cached, dict)
             and _stats_valid(cached)
             and selection_matches
-            and cached_manifest_checksum == dataset_identity
+            and cached.get("input_file_state") == input_file_state
         ):
             return {
                 **cached,
                 "index_selection": selection,
-                "dataset_identity": dataset_identity,
             }
 
     if dataset is None:
@@ -413,7 +424,9 @@ def load_or_compute_stats(
 
     eta_min, eta_max, eta_absmax = _compute_selected_extrema(dataset["eta"], indices)
     xi_min, xi_max, xi_absmax = _compute_selected_extrema(dataset["xi"], indices)
-    target_min, target_max, target_absmax = _compute_selected_extrema(dataset["gxi"], indices)
+    target_min, target_max, target_absmax = _compute_selected_extrema(
+        dataset["gxi"], indices
+    )
     depth_arr = np.asarray(dataset["depth"], dtype=np.float64)
     depth_min, depth_max, _ = _compute_selected_extrema(depth_arr, indices)
     log_depth = np.log(np.clip(depth_arr, 1e-12, None))
@@ -434,7 +447,7 @@ def load_or_compute_stats(
         "log_depth_max": log_depth_max,
         "domain_length": float(dataset.get("domain_length", 2.0 * np.pi)),
         "index_selection": selection,
-        "dataset_identity": dataset_identity,
+        "input_file_state": input_file_state,
     }
     stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
     return stats
@@ -453,15 +466,22 @@ class NormStats:
     @staticmethod
     def from_dict(stats: StatsDict, mode: str = "minmax") -> NormStats:
         feature_absmax = np.asarray(
-            stats.get("feature_absmax", [1.0, 1.0]), dtype=np.float32,
+            cast(Sequence[float], stats.get("feature_absmax", [1.0, 1.0])),
+            dtype=np.float32,
         ).reshape((1, 1, 2))
-        target_absmax = float(stats.get("target_absmax", 1.0))
+        target_absmax = float(cast(float | int, stats.get("target_absmax", 1.0)))
         return NormStats(
-            feature_min=np.asarray(stats["feature_min"], dtype=np.float32).reshape((1, 1, 2)),
-            feature_max=np.asarray(stats["feature_max"], dtype=np.float32).reshape((1, 1, 2)),
+            feature_min=np.asarray(
+                cast(Sequence[float], stats["feature_min"]),
+                dtype=np.float32,
+            ).reshape((1, 1, 2)),
+            feature_max=np.asarray(
+                cast(Sequence[float], stats["feature_max"]),
+                dtype=np.float32,
+            ).reshape((1, 1, 2)),
             feature_absmax=np.where(feature_absmax > 0, feature_absmax, 1.0),
-            target_min=float(stats["target_min"]),
-            target_max=float(stats["target_max"]),
+            target_min=float(cast(float | int, stats["target_min"])),
+            target_max=float(cast(float | int, stats["target_max"])),
             target_absmax=target_absmax if target_absmax > 0 else 1.0,
             mode=mode,
         )
@@ -498,7 +518,9 @@ def make_normalizers(ns: NormStats) -> NormalizerFunctions:
 
     else:
         feat_min = jnp.asarray(ns.feature_min, dtype=jnp.float32)
-        feat_range = jnp.asarray(ns.feature_max - ns.feature_min + 1e-8, dtype=jnp.float32)
+        feat_range = jnp.asarray(
+            ns.feature_max - ns.feature_min + 1e-8, dtype=jnp.float32
+        )
         tgt_min = jnp.float32(ns.target_min)
         tgt_range = jnp.float32(ns.target_max - ns.target_min + 1e-8)
 
@@ -591,6 +613,10 @@ def device_prefetch(
         item = q.get()
         if item is sentinel:
             return
-        if isinstance(item, tuple) and len(item) == 2 and item[0] == "__prefetch_error__":
+        if (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "__prefetch_error__"
+        ):
             raise item[1]
         yield item

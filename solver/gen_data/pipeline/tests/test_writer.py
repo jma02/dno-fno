@@ -9,17 +9,16 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.archive import BatchStatus, inspect_batch
-from solver.gen_data.pipeline.manifest import build_dataset_view
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch
+from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     CaseKey,
     SplitId,
 )
-from solver.gen_data.pipeline.quality import (
-    QualityDecision,
-    QualityReason,
-    QualityScope,
+from solver.gen_data.pipeline.case_checks import (
+    CaseCheckResult,
+    CaseCheck,
 )
 from solver.gen_data.pipeline.writer import (
     AcceptedCaseRows,
@@ -30,11 +29,8 @@ from solver.gen_data.pipeline.writer import (
 )
 
 
-FINGERPRINT = "e" * 64
 REQUIRED = (
-    QualityReason.NONFINITE_STATE
-    | QualityReason.NONFINITE_TARGET
-    | QualityReason.BOTTOM_CLEARANCE
+    CaseCheck.NONFINITE_STATE | CaseCheck.NONFINITE_TARGET | CaseCheck.BOTTOM_CLEARANCE
 )
 
 
@@ -54,12 +50,11 @@ def _assignments(split_id: SplitId) -> tuple[AttemptAssignment, ...]:
     )
 
 
-def _decision(*, accepted: bool) -> QualityDecision:
-    return QualityDecision(
-        scope=QualityScope.TRAJECTORY,
+def _decision(*, accepted: bool) -> CaseCheckResult:
+    return CaseCheckResult(
         required=REQUIRED,
         evaluated=REQUIRED,
-        failed=QualityReason.NONE if accepted else QualityReason.NONFINITE_TARGET,
+        failed=CaseCheck.NONE if accepted else CaseCheck.NONFINITE_TARGET,
     )
 
 
@@ -83,7 +78,6 @@ class CommonWriterTests(unittest.TestCase):
             ),
             cell_codes={"shallow": 0, "deep": 1},
             batch_id=4,
-            config_fingerprint=FINGERPRINT,
             metadata={"target": "order_6_pad_8_band_128"},
         )
 
@@ -139,9 +133,7 @@ class CommonWriterTests(unittest.TestCase):
                     np.full(2, 2026072210, dtype=np.uint64),
                 )
             )
-            specifications = [
-                json.loads(value) for value in proposal["case_spec_json"]
-            ]
+            specifications = [json.loads(value) for value in proposal["case_spec_json"]]
             self.assertEqual(specifications[0]["phase_right"], [0.1, 0.2])
         with np.load(self.paths.shard, allow_pickle=False) as shard:
             self.assertEqual(shard["eta"].shape, (3, 4))
@@ -150,7 +142,6 @@ class CommonWriterTests(unittest.TestCase):
         view = build_dataset_view(
             self.root,
             (self.paths,),
-            expected_fingerprint=FINGERPRINT,
         )
         with np.load(view.trajectory_map, allow_pickle=False) as trajectory_map:
             self.assertTrue(

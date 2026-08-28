@@ -22,7 +22,7 @@ from typing import Final, Literal, TypeAlias
 
 import numpy as np
 
-from solver.gen_data.pipeline.production import (
+from solver.gen_data.pipeline.case_allocation import (
     AttemptAssignment,
     random_generator_for_case,
 )

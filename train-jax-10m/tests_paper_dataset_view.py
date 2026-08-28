@@ -8,14 +8,14 @@ import tempfile
 
 import numpy as np
 
-from solver.gen_data.pipeline.archive import (
+from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     CaseCommitRecord,
     commit_batch,
     ensure_proposal,
     ensure_shard,
 )
-from solver.gen_data.pipeline.manifest import build_dataset_view
+from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 
 TRAIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_DIR))
@@ -23,13 +23,8 @@ sys.path.insert(0, str(TRAIN_DIR))
 from util import (  # noqa: E402
     build_dataset_split_indices,
     load_dataset_arrays,
-    load_dataset_identity,
     load_or_compute_stats,
 )
-
-
-FINGERPRINT = "d" * 64
-
 
 def _write_batch(
     root: Path,
@@ -41,14 +36,13 @@ def _write_batch(
     case_ids: tuple[int, ...],
     accepted_local_indices: tuple[int, ...],
 ) -> BatchPaths:
-    paths = BatchPaths.under(
+    paths = BatchPaths.for_batch(
         root,
         family=family,
         split=split,
         batch_id=0,
     )
     proposal = {
-        "config_fingerprint": np.asarray(FINGERPRINT),
         "family_id": np.asarray(family_id, dtype=np.int16),
         "revision_id": np.asarray(1, dtype=np.int16),
         "split_id": np.asarray(split_id, dtype=np.uint8),
@@ -60,7 +54,7 @@ def _write_batch(
         ),
         "metadata_json": np.asarray("{}"),
     }
-    proposal_sha256 = ensure_proposal(paths, proposal)
+    ensure_proposal(paths, proposal)
     frames_per_case = 2
     case_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
@@ -84,8 +78,6 @@ def _write_batch(
         "case_local_index": case_local_index,
         "frame_index": frame_index,
         "selected_dense_index": frame_index * np.int32(4),
-        "config_fingerprint": np.asarray(FINGERPRINT),
-        "proposal_sha256": np.asarray(proposal_sha256),
     }
     ensure_shard(paths, shard)
     blocks = {
@@ -122,7 +114,6 @@ def _build_single_family_view(root: Path) -> Path:
     return build_dataset_view(
         root,
         (batch,),
-        expected_fingerprint=FINGERPRINT,
     ).manifest
 
 
@@ -150,7 +141,6 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
         paths = build_dataset_view(
             root,
             (train, validation),
-            expected_fingerprint=FINGERPRINT,
         )
 
         dataset = load_dataset_arrays(paths.manifest)
@@ -183,7 +173,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             )
         )
 
-def test_stats_cache_is_bound_to_manifest_identity() -> None:
+def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
         root = Path(raw_directory)
         manifest_path = _build_single_family_view(root)
@@ -194,24 +184,22 @@ def test_stats_cache_is_bound_to_manifest_identity() -> None:
             dataset=dataset,
             indices=indices,
         )
-        first_identity = first["dataset_identity"]
-        assert first_identity == load_dataset_identity(manifest_path)
+
+        cache_path = manifest_path.with_suffix(".stats.json")
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached["target_absmax"] = 123456.0
+        cache_path.write_text(json.dumps(cached), encoding="utf-8")
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["view_note"] = "identity changed"
+        manifest["view_note"] = "changed"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         second = load_or_compute_stats(
             manifest_path,
             dataset=dataset,
             indices=indices,
         )
-        second_identity = second["dataset_identity"]
-
-        assert second_identity == load_dataset_identity(manifest_path)
-        assert second_identity != first_identity
-        cache_path = manifest_path.with_suffix(".stats.json")
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        assert cached["dataset_identity"] == second_identity
+        assert second["target_absmax"] == first["target_absmax"]
+        assert second["target_absmax"] != 123456.0
 
 
 def test_direct_npz_dataset_is_rejected() -> None:
@@ -227,7 +215,7 @@ def test_direct_npz_dataset_is_rejected() -> None:
 
 def main() -> int:
     test_schema_v2_loads_shards_and_uses_preassigned_splits()
-    test_stats_cache_is_bound_to_manifest_identity()
+    test_stats_cache_is_refreshed_when_dataset_inputs_change()
     test_direct_npz_dataset_is_rejected()
     print("[PASS] schema-v2 paper-dataset view and preassigned splits")
     return 0

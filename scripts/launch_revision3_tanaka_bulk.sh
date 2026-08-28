@@ -127,7 +127,7 @@ import json, sys
 from pathlib import Path
 
 plans = [json.loads(Path(path).read_text()) for path in sys.argv[1:]]
-identities = []
+contracts = []
 for plan in plans:
     run = plan.get("run_spec", {})
     config = run.get("configuration", {})
@@ -139,11 +139,11 @@ for plan in plans:
             or config.get("execution_platform") != "gpu"
             or plan.get("execution") != config.get("trajectory_execution")):
         raise SystemExit("invalid revision-3 Tanaka preflight")
-    identities.append(json.dumps({key: config.get(key) for key in (
-        "dependency_environment", "source_sha256", "trajectory_execution",
-        "ordered_cell_ids")}, sort_keys=True, separators=(",", ":")))
-if len(plans) != 6 or len(set(identities)) != 1:
-    raise SystemExit("Tanaka preflights do not share one frozen identity")
+    contracts.append(json.dumps({key: config.get(key) for key in (
+        "trajectory_execution", "ordered_cell_ids")},
+        sort_keys=True, separators=(",", ":")))
+if len(plans) != 6 or len(set(contracts)) != 1:
+    raise SystemExit("Tanaka preflights do not share one numerical contract")
 ' "${PREFLIGHTS[@]}"
 
 check_summary() {
@@ -151,11 +151,8 @@ check_summary() {
 import json, sys
 from pathlib import Path
 p, s = (json.loads(Path(path).read_text()) for path in sys.argv[1:])
-if (s.get("schema") != "paper_dataset_quota_summary_v1"
-        or s.get("status") != "complete"
-        or s.get("configuration_fingerprint")
-        != p.get("configuration_fingerprint")):
-    raise SystemExit("completion differs from its frozen preflight")
+if s.get("status") != "complete" or s.get("run_spec") != p.get("run_spec"):
+    raise SystemExit("completion differs from its preflight")
 ' "$PREFLIGHT" "$SUMMARY"
 }
 
@@ -237,10 +234,8 @@ for split, wanted in expected.items():
     if got != wanted or len({c.root for c in selected}) != len(selected):
         raise SystemExit(f"invalid Tanaka {split} intervals: {got}")
     observed[split] = got
-identity = {(c.revision_id, c.dependency_fingerprint, c.source_fingerprint,
-             c.execution_fingerprint, c.execution_platform) for c in chunks}
-if len(chunks) != 6 or len(identity) != 1:
-    raise SystemExit("completed Tanaka chunks do not share one identity")
+if len(chunks) != 6 or len({c.revision_id for c in chunks}) != 1:
+    raise SystemExit("completed Tanaka chunks do not share one revision")
 print(json.dumps({"status": "passed", "family": "tanaka",
     "accepted_cases": {"train": 16384, "validation": 1024, "test": 1024},
     "intervals_with_stream_id": observed,

@@ -5,6 +5,7 @@ Run directly; pytest is not required:
     JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
       .venv/bin/python solver/solvers/tests_rollout_saved_gxi.py
 """
+
 from __future__ import annotations
 
 import os
@@ -39,9 +40,6 @@ def test_saved_gxi_respects_rollout_lowpass() -> None:
         dno_order=0,
         pad_factor=1,
         filter_fraction=0.25,
-        gl2_post_step_houli=True,
-        gl2_post_step_houli_a=36.0,
-        gl2_post_step_houli_m=18.0,
     )
     initial_state = State(
         eta=jnp.zeros((2, nx)),
@@ -69,7 +67,9 @@ def test_saved_gxi_respects_rollout_lowpass() -> None:
         save_gxi=True,
     )
 
-    np.testing.assert_allclose(np.asarray(result["gxi"][0]), np.asarray(expected), atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(result["gxi"][0]), np.asarray(expected), atol=1e-12
+    )
     assert float(jnp.linalg.norm(raw_gxi - expected)) > 1.0
 
 

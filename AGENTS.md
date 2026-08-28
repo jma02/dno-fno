@@ -18,6 +18,7 @@
 - If ruff is installed use `uv run ruff` to verify correctness frequently.
 - If pyright is installed use `uv run pyright` to verify correctness frequently.
 - If the tooling is not available, try to run python -m py_compile or whatever the equivalent is.
+- Commit file changes liberally to git. Do not use other methods of ensuring reproducibility.
 
 ### Testing
 - Prefer to use hypothesis when there are clear invariants that should hold.

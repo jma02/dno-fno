@@ -4,17 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import re
 from typing import Any, Mapping
 
 import numpy as np
 from numpy.typing import NDArray
 
 
-BATCH_RESULT_SCHEMA = "paper_dataset_batch_result_v1"
-FATAL_FAILURE_SCHEMA = "paper_dataset_fatal_failure_v1"
-
-_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _PROPOSAL_DTYPES = {
     "family_id": np.dtype(np.int16),
     "revision_id": np.dtype(np.int16),
@@ -24,7 +19,6 @@ _PROPOSAL_DTYPES = {
     "cell_id": np.dtype(np.int32),
 }
 _PROPOSAL_STRING_FIELDS = {
-    "config_fingerprint",
     "case_spec_json",
     "metadata_json",
 }
@@ -37,10 +31,6 @@ _SHARD_DTYPES = {
     "case_local_index": np.dtype(np.int32),
     "frame_index": np.dtype(np.int32),
     "selected_dense_index": np.dtype(np.int32),
-}
-_SHARD_STRING_FIELDS = {
-    "config_fingerprint",
-    "proposal_sha256",
 }
 
 
@@ -120,11 +110,6 @@ def parse_case_commit_record(
     )
 
 
-def validate_sha256(value: str, field_name: str) -> None:
-    if _SHA256_PATTERN.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-
-
 def strict_json_loads(text: str) -> object:
     """Load JSON while rejecting nonfinite numeric constants."""
 
@@ -180,8 +165,8 @@ def case_row_blocks(
     }
 
 
-def validate_proposal_arrays(arrays: Mapping[str, NDArray[Any]]) -> str:
-    """Validate a proposal and return its configuration fingerprint."""
+def validate_proposal_arrays(arrays: Mapping[str, NDArray[Any]]) -> None:
+    """Validate the arrays stored in one batch proposal."""
 
     _require_exact_dtype(arrays, _PROPOSAL_DTYPES)
     missing_strings = _PROPOSAL_STRING_FIELDS.difference(arrays)
@@ -210,11 +195,6 @@ def validate_proposal_arrays(arrays: Mapping[str, NDArray[Any]]) -> str:
     if np.unique(case_ids).size != case_ids.size:
         raise ValueError("case_id values must be unique within a proposal")
 
-    fingerprint = _scalar_string(
-        arrays["config_fingerprint"],
-        "config_fingerprint",
-    )
-    validate_sha256(fingerprint, "config_fingerprint")
     metadata = _scalar_string(arrays["metadata_json"], "metadata_json")
     if not isinstance(strict_json_loads(metadata), dict):
         raise ValueError("metadata_json must encode a JSON object")
@@ -231,21 +211,14 @@ def validate_proposal_arrays(arrays: Mapping[str, NDArray[Any]]) -> str:
     for name, array in arrays.items():
         if array.dtype.kind in {"f", "c"} and not np.isfinite(array).all():
             raise ValueError(f"proposal array {name!r} contains nonfinite values")
-    return fingerprint
-
-
 def validate_shard_arrays(
     arrays: Mapping[str, NDArray[Any]],
     *,
     proposal_arrays: Mapping[str, NDArray[Any]],
-    proposal_sha256: str,
 ) -> None:
     """Validate all stored rows and their link to a proposal."""
 
     _require_exact_dtype(arrays, _SHARD_DTYPES)
-    missing_strings = _SHARD_STRING_FIELDS.difference(arrays)
-    if missing_strings:
-        raise ValueError(f"shard is missing required arrays {sorted(missing_strings)}")
     if any(array.dtype.kind == "O" for array in arrays.values()):
         raise TypeError("shard arrays cannot use object dtype")
 
@@ -270,16 +243,6 @@ def validate_shard_arrays(
             raise ValueError(f"shard array {name!r} contains nonfinite values")
     if np.any(arrays["depth"] <= 0.0):
         raise ValueError("every stored depth must be positive")
-
-    fingerprint = _scalar_string(arrays["config_fingerprint"], "config_fingerprint")
-    proposal_fingerprint = _scalar_string(
-        proposal_arrays["config_fingerprint"],
-        "proposal config_fingerprint",
-    )
-    if fingerprint != proposal_fingerprint:
-        raise ValueError("shard and proposal configuration fingerprints differ")
-    if _scalar_string(arrays["proposal_sha256"], "proposal_sha256") != proposal_sha256:
-        raise ValueError("shard references a different proposal hash")
 
     blocks = case_row_blocks(
         arrays["case_local_index"],

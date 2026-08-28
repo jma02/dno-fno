@@ -91,7 +91,6 @@ def save_checkpoint(
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
         "stats": stats,
-        "dataset_identity": stats.get("dataset_identity"),
     }
     checkpoints.save_checkpoint(
         ckpt_dir=output_dir,
@@ -390,7 +389,6 @@ def main() -> None:
         "param_count": count_params(params),
         "train_examples": int(train_indices.shape[0]),
         "val_examples": int(val_indices.shape[0]),
-        "dataset_identity": stats.get("dataset_identity"),
     }
     config_payload["domain_length"] = domain_length
     config_payload["xi_scale"] = xi_scale

@@ -1,6 +1,6 @@
 """Cross-family CPU smoke tests for the current dataset constructors.
 
-The Benjamin--Feir arm exercises the revision-4 JCP09 constructor used by the
+The Benjamin--Feir rollout exercises the revision-4 JCP09 constructor used by the
 current paper dataset.
 
 Run with:
@@ -8,6 +8,7 @@ Run with:
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
       uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_cross_family
 """
+
 from __future__ import annotations
 
 import os
@@ -186,6 +187,7 @@ class CrossFamilyAcceptanceSmokeTest(unittest.TestCase):
             rtol=1e-10,
             atol=1e-12,
         )
+
 
 if __name__ == "__main__":
     unittest.main()

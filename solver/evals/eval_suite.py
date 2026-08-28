@@ -1,7 +1,7 @@
 """Evaluate a trained surrogate on the released four-family paper dataset.
 
 The dataset stores adaptive, case-specific save times, so this evaluator uses
-authenticated test-split initial conditions and recomputes both f64 truth and
+test-split initial conditions and recomputes both f64 truth and
 surrogate trajectories on one fixed evaluation grid per physical family.
 
 Typical use::
@@ -12,10 +12,10 @@ Typical use::
 c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json \
         --n_ics 16 --gpu
 """
+
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -74,32 +74,9 @@ class FamilyConfig:
 FAMILY_CONFIGS: dict[str, FamilyConfig] = {
     "stokes": FamilyConfig(family_id=1, dt=0.08, tmax=20.0, substeps=8),
     "tanaka": FamilyConfig(family_id=2, dt=0.8, tmax=200.0, substeps=80),
-    "benjamin_feir": FamilyConfig(
-        family_id=3, dt=0.8, tmax=200.0, substeps=80
-    ),
+    "benjamin_feir": FamilyConfig(family_id=3, dt=0.8, tmax=200.0, substeps=80),
     "jonswap_tma": FamilyConfig(family_id=4, dt=0.08, tmax=20.0, substeps=8),
 }
-
-
-def _file_sha256(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def _directory_sha256(path: Path) -> str:
-    """Hash relative paths and contents of every regular file in a directory."""
-    digest = hashlib.sha256()
-    files = sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
-    if not files:
-        raise ValueError(f"cannot hash empty checkpoint directory: {path}")
-    for candidate in files:
-        relative = candidate.relative_to(path).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(8, "little"))
-        digest.update(relative)
-        with candidate.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _resolve_manifest_path(manifest_path: Path, value: object, label: str) -> Path:
@@ -111,23 +88,12 @@ def _resolve_manifest_path(manifest_path: Path, value: object, label: str) -> Pa
     return path
 
 
-def _require_sha256(path: Path, expected: object, label: str) -> str:
-    if not isinstance(expected, str) or len(expected) != 64:
-        raise ValueError(f"dataset manifest has invalid SHA-256 for {label}")
-    actual = _file_sha256(path)
-    if actual != expected:
-        raise ValueError(
-            f"dataset {label} SHA-256 mismatch: expected {expected}, got {actual}"
-        )
-    return actual
-
-
 def _load_paper_dataset_ics(
     dataset_path: Path,
     family: str,
     n_ics: int,
 ) -> tuple[list[IC], dict[str, object], int, float]:
-    """Authenticate and load the first accepted test ICs for one family."""
+    """Load the first accepted test initial conditions for one family."""
     dataset_path = dataset_path.resolve()
     manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
@@ -147,11 +113,6 @@ def _load_paper_dataset_ics(
 
     trajectory_map_path = _resolve_manifest_path(
         dataset_path, manifest.get("trajectory_map_npz"), "trajectory_map_npz"
-    )
-    trajectory_map_sha256 = _require_sha256(
-        trajectory_map_path,
-        manifest.get("trajectory_map_sha256"),
-        "trajectory map",
     )
     family_id = FAMILY_CONFIGS[family].family_id
 
@@ -175,14 +136,18 @@ def _load_paper_dataset_ics(
         accepted = np.asarray(mapping["trajectory_accepted"], dtype=bool)
         family_ids = np.asarray(mapping["trajectory_family_id"])
         split_ids = np.asarray(mapping["trajectory_split_id"])
-        candidates = np.flatnonzero(accepted & (family_ids == family_id) & (split_ids == 2))
+        candidates = np.flatnonzero(
+            accepted & (family_ids == family_id) & (split_ids == 2)
+        )
         if candidates.size < n_ics:
             raise ValueError(
                 f"family {family!r} has only {candidates.size} accepted test trajectories; "
                 f"requested {n_ics}"
             )
         selected = candidates[:n_ics]
-        first_rows = np.asarray(mapping["trajectory_first_row"])[selected].astype(np.int64)
+        first_rows = np.asarray(mapping["trajectory_first_row"])[selected].astype(
+            np.int64
+        )
         row_counts = np.asarray(mapping["trajectory_row_count"])[selected]
         case_ids = np.asarray(mapping["trajectory_case_id"])[selected].astype(np.int64)
         trajectory_index = np.asarray(mapping["trajectory_index"])[first_rows]
@@ -193,9 +158,13 @@ def _load_paper_dataset_ics(
     if np.any(row_counts <= 0):
         raise ValueError(f"family {family!r} contains an empty selected trajectory")
     if not np.array_equal(trajectory_index, selected):
-        raise ValueError(f"family {family!r} has inconsistent trajectory first-row pointers")
+        raise ValueError(
+            f"family {family!r} has inconsistent trajectory first-row pointers"
+        )
     if np.any(frame_indices != 0):
-        raise ValueError(f"family {family!r} selected trajectory does not begin at frame 0")
+        raise ValueError(
+            f"family {family!r} selected trajectory does not begin at frame 0"
+        )
     if np.unique(case_ids).size != n_ics:
         raise ValueError(f"family {family!r} selected test case IDs are not unique")
 
@@ -203,19 +172,18 @@ def _load_paper_dataset_ics(
     if not isinstance(shard_specs, list):
         raise ValueError("dataset manifest is missing dataset_shards")
     loaded_rows: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    authenticated_shards: list[dict[str, object]] = []
+    loaded_shards: list[dict[str, object]] = []
     for shard_index in np.unique(shard_indices):
         try:
             shard_spec = shard_specs[int(shard_index)]
         except (IndexError, TypeError) as exc:
-            raise ValueError(f"trajectory map references invalid shard {shard_index}") from exc
+            raise ValueError(
+                f"trajectory map references invalid shard {shard_index}"
+            ) from exc
         if not isinstance(shard_spec, dict):
             raise ValueError(f"dataset shard {shard_index} metadata is not an object")
         shard_path = _resolve_manifest_path(
             dataset_path, shard_spec.get("path"), f"shard {shard_index}"
-        )
-        shard_sha256 = _require_sha256(
-            shard_path, shard_spec.get("sha256"), f"shard {shard_index}"
         )
         positions = np.flatnonzero(shard_indices == shard_index)
         rows = shard_rows[positions]
@@ -223,22 +191,25 @@ def _load_paper_dataset_ics(
             required_arrays = {"eta", "xi", "depth", "frame_index"}
             missing = sorted(required_arrays.difference(shard.files))
             if missing:
-                raise ValueError(f"dataset shard {shard_path} is missing arrays: {missing}")
+                raise ValueError(
+                    f"dataset shard {shard_path} is missing arrays: {missing}"
+                )
             if np.any(rows < 0) or np.any(rows >= shard["eta"].shape[0]):
                 raise ValueError(f"trajectory map references rows outside {shard_path}")
             if np.any(np.asarray(shard["frame_index"])[rows] != 0):
-                raise ValueError(f"trajectory map frame-0 rows disagree with {shard_path}")
+                raise ValueError(
+                    f"trajectory map frame-0 rows disagree with {shard_path}"
+                )
             for position, row in zip(positions, rows, strict=True):
                 loaded_rows[int(position)] = (
                     np.asarray(shard["eta"][row], dtype=np.float64),
                     np.asarray(shard["xi"][row], dtype=np.float64),
                     np.asarray(shard["depth"][row], dtype=np.float64),
                 )
-        authenticated_shards.append(
+        loaded_shards.append(
             {
                 "index": int(shard_index),
                 "path": str(shard_path),
-                "sha256": shard_sha256,
             }
         )
 
@@ -251,7 +222,9 @@ def _load_paper_dataset_ics(
                 f"family {family!r} IC shape mismatch: eta={eta.shape}, xi={xi.shape}, "
                 f"expected ({nx},)"
             )
-        if not (np.isfinite(eta).all() and np.isfinite(xi).all() and np.isfinite(depth)):
+        if not (
+            np.isfinite(eta).all() and np.isfinite(xi).all() and np.isfinite(depth)
+        ):
             raise ValueError(f"family {family!r} contains non-finite initial data")
         if depth <= 0.0:
             raise ValueError(f"family {family!r} contains non-positive depth {depth}")
@@ -275,22 +248,10 @@ def _load_paper_dataset_ics(
         "family_id": family_id,
         "split_id": 2,
         "dataset_manifest": str(dataset_path),
-        "dataset_manifest_sha256": _file_sha256(dataset_path),
         "trajectory_map": str(trajectory_map_path),
-        "trajectory_map_sha256": trajectory_map_sha256,
-        "authenticated_shards": authenticated_shards,
+        "loaded_shards": loaded_shards,
     }
     return ics, source, nx, length
-
-
-def _initial_conditions_sha256(ics: list[IC]) -> str:
-    digest = hashlib.sha256()
-    for ic in ics:
-        digest.update(np.asarray(ic.case_id, dtype="<i8").tobytes())
-        digest.update(np.asarray(ic.depth, dtype="<f8").tobytes())
-        digest.update(np.asarray(ic.eta, dtype="<f8").tobytes())
-        digest.update(np.asarray(ic.xi, dtype="<f8").tobytes())
-    return digest.hexdigest()
 
 
 def _truth_protocol(
@@ -299,9 +260,8 @@ def _truth_protocol(
     *,
     nx: int,
     length: float,
-    source: dict[str, object],
     ics: list[IC],
-) -> tuple[str, str]:
+) -> str:
     protocol = {
         "schema_version": 1,
         "family": family,
@@ -315,12 +275,10 @@ def _truth_protocol(
         "dtype": "float64",
         "nx": nx,
         "length": length,
-        "dataset_manifest_sha256": source["dataset_manifest_sha256"],
-        "trajectory_map_sha256": source["trajectory_map_sha256"],
-        "initial_conditions_sha256": _initial_conditions_sha256(ics),
+        "case_ids": [ic.case_id for ic in ics],
+        "depths": [ic.depth for ic in ics],
     }
-    text = json.dumps(protocol, sort_keys=True, separators=(",", ":"))
-    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return json.dumps(protocol, sort_keys=True, separators=(",", ":"))
 
 
 def _try_load_cached_truth(
@@ -329,7 +287,7 @@ def _try_load_cached_truth(
     *,
     expected_shape: tuple[int, int, int],
     expected_case_ids: list[int],
-    expected_protocol_sha256: str,
+    expected_protocol_json: str,
 ) -> RolloutPayload | None:
     if cache_dir is None:
         return None
@@ -347,20 +305,27 @@ def _try_load_cached_truth(
                     for name in ("eta", "xi", "gxi")
                 }
                 case_ids = np.asarray(archive["case_ids"]).tolist()
-                protocol_sha256 = str(archive["truth_protocol_sha256"].item())
+                protocol_json = str(archive["truth_protocol_json"].item())
         except (KeyError, OSError, ValueError) as exc:
             print(f"[{family}] truth cache rejected ({path}): {exc}", flush=True)
             continue
         if any(values.shape != expected_shape for values in fields.values()):
-            print(f"[{family}] truth cache rejected ({path}): shape mismatch", flush=True)
+            print(
+                f"[{family}] truth cache rejected ({path}): shape mismatch", flush=True
+            )
             continue
         if case_ids != expected_case_ids:
-            print(f"[{family}] truth cache rejected ({path}): case IDs differ", flush=True)
+            print(
+                f"[{family}] truth cache rejected ({path}): case IDs differ", flush=True
+            )
             continue
-        if protocol_sha256 != expected_protocol_sha256:
-            print(f"[{family}] truth cache rejected ({path}): protocol differs", flush=True)
+        if protocol_json != expected_protocol_json:
+            print(
+                f"[{family}] truth cache rejected ({path}): protocol differs",
+                flush=True,
+            )
             continue
-        print(f"[{family}] using authenticated truth cache {path}", flush=True)
+        print(f"[{family}] using truth cache {path}", flush=True)
         return {**fields, "wall_s": 0.0}
     return None
 
@@ -374,7 +339,6 @@ def _write_truth_cache(
     depths: np.ndarray,
     case_ids: np.ndarray,
     truth_protocol_json: str,
-    truth_protocol_sha256: str,
 ) -> Path:
     path = out_dir / f"{family}_truth_cache.npz"
     temporary = out_dir / f".{family}_truth_cache.tmp.npz"
@@ -387,7 +351,6 @@ def _write_truth_cache(
         truth_xi=truth["xi"],
         truth_gxi=truth["gxi"],
         truth_protocol_json=np.asarray(truth_protocol_json),
-        truth_protocol_sha256=np.asarray(truth_protocol_sha256),
     )
     temporary.replace(path)
     return path
@@ -445,9 +408,7 @@ def surrogate_rollout_batched(
     nx: int,
     length: float,
     cfg: FamilyConfig,
-    predict_gxi_batched: Callable[
-        [jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray
-    ],
+    predict_gxi_batched: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
 ) -> RolloutPayload:
     """Run the locked-in unguarded surrogate in an f64 integration harness."""
     dtype = jnp.float64
@@ -601,25 +562,27 @@ def compute_metrics(
     """Compute failure-aware rollout metrics without compatibility aliases."""
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         errors = {
-            field: _rel_l2(pred[field], truth[field])
-            for field in ("eta", "xi", "gxi")
+            field: _rel_l2(pred[field], truth[field]) for field in ("eta", "xi", "gxi")
         }
         n_t, n_ics = errors["eta"].shape
         dx = length / truth["eta"].shape[-1]
-        h_truth = 0.5 * np.sum(
-            truth["xi"] * truth["gxi"] + truth["eta"] ** 2, axis=-1
-        ) * dx
-        h_pred = 0.5 * np.sum(
-            pred["xi"] * pred["gxi"] + pred["eta"] ** 2, axis=-1
-        ) * dx
+        h_truth = (
+            0.5 * np.sum(truth["xi"] * truth["gxi"] + truth["eta"] ** 2, axis=-1) * dx
+        )
+        h_pred = 0.5 * np.sum(pred["xi"] * pred["gxi"] + pred["eta"] ** 2, axis=-1) * dx
         drift_truth = (h_truth - h_truth[:1]) / (np.abs(h_truth[:1]) + 1e-12)
         drift_pred = (h_pred - h_pred[:1]) / (np.abs(h_pred[:1]) + 1e-12)
         energy_error = (h_pred - h_truth) / (np.abs(h_truth) + 1e-12)
     if np.asarray(times).shape != (n_t,):
-        raise ValueError(f"times must have shape ({n_t},), got {np.asarray(times).shape}")
+        raise ValueError(
+            f"times must have shape ({n_t},), got {np.asarray(times).shape}"
+        )
 
-    truth_nonfinite_by_field = {
-        field: ~np.isfinite(truth[field]).all(axis=(0, 2))
+    truth_nonfinite_by_field: dict[str, np.ndarray] = {
+        field: np.asarray(
+            ~np.isfinite(truth[field]).all(axis=(0, 2)),
+            dtype=np.bool_,
+        )
         for field in ("eta", "xi", "gxi")
     }
     truth_nonfinite = np.logical_or.reduce(tuple(truth_nonfinite_by_field.values()))
@@ -692,7 +655,9 @@ def compute_metrics(
     terminal_metric_nonfinite = ~np.isfinite(errors["eta"][-1])
     for tau in TERMINAL_FAILURE_THRESHOLDS:
         label = _tau_label(tau)
-        failed = pred_nonfinite_any | terminal_metric_nonfinite | (errors["eta"][-1] > tau)
+        failed = (
+            pred_nonfinite_any | terminal_metric_nonfinite | (errors["eta"][-1] > tau)
+        )
         out[f"terminal_eta_failure_count_tau_{label}"] = int(
             np.count_nonzero(failed & valid)
         )
@@ -757,20 +722,19 @@ def compute_macro_summary(summaries: dict[str, dict[str, Any]]) -> dict[str, obj
         for name, summary in summaries.items()
         if "n_ics_attempted" in summary
     ]
+    attempted_total = sum(int(summary["n_ics_attempted"]) for _, summary in items)
+    truth_valid_total = sum(int(summary["n_truth_valid"]) for _, summary in items)
+    truth_invalid_total = sum(int(summary["n_truth_invalid"]) for _, summary in items)
     macro: dict[str, object] = {
         "n_families": len(items),
         "families": [name for name, _ in items],
         "family_macro_definition": "equal weight for every physical dataset family",
-        "n_ics_attempted_total": sum(
-            int(summary["n_ics_attempted"]) for _, summary in items
-        ),
-        "n_truth_valid_total": sum(int(summary["n_truth_valid"]) for _, summary in items),
-        "n_truth_invalid_total": sum(
-            int(summary["n_truth_invalid"]) for _, summary in items
-        ),
+        "n_ics_attempted_total": attempted_total,
+        "n_truth_valid_total": truth_valid_total,
+        "n_truth_invalid_total": truth_invalid_total,
     }
-    attempted = int(macro["n_ics_attempted_total"])
-    valid = int(macro["n_truth_valid_total"])
+    attempted = attempted_total
+    valid = truth_valid_total
     invalid_rates = np.asarray(
         [
             _summary_float(summary["truth_invalid_rate_attempted"])
@@ -783,13 +747,14 @@ def compute_macro_summary(summaries: dict[str, dict[str, Any]]) -> dict[str, obj
         float(np.mean(invalid_rates)) if invalid_rates.size else float("nan")
     )
     macro["truth_invalid_rate_attempted_micro"] = (
-        float(int(macro["n_truth_invalid_total"]) / attempted)
-        if attempted
-        else float("nan")
+        float(truth_invalid_total / attempted) if attempted else float("nan")
     )
 
     rate_and_count_keys = [
-        ("model_nonfinite_any_rate_truth_valid", "model_nonfinite_any_count_truth_valid"),
+        (
+            "model_nonfinite_any_rate_truth_valid",
+            "model_nonfinite_any_count_truth_valid",
+        ),
         *[
             (
                 f"terminal_eta_failure_rate_tau_{_tau_label(tau)}",
@@ -836,9 +801,7 @@ def run_family(
     family: str,
     cfg: FamilyConfig,
     loaded: LoadedRun,
-    predict_gxi_batched: Callable[
-        [jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray
-    ],
+    predict_gxi_batched: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
     out_dir: Path,
     dataset_path: Path,
     n_ics: int,
@@ -846,16 +809,13 @@ def run_family(
     checkpoint_source: dict[str, object],
     rollout_batch_size: int | None,
 ) -> dict[str, Any]:
-    ics, source, nx, length = _load_paper_dataset_ics(
-        dataset_path, family, n_ics
-    )
+    ics, source, nx, length = _load_paper_dataset_ics(dataset_path, family, n_ics)
     times_np = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
-    protocol_json, protocol_sha256 = _truth_protocol(
+    protocol_json = _truth_protocol(
         family,
         cfg,
         nx=nx,
         length=length,
-        source=source,
         ics=ics,
     )
     shape = (len(times_np), len(ics), nx)
@@ -869,7 +829,7 @@ def run_family(
         truth_cache_dir,
         expected_shape=shape,
         expected_case_ids=[ic.case_id for ic in ics],
-        expected_protocol_sha256=protocol_sha256,
+        expected_protocol_json=protocol_json,
     )
     truth_cache_path: Path | None = None
     if truth is None:
@@ -894,7 +854,6 @@ def run_family(
             depths=np.asarray([ic.depth for ic in ics]),
             case_ids=np.asarray([ic.case_id for ic in ics]),
             truth_protocol_json=protocol_json,
-            truth_protocol_sha256=protocol_sha256,
         )
     print(f"[{family}] truth wall={float(truth['wall_s']):.1f}s", flush=True)
 
@@ -940,7 +899,6 @@ def run_family(
         truth_valid=arrays["truth_valid"],
         model_nonfinite_any=arrays["model_nonfinite_any"],
         truth_protocol_json=np.asarray(protocol_json),
-        truth_protocol_sha256=np.asarray(protocol_sha256),
     )
 
     summary = {key: value for key, value in metrics.items() if key != "_arrays"}
@@ -960,7 +918,6 @@ def run_family(
             "truth_wall_s": truth["wall_s"],
             "surrogate_wall_s": pred["wall_s"],
             "truth_protocol": json.loads(protocol_json),
-            "truth_protocol_sha256": protocol_sha256,
             "precision": "f64 integration harness / f32 model",
             "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         }
@@ -980,7 +937,7 @@ def run_family(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate a checkpoint on authenticated paper-dataset test ICs."
+        description="Evaluate a checkpoint on paper-dataset test initial conditions."
     )
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
@@ -1008,9 +965,7 @@ def main() -> None:
     run_dir = Path(args.run_dir).resolve()
     dataset_path = Path(args.dataset).resolve()
     out_dir = (
-        Path(args.output_dir).resolve()
-        if args.output_dir
-        else run_dir / "eval_suite"
+        Path(args.output_dir).resolve() if args.output_dir else run_dir / "eval_suite"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint=args.checkpoint)
@@ -1021,7 +976,6 @@ def main() -> None:
         "run_dir": str(run_dir),
         "selection": args.checkpoint,
         "path": str(checkpoint_dir),
-        "sha256": _directory_sha256(checkpoint_dir),
         "epoch": loaded.epoch,
     }
     predict_gxi_batched = build_predict_gxi_batched(loaded)

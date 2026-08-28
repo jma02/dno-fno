@@ -30,13 +30,13 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     find_benjamin_feir_sample_violations,
     sample_benjamin_feir_case,
 )
-from solver.gen_data.pipeline.production import (  # noqa: E402
+from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
     AttemptAssignment,
     CaseKey,
     SplitId,
     balanced_valid_case_targets,
     random_generator_for_case,
-    schedule_attempt_batch,
+    assign_next_cases,
 )
 
 
@@ -87,7 +87,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
     def test_common_scheduler_balances_the_pair_cells_exactly(self) -> None:
         cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
         targets = balanced_valid_case_targets(cell_ids, case_count=20_000)
-        scheduled = schedule_attempt_batch(
+        scheduled = assign_next_cases(
             targets,
             {},
             family_id=3,
