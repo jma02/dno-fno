@@ -10,7 +10,7 @@ lane_zero=""
 lane_one=""
 
 # lane split count accepted_before stream relative_root label
-# The last 8,192-case learning-curve increment is split into three disjoint
+# The last 8,192-simulation learning-curve increment is split into three disjoint
 # execution shards so the two remaining GPU lanes have nearly equal work.
 CHUNKS=(
     "0 train 2048 2048 1 train/jonswap_tma/chunk_02048_02048 train_02048_02048"
@@ -52,9 +52,9 @@ build_chunk() {
         "$PYTHON" scripts/generate_paper_dataset_jonswap.py
         --solver-batch-size 8
         --family jonswap_tma --split "$SPLIT"
-        --accepted-cases "$COUNT" --accepted-cases-before "$BEFORE"
+        --accepted-simulations "$COUNT" --accepted-simulations-before "$BEFORE"
         --stream-id "$STREAM" --first-attempt-index 0
-        --batch-size 32 --maximum-attempts-per-accepted-case 4
+        --batch-size 32
         --platform gpu --output-root "$CHUNK_ROOT"
     )
 }
@@ -104,7 +104,7 @@ for plan in plans:
             or plan.get("no_numerical_generation_performed") is not True
             or run.get("family_name") != "jonswap_tma"
             or run.get("revision_id") != 4 or run.get("batch_size") != 32
-            or run.get("maximum_attempts_per_accepted_case") != 4
+            or run.get("maximum_retries_per_parameter_group") != 32
             or config.get("execution_platform") != "gpu"
             or plan.get("execution") != config.get("trajectory_execution")
             or numerical.get("nx") != 2048
@@ -208,7 +208,7 @@ for split, wanted in expected.items():
 if len(chunks) != 8 or len({c.revision_id for c in chunks}) != 1:
     raise SystemExit("completed JONSWAP chunks do not share one revision")
 print(json.dumps({"status": "passed", "family": "jonswap_tma",
-    "accepted_cases": {"train": 16384, "validation": 1024, "test": 1024},
+    "accepted_simulations": {"train": 16384, "validation": 1024, "test": 1024},
     "intervals_with_stream_id": observed,
     "full_four_family_view_preflight_pending": True}, indent=2))
 ' "${summaries[@]}" >"$OUTPUT_BASE/jonswap_view_builder_input_check.json"

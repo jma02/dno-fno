@@ -16,7 +16,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
+from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dno_target import (  # noqa: E402
     compute_dno_target,
 )
@@ -31,13 +31,12 @@ from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     resample_to_target_grid,
     GL2BatchTelemetry,
     InternalHealthTelemetry,
-    CompletedAdjustmentRollout,
+    IntegratedAdjustmentBatch,
     IntegratedTrajectoryBatch,
 )
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
+    execute_adjustment_batch,
     execute_trajectory_batch,
-    execute_variable_horizon_adjustment,
-    execute_variable_horizon_trajectory_batch,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -115,7 +114,7 @@ class InjectedRolloutExecutor:
 
 
 class VariableHorizonRolloutExecutor:
-    """Independent synthetic cases with deliberate post-horizon failures."""
+    """Independent synthetic simulations with deliberate post-horizon failures."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[float, tuple[int, ...], float]] = []
@@ -154,23 +153,23 @@ class VariableHorizonRolloutExecutor:
         internal_dno_output_finite = np.ones((nt, batch), dtype=np.bool_)
         minimum_water_column = np.full((nt, batch), 9.0, dtype=np.float64)
         horizon_by_marker = {1: 0.04, 2: 0.06, 3: 0.08}
-        for case_index, marker in enumerate(markers):
+        for simulation_index, marker in enumerate(markers):
             horizon = horizon_by_marker[int(marker)]
             saved_after = saved_times > horizon + 1.0e-14
             steps_after = step_times >= horizon - 1.0e-14
             if np.any(saved_after):
                 self.poisoned.append((config.dt, int(marker)))
-                eta[saved_after, case_index] = np.nan
-                xi[saved_after, case_index] = np.nan
-                q_ref[saved_after, case_index] = np.nan
-                residual[steps_after, case_index] = np.inf
-                converged[steps_after, case_index] = False
-                stage_finite[steps_after, case_index] = False
-                state_finite[steps_after, case_index] = False
-                internal_hamiltonian[saved_after, case_index] = np.nan
-                internal_state_finite[saved_after, case_index] = False
-                internal_dno_output_finite[saved_after, case_index] = False
-                minimum_water_column[saved_after, case_index] = np.nan
+                eta[saved_after, simulation_index] = np.nan
+                xi[saved_after, simulation_index] = np.nan
+                q_ref[saved_after, simulation_index] = np.nan
+                residual[steps_after, simulation_index] = np.inf
+                converged[steps_after, simulation_index] = False
+                stage_finite[steps_after, simulation_index] = False
+                state_finite[steps_after, simulation_index] = False
+                internal_hamiltonian[saved_after, simulation_index] = np.nan
+                internal_state_finite[saved_after, simulation_index] = False
+                internal_dno_output_finite[saved_after, simulation_index] = False
+                minimum_water_column[saved_after, simulation_index] = np.nan
 
         return IntegratedTrajectoryBatch(
             eta=eta,
@@ -192,7 +191,7 @@ class VariableHorizonRolloutExecutor:
 
 
 class InternalHealthRolloutExecutor:
-    """Return five cases that isolate the four required internal gates."""
+    """Return five simulations that isolate the four required internal gates."""
 
     def __call__(
         self,
@@ -239,7 +238,7 @@ class InternalHealthRolloutExecutor:
 
 
 class InjectedAdjustmentRolloutExecutor:
-    """Return per-case endpoints and one deliberate within-horizon failure."""
+    """Return per-simulation endpoints and one deliberate within-horizon failure."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[np.ndarray, int]] = []
@@ -254,7 +253,7 @@ class InjectedAdjustmentRolloutExecutor:
         config: RolloutConfig,
         nonlinear_ramp_times: np.ndarray,
         nonlinear_ramp_order: int,
-    ) -> CompletedAdjustmentRollout:
+    ) -> IntegratedAdjustmentBatch:
         del depths
         self.calls.append((nonlinear_ramp_times.copy(), nonlinear_ramp_order))
         markers = np.rint(eta0[:, 0]).astype(int)
@@ -278,19 +277,19 @@ class InjectedAdjustmentRolloutExecutor:
         stage_finite = np.ones(step_shape, dtype=np.bool_)
         state_finite = np.ones(step_shape, dtype=np.bool_)
         horizon_by_marker = {1: 0.04, 2: 0.06, 3: 0.08}
-        for case_index, marker in enumerate(markers):
+        for simulation_index, marker in enumerate(markers):
             horizon = horizon_by_marker[int(marker)]
             saved_after = saved_times > horizon + 1.0e-14
             if np.any(saved_after):
-                eta[saved_after, case_index] = np.nan
-                xi[saved_after, case_index] = np.nan
+                eta[saved_after, simulation_index] = np.nan
+                xi[saved_after, simulation_index] = np.nan
                 steps_after = step_times >= horizon - 1.0e-14
-                residual[steps_after, case_index] = np.inf
-                converged[steps_after, case_index] = False
+                residual[steps_after, simulation_index] = np.inf
+                converged[steps_after, simulation_index] = False
             if marker == 3:
-                residual[0, case_index] = 2.0 * config.gl2_residual_tolerance
-                converged[0, case_index] = False
-        return CompletedAdjustmentRollout(
+                residual[0, simulation_index] = 2.0 * config.gl2_residual_tolerance
+                converged[0, simulation_index] = False
+        return IntegratedAdjustmentBatch(
             eta=eta,
             xi=xi,
             gl2=GL2BatchTelemetry(
@@ -540,26 +539,26 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.zeros((5, contract.nx), dtype=np.float64),
             np.zeros((5, contract.nx), dtype=np.float64),
             np.ones(5, dtype=np.float64),
-            np.asarray([0.0, contract.saved_dt]),
+            (np.asarray([0.0, contract.saved_dt]),) * 5,
             config=contract,
-            rollout_executor=InternalHealthRolloutExecutor(),
+            integrator=InternalHealthRolloutExecutor(),
         )
 
         self.assertEqual(
-            tuple(case.decision.accepted for case in execution),
+            tuple(simulation.decision.accepted for simulation in execution),
             (True, False, False, False, False),
         )
         expected_failures = (
-            CaseCheck.HAMILTONIAN_DRIFT,
-            CaseCheck.NONFINITE_STATE,
-            CaseCheck.NONFINITE_TARGET,
-            CaseCheck.BOTTOM_CLEARANCE,
+            SimulationCheck.HAMILTONIAN_DRIFT,
+            SimulationCheck.NONFINITE_STATE,
+            SimulationCheck.NONFINITE_TARGET,
+            SimulationCheck.BOTTOM_CLEARANCE,
         )
-        for case, reason in zip(execution[1:], expected_failures):
-            self.assertTrue(case.decision.required & reason)
-            self.assertTrue(case.decision.evaluated & reason)
-            self.assertTrue(case.decision.failed & reason)
-            self.assertIsNone(case.trajectory)
+        for simulation, reason in zip(execution[1:], expected_failures):
+            self.assertTrue(simulation.decision.required & reason)
+            self.assertTrue(simulation.decision.evaluated & reason)
+            self.assertTrue(simulation.decision.failed & reason)
+            self.assertIsNone(simulation.trajectory)
 
     def test_target_delivers_only_the_declared_lower_band(self) -> None:
         contract = RolloutConfig(
@@ -625,20 +624,22 @@ class TrajectoryRolloutTest(unittest.TestCase):
             eta0,
             np.zeros_like(eta0),
             np.full(2, 10.0),
-            np.asarray([0.0, 0.02]),
+            (np.asarray([0.0, 0.02]),) * 2,
             config=contract,
-            rollout_executor=executor,
+            integrator=executor,
         )
 
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual(executor.calls[0][0], contract.dt)
         self.assertEqual(
-            tuple(case.decision.accepted for case in execution),
+            tuple(simulation.decision.accepted for simulation in execution),
             (True, True),
         )
-        self.assertTrue(all(case.trajectory is not None for case in execution))
+        self.assertTrue(
+            all(simulation.trajectory is not None for simulation in execution)
+        )
 
-    def test_variable_horizon_trajectory_crops_post_horizon_failures(
+    def test_variable_duration_trajectory_ignores_later_failures(
         self,
     ) -> None:
         contract = cheap_contract(
@@ -654,13 +655,13 @@ class TrajectoryRolloutTest(unittest.TestCase):
         )
         executor = VariableHorizonRolloutExecutor()
 
-        execution = execute_variable_horizon_trajectory_batch(
+        execution = execute_trajectory_batch(
             eta0,
             np.zeros_like(eta0),
             np.full(3, 10.0),
             grids,
             config=contract,
-            rollout_executor=executor,
+            integrator=executor,
         )
 
         self.assertEqual(
@@ -668,15 +669,17 @@ class TrajectoryRolloutTest(unittest.TestCase):
             [(contract.dt, (1, 2, 3), 0.08)],
         )
         self.assertEqual(
-            tuple(case.decision.accepted for case in execution),
+            tuple(simulation.decision.accepted for simulation in execution),
             (True, True, True),
         )
-        for case in execution:
-            self.assertTrue(case.decision.required & CaseCheck.HAMILTONIAN_DRIFT)
-            self.assertIsNotNone(case.health_metrics)
-            assert case.health_metrics is not None
+        for simulation in execution:
+            self.assertTrue(
+                simulation.decision.required & SimulationCheck.HAMILTONIAN_DRIFT
+            )
+            self.assertIsNotNone(simulation.health_metrics)
+            assert simulation.health_metrics is not None
             self.assertEqual(
-                case.health_metrics.maximum_relative_hamiltonian_drift,
+                simulation.health_metrics.maximum_relative_hamiltonian_drift,
                 0.0,
             )
 
@@ -694,7 +697,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
         ramp_times = np.asarray([0.4, 0.6, 0.8], dtype=np.float64)
         rollout_executor = InjectedAdjustmentRolloutExecutor()
 
-        execution = execute_variable_horizon_adjustment(
+        execution = execute_adjustment_batch(
             eta0,
             xi0,
             np.full(3, 10.0),
@@ -702,34 +705,38 @@ class TrajectoryRolloutTest(unittest.TestCase):
             nonlinear_ramp_times=ramp_times,
             nonlinear_ramp_order=4,
             config=contract,
-            rollout_executor=rollout_executor,
+            integrator=rollout_executor,
         )
 
         self.assertEqual(len(rollout_executor.calls), 1)
         np.testing.assert_array_equal(rollout_executor.calls[0][0], ramp_times)
         self.assertEqual(rollout_executor.calls[0][1], 4)
         self.assertEqual(
-            tuple(case.decision.accepted for case in execution),
+            tuple(simulation.decision.accepted for simulation in execution),
             (True, True, False),
         )
         for index, expected_terminal in enumerate((1.04, 2.06)):
-            case = execution[index]
-            self.assertIsNotNone(case.terminal_eta)
-            self.assertIsNotNone(case.terminal_xi)
-            assert case.terminal_eta is not None
-            assert case.terminal_xi is not None
-            np.testing.assert_allclose(case.terminal_eta, expected_terminal)
+            simulation = execution[index]
+            self.assertIsNotNone(simulation.terminal_eta)
+            self.assertIsNotNone(simulation.terminal_xi)
+            assert simulation.terminal_eta is not None
+            assert simulation.terminal_xi is not None
+            np.testing.assert_allclose(simulation.terminal_eta, expected_terminal)
             np.testing.assert_allclose(
-                case.terminal_xi,
+                simulation.terminal_xi,
                 -float(grids[index][-1]),
             )
-            self.assertFalse(case.decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
-            self.assertEqual(case.maximum_gl2_stage_residual, 0.0)
+            self.assertFalse(
+                simulation.decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL
+            )
+            self.assertEqual(simulation.maximum_gl2_stage_residual, 0.0)
         rejected = execution[2]
         self.assertIsNone(rejected.terminal_eta)
         self.assertIsNone(rejected.terminal_xi)
-        self.assertTrue(rejected.decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
-        self.assertTrue(rejected.decision.failed & CaseCheck.INCOMPLETE_TRAJECTORY)
+        self.assertTrue(rejected.decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL)
+        self.assertTrue(
+            rejected.decision.failed & SimulationCheck.INCOMPLETE_TRAJECTORY
+        )
 
 
 if __name__ == "__main__":

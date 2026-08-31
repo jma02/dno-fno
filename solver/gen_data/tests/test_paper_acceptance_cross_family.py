@@ -29,7 +29,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     deep_water_proxy_depth,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
-    build_per_case_initial_conditions,
+    build_per_simulation_initial_conditions,
 )
 from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
 from solver.solvers.dno_series_jax import (  # noqa: E402
@@ -85,10 +85,10 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
         dno_order=6,
         pad_factor=8,
     )
-    tanaka_eta, tanaka_xi = build_per_case_initial_conditions(
+    tanaka_eta, tanaka_xi = build_per_simulation_initial_conditions(
         template_params=template,
-        case_h_ref=np.asarray([tanaka_depth], dtype=np.float64),
-        case_specs=[
+        simulation_h_ref=np.asarray([tanaka_depth], dtype=np.float64),
+        simulation_specs=[
             [
                 TanakaCrest(
                     alpha=0.10,

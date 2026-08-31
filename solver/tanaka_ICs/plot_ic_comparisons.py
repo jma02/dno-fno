@@ -29,8 +29,19 @@ import jax.numpy as jnp
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot Tanaka IC comparisons against the provided solitary-wave data.")
-    parser.add_argument("--cases", nargs="+", default=["coll.anim_s005", "coll.anim_s01", "coll.anim_s02", "coll.anim_s04"])
+    parser = argparse.ArgumentParser(
+        description="Plot Tanaka IC comparisons against solitary-wave data."
+    )
+    parser.add_argument(
+        "--simulations",
+        nargs="+",
+        default=[
+            "coll.anim_s005",
+            "coll.anim_s01",
+            "coll.anim_s02",
+            "coll.anim_s04",
+        ],
+    )
     parser.add_argument("--soliton_root", default=str(DEFAULT_SOLITON_ROOT))
     parser.add_argument("--output_dir", default="outputs/tanaka_ic_comparisons")
     parser.add_argument("--depth", type=float, default=1.0)
@@ -78,16 +89,16 @@ def _load_initial_snapshot(path: Path) -> dict[str, np.ndarray | float | str]:
     }
 
 
-def _resolve_case_path(root: Path, case_name: str) -> Path:
-    direct = root / case_name
+def _resolve_simulation_path(root: Path, simulation_name: str) -> Path:
+    direct = root / simulation_name
     if direct.exists():
         return direct
-    prefixed = root / f"coll.anim_{case_name}"
+    prefixed = root / f"coll.anim_{simulation_name}"
     return prefixed
 
 
-def _infer_family(case_name: str) -> str:
-    stem = Path(case_name).name.replace("coll.anim_", "")
+def _infer_family(simulation_name: str) -> str:
+    stem = Path(simulation_name).name.replace("coll.anim_", "")
     return stem[0]
 
 
@@ -95,7 +106,12 @@ def _relative_l2(pred: np.ndarray, truth: np.ndarray, eps: float = 1e-16) -> flo
     return float(np.linalg.norm(pred - truth) / max(np.linalg.norm(truth), eps))
 
 
-def _objective(snapshot: dict[str, np.ndarray | float | str], pred_eta: np.ndarray, pred_xi: np.ndarray, pred_gxi: np.ndarray) -> float:
+def _objective(
+    snapshot: dict[str, np.ndarray | float | str],
+    pred_eta: np.ndarray,
+    pred_xi: np.ndarray,
+    pred_gxi: np.ndarray,
+) -> float:
     xi_true = np.asarray(snapshot["xi"], dtype=np.float64)
     xi_true_zero = xi_true - xi_true.mean()
     xi_pred_zero = pred_xi - pred_xi.mean()
@@ -106,7 +122,13 @@ def _objective(snapshot: dict[str, np.ndarray | float | str], pred_eta: np.ndarr
     )
 
 
-def _build_params(snapshot: dict[str, np.ndarray | float | str], args: argparse.Namespace, amplitude: float, center: float, direction: int) -> ModifiedTanakaParams:
+def _build_params(
+    snapshot: dict[str, np.ndarray | float | str],
+    args: argparse.Namespace,
+    amplitude: float,
+    center: float,
+    direction: int,
+) -> ModifiedTanakaParams:
     return replace(
         make_default_tanaka_template(
             depth=args.depth,
@@ -139,31 +161,65 @@ def _periodic_index_distance(i: int, j: int, n: int) -> int:
     return min(delta, n - delta)
 
 
-def _select_crest_indices(eta: np.ndarray, n_components: int, min_separation: int) -> list[int]:
+def _select_crest_indices(
+    eta: np.ndarray, n_components: int, min_separation: int
+) -> list[int]:
     local_maxima = np.where((eta >= np.roll(eta, 1)) & (eta > np.roll(eta, -1)))[0]
     ordered = local_maxima[np.argsort(eta[local_maxima])[::-1]]
 
     selected: list[int] = []
     for idx in ordered:
-        if all(_periodic_index_distance(int(idx), prev, eta.size) >= min_separation for prev in selected):
+        if all(
+            _periodic_index_distance(int(idx), prev, eta.size) >= min_separation
+            for prev in selected
+        ):
             selected.append(int(idx))
         if len(selected) == n_components:
             return selected
 
     fallback = np.argsort(eta)[::-1]
     for idx in fallback:
-        if all(_periodic_index_distance(int(idx), prev, eta.size) >= min_separation for prev in selected):
+        if all(
+            _periodic_index_distance(int(idx), prev, eta.size) >= min_separation
+            for prev in selected
+        ):
             selected.append(int(idx))
         if len(selected) == n_components:
             break
     return selected
 
 
-def _assemble_model(snapshot: dict[str, np.ndarray | float | str], family: str, components: list[dict[str, object]]) -> dict[str, object]:
-    pred_eta = np.sum([np.asarray(component["solution"].eta_periodic, dtype=np.float64) for component in components], axis=0)
-    pred_xi = np.sum([np.asarray(component["solution"].xi_periodic, dtype=np.float64) for component in components], axis=0)
-    pred_gxi = np.sum([np.asarray(component["solution"].gxi_periodic, dtype=np.float64) for component in components], axis=0)
-    pred_xi = pred_xi - pred_xi.mean() + float(np.mean(np.asarray(snapshot["xi"], dtype=np.float64)))
+def _assemble_model(
+    snapshot: dict[str, np.ndarray | float | str],
+    family: str,
+    components: list[dict[str, object]],
+) -> dict[str, object]:
+    pred_eta = np.sum(
+        [
+            np.asarray(component["solution"].eta_periodic, dtype=np.float64)
+            for component in components
+        ],
+        axis=0,
+    )
+    pred_xi = np.sum(
+        [
+            np.asarray(component["solution"].xi_periodic, dtype=np.float64)
+            for component in components
+        ],
+        axis=0,
+    )
+    pred_gxi = np.sum(
+        [
+            np.asarray(component["solution"].gxi_periodic, dtype=np.float64)
+            for component in components
+        ],
+        axis=0,
+    )
+    pred_xi = (
+        pred_xi
+        - pred_xi.mean()
+        + float(np.mean(np.asarray(snapshot["xi"], dtype=np.float64)))
+    )
 
     score = _objective(snapshot, pred_eta, pred_xi, pred_gxi)
     return {
@@ -193,7 +249,9 @@ def _components_from_batch(
     batch: ModifiedTanakaBatchSolution,
 ) -> list[dict[str, object]]:
     components: list[dict[str, object]] = []
-    for idx, (amplitude, center, direction) in enumerate(zip(amplitudes, centers, directions)):
+    for idx, (amplitude, center, direction) in enumerate(
+        zip(amplitudes, centers, directions)
+    ):
         solution = ModifiedTanakaSolution(
             amplitude=float(amplitude),
             qc=float(batch.qc[idx]),
@@ -221,7 +279,9 @@ def _components_from_batch(
     return components
 
 
-def _fit_case(snapshot: dict[str, np.ndarray | float | str], args: argparse.Namespace) -> dict[str, object]:
+def _fit_simulation(
+    snapshot: dict[str, np.ndarray | float | str], args: argparse.Namespace
+) -> dict[str, object]:
     family = _infer_family(str(snapshot["name"]))
     eta = np.asarray(snapshot["eta"], dtype=np.float64)
     x = np.asarray(snapshot["x"], dtype=np.float64)
@@ -244,11 +304,18 @@ def _fit_case(snapshot: dict[str, np.ndarray | float | str], args: argparse.Name
         ]
         return min(candidate_models, key=lambda model: model["score"])
 
-    crest_indices = _select_crest_indices(eta, n_components=2, min_separation=max(32, eta.size // 12))
+    crest_indices = _select_crest_indices(
+        eta, n_components=2, min_separation=max(32, eta.size // 12)
+    )
     crest_indices = sorted(crest_indices, key=lambda idx: x[idx])
     crest_amplitudes = [float(eta[idx]) for idx in crest_indices]
     crest_centers = [float(x[idx]) for idx in crest_indices]
-    amplitudes = [crest_amplitudes[0], crest_amplitudes[0], crest_amplitudes[1], crest_amplitudes[1]]
+    amplitudes = [
+        crest_amplitudes[0],
+        crest_amplitudes[0],
+        crest_amplitudes[1],
+        crest_amplitudes[1],
+    ]
     centers = [crest_centers[0], crest_centers[0], crest_centers[1], crest_centers[1]]
     directions = [-1, 1, -1, 1]
     template_params = _build_params(snapshot, args, 0.0, 0.0, 1)
@@ -275,13 +342,17 @@ def _fit_case(snapshot: dict[str, np.ndarray | float | str], args: argparse.Name
         sign_combinations = list(product((-1, 1), repeat=2))
 
     models = [
-        _assemble_model(snapshot, family, [candidates[0][signs[0]], candidates[1][signs[1]]])
+        _assemble_model(
+            snapshot, family, [candidates[0][signs[0]], candidates[1][signs[1]]]
+        )
         for signs in sign_combinations
     ]
     return min(models, key=lambda model: model["score"])
 
 
-def _make_summary(snapshot: dict[str, np.ndarray | float | str], model: dict[str, object]) -> dict[str, object]:
+def _make_summary(
+    snapshot: dict[str, np.ndarray | float | str], model: dict[str, object]
+) -> dict[str, object]:
     eta_true = np.asarray(snapshot["eta"], dtype=np.float64)
     xi_true = np.asarray(snapshot["xi"], dtype=np.float64)
     gxi_true = np.asarray(snapshot["gxi"], dtype=np.float64)
@@ -300,9 +371,13 @@ def _make_summary(snapshot: dict[str, np.ndarray | float | str], model: dict[str
         "n_components": len(components),
         "amplitude": float(snapshot["amplitude"]),
         "center": float(snapshot["center"]),
-        "component_amplitudes": [float(component["amplitude"]) for component in components],
+        "component_amplitudes": [
+            float(component["amplitude"]) for component in components
+        ],
         "component_centers": [float(component["center"]) for component in components],
-        "component_directions": [int(component["direction"]) for component in components],
+        "component_directions": [
+            int(component["direction"]) for component in components
+        ],
         "component_qc": [float(component["qc"]) for component in components],
         "component_froude": [float(component["froude"]) for component in components],
         "component_speed": [float(component["speed"]) for component in components],
@@ -313,7 +388,12 @@ def _make_summary(snapshot: dict[str, np.ndarray | float | str], model: dict[str
     }
 
 
-def _plot_case(snapshot: dict[str, np.ndarray | float | str], model: dict[str, object], png_path: Path, grid_mode: str) -> dict[str, object]:
+def _plot_simulation(
+    snapshot: dict[str, np.ndarray | float | str],
+    model: dict[str, object],
+    png_path: Path,
+    grid_mode: str,
+) -> dict[str, object]:
     x = np.asarray(snapshot["x"], dtype=np.float64)
     eta_true = np.asarray(snapshot["eta"], dtype=np.float64)
     xi_true = np.asarray(snapshot["xi"], dtype=np.float64)
@@ -331,21 +411,29 @@ def _plot_case(snapshot: dict[str, np.ndarray | float | str], model: dict[str, o
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
     axes[0, 0].plot(x, eta_true, color="tab:blue", linewidth=2.2, label="true")
-    axes[0, 0].plot(x, eta_pred, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka")
+    axes[0, 0].plot(
+        x, eta_pred, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka"
+    )
     axes[0, 0].set_title(rf"$\eta(x)$ | rel L2 = {summary['eta_rel_l2']:.3e}")
     axes[0, 0].set_xlabel("x")
     axes[0, 0].grid(True, alpha=0.3)
     axes[0, 0].legend()
 
     axes[0, 1].plot(x, xi_true_zero, color="tab:blue", linewidth=2.2, label="true")
-    axes[0, 1].plot(x, xi_pred_zero, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka")
-    axes[0, 1].set_title(rf"$\xi(x)-\langle \xi \rangle$ | rel L2 = {summary['xi_zero_mean_rel_l2']:.3e}")
+    axes[0, 1].plot(
+        x, xi_pred_zero, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka"
+    )
+    axes[0, 1].set_title(
+        rf"$\xi(x)-\langle \xi \rangle$ | rel L2 = {summary['xi_zero_mean_rel_l2']:.3e}"
+    )
     axes[0, 1].set_xlabel("x")
     axes[0, 1].grid(True, alpha=0.3)
     axes[0, 1].legend()
 
     axes[1, 0].plot(x, gxi_true, color="tab:blue", linewidth=2.2, label="true")
-    axes[1, 0].plot(x, gxi_pred, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka")
+    axes[1, 0].plot(
+        x, gxi_pred, color="tab:red", linewidth=1.8, linestyle="--", label="tanaka"
+    )
     axes[1, 0].set_title(rf"$G(\eta)\xi$ | rel L2 = {summary['gxi_rel_l2']:.3e}")
     axes[1, 0].set_xlabel("x")
     axes[1, 0].grid(True, alpha=0.3)
@@ -396,9 +484,14 @@ def main() -> None:
 
     summaries: list[dict[str, float | str]] = []
 
-    snapshots = [_load_initial_snapshot(_resolve_case_path(soliton_root, case_name)) for case_name in args.cases]
+    snapshots = [
+        _load_initial_snapshot(_resolve_simulation_path(soliton_root, simulation_name))
+        for simulation_name in args.simulations
+    ]
 
-    if args.continuation and all(_infer_family(str(snapshot["name"])) == "s" for snapshot in snapshots):
+    if args.continuation and all(
+        _infer_family(str(snapshot["name"])) == "s" for snapshot in snapshots
+    ):
         common_params = _build_params(
             snapshots[0],
             args,
@@ -412,12 +505,19 @@ def main() -> None:
             _assemble_model(
                 snapshot,
                 "s",
-                [{"amplitude": float(snapshot["amplitude"]), "center": float(snapshot["center"]), "direction": args.direction, "solution": solution}],
+                [
+                    {
+                        "amplitude": float(snapshot["amplitude"]),
+                        "center": float(snapshot["center"]),
+                        "direction": args.direction,
+                        "solution": solution,
+                    }
+                ],
             )
             for snapshot, solution in zip(snapshots, branch)
         ]
     else:
-        models = [_fit_case(snapshot, args) for snapshot in snapshots]
+        models = [_fit_simulation(snapshot, args) for snapshot in snapshots]
 
     for snapshot, model in zip(snapshots, models):
         stem = Path(str(snapshot["name"])).name.replace("coll.anim_", "")
@@ -425,7 +525,7 @@ def main() -> None:
         npz_path = output_dir / f"{stem}.npz"
         json_path = output_dir / f"{stem}.json"
 
-        summary = _plot_case(snapshot, model, png_path, args.grid_mode)
+        summary = _plot_simulation(snapshot, model, png_path, args.grid_mode)
         summaries.append(summary)
 
         np.savez_compressed(
@@ -444,7 +544,9 @@ def main() -> None:
         json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(json.dumps(summary, indent=2))
 
-    (output_dir / "summary.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
+    (output_dir / "summary.json").write_text(
+        json.dumps(summaries, indent=2), encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":

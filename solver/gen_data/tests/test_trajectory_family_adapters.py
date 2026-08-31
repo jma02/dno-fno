@@ -38,16 +38,16 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     BatchPaths,
     BatchStatus,
-    CaseCommitRecord,
+    SimulationCommitRecord,
     commit_batch,
-    ensure_shard,
+    save_shard,
     inspect_batch,
     record_fatal_failure,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     PhysicalFamilyId,
     SplitId,
     DATASET_REVISION_BY_FAMILY,
@@ -59,12 +59,12 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
     execute_trajectory_batch,
 )
-from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
-    StoredTimePolicy,
-    outcomes_from_trajectories,
+from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
+    TrajectoryFrameSelectionConfig,
+    subsample_trajectories,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
-    commit_case_outcomes,
+    commit_simulation_outcomes,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_SAMPLE_CELL_IDS,
@@ -74,11 +74,11 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_benjamin_feir_trajectory_batch,
     construct_jonswap_tma_trajectory_batch,
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_proposal,
+    persist_sampled_trajectory_plan,
     resolved_band_for_contract,
-    sample_benjamin_feir_trajectory_cases,
-    sample_jonswap_tma_trajectory_cases,
-    sample_tanaka_trajectory_cases,
+    sample_benjamin_feir_simulations,
+    sample_jonswap_tma_simulations,
+    sample_tanaka_simulations,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -120,7 +120,7 @@ def assignment(
         else revision_id
     )
     return AttemptAssignment(
-        case_key=CaseKey(
+        simulation_key=SimulationKey(
             family_id=family_id,
             revision_id=selected_revision,
             split_id=SplitId.TEST,
@@ -176,7 +176,7 @@ def write_single_row_shard(
 ) -> None:
     """Write one valid orphaned shard for adapter replay tests."""
 
-    ensure_shard(
+    save_shard(
         paths,
         {
             "eta": np.asarray(batch.eta0[:1], dtype=np.float32),
@@ -184,7 +184,7 @@ def write_single_row_shard(
             "gxi": np.zeros_like(batch.eta0[:1], dtype=np.float32),
             "depth": np.asarray(batch.depths[:1], dtype=np.float64),
             "time": np.asarray([0.0], dtype=np.float64),
-            "case_local_index": np.asarray([0], dtype=np.int32),
+            "simulation_local_index": np.asarray([0], dtype=np.int32),
             "frame_index": np.asarray([0], dtype=np.int32),
             "selected_dense_index": np.asarray([0], dtype=np.int32),
         },
@@ -202,7 +202,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
             attempt_index=29,
         )
-        sampled = sample_jonswap_tma_trajectory_cases(
+        sampled = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
@@ -226,7 +226,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             PAPER_RELATIVE_FREQUENCY_WINDOW,
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -282,7 +282,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
             attempt_index=31,
         )
-        sampled = sample_jonswap_tma_trajectory_cases(
+        sampled = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
@@ -305,7 +305,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -364,19 +364,19 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         families = (
             (
                 "tanaka",
-                sample_tanaka_trajectory_cases,
+                sample_tanaka_simulations,
                 construct_tanaka_trajectory_batch,
                 tanaka_assignment,
             ),
             (
                 "benjamin_feir",
-                sample_benjamin_feir_trajectory_cases,
+                sample_benjamin_feir_simulations,
                 construct_benjamin_feir_trajectory_batch,
                 bf_assignment,
             ),
             (
                 "jonswap_tma",
-                sample_jonswap_tma_trajectory_cases,
+                sample_jonswap_tma_simulations,
                 construct_jonswap_tma_trajectory_batch,
                 jonswap_assignment,
             ),
@@ -402,7 +402,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                             bf_record["initial_condition_constructor"],
                             ("jcp09_equation_33_with_project_fifth_order_carrier_v2"),
                         )
-                    proposed = persist_sampled_trajectory_proposal(
+                    proposed = persist_sampled_trajectory_plan(
                         first_sampled,
                         root=root,
                         family_name=family,
@@ -412,7 +412,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                             "test_scope": "reduced_N64_M0_wiring_only",
                         },
                     )
-                    self.assertTrue(proposed.paths.proposal.is_file())
+                    self.assertTrue(proposed.paths.batch_plan.is_file())
                     first = constructor(proposed)
                     second = constructor(proposed)
                     assert_valid_initial_batch(self, first, contract=contract)
@@ -441,19 +441,19 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 PAPER_RELATIVE_FREQUENCY_WINDOW,
             )
 
-    def test_construction_refuses_an_absent_or_changed_proposal(self) -> None:
+    def test_construction_refuses_an_absent_or_changed_batch_plan(self) -> None:
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
             cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
             attempt_index=31,
         )
-        sampled = sample_jonswap_tma_trajectory_cases(
+        sampled = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -461,19 +461,19 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 cell_codes={attempted.cell_id: 0},
                 metadata={"test_scope": "transaction_order"},
             )
-            proposed.paths.proposal.unlink()
+            proposed.paths.batch_plan.unlink()
             with self.assertRaisesRegex(
                 RuntimeError,
-                "proposal",
+                "saved batch plan",
             ):
                 construct_jonswap_tma_trajectory_batch(proposed)
 
-        replayed = sample_jonswap_tma_trajectory_cases(
+        replayed = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 replayed,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -495,7 +495,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
             attempt_index=35,
         )
-        sampled = sample_jonswap_tma_trajectory_cases(
+        sampled = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
@@ -505,7 +505,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         }
         changed = replace(sampled, construction_settings=changed_settings)
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 changed,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -523,12 +523,12 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
             attempt_index=37,
         )
-        sampled = sample_jonswap_tma_trajectory_cases(
+        sampled = sample_jonswap_tma_simulations(
             (attempted,),
             contract=contract,
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -563,9 +563,9 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
             commit_batch(
                 proposed.paths,
-                cases=(
-                    CaseCommitRecord(
-                        case_id=attempted.case_key.case_id,
+                simulations=(
+                    SimulationCommitRecord(
+                        simulation_id=attempted.simulation_key.simulation_id,
                         accepted=True,
                         required_bits=0,
                         evaluated_bits=0,
@@ -581,9 +581,9 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 inspect_batch(proposed.paths).status,
                 BatchStatus.COMMITTED,
             )
-            with self.assertRaisesRegex(RuntimeError, "proposed or shard-written"):
+            with self.assertRaisesRegex(RuntimeError, "saved batch plan"):
                 construct_jonswap_tma_trajectory_batch(proposed)
-            with self.assertRaisesRegex(RuntimeError, "proposed or shard-written"):
+            with self.assertRaisesRegex(RuntimeError, "saved batch plan"):
                 replace(proposed)
 
     def test_construction_refuses_failed_and_corrupt_batches(self) -> None:
@@ -595,12 +595,12 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=cell_id,
             attempt_index=39,
         )
-        failed_sampled = sample_jonswap_tma_trajectory_cases(
+        failed_sampled = sample_jonswap_tma_simulations(
             (failed_attempt,),
             contract=contract,
         )
         with tempfile.TemporaryDirectory() as directory:
-            failed = persist_sampled_trajectory_proposal(
+            failed = persist_sampled_trajectory_plan(
                 failed_sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -619,9 +619,9 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 inspect_batch(failed.paths).status,
                 BatchStatus.FAILED,
             )
-            with self.assertRaisesRegex(RuntimeError, "proposed or shard-written"):
+            with self.assertRaisesRegex(RuntimeError, "saved batch plan"):
                 construct_jonswap_tma_trajectory_batch(failed)
-            with self.assertRaisesRegex(RuntimeError, "proposed or shard-written"):
+            with self.assertRaisesRegex(RuntimeError, "saved batch plan"):
                 replace(failed)
 
         corrupt_attempt = assignment(
@@ -629,12 +629,12 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             cell_id=cell_id,
             attempt_index=40,
         )
-        corrupt_sampled = sample_jonswap_tma_trajectory_cases(
+        corrupt_sampled = sample_jonswap_tma_simulations(
             (corrupt_attempt,),
             contract=contract,
         )
         with tempfile.TemporaryDirectory() as directory:
-            corrupt = persist_sampled_trajectory_proposal(
+            corrupt = persist_sampled_trajectory_plan(
                 corrupt_sampled,
                 root=Path(directory),
                 family_name="jonswap_tma",
@@ -649,11 +649,11 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             )
             with np.load(corrupt.paths.shard, allow_pickle=False) as archive:
                 shard = {name: np.asarray(archive[name]) for name in archive.files}
-            shard["case_local_index"] = np.asarray([1], dtype=np.int32)
+            shard["simulation_local_index"] = np.asarray([1], dtype=np.int32)
             np.savez(corrupt.paths.shard, **shard)
-            with self.assertRaisesRegex(ValueError, "missing proposal case"):
+            with self.assertRaisesRegex(ValueError, "absent from the plan"):
                 construct_jonswap_tma_trajectory_batch(corrupt)
-            with self.assertRaisesRegex(ValueError, "missing proposal case"):
+            with self.assertRaisesRegex(ValueError, "absent from the plan"):
                 replace(corrupt)
 
     def test_bf_and_jonswap_real_gl2_to_committed_manifest_wiring(
@@ -662,7 +662,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         """Exercise the real CPU executor; numerical settings are smoke-only."""
 
         contract = wiring_contract()
-        cases = (
+        simulations = (
             (
                 "benjamin_feir",
                 assignment(
@@ -670,7 +670,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
                     attempt_index=41,
                 ),
-                sample_benjamin_feir_trajectory_cases,
+                sample_benjamin_feir_simulations,
                 construct_benjamin_feir_trajectory_batch,
             ),
             (
@@ -680,23 +680,23 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
                     attempt_index=43,
                 ),
-                sample_jonswap_tma_trajectory_cases,
+                sample_jonswap_tma_simulations,
                 construct_jonswap_tma_trajectory_batch,
             ),
         )
         saved_times = np.asarray([0.0, 0.02, 0.04], dtype=np.float64)
-        policy = StoredTimePolicy(
+        selection = TrajectoryFrameSelectionConfig(
             tanaka_count=3,
             benjamin_feir_count=3,
-            random_sea_count=3,
+            jonswap_tma_count=3,
         )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = []
-            for family, attempted, sampler, constructor in cases:
+            for family, attempted, sampler, constructor in simulations:
                 sampled = sampler((attempted,), contract=contract)
-                proposed = persist_sampled_trajectory_proposal(
+                proposed = persist_sampled_trajectory_plan(
                     sampled,
                     root=root,
                     family_name=family,
@@ -706,7 +706,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                         "test_scope": "reduced_N64_M0_wiring_only",
                     },
                 )
-                self.assertTrue(proposed.paths.proposal.is_file())
+                self.assertTrue(proposed.paths.batch_plan.is_file())
                 self.assertFalse(proposed.paths.shard.exists())
                 self.assertFalse(proposed.paths.result.exists())
                 initial = constructor(proposed)
@@ -714,21 +714,20 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     initial.eta0,
                     initial.xi0,
                     initial.depths,
-                    saved_times,
+                    (saved_times,) * initial.eta0.shape[0],
                     config=contract,
                 )
                 self.assertTrue(execution[0].decision.accepted)
-                outcomes = outcomes_from_trajectories(
+                outcomes = subsample_trajectories(
                     execution,
                     initial.depths,
                     family=family,
                     length=contract.length,
-                    integration_dt=contract.dt,
-                    policy=policy,
+                    frame_selection=selection,
                 )
-                commit_case_outcomes(
+                commit_simulation_outcomes(
                     proposed.paths,
-                    proposed.proposal_arrays,
+                    proposed.batch_plan,
                     outcomes,
                     metadata={
                         "test_scope": "reduced_N64_M0_wiring_only",

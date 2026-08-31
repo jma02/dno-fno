@@ -22,11 +22,11 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
     TanakaPotentialRadicandError,
     _validate_tanaka_surface_potential_radicand,
-    build_per_case_initial_conditions,
+    build_per_simulation_initial_conditions,
 )
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
@@ -38,8 +38,8 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_proposal,
-    sample_tanaka_trajectory_cases,
+    persist_sampled_trajectory_plan,
+    sample_tanaka_simulations,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
     make_default_tanaka_template,
@@ -56,18 +56,18 @@ def validate(
     speeds: np.ndarray,
     depths: np.ndarray,
     specs: list[TanakaCrest],
-    case_ids: np.ndarray,
-    components_within_case: tuple[int, ...],
+    simulation_ids: np.ndarray,
+    components_within_simulation: tuple[int, ...],
 ) -> None:
     """Apply the production validator on a small deterministic grid."""
     _validate_tanaka_surface_potential_radicand(
         radical,
         x_grid=np.linspace(0.0, 1.5, radical.shape[1], dtype=np.float64),
         speed_per_crest=speeds,
-        case_h_ref=depths,
+        simulation_h_ref=depths,
         flat_specs=specs,
-        crest_case_ids=case_ids,
-        components_within_case=components_within_case,
+        crest_simulation_ids=simulation_ids,
+        components_within_simulation=components_within_simulation,
     )
 
 
@@ -78,8 +78,8 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             speeds=np.asarray((2.0,), dtype=np.float64),
             depths=np.asarray((0.2,), dtype=np.float64),
             specs=[TanakaCrest(0.25, 0.5, 1)],
-            case_ids=np.asarray((0,), dtype=np.int32),
-            components_within_case=(0,),
+            simulation_ids=np.asarray((0,), dtype=np.int32),
+            components_within_simulation=(0,),
         )
 
     def test_smallest_representable_negative_value_is_rejected(self) -> None:
@@ -93,8 +93,8 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 speeds=np.asarray((2.0,), dtype=np.float64),
                 depths=np.asarray((0.2,), dtype=np.float64),
                 specs=[TanakaCrest(0.25, 0.5, -1)],
-                case_ids=np.asarray((0,), dtype=np.int32),
-                components_within_case=(0,),
+                simulation_ids=np.asarray((0,), dtype=np.int32),
+                components_within_simulation=(0,),
             )
 
         record = caught.exception.failure_record
@@ -129,8 +129,8 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 speeds=np.asarray((1.0, 2.0, 3.0), dtype=np.float64),
                 depths=np.asarray((0.15, 0.25), dtype=np.float64),
                 specs=specifications,
-                case_ids=np.asarray((0, 0, 1), dtype=np.int32),
-                components_within_case=(0, 1, 0),
+                simulation_ids=np.asarray((0, 0, 1), dtype=np.int32),
+                components_within_simulation=(0, 1, 0),
             )
 
         record = caught.exception.failure_record
@@ -138,7 +138,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             record["schema"],
             TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
         )
-        self.assertEqual(record["invalid_case_indices"], [0, 1])
+        self.assertEqual(record["invalid_simulation_indices"], [0, 1])
         components = record["components"]
         self.assertEqual(
             [component["global_component_index"] for component in components],
@@ -147,8 +147,8 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
         self.assertEqual(
             [
                 (
-                    component["local_case_index"],
-                    component["component_within_case"],
+                    component["local_simulation_index"],
+                    component["component_within_simulation"],
                 )
                 for component in components
             ],
@@ -181,8 +181,8 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                     TanakaCrest(0.2, 0.2, 1),
                     TanakaCrest(0.3, 0.3, -1),
                 ],
-                case_ids=np.asarray((0, 0, 1), dtype=np.int32),
-                components_within_case=(0, 1, 0),
+                simulation_ids=np.asarray((0, 0, 1), dtype=np.int32),
+                components_within_simulation=(0, 1, 0),
             )
 
         record = caught.exception.failure_record
@@ -190,7 +190,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             record["reason"],
             "nonpositive_or_nonfinite_surface_potential_speed_squared",
         )
-        self.assertEqual(record["invalid_case_indices"], [0, 1])
+        self.assertEqual(record["invalid_simulation_indices"], [0, 1])
         components = record["components"]
         self.assertEqual(components[0]["speed_squared"], 0.0)
         self.assertIsNone(components[1]["unsigned_speed"])
@@ -215,10 +215,10 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             dno_order=6,
             pad_factor=8,
         )
-        eta, xi = build_per_case_initial_conditions(
+        eta, xi = build_per_simulation_initial_conditions(
             template_params=template,
-            case_h_ref=np.asarray((0.35, 0.35, 0.35), dtype=np.float64),
-            case_specs=[
+            simulation_h_ref=np.asarray((0.35, 0.35, 0.35), dtype=np.float64),
+            simulation_specs=[
                 [TanakaCrest(0.45, 0.0, 1)],
                 [TanakaCrest(0.45, LENGTH / 2.0, 1)],
                 [TanakaCrest(0.45, 0.0, -1)],
@@ -275,7 +275,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
         )
         cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         attempted = AttemptAssignment(
-            case_key=CaseKey(
+            simulation_key=SimulationKey(
                 family_id=2,
                 revision_id=3,
                 split_id=SplitId.TEST,
@@ -284,7 +284,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             ),
             cell_id=cell_id,
         )
-        sampled = sample_tanaka_trajectory_cases(
+        sampled = sample_tanaka_simulations(
             (attempted,),
             contract=contract,
         )
@@ -292,28 +292,28 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             {
                 "schema": TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
                 "reason": ("negative_or_nonfinite_surface_potential_radicand"),
-                "invalid_case_indices": [0],
+                "invalid_simulation_indices": [0],
                 "components": [],
             }
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_proposal(
+            proposed = persist_sampled_trajectory_plan(
                 sampled,
                 root=Path(directory),
                 family_name="tanaka",
                 batch_id=0,
                 cell_codes={cell_id: 0},
-                metadata={"test_scope": "durable_proposal_before_domain_check"},
+                metadata={"test_scope": "saved_batch_plan_before_domain_check"},
             )
             with patch(
                 "solver.gen_data.trajectory_family_adapters."
-                "build_per_case_initial_conditions",
+                "build_per_simulation_initial_conditions",
                 side_effect=failure,
             ):
                 with self.assertRaises(TanakaPotentialRadicandError):
                     construct_tanaka_trajectory_batch(proposed)
 
-            self.assertTrue(proposed.paths.proposal.is_file())
+            self.assertTrue(proposed.paths.batch_plan.is_file())
             self.assertFalse(proposed.paths.shard.exists())
             self.assertFalse(proposed.paths.result.exists())
             self.assertFalse(proposed.paths.failure.exists())

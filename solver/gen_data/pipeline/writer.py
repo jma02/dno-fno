@@ -1,28 +1,27 @@
-"""Common proposal and complete-case shard assembly for paper-dataset writers."""
+"""Save simulation assignments, accepted rows, and quality decisions by batch."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import json
-from pathlib import Path
 from typing import Any, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
 
+from solver.gen_data.pipeline.artifact_io import json_text
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
-    CaseCommitRecord,
+    SimulationCommitRecord,
     commit_batch,
-    ensure_proposal,
-    ensure_shard,
+    save_batch_plan,
+    save_shard,
 )
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    split_code,
+    SPLIT_CODE_BY_ID,
 )
-from solver.gen_data.pipeline.case_checks import CaseCheckResult
+from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 
 
 FloatArray: TypeAlias = NDArray[np.floating]
@@ -30,7 +29,7 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 
 
 @dataclass(frozen=True)
-class AcceptedCaseRows:
+class AcceptedSimulationRows:
     """Rows retained from one accepted static state or trajectory."""
 
     eta: FloatArray
@@ -42,11 +41,11 @@ class AcceptedCaseRows:
 
 
 @dataclass(frozen=True)
-class CaseOutcome:
+class SimulationOutcome:
     """One complete quality decision and its optional retained rows."""
 
-    decision: CaseCheckResult
-    rows: AcceptedCaseRows | None
+    decision: SimulationCheckResult
+    rows: AcceptedSimulationRows | None
     metrics: Mapping[str, JsonScalar]
 
     def __post_init__(self) -> None:
@@ -56,16 +55,7 @@ class CaseOutcome:
             )
 
 
-def _strict_json(value: Mapping[str, object]) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def build_proposal_arrays(
+def build_batch_plan(
     assignments: Sequence[AttemptAssignment],
     specifications: Sequence[Mapping[str, object]],
     *,
@@ -73,7 +63,7 @@ def build_proposal_arrays(
     batch_id: int,
     metadata: Mapping[str, object],
 ) -> dict[str, NDArray[Any]]:
-    """Build the exact proposal persisted before numerical construction."""
+    """Build the exact batch plan saved before numerical construction."""
 
     if not assignments:
         raise ValueError("assignments must not be empty")
@@ -82,7 +72,7 @@ def build_proposal_arrays(
     if batch_id < 0:
         raise ValueError("batch_id must be nonnegative")
 
-    first_key = assignments[0].case_key
+    first_key = assignments[0].simulation_key
     shared_coordinates = (
         first_key.family_id,
         first_key.revision_id,
@@ -90,9 +80,9 @@ def build_proposal_arrays(
     )
     if any(
         (
-            assignment.case_key.family_id,
-            assignment.case_key.revision_id,
-            assignment.case_key.split_id,
+            assignment.simulation_key.family_id,
+            assignment.simulation_key.revision_id,
+            assignment.simulation_key.split_id,
         )
         != shared_coordinates
         for assignment in assignments
@@ -118,123 +108,101 @@ def build_proposal_arrays(
     return {
         "family_id": np.asarray(first_key.family_id, dtype=np.int16),
         "revision_id": np.asarray(first_key.revision_id, dtype=np.int16),
-        "split_id": np.asarray(split_code(first_key.split_id), dtype=np.uint8),
+        "split_id": np.asarray(
+            SPLIT_CODE_BY_ID[first_key.split_id], dtype=np.uint8
+        ),
         "batch_id": np.asarray(batch_id, dtype=np.int64),
-        "case_id": np.asarray(
-            [assignment.case_key.case_id for assignment in assignments],
+        "simulation_id": np.asarray(
+            [assignment.simulation_key.simulation_id for assignment in assignments],
             dtype=np.int64,
         ),
         "cell_id": encoded_cell_codes,
         "root_seed": np.asarray(
-            [assignment.case_key.root_seed for assignment in assignments],
+            [assignment.simulation_key.root_seed for assignment in assignments],
             dtype=np.uint64,
         ),
         "stream_id": np.asarray(
-            [assignment.case_key.stream_id for assignment in assignments],
+            [assignment.simulation_key.stream_id for assignment in assignments],
             dtype=np.uint32,
         ),
         "attempt_index": np.asarray(
-            [assignment.case_key.attempt_index for assignment in assignments],
+            [assignment.simulation_key.attempt_index for assignment in assignments],
             dtype=np.uint64,
         ),
-        "case_spec_json": np.asarray(
-            [_strict_json(dict(specification)) for specification in specifications]
+        "simulation_spec_json": np.asarray(
+            [json_text(specification) for specification in specifications]
         ),
-        "metadata_json": np.asarray(_strict_json(dict(metadata))),
+        "metadata_json": np.asarray(json_text(metadata)),
     }
 
 
-def _validated_rows(
-    rows: AcceptedCaseRows,
-) -> tuple[
-    NDArray[np.float32],
-    NDArray[np.float32],
-    NDArray[np.float32],
-    NDArray[np.float64],
-    NDArray[np.int32],
-]:
-    eta = np.asarray(rows.eta, dtype=np.float32)
-    xi = np.asarray(rows.xi, dtype=np.float32)
-    gxi = np.asarray(rows.gxi, dtype=np.float32)
-    time = np.asarray(rows.time, dtype=np.float64)
-    selected = np.asarray(rows.selected_dense_index, dtype=np.int32)
-    if eta.ndim != 2 or eta.shape[0] == 0 or eta.shape[1] == 0:
-        raise ValueError("accepted eta must have nonempty shape (time, space)")
-    if xi.shape != eta.shape or gxi.shape != eta.shape:
-        raise ValueError("accepted eta, xi, and gxi must have identical shapes")
-    if time.shape != (eta.shape[0],):
-        raise ValueError("accepted time must have one value per field row")
-    if selected.shape != time.shape:
-        raise ValueError("selected_dense_index must have one value per field row")
-    if not np.isfinite(rows.depth) or rows.depth <= 0.0:
-        raise ValueError("accepted depth must be finite and positive")
-    if not all(np.isfinite(value).all() for value in (eta, xi, gxi, time)):
-        raise ValueError("accepted rows must be finite")
-    if np.any(np.diff(time) <= 0.0):
-        raise ValueError("accepted times must increase strictly")
-    if np.any(np.diff(selected) <= 0):
-        raise ValueError("selected dense indices must increase strictly")
-    return eta, xi, gxi, time, selected
-
-
-def commit_case_outcomes(
+def commit_simulation_outcomes(
     paths: BatchPaths,
-    proposal_arrays: Mapping[str, NDArray[Any]],
-    outcomes: Sequence[CaseOutcome],
+    batch_plan: Mapping[str, NDArray[Any]],
+    outcomes: Sequence[SimulationOutcome],
     *,
     metadata: Mapping[str, object],
 ) -> None:
-    """Persist accepted whole-case rows and commit every attempted decision."""
+    """Persist accepted whole-simulation rows and every attempted decision."""
 
-    if len(outcomes) != int(np.asarray(proposal_arrays["case_id"]).size):
-        raise ValueError("outcomes must contain every proposed case")
-    ensure_proposal(paths, proposal_arrays)
+    simulation_ids = np.asarray(batch_plan["simulation_id"], dtype=np.int64)
+    if len(outcomes) != simulation_ids.size:
+        raise ValueError("outcomes must contain every planned simulation")
+    save_batch_plan(paths, batch_plan)
 
     eta_parts: list[NDArray[np.float32]] = []
     xi_parts: list[NDArray[np.float32]] = []
     gxi_parts: list[NDArray[np.float32]] = []
     depth_parts: list[NDArray[np.float64]] = []
     time_parts: list[NDArray[np.float64]] = []
-    case_parts: list[NDArray[np.int32]] = []
+    simulation_parts: list[NDArray[np.int32]] = []
     frame_parts: list[NDArray[np.int32]] = []
     selected_parts: list[NDArray[np.int32]] = []
-    records: list[CaseCommitRecord] = []
+    records: list[SimulationCommitRecord] = []
     first_row = 0
 
-    case_ids = np.asarray(proposal_arrays["case_id"], dtype=np.int64)
-    for local_index, (case_id, outcome) in enumerate(zip(case_ids, outcomes)):
+    for local_index, (simulation_id, outcome) in enumerate(
+        zip(simulation_ids, outcomes, strict=True)
+    ):
         decision = outcome.decision
         row_count = 0
-        case_first_row = -1
-        if outcome.rows is not None:
-            eta, xi, gxi, time, selected = _validated_rows(outcome.rows)
+        simulation_first_row = -1
+        rows = outcome.rows
+        if rows is not None:
+            eta = np.asarray(rows.eta, dtype=np.float32)
+            if eta.ndim != 2:
+                raise ValueError("accepted eta must have shape (time, space)")
+            xi = np.asarray(rows.xi, dtype=np.float32)
+            gxi = np.asarray(rows.gxi, dtype=np.float32)
+            time = np.asarray(rows.time, dtype=np.float64)
+            selected = np.asarray(rows.selected_dense_index, dtype=np.int32)
             row_count = eta.shape[0]
-            case_first_row = first_row
+            simulation_first_row = first_row
             eta_parts.append(eta)
             xi_parts.append(xi)
             gxi_parts.append(gxi)
-            depth_parts.append(np.full(row_count, outcome.rows.depth, dtype=np.float64))
+            depth_parts.append(np.full(row_count, rows.depth, dtype=np.float64))
             time_parts.append(time)
-            case_parts.append(np.full(row_count, local_index, dtype=np.int32))
+            simulation_parts.append(np.full(row_count, local_index, dtype=np.int32))
             frame_parts.append(np.arange(row_count, dtype=np.int32))
             selected_parts.append(selected)
             first_row += row_count
 
         records.append(
-            CaseCommitRecord(
-                case_id=int(case_id),
+            SimulationCommitRecord(
+                simulation_id=int(simulation_id),
                 accepted=decision.accepted,
                 required_bits=int(decision.required),
                 evaluated_bits=int(decision.evaluated),
                 failed_bits=int(decision.failed),
-                first_row=case_first_row,
+                first_row=simulation_first_row,
                 row_count=row_count,
                 metrics=dict(outcome.metrics),
             )
         )
 
     if eta_parts:
-        ensure_shard(
+        save_shard(
             paths,
             {
                 "eta": np.concatenate(eta_parts),
@@ -242,31 +210,9 @@ def commit_case_outcomes(
                 "gxi": np.concatenate(gxi_parts),
                 "depth": np.concatenate(depth_parts),
                 "time": np.concatenate(time_parts),
-                "case_local_index": np.concatenate(case_parts),
+                "simulation_local_index": np.concatenate(simulation_parts),
                 "frame_index": np.concatenate(frame_parts),
                 "selected_dense_index": np.concatenate(selected_parts),
             },
         )
-    commit_batch(paths, cases=records, metadata=metadata)
-
-
-def batch_paths_for_assignments(
-    root: Path,
-    assignments: Sequence[AttemptAssignment],
-    *,
-    family_name: str,
-    batch_id: int,
-) -> BatchPaths:
-    """Return standard paths after checking one batch's split consistency."""
-
-    if not assignments:
-        raise ValueError("assignments must not be empty")
-    split_id = assignments[0].case_key.split_id
-    if any(assignment.case_key.split_id is not split_id for assignment in assignments):
-        raise ValueError("one batch cannot mix data splits")
-    return BatchPaths.for_batch(
-        root,
-        family=family_name,
-        split=split_id.value,
-        batch_id=batch_id,
-    )
+    commit_batch(paths, simulations=records, metadata=metadata)

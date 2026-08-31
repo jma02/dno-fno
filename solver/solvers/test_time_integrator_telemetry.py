@@ -40,7 +40,7 @@ class NonlinearRampTest(unittest.TestCase):
             atol=0.0,
         )
 
-    def test_casewise_times_and_ramp_times_pair_elementwise(self) -> None:
+    def test_simulationwise_times_and_ramp_times_pair_elementwise(self) -> None:
         params = make_solver_params(
             16,
             2.0 * math.pi,

@@ -1,4 +1,4 @@
-"""CPU tests for common proposal and complete-case shard assembly."""
+"""CPU tests for common batch-plan and complete-simulation shard assembly."""
 
 from __future__ import annotations
 
@@ -9,35 +9,40 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch
+from solver.gen_data.pipeline.batch_storage import (
+    BatchPaths,
+    BatchStatus,
+    inspect_batch,
+)
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
 )
-from solver.gen_data.pipeline.case_checks import (
-    CaseCheckResult,
-    CaseCheck,
+from solver.gen_data.pipeline.simulation_checks import (
+    SimulationCheckResult,
+    SimulationCheck,
 )
 from solver.gen_data.pipeline.writer import (
-    AcceptedCaseRows,
-    CaseOutcome,
-    batch_paths_for_assignments,
-    build_proposal_arrays,
-    commit_case_outcomes,
+    AcceptedSimulationRows,
+    SimulationOutcome,
+    build_batch_plan,
+    commit_simulation_outcomes,
 )
 
 
 REQUIRED = (
-    CaseCheck.NONFINITE_STATE | CaseCheck.NONFINITE_TARGET | CaseCheck.BOTTOM_CLEARANCE
+    SimulationCheck.NONFINITE_STATE
+    | SimulationCheck.NONFINITE_TARGET
+    | SimulationCheck.BOTTOM_CLEARANCE
 )
 
 
 def _assignments(split_id: SplitId) -> tuple[AttemptAssignment, ...]:
     return tuple(
         AttemptAssignment(
-            case_key=CaseKey(
+            simulation_key=SimulationKey(
                 family_id=3,
                 revision_id=2,
                 split_id=split_id,
@@ -50,11 +55,11 @@ def _assignments(split_id: SplitId) -> tuple[AttemptAssignment, ...]:
     )
 
 
-def _decision(*, accepted: bool) -> CaseCheckResult:
-    return CaseCheckResult(
+def _decision(*, accepted: bool) -> SimulationCheckResult:
+    return SimulationCheckResult(
         required=REQUIRED,
         evaluated=REQUIRED,
-        failed=CaseCheck.NONE if accepted else CaseCheck.NONFINITE_TARGET,
+        failed=SimulationCheck.NONE if accepted else SimulationCheck.NONFINITE_TARGET,
     )
 
 
@@ -64,13 +69,13 @@ class CommonWriterTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.assignments = _assignments(SplitId.TRAIN)
-        self.paths = batch_paths_for_assignments(
+        self.paths = BatchPaths.for_batch(
             self.root,
-            self.assignments,
-            family_name="jonswap_tma",
+            family="jonswap_tma",
+            split=SplitId.TRAIN.value,
             batch_id=4,
         )
-        self.proposal = build_proposal_arrays(
+        self.batch_plan = build_batch_plan(
             self.assignments,
             (
                 {"depth": 0.1, "phase_right": [0.1, 0.2]},
@@ -81,12 +86,14 @@ class CommonWriterTests(unittest.TestCase):
             metadata={"target": "order_6_pad_8_band_128"},
         )
 
-    def test_proposal_preassigns_identity_and_commit_keeps_whole_cases(self) -> None:
+    def test_proposal_preassigns_identity_and_commit_keeps_whole_simulations(
+        self,
+    ) -> None:
         field = np.arange(12, dtype=np.float64).reshape(3, 4) / 100.0
         outcomes = (
-            CaseOutcome(
+            SimulationOutcome(
                 decision=_decision(accepted=True),
-                rows=AcceptedCaseRows(
+                rows=AcceptedSimulationRows(
                     eta=field,
                     xi=field + 0.1,
                     gxi=field - 0.1,
@@ -96,31 +103,31 @@ class CommonWriterTests(unittest.TestCase):
                 ),
                 metrics={"maximum_error": 2.0e-5},
             ),
-            CaseOutcome(
+            SimulationOutcome(
                 decision=_decision(accepted=False),
                 rows=None,
                 metrics={"maximum_error": None},
             ),
         )
 
-        commit_case_outcomes(
+        commit_simulation_outcomes(
             self.paths,
-            self.proposal,
+            self.batch_plan,
             outcomes,
-            metadata={"accepted_cases": 1},
+            metadata={"accepted_simulations": 1},
         )
 
         self.assertEqual(
             inspect_batch(self.paths).status,
             BatchStatus.COMMITTED,
         )
-        with np.load(self.paths.proposal, allow_pickle=False) as proposal:
+        with np.load(self.paths.batch_plan, allow_pickle=False) as proposal:
             self.assertTrue(
                 np.array_equal(
-                    proposal["case_id"],
+                    proposal["simulation_id"],
                     np.asarray(
                         [
-                            assignment.case_key.case_id
+                            assignment.simulation_key.simulation_id
                             for assignment in self.assignments
                         ],
                         dtype=np.int64,
@@ -133,11 +140,13 @@ class CommonWriterTests(unittest.TestCase):
                     np.full(2, 2026072210, dtype=np.uint64),
                 )
             )
-            specifications = [json.loads(value) for value in proposal["case_spec_json"]]
+            specifications = [
+                json.loads(value) for value in proposal["simulation_spec_json"]
+            ]
             self.assertEqual(specifications[0]["phase_right"], [0.1, 0.2])
         with np.load(self.paths.shard, allow_pickle=False) as shard:
             self.assertEqual(shard["eta"].shape, (3, 4))
-            self.assertTrue(np.all(shard["case_local_index"] == 0))
+            self.assertTrue(np.all(shard["simulation_local_index"] == 0))
 
         view = build_dataset_view(
             self.root,
@@ -159,7 +168,7 @@ class CommonWriterTests(unittest.TestCase):
 
     def test_all_rejected_batch_commits_without_a_shard(self) -> None:
         outcomes = tuple(
-            CaseOutcome(
+            SimulationOutcome(
                 decision=_decision(accepted=False),
                 rows=None,
                 metrics={"maximum_error": None},
@@ -167,11 +176,11 @@ class CommonWriterTests(unittest.TestCase):
             for _ in self.assignments
         )
 
-        commit_case_outcomes(
+        commit_simulation_outcomes(
             self.paths,
-            self.proposal,
+            self.batch_plan,
             outcomes,
-            metadata={"accepted_cases": 0},
+            metadata={"accepted_simulations": 0},
         )
 
         self.assertFalse(self.paths.shard.exists())
@@ -179,7 +188,7 @@ class CommonWriterTests(unittest.TestCase):
 
     def test_decision_and_row_presence_cannot_disagree(self) -> None:
         with self.assertRaisesRegex(ValueError, "must have rows"):
-            CaseOutcome(
+            SimulationOutcome(
                 decision=_decision(accepted=True),
                 rows=None,
                 metrics={},

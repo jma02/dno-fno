@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,6 +22,7 @@ from solver.gen_data.pipeline.artifact_io import (
     write_json_atomic,
     write_npz_atomic,
 )
+from solver.gen_data.pipeline.batch_artifacts import parse_batch_plan_metadata
 
 
 DATASET_VIEW_SCHEMA_VERSION = 2
@@ -44,32 +44,6 @@ _STORED_DTYPES = {
 }
 
 
-def _same_json_value(left: object, right: object) -> bool:
-    """Compare strict JSON values without Python's numeric coercions."""
-
-    return json.dumps(
-        _plain_json_value(left),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ) == json.dumps(
-        _plain_json_value(right),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _plain_json_value(value: object) -> object:
-    """Copy immutable JSON-like mappings/sequences into plain containers."""
-
-    if isinstance(value, Mapping):
-        return {str(key): _plain_json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json_value(item) for item in value]
-    return value
-
-
 @dataclass(frozen=True)
 class DatasetViewPaths:
     """The two derived files consumed by the training loader."""
@@ -80,21 +54,11 @@ class DatasetViewPaths:
 
 @dataclass(frozen=True)
 class _BatchContract:
-    """Dataset-wide and family-specific contracts recovered from a proposal."""
+    """Dataset-wide and family-specific contracts recovered from a batch plan."""
 
     target: Mapping[str, object]
     family_execution: Mapping[str, object]
     trajectory_numerical: Mapping[str, object] | None
-
-
-def _metadata_object(proposal: Mapping[str, NDArray[Any]]) -> dict[str, object]:
-    encoded = proposal["metadata_json"]
-    if encoded.ndim != 0 or encoded.dtype.kind not in {"U", "S"}:
-        raise TypeError("proposal metadata_json must be a scalar string array")
-    value = json.loads(str(encoded.item()))
-    if not isinstance(value, dict):
-        raise ValueError("proposal metadata_json must encode a JSON object")
-    return value
 
 
 def _object_field(
@@ -192,11 +156,11 @@ def _shared_target(
 
 
 def _batch_contract(
-    proposal: Mapping[str, NDArray[Any]],
+    batch_plan: Mapping[str, NDArray[Any]],
 ) -> _BatchContract | None:
-    metadata = _metadata_object(proposal)
-    case_kind = metadata.get("case_kind")
-    if case_kind == "static":
+    metadata = parse_batch_plan_metadata(batch_plan["metadata_json"])
+    simulation_type = metadata.get("simulation_type")
+    if simulation_type == "static":
         execution = _object_field(metadata, "contract", context="static metadata")
         target = _shared_target(execution, role=execution.get("role"))
         return _BatchContract(
@@ -204,7 +168,7 @@ def _batch_contract(
             family_execution=execution,
             trajectory_numerical=None,
         )
-    if case_kind == "trajectory":
+    if simulation_type == "trajectory":
         execution = _object_field(
             metadata,
             "trajectory_execution",
@@ -222,7 +186,9 @@ def _batch_contract(
             trajectory_numerical=numerical,
         )
     if "contract" in metadata or "trajectory_execution" in metadata:
-        raise ValueError("proposal metadata has an unknown or missing case_kind")
+        raise ValueError(
+            "batch-plan metadata has an unknown or missing simulation_type"
+        )
     return None
 
 
@@ -237,10 +203,10 @@ def build_dataset_view(
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
 ) -> DatasetViewPaths:
-    """Write a training manifest and attempted-case trajectory map.
+    """Write a training manifest and attempted-simulation trajectory map.
 
     ``batches`` defines the immutable shard order.  Every batch must already
-    be committed, but a batch with no accepted cases may legitimately have no
+    be committed, but a batch with no accepted simulations may legitimately have no
     shard.
     """
 
@@ -265,7 +231,7 @@ def build_dataset_view(
     family_ids: list[int] = []
     revision_ids: list[int] = []
     split_ids: list[int] = []
-    case_ids: list[int] = []
+    simulation_ids: list[int] = []
     cell_ids: list[int] = []
     accepted_values: list[bool] = []
     required_bits_values: list[int] = []
@@ -295,14 +261,14 @@ def build_dataset_view(
             raise RuntimeError(
                 f"dataset views require committed batches, got {inspection.status.value}"
             )
-        proposal = load_npz(batch.proposal)
-        contract = _batch_contract(proposal)
+        batch_plan = load_npz(batch.batch_plan)
+        contract = _batch_contract(batch_plan)
         batch_contracts.append(contract)
-        family_id = int(proposal["family_id"])
-        revision_id = int(proposal["revision_id"])
+        family_id = int(batch_plan["family_id"])
+        revision_id = int(batch_plan["revision_id"])
 
-        proposed_case_ids = proposal["case_id"]
-        number_of_cases = int(proposed_case_ids.size)
+        planned_simulation_ids = batch_plan["simulation_id"]
+        number_of_simulations = int(planned_simulation_ids.size)
 
         shard: dict[str, NDArray[Any]] | None = None
         shard_index: int | None = None
@@ -323,7 +289,7 @@ def build_dataset_view(
                     "batch_index": batch_index,
                 }
             )
-            local_index = shard["case_local_index"]
+            local_index = shard["simulation_local_index"]
             row_trajectory_parts.append(
                 np.asarray(local_index + trajectory_offset, dtype=np.int32)
             )
@@ -332,24 +298,28 @@ def build_dataset_view(
                 np.full(shard_row_count, shard_index, dtype=np.int32)
             )
             row_shard_row_parts.append(np.arange(shard_row_count, dtype=np.int64))
-        split_id = int(proposal["split_id"])
-        batch_id = int(proposal["batch_id"])
+        split_id = int(batch_plan["split_id"])
+        batch_id = int(batch_plan["batch_id"])
         accepted_in_batch = 0
-        for local_index, (proposed_case_id, case) in enumerate(
-            zip(proposed_case_ids, inspection.cases)
+        for local_index, (planned_simulation_id, simulation) in enumerate(
+            zip(planned_simulation_ids, inspection.simulations)
         ):
-            block = (case.first_row, case.row_count) if case.accepted else None
+            block = (
+                (simulation.first_row, simulation.row_count)
+                if simulation.accepted
+                else None
+            )
 
             family_ids.append(family_id)
             revision_ids.append(revision_id)
             split_ids.append(split_id)
-            case_ids.append(int(proposed_case_id))
-            cell_ids.append(int(proposal["cell_id"][local_index]))
-            accepted_values.append(case.accepted)
-            accepted_in_batch += int(case.accepted)
-            required_bits_values.append(case.required_bits)
-            evaluated_bits_values.append(case.evaluated_bits)
-            failed_bits_values.append(case.failed_bits)
+            simulation_ids.append(int(planned_simulation_id))
+            cell_ids.append(int(batch_plan["cell_id"][local_index]))
+            accepted_values.append(simulation.accepted)
+            accepted_in_batch += int(simulation.accepted)
+            required_bits_values.append(simulation.required_bits)
+            evaluated_bits_values.append(simulation.evaluated_bits)
+            failed_bits_values.append(simulation.failed_bits)
             if block is None:
                 first_rows.append(-1)
                 row_counts.append(0)
@@ -359,8 +329,8 @@ def build_dataset_view(
 
         batch_records.append(
             {
-                "proposal_path": _relative_path(
-                    batch.proposal,
+                "batch_plan_path": _relative_path(
+                    batch.batch_plan,
                     output_paths.manifest.parent,
                 ),
                 "result_path": _relative_path(
@@ -372,7 +342,7 @@ def build_dataset_view(
                 "revision_id": revision_id,
                 "split_id": split_id,
                 "batch_id": batch_id,
-                "n_attempted_trajectories": number_of_cases,
+                "n_attempted_trajectories": number_of_simulations,
                 "n_accepted_trajectories": accepted_in_batch,
                 "n_rows": shard_row_count,
             }
@@ -390,24 +360,21 @@ def build_dataset_view(
                 family_key,
                 contract.family_execution,
             )
-            if not _same_json_value(previous_execution, contract.family_execution):
+            if previous_execution != contract.family_execution:
                 raise ValueError("one family revision cannot mix execution contracts")
             if contract.trajectory_numerical is not None:
                 previous_numerical = family_trajectory_numerical.setdefault(
                     family_key,
                     contract.trajectory_numerical,
                 )
-                if not _same_json_value(
-                    previous_numerical,
-                    contract.trajectory_numerical,
-                ):
+                if previous_numerical != contract.trajectory_numerical:
                     raise ValueError(
                         "one family revision cannot mix numerical integration contracts"
                     )
 
         if shard is not None:
             global_row_count += int(shard["eta"].shape[0])
-        trajectory_offset += number_of_cases
+        trajectory_offset += number_of_simulations
 
     has_contract = [contract is not None for contract in batch_contracts]
     if any(has_contract) and not all(has_contract):
@@ -428,10 +395,12 @@ def build_dataset_view(
             raise ValueError(
                 "shared target length differs from the dataset-view length"
             )
-    if trajectory_offset >= 1 << 31:
+    if trajectory_offset > np.iinfo(np.int32).max:
         raise ValueError("trajectory count exceeds the int32 map capacity")
-    if len(set(zip(family_ids, revision_ids, case_ids))) != trajectory_offset:
-        raise ValueError("compound case IDs (family, revision, case) must be unique")
+    if len(set(zip(family_ids, revision_ids, simulation_ids))) != trajectory_offset:
+        raise ValueError(
+            "compound simulation IDs (family, revision, simulation) must be unique"
+        )
 
     row_trajectory = np.concatenate(row_trajectory_parts)
     row_frame = np.concatenate(row_frame_parts)
@@ -449,7 +418,7 @@ def build_dataset_view(
         "trajectory_family_id": np.asarray(family_ids, dtype=np.int16),
         "trajectory_revision_id": np.asarray(revision_ids, dtype=np.int16),
         "trajectory_split_id": np.asarray(split_ids, dtype=np.uint8),
-        "trajectory_case_id": np.asarray(case_ids, dtype=np.int64),
+        "trajectory_simulation_id": np.asarray(simulation_ids, dtype=np.int64),
         "trajectory_cell_id": np.asarray(cell_ids, dtype=np.int32),
         "trajectory_accepted": np.asarray(accepted_values, dtype=np.bool_),
         "trajectory_required_bits": np.asarray(
@@ -501,7 +470,7 @@ def build_dataset_view(
             dict(trajectory_numerical_values[0])
             if trajectory_numerical_values
             and all(
-                _same_json_value(numerical, trajectory_numerical_values[0])
+                numerical == trajectory_numerical_values[0]
                 for numerical in trajectory_numerical_values[1:]
             )
             else None
@@ -511,7 +480,7 @@ def build_dataset_view(
             "trajectory_numerical": common_trajectory_numerical,
             "trajectory_numerical_by_family_revision": (trajectory_numerical_records),
             "stored_dtypes": dict(_STORED_DTYPES),
-            "whole_case_rows": True,
+            "whole_simulation_rows": True,
         }
     manifest: dict[str, object] = {
         "schema_version": DATASET_VIEW_SCHEMA_VERSION,

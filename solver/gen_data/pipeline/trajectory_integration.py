@@ -56,8 +56,8 @@ class IntegratedTrajectoryBatch:
 
 
 @dataclass(frozen=True)
-class CompletedAdjustmentRollout:
-    """States and solver diagnostics from the JONSWAP nonlinear warm-up."""
+class IntegratedAdjustmentBatch:
+    """States and solver diagnostics from a JONSWAP nonlinear warm-up."""
 
     eta: FloatArray
     xi: FloatArray
@@ -91,7 +91,7 @@ class AdjustmentBatchIntegrator(Protocol):
         config: RolloutConfig,
         nonlinear_ramp_times: FloatArray,
         nonlinear_ramp_order: int,
-    ) -> CompletedAdjustmentRollout: ...
+    ) -> IntegratedAdjustmentBatch: ...
 
 
 def resample_to_target_grid(field: jax.Array, *, config: RolloutConfig) -> jax.Array:
@@ -349,7 +349,7 @@ def integrate_adjustment_batch(
     config: RolloutConfig,
     nonlinear_ramp_times: FloatArray,
     nonlinear_ramp_order: int,
-) -> CompletedAdjustmentRollout:
+) -> IntegratedAdjustmentBatch:
     """Warm up a validated JONSWAP batch by gradually enabling nonlinearity."""
 
     if not jax.config.read("jax_enable_x64"):
@@ -364,7 +364,7 @@ def integrate_adjustment_batch(
         nonlinear_ramp_order=nonlinear_ramp_order,
     )
     eta, xi = jax.device_get((payload["eta"], payload["xi"]))
-    return CompletedAdjustmentRollout(
+    return IntegratedAdjustmentBatch(
         eta=np.asarray(eta, dtype=np.float64),
         xi=np.asarray(xi, dtype=np.float64),
         gl2=_extract_gl2_telemetry(payload),
@@ -421,7 +421,7 @@ def validate_integrated_batch(
 
 
 def validate_adjustment_rollout(
-    rollout: CompletedAdjustmentRollout,
+    rollout: IntegratedAdjustmentBatch,
     *,
     batch_size: int,
     saved_time_count: int,

@@ -1,4 +1,5 @@
 """Compare final translation and shape errors on paired rollout archives."""
+
 from __future__ import annotations
 
 import argparse
@@ -21,7 +22,10 @@ REGIMES = ("tanaka_g0", "tanaka_g1")
 def archive_metrics(path: Path, length: float) -> dict[str, np.ndarray]:
     """Return final raw, aligned, and translation-component errors."""
     with np.load(path) as archive:
-        case_ids = np.asarray(archive["case_ids"], dtype=np.int64)
+        if "simulation_ids" in archive.files:
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+        else:
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
         depths = np.asarray(archive["depths"], dtype=np.float64)
         truth = np.asarray(archive["truth_eta"][-1], dtype=np.float64)
         prediction = np.asarray(archive["pred_eta"][-1], dtype=np.float64)
@@ -49,7 +53,7 @@ def archive_metrics(path: Path, length: float) -> dict[str, np.ndarray]:
     aligned = np.linalg.norm(aligned_prediction - truth, axis=-1) / truth_norm
     translation = np.sqrt(np.maximum(raw**2 - aligned**2, 0.0))
     return {
-        "case_ids": case_ids,
+        "simulation_ids": simulation_ids,
         "depths": depths,
         "valid": valid,
         "truth": truth,
@@ -87,18 +91,12 @@ def paired_summary(
             "candidate": scalar_summary(after),
             "median_paired_change": float(np.median(differences)),
             "fraction_improved": float(np.mean(after < before)),
-            "wilcoxon_two_sided_p": (
-                None if test is None else float(test.pvalue)
-            ),
+            "wilcoxon_two_sided_p": (None if test is None else float(test.pvalue)),
         }
     result["raw_threshold_counts"] = {
         str(threshold): {
-            "baseline": int(
-                np.count_nonzero(baseline["raw"][mask] > threshold)
-            ),
-            "candidate": int(
-                np.count_nonzero(candidate["raw"][mask] > threshold)
-            ),
+            "baseline": int(np.count_nonzero(baseline["raw"][mask] > threshold)),
+            "candidate": int(np.count_nonzero(candidate["raw"][mask] > threshold)),
         }
         for threshold in (0.25, 0.5, 0.75, 1.0)
     }
@@ -115,8 +113,8 @@ def compare_regime(
     """Compare one paired regime and verify its reference panel."""
     baseline = archive_metrics(baseline_path, length)
     candidate = archive_metrics(candidate_path, length)
-    if not np.array_equal(baseline["case_ids"], candidate["case_ids"]):
-        raise ValueError(f"{regime}: case IDs do not match")
+    if not np.array_equal(baseline["simulation_ids"], candidate["simulation_ids"]):
+        raise ValueError(f"{regime}: simulation IDs do not match")
     if not np.array_equal(baseline["depths"], candidate["depths"]):
         raise ValueError(f"{regime}: depths do not match")
     truth_max_abs_difference = float(
@@ -124,8 +122,7 @@ def compare_regime(
     )
     if truth_max_abs_difference > 1e-8:
         raise ValueError(
-            f"{regime}: final truth states differ by "
-            f"{truth_max_abs_difference:.3e}"
+            f"{regime}: final truth states differ by {truth_max_abs_difference:.3e}"
         )
     valid = baseline["valid"] & candidate["valid"]
     shallow = valid & (baseline["depths"] < shallow_depth)
@@ -142,8 +139,8 @@ def compare_regime(
     ordered = np.flatnonzero(valid)[np.argsort(translation_change[valid])]
     result["largest_translation_improvements"] = [
         {
-            "case_index": int(index),
-            "case_id": int(baseline["case_ids"][index]),
+            "simulation_index": int(index),
+            "simulation_id": int(baseline["simulation_ids"][index]),
             "depth": float(baseline["depths"][index]),
             "baseline": float(baseline["translation"][index]),
             "candidate": float(candidate["translation"][index]),
@@ -152,8 +149,8 @@ def compare_regime(
     ]
     result["largest_translation_regressions"] = [
         {
-            "case_index": int(index),
-            "case_id": int(baseline["case_ids"][index]),
+            "simulation_index": int(index),
+            "simulation_id": int(baseline["simulation_ids"][index]),
             "depth": float(baseline["depths"][index]),
             "baseline": float(baseline["translation"][index]),
             "candidate": float(candidate["translation"][index]),

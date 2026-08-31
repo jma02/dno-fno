@@ -19,11 +19,11 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
     FINITE_DEPTH_STOKES_URSELL_LIMIT,
     finite_depth_stokes_ursell_upper_bound,
 )
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEEP_CARRIER_MODE_BOUNDS,
@@ -40,7 +40,7 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     effective_amplitude_bounds,
     effective_depth_bounds,
     feasible_carrier_modes,
-    sample_stokes_case,
+    sample_stokes_simulation,
     stokes_support_violations,
 )
 
@@ -58,7 +58,7 @@ def assignment(
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
-        case_key=CaseKey(
+        simulation_key=SimulationKey(
             family_id=family_id,
             revision_id=revision_id,
             split_id=split_id,
@@ -94,33 +94,35 @@ class StokesSamplingTest(unittest.TestCase):
     def test_replay_is_bitwise_deterministic(self) -> None:
         for cell_index, cell_id in enumerate(STOKES_SAMPLE_CELL_IDS):
             with self.subTest(cell=cell_id):
-                first = sample_stokes_case(
+                first = sample_stokes_simulation(
                     assignment(cell_index, attempt_index=90 + cell_index)
                 )
-                second = sample_stokes_case(
+                second = sample_stokes_simulation(
                     assignment(cell_index, attempt_index=90 + cell_index)
                 )
                 self.assertEqual(first, second)
                 self.assertEqual(first.to_json_record(), second.to_json_record())
 
-    def test_pcg64_uses_all_case_key_seed_words(self) -> None:
-        base = assignment(0, attempt_index=41).case_key
+    def test_pcg64_uses_all_simulation_key_seed_words(self) -> None:
+        base = assignment(0, attempt_index=41).simulation_key
         expected = np.random.Generator(
             np.random.PCG64(np.random.SeedSequence(base.seed_words))
         ).random(8)
         np.testing.assert_array_equal(
-            random_generator_for_case(base).random(8), expected
+            random_generator_for_simulation(base).random(8), expected
         )
 
         keys = (
             base,
-            CaseKey(2, 2, SplitId.TRAIN, 0, 41),
-            CaseKey(1, 3, SplitId.TRAIN, 0, 41),
-            CaseKey(1, 2, SplitId.VALIDATION, 0, 41),
-            CaseKey(1, 2, SplitId.TRAIN, 1, 41),
-            CaseKey(1, 2, SplitId.TRAIN, 0, 42),
+            SimulationKey(2, 2, SplitId.TRAIN, 0, 41),
+            SimulationKey(1, 3, SplitId.TRAIN, 0, 41),
+            SimulationKey(1, 2, SplitId.VALIDATION, 0, 41),
+            SimulationKey(1, 2, SplitId.TRAIN, 1, 41),
+            SimulationKey(1, 2, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
+        first_draws = {
+            tuple(random_generator_for_simulation(key).random(8)) for key in keys
+        }
         self.assertEqual(len(first_draws), len(keys))
 
     def test_feasible_modes_and_conditional_bounds_are_exact(self) -> None:
@@ -161,7 +163,7 @@ class StokesSamplingTest(unittest.TestCase):
             branch, steepness_cell_index = STOKES_SAMPLE_CELLS[cell_id]
             for attempt_index in range(96):
                 try:
-                    sample = sample_stokes_case(
+                    sample = sample_stokes_simulation(
                         assignment(cell_index, attempt_index=attempt_index),
                     )
                 except UrsellRedrawLimitReached as error:
@@ -232,7 +234,7 @@ class StokesSamplingTest(unittest.TestCase):
         self.assertEqual(failures_by_cell[2:], [0, 0])
 
     def test_cell_and_depth_boundaries_fail_closed(self) -> None:
-        deep_low = sample_stokes_case(assignment(2, attempt_index=400))
+        deep_low = sample_stokes_simulation(assignment(2, attempt_index=400))
         low_upper = deep_low.steepness_bounds[1] / deep_low.wavenumber
         outside_low = replace(
             deep_low,
@@ -243,7 +245,7 @@ class StokesSamplingTest(unittest.TestCase):
             stokes_support_violations(outside_low),
         )
 
-        deep_moderate = sample_stokes_case(assignment(3, attempt_index=401))
+        deep_moderate = sample_stokes_simulation(assignment(3, attempt_index=401))
         lower_moderate = deep_moderate.steepness_bounds[0] / deep_moderate.wavenumber
         at_lower_moderate = replace(
             deep_moderate,
@@ -255,7 +257,7 @@ class StokesSamplingTest(unittest.TestCase):
             sample
             for index in range(700, 800)
             if (
-                sample := sample_stokes_case(assignment(2, attempt_index=index))
+                sample := sample_stokes_simulation(assignment(2, attempt_index=index))
             ).carrier_mode
             == 1
         )
@@ -279,7 +281,7 @@ class StokesSamplingTest(unittest.TestCase):
             "solver.gen_data.stokes_sampling._evaluate_finite_depth_ursell",
             side_effect=lambda **_: next(values),
         ):
-            sample = sample_stokes_case(
+            sample = sample_stokes_simulation(
                 assignment(0, attempt_index=500),
                 maximum_ursell_redraws=1,
             )
@@ -293,7 +295,7 @@ class StokesSamplingTest(unittest.TestCase):
         )
         self.assertEqual(
             record["seed_words"],
-            list(sample.assignment.case_key.seed_words),
+            list(sample.assignment.simulation_key.seed_words),
         )
         json.dumps(record, sort_keys=True, allow_nan=False)
 
@@ -306,7 +308,7 @@ class StokesSamplingTest(unittest.TestCase):
             ),
             self.assertRaises(UrsellRedrawLimitReached) as caught,
         ):
-            sample_stokes_case(
+            sample_stokes_simulation(
                 assignment(1, attempt_index=501),
                 maximum_ursell_redraws=2,
             )
@@ -337,16 +339,18 @@ class StokesSamplingTest(unittest.TestCase):
     def test_invalid_inputs_and_corrupt_histories_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown Stokes"):
             valid_assignment = assignment(0)
-            sample_stokes_case(AttemptAssignment(valid_assignment.case_key, "unknown"))
+            sample_stokes_simulation(
+                AttemptAssignment(valid_assignment.simulation_key, "unknown")
+            )
         with self.assertRaisesRegex(ValueError, "positive and finite"):
-            sample_stokes_case(assignment(0), domain_length=np.nan)
+            sample_stokes_simulation(assignment(0), domain_length=np.nan)
         with self.assertRaisesRegex(ValueError, "nonnegative"):
-            sample_stokes_case(
+            sample_stokes_simulation(
                 assignment(0),
                 maximum_ursell_redraws=-1,
             )
 
-        sample = sample_stokes_case(assignment(2, attempt_index=600))
+        sample = sample_stokes_simulation(assignment(2, attempt_index=600))
         corrupt = replace(
             sample,
             amplitude_attempts=((np.nan, None),),
@@ -357,7 +361,7 @@ class StokesSamplingTest(unittest.TestCase):
         )
 
     def test_forged_cell_reusing_a_canonical_id_fails_closed(self) -> None:
-        sample = sample_stokes_case(assignment(2, attempt_index=601))
+        sample = sample_stokes_simulation(assignment(2, attempt_index=601))
         forged = replace(
             sample,
             branch="finite",

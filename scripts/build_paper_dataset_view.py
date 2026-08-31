@@ -3,7 +3,7 @@
 The default mode checks the inputs without writing anything. ``--execute``
 builds the manifest and trajectory map after every chunk is complete, chunk
 intervals are contiguous, and all four physical families contribute the same
-number of accepted cases to each included split.
+number of accepted simulations to each included split.
 """
 
 from __future__ import annotations
@@ -25,24 +25,25 @@ from solver.gen_data.jonswap_horizon_executor import (
     BucketingConfig,
 )
 from solver.gen_data.pipeline.artifact_io import write_json_atomic
+from solver.gen_data.pipeline.batch_artifacts import parse_batch_plan_metadata
 from solver.gen_data.pipeline.batch_storage import BatchPaths
 from solver.gen_data.pipeline.build_dataset_view import (
     DATASET_VIEW_SCHEMA_VERSION,
     DatasetViewPaths,
     build_dataset_view,
 )
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     DATASET_REVISION_BY_FAMILY,
     PhysicalFamilyId,
     SampleCellTarget,
     SplitId,
-    balanced_valid_case_targets,
+    balanced_simulation_targets,
 )
-from solver.gen_data.pipeline.valid_case_generation import (
-    DatasetGenerationSpec,
+from solver.gen_data.pipeline.dataset_generation import (
+    DatasetChunkConfig,
     scan_dataset_generation,
 )
-from solver.gen_data.pipeline.trajectory_writer import TrajectoryFamily
+from solver.gen_data.pipeline.trajectory_subsampling import TrajectoryFamily
 from solver.gen_data.stokes_static_pipeline import PAPER_STATIC_STOKES_CONTRACT
 from solver.gen_data.trajectory_batch_executor import paper_trajectory_execution
 
@@ -59,32 +60,12 @@ FAMILY_IDS = {
     "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
-ROWS_PER_ACCEPTED_CASE = {
+ROWS_PER_ACCEPTED_SIMULATION = {
     "stokes": 1,
     "tanaka": 200,
     "benjamin_feir": 200,
     "jonswap_tma": 16,
 }
-
-
-def _plain_json_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json_value(item) for item in value]
-    return value
-
-
-def _same_json_value(left: object, right: object) -> bool:
-    def encode(value: object) -> str:
-        return json.dumps(
-            _plain_json_value(value),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-
-    return encode(left) == encode(right)
 
 
 @dataclass(frozen=True)
@@ -110,10 +91,10 @@ class CombinedDatasetPlan:
 
     chunks: tuple[CompletedChunk, ...]
     splits: tuple[SplitId, ...]
-    accepted_cases_per_family_by_split: Mapping[str, int]
-    attempted_cases_by_split: Mapping[str, int]
-    attempted_cases: int
-    accepted_cases: int
+    accepted_simulations_per_family_by_split: Mapping[str, int]
+    attempted_simulations_by_split: Mapping[str, int]
+    attempted_simulations: int
+    accepted_simulations: int
     expected_rows: int
 
 
@@ -202,11 +183,11 @@ def _ordered_cell_ids(configuration: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _reconstruct_spec(
+def _reconstruct_chunk_config(
     summary: Mapping[str, object],
     *,
     root: Path,
-) -> DatasetGenerationSpec:
+) -> DatasetChunkConfig:
     record = _required_mapping(summary, "run_spec")
     family = _required_string(record, "family_name")
     if family not in FAMILY_IDS:
@@ -222,59 +203,54 @@ def _reconstruct_spec(
     targets = tuple(
         SampleCellTarget(
             cell_id=_required_string(target, "cell_id"),
-            case_count=_required_integer(target, "target_accepted"),
+            simulation_count=_required_integer(target, "target_accepted"),
         )
         for target in raw_targets
         if isinstance(target, Mapping)
     )
     raw_codes = _required_mapping(record, "cell_codes")
-    return DatasetGenerationSpec(
+    return DatasetChunkConfig(
         root=root,
         family_name=family,
         family_id=family_id,
         revision_id=_required_integer(record, "revision_id"),
         split_id=SplitId(_required_string(record, "split_id")),
         stream_id=_required_integer(record, "stream_id"),
-        case_targets=targets,
+        simulation_targets=targets,
         cell_codes={
             str(cell_id): _required_integer(raw_codes, str(cell_id))
             for cell_id in raw_codes
         },
         batch_size=_required_integer(record, "batch_size", minimum=1),
         first_attempt_index=_required_integer(record, "first_attempt_index"),
-        maximum_attempts_per_accepted_case=_required_integer(
-            record,
-            "maximum_attempts_per_accepted_case",
-            minimum=1,
-        ),
         configuration=_required_mapping(record, "configuration"),
     )
 
 
-def _validate_current_execution_contract(spec: DatasetGenerationSpec) -> None:
-    configuration = spec.configuration
-    if spec.family_name == "stokes":
+def _validate_current_execution_contract(chunk_config: DatasetChunkConfig) -> None:
+    configuration = chunk_config.configuration
+    if chunk_config.family_name == "stokes":
         name = "contract"
         expected = PAPER_STATIC_STOKES_CONTRACT.to_json_record()
     else:
         name = "trajectory_execution"
-        family = cast(TrajectoryFamily, spec.family_name)
+        family = cast(TrajectoryFamily, chunk_config.family_name)
         expected = paper_trajectory_execution(family).to_json_record()
-    if not _same_json_value(_required_mapping(configuration, name), expected):
+    if _required_mapping(configuration, name) != expected:
         raise ValueError(
-            f"{spec.family_name} chunk does not use the current numerical contract"
+            f"{chunk_config.family_name} chunk does not use the current numerical contract"
         )
 
-    if spec.family_name != "jonswap_tma":
+    if chunk_config.family_name != "jonswap_tma":
         return
     record = _required_mapping(configuration, BUCKETING_CONFIG_KEY)
     solver_batch_size = _required_integer(record, "solver_batch_size", minimum=1)
-    if solver_batch_size > spec.batch_size:
-        raise ValueError("JONSWAP solver batch size exceeds proposal batch size")
+    if solver_batch_size > chunk_config.batch_size:
+        raise ValueError("JONSWAP solver batch size exceeds dataset batch size")
     adjustment = paper_trajectory_execution("jonswap_tma").jonswap_adjustment
     assert adjustment is not None
     expected_config = BucketingConfig(
-        outer_proposal_size=spec.batch_size,
+        batch_size=chunk_config.batch_size,
         solver_batch_size=solver_batch_size,
         adjustment=adjustment,
     )
@@ -282,29 +258,24 @@ def _validate_current_execution_contract(spec: DatasetGenerationSpec) -> None:
         raise ValueError("JONSWAP chunk does not use the current bucketing config")
 
 
-def _validate_proposal_metadata(
+def _validate_batch_plan_metadata(
     paths: BatchPaths,
     *,
-    spec: DatasetGenerationSpec,
+    chunk_config: DatasetChunkConfig,
 ) -> None:
-    with np.load(paths.proposal, allow_pickle=False) as proposal:
-        encoded = np.asarray(proposal["metadata_json"])
-    if encoded.ndim != 0 or encoded.dtype.kind not in {"U", "S"}:
-        raise TypeError("proposal metadata_json must be a scalar string")
-    metadata = json.loads(str(encoded.item()))
-    if not isinstance(metadata, dict):
-        raise TypeError("proposal metadata_json must encode an object")
-    if metadata.get("family") != spec.family_name:
-        raise ValueError("proposal family differs from its chunk")
-    expected_kind = "static" if spec.family_name == "stokes" else "trajectory"
-    if metadata.get("case_kind") != expected_kind:
-        raise ValueError("proposal case kind differs from its chunk")
-    execution_name = "contract" if expected_kind == "static" else "trajectory_execution"
-    if not _same_json_value(
-        _required_mapping(metadata, execution_name),
-        _required_mapping(spec.configuration, execution_name),
+    with np.load(paths.batch_plan, allow_pickle=False) as batch_plan:
+        encoded = np.asarray(batch_plan["metadata_json"])
+    metadata = parse_batch_plan_metadata(encoded)
+    if metadata.get("family") != chunk_config.family_name:
+        raise ValueError("batch-plan family differs from its chunk")
+    expected_type = "static" if chunk_config.family_name == "stokes" else "trajectory"
+    if metadata.get("simulation_type") != expected_type:
+        raise ValueError("batch-plan simulation type differs from its chunk")
+    execution_name = "contract" if expected_type == "static" else "trajectory_execution"
+    if _required_mapping(metadata, execution_name) != _required_mapping(
+        chunk_config.configuration, execution_name
     ):
-        raise ValueError("proposal numerical contract differs from its chunk")
+        raise ValueError("batch-plan numerical contract differs from its chunk")
 
 
 def load_completed_chunk(summary_path: Path) -> CompletedChunk:
@@ -317,64 +288,68 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
     root = Path(_required_string(summary, "output_root")).expanduser().resolve()
     if path.parent != root:
         raise ValueError("chunk summary must live directly in its output root")
-    spec = _reconstruct_spec(summary, root=root)
-    current_revision = DATASET_REVISION_BY_FAMILY[FAMILY_IDS[spec.family_name]]
-    if spec.revision_id != current_revision:
+    chunk_config = _reconstruct_chunk_config(summary, root=root)
+    current_revision = DATASET_REVISION_BY_FAMILY[FAMILY_IDS[chunk_config.family_name]]
+    if chunk_config.revision_id != current_revision:
         raise ValueError(
-            f"{spec.family_name} revision {spec.revision_id} is not current "
+            f"{chunk_config.family_name} revision {chunk_config.revision_id} is not current "
             f"revision {current_revision}"
         )
-    _validate_current_execution_contract(spec)
+    _validate_current_execution_contract(chunk_config)
 
-    configuration = spec.configuration
+    configuration = chunk_config.configuration
     accepted_count = _required_integer(
         configuration,
-        "accepted_case_count",
+        "accepted_simulation_count",
         minimum=1,
     )
-    accepted_before = _required_integer(configuration, "accepted_cases_before")
-    accepted_after = _required_integer(configuration, "accepted_cases_after")
+    accepted_before = _required_integer(configuration, "accepted_simulations_before")
+    accepted_after = _required_integer(configuration, "accepted_simulations_after")
     if accepted_after != accepted_before + accepted_count:
         raise ValueError("chunk accepted interval is inconsistent")
 
     ordered_cells = _ordered_cell_ids(configuration)
-    before = balanced_valid_case_targets(ordered_cells, case_count=accepted_before)
-    after = balanced_valid_case_targets(ordered_cells, case_count=accepted_after)
-    expected_increment = tuple(
-        end.case_count - start.case_count for start, end in zip(before, after)
+    before = balanced_simulation_targets(
+        ordered_cells, simulation_count=accepted_before
     )
-    if tuple(target.cell_id for target in spec.case_targets) != ordered_cells:
+    after = balanced_simulation_targets(ordered_cells, simulation_count=accepted_after)
+    expected_increment = tuple(
+        end.simulation_count - start.simulation_count
+        for start, end in zip(before, after)
+    )
+    if (
+        tuple(target.cell_id for target in chunk_config.simulation_targets)
+        != ordered_cells
+    ):
         raise ValueError("chunk quota order differs from ordered_cell_ids")
-    if tuple(target.case_count for target in spec.case_targets) != expected_increment:
+    if (
+        tuple(target.simulation_count for target in chunk_config.simulation_targets)
+        != expected_increment
+    ):
         raise ValueError("chunk quotas do not match its accepted interval")
 
-    state = scan_dataset_generation(spec)
-    if (
-        not state.complete
-        or state.pending is not None
-        or state.terminal_failure is not None
-        or state.attempt_limit_failure is not None
-    ):
+    state = scan_dataset_generation(chunk_config)
+    if not state.complete or state.pending_batch is not None:
         raise RuntimeError("chunk batches are not complete")
-    if sum(state.accepted_by_cell.values()) != accepted_count:
+    if sum(state.accepted_simulation_counts.values()) != accepted_count:
         raise RuntimeError("chunk batches contain the wrong accepted count")
     for paths in state.committed:
-        _validate_proposal_metadata(paths, spec=spec)
+        _validate_batch_plan_metadata(paths, chunk_config=chunk_config)
 
     counts = _required_mapping(summary, "counts")
     if _required_integer(counts, "accepted") != accepted_count:
         raise RuntimeError("chunk summary accepted count is inconsistent")
     attempted_count = _required_integer(counts, "attempted", minimum=accepted_count)
-    if attempted_count != sum(state.attempted_by_cell.values()):
+    if attempted_count != sum(state.simulation_attempt_counts.values()):
         raise RuntimeError("chunk summary attempted count is inconsistent")
 
     return CompletedChunk(
         summary_path=path,
         root=root,
-        family=spec.family_name,
-        revision_id=spec.revision_id,
-        split=spec.split_id,
-        stream_id=spec.stream_id,
+        family=chunk_config.family_name,
+        revision_id=chunk_config.revision_id,
+        split=chunk_config.split_id,
+        stream_id=chunk_config.stream_id,
         accepted_before=accepted_before,
         accepted_count=accepted_count,
         accepted_after=accepted_after,
@@ -437,16 +412,16 @@ def validate_combined_plan(
             chunk.attempted_count for chunk in split_chunks
         )
 
-    accepted_cases = len(FAMILY_ORDER) * sum(accepted_by_split.values())
+    accepted_simulations = len(FAMILY_ORDER) * sum(accepted_by_split.values())
     return CombinedDatasetPlan(
         chunks=tuple(ordered),
         splits=split_order,
-        accepted_cases_per_family_by_split=accepted_by_split,
-        attempted_cases_by_split=attempted_by_split,
-        attempted_cases=sum(attempted_by_split.values()),
-        accepted_cases=accepted_cases,
+        accepted_simulations_per_family_by_split=accepted_by_split,
+        attempted_simulations_by_split=attempted_by_split,
+        attempted_simulations=sum(attempted_by_split.values()),
+        accepted_simulations=accepted_simulations,
         expected_rows=(
-            sum(accepted_by_split.values()) * sum(ROWS_PER_ACCEPTED_CASE.values())
+            sum(accepted_by_split.values()) * sum(ROWS_PER_ACCEPTED_SIMULATION.values())
         ),
     )
 
@@ -482,11 +457,11 @@ def preflight(
         "output_root": str(root),
         "view_name": view_name,
         "splits": [split.value for split in plan.splits],
-        "accepted_cases_per_family_by_split": dict(
-            plan.accepted_cases_per_family_by_split
+        "accepted_simulations_per_family_by_split": dict(
+            plan.accepted_simulations_per_family_by_split
         ),
-        "accepted_cases_total": plan.accepted_cases,
-        "attempted_cases_total": plan.attempted_cases,
+        "accepted_simulations_total": plan.accepted_simulations,
+        "attempted_simulations_total": plan.attempted_simulations,
         "expected_rows": plan.expected_rows,
         "chunks": [
             {
@@ -517,13 +492,13 @@ def _validate_view(
         "trajectory_map_npz": view.trajectory_map.name,
         "requires_trajectory_map": True,
         "n_rows": plan.expected_rows,
-        "n_trajectories": plan.attempted_cases,
-        "n_accepted_trajectories": plan.accepted_cases,
+        "n_trajectories": plan.attempted_simulations,
+        "n_accepted_trajectories": plan.accepted_simulations,
         "n_accepted_rows": plan.expected_rows,
         "grid": {"length": 2.0 * math.pi, "nx": 1024},
     }
     for name, value in expected.items():
-        if not _same_json_value(manifest.get(name), value):
+        if manifest.get(name) != value:
             raise RuntimeError(
                 f"combined view {name} is {manifest.get(name)!r}, expected {value!r}"
             )
@@ -531,21 +506,21 @@ def _validate_view(
     if not isinstance(split_counts, Mapping):
         raise TypeError("combined view split_counts must be an object")
     for split in (SplitId.TRAIN, SplitId.VALIDATION, SplitId.TEST):
-        per_family = plan.accepted_cases_per_family_by_split.get(split.value, 0)
+        per_family = plan.accepted_simulations_per_family_by_split.get(split.value, 0)
         expected_split = {
-            "attempted": plan.attempted_cases_by_split.get(split.value, 0),
+            "attempted": plan.attempted_simulations_by_split.get(split.value, 0),
             "accepted": len(FAMILY_ORDER) * per_family,
         }
-        if not _same_json_value(split_counts.get(split.value), expected_split):
+        if split_counts.get(split.value) != expected_split:
             raise RuntimeError(f"combined view {split.value} split count is wrong")
 
     with np.load(view.trajectory_map, allow_pickle=False) as stored:
         accepted = np.asarray(stored["trajectory_accepted"], dtype=np.bool_)
         row_count = np.asarray(stored["trajectory_row_count"], dtype=np.int64)
         row_owner = np.asarray(stored["trajectory_index"], dtype=np.int64)
-    if accepted.size != plan.attempted_cases:
-        raise RuntimeError("trajectory map has the wrong case count")
-    if int(np.count_nonzero(accepted)) != plan.accepted_cases:
+    if accepted.size != plan.attempted_simulations:
+        raise RuntimeError("trajectory map has the wrong simulation count")
+    if int(np.count_nonzero(accepted)) != plan.accepted_simulations:
         raise RuntimeError("trajectory map has the wrong accepted count")
     if int(np.sum(row_count, dtype=np.int64)) != plan.expected_rows:
         raise RuntimeError("trajectory map declares the wrong row count")

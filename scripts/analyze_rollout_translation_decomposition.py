@@ -1,17 +1,18 @@
 """Decompose saved periodic rollout errors into translation and shape parts.
 
-For every saved frame and case, this script finds the continuous periodic
+For every saved frame and simulation, this script finds the continuous periodic
 displacement that minimizes the elevation error.  The same elevation-derived
 displacement is then applied to every requested field, so the optional
 ``xi`` and ``q = G(eta) xi`` diagnostics describe one common state-space
 registration rather than unrelated field-wise alignments.
 
 The input is an ``eval_suite.py`` trajectory archive with arrays shaped
-``(time, case, grid)``.  The output JSON is accompanied by a compressed NPZ of
-framewise arrays and CSV tables for per-case onsets and population
+``(time, simulation, grid)``. The output JSON is accompanied by a compressed NPZ
+of framewise arrays and CSV tables for per-simulation onsets and population
 correlations.  This is a CPU-only, saved-data analysis; it does not load a
 model or run a solver.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -152,8 +153,7 @@ def parse_field_list(value: str) -> tuple[str, ...]:
     invalid = sorted(set(fields).difference(FIELD_KEYS))
     if not fields or "eta" not in fields or invalid:
         raise argparse.ArgumentTypeError(
-            "fields must include eta and be drawn from eta,xi,q; "
-            f"got {fields}"
+            f"fields must include eta and be drawn from eta,xi,q; got {fields}"
         )
     return tuple(dict.fromkeys(fields))
 
@@ -163,9 +163,11 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     try:
         values = tuple(int(part.strip()) for part in value.split(",") if part.strip())
     except ValueError as error:
-        raise argparse.ArgumentTypeError("expected a comma-separated integer list") from error
+        raise argparse.ArgumentTypeError(
+            "expected a comma-separated integer list"
+        ) from error
     if not values or any(item < 0 for item in values):
-        raise argparse.ArgumentTypeError("expected nonnegative case indices")
+        raise argparse.ArgumentTypeError("expected nonnegative simulation indices")
     return tuple(dict.fromkeys(values))
 
 
@@ -189,18 +191,18 @@ def validate_field_pair(
     prediction: Array,
     *,
     name: str,
-    expected_time_cases: tuple[int, int],
+    expected_time_simulations: tuple[int, int],
 ) -> None:
     """Validate one saved truth/prediction field pair."""
     if truth.ndim != 3 or prediction.shape != truth.shape:
         raise ValueError(
-            f"{name} truth/prediction must share shape (time, case, grid), got "
+            f"{name} truth/prediction must share shape (time, simulation, grid), got "
             f"{truth.shape} and {prediction.shape}"
         )
-    if truth.shape[:2] != expected_time_cases:
+    if truth.shape[:2] != expected_time_simulations:
         raise ValueError(
-            f"{name} has time/case shape {truth.shape[:2]}, expected "
-            f"{expected_time_cases}"
+            f"{name} has time/simulation shape {truth.shape[:2]}, expected "
+            f"{expected_time_simulations}"
         )
 
 
@@ -219,16 +221,16 @@ def compute_eta_alignment(
     ``argmin_d ||pred_eta(t,c,x+d) - truth_eta(t,c,x)||_2``.
 
     Unwrapping changes only the representative modulo ``length`` and is done
-    separately on every contiguous finite segment of each case.
+    separately on every contiguous finite segment of each simulation.
     """
     validate_field_pair(
         truth_eta,
         pred_eta,
         name="eta",
-        expected_time_cases=truth_eta.shape[:2],
+        expected_time_simulations=truth_eta.shape[:2],
     )
-    n_times, n_cases, _ = truth_eta.shape
-    wrapped = np.full((n_times, n_cases), np.nan, dtype=np.float64)
+    n_times, n_simulations, _ = truth_eta.shape
+    wrapped = np.full((n_times, n_simulations), np.nan, dtype=np.float64)
     finite = np.all(
         np.isfinite(truth_eta) & np.isfinite(pred_eta),
         axis=-1,
@@ -244,31 +246,34 @@ def compute_eta_alignment(
         if progress and (frame == 0 or (frame + 1) % 10 == 0 or frame + 1 == n_times):
             print(
                 f"alignment frame {frame + 1}/{n_times}: "
-                f"{int(np.count_nonzero(frame_mask))}/{n_cases} finite",
+                f"{int(np.count_nonzero(frame_mask))}/{n_simulations} finite",
                 flush=True,
             )
     unwrapped = np.stack(
-        [unwrap_displacements(wrapped[:, case], length) for case in range(n_cases)],
+        [
+            unwrap_displacements(wrapped[:, simulation], length)
+            for simulation in range(n_simulations)
+        ],
         axis=1,
     )
     return wrapped, unwrapped, finite
 
 
 def displacement_drift(unwrapped: Array) -> Array:
-    """Subtract each case's first finite displacement from its trajectory."""
+    """Subtract each simulation's first finite displacement from its trajectory."""
     drift = np.asarray(unwrapped, dtype=np.float64).copy()
-    for case in range(drift.shape[1]):
-        finite_indices = np.flatnonzero(np.isfinite(drift[:, case]))
+    for simulation in range(drift.shape[1]):
+        finite_indices = np.flatnonzero(np.isfinite(drift[:, simulation]))
         if finite_indices.size:
-            drift[:, case] -= drift[finite_indices[0], case]
+            drift[:, simulation] -= drift[finite_indices[0], simulation]
     return drift
 
 
 def differentiate_finite_segments(values: Array, times: Array) -> Array:
     """Differentiate every contiguous finite segment along the time axis."""
     derivative = np.full(values.shape, np.nan, dtype=np.float64)
-    for case in range(values.shape[1]):
-        finite_indices = np.flatnonzero(np.isfinite(values[:, case]))
+    for simulation in range(values.shape[1]):
+        finite_indices = np.flatnonzero(np.isfinite(values[:, simulation]))
         if not finite_indices.size:
             continue
         split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
@@ -276,8 +281,8 @@ def differentiate_finite_segments(values: Array, times: Array) -> Array:
             if segment.size < 2:
                 continue
             edge_order = 2 if segment.size >= 3 else 1
-            derivative[segment, case] = np.gradient(
-                values[segment, case],
+            derivative[segment, simulation] = np.gradient(
+                values[segment, simulation],
                 times[segment],
                 edge_order=edge_order,
             )
@@ -287,17 +292,19 @@ def differentiate_finite_segments(values: Array, times: Array) -> Array:
 def integrate_finite_segments(values: Array, times: Array) -> Array:
     """Cumulatively trapezoid-integrate contiguous finite time segments."""
     integral = np.full(values.shape, np.nan, dtype=np.float64)
-    for case in range(values.shape[1]):
-        finite_indices = np.flatnonzero(np.isfinite(values[:, case]))
+    for simulation in range(values.shape[1]):
+        finite_indices = np.flatnonzero(np.isfinite(values[:, simulation]))
         if not finite_indices.size:
             continue
         split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
         for segment in np.split(finite_indices, split_points):
-            integral[segment[0], case] = 0.0
+            integral[segment[0], simulation] = 0.0
             for previous, current in zip(segment[:-1], segment[1:]):
                 dt = times[current] - times[previous]
-                integral[current, case] = integral[previous, case] + 0.5 * dt * (
-                    values[previous, case] + values[current, case]
+                integral[current, simulation] = integral[
+                    previous, simulation
+                ] + 0.5 * dt * (
+                    values[previous, simulation] + values[current, simulation]
                 )
     return integral
 
@@ -339,10 +346,10 @@ def compute_alignment_velocity_identity(
             truth,
             prediction,
             name=name,
-            expected_time_cases=displacement.shape,
+            expected_time_simulations=displacement.shape,
         )
-    n_times, n_cases, _ = truth_eta.shape
-    shape = (n_times, n_cases)
+    n_times, n_simulations, _ = truth_eta.shape
+    shape = (n_times, n_simulations)
     result = {
         "identity_velocity": np.full(shape, np.nan, dtype=np.float64),
         "direct_velocity": np.full(shape, np.nan, dtype=np.float64),
@@ -385,7 +392,8 @@ def compute_alignment_velocity_identity(
         direct_numerator = np.sum(q_error * aligned_eta_x, axis=-1)
         geometry_numerator = np.sum(error * aligned_q_x, axis=-1)
         well_conditioned = np.abs(denominator) > (
-            denominator_tolerance * np.maximum(tangent_energy, np.finfo(np.float64).tiny)
+            denominator_tolerance
+            * np.maximum(tangent_energy, np.finfo(np.float64).tiny)
         )
         direct_velocity = np.full(denominator.shape, np.nan, dtype=np.float64)
         geometry_velocity = np.full(denominator.shape, np.nan, dtype=np.float64)
@@ -408,12 +416,9 @@ def compute_alignment_velocity_identity(
         stationarity[nonzero_norm] = stationarity_inner_product[nonzero_norm] / (
             error_norm[nonzero_norm] * tangent_norm[nonzero_norm]
         )
-        stationarity_correction = np.full(
-            denominator.shape, np.nan, dtype=np.float64
-        )
+        stationarity_correction = np.full(denominator.shape, np.nan, dtype=np.float64)
         stationarity_correction[well_conditioned] = (
-            stationarity_inner_product[well_conditioned]
-            / denominator[well_conditioned]
+            stationarity_inner_product[well_conditioned] / denominator[well_conditioned]
         )
 
         result["identity_velocity"][frame, finite] = direct_velocity + geometry_velocity
@@ -426,8 +431,8 @@ def compute_alignment_velocity_identity(
 
     unwrapped_displacement = np.stack(
         [
-            unwrap_displacements(displacement[:, case], length)
-            for case in range(n_cases)
+            unwrap_displacements(displacement[:, simulation], length)
+            for simulation in range(n_simulations)
         ],
         axis=1,
     )
@@ -474,10 +479,10 @@ def compute_field_metrics(
         truth,
         prediction,
         name="field",
-        expected_time_cases=displacement.shape,
+        expected_time_simulations=displacement.shape,
     )
-    n_times, n_cases, nx = truth.shape
-    shape = (n_times, n_cases)
+    n_times, n_simulations, nx = truth.shape
+    shape = (n_times, n_simulations)
     metrics = {
         "truth_l2_norm": np.full(shape, np.nan, dtype=np.float64),
         "raw_relative_error": np.full(shape, np.nan, dtype=np.float64),
@@ -527,7 +532,9 @@ def compute_field_metrics(
             values[has_reference] = numerator[has_reference] / truth_norm[has_reference]
             metrics[key][frame, finite] = values
         removed = np.zeros(raw_norm.shape, dtype=np.float64)
-        removed[has_raw_error] = gain_squared[has_raw_error] / raw_norm[has_raw_error] ** 2
+        removed[has_raw_error] = (
+            gain_squared[has_raw_error] / raw_norm[has_raw_error] ** 2
+        )
         metrics["signed_squared_error_removed"][frame, finite] = removed
         metrics["raw_rms_error"][frame, finite] = raw_norm / root_nx
         metrics["aligned_rms_error"][frame, finite] = aligned_norm / root_nx
@@ -571,9 +578,9 @@ def threshold_label(threshold: float) -> str:
     return f"{threshold:g}".replace("-", "m").replace(".", "p")
 
 
-def build_case_records(
+def build_simulation_records(
     times: Array,
-    case_ids: Array,
+    simulation_ids: Array,
     depths: Array,
     truth_valid: Array,
     alignment_finite: Array,
@@ -584,22 +591,22 @@ def build_case_records(
     thresholds: tuple[float, ...],
     dominance_fraction: float,
 ) -> list[dict[str, Any]]:
-    """Build the per-case terminal and threshold-onset table."""
+    """Build the per-simulation terminal and threshold-onset table."""
     eta_metrics = field_metrics["eta"]
     records: list[dict[str, Any]] = []
-    for case, case_id in enumerate(case_ids):
-        one_grid_index = first_crossing_index(np.abs(drift[:, case]) / dx, 1.0)
-        nonfinite_index = first_false_index(alignment_finite[:, case])
+    for simulation, simulation_id in enumerate(simulation_ids):
+        one_grid_index = first_crossing_index(np.abs(drift[:, simulation]) / dx, 1.0)
+        nonfinite_index = first_false_index(alignment_finite[:, simulation])
         record: dict[str, Any] = {
-            "case_index": case,
-            "case_id": int(case_id),
-            "depth": _finite_float(depths[case]),
-            "truth_valid": bool(truth_valid[case]),
+            "simulation_index": simulation,
+            "simulation_id": int(simulation_id),
+            "depth": _finite_float(depths[simulation]),
+            "truth_valid": bool(truth_valid[simulation]),
             "first_nonfinite_time": _time_at(times, nonfinite_index),
             "one_grid_displacement_onset_time": _time_at(times, one_grid_index),
-            "final_displacement_grid_points": _finite_float(drift[-1, case] / dx),
+            "final_displacement_grid_points": _finite_float(drift[-1, simulation] / dx),
             "max_abs_displacement_grid_points": _finite_extreme(
-                np.abs(drift[:, case]) / dx, "max"
+                np.abs(drift[:, simulation]) / dx, "max"
             ),
         }
         for field, metrics in field_metrics.items():
@@ -610,40 +617,46 @@ def build_case_records(
                 "signed_squared_error_removed",
             ):
                 record[f"final_{field}_{metric}"] = _finite_float(
-                    metrics[metric][-1, case]
+                    metrics[metric][-1, simulation]
                 )
         if velocity_metrics is not None:
-            identity_velocity = velocity_metrics["identity_velocity"][:, case]
-            numerical_velocity = velocity_metrics["numerical_velocity"][:, case]
+            identity_velocity = velocity_metrics["identity_velocity"][:, simulation]
+            numerical_velocity = velocity_metrics["numerical_velocity"][:, simulation]
             velocity_correlation = _correlation(
                 identity_velocity,
                 numerical_velocity,
                 np.ones(times.shape, dtype=bool),
             )
-            integrated = velocity_metrics["integrated_identity_velocity"][-1, case]
+            integrated = velocity_metrics["integrated_identity_velocity"][
+                -1, simulation
+            ]
             record.update(
                 {
                     "alignment_velocity_correlation_n": velocity_correlation["n"],
                     "alignment_velocity_pearson": velocity_correlation["pearson"],
                     "alignment_velocity_spearman": velocity_correlation["spearman"],
-                    "final_observed_displacement_drift": _finite_float(drift[-1, case]),
+                    "final_observed_displacement_drift": _finite_float(
+                        drift[-1, simulation]
+                    ),
                     "final_integrated_identity_velocity": _finite_float(integrated),
                     "final_integrated_direct_velocity": _finite_float(
-                        velocity_metrics["integrated_direct_velocity"][-1, case]
+                        velocity_metrics["integrated_direct_velocity"][-1, simulation]
                     ),
                     "final_integrated_geometry_velocity": _finite_float(
-                        velocity_metrics["integrated_geometry_velocity"][-1, case]
+                        velocity_metrics["integrated_geometry_velocity"][-1, simulation]
                     ),
                     "final_velocity_integration_residual": _finite_float(
-                        integrated - drift[-1, case]
+                        integrated - drift[-1, simulation]
                     ),
                     "final_velocity_integration_residual_grid_points": _finite_float(
-                        (integrated - drift[-1, case]) / dx
+                        (integrated - drift[-1, simulation]) / dx
                     ),
                     "max_abs_alignment_stationarity_correction_grid_points": (
                         _finite_extreme(
                             np.abs(
-                                velocity_metrics["stationarity_correction"][:, case]
+                                velocity_metrics["stationarity_correction"][
+                                    :, simulation
+                                ]
                             )
                             / dx,
                             "max",
@@ -651,9 +664,9 @@ def build_case_records(
                     ),
                     "min_abs_velocity_denominator_over_tangent_energy": _finite_extreme(
                         np.abs(
-                            velocity_metrics[
-                                "denominator_over_tangent_energy"
-                            ][:, case]
+                            velocity_metrics["denominator_over_tangent_energy"][
+                                :, simulation
+                            ]
                         ),
                         "min",
                     ),
@@ -662,13 +675,13 @@ def build_case_records(
         for threshold in thresholds:
             label = threshold_label(threshold)
             raw_index = first_crossing_index(
-                eta_metrics["raw_relative_error"][:, case], threshold
+                eta_metrics["raw_relative_error"][:, simulation], threshold
             )
             shape_index = first_crossing_index(
-                eta_metrics["aligned_relative_error"][:, case], threshold
+                eta_metrics["aligned_relative_error"][:, simulation], threshold
             )
             translation_index = first_crossing_index(
-                eta_metrics["translation_relative_error"][:, case], threshold
+                eta_metrics["translation_relative_error"][:, simulation], threshold
             )
             record[f"eta_raw_gt_{label}_onset_time"] = _time_at(times, raw_index)
             record[f"eta_shape_gt_{label}_onset_time"] = _time_at(times, shape_index)
@@ -679,7 +692,7 @@ def build_case_records(
                 None
                 if raw_index is None
                 else bool(
-                    eta_metrics["signed_squared_error_removed"][raw_index, case]
+                    eta_metrics["signed_squared_error_removed"][raw_index, simulation]
                     >= dominance_fraction
                 )
             )
@@ -699,11 +712,11 @@ def _median_or_none(values: list[float]) -> float | None:
 
 
 def build_onset_table(
-    case_records: list[dict[str, Any]],
+    simulation_records: list[dict[str, Any]],
     thresholds: tuple[float, ...],
 ) -> list[dict[str, Any]]:
-    """Aggregate threshold crossings over truth-valid cases."""
-    valid_records = [record for record in case_records if record["truth_valid"]]
+    """Aggregate threshold crossings over truth-valid simulations."""
+    valid_records = [record for record in simulation_records if record["truth_valid"]]
     rows: list[dict[str, Any]] = []
     for threshold in thresholds:
         label = threshold_label(threshold)
@@ -712,7 +725,9 @@ def build_onset_table(
         translation_key = f"eta_translation_gt_{label}_onset_time"
         dominated_key = f"eta_raw_gt_{label}_translation_dominated_at_onset"
         lead_key = f"one_grid_lead_to_eta_raw_gt_{label}"
-        raw_crossers = [record for record in valid_records if record[raw_key] is not None]
+        raw_crossers = [
+            record for record in valid_records if record[raw_key] is not None
+        ]
         rows.append(
             {
                 "threshold": threshold,
@@ -748,7 +763,11 @@ def build_onset_table(
                     ]
                 ),
                 "median_one_grid_lead_to_raw_onset": _median_or_none(
-                    [record[lead_key] for record in raw_crossers if record[lead_key] is not None]
+                    [
+                        record[lead_key]
+                        for record in raw_crossers
+                        if record[lead_key] is not None
+                    ]
                 ),
             }
         )
@@ -760,11 +779,15 @@ def _correlation(x: Array, y: Array, mask: Array) -> dict[str, float | int | Non
     count = int(np.count_nonzero(keep))
     x_kept = x[keep]
     y_kept = y[keep]
-    x_constant_tolerance = 100.0 * np.finfo(np.float64).eps * max(
-        float(np.max(np.abs(x_kept), initial=0.0)), 1e-30
+    x_constant_tolerance = (
+        100.0
+        * np.finfo(np.float64).eps
+        * max(float(np.max(np.abs(x_kept), initial=0.0)), 1e-30)
     )
-    y_constant_tolerance = 100.0 * np.finfo(np.float64).eps * max(
-        float(np.max(np.abs(y_kept), initial=0.0)), 1e-30
+    y_constant_tolerance = (
+        100.0
+        * np.finfo(np.float64).eps
+        * max(float(np.max(np.abs(y_kept), initial=0.0)), 1e-30)
     )
     if (
         count < 3
@@ -779,7 +802,9 @@ def _correlation(x: Array, y: Array, mask: Array) -> dict[str, float | int | Non
     }
 
 
-def correlation_frames(times: Array, requested_times: tuple[float, ...] | None) -> list[int]:
+def correlation_frames(
+    times: Array, requested_times: tuple[float, ...] | None
+) -> list[int]:
     """Return unique nearest saved frames for requested or default times."""
     if requested_times is None:
         start, stop = float(times[0]), float(times[-1])
@@ -787,7 +812,9 @@ def correlation_frames(times: Array, requested_times: tuple[float, ...] | None) 
             start + fraction * (stop - start)
             for fraction in (0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
         )
-    frames = [int(np.argmin(np.abs(times - requested))) for requested in requested_times]
+    frames = [
+        int(np.argmin(np.abs(times - requested))) for requested in requested_times
+    ]
     return list(dict.fromkeys(frames))
 
 
@@ -804,9 +831,9 @@ def build_correlation_table(
     targets = {
         "terminal_eta_raw": field_metrics["eta"]["raw_relative_error"][-1],
         "terminal_eta_shape": field_metrics["eta"]["aligned_relative_error"][-1],
-        "terminal_eta_translation": field_metrics["eta"][
-            "translation_relative_error"
-        ][-1],
+        "terminal_eta_translation": field_metrics["eta"]["translation_relative_error"][
+            -1
+        ],
     }
     rows: list[dict[str, Any]] = []
     for frame in correlation_frames(times, requested_times):
@@ -816,9 +843,9 @@ def build_correlation_table(
         for field, metrics in field_metrics.items():
             predictors[f"{field}_raw"] = metrics["raw_relative_error"][frame]
             predictors[f"{field}_aligned"] = metrics["aligned_relative_error"][frame]
-            predictors[f"{field}_translation"] = metrics[
-                "translation_relative_error"
-            ][frame]
+            predictors[f"{field}_translation"] = metrics["translation_relative_error"][
+                frame
+            ]
         if velocity_metrics is not None:
             predictors["abs_alignment_velocity_identity"] = np.abs(
                 velocity_metrics["identity_velocity"][frame]
@@ -864,7 +891,7 @@ def velocity_validation_summary(
     dx: float,
     velocity_metrics: dict[str, Array] | None,
 ) -> dict[str, Any] | None:
-    """Summarize the differentiated alignment identity over cases and frames."""
+    """Summarize the alignment identity over simulations and frames."""
     if velocity_metrics is None:
         return None
     frame_mask = np.broadcast_to(truth_valid[None, :], drift.shape)
@@ -916,19 +943,21 @@ def analyze_archive(
     correlation_times_requested: tuple[float, ...] | None,
     center_xi: bool,
     progress: bool,
-    focus_case_indices: tuple[int, ...] = (),
+    focus_simulation_indices: tuple[int, ...] = (),
     focus_label: str | None = None,
 ) -> dict[str, Any]:
     """Analyze one trajectory archive and write JSON, NPZ, and CSV outputs."""
     if not 0.0 <= dominance_fraction <= 1.0:
         raise ValueError(
-            "dominance_fraction must lie in [0, 1], got "
-            f"{dominance_fraction}"
+            f"dominance_fraction must lie in [0, 1], got {dominance_fraction}"
         )
     if any(threshold < 0.0 for threshold in thresholds):
         raise ValueError(f"thresholds must be nonnegative, got {thresholds}")
-    if any(index < 0 for index in focus_case_indices):
-        raise ValueError(f"focus case indices must be nonnegative, got {focus_case_indices}")
+    if any(index < 0 for index in focus_simulation_indices):
+        raise ValueError(
+            "focus simulation indices must be nonnegative, got "
+            f"{focus_simulation_indices}"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with np.load(archive_path, allow_pickle=False) as archive:
@@ -936,7 +965,9 @@ def analyze_archive(
             raise KeyError(f"{archive_path} does not contain times")
         times = np.asarray(archive["times"], dtype=np.float64)
         if times.ndim != 1 or not times.size or not np.all(np.isfinite(times)):
-            raise ValueError(f"times must be a nonempty finite vector, got {times.shape}")
+            raise ValueError(
+                f"times must be a nonempty finite vector, got {times.shape}"
+            )
         if times.size > 1 and np.any(np.diff(times) <= 0.0):
             raise ValueError("times must be strictly increasing")
         periodic_length = resolve_length(archive, length)
@@ -944,35 +975,36 @@ def analyze_archive(
         pred_eta = np.asarray(archive["pred_eta"])
         if truth_eta.ndim != 3:
             raise ValueError(
-                "truth_eta must have shape (time, case, grid), got "
+                "truth_eta must have shape (time, simulation, grid), got "
                 f"{truth_eta.shape}"
             )
         validate_field_pair(
             truth_eta,
             pred_eta,
             name="eta",
-            expected_time_cases=(times.size, truth_eta.shape[1]),
+            expected_time_simulations=(times.size, truth_eta.shape[1]),
         )
-        n_times, n_cases, nx = truth_eta.shape
-        case_ids = (
-            np.asarray(archive["case_ids"], dtype=np.int64)
-            if "case_ids" in archive.files
-            else np.arange(n_cases, dtype=np.int64)
-        )
+        n_times, n_simulations, nx = truth_eta.shape
+        if "simulation_ids" in archive.files:
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+        elif "simulation_ids" in archive.files:
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+        else:
+            simulation_ids = np.arange(n_simulations, dtype=np.int64)
         depths = (
             np.asarray(archive["depths"], dtype=np.float64)
             if "depths" in archive.files
-            else np.full(n_cases, np.nan, dtype=np.float64)
+            else np.full(n_simulations, np.nan, dtype=np.float64)
         )
         truth_valid = (
             np.asarray(archive["truth_valid"], dtype=bool)
             if "truth_valid" in archive.files
-            else np.ones(n_cases, dtype=bool)
+            else np.ones(n_simulations, dtype=bool)
         )
-        if case_ids.shape != (n_cases,) or depths.shape != (n_cases,):
-            raise ValueError("case_ids and depths must each have shape (case,)")
-        if truth_valid.shape != (n_cases,):
-            raise ValueError("truth_valid must have shape (case,)")
+        if simulation_ids.shape != (n_simulations,) or depths.shape != (n_simulations,):
+            raise ValueError("simulation_ids and depths must each have shape (simulation,)")
+        if truth_valid.shape != (n_simulations,):
+            raise ValueError("truth_valid must have shape (simulation,)")
 
         wrapped, unwrapped, alignment_finite = compute_eta_alignment(
             truth_eta,
@@ -985,25 +1017,27 @@ def analyze_archive(
         missing_fields: list[str] = []
         field_metrics: dict[str, dict[str, Array]] = {}
         velocity_metrics: dict[str, Array] | None = None
-        ordered_fields = tuple(
-            field for field in ("eta", "q", "xi") if field in fields
-        )
+        ordered_fields = tuple(field for field in ("eta", "q", "xi") if field in fields)
         for field in ordered_fields:
             truth_key, prediction_key = FIELD_KEYS[field]
             if truth_key not in archive.files or prediction_key not in archive.files:
                 if field == "eta":
-                    raise KeyError(f"archive lacks required {truth_key}/{prediction_key}")
+                    raise KeyError(
+                        f"archive lacks required {truth_key}/{prediction_key}"
+                    )
                 missing_fields.append(field)
                 continue
-            truth_field = truth_eta if field == "eta" else np.asarray(archive[truth_key])
-            prediction_field = pred_eta if field == "eta" else np.asarray(
-                archive[prediction_key]
+            truth_field = (
+                truth_eta if field == "eta" else np.asarray(archive[truth_key])
+            )
+            prediction_field = (
+                pred_eta if field == "eta" else np.asarray(archive[prediction_key])
             )
             validate_field_pair(
                 truth_field,
                 prediction_field,
                 name=field,
-                expected_time_cases=(n_times, n_cases),
+                expected_time_simulations=(n_times, n_simulations),
             )
             if truth_field.shape[-1] != nx:
                 raise ValueError(
@@ -1035,9 +1069,9 @@ def analyze_archive(
             del truth_eta, pred_eta
 
     dx = periodic_length / nx
-    case_records = build_case_records(
+    simulation_records = build_simulation_records(
         times,
-        case_ids,
+        simulation_ids,
         depths,
         truth_valid,
         alignment_finite,
@@ -1048,7 +1082,7 @@ def analyze_archive(
         thresholds,
         dominance_fraction,
     )
-    onset_table = build_onset_table(case_records, thresholds)
+    onset_table = build_onset_table(simulation_records, thresholds)
     correlation_table = build_correlation_table(
         times,
         truth_valid,
@@ -1060,13 +1094,13 @@ def analyze_archive(
     )
 
     framewise_path = output_path.with_suffix(".framewise.npz")
-    cases_path = output_path.with_suffix(".cases.csv")
+    simulations_path = output_path.with_suffix(".simulations.csv")
     onsets_path = output_path.with_suffix(".onsets.csv")
     correlations_path = output_path.with_suffix(".correlations.csv")
     focus_path = output_path.with_suffix(".focus.csv")
     framewise_arrays: dict[str, Array] = {
         "times": times,
-        "case_ids": case_ids,
+        "simulation_ids": simulation_ids,
         "depths": depths,
         "truth_valid": truth_valid,
         "alignment_finite": alignment_finite,
@@ -1081,16 +1115,19 @@ def analyze_archive(
         for metric, values in velocity_metrics.items():
             framewise_arrays[f"alignment_velocity_{metric}"] = values
     np.savez_compressed(framewise_path, **framewise_arrays)
-    write_csv(cases_path, case_records)
+    write_csv(simulations_path, simulation_records)
     write_csv(onsets_path, onset_table)
     write_csv(correlations_path, correlation_table)
 
-    invalid_focus = [index for index in focus_case_indices if index >= n_cases]
+    invalid_focus = [
+        index for index in focus_simulation_indices if index >= n_simulations
+    ]
     if invalid_focus:
         raise ValueError(
-            f"focus case indices exceed the {n_cases}-case archive: {invalid_focus}"
+            "focus simulation indices exceed the "
+            f"{n_simulations}-simulation archive: {invalid_focus}"
         )
-    focus_records = [case_records[index] for index in focus_case_indices]
+    focus_records = [simulation_records[index] for index in focus_simulation_indices]
     write_csv(focus_path, focus_records)
 
     result: dict[str, Any] = {
@@ -1104,9 +1141,7 @@ def analyze_archive(
                 "||T_{-d} prediction - truth||_2 / ||truth||_2, using the "
                 "elevation-fitted d for every field"
             ),
-            "translation_error": (
-                "sqrt(max(raw_relative_error^2 - shape_error^2, 0))"
-            ),
+            "translation_error": ("sqrt(max(raw_relative_error^2 - shape_error^2, 0))"),
             "xi_gauge": "zero spatial mean" if center_xi else "raw",
             "translation_dominance_fraction": dominance_fraction,
             "threshold_crossing": "first saved frame with error strictly greater than threshold",
@@ -1121,7 +1156,7 @@ def analyze_archive(
         "grid_points": nx,
         "grid_spacing": dx,
         "n_times": n_times,
-        "n_cases": n_cases,
+        "n_simulations": n_simulations,
         "fields": requested_and_available,
         "missing_requested_optional_fields": missing_fields,
         "n_truth_valid": int(np.count_nonzero(truth_valid)),
@@ -1147,15 +1182,15 @@ def analyze_archive(
         ),
         "onset_table": onset_table,
         "correlation_table": correlation_table,
-        "case_records": case_records,
+        "simulation_records": simulation_records,
         "focus": {
             "label": focus_label,
-            "case_indices": list(focus_case_indices),
-            "case_records": focus_records,
+            "simulation_indices": list(focus_simulation_indices),
+            "simulation_records": focus_records,
         },
         "outputs": {
             "framewise_npz": str(framewise_path.resolve()),
-            "cases_csv": str(cases_path.resolve()),
+            "simulations_csv": str(simulations_path.resolve()),
             "onsets_csv": str(onsets_path.resolve()),
             "correlations_csv": str(correlations_path.resolve()),
             "focus_csv": str(focus_path.resolve()),
@@ -1213,7 +1248,7 @@ def main() -> None:
         help="Suppress framewise alignment progress.",
     )
     parser.add_argument(
-        "--focus-case-indices",
+        "--focus-simulation-indices",
         type=parse_int_list,
         default=(),
         help="Optional comma-separated archive-local indices copied to a focused table.",
@@ -1221,7 +1256,7 @@ def main() -> None:
     parser.add_argument(
         "--focus-label",
         default=None,
-        help="Description of the preselected focused cases.",
+        help="Description of the preselected focused simulations.",
     )
     args = parser.parse_args()
 
@@ -1235,14 +1270,14 @@ def main() -> None:
         correlation_times_requested=args.correlation_times,
         center_xi=not args.raw_xi_gauge,
         progress=not args.quiet,
-        focus_case_indices=args.focus_case_indices,
+        focus_simulation_indices=args.focus_simulation_indices,
         focus_label=args.focus_label,
     )
     print(
         json.dumps(
             {
                 "output": str(args.output.resolve()),
-                "n_cases": result["n_cases"],
+                "n_simulations": result["n_simulations"],
                 "n_truth_valid": result["n_truth_valid"],
                 "fields": result["fields"],
                 "onset_table": result["onset_table"],

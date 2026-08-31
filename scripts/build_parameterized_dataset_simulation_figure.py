@@ -1,8 +1,8 @@
 """Build deterministic family illustrations from the completed paper dataset.
 
-The four profiles are accepted validation cases, not manufactured states or
-empirical medoids. For each family, this selects the lower-median case ID in a
-fixed central parameter category and plots that case's first stored row.
+The four profiles are accepted validation simulations, not manufactured states
+or empirical medoids. For each family, this selects the lower-median simulation
+ID in a fixed central parameter category and plots its first stored row.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.render_paper_dataset_worst_cases import (  # noqa: E402
+from scripts.render_paper_dataset_worst_simulations import (  # noqa: E402
     CombinedSummaryBinding,
     DatasetSource,
     TrajectoryIndex,
@@ -48,18 +48,18 @@ from scripts.render_paper_dataset_worst_cases import (  # noqa: E402
     validate_final_paper_dataset,
     validate_scanned_population,
 )
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
+    SPLIT_CODE_BY_ID,
     PhysicalFamilyId,
     SplitId,
-    split_code,
 )
 
 
 DESCRIPTION = (
     "Deterministic accepted validation illustrations; these are lower-median "
-    "case IDs in fixed central cells, not medoids."
+    "simulation IDs in fixed central cells, not medoids."
 )
-SELECTION_RULE = "sort accepted validation case IDs; choose explicit lower median"
+SELECTION_RULE = "sort accepted validation simulation IDs; choose lower median"
 DIMENSIONLESS_VARIABLES: Final = {
     "horizontal": "x/L",
     "surface_elevation": "eta/h",
@@ -146,7 +146,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-stem",
         type=Path,
-        default=ROOT / "notes/figures/parameterized_dataset_case_examples",
+        default=ROOT / "notes/figures/parameterized_dataset_simulation_examples",
     )
     return parser.parse_args(argv)
 
@@ -231,7 +231,7 @@ def _validate_source_map(
         raise ValueError(f"{source.family} trajectory map has a wrong family ID")
     if not np.all(revisions == revision_id):
         raise ValueError(f"{source.family} trajectory map has a wrong revision")
-    if not np.all(split_ids == split_code(SplitId(source.split))):
+    if not np.all(split_ids == SPLIT_CODE_BY_ID[SplitId(source.split)]):
         raise ValueError(f"{source.family} trajectory map has a wrong split ID")
 
 
@@ -267,14 +267,14 @@ def validate_dataset_sources(
     sources: Sequence[DatasetSource],
 ) -> tuple[SourceDetails, ...]:
     validate_bound_sources(binding, sources)
-    accepted_cases = sum(len(source.trajectories) for source in sources)
+    accepted_simulations = sum(len(source.trajectories) for source in sources)
     retained_rows = sum(
         trajectory.row_count for source in sources for trajectory in source.trajectories
     )
     validate_scanned_population(
         binding,
         source_count=len(sources),
-        accepted_cases=accepted_cases,
+        accepted_simulations=accepted_simulations,
         retained_rows=retained_rows,
     )
     validate_final_paper_dataset(sources, retained_rows=retained_rows)
@@ -284,7 +284,7 @@ def validate_dataset_sources(
 def select_validation_trajectories(
     details: Sequence[SourceDetails],
 ) -> tuple[SelectedTrajectory, ...]:
-    """Choose the lower-median case ID in each fixed validation category."""
+    """Choose the lower-median simulation ID in each validation category."""
 
     selected: list[SelectedTrajectory] = []
     for family in FAMILY_ORDER:
@@ -298,13 +298,13 @@ def select_validation_trajectories(
                 for trajectory in item.source.trajectories
                 if trajectory.category == category
             ),
-            key=lambda pair: pair[1].case_id,
+            key=lambda pair: pair[1].simulation_id,
         )
         if not candidates:
-            raise ValueError(f"no validation cases found for {family}/{category}")
-        case_ids = [trajectory.case_id for _, trajectory in candidates]
-        if len(case_ids) != len(set(case_ids)):
-            raise ValueError(f"duplicate case IDs in {family}/{category}")
+            raise ValueError(f"no validation simulations found for {family}/{category}")
+        simulation_ids = [trajectory.simulation_id for _, trajectory in candidates]
+        if len(simulation_ids) != len(set(simulation_ids)):
+            raise ValueError(f"duplicate simulation IDs in {family}/{category}")
         lower_median_index = (len(candidates) - 1) // 2
         source_details, trajectory = candidates[lower_median_index]
         selected.append(
@@ -461,7 +461,7 @@ def _render_figure(
             0.92,
             (
                 f"{FAMILY_LABELS[source.family]}\n"
-                f"{trajectory.category}; case {trajectory.case_id}"
+                f"{trajectory.category}; simulation {trajectory.simulation_id}"
             ),
             transform=axes[row, 0].transAxes,
             va="top",
@@ -478,7 +478,7 @@ def _render_figure(
         pdf_path,
         bbox_inches="tight",
         metadata={
-            "Creator": "build_parameterized_dataset_case_figure.py",
+            "Creator": "build_parameterized_dataset_simulation_figure.py",
             "CreationDate": None,
             "ModDate": None,
         },
@@ -487,12 +487,12 @@ def _render_figure(
         png_path,
         dpi=220,
         bbox_inches="tight",
-        metadata={"Software": "build_parameterized_dataset_case_figure.py"},
+        metadata={"Software": "build_parameterized_dataset_simulation_figure.py"},
     )
     plt.close(figure)
 
 
-def _case_record(illustration: Illustration) -> dict[str, object]:
+def _simulation_record(illustration: Illustration) -> dict[str, object]:
     selected = illustration.selected
     details = selected.details
     source = details.source
@@ -502,7 +502,7 @@ def _case_record(illustration: Illustration) -> dict[str, object]:
         "revision_id": details.revision_id,
         "split": source.split,
         "category": trajectory.category,
-        "case_id": trajectory.case_id,
+        "simulation_id": trajectory.simulation_id,
         "time": illustration.time,
         "depth": illustration.depth,
         "gravity": details.gravity,
@@ -562,7 +562,7 @@ def publish_outputs(
                 "status": "complete",
                 "description": DESCRIPTION,
                 "combined_summary": str(binding.path),
-                "cases": [_case_record(item) for item in illustrations],
+                "simulations": [_simulation_record(item) for item in illustrations],
                 "artifacts": {
                     "pdf": {"path": str(final_pdf), "bytes": staged_pdf.stat().st_size},
                     "png": {"path": str(final_png), "bytes": staged_png.stat().st_size},

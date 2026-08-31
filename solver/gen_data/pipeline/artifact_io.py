@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 import json
-import os
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 import uuid
 
 import numpy as np
@@ -19,55 +19,47 @@ def load_npz(path: Path) -> dict[str, NDArray[Any]]:
         return {name: np.asarray(archive[name]) for name in archive.files}
 
 
-def npz_arrays_equal(
-    left: Mapping[str, NDArray[Any]],
-    right: Mapping[str, NDArray[Any]],
-) -> bool:
-    """Check that two NPZ array mappings have identical names, dtypes, and values."""
+def json_text(value: object, *, indent: int | None = None) -> str:
+    """Serialize a JSON-like value deterministically and reject nonfinite numbers."""
 
-    if set(left) != set(right):
-        return False
-
-    for name, left_array in left.items():
-        right_array = right[name]
-        if left_array.dtype != right_array.dtype:
-            return False
-        if not np.array_equal(
-            left_array,
-            right_array,
-            equal_nan=left_array.dtype.kind in {"f", "c"},
-        ):
-            return False
-    return True
+    return json.dumps(
+        value,
+        indent=indent,
+        sort_keys=True,
+        separators=(",", ":") if indent is None else None,
+        allow_nan=False,
+    )
 
 
-def deterministic_json_bytes(payload: Mapping[str, object]) -> bytes:
-    """Serialize an object as deterministic, finite, human-readable JSON."""
+def parse_json(text: str) -> object:
+    """Parse JSON, rejecting the nonstandard NaN and Infinity values."""
 
-    return (
-        json.dumps(
-            payload,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"nonfinite JSON constant {value!r}")
+
+    return json.loads(text, parse_constant=reject_constant)
 
 
-def _replace_atomically(path: Path, writer: Callable[[Path], None]) -> None:
+def read_json_object(path: Path) -> dict[str, object]:
+    """Read a JSON file and require an object at its root."""
+
+    value = parse_json(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return value
+
+
+def _write_file_atomically(
+    path: Path,
+    write_temporary_file: Callable[[Path], None],
+) -> None:
+    """Write a temporary file completely, then rename it to the destination."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        writer(temporary)
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
+        write_temporary_file(temporary)
         temporary.replace(path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -82,21 +74,20 @@ def write_npz_atomic(
     if any(array.dtype.kind == "O" for array in ordered.values()):
         raise TypeError("atomic NPZ arrays cannot use object dtype")
 
-    def writer(temporary: Path) -> None:
+    def write_temporary_file(temporary: Path) -> None:
         with temporary.open("wb") as handle:
             # NumPy's stub treats arbitrary NPZ member names as potential
             # ``allow_pickle`` arguments even though object arrays are rejected above.
             np.savez(handle, **ordered)  # pyright: ignore[reportArgumentType]
 
-    _replace_atomically(path, writer)
+    _write_file_atomically(path, write_temporary_file)
 
 
 def ensure_npz(
     path: Path,
     arrays: Mapping[str, NDArray[Any]],
     *,
-    validate: Callable[[Mapping[str, NDArray[Any]]], object],
-    artifact_name: str,
+    validate: Callable[[Mapping[str, NDArray[Any]]], None],
 ) -> None:
     """Write a valid NPZ or verify that an existing artifact is an exact replay."""
 
@@ -105,10 +96,17 @@ def ensure_npz(
     if path.exists():
         existing = load_npz(path)
         validate(existing)
-        if not npz_arrays_equal(existing, normalized):
-            raise RuntimeError(
-                f"existing {artifact_name} differs from replayed {artifact_name}"
+        arrays_differ = existing.keys() != normalized.keys() or any(
+            existing[name].dtype != array.dtype
+            or not np.array_equal(
+                existing[name],
+                array,
+                equal_nan=array.dtype.kind in {"f", "c"},
             )
+            for name, array in normalized.items()
+        )
+        if arrays_differ:
+            raise RuntimeError(f"existing {path} differs from replayed arrays")
     else:
         write_npz_atomic(path, normalized)
 
@@ -116,26 +114,9 @@ def ensure_npz(
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     """Atomically write deterministic, finite JSON."""
 
-    encoded = deterministic_json_bytes(payload)
+    encoded = (json_text(payload, indent=2) + "\n").encode("utf-8")
 
-    def writer(temporary: Path) -> None:
-        with temporary.open("wb") as handle:
-            handle.write(encoded)
+    def write_temporary_file(temporary: Path) -> None:
+        temporary.write_bytes(encoded)
 
-    _replace_atomically(path, writer)
-
-
-def ensure_json(
-    path: Path,
-    payload: Mapping[str, object],
-    *,
-    artifact_name: str,
-) -> None:
-    """Write new JSON or verify that an existing artifact is an exact replay."""
-
-    encoded = deterministic_json_bytes(payload)
-    if path.exists():
-        if path.read_bytes() != encoded:
-            raise RuntimeError(f"existing {artifact_name} differs from replay")
-    else:
-        write_json_atomic(path, payload)
+    _write_file_atomically(path, write_temporary_file)

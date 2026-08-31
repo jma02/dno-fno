@@ -26,7 +26,7 @@ TRAJS_DIR = (
     / "eval_suite_f64h"
 )
 
-# Failing-IC manifest. tag -> {case_ids in trajs.npz}, file paths, dataset name.
+# Failing-IC manifest. tag -> {simulation_ids in trajs.npz}, file paths, dataset name.
 FAILING = [
     {"tag": "g0", "cid": 5, "label": "tanaka_g0_cid5"},
     {"tag": "g0", "cid": 11, "label": "tanaka_g0_cid11"},
@@ -49,12 +49,12 @@ def load_ic_from_dataset(tag: str, cid: int) -> dict:
     d = np.load(f, allow_pickle=True)
     # case 5 / 11 / 1000006 / 1000011 are all in batch 0000.
     batch = "0000"
-    cids = d[f"case_id_batch_{batch}"]
+    cids = d[f"simulation_id_batch_{batch}"]
     mask = cids == cid
     if not mask.any():
         # try other batches
         for b in range(20):
-            cids_b = d[f"case_id_batch_{b:04d}"]
+            cids_b = d[f"simulation_id_batch_{b:04d}"]
             if (cids_b == cid).any():
                 batch = f"{b:04d}"
                 cids = cids_b
@@ -388,7 +388,7 @@ def main() -> dict:
         tag = ic["tag"]
         cid = ic["cid"]
         t = trajs[tag]
-        i = int(np.where(t["case_ids"] == cid)[0][0])
+        i = int(np.where(t["simulation_ids"] == cid)[0][0])
         times = t["times"]
         pred_eta = t["pred_eta"][:, i, :]
         truth_eta = t["truth_eta"][:, i, :]

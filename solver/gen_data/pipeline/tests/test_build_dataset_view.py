@@ -12,10 +12,10 @@ import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
-    CaseCommitRecord,
+    SimulationCommitRecord,
     commit_batch,
-    ensure_proposal,
-    ensure_shard,
+    save_batch_plan,
+    save_shard,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 
@@ -35,7 +35,7 @@ def _target(*, nx: int = 4, maximum_wavenumber: float = 1.0) -> dict[str, object
 def _static_metadata(*, maximum_wavenumber: float = 1.0) -> dict[str, object]:
     return {
         "family": "stokes",
-        "case_kind": "static",
+        "simulation_type": "static",
         "contract": {
             "role": "test",
             **_target(maximum_wavenumber=maximum_wavenumber),
@@ -70,13 +70,13 @@ def _trajectory_metadata(
         numerical["target_maximum_wavenumber"] = target_maximum_wavenumber
     return {
         "family": family,
-        "case_kind": "trajectory",
+        "simulation_type": "trajectory",
         "trajectory_execution": {
             "family": family,
             "role": "test",
             "numerical": numerical,
             "horizon": {"kind": "fixed_terminal_time"},
-            "stored_time_policy": {"count": 2},
+            "frame_selection": {"count": 2},
         },
     }
 
@@ -87,7 +87,7 @@ def _proposal(
     revision_id: int,
     split_id: int,
     batch_id: int,
-    case_ids: tuple[int, ...],
+    simulation_ids: tuple[int, ...],
     metadata: dict[str, object],
 ) -> dict[str, np.ndarray]:
     return {
@@ -95,10 +95,16 @@ def _proposal(
         "revision_id": np.asarray(revision_id, dtype=np.int16),
         "split_id": np.asarray(split_id, dtype=np.uint8),
         "batch_id": np.asarray(batch_id, dtype=np.int64),
-        "case_id": np.asarray(case_ids, dtype=np.int64),
-        "cell_id": np.arange(len(case_ids), dtype=np.int32),
-        "case_spec_json": np.asarray(
-            [json.dumps({"case_id": case_id}) for case_id in case_ids]
+        "simulation_id": np.asarray(simulation_ids, dtype=np.int64),
+        "cell_id": np.arange(len(simulation_ids), dtype=np.int32),
+        "root_seed": np.zeros(len(simulation_ids), dtype=np.uint64),
+        "stream_id": np.zeros(len(simulation_ids), dtype=np.uint32),
+        "attempt_index": np.arange(len(simulation_ids), dtype=np.uint64),
+        "simulation_spec_json": np.asarray(
+            [
+                json.dumps({"simulation_id": simulation_id})
+                for simulation_id in simulation_ids
+            ]
         ),
         "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
     }
@@ -109,23 +115,23 @@ def _write_batch(
     *,
     proposal: dict[str, np.ndarray],
     accepted_local_indices: tuple[int, ...],
-    frames_per_case: int,
+    frames_per_simulation: int,
     spatial_size: int = 4,
 ) -> None:
-    ensure_proposal(paths, proposal)
-    case_local_index = np.repeat(
+    save_batch_plan(paths, proposal)
+    simulation_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
-        frames_per_case,
+        frames_per_simulation,
     )
     frame_index = np.tile(
-        np.arange(frames_per_case, dtype=np.int32),
+        np.arange(frames_per_simulation, dtype=np.int32),
         len(accepted_local_indices),
     )
-    row_count = case_local_index.size
+    row_count = simulation_local_index.size
     field = np.arange(row_count * spatial_size, dtype=np.float32).reshape(
         row_count, spatial_size
     )
-    ensure_shard(
+    save_shard(
         paths,
         {
             "eta": field,
@@ -133,20 +139,20 @@ def _write_batch(
             "gxi": field - np.float32(0.1),
             "depth": np.ones(row_count, dtype=np.float64),
             "time": frame_index.astype(np.float64),
-            "case_local_index": case_local_index,
+            "simulation_local_index": simulation_local_index,
             "frame_index": frame_index,
             "selected_dense_index": frame_index,
         },
     )
     blocks = {
-        local_index: (position * frames_per_case, frames_per_case)
+        local_index: (position * frames_per_simulation, frames_per_simulation)
         for position, local_index in enumerate(accepted_local_indices)
     }
     commit_batch(
         paths,
-        cases=tuple(
-            CaseCommitRecord(
-                case_id=int(case_id),
+        simulations=tuple(
+            SimulationCommitRecord(
+                simulation_id=int(simulation_id),
                 accepted=local_index in blocks,
                 required_bits=63,
                 evaluated_bits=63,
@@ -155,7 +161,7 @@ def _write_batch(
                 row_count=blocks.get(local_index, (-1, 0))[1],
                 metrics={},
             )
-            for local_index, case_id in enumerate(proposal["case_id"])
+            for local_index, simulation_id in enumerate(proposal["simulation_id"])
         ),
         metadata={},
     )
@@ -167,7 +173,7 @@ class DatasetViewTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def test_view_preserves_rejected_cases_and_row_ownership(self) -> None:
+    def test_view_preserves_rejected_simulations_and_row_ownership(self) -> None:
         first = BatchPaths.for_batch(
             self.root, family="stokes", split="train", batch_id=0
         )
@@ -181,11 +187,11 @@ class DatasetViewTests(unittest.TestCase):
                 revision_id=2,
                 split_id=0,
                 batch_id=0,
-                case_ids=(10, 11),
+                simulation_ids=(10, 11),
                 metadata=_static_metadata(),
             ),
             accepted_local_indices=(0,),
-            frames_per_case=1,
+            frames_per_simulation=1,
         )
         _write_batch(
             second,
@@ -194,11 +200,11 @@ class DatasetViewTests(unittest.TestCase):
                 revision_id=3,
                 split_id=1,
                 batch_id=0,
-                case_ids=(20,),
+                simulation_ids=(20,),
                 metadata=_trajectory_metadata("tanaka"),
             ),
             accepted_local_indices=(0,),
-            frames_per_case=2,
+            frames_per_simulation=2,
         )
 
         view = build_dataset_view(self.root, (first, second))
@@ -233,11 +239,11 @@ class DatasetViewTests(unittest.TestCase):
                 revision_id=2,
                 split_id=0,
                 batch_id=0,
-                case_ids=(1,),
+                simulation_ids=(1,),
                 metadata=_static_metadata(maximum_wavenumber=2.0),
             ),
             accepted_local_indices=(0,),
-            frames_per_case=1,
+            frames_per_simulation=1,
         )
         _write_batch(
             tanaka,
@@ -246,20 +252,18 @@ class DatasetViewTests(unittest.TestCase):
                 revision_id=3,
                 split_id=1,
                 batch_id=0,
-                case_ids=(2,),
+                simulation_ids=(2,),
                 metadata=_trajectory_metadata("tanaka", maximum_wavenumber=1.0),
             ),
             accepted_local_indices=(0,),
-            frames_per_case=1,
+            frames_per_simulation=1,
         )
         with self.assertRaisesRegex(ValueError, "DNO target contract"):
             build_dataset_view(self.root, (stokes, tanaka))
 
     def test_one_family_revision_cannot_mix_execution_contracts(self) -> None:
         batches = tuple(
-            BatchPaths.for_batch(
-                self.root, family="tanaka", split=split, batch_id=0
-            )
+            BatchPaths.for_batch(self.root, family="tanaka", split=split, batch_id=0)
             for split in ("train", "validation")
         )
         for index, (paths, fine_dt) in enumerate(zip(batches, (0.01, 0.005))):
@@ -270,11 +274,11 @@ class DatasetViewTests(unittest.TestCase):
                     revision_id=3,
                     split_id=index,
                     batch_id=0,
-                    case_ids=(10 + index,),
+                    simulation_ids=(10 + index,),
                     metadata=_trajectory_metadata("tanaka", fine_dt=fine_dt),
                 ),
                 accepted_local_indices=(0,),
-                frames_per_case=1,
+                frames_per_simulation=1,
             )
         with self.assertRaisesRegex(ValueError, "cannot mix execution contracts"):
             build_dataset_view(self.root, batches)
@@ -290,7 +294,7 @@ class DatasetViewTests(unittest.TestCase):
                 revision_id=4,
                 split_id=2,
                 batch_id=0,
-                case_ids=(30,),
+                simulation_ids=(30,),
                 metadata=_trajectory_metadata(
                     "jonswap_tma",
                     evolution_nx=8,
@@ -298,7 +302,7 @@ class DatasetViewTests(unittest.TestCase):
                 ),
             ),
             accepted_local_indices=(0,),
-            frames_per_case=2,
+            frames_per_simulation=2,
             spatial_size=4,
         )
         view = build_dataset_view(self.root, (paths,))
@@ -310,14 +314,14 @@ class DatasetViewTests(unittest.TestCase):
         paths = BatchPaths.for_batch(
             self.root, family="stokes", split="test", batch_id=0
         )
-        ensure_proposal(
+        save_batch_plan(
             paths,
             _proposal(
                 family_id=0,
                 revision_id=2,
                 split_id=2,
                 batch_id=0,
-                case_ids=(40,),
+                simulation_ids=(40,),
                 metadata=_static_metadata(),
             ),
         )

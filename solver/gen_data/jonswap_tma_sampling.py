@@ -2,8 +2,8 @@
 
 The 27 allocation cells are the Cartesian product of three depth strata,
 three peak-enhancement values, and three right-moving energy fractions.
-Each attempted case owns one PCG64 stream determined by its complete
-``CaseKey.seed_words`` tuple.
+Each attempted simulation owns one PCG64 stream determined by its complete
+``SimulationKey.seed_words`` tuple.
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ from solver.gen_data.jonswap_tma import (
     relative_frequency_interval_fits,
     sample_jonswap_tma_phases,
 )
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 
 
@@ -73,7 +73,7 @@ class JonswapTmaSample:
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
-        record: JsonRecord = {
+        return {
             **self.assignment.to_json_record(),
             "stratum": self.stratum,
             "depth": self.parameters.depth,
@@ -84,7 +84,6 @@ class JonswapTmaSample:
             "phase_right": self.phase_right.tolist(),
             "phase_left": self.phase_left.tolist(),
         }
-        return record
 
 
 def _sample_shallow_parameters(
@@ -162,19 +161,19 @@ def _sample_finite_or_deep_parameters(
             return candidate
 
 
-def sample_jonswap_tma_case(
+def sample_jonswap_tma_simulation(
     assignment: AttemptAssignment,
     *,
     band: ResolvedBand,
 ) -> JonswapTmaSample:
-    """Sample one complete JONSWAP/TMA specification for an attempted case.
+    """Sample one complete JONSWAP/TMA specification for an attempted simulation.
 
     The assignment fixes the allocation cell and random stream before any
     parameter or phase is drawn. The returned specification includes both
     phase arrays and passes the paper-support predicate by construction.
     """
 
-    if assignment.case_key.revision_id != JONSWAP_TMA_SAMPLING_REVISION_V4:
+    if assignment.simulation_key.revision_id != JONSWAP_TMA_SAMPLING_REVISION_V4:
         raise ValueError(
             "JONSWAP/TMA sampling requires the current revision "
             f"{JONSWAP_TMA_SAMPLING_REVISION_V4}"
@@ -187,7 +186,7 @@ def sample_jonswap_tma_case(
         raise ValueError(
             f"unknown JONSWAP/TMA sample cell: {assignment.cell_id}"
         ) from error
-    rng = random_generator_for_case(assignment.case_key)
+    rng = random_generator_for_simulation(assignment.simulation_key)
     if stratum == "shallow":
         parameters = _sample_shallow_parameters(
             rng,

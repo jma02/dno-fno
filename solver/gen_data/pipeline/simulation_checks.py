@@ -1,4 +1,4 @@
-"""Record which checks ran and failed for a generated case."""
+"""Record which checks ran and failed for a generated simulation."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from operator import index
 from typing import SupportsIndex
 
 
-class CaseCheck(IntFlag):
-    # idk wtf the ai is doing but ok
+class SimulationCheck(IntFlag):
+    """Reasons a generated simulation can be rejected."""
+
     NONE = 0
     NONFINITE_STATE = 1
     NONFINITE_TARGET = 2
@@ -23,20 +24,20 @@ class CaseCheck(IntFlag):
     INCOMPLETE_TRAJECTORY = 512
 
 
-def checks_from_bits(bits: SupportsIndex) -> tuple[CaseCheck, ...]:
+def checks_from_bits(bits: SupportsIndex) -> tuple[SimulationCheck, ...]:
     """Return the individual failure reasons stored in a bit mask."""
 
-    mask = CaseCheck(index(bits))
-    return tuple(reason for reason in CaseCheck if reason & mask)
+    mask = SimulationCheck(index(bits))
+    return tuple(reason for reason in SimulationCheck if reason & mask)
 
 
 @dataclass(frozen=True)
-class CaseCheckResult:
-    """Checks required, checks run, and checks failed for one case."""
+class SimulationCheckResult:
+    """Checks required, checks run, and checks failed for one simulation."""
 
-    required: CaseCheck
-    evaluated: CaseCheck
-    failed: CaseCheck
+    required: SimulationCheck
+    evaluated: SimulationCheck
+    failed: SimulationCheck
 
     def __post_init__(self) -> None:
         if self.failed & ~self.evaluated:
@@ -48,15 +49,15 @@ class CaseCheckResult:
         required_bits: SupportsIndex,
         evaluated_bits: SupportsIndex,
         failed_bits: SupportsIndex,
-    ) -> CaseCheckResult:
+    ) -> SimulationCheckResult:
         return cls(
-            required=CaseCheck(index(required_bits)),
-            evaluated=CaseCheck(index(evaluated_bits)),
-            failed=CaseCheck(index(failed_bits)),
+            required=SimulationCheck(index(required_bits)),
+            evaluated=SimulationCheck(index(evaluated_bits)),
+            failed=SimulationCheck(index(failed_bits)),
         )
 
     @property
-    def missing(self) -> CaseCheck:
+    def missing(self) -> SimulationCheck:
         return self.required & ~self.evaluated
 
     @property

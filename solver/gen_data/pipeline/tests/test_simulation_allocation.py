@@ -1,18 +1,19 @@
-"""Tests for deterministic case allocation."""
+"""Tests for deterministic simulation allocation."""
 
 from __future__ import annotations
 
 import unittest
 
-from solver.gen_data.pipeline.case_allocation import (
-    CaseKey,
+import numpy as np
+
+from solver.gen_data.pipeline.simulation_allocation import (
     DATASET_REVISION_BY_FAMILY,
+    SPLIT_ROOT_SEED_BY_ID,
     PhysicalFamilyId,
+    SimulationKey,
     SplitId,
-    balanced_valid_case_targets,
-    assign_next_cases,
-    split_code,
-    split_root,
+    balanced_simulation_targets,
+    build_next_attempt_batch,
 )
 
 
@@ -40,39 +41,40 @@ class FamilyIdentityTest(unittest.TestCase):
 
 class BalancedSampleCellTargetsTest(unittest.TestCase):
     def test_uses_exact_quotient_and_remainder_balance(self) -> None:
-        targets = balanced_valid_case_targets(
+        targets = balanced_simulation_targets(
             ("shallow", "finite", "deep"),
-            case_count=8,
+            simulation_count=8,
         )
 
         self.assertEqual(
-            [(target.cell_id, target.case_count) for target in targets],
+            [(target.cell_id, target.simulation_count) for target in targets],
             [("shallow", 3), ("finite", 3), ("deep", 2)],
         )
-        self.assertEqual(sum(target.case_count for target in targets), 8)
+        self.assertEqual(sum(target.simulation_count for target in targets), 8)
 
     def test_total_smaller_than_cell_count_is_deterministic(self) -> None:
-        targets = balanced_valid_case_targets(
+        targets = balanced_simulation_targets(
             ("a", "b", "c", "d"),
-            case_count=2,
+            simulation_count=2,
         )
 
         self.assertEqual(
-            [target.case_count for target in targets],
+            [target.simulation_count for target in targets],
             [1, 1, 0, 0],
         )
 
     def test_rejects_duplicate_cells(self) -> None:
         with self.assertRaisesRegex(ValueError, "unique"):
-            balanced_valid_case_targets(("same", "same"), case_count=2)
+            balanced_simulation_targets(("same", "same"), simulation_count=2)
 
 
 class AttemptScheduleTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.targets = balanced_valid_case_targets(
+        self.targets = balanced_simulation_targets(
             ("low", "moderate"),
-            case_count=4,
+            simulation_count=4,
         )
+        self.attempt_limits = {target.cell_id: 34 for target in self.targets}
 
     def test_replay_has_identical_assignments_and_seed_words(self) -> None:
         arguments = {
@@ -84,8 +86,20 @@ class AttemptScheduleTest(unittest.TestCase):
             "batch_size": 3,
         }
 
-        first = assign_next_cases(self.targets, {}, **arguments)
-        replay = assign_next_cases(self.targets, {}, **arguments)
+        first = build_next_attempt_batch(
+            self.targets,
+            {},
+            {},
+            self.attempt_limits,
+            **arguments,
+        )
+        replay = build_next_attempt_batch(
+            self.targets,
+            {},
+            {},
+            self.attempt_limits,
+            **arguments,
+        )
 
         self.assertEqual(first, replay)
         self.assertEqual(
@@ -93,47 +107,56 @@ class AttemptScheduleTest(unittest.TestCase):
             ["low", "moderate", "low"],
         )
         self.assertEqual(
-            [assignment.case_key.attempt_index for assignment in first],
+            [assignment.simulation_key.attempt_index for assignment in first],
             [17, 18, 19],
         )
         self.assertTrue(
             all(
-                (assignment.case_key.family_id, assignment.case_key.revision_id)
+                (
+                    assignment.simulation_key.family_id,
+                    assignment.simulation_key.revision_id,
+                )
                 == (2, 1)
                 for assignment in first
             )
         )
         self.assertEqual(
-            first[0].case_key.seed_words,
+            first[0].simulation_key.seed_words,
             (2026072204, 2, 1, 9, 17),
         )
         self.assertEqual(
-            first[0].case_key.case_id,
-            (split_code(SplitId.VALIDATION) << 60) | (9 << 40) | 17,
+            first[0].simulation_key.simulation_id,
+            1_152_931_400_211_496_977,
         )
 
-    def test_case_id_separates_splits_streams_and_attempts(self) -> None:
+    def test_simulation_id_separates_splits_streams_and_attempts(self) -> None:
         keys = (
-            CaseKey(2, 1, SplitId.TRAIN, 0, 0),
-            CaseKey(2, 1, SplitId.VALIDATION, 0, 0),
-            CaseKey(2, 1, SplitId.TEST, 0, 0),
-            CaseKey(2, 1, SplitId.TRAIN, 1, 0),
-            CaseKey(2, 1, SplitId.TRAIN, 0, 1),
+            SimulationKey(2, 1, SplitId.TRAIN, 0, 0),
+            SimulationKey(2, 1, SplitId.VALIDATION, 0, 0),
+            SimulationKey(2, 1, SplitId.TEST, 0, 0),
+            SimulationKey(2, 1, SplitId.TRAIN, 1, 0),
+            SimulationKey(2, 1, SplitId.TRAIN, 0, 1),
         )
 
-        self.assertEqual(len({key.case_id for key in keys}), len(keys))
-        self.assertTrue(all(0 <= key.case_id < 1 << 63 for key in keys))
+        self.assertEqual(len({key.simulation_id for key in keys}), len(keys))
+        self.assertTrue(
+            all(key.simulation_id <= np.iinfo(np.int64).max for key in keys)
+        )
 
-    def test_case_key_rejects_ids_that_do_not_fit_the_archive_layout(self) -> None:
+    def test_simulation_key_rejects_ids_that_do_not_fit_the_archive_layout(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(ValueError, "stream_id"):
-            CaseKey(2, 1, SplitId.TRAIN, 1 << 20, 0)
+            SimulationKey(2, 1, SplitId.TRAIN, 1_048_576, 0)
         with self.assertRaisesRegex(ValueError, "attempt_index"):
-            CaseKey(2, 1, SplitId.TRAIN, 0, 1 << 40)
+            SimulationKey(2, 1, SplitId.TRAIN, 0, 1_099_511_627_776)
 
     def test_rejection_leaves_the_target_unmet_in_its_original_cell(self) -> None:
-        first = assign_next_cases(
+        first = build_next_attempt_batch(
             self.targets,
             {},
+            {},
+            self.attempt_limits,
             family_id=2,
             revision_id=1,
             split_id=SplitId.TRAIN,
@@ -147,9 +170,11 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
         # The low-cell attempt passed; the moderate-cell attempt failed.
-        replacement = assign_next_cases(
+        replacement = build_next_attempt_batch(
             self.targets,
             {"low": 1, "moderate": 0},
+            {"low": 1, "moderate": 1},
+            self.attempt_limits,
             family_id=2,
             revision_id=1,
             split_id=SplitId.TRAIN,
@@ -159,12 +184,14 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
         self.assertEqual(replacement[0].cell_id, "moderate")
-        self.assertEqual(replacement[0].case_key.attempt_index, 2)
+        self.assertEqual(replacement[0].simulation_key.attempt_index, 2)
 
     def test_split_is_fixed_on_every_pre_outcome_assignment(self) -> None:
-        assignments = assign_next_cases(
+        assignments = build_next_attempt_batch(
             self.targets,
             {},
+            {},
+            self.attempt_limits,
             family_id=2,
             revision_id=1,
             split_id=SplitId.TEST,
@@ -175,21 +202,24 @@ class AttemptScheduleTest(unittest.TestCase):
 
         self.assertTrue(
             all(
-                assignment.case_key.split_id is SplitId.TEST
+                assignment.simulation_key.split_id is SplitId.TEST
                 for assignment in assignments
             )
         )
         self.assertTrue(
             all(
-                assignment.case_key.root_seed == split_root(SplitId.TEST)
+                assignment.simulation_key.root_seed
+                == SPLIT_ROOT_SEED_BY_ID[SplitId.TEST]
                 for assignment in assignments
             )
         )
 
-    def test_final_batch_is_partial_and_contains_only_whole_cases(self) -> None:
-        assignments = assign_next_cases(
+    def test_final_batch_is_partial_and_contains_only_whole_simulations(self) -> None:
+        assignments = build_next_attempt_batch(
             self.targets,
             {"low": 2, "moderate": 1},
+            {"low": 2, "moderate": 1},
+            self.attempt_limits,
             family_id=2,
             revision_id=1,
             split_id=SplitId.TRAIN,
@@ -201,8 +231,8 @@ class AttemptScheduleTest(unittest.TestCase):
         self.assertEqual(len(assignments), 1)
         self.assertEqual(assignments[0].cell_id, "moderate")
         self.assertEqual(
-            assignments[0].case_key,
-            CaseKey(
+            assignments[0].simulation_key,
+            SimulationKey(
                 family_id=2,
                 revision_id=1,
                 split_id=SplitId.TRAIN,
@@ -212,9 +242,11 @@ class AttemptScheduleTest(unittest.TestCase):
         )
 
     def test_met_targets_schedule_no_more_attempts(self) -> None:
-        assignments = assign_next_cases(
+        assignments = build_next_attempt_batch(
             self.targets,
             {"low": 2, "moderate": 2},
+            {"low": 2, "moderate": 2},
+            self.attempt_limits,
             family_id=2,
             revision_id=1,
             split_id=SplitId.TRAIN,

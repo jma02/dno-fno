@@ -6,8 +6,8 @@ part of ``[0.05, 0.13]`` inside the leading deep-water instability band and
 below the declared focused-steepness limit.  The sideband-to-carrier amplitude
 ratio is uniform on ``[0.05, 0.10]``, and the global translation is uniform on
 ``[0, L)``.  Relative to the translated coordinate, both sidebands have the
-fixed JCP09 phase shift ``-pi/4``.  Each attempted case uses one PCG64 stream
-constructed from every word in ``CaseKey.seed_words``.
+fixed JCP09 phase shift ``-pi/4``. Each attempted simulation uses one PCG64 stream
+constructed from every word in ``SimulationKey.seed_words``.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ from solver.gen_data.benjamin_feir_jcp09 import (
     focused_steepness_proxy,
     instability_band_fraction,
 )
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 
 
@@ -159,7 +159,7 @@ class BenjaminFeirSample:
         )
 
     def to_parameter_arrays(self) -> ParameterArrays:
-        """Return a one-case batch for ``build_initial_conditions``."""
+        """Return a one-simulation batch for ``build_initial_conditions``."""
 
         return {
             "n_carr": np.asarray([self.carrier_mode], dtype=np.int32),
@@ -195,7 +195,7 @@ class BenjaminFeirSample:
             )
 
         fundamental = self.fundamental_wavenumber
-        record: JsonRecord = {
+        return {
             **self.assignment.to_json_record(),
             "domain_length": self.domain_length,
             "depth": self.depth,
@@ -218,7 +218,6 @@ class BenjaminFeirSample:
             "focused_steepness": self.focused_steepness,
             "focused_steepness_limit": PAPER_FOCUSED_STEEPNESS_LIMIT,
         }
-        return record
 
 
 def find_benjamin_feir_sample_violations(
@@ -258,7 +257,7 @@ def find_benjamin_feir_sample_violations(
     return tuple(violations)
 
 
-def sample_benjamin_feir_case(
+def sample_benjamin_feir_simulation(
     assignment: AttemptAssignment,
     *,
     domain_length: float = 2.0 * math.pi,
@@ -272,7 +271,7 @@ def sample_benjamin_feir_case(
     if cell is None:
         raise ValueError(f"unknown Benjamin--Feir sample cell: {assignment.cell_id}")
     carrier_mode, sideband_offset = cell
-    rng = random_generator_for_case(assignment.case_key)
+    rng = random_generator_for_simulation(assignment.simulation_key)
     steepness_lower, steepness_upper = _conditional_steepness_bounds(
         carrier_mode,
         sideband_offset,

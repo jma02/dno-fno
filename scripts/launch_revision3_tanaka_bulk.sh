@@ -84,9 +84,9 @@ build_chunk() {
     COMMAND=(
         "$PYTHON" scripts/generate_paper_dataset.py
         --family tanaka --split "$SPLIT"
-        --accepted-cases "$COUNT" --accepted-cases-before "$BEFORE"
+        --accepted-simulations "$COUNT" --accepted-simulations-before "$BEFORE"
         --stream-id "$STREAM" --first-attempt-index 0
-        --batch-size 256 --maximum-attempts-per-accepted-case 4
+        --batch-size 256
         --platform gpu --output-root "$CHUNK_ROOT"
     )
 }
@@ -120,7 +120,7 @@ preflight_chunk() {
 }
 
 # Freeze all six plans before either GPU starts numerical generation.  This is
-# a fresh deterministic population; it does not reproduce old random cases.
+# a fresh deterministic population; it does not reproduce old random simulations.
 for row in "${CHUNKS[@]}"; do preflight_chunk "$row"; done
 "$PYTHON" -c '
 import json, sys
@@ -135,7 +135,7 @@ for plan in plans:
             or plan.get("no_numerical_generation_performed") is not True
             or run.get("family_name") != "tanaka"
             or run.get("revision_id") != 3 or run.get("batch_size") != 256
-            or run.get("maximum_attempts_per_accepted_case") != 4
+            or run.get("maximum_retries_per_parameter_group") != 32
             or config.get("execution_platform") != "gpu"
             or plan.get("execution") != config.get("trajectory_execution")):
         raise SystemExit("invalid revision-3 Tanaka preflight")
@@ -237,7 +237,7 @@ for split, wanted in expected.items():
 if len(chunks) != 6 or len({c.revision_id for c in chunks}) != 1:
     raise SystemExit("completed Tanaka chunks do not share one revision")
 print(json.dumps({"status": "passed", "family": "tanaka",
-    "accepted_cases": {"train": 16384, "validation": 1024, "test": 1024},
+    "accepted_simulations": {"train": 16384, "validation": 1024, "test": 1024},
     "intervals_with_stream_id": observed,
     "historical_random_specifications_reused": False,
     "full_four_family_view_preflight_pending": True}, indent=2))

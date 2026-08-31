@@ -1,6 +1,6 @@
 """Deep-water Benjamin--Feir initial conditions in the form of JCP09 (33).
 
-A case is described by a carrier mode, first-harmonic carrier steepness,
+A simulation is described by a carrier mode, first-harmonic carrier steepness,
 symmetric sideband offset, one relative sideband amplitude, and one global
 translation.  In the translated frame, both sidebands have the JCP09 phase
 shift ``-pi/4``.  The discrete modes are restricted to the leading deep-water
@@ -8,6 +8,7 @@ modulational-instability band.  JCP09 used a numerically computed steady
 Stokes carrier; this module uses the project's analytic fifth-order deep-water
 carrier and does not claim that stronger equivalence.
 """
+
 from __future__ import annotations
 
 import math
@@ -28,15 +29,12 @@ CARRIER_STEEPNESS_MAX = 0.13
 PERTURBATION_RATIO_MIN = 0.05
 DEEP_WATER_MINIMUM_KH = 5.0
 JCP09_RELATIVE_SIDEBAND_PHASE = -math.pi / 4.0
-BENJAMIN_FEIR_CONSTRUCTOR = (
-    "jcp09_equation_33_with_project_fifth_order_carrier_v2"
-)
+BENJAMIN_FEIR_CONSTRUCTOR = "jcp09_equation_33_with_project_fifth_order_carrier_v2"
 BENJAMIN_FEIR_MODE_PAIRS = tuple(
     (carrier_mode, sideband_offset)
     for carrier_mode in range(CARRIER_MODE_MIN, CARRIER_MODE_MAX + 1)
     for sideband_offset in range(1, carrier_mode)
-    if sideband_offset / carrier_mode
-    < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
+    if sideband_offset / carrier_mode < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
 )
 
 
@@ -86,9 +84,7 @@ def focused_steepness_proxy(
     )
     radicand = 1.0 - band_fraction**2
     in_band = (band_fraction > 0.0) & (radicand >= 0.0)
-    value = steepness * (
-        1.0 + 2.0 * np.sqrt(np.maximum(radicand, 0.0))
-    )
+    value = steepness * (1.0 + 2.0 * np.sqrt(np.maximum(radicand, 0.0)))
     return np.where(in_band, value, np.nan)
 
 
@@ -100,20 +96,14 @@ def focused_steepness_carrier_upper_bound(
 ) -> np.ndarray:
     """Return the carrier-steepness endpoint implied by the focus bound."""
 
-    if (
-        not math.isfinite(focused_steepness_limit)
-        or focused_steepness_limit <= 0.0
-    ):
+    if not math.isfinite(focused_steepness_limit) or focused_steepness_limit <= 0.0:
         raise ValueError("focused_steepness_limit must be finite and positive")
     carrier = np.asarray(carrier_mode)
     offset = np.asarray(sideband_offset)
     instability_threshold = offset / (2.0 * np.sqrt(2.0) * carrier)
     return (
         -focused_steepness_limit
-        + 2.0
-        * np.sqrt(
-            focused_steepness_limit**2 + 3.0 * instability_threshold**2
-        )
+        + 2.0 * np.sqrt(focused_steepness_limit**2 + 3.0 * instability_threshold**2)
     ) / 3.0
 
 
@@ -133,11 +123,7 @@ def _deep_stokes_carrier(
     bare_amplitude = amplitude
     for _ in range(8):
         bare_steepness = wavenumber * bare_amplitude
-        factor = (
-            1.0
-            + bare_steepness**2 / 8.0
-            + 121.0 * bare_steepness**4 / 192.0
-        )
+        factor = 1.0 + bare_steepness**2 / 8.0 + 121.0 * bare_steepness**4 / 192.0
         bare_amplitude = amplitude / factor
     eta, xi = stokes_eta_xi(
         x=x,
@@ -176,16 +162,10 @@ def _initial_condition(
     dtype = x.dtype
     fundamental = 2.0 * jnp.pi / length
     left_wavenumber = (carrier_mode - sideband_offset).astype(dtype) * fundamental
-    right_wavenumber = (
-        carrier_mode + sideband_offset
-    ).astype(dtype) * fundamental
+    right_wavenumber = (carrier_mode + sideband_offset).astype(dtype) * fundamental
     sideband_amplitude = perturbation_ratio * carrier_amplitude
-    left_phase = (
-        left_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
-    )
-    right_phase = (
-        right_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
-    )
+    left_phase = left_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
+    right_phase = right_wavenumber * translated_x + JCP09_RELATIVE_SIDEBAND_PHASE
     eta = (
         eta_carrier
         + sideband_amplitude * jnp.cos(left_phase)
@@ -213,7 +193,7 @@ def build_initial_conditions(
     gravity: float,
     dtype: jnp.dtype,
 ) -> tuple[jax.Array, jax.Array]:
-    """Vectorize the deep-water JCP09-form construction over a case batch."""
+    """Vectorize the deep-water JCP09 construction over a simulation batch."""
 
     x_array = jnp.asarray(x, dtype=dtype)
     carrier_mode = jnp.asarray(parameters["n_carr"], dtype=jnp.int32)

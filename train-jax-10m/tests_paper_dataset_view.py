@@ -1,4 +1,5 @@
 """CPU integration test for schema-v2 paper-dataset views."""
+
 from __future__ import annotations
 
 import json
@@ -10,10 +11,10 @@ import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
-    CaseCommitRecord,
+    SimulationCommitRecord,
     commit_batch,
-    ensure_proposal,
-    ensure_shard,
+    save_batch_plan,
+    save_shard,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 
@@ -26,6 +27,7 @@ from util import (  # noqa: E402
     load_or_compute_stats,
 )
 
+
 def _write_batch(
     root: Path,
     *,
@@ -33,7 +35,7 @@ def _write_batch(
     family_id: int,
     split: str,
     split_id: int,
-    case_ids: tuple[int, ...],
+    simulation_ids: tuple[int, ...],
     accepted_local_indices: tuple[int, ...],
 ) -> BatchPaths:
     paths = BatchPaths.for_batch(
@@ -47,24 +49,30 @@ def _write_batch(
         "revision_id": np.asarray(1, dtype=np.int16),
         "split_id": np.asarray(split_id, dtype=np.uint8),
         "batch_id": np.asarray(0, dtype=np.int64),
-        "case_id": np.asarray(case_ids, dtype=np.int64),
-        "cell_id": np.arange(len(case_ids), dtype=np.int32),
-        "case_spec_json": np.asarray(
-            [json.dumps({"case_id": case_id}) for case_id in case_ids]
+        "simulation_id": np.asarray(simulation_ids, dtype=np.int64),
+        "cell_id": np.arange(len(simulation_ids), dtype=np.int32),
+        "root_seed": np.zeros(len(simulation_ids), dtype=np.uint64),
+        "stream_id": np.zeros(len(simulation_ids), dtype=np.uint32),
+        "attempt_index": np.arange(len(simulation_ids), dtype=np.uint64),
+        "simulation_spec_json": np.asarray(
+            [
+                json.dumps({"simulation_id": simulation_id})
+                for simulation_id in simulation_ids
+            ]
         ),
         "metadata_json": np.asarray("{}"),
     }
-    ensure_proposal(paths, proposal)
-    frames_per_case = 2
-    case_local_index = np.repeat(
+    save_batch_plan(paths, proposal)
+    frames_per_simulation = 2
+    simulation_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
-        frames_per_case,
+        frames_per_simulation,
     )
     frame_index = np.tile(
-        np.arange(frames_per_case, dtype=np.int32),
+        np.arange(frames_per_simulation, dtype=np.int32),
         len(accepted_local_indices),
     )
-    rows = case_local_index.size
+    rows = simulation_local_index.size
     field = np.arange(rows * 4, dtype=np.float32).reshape(rows, 4) / 10.0
     shard = {
         "eta": field,
@@ -72,21 +80,21 @@ def _write_batch(
         "gxi": field - np.float32(0.1),
         "depth": np.repeat(
             np.arange(1, len(accepted_local_indices) + 1, dtype=np.float64),
-            frames_per_case,
+            frames_per_simulation,
         ),
         "time": frame_index.astype(np.float64),
-        "case_local_index": case_local_index,
+        "simulation_local_index": simulation_local_index,
         "frame_index": frame_index,
         "selected_dense_index": frame_index * np.int32(4),
     }
-    ensure_shard(paths, shard)
+    save_shard(paths, shard)
     blocks = {
-        local_index: (position * frames_per_case, frames_per_case)
+        local_index: (position * frames_per_simulation, frames_per_simulation)
         for position, local_index in enumerate(accepted_local_indices)
     }
     records = tuple(
-        CaseCommitRecord(
-            case_id=case_id,
+        SimulationCommitRecord(
+            simulation_id=simulation_id,
             accepted=local_index in blocks,
             required_bits=63 if local_index in blocks else 32,
             evaluated_bits=63,
@@ -95,9 +103,9 @@ def _write_batch(
             row_count=blocks.get(local_index, (-1, 0))[1],
             metrics={},
         )
-        for local_index, case_id in enumerate(case_ids)
+        for local_index, simulation_id in enumerate(simulation_ids)
     )
-    commit_batch(paths, cases=records, metadata={})
+    commit_batch(paths, simulations=records, metadata={})
     return paths
 
 
@@ -108,7 +116,7 @@ def _build_single_family_view(root: Path) -> Path:
         family_id=0,
         split="train",
         split_id=0,
-        case_ids=(10,),
+        simulation_ids=(10,),
         accepted_local_indices=(0,),
     )
     return build_dataset_view(
@@ -126,7 +134,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family_id=0,
             split="train",
             split_id=0,
-            case_ids=(10, 11),
+            simulation_ids=(10, 11),
             accepted_local_indices=(0,),
         )
         validation = _write_batch(
@@ -135,7 +143,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family_id=1,
             split="validation",
             split_id=1,
-            case_ids=(20,),
+            simulation_ids=(20,),
             accepted_local_indices=(0,),
         )
         paths = build_dataset_view(
@@ -172,6 +180,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
                 repeated,
             )
         )
+
 
 def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:

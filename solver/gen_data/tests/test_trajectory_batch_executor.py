@@ -20,7 +20,7 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     BENJAMIN_FEIR_SAMPLE_CELL_IDS,
-    sample_benjamin_feir_case,
+    sample_benjamin_feir_simulation,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TanakaPotentialRadicandError,
@@ -32,19 +32,23 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_SAMPLE_CELL_IDS,
 )
-from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch  # noqa: E402
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
+    BatchPaths,
+    BatchStatus,
+    inspect_batch,
+)
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     DATASET_REVISION_BY_FAMILY,
     SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
 )
-from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
-from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
-    DatasetGenerationSpec,
-    generate_valid_cases,
+from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
+from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
+    DatasetChunkConfig,
+    generate_simulations,
     scan_dataset_generation,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
@@ -57,8 +61,8 @@ from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     IntegratedTrajectoryBatch,
     GL2BatchTelemetry,
 )
-from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
-    StoredTimePolicy,
+from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
+    TrajectoryFrameSelectionConfig,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_SAMPLE_CELL_IDS,
@@ -66,11 +70,11 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     JonswapInitialStateDomainError,
-    PersistedTrajectoryProposal,
+    PersistedTrajectoryPlan,
     TrajectoryInitialBatch,
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_proposal,
-    sample_tanaka_trajectory_cases,
+    persist_sampled_trajectory_plan,
+    sample_tanaka_simulations,
 )
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TRAJECTORY_REQUIRED_CHECKS,
@@ -134,12 +138,12 @@ def _execution(family: str) -> TrajectoryExecutionConfig:
                 else fixed_time_horizon(0.16)
             )
         ),
-        stored_time_policy=StoredTimePolicy(
+        frame_selection=TrajectoryFrameSelectionConfig(
             tanaka_count=3,
             tanaka_alpha=0.5,
             tanaka_sigma_steps=1.0,
             benjamin_feir_count=3,
-            random_sea_count=3,
+            jonswap_tma_count=3,
         ),
         jonswap_quadrature_order=4 if family == "jonswap_tma" else None,
     )
@@ -153,20 +157,20 @@ def _run_spec(
     targets: tuple[int, ...],
     batch_size: int = 2,
     execution_record: dict[str, object] | None = None,
-) -> DatasetGenerationSpec:
+) -> DatasetChunkConfig:
     family_id = {
         "tanaka": PhysicalFamilyId.TANAKA,
         "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
         "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
     }[execution.family]
-    return DatasetGenerationSpec(
+    return DatasetChunkConfig(
         root=root,
         family_name=execution.family,
         family_id=family_id,
         revision_id=DATASET_REVISION_BY_FAMILY[family_id],
         split_id=SplitId.TEST,
         stream_id=13,
-        case_targets=tuple(
+        simulation_targets=tuple(
             SampleCellTarget(cell_id, target)
             for cell_id, target in zip(cell_ids, targets)
         ),
@@ -188,14 +192,14 @@ def _sample_depth(sample: object) -> float:
 
 
 def _tanaka_failure_component(
-    local_case_index: int,
+    local_simulation_index: int,
     global_component_index: int,
     *,
-    component_within_case: int = 0,
+    component_within_simulation: int = 0,
 ) -> dict[str, object]:
     return {
-        "local_case_index": local_case_index,
-        "component_within_case": component_within_case,
+        "local_simulation_index": local_simulation_index,
+        "component_within_simulation": component_within_simulation,
         "global_component_index": global_component_index,
         "alpha": 0.2,
         "center": 0.3,
@@ -215,14 +219,14 @@ def _tanaka_failure_component(
 
 
 class MarkerConstructor:
-    """Construct constant markers after checking the saved proposal."""
+    """Construct constant markers after checking the saved batch plan."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, ...]] = []
 
     def __call__(
         self,
-        proposed: PersistedTrajectoryProposal[object],
+        proposed: PersistedTrajectoryPlan[object],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
@@ -236,7 +240,7 @@ class MarkerConstructor:
             proposed.sampled.specification_records[index] for index in selected
         )
         markers = np.asarray(
-            [assignment.case_key.attempt_index + 1 for assignment in assignments],
+            [assignment.simulation_key.attempt_index + 1 for assignment in assignments],
             dtype=np.float64,
         )
         eta0 = np.repeat(
@@ -256,10 +260,10 @@ class MarkerConstructor:
 
     @staticmethod
     def assert_proposed(
-        proposed: PersistedTrajectoryProposal[object],
+        proposed: PersistedTrajectoryPlan[object],
     ) -> None:
         status = inspect_batch(proposed.paths).status
-        if status not in (BatchStatus.PROPOSED, BatchStatus.SHARD_WRITTEN):
+        if status not in (BatchStatus.PLAN_SAVED, BatchStatus.SHARD_WRITTEN):
             raise AssertionError(f"constructor observed status {status}")
 
 
@@ -272,7 +276,7 @@ class JonswapRejectingConstructor:
 
     def __call__(
         self,
-        proposed: PersistedTrajectoryProposal[object],
+        proposed: PersistedTrajectoryPlan[object],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
@@ -285,13 +289,16 @@ class JonswapRejectingConstructor:
             position
             for position, original_index in enumerate(selected)
             if (
-                proposed.sampled.assignments[original_index].case_key.attempt_index == 0
+                proposed.sampled.assignments[
+                    original_index
+                ].simulation_key.attempt_index
+                == 0
             )
         )
         if invalid_positions:
-            cases = [
+            simulations = [
                 {
-                    "local_case_index": position,
+                    "local_simulation_index": position,
                     "failure_reason": "nonpositive_initial_water_column",
                     "state_finite": True,
                     "minimum_water_column": -0.01,
@@ -303,8 +310,8 @@ class JonswapRejectingConstructor:
                     "schema": "jonswap_initial_state_domain_failure_v1",
                     "reason": "invalid_initial_graph_state",
                     "index_space": "constructor_subbatch_local_index",
-                    "invalid_case_indices": list(invalid_positions),
-                    "cases": cases,
+                    "invalid_simulation_indices": list(invalid_positions),
+                    "simulations": simulations,
                 }
             )
         return self.base(
@@ -361,7 +368,7 @@ def _declared_classifier(
 ) -> DeclaredConstructionFailure | None:
     if not isinstance(error, FakeDeclaredTanakaFailure):
         return None
-    indices = error.failure_record["invalid_case_indices"]
+    indices = error.failure_record["invalid_simulation_indices"]
     assert isinstance(indices, list)
     return DeclaredConstructionFailure(
         local_indices=tuple(indices),
@@ -389,46 +396,45 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         constructor = MarkerConstructor()
         rollouts = FastRolloutExecutor(failed_production_markers=frozenset({1}))
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
             constructor=constructor,
             rollout_executor=rollouts,
         )
 
-        state = generate_valid_cases(spec, executor)
+        state = generate_simulations(spec, executor)
 
         self.assertTrue(state.complete)
-        self.assertEqual(dict(state.accepted_by_cell), {cell_id: 2})
-        self.assertEqual(state.next_attempt_index, 3)
+        self.assertEqual(dict(state.accepted_simulation_counts), {cell_id: 2})
         self.assertEqual(constructor.calls, [(0, 1), (0,)])
         first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
         self.assertEqual(
-            [case["accepted"] for case in first_result["cases"]],
+            [simulation["accepted"] for simulation in first_result["simulations"]],
             [False, True],
         )
         self.assertTrue(
             all(
-                case["required_bits"] == int(TRAJECTORY_REQUIRED_CHECKS)
-                for case in first_result["cases"]
+                simulation["required_bits"] == int(TRAJECTORY_REQUIRED_CHECKS)
+                for simulation in first_result["simulations"]
             )
         )
         self.assertEqual(
-            first_result["cases"][0]["evaluated_bits"]
+            first_result["simulations"][0]["evaluated_bits"]
             & int(TRAJECTORY_REQUIRED_CHECKS),
             int(TRAJECTORY_REQUIRED_CHECKS),
         )
         with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["case_local_index"] == 1))
+            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
             self.assertEqual(shard["eta"].shape[0], 3)
         with np.load(
-            state.committed[1].proposal,
+            state.committed[1].batch_plan,
             allow_pickle=False,
         ) as proposal:
-            replacement = json.loads(str(proposal["case_spec_json"][0]))
+            replacement = json.loads(str(proposal["simulation_spec_json"][0]))
         self.assertEqual(replacement["attempt_index"], 2)
         self.assertEqual(replacement["cell_id"], cell_id)
 
-    def test_declared_tanaka_failure_rejects_only_named_case(self) -> None:
+    def test_declared_tanaka_failure_rejects_only_named_simulation(self) -> None:
         execution = _execution("tanaka")
         cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         spec = _run_spec(
@@ -440,7 +446,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         base_constructor = MarkerConstructor()
 
         def declared_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -451,7 +457,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 position
                 for position, original_index in enumerate(selected)
                 if (
-                    proposed.sampled.assignments[original_index].case_key.attempt_index
+                    proposed.sampled.assignments[
+                        original_index
+                    ].simulation_key.attempt_index
                     == 0
                 )
             ]
@@ -460,7 +468,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                     {
                         "schema": "tanaka_potential_radicand_failure_v1",
                         "reason": "negative_surface_potential_radicand",
-                        "invalid_case_indices": invalid_positions,
+                        "invalid_simulation_indices": invalid_positions,
                         "components": [
                             _tanaka_failure_component(position, position)
                             for position in invalid_positions
@@ -473,39 +481,38 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             )
 
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
             constructor=declared_constructor,
             construction_failure_classifier=_declared_classifier,
             rollout_executor=FastRolloutExecutor(),
         )
-        state = generate_valid_cases(spec, executor)
+        state = generate_simulations(spec, executor)
 
         self.assertTrue(state.complete)
-        self.assertEqual(state.next_attempt_index, 3)
         first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
         self.assertEqual(
-            [case["accepted"] for case in first_result["cases"]],
+            [simulation["accepted"] for simulation in first_result["simulations"]],
             [False, True],
         )
         self.assertEqual(
-            first_result["cases"][0]["metrics"]["construction_status"],
+            first_result["simulations"][0]["metrics"]["construction_status"],
             "declared_outside_support",
         )
         self.assertEqual(
-            first_result["cases"][0]["required_bits"],
+            first_result["simulations"][0]["required_bits"],
             int(TRAJECTORY_REQUIRED_CHECKS),
         )
         self.assertEqual(
-            first_result["cases"][0]["evaluated_bits"],
-            int(CaseCheck.OUTSIDE_SUPPORT),
+            first_result["simulations"][0]["evaluated_bits"],
+            int(SimulationCheck.OUTSIDE_SUPPORT),
         )
         self.assertEqual(
-            first_result["cases"][0]["failed_bits"],
-            int(CaseCheck.OUTSIDE_SUPPORT),
+            first_result["simulations"][0]["failed_bits"],
+            int(SimulationCheck.OUTSIDE_SUPPORT),
         )
         with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["case_local_index"] == 1))
+            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
 
         unexpected_spec = _run_spec(
             self.root / "unexpected",
@@ -516,7 +523,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def unexpected_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -524,18 +531,17 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             raise ValueError("unclassified constructor bug")
 
         unexpected = TrajectoryBatchExecutor(
-            run_spec=unexpected_spec,
+            chunk_config=unexpected_spec,
             execution=execution,
             constructor=unexpected_constructor,
             construction_failure_classifier=_declared_classifier,
             rollout_executor=FastRolloutExecutor(),
         )
         with self.assertRaisesRegex(ValueError, "unclassified"):
-            generate_valid_cases(unexpected_spec, unexpected)
-        pending = scan_dataset_generation(unexpected_spec).pending
+            generate_simulations(unexpected_spec, unexpected)
+        pending = scan_dataset_generation(unexpected_spec).pending_batch
         self.assertIsNotNone(pending)
         assert pending is not None
-        self.assertEqual(pending.status, BatchStatus.PROPOSED)
         self.assertFalse(pending.paths.result.exists())
 
     def test_declared_jonswap_graph_failure_retains_sibling_and_replays(
@@ -552,10 +558,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 targets=(2,),
             )
             constructor = JonswapRejectingConstructor()
-            state = generate_valid_cases(
+            state = generate_simulations(
                 spec,
                 TrajectoryBatchExecutor(
-                    run_spec=spec,
+                    chunk_config=spec,
                     execution=execution,
                     constructor=constructor,
                     rollout_executor=FastRolloutExecutor(),
@@ -565,43 +571,44 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
         state, constructor = run(self.root / "first")
         self.assertTrue(state.complete)
-        self.assertEqual(state.next_attempt_index, 3)
         self.assertEqual(constructor.calls, [(0, 1), (1,), (0,)])
         first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
         self.assertEqual(
-            [case["accepted"] for case in first_result["cases"]],
+            [simulation["accepted"] for simulation in first_result["simulations"]],
             [False, True],
         )
-        rejected = first_result["cases"][0]
+        rejected = first_result["simulations"][0]
         expected_evaluated = (
-            CaseCheck.OUTSIDE_SUPPORT
-            | CaseCheck.NONFINITE_STATE
-            | CaseCheck.BOTTOM_CLEARANCE
+            SimulationCheck.OUTSIDE_SUPPORT
+            | SimulationCheck.NONFINITE_STATE
+            | SimulationCheck.BOTTOM_CLEARANCE
         )
-        expected_failed = CaseCheck.OUTSIDE_SUPPORT | CaseCheck.BOTTOM_CLEARANCE
+        expected_failed = (
+            SimulationCheck.OUTSIDE_SUPPORT | SimulationCheck.BOTTOM_CLEARANCE
+        )
         self.assertEqual(rejected["required_bits"], int(TRAJECTORY_REQUIRED_CHECKS))
         self.assertEqual(rejected["evaluated_bits"], int(expected_evaluated))
         self.assertEqual(rejected["failed_bits"], int(expected_failed))
         failure = json.loads(rejected["metrics"]["construction_failure_json"])
-        self.assertEqual(failure["index_space"], "original_proposal_local_index")
-        self.assertEqual(failure["invalid_case_indices"], [0])
+        self.assertEqual(failure["index_space"], "original_batch_plan_local_index")
+        self.assertEqual(failure["invalid_simulation_indices"], [0])
         self.assertEqual(
-            failure["constructor_subbatch_invalid_case_indices"],
+            failure["constructor_subbatch_invalid_simulation_indices"],
             [0],
         )
         with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["case_local_index"] == 1))
+            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
 
         replay, replay_constructor = run(self.root / "replay")
         self.assertTrue(replay.complete)
         self.assertEqual(replay_constructor.calls, constructor.calls)
         self.assertEqual(
             [
-                json.loads(batch.result.read_text(encoding="utf-8"))["cases"]
+                json.loads(batch.result.read_text(encoding="utf-8"))["simulations"]
                 for batch in replay.committed
             ],
             [
-                json.loads(batch.result.read_text(encoding="utf-8"))["cases"]
+                json.loads(batch.result.read_text(encoding="utf-8"))["simulations"]
                 for batch in state.committed
             ],
         )
@@ -612,10 +619,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                     "schema": "jonswap_initial_state_domain_failure_v1",
                     "reason": "invalid_initial_graph_state",
                     "index_space": "constructor_subbatch_local_index",
-                    "invalid_case_indices": [0],
-                    "cases": [
+                    "invalid_simulation_indices": [0],
+                    "simulations": [
                         {
-                            "local_case_index": 0,
+                            "local_simulation_index": 0,
                             "failure_reason": "nonfinite_initial_state",
                             "state_finite": False,
                             "minimum_water_column": None,
@@ -634,7 +641,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         record = {
             "schema": "tanaka_potential_radicand_failure_v1",
             "reason": "negative_or_nonfinite_surface_potential_radicand",
-            "invalid_case_indices": [0, 2],
+            "invalid_simulation_indices": [0, 2],
             "components": [
                 _tanaka_failure_component(0, 0),
                 _tanaka_failure_component(2, 2),
@@ -677,11 +684,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 TanakaPotentialRadicandError(
                     {
                         **record,
-                        "invalid_case_indices": [0],
+                        "invalid_simulation_indices": [0],
                         "components": [
                             {
-                                "local_case_index": 0,
-                                "component_within_case": 0,
+                                "local_simulation_index": 0,
+                                "component_within_simulation": 0,
                                 "global_component_index": 0,
                             }
                         ],
@@ -693,7 +700,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 TanakaPotentialRadicandError(
                     {
                         **record,
-                        "invalid_case_indices": [0],
+                        "invalid_simulation_indices": [0],
                         "components": [
                             _tanaka_failure_component(0, 0),
                             _tanaka_failure_component(0, 0),
@@ -730,7 +737,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                         TanakaPotentialRadicandError(
                             {
                                 **record,
-                                "invalid_case_indices": [0],
+                                "invalid_simulation_indices": [0],
                                 "components": [component],
                             }
                         )
@@ -748,7 +755,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def malformed_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -759,23 +766,22 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 {
                     "schema": "tanaka_potential_radicand_failure_v1",
                     "reason": "negative_or_nonfinite_surface_potential_radicand",
-                    "invalid_case_indices": [0],
+                    "invalid_simulation_indices": [0],
                     "components": [component],
                 }
             )
 
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
             constructor=malformed_constructor,
             rollout_executor=FastRolloutExecutor(),
         )
         with self.assertRaisesRegex(ValueError, "speed fields"):
-            generate_valid_cases(spec, executor)
-        pending = scan_dataset_generation(spec).pending
+            generate_simulations(spec, executor)
+        pending = scan_dataset_generation(spec).pending_batch
         self.assertIsNotNone(pending)
         assert pending is not None
-        self.assertEqual(pending.status, BatchStatus.PROPOSED)
         self.assertFalse(pending.paths.result.exists())
 
     def test_default_classifier_accepts_the_constructor_generated_record(
@@ -786,10 +792,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 np.asarray(((1.0, -1.0e-8),), dtype=np.float64),
                 x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                 speed_per_crest=np.asarray((1.0,), dtype=np.float64),
-                case_h_ref=np.asarray((0.2,), dtype=np.float64),
+                simulation_h_ref=np.asarray((0.2,), dtype=np.float64),
                 flat_specs=[TanakaCrest(0.2, 0.3, 1)],
-                crest_case_ids=np.asarray((0,), dtype=np.int32),
-                components_within_case=(0,),
+                crest_simulation_ids=np.asarray((0,), dtype=np.int32),
+                components_within_simulation=(0,),
             )
         failure = classify_tanaka_construction_failure(caught.exception)
         self.assertIsNotNone(failure)
@@ -808,10 +814,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                     np.asarray(((1.0, 2.0),), dtype=np.float64),
                     x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                     speed_per_crest=np.asarray((speed,), dtype=np.float64),
-                    case_h_ref=np.asarray((0.2,), dtype=np.float64),
+                    simulation_h_ref=np.asarray((0.2,), dtype=np.float64),
                     flat_specs=[TanakaCrest(0.2, 0.3, 1)],
-                    crest_case_ids=np.asarray((0,), dtype=np.int32),
-                    components_within_case=(0,),
+                    crest_simulation_ids=np.asarray((0,), dtype=np.int32),
+                    components_within_simulation=(0,),
                 )
             failure = classify_tanaka_construction_failure(caught.exception)
             self.assertIsNone(failure)
@@ -824,10 +830,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 np.asarray(((1.0, math.nan),), dtype=np.float64),
                 x_grid=np.asarray((0.0, 0.5), dtype=np.float64),
                 speed_per_crest=np.asarray((1.0,), dtype=np.float64),
-                case_h_ref=np.asarray((0.2,), dtype=np.float64),
+                simulation_h_ref=np.asarray((0.2,), dtype=np.float64),
                 flat_specs=[TanakaCrest(0.2, 0.3, 1)],
-                crest_case_ids=np.asarray((0,), dtype=np.int32),
-                components_within_case=(0,),
+                crest_simulation_ids=np.asarray((0,), dtype=np.int32),
+                components_within_simulation=(0,),
             )
         self.assertIsNone(classify_tanaka_construction_failure(caught.exception))
 
@@ -844,7 +850,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         base_constructor = MarkerConstructor()
 
         def rejecting_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -852,7 +858,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 range(len(proposed.sampled.assignments))
             )
             attempts = tuple(
-                proposed.sampled.assignments[index].case_key.attempt_index
+                proposed.sampled.assignments[index].simulation_key.attempt_index
                 for index in selected
             )
             failed_attempt = 0 if 0 in attempts else 2 if 2 in attempts else None
@@ -862,7 +868,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                     {
                         "schema": "tanaka_potential_radicand_failure_v1",
                         "reason": ("negative_or_nonfinite_surface_potential_radicand"),
-                        "invalid_case_indices": [position],
+                        "invalid_simulation_indices": [position],
                         "components": [_tanaka_failure_component(position, position)],
                     }
                 )
@@ -871,10 +877,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 selected_local_indices=selected,
             )
 
-        state = generate_valid_cases(
+        state = generate_simulations(
             spec,
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=spec,
                 execution=execution,
                 constructor=rejecting_constructor,
                 rollout_executor=FastRolloutExecutor(),
@@ -882,25 +888,24 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         self.assertTrue(state.complete)
-        self.assertEqual(state.next_attempt_index, 5)
         first_result = json.loads(state.committed[0].result.read_text())
         self.assertEqual(
-            [case["accepted"] for case in first_result["cases"]],
+            [simulation["accepted"] for simulation in first_result["simulations"]],
             [False, True, False],
         )
-        second_failure_json = first_result["cases"][2]["metrics"][
+        second_failure_json = first_result["simulations"][2]["metrics"][
             "construction_failure_json"
         ]
         second_failure = json.loads(second_failure_json)
-        self.assertEqual(second_failure["invalid_case_indices"], [2])
+        self.assertEqual(second_failure["invalid_simulation_indices"], [2])
         self.assertEqual(
-            second_failure["constructor_subbatch_invalid_case_indices"],
+            second_failure["constructor_subbatch_invalid_simulation_indices"],
             [1],
         )
         component = second_failure["components"][0]
-        self.assertEqual(component["local_case_index"], 2)
+        self.assertEqual(component["local_simulation_index"], 2)
         self.assertEqual(component["global_component_index"], 2)
-        self.assertEqual(component["constructor_subbatch_local_case_index"], 1)
+        self.assertEqual(component["constructor_subbatch_local_simulation_index"], 1)
         self.assertEqual(
             component["constructor_subbatch_global_component_index"],
             1,
@@ -918,7 +923,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def fatal_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -929,19 +934,23 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 telemetry={"test_code": 17},
             )
 
-        state = generate_valid_cases(
-            spec,
-            TrajectoryBatchExecutor(
-                run_spec=spec,
-                execution=execution,
-                constructor=fatal_constructor,
-                rollout_executor=FastRolloutExecutor(),
-            ),
-        )
-        self.assertFalse(state.complete)
-        self.assertIsNotNone(state.terminal_failure)
-        assert state.terminal_failure is not None
-        failure = json.loads(state.terminal_failure.failure.read_text())
+        with self.assertRaisesRegex(RuntimeError, "batch 0 failed"):
+            generate_simulations(
+                spec,
+                TrajectoryBatchExecutor(
+                    chunk_config=spec,
+                    execution=execution,
+                    constructor=fatal_constructor,
+                    rollout_executor=FastRolloutExecutor(),
+                ),
+            )
+        failure_path = BatchPaths.for_batch(
+            spec.root,
+            family=spec.family_name,
+            split=spec.split_id.value,
+            batch_id=0,
+        ).failure
+        failure = json.loads(failure_path.read_text())
         self.assertEqual(failure["phase"], "construction")
         self.assertEqual(
             failure["exception_type"],
@@ -956,7 +965,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         cell_id = TANAKA_SAMPLE_CELL_IDS[0]
         assignments = tuple(
             AttemptAssignment(
-                case_key=CaseKey(
+                simulation_key=SimulationKey(
                     family_id=int(PhysicalFamilyId.TANAKA),
                     revision_id=3,
                     split_id=SplitId.TEST,
@@ -967,11 +976,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             )
             for index in (19, 20)
         )
-        sampled = sample_tanaka_trajectory_cases(
+        sampled = sample_tanaka_simulations(
             assignments,
             contract=execution.numerical,
         )
-        proposed = persist_sampled_trajectory_proposal(
+        proposed = persist_sampled_trajectory_plan(
             sampled,
             root=self.root,
             family_name="tanaka",
@@ -982,9 +991,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         observed_depths: list[np.ndarray] = []
 
         def fake_builder(**arguments):
-            depths = np.asarray(arguments["case_h_ref"], dtype=np.float64)
-            case_specs = arguments["case_specs"]
-            self.assertEqual(len(case_specs), 1)
+            depths = np.asarray(arguments["simulation_h_ref"], dtype=np.float64)
+            simulation_specs = arguments["simulation_specs"]
+            self.assertEqual(len(simulation_specs), 1)
             observed_depths.append(depths.copy())
             zeros = np.zeros(
                 (depths.size, execution.numerical.nx),
@@ -994,7 +1003,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
         with mock.patch(
             "solver.gen_data.trajectory_family_adapters."
-            "build_per_case_initial_conditions",
+            "build_per_simulation_initial_conditions",
             side_effect=fake_builder,
         ):
             selected = construct_tanaka_trajectory_batch(
@@ -1016,7 +1025,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 selected_local_indices=(1, 0),
             )
 
-    def test_jonswap_cases_use_distinct_per_case_peak_period_grids(self) -> None:
+    def test_jonswap_simulations_use_distinct_per_simulation_peak_period_grids(
+        self,
+    ) -> None:
         execution = _execution("jonswap_tma")
         cell_ids = (
             JONSWAP_TMA_SAMPLE_CELL_IDS[9],
@@ -1030,15 +1041,15 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         rollouts = FastRolloutExecutor()
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
             rollout_executor=rollouts,
         )
-        state = generate_valid_cases(spec, executor)
+        state = generate_simulations(spec, executor)
         self.assertTrue(state.complete)
 
-        with np.load(state.committed[0].proposal, allow_pickle=False) as proposal:
-            records = [json.loads(str(value)) for value in proposal["case_spec_json"]]
+        with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
+            records = [json.loads(str(value)) for value in proposal["simulation_spec_json"]]
             metadata = json.loads(str(proposal["metadata_json"]))
         expected_terminal_times = []
         for record in records:
@@ -1057,7 +1068,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 )
                 * execution.numerical.saved_dt
             )
-        observed_grids = metadata["case_time_grids"]
+        observed_grids = metadata["simulation_time_grids"]
         np.testing.assert_allclose(
             [grid["realized_terminal_time"] for grid in observed_grids],
             expected_terminal_times,
@@ -1072,18 +1083,18 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         with np.load(state.committed[0].shard, allow_pickle=False) as shard:
             self.assertEqual(
-                np.bincount(shard["case_local_index"]).tolist(),
+                np.bincount(shard["simulation_local_index"]).tolist(),
                 [3, 3],
             )
         result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
-        for case in result["cases"]:
-            self.assertIn("initial_discrete_peak_wavenumber", case["metrics"])
+        for simulation in result["simulations"]:
+            self.assertIn("initial_discrete_peak_wavenumber", simulation["metrics"])
             self.assertIn(
                 "initial_linear_hamiltonian_relative_error",
-                case["metrics"],
+                simulation["metrics"],
             )
 
-    def test_benjamin_feir_cases_use_distinct_carrier_period_grids(self) -> None:
+    def test_benjamin_feir_simulations_use_distinct_carrier_period_grids(self) -> None:
         execution = _execution("benjamin_feir")
         cell_ids = (
             BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
@@ -1097,16 +1108,16 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         rollouts = FastRolloutExecutor()
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
             constructor=MarkerConstructor(),
             rollout_executor=rollouts,
         )
-        state = generate_valid_cases(spec, executor)
+        state = generate_simulations(spec, executor)
         self.assertTrue(state.complete)
 
-        with np.load(state.committed[0].proposal, allow_pickle=False) as proposal:
-            records = [json.loads(str(value)) for value in proposal["case_spec_json"]]
+        with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
+            records = [json.loads(str(value)) for value in proposal["simulation_spec_json"]]
             metadata = json.loads(str(proposal["metadata_json"]))
         expected_terminal_times = []
         for record in records:
@@ -1120,7 +1131,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 math.floor(intended / execution.numerical.saved_dt)
                 * execution.numerical.saved_dt
             )
-        observed_grids = metadata["case_time_grids"]
+        observed_grids = metadata["simulation_time_grids"]
         np.testing.assert_allclose(
             [grid["realized_terminal_time"] for grid in observed_grids],
             expected_terminal_times,
@@ -1133,7 +1144,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self.assertEqual(rollouts.calls[0][2], max(expected_terminal_times))
         with np.load(state.committed[0].shard, allow_pickle=False) as shard:
             self.assertEqual(
-                np.bincount(shard["case_local_index"]).tolist(),
+                np.bincount(shard["simulation_local_index"]).tolist(),
                 [3, 3],
             )
 
@@ -1166,9 +1177,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
     ) -> None:
         execution = paper_trajectory_execution("benjamin_feir")
         samples = tuple(
-            sample_benjamin_feir_case(
+            sample_benjamin_feir_simulation(
                 AttemptAssignment(
-                    case_key=CaseKey(
+                    simulation_key=SimulationKey(
                         family_id=3,
                         revision_id=4,
                         split_id=SplitId.TEST,
@@ -1215,7 +1226,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[1]
 
         proposal_spec = _run_spec(
-            self.root / "proposal",
+            self.root / "batch_plan",
             execution,
             cell_ids=(cell_id,),
             targets=(1,),
@@ -1223,37 +1234,37 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def interrupt_constructor(
-            proposed: PersistedTrajectoryProposal[object],
+            proposed: PersistedTrajectoryPlan[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
             del selected_local_indices
             MarkerConstructor.assert_proposed(proposed)
-            raise InjectedInterruption("after proposal")
+            raise InjectedInterruption("after batch plan")
 
         interrupted = TrajectoryBatchExecutor(
-            run_spec=proposal_spec,
+            chunk_config=proposal_spec,
             execution=execution,
             constructor=interrupt_constructor,
             rollout_executor=FastRolloutExecutor(),
         )
-        with self.assertRaisesRegex(InjectedInterruption, "after proposal"):
-            generate_valid_cases(proposal_spec, interrupted)
-        proposal_pending = scan_dataset_generation(proposal_spec).pending
+        with self.assertRaisesRegex(InjectedInterruption, "after batch plan"):
+            generate_simulations(proposal_spec, interrupted)
+        proposal_pending = scan_dataset_generation(proposal_spec).pending_batch
         self.assertIsNotNone(proposal_pending)
         assert proposal_pending is not None
-        proposal_bytes = proposal_pending.paths.proposal.read_bytes()
-        proposal_state = generate_valid_cases(
+        proposal_bytes = proposal_pending.paths.batch_plan.read_bytes()
+        proposal_state = generate_simulations(
             proposal_spec,
             TrajectoryBatchExecutor(
-                run_spec=proposal_spec,
+                chunk_config=proposal_spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
                 rollout_executor=FastRolloutExecutor(),
             ),
         )
         self.assertTrue(proposal_state.complete)
-        self.assertEqual(proposal_pending.paths.proposal.read_bytes(), proposal_bytes)
+        self.assertEqual(proposal_pending.paths.batch_plan.read_bytes(), proposal_bytes)
 
         shard_spec = _run_spec(
             self.root / "shard",
@@ -1263,7 +1274,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         shard_executor = TrajectoryBatchExecutor(
-            run_spec=shard_spec,
+            chunk_config=shard_spec,
             execution=execution,
             constructor=MarkerConstructor(),
             rollout_executor=FastRolloutExecutor(),
@@ -1275,13 +1286,12 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(InjectedInterruption, "after shard"),
         ):
-            generate_valid_cases(shard_spec, shard_executor)
-        shard_pending = scan_dataset_generation(shard_spec).pending
+            generate_simulations(shard_spec, shard_executor)
+        shard_pending = scan_dataset_generation(shard_spec).pending_batch
         self.assertIsNotNone(shard_pending)
         assert shard_pending is not None
-        self.assertEqual(shard_pending.status, BatchStatus.SHARD_WRITTEN)
         shard_bytes = shard_pending.paths.shard.read_bytes()
-        shard_state = generate_valid_cases(shard_spec, shard_executor)
+        shard_state = generate_simulations(shard_spec, shard_executor)
         self.assertTrue(shard_state.complete)
         self.assertEqual(shard_pending.paths.shard.read_bytes(), shard_bytes)
 
@@ -1303,7 +1313,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "configuration differs"):
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
                 rollout_executor=FastRolloutExecutor(),
@@ -1315,7 +1325,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 role="paper_dataset",
                 numerical=_contract(),
                 horizon=benjamin_feir_horizon(1),
-                stored_time_policy=execution.stored_time_policy,
+                frame_selection=execution.frame_selection,
                 jonswap_quadrature_order=None,
             )
 
@@ -1395,18 +1405,18 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             batch_size=1,
         )
         TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=spec,
             execution=execution,
         )
         with self.assertRaisesRegex(ValueError, "production constructor"):
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
             )
         with self.assertRaisesRegex(ValueError, "production constructor"):
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=spec,
                 execution=execution,
                 rollout_executor=FastRolloutExecutor(),
             )
@@ -1424,7 +1434,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "nonlinear-adjustment executor"):
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=spec,
                 execution=execution,
             )
 

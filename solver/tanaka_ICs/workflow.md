@@ -26,8 +26,8 @@ flowchart TD
     E1 --> E2[Batched normalized Tanaka solves]
     E2 --> E3[Place periodic tangent-Hermite profiles]
     E3 --> E4[Validate surface-potential radicands]
-    E4 --> E5[Sum crest components per case]
-    E5 --> E6[Per-case eta and xi initial conditions]
+    E4 --> E5[Sum crest components per simulation]
+    E5 --> E6[Per-simulation eta and xi initial conditions]
 
     F --> F1[Load initial frame from provided soliton file]
     F1 --> F2{Case family}

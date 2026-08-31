@@ -26,13 +26,13 @@ DEFAULT_C27_DIR = (
     / "eval_final_soliton_spectral_guard_20260719_191228"
 )
 DEFAULT_OUTPUT = ROOT / "outputs/v8_exploding_vs_c27_stable_gifs_20260820"
-DEFAULT_CASES = ("tanaka_g0:5", "tanaka_g0:11", "tanaka_g1:1000006")
+DEFAULT_SIMULATIONS = ("tanaka_g0:5", "tanaka_g0:11", "tanaka_g1:1000006")
 
 
 @dataclass(frozen=True)
 class RolloutArchive:
     path: Path
-    case_ids: np.ndarray
+    simulation_ids: np.ndarray
     times: np.ndarray
     depths: np.ndarray
     truth_eta: np.ndarray
@@ -46,7 +46,7 @@ def _load_archive(path: Path) -> RolloutArchive:
     with np.load(path, allow_pickle=False) as archive:
         return RolloutArchive(
             path=path.resolve(),
-            case_ids=np.array(archive["case_ids"], copy=True),
+            simulation_ids=np.array(archive["simulation_ids"], copy=True),
             times=np.array(archive["times"], copy=True),
             depths=np.array(archive["depths"], copy=True),
             truth_eta=np.array(archive["truth_eta"], copy=True),
@@ -57,11 +57,11 @@ def _load_archive(path: Path) -> RolloutArchive:
         )
 
 
-def _case_index(archive: RolloutArchive, case_id: int) -> int:
-    matches = np.flatnonzero(archive.case_ids == case_id)
+def _simulation_index(archive: RolloutArchive, simulation_id: int) -> int:
+    matches = np.flatnonzero(archive.simulation_ids == simulation_id)
     if matches.size != 1:
         raise ValueError(
-            f"expected exactly one case ID {case_id} in {archive.path}, "
+            f"expected exactly one simulation ID {simulation_id} in {archive.path}, "
             f"found {matches.size}"
         )
     return int(matches[0])
@@ -76,25 +76,31 @@ def _validate_match(
     if not np.array_equal(old.times, new.times):
         raise ValueError("saved time grids differ between old and C27 archives")
     if old.depths[old_index] != new.depths[new_index]:
-        raise ValueError("depths differ between the matched cases")
+        raise ValueError("depths differ between the matched simulations")
     for name in ("truth_eta", "truth_xi"):
         old_initial = getattr(old, name)[0, old_index]
         new_initial = getattr(new, name)[0, new_index]
         if not np.array_equal(old_initial, new_initial):
-            raise ValueError(f"frame-zero {name} differs between the matched cases")
+            raise ValueError(
+                f"frame-zero {name} differs between the matched simulations"
+            )
 
 
-def _finite_frames(archive: RolloutArchive, case_index: int) -> np.ndarray:
+def _finite_frames(archive: RolloutArchive, simulation_index: int) -> np.ndarray:
     fields = (archive.pred_eta, archive.pred_xi, archive.pred_gxi)
     return np.logical_and.reduce(
-        tuple(np.all(np.isfinite(field[:, case_index]), axis=1) for field in fields)
+        tuple(
+            np.all(np.isfinite(field[:, simulation_index]), axis=1) for field in fields
+        )
     )
 
 
-def _last_finite_index(archive: RolloutArchive, case_index: int) -> int:
-    indices = np.flatnonzero(_finite_frames(archive, case_index))
+def _last_finite_index(archive: RolloutArchive, simulation_index: int) -> int:
+    indices = np.flatnonzero(_finite_frames(archive, simulation_index))
     if indices.size == 0:
-        raise ValueError(f"case index {case_index} has no finite saved frame")
+        raise ValueError(
+            f"simulation index {simulation_index} has no finite saved frame"
+        )
     return int(indices[-1])
 
 
@@ -116,9 +122,9 @@ def _positive_limit(value: float, floor: float) -> float:
     return max(float(value) * 1.08, float(floor), np.finfo(float).tiny)
 
 
-def _render_case(
+def _render_simulation(
     family: str,
-    case_id: int,
+    simulation_id: int,
     old: RolloutArchive,
     new: RolloutArchive,
     output_dir: Path,
@@ -126,17 +132,19 @@ def _render_case(
     fps: int,
     dpi: int,
 ) -> dict[str, Any]:
-    old_index = _case_index(old, case_id)
-    new_index = _case_index(new, case_id)
+    old_index = _simulation_index(old, simulation_id)
+    new_index = _simulation_index(new, simulation_id)
     _validate_match(old, old_index, new, new_index)
 
     old_finite = _finite_frames(old, old_index)
     new_finite = _finite_frames(new, new_index)
     last_old = _last_finite_index(old, old_index)
     if np.all(old_finite):
-        raise ValueError(f"old case {family}:{case_id} does not explode")
+        raise ValueError(f"old simulation {family}:{simulation_id} does not explode")
     if not np.all(new_finite):
-        raise ValueError(f"C27 case {family}:{case_id} is not finite to T=200")
+        raise ValueError(
+            f"C27 simulation {family}:{simulation_id} is not finite to T=200"
+        )
 
     indices = _frame_indices(
         frame_count,
@@ -242,7 +250,7 @@ def _render_case(
 
         figure.suptitle(
             "Same Tanaka initial condition: old unstable model vs stable C27\n"
-            f"{family}, case {case_id}, h={old.depths[old_index]:.4f}"
+            f"{family}, simulation {simulation_id}, h={old.depths[old_index]:.4f}"
             f" • t={comparison_time:.1f}/{terminal_time:.0f}",
             fontsize=14,
             fontweight="bold",
@@ -250,7 +258,7 @@ def _render_case(
         return [*lines, *amplitude_labels, *failure_labels]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{family}_case_{case_id}_v8_exploding_top_c27_stable_bottom"
+    stem = f"{family}_simulation_{simulation_id}_v8_exploding_top_c27_stable_bottom"
     gif_path = output_dir / f"{stem}.gif"
     animation = FuncAnimation(
         figure,
@@ -276,7 +284,7 @@ def _render_case(
     plt.close(figure)
 
     return {
-        "case_id": case_id,
+        "simulation_id": simulation_id,
         "c27_finite_to_terminal": True,
         "depth": float(old.depths[old_index]),
         "family": family,
@@ -301,16 +309,16 @@ def _render_case(
     }
 
 
-def _parse_case(value: str) -> tuple[str, int]:
-    family, separator, case_id = value.partition(":")
+def _parse_simulation(value: str) -> tuple[str, int]:
+    family, separator, simulation_id = value.partition(":")
     if not separator or family not in {"tanaka_g0", "tanaka_g1"}:
         raise argparse.ArgumentTypeError(
-            "case must have form tanaka_g0:ID or tanaka_g1:ID"
+            "simulation must have form tanaka_g0:ID or tanaka_g1:ID"
         )
     try:
-        return family, int(case_id)
+        return family, int(simulation_id)
     except ValueError as error:
-        raise argparse.ArgumentTypeError("case ID must be an integer") from error
+        raise argparse.ArgumentTypeError("simulation ID must be an integer") from error
 
 
 def _parse_args() -> argparse.Namespace:
@@ -321,11 +329,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--c27-dir", type=Path, default=DEFAULT_C27_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
-        "--case",
+        "--simulation",
         action="append",
-        type=_parse_case,
-        dest="cases",
-        help="Matched case as FAMILY:ID; repeat for multiple cases.",
+        type=_parse_simulation,
+        dest="simulations",
+        help="Matched simulation as FAMILY:ID; repeat for multiple simulations.",
     )
     parser.add_argument("--frames", type=int, default=121)
     parser.add_argument("--fps", type=int, default=12)
@@ -335,7 +343,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    cases = args.cases or tuple(map(_parse_case, DEFAULT_CASES))
+    simulations = args.simulations or tuple(map(_parse_simulation, DEFAULT_SIMULATIONS))
     archives: dict[tuple[str, str], RolloutArchive] = {}
 
     def archive(version: str, family: str) -> RolloutArchive:
@@ -346,9 +354,9 @@ def main() -> None:
         return archives[key]
 
     records = [
-        _render_case(
+        _render_simulation(
             family,
-            case_id,
+            simulation_id,
             archive("v8", family),
             archive("c27", family),
             args.output_dir,
@@ -356,7 +364,7 @@ def main() -> None:
             args.fps,
             args.dpi,
         )
-        for family, case_id in cases
+        for family, simulation_id in simulations
     ]
     sources = {
         str(archive.path): {
@@ -365,7 +373,7 @@ def main() -> None:
         for archive in archives.values()
     }
     summary = {
-        "cases": records,
+        "simulations": records,
         "created_at": datetime.now().astimezone().isoformat(),
         "layout": {
             "bottom": "C27 learned model: relative L2 plus mode, tangent, and Hadamard terms",

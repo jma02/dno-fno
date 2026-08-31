@@ -1,6 +1,6 @@
 """Evaluate a trained surrogate on the released four-family paper dataset.
 
-The dataset stores adaptive, case-specific save times, so this evaluator uses
+The dataset stores adaptive, simulation-specific save times, so this evaluator uses
 test-split initial conditions and recomputes both f64 truth and
 surrogate trajectories on one fixed evaluation grid per physical family.
 
@@ -58,7 +58,7 @@ class IC:
     eta: np.ndarray
     xi: np.ndarray
     depth: float
-    case_id: int
+    simulation_id: int
     meta: dict[str, object] = field(default_factory=dict)
 
 
@@ -122,7 +122,7 @@ def _load_paper_dataset_ics(
             "shard_index",
             "shard_row",
             "trajectory_accepted",
-            "trajectory_case_id",
+            "trajectory_simulation_id",
             "trajectory_family_id",
             "trajectory_first_row",
             "trajectory_index",
@@ -149,7 +149,9 @@ def _load_paper_dataset_ics(
             np.int64
         )
         row_counts = np.asarray(mapping["trajectory_row_count"])[selected]
-        case_ids = np.asarray(mapping["trajectory_case_id"])[selected].astype(np.int64)
+        simulation_ids = np.asarray(mapping["trajectory_simulation_id"])[selected].astype(
+            np.int64
+        )
         trajectory_index = np.asarray(mapping["trajectory_index"])[first_rows]
         frame_indices = np.asarray(mapping["frame_index"])[first_rows]
         shard_indices = np.asarray(mapping["shard_index"])[first_rows].astype(np.int64)
@@ -165,8 +167,10 @@ def _load_paper_dataset_ics(
         raise ValueError(
             f"family {family!r} selected trajectory does not begin at frame 0"
         )
-    if np.unique(case_ids).size != n_ics:
-        raise ValueError(f"family {family!r} selected test case IDs are not unique")
+    if np.unique(simulation_ids).size != n_ics:
+        raise ValueError(
+            f"family {family!r} selected test simulation IDs are not unique"
+        )
 
     shard_specs = manifest.get("dataset_shards")
     if not isinstance(shard_specs, list):
@@ -214,7 +218,7 @@ def _load_paper_dataset_ics(
         )
 
     ics = []
-    for position, case_id in enumerate(case_ids):
+    for position, simulation_id in enumerate(simulation_ids):
         eta, xi, depth_array = loaded_rows[position]
         depth = float(depth_array)
         if eta.shape != (nx,) or xi.shape != (nx,):
@@ -233,7 +237,7 @@ def _load_paper_dataset_ics(
                 eta=eta,
                 xi=xi,
                 depth=depth,
-                case_id=int(case_id),
+                simulation_id=int(simulation_id),
                 meta={
                     "trajectory_index": int(selected[position]),
                     "shard_index": int(shard_indices[position]),
@@ -263,7 +267,7 @@ def _truth_protocol(
     ics: list[IC],
 ) -> str:
     protocol = {
-        "schema_version": 1,
+        "schema_version": 2,
         "family": family,
         "dt": cfg.dt,
         "tmax": cfg.tmax,
@@ -275,7 +279,7 @@ def _truth_protocol(
         "dtype": "float64",
         "nx": nx,
         "length": length,
-        "case_ids": [ic.case_id for ic in ics],
+        "simulation_ids": [ic.simulation_id for ic in ics],
         "depths": [ic.depth for ic in ics],
     }
     return json.dumps(protocol, sort_keys=True, separators=(",", ":"))
@@ -286,7 +290,7 @@ def _try_load_cached_truth(
     cache_dir: Path | None,
     *,
     expected_shape: tuple[int, int, int],
-    expected_case_ids: list[int],
+    expected_simulation_ids: list[int],
     expected_protocol_json: str,
 ) -> RolloutPayload | None:
     if cache_dir is None:
@@ -304,7 +308,7 @@ def _try_load_cached_truth(
                     name: np.asarray(archive[f"truth_{name}"])
                     for name in ("eta", "xi", "gxi")
                 }
-                case_ids = np.asarray(archive["case_ids"]).tolist()
+                simulation_ids = np.asarray(archive["simulation_ids"]).tolist()
                 protocol_json = str(archive["truth_protocol_json"].item())
         except (KeyError, OSError, ValueError) as exc:
             print(f"[{family}] truth cache rejected ({path}): {exc}", flush=True)
@@ -314,9 +318,10 @@ def _try_load_cached_truth(
                 f"[{family}] truth cache rejected ({path}): shape mismatch", flush=True
             )
             continue
-        if case_ids != expected_case_ids:
+        if simulation_ids != expected_simulation_ids:
             print(
-                f"[{family}] truth cache rejected ({path}): case IDs differ", flush=True
+                f"[{family}] truth cache rejected ({path}): simulation IDs differ",
+                flush=True,
             )
             continue
         if protocol_json != expected_protocol_json:
@@ -337,7 +342,7 @@ def _write_truth_cache(
     *,
     times: np.ndarray,
     depths: np.ndarray,
-    case_ids: np.ndarray,
+    simulation_ids: np.ndarray,
     truth_protocol_json: str,
 ) -> Path:
     path = out_dir / f"{family}_truth_cache.npz"
@@ -346,7 +351,7 @@ def _write_truth_cache(
         temporary,
         times=np.asarray(times, dtype=np.float64),
         depths=np.asarray(depths, dtype=np.float64),
-        case_ids=np.asarray(case_ids, dtype=np.int64),
+        simulation_ids=np.asarray(simulation_ids, dtype=np.int64),
         truth_eta=truth["eta"],
         truth_xi=truth["xi"],
         truth_gxi=truth["gxi"],
@@ -716,7 +721,7 @@ def compute_metrics(
 
 
 def compute_macro_summary(summaries: dict[str, dict[str, Any]]) -> dict[str, object]:
-    """Compute equal-family macro rates and pooled-case micro rates."""
+    """Compute equal-family macro rates and pooled-simulation micro rates."""
     items = [
         (name, summary)
         for name, summary in summaries.items()
@@ -828,7 +833,7 @@ def run_family(
         family,
         truth_cache_dir,
         expected_shape=shape,
-        expected_case_ids=[ic.case_id for ic in ics],
+        expected_simulation_ids=[ic.simulation_id for ic in ics],
         expected_protocol_json=protocol_json,
     )
     truth_cache_path: Path | None = None
@@ -852,7 +857,7 @@ def run_family(
             truth,
             times=times_np,
             depths=np.asarray([ic.depth for ic in ics]),
-            case_ids=np.asarray([ic.case_id for ic in ics]),
+            simulation_ids=np.asarray([ic.simulation_id for ic in ics]),
             truth_protocol_json=protocol_json,
         )
     print(f"[{family}] truth wall={float(truth['wall_s']):.1f}s", flush=True)
@@ -883,7 +888,7 @@ def run_family(
         out_dir / f"{family}_trajs.npz",
         times=times_np.astype(np.float32),
         depths=np.asarray([ic.depth for ic in ics], dtype=np.float32),
-        case_ids=np.asarray([ic.case_id for ic in ics], dtype=np.int64),
+        simulation_ids=np.asarray([ic.simulation_id for ic in ics], dtype=np.int64),
         truth_eta=truth["eta"],
         truth_xi=truth["xi"],
         truth_gxi=truth["gxi"],
@@ -911,7 +916,7 @@ def run_family(
             "nx": nx,
             "n_ics": len(ics),
             "depths": [ic.depth for ic in ics],
-            "case_ids": [ic.case_id for ic in ics],
+            "simulation_ids": [ic.simulation_id for ic in ics],
             "epoch": loaded.epoch,
             "checkpoint_source": checkpoint_source,
             "evaluation_source": source,

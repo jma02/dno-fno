@@ -2,9 +2,9 @@
 
 The required production order is encoded by the public API:
 
-1. ``sample_*_trajectory_cases`` draws complete specifications.
-2. ``persist_sampled_trajectory_proposal`` writes those specifications.
-3. ``construct_*_trajectory_batch`` accepts only that saved proposal and
+1. ``sample_*_simulations`` draws complete specifications.
+2. ``persist_sampled_trajectory_plan`` writes those specifications.
+3. ``construct_*_trajectory_batch`` accepts only that saved plan and
    performs numerical construction.
 
 There is deliberately no function that samples and constructs in one call.
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any, Generic, TypeAlias, TypeVar
 
@@ -25,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 
+from solver.gen_data.pipeline.artifact_io import json_text
 from solver.gen_data.benjamin_feir_jcp09 import (
     BENJAMIN_FEIR_CONSTRUCTOR,
     ParameterArrays,
@@ -32,11 +32,11 @@ from solver.gen_data.benjamin_feir_jcp09 import (
 )
 from solver.gen_data.benjamin_feir_sampling import (
     BenjaminFeirSample,
-    sample_benjamin_feir_case,
+    sample_benjamin_feir_simulation,
 )
 from solver.gen_data.tanaka_initial_conditions import (
     TANAKA_PROFILE_RECONSTRUCTION,
-    build_per_case_initial_conditions,
+    build_per_simulation_initial_conditions,
 )
 from solver.gen_data.jonswap_tma import (
     PAPER_RELATIVE_FREQUENCY_MAXIMUM,
@@ -49,25 +49,24 @@ from solver.gen_data.jonswap_tma import (
 )
 from solver.gen_data.jonswap_tma_sampling import (
     JonswapTmaSample,
-    sample_jonswap_tma_case,
+    sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
-    ensure_proposal,
+    save_batch_plan,
     inspect_batch,
 )
-from solver.gen_data.pipeline.case_allocation import AttemptAssignment
+from solver.gen_data.pipeline.simulation_allocation import AttemptAssignment
 from solver.gen_data.pipeline.dno_target import project_fixed_band
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig
 from solver.gen_data.pipeline.writer import (
     JsonScalar,
-    batch_paths_for_assignments,
-    build_proposal_arrays,
+    build_batch_plan,
 )
 from solver.gen_data.tanaka_sampling import (
     TanakaSample,
-    sample_tanaka_case,
+    sample_tanaka_simulation,
 )
 from solver.solvers.dno_series_jax import build_grid
 from solver.tanaka_ICs.modified_tanaka import make_default_tanaka_template
@@ -76,24 +75,24 @@ from solver.tanaka_ICs.modified_tanaka import make_default_tanaka_template
 FloatArray: TypeAlias = NDArray[np.float64]
 SpecificationRecord: TypeAlias = Mapping[str, object]
 MetricsRecord: TypeAlias = Mapping[str, JsonScalar]
-ProposalArrays: TypeAlias = Mapping[str, NDArray[Any]]
+BatchPlan: TypeAlias = Mapping[str, NDArray[Any]]
 SampleT = TypeVar("SampleT")
 _CONSTRUCTIBLE_BATCH_STATUSES = frozenset(
-    (BatchStatus.PROPOSED, BatchStatus.SHARD_WRITTEN)
+    (BatchStatus.PLAN_SAVED, BatchStatus.SHARD_WRITTEN)
 )
 
 
 def _require_constructible_batch_status(status: BatchStatus) -> None:
     if status not in _CONSTRUCTIBLE_BATCH_STATUSES:
         raise RuntimeError(
-            "numerical construction requires a proposal in proposed or "
-            "shard-written state"
+            "numerical construction requires a saved batch plan that has not "
+            "reached a terminal result"
         )
 
 
 @dataclass(frozen=True)
-class SampledTrajectoryCases(Generic[SampleT]):
-    """Complete sampled cases and strict records, before numerical work."""
+class SampledSimulations(Generic[SampleT]):
+    """Complete sampled simulations and strict records, before numerical work."""
 
     assignments: tuple[AttemptAssignment, ...]
     samples: tuple[SampleT, ...]
@@ -104,27 +103,22 @@ class SampledTrajectoryCases(Generic[SampleT]):
     def __post_init__(self) -> None:
         count = len(self.assignments)
         if count == 0:
-            raise ValueError("sampled trajectory cases must not be empty")
+            raise ValueError("sampled trajectory simulations must not be empty")
         if len(self.samples) != count or len(self.specification_records) != count:
             raise ValueError(
                 "assignments, samples, and records must have equal lengths"
             )
         for record in self.specification_records:
-            json.dumps(
-                record,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
+            json_text(record)
 
 
 @dataclass(frozen=True)
-class PersistedTrajectoryProposal(Generic[SampleT]):
-    """Sampled cases whose exact proposal already exists on disk."""
+class PersistedTrajectoryPlan(Generic[SampleT]):
+    """Sampled simulations whose exact batch plan already exists on disk."""
 
-    sampled: SampledTrajectoryCases[SampleT]
+    sampled: SampledSimulations[SampleT]
     paths: BatchPaths
-    proposal_arrays: ProposalArrays
+    batch_plan: BatchPlan
 
     def __post_init__(self) -> None:
         inspection = inspect_batch(self.paths)
@@ -133,7 +127,7 @@ class PersistedTrajectoryProposal(Generic[SampleT]):
 
 @dataclass(frozen=True)
 class TrajectoryInitialBatch:
-    """One constructor-ready batch and its persisted case specifications."""
+    """One constructor-ready batch and its persisted simulation specifications."""
 
     eta0: FloatArray
     xi0: FloatArray
@@ -149,20 +143,19 @@ class TrajectoryInitialBatch:
         if self.eta0.ndim != 2 or self.xi0.shape != self.eta0.shape:
             raise ValueError("eta0 and xi0 must have common shape (batch, nx)")
         if self.depths.shape != (self.eta0.shape[0],):
-            raise ValueError("depths must contain one value per case")
+            raise ValueError("depths must contain one value per simulation")
         if len(self.specification_records) != self.eta0.shape[0]:
-            raise ValueError("specification_records must contain one record per case")
+            raise ValueError(
+                "specification_records must contain one record per simulation"
+            )
         if self.construction_metrics and (
             len(self.construction_metrics) != self.eta0.shape[0]
         ):
-            raise ValueError("construction_metrics must contain one record per case")
-        for metrics in self.construction_metrics:
-            json.dumps(
-                metrics,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
+            raise ValueError(
+                "construction_metrics must contain one record per simulation"
             )
+        for metrics in self.construction_metrics:
+            json_text(metrics)
         if not np.isfinite(self.eta0).all() or not np.isfinite(self.xi0).all():
             raise ValueError("initial fields must be finite")
         if not np.isfinite(self.depths).all() or np.any(self.depths <= 0.0):
@@ -172,11 +165,11 @@ class TrajectoryInitialBatch:
 
 
 class JonswapInitialStateDomainError(ValueError):
-    """Per-case failure of the JONSWAP initial graph-domain conditions."""
+    """Per-simulation failure of the JONSWAP initial graph-domain conditions."""
 
     def __init__(self, failure_record: dict[str, object]) -> None:
         self.failure_record = failure_record
-        invalid = failure_record.get("invalid_case_indices")
+        invalid = failure_record.get("invalid_simulation_indices")
         super().__init__(
             "JONSWAP/TMA initial states violate the graph domain at "
             f"constructor-sub-batch indices {invalid}"
@@ -283,19 +276,19 @@ def _strict_record(
         },
         "constructor_settings": dict(constructor_settings or {}),
     }
-    json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    json_text(record)
     return record
 
 
-def _sampled_cases(
+def _sampled_simulations(
     assignments: tuple[AttemptAssignment, ...],
     samples: tuple[SampleT, ...],
     records: tuple[SpecificationRecord, ...],
     *,
     contract: RolloutConfig,
     construction_settings: SpecificationRecord,
-) -> SampledTrajectoryCases[SampleT]:
-    return SampledTrajectoryCases(
+) -> SampledSimulations[SampleT]:
+    return SampledSimulations(
         assignments=assignments,
         samples=samples,
         specification_records=records,
@@ -304,70 +297,66 @@ def _sampled_cases(
     )
 
 
-def persist_sampled_trajectory_proposal(
-    sampled: SampledTrajectoryCases[SampleT],
+def persist_sampled_trajectory_plan(
+    sampled: SampledSimulations[SampleT],
     *,
     root: Path,
     family_name: str,
     batch_id: int,
     cell_codes: Mapping[str, int],
     metadata: Mapping[str, object],
-) -> PersistedTrajectoryProposal[SampleT]:
-    """Durably propose sampled cases before any numerical construction."""
+) -> PersistedTrajectoryPlan[SampleT]:
+    """Save sampled simulations before any numerical construction."""
 
-    proposal_arrays = build_proposal_arrays(
+    batch_plan = build_batch_plan(
         sampled.assignments,
         sampled.specification_records,
         cell_codes=cell_codes,
         batch_id=batch_id,
         metadata=metadata,
     )
-    paths = batch_paths_for_assignments(
+    paths = BatchPaths.for_batch(
         root,
-        sampled.assignments,
-        family_name=family_name,
+        family=family_name,
+        split=sampled.assignments[0].simulation_key.split_id.value,
         batch_id=batch_id,
     )
-    ensure_proposal(paths, proposal_arrays)
-    return PersistedTrajectoryProposal(
+    save_batch_plan(paths, batch_plan)
+    return PersistedTrajectoryPlan(
         sampled=sampled,
         paths=paths,
-        proposal_arrays=proposal_arrays,
+        batch_plan=batch_plan,
     )
 
 
-def _strict_json_text(record: SpecificationRecord) -> str:
-    return json.dumps(
-        record,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _verify_preconstruction_proposal(
-    proposed: PersistedTrajectoryProposal[SampleT],
+def _verify_saved_batch_plan(
+    proposed: PersistedTrajectoryPlan[SampleT],
     *,
     expected_records: tuple[SpecificationRecord, ...],
 ) -> None:
-    """Verify proposal state, identity, and unchanged sampled specifications."""
+    """Verify plan state, identity, and unchanged sampled specifications."""
 
     inspection = inspect_batch(proposed.paths)
     _require_constructible_batch_status(inspection.status)
     if expected_records != proposed.sampled.specification_records:
-        raise RuntimeError("sampled specification changed after proposal")
+        raise RuntimeError("sampled specification changed after saving the plan")
 
-    with np.load(proposed.paths.proposal, allow_pickle=False) as archive:
-        disk_case_ids = np.asarray(archive["case_id"], dtype=np.int64)
-        disk_records = tuple(str(value) for value in archive["case_spec_json"])
-    expected_case_ids = np.asarray(
-        [assignment.case_key.case_id for assignment in proposed.sampled.assignments],
+    with np.load(proposed.paths.batch_plan, allow_pickle=False) as archive:
+        disk_simulation_ids = np.asarray(archive["simulation_id"], dtype=np.int64)
+        disk_records = tuple(str(value) for value in archive["simulation_spec_json"])
+    expected_simulation_ids = np.asarray(
+        [
+            assignment.simulation_key.simulation_id
+            for assignment in proposed.sampled.assignments
+        ],
         dtype=np.int64,
     )
-    if not np.array_equal(disk_case_ids, expected_case_ids):
-        raise RuntimeError("proposal case identities differ from sampled cases")
-    if disk_records != tuple(map(_strict_json_text, expected_records)):
-        raise RuntimeError("proposal records differ from sampled specifications")
+    if not np.array_equal(disk_simulation_ids, expected_simulation_ids):
+        raise RuntimeError(
+            "batch-plan simulation identities differ from sampled simulations"
+        )
+    if disk_records != tuple(map(json_text, expected_records)):
+        raise RuntimeError("batch-plan records differ from sampled specifications")
 
 
 def _project_once(
@@ -403,6 +392,27 @@ def _project_once(
     )
 
 
+def _resolve_selected_simulation_indices(
+    selected_local_indices: Sequence[int] | None,
+    *,
+    simulation_count: int,
+) -> tuple[int, ...]:
+    """Return all simulation indices or validate an explicit ordered subset."""
+
+    if selected_local_indices is None:
+        return tuple(range(simulation_count))
+    selected = tuple(selected_local_indices)
+    if not selected:
+        raise ValueError("selected_local_indices must not be empty")
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in selected):
+        raise TypeError("selected_local_indices must contain integers")
+    if tuple(sorted(set(selected))) != selected:
+        raise ValueError("selected_local_indices must be unique and increasing")
+    if selected[0] < 0 or selected[-1] >= simulation_count:
+        raise ValueError("selected_local_indices contains an out-of-range index")
+    return selected
+
+
 def _batch(
     eta0: FloatArray | jax.Array,
     xi0: FloatArray | jax.Array,
@@ -420,16 +430,16 @@ def _batch(
     )
 
 
-def sample_tanaka_trajectory_cases(
+def sample_tanaka_simulations(
     assignments: Sequence[AttemptAssignment],
     *,
     contract: RolloutConfig,
-) -> SampledTrajectoryCases[TanakaSample]:
-    """Sample complete Tanaka cases without running the Tanaka solver."""
+) -> SampledSimulations[TanakaSample]:
+    """Sample complete Tanaka simulations without running the Tanaka solver."""
 
     attempted = _require_assignments(assignments)
     samples = tuple(
-        sample_tanaka_case(
+        sample_tanaka_simulation(
             assignment,
             domain_length=contract.length,
         )
@@ -448,7 +458,7 @@ def sample_tanaka_trajectory_cases(
         )
         for sample in samples
     )
-    return _sampled_cases(
+    return _sampled_simulations(
         attempted,
         samples,
         records,
@@ -458,14 +468,14 @@ def sample_tanaka_trajectory_cases(
 
 
 def construct_tanaka_trajectory_batch(
-    proposed: PersistedTrajectoryProposal[TanakaSample],
+    proposed: PersistedTrajectoryPlan[TanakaSample],
     *,
     selected_local_indices: Sequence[int] | None = None,
 ) -> TrajectoryInitialBatch:
-    """Construct selected tangent-Hermite states after the full proposal.
+    """Construct selected tangent-Hermite states after the full batch plan.
 
     ``selected_local_indices`` is used only to recover valid siblings after a
-    declared per-case construction failure.  The unchanged full proposal is
+    declared per-simulation construction failure. The unchanged full batch plan is
     always verified before the selected subset is constructed.
     """
 
@@ -482,24 +492,14 @@ def construct_tanaka_trajectory_batch(
         )
         for sample in samples
     )
-    _verify_preconstruction_proposal(
+    _verify_saved_batch_plan(
         proposed,
         expected_records=expected_records,
     )
-    if selected_local_indices is None:
-        selected = tuple(range(len(samples)))
-    else:
-        selected = tuple(selected_local_indices)
-        if not selected:
-            raise ValueError("selected_local_indices must not be empty")
-        if any(
-            isinstance(index, bool) or not isinstance(index, int) for index in selected
-        ):
-            raise TypeError("selected_local_indices must contain integers")
-        if tuple(sorted(set(selected))) != selected:
-            raise ValueError("selected_local_indices must be unique and increasing")
-        if selected[0] < 0 or selected[-1] >= len(samples):
-            raise ValueError("selected_local_indices contains an out-of-range index")
+    selected = _resolve_selected_simulation_indices(
+        selected_local_indices,
+        simulation_count=len(samples),
+    )
 
     selected_samples = tuple(samples[index] for index in selected)
     selected_records = tuple(expected_records[index] for index in selected)
@@ -508,7 +508,7 @@ def construct_tanaka_trajectory_batch(
         [sample.depth for sample in selected_samples],
         dtype=np.float64,
     )
-    case_specs = [list(sample.crests) for sample in selected_samples]
+    simulation_specs = [list(sample.crests) for sample in selected_samples]
     template = make_default_tanaka_template(
         depth=1.0,
         gravity=contract.gravity,
@@ -519,10 +519,10 @@ def construct_tanaka_trajectory_batch(
         dno_order=contract.dno_order,
         pad_factor=contract.pad_factor,
     )
-    eta0, xi0 = build_per_case_initial_conditions(
+    eta0, xi0 = build_per_simulation_initial_conditions(
         template_params=template,
-        case_h_ref=depths,
-        case_specs=case_specs,
+        simulation_h_ref=depths,
+        simulation_specs=simulation_specs,
         length=contract.length,
         nx=contract.nx,
         gravity=contract.gravity,
@@ -536,16 +536,16 @@ def construct_tanaka_trajectory_batch(
     )
 
 
-def sample_benjamin_feir_trajectory_cases(
+def sample_benjamin_feir_simulations(
     assignments: Sequence[AttemptAssignment],
     *,
     contract: RolloutConfig,
-) -> SampledTrajectoryCases[BenjaminFeirSample]:
-    """Sample complete Benjamin--Feir cases without numerical construction."""
+) -> SampledSimulations[BenjaminFeirSample]:
+    """Sample complete Benjamin--Feir simulations without numerical construction."""
 
     attempted = _require_assignments(assignments)
     samples = tuple(
-        sample_benjamin_feir_case(
+        sample_benjamin_feir_simulation(
             assignment,
             domain_length=contract.length,
         )
@@ -559,7 +559,7 @@ def sample_benjamin_feir_trajectory_cases(
         )
         for sample in samples
     )
-    return _sampled_cases(
+    return _sampled_simulations(
         attempted,
         samples,
         records,
@@ -569,9 +569,9 @@ def sample_benjamin_feir_trajectory_cases(
 
 
 def construct_benjamin_feir_trajectory_batch(
-    proposed: PersistedTrajectoryProposal[BenjaminFeirSample],
+    proposed: PersistedTrajectoryPlan[BenjaminFeirSample],
 ) -> TrajectoryInitialBatch:
-    """Construct Benjamin--Feir states after saving their proposal."""
+    """Construct Benjamin--Feir states after saving their batch plan."""
 
     sampled = proposed.sampled
     samples = sampled.samples
@@ -585,16 +585,21 @@ def construct_benjamin_feir_trajectory_batch(
         )
         for sample in samples
     )
-    _verify_preconstruction_proposal(
+    _verify_saved_batch_plan(
         proposed,
         expected_records=expected_records,
     )
     contract = sampled.contract
-    per_case_parameters = tuple(sample.to_parameter_arrays() for sample in samples)
-    parameter_names = tuple(per_case_parameters[0])
+    per_simulation_parameters = tuple(
+        sample.to_parameter_arrays() for sample in samples
+    )
+    parameter_names = tuple(per_simulation_parameters[0])
     parameters: ParameterArrays = {
         name: np.concatenate(
-            tuple(case_parameters[name] for case_parameters in per_case_parameters)
+            tuple(
+                simulation_parameters[name]
+                for simulation_parameters in per_simulation_parameters
+            )
         )
         for name in parameter_names
     }
@@ -616,13 +621,13 @@ def construct_benjamin_feir_trajectory_batch(
     )
 
 
-def sample_jonswap_tma_trajectory_cases(
+def sample_jonswap_tma_simulations(
     assignments: Sequence[AttemptAssignment],
     *,
     contract: RolloutConfig,
     quadrature_order: int = 16,
-) -> SampledTrajectoryCases[JonswapTmaSample]:
-    """Sample complete JONSWAP/TMA cases and both phase arrays."""
+) -> SampledSimulations[JonswapTmaSample]:
+    """Sample complete JONSWAP/TMA simulations and both phase arrays."""
 
     attempted = _require_assignments(assignments)
     band = resolved_band_for_contract(
@@ -630,7 +635,7 @@ def sample_jonswap_tma_trajectory_cases(
         quadrature_order=quadrature_order,
     )
     samples = tuple(
-        sample_jonswap_tma_case(assignment, band=band) for assignment in attempted
+        sample_jonswap_tma_simulation(assignment, band=band) for assignment in attempted
     )
     constructor = "relative_frequency_jonswap_tma_linear_state_v2"
     settings: SpecificationRecord = {
@@ -648,7 +653,7 @@ def sample_jonswap_tma_trajectory_cases(
         )
         for sample in samples
     )
-    return _sampled_cases(
+    return _sampled_simulations(
         attempted,
         samples,
         records,
@@ -658,11 +663,11 @@ def sample_jonswap_tma_trajectory_cases(
 
 
 def construct_jonswap_tma_trajectory_batch(
-    proposed: PersistedTrajectoryProposal[JonswapTmaSample],
+    proposed: PersistedTrajectoryPlan[JonswapTmaSample],
     *,
     selected_local_indices: Sequence[int] | None = None,
 ) -> TrajectoryInitialBatch:
-    """Construct selected resolved-band states after saving the full proposal."""
+    """Construct selected resolved-band states after saving the full batch plan."""
 
     sampled = proposed.sampled
     samples = sampled.samples
@@ -702,24 +707,14 @@ def construct_jonswap_tma_trajectory_batch(
         )
         for sample in samples
     )
-    _verify_preconstruction_proposal(
+    _verify_saved_batch_plan(
         proposed,
         expected_records=expected_records,
     )
-    if selected_local_indices is None:
-        selected = tuple(range(len(samples)))
-    else:
-        selected = tuple(selected_local_indices)
-        if not selected:
-            raise ValueError("selected_local_indices must not be empty")
-        if any(
-            isinstance(index, bool) or not isinstance(index, int) for index in selected
-        ):
-            raise TypeError("selected_local_indices must contain integers")
-        if tuple(sorted(set(selected))) != selected:
-            raise ValueError("selected_local_indices must be unique and increasing")
-        if selected[0] < 0 or selected[-1] >= len(samples):
-            raise ValueError("selected_local_indices contains an out-of-range index")
+    selected = _resolve_selected_simulation_indices(
+        selected_local_indices,
+        simulation_count=len(samples),
+    )
 
     selected_samples = tuple(samples[index] for index in selected)
     selected_records = tuple(expected_records[index] for index in selected)
@@ -759,13 +754,13 @@ def construct_jonswap_tma_trajectory_batch(
         | (minimum_water_columns <= 0.0)
     )
     if invalid.size:
-        cases: list[dict[str, object]] = []
+        simulations: list[dict[str, object]] = []
         for index in invalid:
             local_index = int(index)
             finite = bool(state_finite[local_index])
-            cases.append(
+            simulations.append(
                 {
-                    "local_case_index": local_index,
+                    "local_simulation_index": local_index,
                     "failure_reason": (
                         "nonpositive_initial_water_column"
                         if finite
@@ -781,15 +776,9 @@ def construct_jonswap_tma_trajectory_batch(
             "schema": "jonswap_initial_state_domain_failure_v1",
             "reason": "invalid_initial_graph_state",
             "index_space": "constructor_subbatch_local_index",
-            "invalid_case_indices": [int(index) for index in invalid],
-            "cases": cases,
+            "invalid_simulation_indices": [int(index) for index in invalid],
+            "simulations": simulations,
         }
-        json.dumps(
-            failure_record,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
         raise JonswapInitialStateDomainError(failure_record)
 
     return TrajectoryInitialBatch(

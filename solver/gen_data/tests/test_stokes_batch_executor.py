@@ -19,22 +19,22 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch  # noqa: E402
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
 )
-from solver.gen_data.pipeline.case_checks import CaseCheck  # noqa: E402
-from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
-    DatasetGenerationSpec,
-    generate_valid_cases,
+from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
+from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
+    DatasetChunkConfig,
+    generate_simulations,
     scan_dataset_generation,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
     STOKES_SAMPLE_CELL_IDS,
     StokesSample,
-    sample_stokes_case,
+    sample_stokes_simulation,
 )
 from solver.gen_data.stokes_batch_executor import (  # noqa: E402
     make_static_stokes_batch_executor,
@@ -48,7 +48,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 class InjectedInterruption(OSError):
-    """Controlled exception not converted to a numerical case rejection."""
+    """Controlled exception not converted to a numerical simulation rejection."""
 
 
 def _contract() -> StaticStokesContract:
@@ -70,15 +70,15 @@ def _run_spec(
     targets: tuple[int, ...],
     maximum_ursell_redraws: int = 0,
     batch_size: int = 2,
-) -> DatasetGenerationSpec:
-    return DatasetGenerationSpec(
+) -> DatasetChunkConfig:
+    return DatasetChunkConfig(
         root=root,
         family_name="stokes",
         family_id=PhysicalFamilyId.STOKES,
         revision_id=1,
         split_id=SplitId.TEST,
         stream_id=11,
-        case_targets=tuple(
+        simulation_targets=tuple(
             SampleCellTarget(cell_id, target)
             for cell_id, target in zip(cell_ids, targets)
         ),
@@ -94,10 +94,10 @@ def _run_spec(
     )
 
 
-def _proposal_contains(root: Path, case_id: int) -> bool:
-    for path in (root / "proposals/stokes/test").glob("batch_*.npz"):
+def _proposal_contains(root: Path, simulation_id: int) -> bool:
+    for path in (root / "batch_plans/stokes/test").glob("batch_*.npz"):
         with np.load(path, allow_pickle=False) as proposal:
-            if case_id in set(map(int, proposal["case_id"])):
+            if simulation_id in set(map(int, proposal["simulation_id"])):
                 return True
     return False
 
@@ -155,13 +155,15 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             gravity: float,
             maximum_ursell_redraws: int,
         ) -> StokesSample:
-            sampled_attempts.append(assignment.case_key.attempt_index)
-            forced_ursell = 27.0 if assignment.case_key.attempt_index == 0 else 1.0
+            sampled_attempts.append(assignment.simulation_key.attempt_index)
+            forced_ursell = (
+                27.0 if assignment.simulation_key.attempt_index == 0 else 1.0
+            )
             with patch(
                 "solver.gen_data.stokes_sampling._evaluate_finite_depth_ursell",
                 return_value=forced_ursell,
             ):
-                return sample_stokes_case(
+                return sample_stokes_simulation(
                     assignment,
                     domain_length=domain_length,
                     gravity=gravity,
@@ -175,10 +177,10 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             self.assertTrue(
                 _proposal_contains(
                     self.root,
-                    sample.assignment.case_key.case_id,
+                    sample.assignment.simulation_key.simulation_id,
                 )
             )
-            constructed_attempts.append(sample.assignment.case_key.attempt_index)
+            constructed_attempts.append(sample.assignment.simulation_key.attempt_index)
             return _zero_state(sample, contract)
 
         def checked_target(
@@ -206,7 +208,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             )
 
         executor = make_static_stokes_batch_executor(
-            run_spec=spec,
+            chunk_config=spec,
             contract=contract,
             maximum_ursell_redraws=0,
             metadata={"test_scope": "forced_exhaustion_and_sibling"},
@@ -214,24 +216,24 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             state_constructor=checked_constructor,
             target_evaluator=checked_target,
         )
-        state = generate_valid_cases(spec, executor)
+        state = generate_simulations(spec, executor)
 
         self.assertTrue(state.complete)
         self.assertEqual(
-            dict(state.accepted_by_cell),
+            dict(state.accepted_simulation_counts),
             {finite_cell: 1, deep_cell: 1},
         )
         self.assertEqual(sampled_attempts, [0, 1, 2])
         self.assertEqual(constructed_attempts, [1, 2])
         self.assertEqual(target_calls, 2)
-        self.assertEqual(state.next_attempt_index, 3)
         self.assertEqual(len(state.committed), 2)
 
         first = state.committed[0]
         self.assertFalse(first.failure.exists())
-        with np.load(first.proposal, allow_pickle=False) as proposal:
+        with np.load(first.batch_plan, allow_pickle=False) as proposal:
             specifications = [
-                json.loads(str(value)) for value in proposal["case_spec_json"]
+                json.loads(str(value))
+                for value in proposal["simulation_spec_json"]
             ]
         self.assertEqual(
             [record["status"] for record in specifications],
@@ -243,11 +245,12 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         first_result = json.loads(first.result.read_text(encoding="utf-8"))
         self.assertEqual(
-            [case["accepted"] for case in first_result["cases"]],
+            [simulation["accepted"] for simulation in first_result["simulations"]],
             [False, True],
         )
         self.assertTrue(
-            first_result["cases"][0]["failed_bits"] & int(CaseCheck.OUTSIDE_SUPPORT)
+            first_result["simulations"][0]["failed_bits"]
+            & int(SimulationCheck.OUTSIDE_SUPPORT)
         )
         self.assertEqual(
             first_result["metadata"]["sampling_exhaustions"],
@@ -255,18 +258,18 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         with np.load(first.shard, allow_pickle=False) as shard:
             np.testing.assert_array_equal(
-                shard["case_local_index"],
+                shard["simulation_local_index"],
                 np.asarray([1], dtype=np.int32),
             )
 
         second = state.committed[1]
-        with np.load(second.proposal, allow_pickle=False) as proposal:
-            replacement = json.loads(str(proposal["case_spec_json"][0]))
+        with np.load(second.batch_plan, allow_pickle=False) as proposal:
+            replacement = json.loads(str(proposal["simulation_spec_json"][0]))
         self.assertEqual(replacement["cell_id"], finite_cell)
         self.assertEqual(replacement["attempt_index"], 2)
 
         prior_sample_count = len(sampled_attempts)
-        replay = generate_valid_cases(spec, executor)
+        replay = generate_simulations(spec, executor)
         self.assertTrue(replay.complete)
         self.assertEqual(len(sampled_attempts), prior_sample_count)
 
@@ -290,7 +293,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
                 gravity: float,
                 maximum_ursell_redraws: int,
             ) -> StokesSample:
-                value = sample_stokes_case(
+                value = sample_stokes_simulation(
                     assignment,
                     domain_length=domain_length,
                     gravity=gravity,
@@ -309,13 +312,13 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             self.assertTrue(
                 _proposal_contains(
                     self.root,
-                    sample.assignment.case_key.case_id,
+                    sample.assignment.simulation_key.simulation_id,
                 )
             )
-            raise InjectedInterruption("after proposal write")
+            raise InjectedInterruption("after batch-plan write")
 
         interrupted = make_static_stokes_batch_executor(
-            run_spec=spec,
+            chunk_config=spec,
             contract=contract,
             maximum_ursell_redraws=0,
             sampler=recording_sampler(first_records),
@@ -324,28 +327,27 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             InjectedInterruption,
-            "after proposal write",
+            "after batch-plan write",
         ):
-            generate_valid_cases(spec, interrupted)
+            generate_simulations(spec, interrupted)
 
-        pending = scan_dataset_generation(spec).pending
+        pending = scan_dataset_generation(spec).pending_batch
         self.assertIsNotNone(pending)
         assert pending is not None
-        self.assertEqual(pending.status, BatchStatus.PROPOSED)
-        proposal_bytes = pending.paths.proposal.read_bytes()
+        proposal_bytes = pending.paths.batch_plan.read_bytes()
 
         resumed = make_static_stokes_batch_executor(
-            run_spec=spec,
+            chunk_config=spec,
             contract=contract,
             maximum_ursell_redraws=0,
             sampler=recording_sampler(replay_records),
             state_constructor=_zero_state,
             target_evaluator=_identity_target,
         )
-        state = generate_valid_cases(spec, resumed)
+        state = generate_simulations(spec, resumed)
         self.assertTrue(state.complete)
         self.assertEqual(first_records, replay_records)
-        self.assertEqual(pending.paths.proposal.read_bytes(), proposal_bytes)
+        self.assertEqual(pending.paths.batch_plan.read_bytes(), proposal_bytes)
         self.assertEqual(
             inspect_batch(pending.paths).status,
             BatchStatus.COMMITTED,
@@ -356,14 +358,14 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
     ) -> None:
         contract = _contract()
         deep_cell = STOKES_SAMPLE_CELL_IDS[2]
-        wrong_contract_spec = DatasetGenerationSpec(
+        wrong_contract_spec = DatasetChunkConfig(
             root=self.root / "contract",
             family_name="stokes",
             family_id=PhysicalFamilyId.STOKES,
             revision_id=1,
             split_id=SplitId.TEST,
             stream_id=11,
-            case_targets=(SampleCellTarget(deep_cell, 1),),
+            simulation_targets=(SampleCellTarget(deep_cell, 1),),
             cell_codes={deep_cell: 0},
             batch_size=1,
             configuration={
@@ -376,7 +378,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "contract differs"):
             make_static_stokes_batch_executor(
-                run_spec=wrong_contract_spec,
+                chunk_config=wrong_contract_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
             )
@@ -391,7 +393,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "redraw limit differs"):
             make_static_stokes_batch_executor(
-                run_spec=wrong_sampler_spec,
+                chunk_config=wrong_sampler_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
             )
@@ -408,18 +410,18 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             batch_size=1,
         )
         make_static_stokes_batch_executor(
-            run_spec=spec,
+            chunk_config=spec,
             contract=contract,
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             make_static_stokes_batch_executor(
-                run_spec=spec,
+                chunk_config=spec,
                 contract=contract,
                 state_constructor=_zero_state,
             )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             make_static_stokes_batch_executor(
-                run_spec=spec,
+                chunk_config=spec,
                 contract=contract,
                 target_evaluator=_identity_target,
             )
@@ -433,7 +435,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "paper-dataset execution"):
             make_static_stokes_batch_executor(
-                run_spec=zero_redraw_spec,
+                chunk_config=zero_redraw_spec,
                 contract=contract,
                 maximum_ursell_redraws=0,
             )

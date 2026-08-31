@@ -14,7 +14,7 @@ from scripts.build_paper_dataset_view import (
     preflight,
     validate_combined_plan,
 )
-from solver.gen_data.pipeline.case_allocation import SplitId
+from solver.gen_data.pipeline.simulation_allocation import SplitId
 
 
 def _chunk(
@@ -68,9 +68,9 @@ class CombinedPlanTests(unittest.TestCase):
             FAMILY_ORDER,
         )
         self.assertEqual(plan.splits, (SplitId.TRAIN,))
-        self.assertEqual(plan.accepted_cases_per_family_by_split, {"train": 8})
-        self.assertEqual(plan.accepted_cases, 32)
-        self.assertEqual(plan.attempted_cases, 36)
+        self.assertEqual(plan.accepted_simulations_per_family_by_split, {"train": 8})
+        self.assertEqual(plan.accepted_simulations, 32)
+        self.assertEqual(plan.attempted_simulations, 36)
         self.assertEqual(plan.expected_rows, 8 * (1 + 200 + 200 + 16))
 
     def test_additive_chunks_must_be_contiguous(self) -> None:
@@ -119,7 +119,7 @@ class CombinedPlanTests(unittest.TestCase):
                 name="combined",
             )
 
-        self.assertEqual(plan.accepted_cases, 32)
+        self.assertEqual(plan.accepted_simulations, 32)
         self.assertEqual(resolved, output.resolve())
         self.assertEqual(name, "combined")
         self.assertFalse(output.exists())

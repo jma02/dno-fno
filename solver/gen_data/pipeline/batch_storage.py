@@ -1,33 +1,34 @@
-"""Manage the saved proposal, shard, result, and failure files for each batch.
+"""Manage the saved plan, shard, result, and failure for each batch.
 
-Each attempted batch is proposed before numerical work begins.  A result JSON
-is the commit marker; a shard without a result is therefore recoverable, while
-a result whose referenced shard is absent is corruption.
+The plan is saved before numerical work begins. A result JSON commits the batch;
+a shard without a result can be resumed, while a result that refers to an absent
+shard is corrupt.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import (
-    ensure_json,
     ensure_npz,
     load_npz,
+    read_json_object,
+    write_json_atomic,
 )
-from solver.gen_data.pipeline.batch_format import (
-    CaseCommitRecord,
-    case_row_blocks as _case_row_blocks,
-    parse_case_commit_record as _parse_case_commit_record,
-    strict_json_loads as _strict_json_loads,
-    validate_proposal_arrays as _validate_proposal_arrays,
-    validate_shard_arrays as _validate_shard_arrays,
+from solver.gen_data.pipeline.batch_artifacts import (
+    SimulationCommitRecord,
+    compute_simulation_row_blocks,
+    parse_simulation_result,
+    validate_batch_plan,
+    validate_shard,
 )
 
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
@@ -37,7 +38,7 @@ class BatchStatus(str, Enum):
     """State inferred from the files saved for a batch."""
 
     EMPTY = "empty"
-    PROPOSED = "proposed"
+    PLAN_SAVED = "plan_saved"
     SHARD_WRITTEN = "shard_written"
     COMMITTED = "committed"
     FAILED = "failed"
@@ -47,7 +48,7 @@ class BatchStatus(str, Enum):
 class BatchPaths:
     """Files belonging to one family, split, and batch."""
 
-    proposal: Path
+    batch_plan: Path
     shard: Path
     result: Path
     failure: Path
@@ -60,7 +61,7 @@ class BatchPaths:
         family: str,
         split: str,
         batch_id: int,
-    ) -> "BatchPaths":
+    ) -> BatchPaths:
         """Construct the standard paths without creating any files."""
 
         for value, field_name in ((family, "family"), (split, "split")):
@@ -72,7 +73,7 @@ class BatchPaths:
             raise ValueError("batch_id must be nonnegative")
         filename = f"batch_{batch_id:06d}"
         return cls(
-            proposal=root / "proposals" / family / split / f"{filename}.npz",
+            batch_plan=root / "batch_plans" / family / split / f"{filename}.npz",
             shard=root / "shards" / family / split / f"{filename}.npz",
             result=root / "results" / family / split / f"{filename}.json",
             failure=root / "failures" / family / split / f"{filename}.json",
@@ -84,102 +85,117 @@ class BatchInspection:
     """Validated state reconstructed from one batch's files."""
 
     status: BatchStatus
-    cases: tuple[CaseCommitRecord, ...] = ()
+    simulations: tuple[SimulationCommitRecord, ...] = ()
 
 
-def ensure_proposal(
+def _load_batch_arrays(
+    paths: BatchPaths,
+) -> tuple[dict[str, NDArray[Any]], dict[str, NDArray[Any]] | None]:
+    """Load and validate a batch plan and its optional shard."""
+
+    batch_plan = load_npz(paths.batch_plan)
+    validate_batch_plan(batch_plan)
+    if not paths.shard.exists():
+        return batch_plan, None
+    shard = load_npz(paths.shard)
+    validate_shard(shard, batch_plan=batch_plan)
+    return batch_plan, shard
+
+
+def save_batch_plan(
     paths: BatchPaths,
     arrays: Mapping[str, NDArray[Any]],
 ) -> None:
-    """Create a proposal or verify exact replay of an existing proposal."""
+    """Save a batch plan or verify that the existing plan is identical."""
 
     if paths.result.exists() or paths.failure.exists():
-        raise RuntimeError("cannot replace a terminal batch proposal")
+        raise RuntimeError("cannot replace a terminal batch plan")
     ensure_npz(
-        paths.proposal,
+        paths.batch_plan,
         arrays,
-        validate=_validate_proposal_arrays,
-        artifact_name="proposal",
+        validate=validate_batch_plan,
     )
 
 
-def ensure_shard(
+def save_shard(
     paths: BatchPaths,
     arrays: Mapping[str, NDArray[Any]],
 ) -> None:
-    """Create a complete-case shard or verify an identical orphaned shard."""
+    """Save a shard or verify that the existing shard is identical."""
 
-    if not paths.proposal.exists():
-        raise RuntimeError("a proposal must exist before its shard")
+    if not paths.batch_plan.exists():
+        raise RuntimeError("a batch plan must exist before its shard")
     if paths.result.exists() or paths.failure.exists():
         raise RuntimeError("cannot replace a shard after a terminal record")
-    proposal_arrays = load_npz(paths.proposal)
-    _validate_proposal_arrays(proposal_arrays)
+    batch_plan = load_npz(paths.batch_plan)
+    validate_batch_plan(batch_plan)
+
     def validate(candidate: Mapping[str, NDArray[Any]]) -> None:
-        _validate_shard_arrays(
+        validate_shard(
             candidate,
-            proposal_arrays=proposal_arrays,
+            batch_plan=batch_plan,
         )
 
     ensure_npz(
         paths.shard,
         arrays,
         validate=validate,
-        artifact_name="shard",
     )
 
 
 def commit_batch(
     paths: BatchPaths,
     *,
-    cases: Sequence[CaseCommitRecord],
+    simulations: Sequence[SimulationCommitRecord],
     metadata: Mapping[str, object],
 ) -> None:
-    """Commit the decision for every proposed case."""
+    """Commit the decision for every planned simulation."""
 
-    if not paths.proposal.exists():
-        raise RuntimeError("a proposal must exist before its result")
+    if not paths.batch_plan.exists():
+        raise RuntimeError("a batch plan must exist before its result")
     if paths.failure.exists():
         raise RuntimeError("a failed batch cannot be committed")
-    proposal_arrays = load_npz(paths.proposal)
-    _validate_proposal_arrays(proposal_arrays)
-    proposed_case_ids = proposal_arrays["case_id"]
-    if len(cases) != proposed_case_ids.size:
-        raise ValueError("the result must contain every proposed case")
+    if paths.result.exists():
+        raise RuntimeError("batch is already committed")
+    batch_plan, shard = _load_batch_arrays(paths)
+    planned_simulation_ids = batch_plan["simulation_id"]
+    if len(simulations) != planned_simulation_ids.size:
+        raise ValueError("the result must contain every planned simulation")
     if not np.array_equal(
-        np.asarray([case.case_id for case in cases], dtype=np.int64),
-        proposed_case_ids,
+        np.asarray(
+            [simulation.simulation_id for simulation in simulations], dtype=np.int64
+        ),
+        planned_simulation_ids,
     ):
-        raise ValueError("result cases must preserve proposal order and identity")
+        raise ValueError(
+            "result simulations must preserve batch-plan order and identity"
+        )
 
-    shard_arrays: dict[str, NDArray[Any]] | None = None
-    if paths.shard.exists():
-        shard_arrays = load_npz(paths.shard)
-        _validate_shard_arrays(
-            shard_arrays,
-            proposal_arrays=proposal_arrays,
-        )
     blocks = (
-        _case_row_blocks(
-            shard_arrays["case_local_index"],
-            number_of_cases=int(proposed_case_ids.size),
+        compute_simulation_row_blocks(
+            shard["simulation_local_index"],
+            number_of_simulations=int(planned_simulation_ids.size),
         )
-        if shard_arrays is not None
+        if shard is not None
         else {}
     )
-    for local_index, case in enumerate(cases):
+    for local_index, simulation in enumerate(simulations):
         expected = blocks.get(local_index)
-        observed = (case.first_row, case.row_count) if case.accepted else None
+        observed = (
+            (simulation.first_row, simulation.row_count)
+            if simulation.accepted
+            else None
+        )
         if observed != expected:
             raise ValueError(
-                f"case {case.case_id} row ownership does not match the shard"
+                f"simulation {simulation.simulation_id} row ownership does not match the shard"
             )
 
     payload: dict[str, object] = {
-        "cases": [asdict(case) for case in cases],
+        "simulations": [simulation.to_json_record() for simulation in simulations],
         "metadata": dict(metadata),
     }
-    ensure_json(paths.result, payload, artifact_name="result")
+    write_json_atomic(paths.result, payload)
 
 
 def record_fatal_failure(
@@ -190,12 +206,14 @@ def record_fatal_failure(
     message: str,
     telemetry: Mapping[str, object],
 ) -> None:
-    """Record a fatal failure of the exact stored proposal."""
+    """Record a fatal failure of the exact stored batch plan."""
 
-    if not paths.proposal.exists():
-        raise RuntimeError("a proposal must exist before a failure record")
+    if not paths.batch_plan.exists():
+        raise RuntimeError("a batch plan must exist before a failure record")
     if paths.result.exists():
         raise RuntimeError("a committed batch cannot be marked failed")
+    if paths.failure.exists():
+        raise RuntimeError("batch is already marked failed")
     if not phase or not exception_type:
         raise ValueError("phase and exception_type must be nonempty")
     payload: dict[str, object] = {
@@ -204,73 +222,65 @@ def record_fatal_failure(
         "message": message,
         "telemetry": dict(telemetry),
     }
-    ensure_json(paths.failure, payload, artifact_name="failure")
-
-
-def _load_json_object(path: Path) -> dict[str, object]:
-    value = _strict_json_loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return value
+    write_json_atomic(paths.failure, payload)
 
 
 def inspect_batch(paths: BatchPaths) -> BatchInspection:
     """Validate the batch transaction and classify its restart state."""
 
-    proposal_exists = paths.proposal.exists()
+    plan_exists = paths.batch_plan.exists()
     shard_exists = paths.shard.exists()
     result_exists = paths.result.exists()
     failure_exists = paths.failure.exists()
-    if not any((proposal_exists, shard_exists, result_exists, failure_exists)):
+    if not any((plan_exists, shard_exists, result_exists, failure_exists)):
         return BatchInspection(BatchStatus.EMPTY)
-    if not proposal_exists:
-        raise RuntimeError("orphaned batch artifact exists without its proposal")
+    if not plan_exists:
+        raise RuntimeError("orphaned batch artifact exists without its batch plan")
     if result_exists and failure_exists:
         raise RuntimeError("a batch cannot have both result and failure records")
 
-    proposal_arrays = load_npz(paths.proposal)
-    _validate_proposal_arrays(proposal_arrays)
-
-    shard_arrays: dict[str, NDArray[Any]] | None = None
-    if shard_exists:
-        shard_arrays = load_npz(paths.shard)
-        _validate_shard_arrays(
-            shard_arrays,
-            proposal_arrays=proposal_arrays,
-        )
+    batch_plan, shard = _load_batch_arrays(paths)
 
     if failure_exists:
-        _load_json_object(paths.failure)
+        read_json_object(paths.failure)
         return BatchInspection(BatchStatus.FAILED)
     if result_exists:
-        result = _load_json_object(paths.result)
-        raw_cases = result.get("cases")
-        proposed_case_ids = proposal_arrays["case_id"]
-        if not isinstance(raw_cases, list) or len(raw_cases) != proposed_case_ids.size:
-            raise RuntimeError("result must contain every proposed case")
+        result = read_json_object(paths.result)
+        raw_simulations = result.get("simulations")
+        planned_simulation_ids = batch_plan["simulation_id"]
+        if (
+            not isinstance(raw_simulations, list)
+            or len(raw_simulations) != planned_simulation_ids.size
+        ):
+            raise RuntimeError("result must contain every planned simulation")
         blocks = (
-            _case_row_blocks(
-                shard_arrays["case_local_index"],
-                number_of_cases=int(proposed_case_ids.size),
+            compute_simulation_row_blocks(
+                shard["simulation_local_index"],
+                number_of_simulations=int(planned_simulation_ids.size),
             )
-            if shard_arrays is not None
+            if shard is not None
             else {}
         )
-        cases: list[CaseCommitRecord] = []
-        for local_index, (case_id, raw_case) in enumerate(
-            zip(proposed_case_ids, raw_cases)
+        simulations: list[SimulationCommitRecord] = []
+        for local_index, (simulation_id, raw_simulation) in enumerate(
+            zip(planned_simulation_ids, raw_simulations)
         ):
             try:
-                case = _parse_case_commit_record(
-                    raw_case,
-                    expected_case_id=int(case_id),
-                )
+                simulation = parse_simulation_result(raw_simulation)
+                if simulation.simulation_id != int(simulation_id):
+                    raise ValueError(
+                        "result simulation identity differs from its batch plan"
+                    )
             except ValueError as error:
                 raise RuntimeError(str(error)) from error
-            declared_block = (case.first_row, case.row_count) if case.accepted else None
+            declared_block = (
+                (simulation.first_row, simulation.row_count)
+                if simulation.accepted
+                else None
+            )
             if declared_block != blocks.get(local_index):
                 raise RuntimeError("result row ownership differs from its shard")
-            cases.append(case)
-        return BatchInspection(BatchStatus.COMMITTED, tuple(cases))
-    status = BatchStatus.SHARD_WRITTEN if shard_exists else BatchStatus.PROPOSED
+            simulations.append(simulation)
+        return BatchInspection(BatchStatus.COMMITTED, tuple(simulations))
+    status = BatchStatus.SHARD_WRITTEN if shard_exists else BatchStatus.PLAN_SAVED
     return BatchInspection(status)

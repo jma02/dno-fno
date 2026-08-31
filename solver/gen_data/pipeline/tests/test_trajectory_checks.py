@@ -10,7 +10,7 @@ from solver.gen_data.pipeline.trajectory_checks import (
     evaluate_trajectory_health,
     evaluate_trajectory,
 )
-from solver.gen_data.pipeline.case_checks import CaseCheck
+from solver.gen_data.pipeline.simulation_checks import SimulationCheck
 
 
 def make_trajectory() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -32,13 +32,13 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
             xi,
             gxi,
             depth=2.0,
-            gl2_stages_solved=True,
+            gl2_succeeded=True,
         )
 
         self.assertTrue(decision.accepted)
         self.assertEqual(
             decision.required,
-            CaseCheck.INCOMPLETE_TRAJECTORY,
+            SimulationCheck.INCOMPLETE_TRAJECTORY,
         )
 
     def test_numerical_failure_is_a_diagnostic_cause_of_incompleteness(
@@ -53,13 +53,13 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
             xi,
             nonfinite_target,
             depth=2.0,
-            gl2_stages_solved=False,
+            gl2_succeeded=False,
         )
 
         self.assertFalse(decision.accepted)
-        self.assertTrue(decision.failed & CaseCheck.INCOMPLETE_TRAJECTORY)
-        self.assertTrue(decision.failed & CaseCheck.NONFINITE_TARGET)
-        self.assertTrue(decision.failed & CaseCheck.GL2_STAGE_RESIDUAL)
+        self.assertTrue(decision.failed & SimulationCheck.INCOMPLETE_TRAJECTORY)
+        self.assertTrue(decision.failed & SimulationCheck.NONFINITE_TARGET)
+        self.assertTrue(decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL)
 
 
 class InternalTrajectoryHealthTest(unittest.TestCase):
@@ -84,17 +84,21 @@ class InternalTrajectoryHealthTest(unittest.TestCase):
             5.0e-4,
         )
         defects = (
-            ("hamiltonian", np.asarray([2.0, 2.01]), CaseCheck.HAMILTONIAN_DRIFT),
-            ("state_finite", np.asarray([True, False]), CaseCheck.NONFINITE_STATE),
+            ("hamiltonian", np.asarray([2.0, 2.01]), SimulationCheck.HAMILTONIAN_DRIFT),
+            (
+                "state_finite",
+                np.asarray([True, False]),
+                SimulationCheck.NONFINITE_STATE,
+            ),
             (
                 "dno_output_finite",
                 np.asarray([True, False]),
-                CaseCheck.NONFINITE_TARGET,
+                SimulationCheck.NONFINITE_TARGET,
             ),
             (
                 "minimum_water_column",
                 np.asarray([1.0, 0.0]),
-                CaseCheck.BOTTOM_CLEARANCE,
+                SimulationCheck.BOTTOM_CLEARANCE,
             ),
         )
         for name, value, reason in defects:

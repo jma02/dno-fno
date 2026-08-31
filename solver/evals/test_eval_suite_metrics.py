@@ -1,7 +1,10 @@
 """Focused regression tests for manuscript rollout metrics."""
+
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -12,29 +15,68 @@ from solver.evals.eval_suite import (  # noqa: E402
     IC,
     _json_ready,
     _rollout_ic_chunks,
+    _try_load_cached_truth,
+    _write_truth_cache,
     compute_macro_summary,
     compute_metrics,
 )
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_truth_cache_uses_simulation_ids_consistently(self) -> None:
+        values = np.ones((2, 1, 3), dtype=np.float64)
+        truth = {
+            "eta": values,
+            "xi": 2.0 * values,
+            "gxi": 3.0 * values,
+            "wall_s": 1.0,
+        }
+        protocol = '{"schema_version":2}'
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            path = _write_truth_cache(
+                directory,
+                "tanaka",
+                truth,
+                times=np.asarray((0.0, 1.0)),
+                depths=np.asarray((2.0,)),
+                simulation_ids=np.asarray((17,)),
+                truth_protocol_json=protocol,
+            )
+            with np.load(path, allow_pickle=False) as archive:
+                self.assertIn("simulation_ids", archive.files)
+                self.assertNotIn("simulation_ids", archive.files)
+
+            loaded = _try_load_cached_truth(
+                "tanaka",
+                directory,
+                expected_shape=values.shape,
+                expected_simulation_ids=[17],
+                expected_protocol_json=protocol,
+            )
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        np.testing.assert_array_equal(loaded["eta"], values)
+
     def test_rollout_chunks_preserve_panel_order_and_sum_wall_time(self) -> None:
         ics = [
             IC(
                 eta=np.zeros(3),
                 xi=np.zeros(3),
                 depth=1.0,
-                case_id=case_id,
+                simulation_id=simulation_id,
             )
-            for case_id in range(5)
+            for simulation_id in range(5)
         ]
         calls: list[list[int]] = []
 
         def rollout(chunk: list[IC]) -> dict[str, np.ndarray | float]:
-            case_ids = [ic.case_id for ic in chunk]
-            calls.append(case_ids)
+            simulation_ids = [ic.simulation_id for ic in chunk]
+            calls.append(simulation_ids)
             values = np.broadcast_to(
-                np.asarray(case_ids, dtype=np.float32)[None, :, None],
+                np.asarray(simulation_ids, dtype=np.float32)[None, :, None],
                 (2, len(chunk), 3),
             ).copy()
             return {
@@ -54,7 +96,9 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(np.asarray(result["eta"]).shape, (2, 5, 3))
         self.assertEqual(float(result["wall_s"]), 1.25)
 
-    def test_nonfinite_predictions_are_failures_and_truth_reasons_are_explicit(self) -> None:
+    def test_nonfinite_predictions_are_failures_and_truth_reasons_are_explicit(
+        self,
+    ) -> None:
         n_t, n_ics, nx = 11, 4, 2
         times = np.arange(n_t, dtype=np.float64)
         eta = np.ones((n_t, n_ics, nx), dtype=np.float64)
@@ -219,7 +263,9 @@ class MacroSummaryTest(unittest.TestCase):
         }
 
         macro = compute_macro_summary({"invalid": summary})
-        self.assertIsNone(_json_ready(macro["model_nonfinite_any_rate_truth_valid_micro"]))
+        self.assertIsNone(
+            _json_ready(macro["model_nonfinite_any_rate_truth_valid_micro"])
+        )
         self.assertIsNone(_json_ready(float("nan")))
 
 

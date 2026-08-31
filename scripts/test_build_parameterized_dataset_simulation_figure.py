@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from scripts.build_parameterized_dataset_case_figure import (
+from scripts.build_parameterized_dataset_simulation_figure import (
     CENTRAL_VALIDATION_CATEGORIES,
     FAMILY_ORDER,
     DimensionlessProfile,
@@ -18,7 +18,7 @@ from scripts.build_parameterized_dataset_case_figure import (
     publish_outputs,
     select_validation_trajectories,
 )
-from scripts.render_paper_dataset_worst_cases import (
+from scripts.render_paper_dataset_worst_simulations import (
     CombinedSummaryBinding,
     DatasetSource,
     TrajectoryIndex,
@@ -38,13 +38,13 @@ def _source(family: str, root: Path) -> DatasetSource:
             TrajectoryIndex(
                 accepted_index=index,
                 trajectory_index=index,
-                case_id=case_id,
+                simulation_id=simulation_id,
                 category=CENTRAL_VALIDATION_CATEGORIES[family],
                 shard_index=0,
                 first_shard_row=index,
                 row_count=1,
             )
-            for index, case_id in enumerate((30, 10, 20, 40))
+            for index, simulation_id in enumerate((30, 10, 20, 40))
         ),
     )
 
@@ -75,17 +75,19 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
             np.asarray([2.0, 4.0, 6.0, 8.0]) / (2.0 * np.sqrt(8.0)),
         )
 
-    def test_selects_lower_median_case_id_per_family(self) -> None:
+    def test_selects_lower_median_simulation_id_per_family(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             selected = select_validation_trajectories(
                 tuple(_details(family, root / family) for family in FAMILY_ORDER)
             )
-        self.assertEqual(tuple(item.trajectory.case_id for item in selected), (20,) * 4)
+        self.assertEqual(
+            tuple(item.trajectory.simulation_id for item in selected), (20,) * 4
+        )
         self.assertEqual(tuple(item.lower_median_index for item in selected), (1,) * 4)
         self.assertEqual(tuple(item.candidate_count for item in selected), (4,) * 4)
 
-    def test_published_sidecar_records_cases_without_file_digests(self) -> None:
+    def test_published_sidecar_records_simulations_without_file_digests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             illustrations: list[Illustration] = []
@@ -119,7 +121,7 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
                 path=summary_path,
                 source_summary_paths=(),
                 expected_source_count=0,
-                expected_accepted_cases=0,
+                expected_accepted_simulations=0,
                 expected_retained_rows=0,
             )
             pdf, png, sidecar = publish_outputs(
@@ -132,7 +134,8 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
             self.assertTrue(pdf.is_file())
             self.assertTrue(png.is_file())
             self.assertEqual(
-                [case["family"] for case in record["cases"]], list(FAMILY_ORDER)
+                [simulation["family"] for simulation in record["simulations"]],
+                list(FAMILY_ORDER),
             )
             self.assertEqual(set(record["artifacts"]), {"pdf", "png"})
 

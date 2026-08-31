@@ -16,7 +16,7 @@ mixed into a new dataset.
 
 ## Generation flow
 
-Each attempted case has a deterministic ID derived from its family, revision,
+Each attempted simulation has a deterministic ID derived from its family, revision,
 split, stream, and attempt index. A run then:
 
 1. samples parameters from one declared parameter group;
@@ -26,10 +26,10 @@ split, stream, and attempt index. A run then:
 5. evolves a complete trajectory for rollout families;
 6. computes the common Craig--Sulem DNO target;
 7. applies the required numerical checks;
-8. stores a complete accepted case or a zero-row rejection decision.
+8. stores a complete accepted simulation or a zero-row rejection decision.
 
 Errors in the constructor or solver stop the run. They are not silently turned
-into rejected data. A rejected case is always tied to an explicit failed check.
+into rejected data. A rejected simulation is tied to an explicit failed check.
 
 All accepted trajectory rows stay together in one split. The generator never
 makes row-level train/validation/test splits.
@@ -39,25 +39,25 @@ makes row-level train/validation/test splits.
 Family definitions:
 
 - `stokes_sampling.py` samples finite-depth Stokes states.
-- `tanaka_sampling.py` and `tanaka_initial_conditions.py` build Tanaka cases.
+- `tanaka_sampling.py` and `tanaka_initial_conditions.py` build Tanaka simulations.
 - `benjamin_feir_sampling.py` and `benjamin_feir_jcp09.py` build modulated wave
   groups.
-- `jonswap_tma_sampling.py` and `jonswap_tma.py` build random-sea cases.
+- `jonswap_tma_sampling.py` and `jonswap_tma.py` build random-sea simulations.
 
 Execution:
 
 - `stokes_batch_executor.py` evaluates one static Stokes batch.
 - `trajectory_batch_executor.py` evaluates one rollout batch.
-- `jonswap_horizon_executor.py` groups JONSWAP cases by compatible integration
+- `jonswap_horizon_executor.py` groups JONSWAP simulations by compatible integration
   length so they can run efficiently together.
 - `trajectory_family_adapters.py` connects each rollout family to the shared
   executor.
 
 Shared pipeline:
 
-- `pipeline/case_allocation.py` assigns attempts across parameter groups and
+- `pipeline/simulation_allocation.py` assigns attempts across parameter groups and
   defines deterministic split IDs.
-- `pipeline/case_checks.py` defines the acceptance masks and failure reasons.
+- `pipeline/simulation_checks.py` defines the acceptance masks and failure reasons.
 - `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
 - `pipeline/trajectory_rollout.py` runs and samples trajectories.
 - `pipeline/dno_target.py` computes the stored DNO target.
@@ -66,18 +66,18 @@ Shared pipeline:
 - `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
 - `pipeline/build_dataset_view.py` creates the manifest and trajectory map used
   by training.
-- `pipeline/valid_case_generation.py` resumes a run and continues until each
-  parameter group reaches its accepted-case target.
+- `pipeline/dataset_generation.py` resumes a run and continues until each
+  parameter group reaches its accepted-simulation target.
 
 ## Acceptance
 
-`CaseCheckResult` carries three masks:
+`SimulationCheckResult` carries three masks:
 
 - `required`: checks that must pass for this family and revision;
 - `evaluated`: checks that actually ran;
 - `failed`: evaluated checks that failed.
 
-A case is accepted only when every required check ran and none failed. The
+A simulation is accepted only when every required check ran and none failed. The
 shared checks cover finite values, positive water depth, complete time grids,
 stage convergence, DNO residuals, and internal energy drift where applicable.
 
@@ -90,7 +90,7 @@ adjustment handling.
 
 Each batch may contain:
 
-- a proposal NPZ with case IDs, sampled parameters, and execution settings;
+- a proposal NPZ with simulation IDs, sampled parameters, and execution settings;
 - a result JSON with one acceptance decision per attempt;
 - an accepted-row NPZ shard, omitted when the whole batch is rejected;
 - a failure JSON if execution stopped before a result could be committed.
@@ -104,7 +104,7 @@ The dataset view contains:
 
 - a JSON manifest listing shards, counts, grid settings, and numerical target
   settings;
-- a trajectory-map NPZ mapping every attempted case to its acceptance decision
+- a trajectory-map NPZ mapping every attempted simulation to its acceptance decision
   and every stored row to its trajectory, frame, and shard row.
 
 The training loader uses those two files directly.

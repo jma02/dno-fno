@@ -9,11 +9,11 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 from solver.gen_data.tanaka_sampling import (
     MAIN_DEPTH_BOUNDS,
@@ -26,7 +26,7 @@ from solver.gen_data.tanaka_sampling import (
     TANAKA_SAMPLE_CELLS,
     TANAKA_SAMPLING_REVISION_V3,
     TanakaCrest,
-    sample_tanaka_case,
+    sample_tanaka_simulation,
     tanaka_conditional_depth_bounds,
     tanaka_inverse_width,
     tanaka_resolution_ratio,
@@ -50,7 +50,7 @@ def assignment(
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
-        case_key=CaseKey(
+        simulation_key=SimulationKey(
             family_id=family_id,
             revision_id=revision_id,
             split_id=split_id,
@@ -99,37 +99,39 @@ class TanakaSamplingTest(unittest.TestCase):
                     revision_id=TANAKA_SAMPLING_REVISION_V3,
                     attempt_index=91,
                 )
-                first = sample_tanaka_case(attempted)
-                second = sample_tanaka_case(attempted)
+                first = sample_tanaka_simulation(attempted)
+                second = sample_tanaka_simulation(attempted)
                 self.assertEqual(first, second)
                 self.assertEqual(first.to_json_record(), second.to_json_record())
                 self.assertNotIn("schema", first.to_json_record())
 
-    def test_pcg64_uses_all_case_key_seed_words(self) -> None:
-        base = assignment(0, attempt_index=41).case_key
+    def test_pcg64_uses_all_simulation_key_seed_words(self) -> None:
+        base = assignment(0, attempt_index=41).simulation_key
         expected = np.random.Generator(
             np.random.PCG64(np.random.SeedSequence(base.seed_words))
         ).random(8)
         np.testing.assert_array_equal(
-            random_generator_for_case(base).random(8), expected
+            random_generator_for_simulation(base).random(8), expected
         )
 
         keys = (
             base,
-            CaseKey(1, 3, SplitId.TRAIN, 0, 41),
-            CaseKey(2, 4, SplitId.TRAIN, 0, 41),
-            CaseKey(2, 3, SplitId.VALIDATION, 0, 41),
-            CaseKey(2, 3, SplitId.TRAIN, 1, 41),
-            CaseKey(2, 3, SplitId.TRAIN, 0, 42),
+            SimulationKey(1, 3, SplitId.TRAIN, 0, 41),
+            SimulationKey(2, 4, SplitId.TRAIN, 0, 41),
+            SimulationKey(2, 3, SplitId.VALIDATION, 0, 41),
+            SimulationKey(2, 3, SplitId.TRAIN, 1, 41),
+            SimulationKey(2, 3, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
+        first_draws = {
+            tuple(random_generator_for_simulation(key).random(8)) for key in keys
+        }
         self.assertEqual(len(first_draws), len(keys))
 
     def test_support_sums_and_separation_over_many_attempts(self) -> None:
         for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
             regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[cell_id]
             for attempt_index in range(512):
-                sample = sample_tanaka_case(
+                sample = sample_tanaka_simulation(
                     assignment(cell_index, attempt_index=attempt_index)
                 )
                 self.assertEqual(tanaka_support_violations(sample), ())
@@ -177,7 +179,7 @@ class TanakaSamplingTest(unittest.TestCase):
         for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
             regime, _, _ = TANAKA_SAMPLE_CELLS[cell_id]
             for attempt_index in range(512):
-                sample = sample_tanaka_case(
+                sample = sample_tanaka_simulation(
                     assignment(
                         cell_index,
                         revision_id=TANAKA_SAMPLING_REVISION_V3,
@@ -242,7 +244,7 @@ class TanakaSamplingTest(unittest.TestCase):
         regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[
             TANAKA_SAMPLE_CELL_IDS[cell_index]
         ]
-        rng = random_generator_for_case(attempted.case_key)
+        rng = random_generator_for_simulation(attempted.simulation_key)
 
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
         weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
@@ -281,7 +283,7 @@ class TanakaSamplingTest(unittest.TestCase):
             int(direction) for direction in rng.permutation(direction_multiset)
         )
 
-        sample = sample_tanaka_case(attempted)
+        sample = sample_tanaka_simulation(attempted)
         self.assertEqual(sample.depth, depth)
         self.assertEqual(tuple(crest.alpha for crest in sample.crests), alphas)
         self.assertEqual(
@@ -296,14 +298,14 @@ class TanakaSamplingTest(unittest.TestCase):
     def test_direction_compositions_and_json_are_exact(self) -> None:
         directions: set[int] = set()
         for cell_index in range(len(TANAKA_SAMPLE_CELL_IDS)):
-            sample = sample_tanaka_case(
+            sample = sample_tanaka_simulation(
                 assignment(cell_index, attempt_index=700 + cell_index)
             )
             directions.update(crest.direction for crest in sample.crests)
             record = sample.to_json_record()
             self.assertEqual(
                 record["seed_words"],
-                list(sample.assignment.case_key.seed_words),
+                list(sample.assignment.simulation_key.seed_words),
             )
             self.assertEqual(record["crest_count"], len(sample.crests))
             self.assertEqual(
@@ -314,7 +316,7 @@ class TanakaSamplingTest(unittest.TestCase):
 
         mixed_assignments: set[tuple[int, ...]] = set()
         for attempt_index in range(256):
-            sample = sample_tanaka_case(
+            sample = sample_tanaka_simulation(
                 assignment(6, attempt_index=1000 + attempt_index)
             )
             directions.update(crest.direction for crest in sample.crests)
@@ -332,7 +334,7 @@ class TanakaSamplingTest(unittest.TestCase):
     def test_revision_3_boundary_corruption_fails_below_and_passes_above(
         self,
     ) -> None:
-        sample = sample_tanaka_case(
+        sample = sample_tanaka_simulation(
             assignment(
                 0,
                 revision_id=TANAKA_SAMPLING_REVISION_V3,
@@ -374,9 +376,9 @@ class TanakaSamplingTest(unittest.TestCase):
             with self.subTest(revision_id=revision_id):
                 attempted = assignment(0, revision_id=revision_id)
                 with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
-                    sample_tanaka_case(attempted)
+                    sample_tanaka_simulation(attempted)
 
-                valid = sample_tanaka_case(assignment(0))
+                valid = sample_tanaka_simulation(assignment(0))
                 corrupt = replace(valid, assignment=attempted)
                 self.assertIn(
                     "unsupported Tanaka sampling revision",
@@ -406,7 +408,7 @@ class TanakaSamplingTest(unittest.TestCase):
             tanaka_conditional_depth_bounds("main", (100.0,))
 
     def test_invalid_records_and_impossible_geometry_fail_closed(self) -> None:
-        sample = sample_tanaka_case(assignment(3))
+        sample = sample_tanaka_simulation(assignment(3))
         mismatched_cell = replace(sample, right_moving_count=0)
         self.assertIn(
             "sample parameters do not match the assigned cell",
@@ -436,9 +438,9 @@ class TanakaSamplingTest(unittest.TestCase):
             tanaka_support_violations(wrong_composition),
         )
         with self.assertRaisesRegex(ValueError, "positive and finite"):
-            sample_tanaka_case(assignment(0), domain_length=np.nan)
+            sample_tanaka_simulation(assignment(0), domain_length=np.nan)
         with self.assertRaisesRegex(ValueError, "do not fit"):
-            sample_tanaka_case(assignment(5), domain_length=0.01)
+            sample_tanaka_simulation(assignment(5), domain_length=0.01)
 
 
 if __name__ == "__main__":

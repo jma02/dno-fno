@@ -13,25 +13,22 @@ from scripts.generate_paper_dataset import (
     BOOTSTRAP_PLATFORM,
     FAMILY_CELL_IDS,
     GenerationRequest,
-    build_run_spec,
-    incremental_valid_case_targets,
+    build_chunk_config,
+    incremental_simulation_targets,
     parse_args,
     preflight,
     request_from_args,
 )
-from solver.gen_data.pipeline.batch_storage import ensure_proposal
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.batch_storage import BatchPaths, save_batch_plan
+from solver.gen_data.pipeline.simulation_allocation import (
     SplitId,
-    balanced_valid_case_targets,
-    assign_next_cases,
+    balanced_simulation_targets,
+    build_next_attempt_batch,
 )
-from solver.gen_data.pipeline.valid_case_generation import (
-    DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
+from solver.gen_data.pipeline.dataset_generation import (
+    MAX_RETRIES_PER_PARAMETER_GROUP,
 )
-from solver.gen_data.pipeline.writer import (
-    batch_paths_for_assignments,
-    build_proposal_arrays,
-)
+from solver.gen_data.pipeline.writer import build_batch_plan
 from solver.gen_data.stokes_sampling import DEFAULT_MAXIMUM_URSELL_REDRAWS
 from solver.gen_data.stokes_static_pipeline import (
     PAPER_STATIC_STOKES_CONTRACT,
@@ -52,20 +49,23 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 cumulative = {cell_id: 0 for cell_id in cells}
                 previous = 0
                 for endpoint in endpoints:
-                    chunk = incremental_valid_case_targets(
+                    chunk = incremental_simulation_targets(
                         cells,
-                        accepted_cases_before=previous,
-                        case_count=endpoint - previous,
+                        accepted_simulations_before=previous,
+                        simulation_count=endpoint - previous,
                     )
                     for target in chunk:
-                        cumulative[target.cell_id] += target.case_count
-                    expected = balanced_valid_case_targets(
+                        cumulative[target.cell_id] += target.simulation_count
+                    expected = balanced_simulation_targets(
                         cells,
-                        case_count=endpoint,
+                        simulation_count=endpoint,
                     )
                     self.assertEqual(
                         cumulative,
-                        {target.cell_id: target.case_count for target in expected},
+                        {
+                            target.cell_id: target.simulation_count
+                            for target in expected
+                        },
                     )
                     values = tuple(cumulative.values())
                     self.assertLessEqual(max(values) - min(values), 1)
@@ -85,36 +85,41 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             "jonswap_tma": 4,
         }
         with tempfile.TemporaryDirectory() as directory:
-            for family, accepted_cases in accepted_by_family.items():
+            for family, accepted_simulations in accepted_by_family.items():
                 with self.subTest(family=family):
                     request = GenerationRequest(
                         output_root=Path(directory) / family,
                         family=family,  # type: ignore[arg-type]
                         split=SplitId.VALIDATION,
-                        accepted_cases=accepted_cases,
+                        accepted_simulations=accepted_simulations,
                         batch_size=3,
                         platform=BOOTSTRAP_PLATFORM,
                     )
-                    spec = build_run_spec(request)
+                    chunk_config = build_chunk_config(request)
                     self.assertEqual(
-                        spec.revision_id,
+                        chunk_config.revision_id,
                         expected_revision_by_family[family],
                     )
-                    targets = tuple(target.case_count for target in spec.case_targets)
-                    self.assertEqual(sum(targets), accepted_cases)
+                    targets = tuple(
+                        target.simulation_count
+                        for target in chunk_config.simulation_targets
+                    )
+                    self.assertEqual(sum(targets), accepted_simulations)
                     self.assertLessEqual(max(targets) - min(targets), 1)
                     if family == "tanaka":
                         self.assertEqual(targets, (1,) * 11)
                     self.assertEqual(
-                        tuple(target.cell_id for target in spec.case_targets),
+                        tuple(
+                            target.cell_id for target in chunk_config.simulation_targets
+                        ),
                         FAMILY_CELL_IDS[family],  # type: ignore[index]
                     )
                     self.assertEqual(
-                        spec.configuration["execution_platform"],
+                        chunk_config.configuration["execution_platform"],
                         BOOTSTRAP_PLATFORM,
                     )
                     if family == "benjamin_feir":
-                        support = spec.configuration["sampling_support"]
+                        support = chunk_config.configuration["sampling_support"]
                         self.assertEqual(
                             support["schema"],
                             "paper_benjamin_feir_sampling_support_v1",
@@ -130,11 +135,11 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                         )
                     if family == "stokes":
                         self.assertEqual(
-                            spec.configuration["contract"],
+                            chunk_config.configuration["contract"],
                             PAPER_STATIC_STOKES_CONTRACT.to_json_record(),
                         )
                         self.assertEqual(
-                            spec.configuration["sampler"],
+                            chunk_config.configuration["sampler"],
                             {
                                 "maximum_ursell_redraws": (
                                     DEFAULT_MAXIMUM_URSELL_REDRAWS
@@ -143,7 +148,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                         )
                         continue
 
-                    execution = spec.configuration["trajectory_execution"]
+                    execution = chunk_config.configuration["trajectory_execution"]
                     self.assertEqual(
                         execution,
                         paper_trajectory_execution(
@@ -195,12 +200,12 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     self.assertEqual(numerical["dt"], 0.01)
                     self.assertNotIn("fine_dt", numerical)
                     self.assertNotIn("retry_dt", numerical)
-                    stored = execution["stored_time_policy"]
+                    stored = execution["frame_selection"]
                     self.assertEqual(
                         (
                             stored["tanaka_count"],
                             stored["benjamin_feir_count"],
-                            stored["random_sea_count"],
+                            stored["jonswap_tma_count"],
                         ),
                         (200, 200, 16),
                     )
@@ -242,7 +247,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     "tanaka",
                     "--split",
                     "validation",
-                    "--accepted-cases",
+                    "--accepted-simulations",
                     "5",
                     "--output-root",
                     str(output),
@@ -252,30 +257,6 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             )
             self.assertFalse(args.execute)
             self.assertEqual(args.platform, "cpu")
-            self.assertEqual(
-                args.maximum_attempts_per_accepted_case,
-                DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
-            )
-            overridden_args = parse_args(
-                (
-                    "--family",
-                    "tanaka",
-                    "--split",
-                    "validation",
-                    "--accepted-cases",
-                    "5",
-                    "--output-root",
-                    str(output),
-                    "--batch-size",
-                    "2",
-                    "--maximum-attempts-per-accepted-case",
-                    "7",
-                )
-            )
-            self.assertEqual(
-                request_from_args(overridden_args).maximum_attempts_per_accepted_case,
-                7,
-            )
             request = request_from_args(args)
             _, execution, state, plan = preflight(request)
 
@@ -289,22 +270,22 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertEqual(allocation["nonzero_quota_cell_count"], 5)
             self.assertEqual(allocation["quota_minimum"], 0)
             self.assertEqual(allocation["quota_maximum"], 1)
-            self.assertEqual(allocation["accepted_cases_before"], 0)
-            self.assertEqual(allocation["accepted_cases_after"], 5)
+            self.assertEqual(allocation["accepted_simulations_before"], 0)
+            self.assertEqual(allocation["accepted_simulations_after"], 5)
             self.assertEqual(
-                allocation["maximum_attempts_per_accepted_case"],
-                4,
+                allocation["maximum_retries_per_parameter_group"],
+                MAX_RETRIES_PER_PARAMETER_GROUP,
             )
             self.assertEqual(
-                [quota["attempt_ceiling"] for quota in allocation["quotas"]],
-                [4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0],
+                [quota["maximum_attempts"] for quota in allocation["quotas"]],
+                [33, 33, 33, 33, 33, 0, 0, 0, 0, 0, 0],
             )
             self.assertEqual(
                 [quota["durable_attempted"] for quota in allocation["quotas"]],
                 [0] * 11,
             )
             expected = plan["expected_output"]
-            self.assertEqual(expected["stored_rows_per_accepted_case"], 200)
+            self.assertEqual(expected["stored_rows_per_accepted_simulation"], 200)
             self.assertEqual(expected["retained_rows"], 1_000)
             self.assertEqual(
                 execution,
@@ -318,7 +299,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 output_root=Path(directory) / "jonswap",
                 family="jonswap_tma",
                 split=SplitId.TEST,
-                accepted_cases=27,
+                accepted_simulations=27,
                 batch_size=27,
                 platform=BOOTSTRAP_PLATFORM,
             )
@@ -335,20 +316,20 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 output_root=Path(directory) / "stokes",
                 family="stokes",
                 split=SplitId.TRAIN,
-                accepted_cases=8,
+                accepted_simulations=8,
                 batch_size=4,
                 platform=BOOTSTRAP_PLATFORM,
             )
-            spec, execution, state, plan = preflight(request)
+            chunk_config, execution, state, plan = preflight(request)
 
             self.assertFalse(state.complete)
             self.assertEqual(execution, PAPER_STATIC_STOKES_CONTRACT)
             self.assertEqual(
-                [target.case_count for target in spec.case_targets],
+                [target.simulation_count for target in chunk_config.simulation_targets],
                 [2, 2, 2, 2],
             )
             expected = plan["expected_output"]
-            self.assertEqual(expected["stored_rows_per_accepted_case"], 1)
+            self.assertEqual(expected["stored_rows_per_accepted_simulation"], 1)
             self.assertEqual(expected["retained_rows"], 8)
             self.assertEqual(expected["spatial_points_per_row"], 1024)
             self.assertEqual(plan["execution"]["dno_order"], 6)
@@ -362,50 +343,52 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 output_root=output,
                 family="tanaka",
                 split=SplitId.TEST,
-                accepted_cases=4,
+                accepted_simulations=4,
                 batch_size=1,
                 platform=BOOTSTRAP_PLATFORM,
             )
-            spec = build_run_spec(request)
-            assignments = assign_next_cases(
-                spec.case_targets,
+            chunk_config = build_chunk_config(request)
+            assignments = build_next_attempt_batch(
+                chunk_config.simulation_targets,
                 {},
-                family_id=int(spec.family_id),
-                revision_id=spec.revision_id,
-                split_id=spec.split_id,
-                stream_id=spec.stream_id,
-                first_attempt_index=spec.first_attempt_index,
-                batch_size=spec.batch_size,
+                {},
+                chunk_config.maximum_attempts_by_parameter_group,
+                family_id=int(chunk_config.family_id),
+                revision_id=chunk_config.revision_id,
+                split_id=chunk_config.split_id,
+                stream_id=chunk_config.stream_id,
+                first_attempt_index=chunk_config.first_attempt_index,
+                batch_size=chunk_config.batch_size,
             )
             records = tuple(
                 {
                     "schema": "launcher_resume_test_v1",
                     "cell_id": assignment.cell_id,
-                    "attempt_index": assignment.case_key.attempt_index,
+                    "attempt_index": assignment.simulation_key.attempt_index,
                 }
                 for assignment in assignments
             )
-            paths = batch_paths_for_assignments(
-                spec.root,
-                assignments,
-                family_name=spec.family_name,
+            paths = BatchPaths.for_batch(
+                chunk_config.root,
+                family=chunk_config.family_name,
+                split=chunk_config.split_id.value,
                 batch_id=0,
             )
-            ensure_proposal(
+            save_batch_plan(
                 paths,
-                build_proposal_arrays(
+                build_batch_plan(
                     assignments,
                     records,
-                    cell_codes=spec.cell_codes,
+                    cell_codes=chunk_config.cell_codes,
                     batch_id=0,
                     metadata={"test": "no_compute_resume_scan"},
                 ),
             )
 
             _, _, state, plan = preflight(request)
-            self.assertIsNotNone(state.pending)
+            self.assertIsNotNone(state.pending_batch)
             self.assertEqual(plan["resume_state"]["pending_batch_id"], 0)
-            self.assertEqual(plan["resume_state"]["pending_status"], "proposed")
+
 
 if __name__ == "__main__":
     unittest.main()

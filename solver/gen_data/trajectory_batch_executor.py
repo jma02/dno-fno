@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-import json
 import math
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias
 
 import numpy as np
 
+from solver.gen_data.pipeline.artifact_io import json_text, parse_json
 from solver.gen_data.benjamin_feir_sampling import (
     BENJAMIN_FEIR_SAMPLE_CELLS,
     BenjaminFeirSample,
@@ -22,15 +22,15 @@ from solver.gen_data.jonswap_tma_sampling import (
 )
 from solver.gen_data.pipeline.batch_storage import BatchPaths
 from solver.gen_data.pipeline.batch_storage import record_fatal_failure
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     PhysicalFamilyId,
 )
-from solver.gen_data.pipeline.case_checks import (
-    CaseCheckResult,
-    CaseCheck,
+from solver.gen_data.pipeline.simulation_checks import (
+    SimulationCheckResult,
+    SimulationCheck,
 )
-from solver.gen_data.pipeline.valid_case_generation import DatasetGenerationSpec
+from solver.gen_data.pipeline.dataset_generation import DatasetChunkConfig
 from solver.gen_data.pipeline.trajectory_config import (
     PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
     PAPER_JONSWAP_ROLLOUT_CONFIG,
@@ -43,32 +43,30 @@ from solver.gen_data.pipeline.trajectory_integration import (
 )
 from solver.gen_data.pipeline.trajectory_rollout import (
     execute_trajectory_batch,
-    execute_variable_horizon_trajectory_batch,
 )
-from solver.gen_data.pipeline.trajectory_writer import (
-    PAPER_STORED_TIME_POLICY,
-    StoredTimePolicy,
+from solver.gen_data.pipeline.trajectory_subsampling import (
+    TrajectoryFrameSelectionConfig,
     TrajectoryFamily,
-    outcomes_from_trajectories,
+    subsample_trajectories,
 )
 from solver.gen_data.pipeline.writer import (
-    CaseOutcome,
-    commit_case_outcomes,
+    SimulationOutcome,
+    commit_simulation_outcomes,
 )
 from solver.gen_data.tanaka_sampling import TANAKA_SAMPLE_CELLS
 from solver.gen_data.tanaka_sampling import TanakaSample
 from solver.gen_data.trajectory_family_adapters import (
     JonswapInitialStateDomainError,
-    PersistedTrajectoryProposal,
-    SampledTrajectoryCases,
+    PersistedTrajectoryPlan,
+    SampledSimulations,
     TrajectoryInitialBatch,
     construct_benjamin_feir_trajectory_batch,
     construct_jonswap_tma_trajectory_batch,
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_proposal,
-    sample_benjamin_feir_trajectory_cases,
-    sample_jonswap_tma_trajectory_cases,
-    sample_tanaka_trajectory_cases,
+    persist_sampled_trajectory_plan,
+    sample_benjamin_feir_simulations,
+    sample_jonswap_tma_simulations,
+    sample_tanaka_simulations,
 )
 
 
@@ -84,7 +82,9 @@ HorizonKind: TypeAlias = Literal[
 JsonScalar: TypeAlias = str | int | float | bool | None
 JONSWAP_ADJUSTMENT_SCHEMA = "dommermuth_nonlinear_adjustment_v1"
 JONSWAP_ADJUSTMENT_FORMULA = "A(t)=1-exp(-(t/T_a)^n)"
-TRAJECTORY_REQUIRED_CHECKS = CaseCheck.OUTSIDE_SUPPORT | CaseCheck.INCOMPLETE_TRAJECTORY
+TRAJECTORY_REQUIRED_CHECKS = (
+    SimulationCheck.OUTSIDE_SUPPORT | SimulationCheck.INCOMPLETE_TRAJECTORY
+)
 _TANAKA_FAILURE_REASONS = frozenset(
     {
         "negative_or_nonfinite_surface_potential_radicand",
@@ -93,8 +93,8 @@ _TANAKA_FAILURE_REASONS = frozenset(
 )
 _TANAKA_COMPONENT_FIELDS = frozenset(
     {
-        "local_case_index",
-        "component_within_case",
+        "local_simulation_index",
+        "component_within_simulation",
         "global_component_index",
         "alpha",
         "center",
@@ -138,13 +138,7 @@ def _paper_rollout_config(
 
 
 def _strict_json_copy(value: Mapping[str, object]) -> Mapping[str, object]:
-    encoded = json.dumps(
-        dict(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    parsed = json.loads(encoded)
+    parsed = parse_json(json_text(dict(value)))
     if not isinstance(parsed, dict):
         raise TypeError("value must encode a JSON object")
     return MappingProxyType(parsed)
@@ -257,7 +251,7 @@ class JonswapNonlinearAdjustmentPolicy:
             "ramp_time_peak_periods": self.ramp_time_peak_periods,
             "burn_peak_periods": self.burn_peak_periods,
             "burn_saved_grid_rounding": "floor",
-            "handoff": "full_internal_band_at_each_case_endpoint",
+            "handoff": "full_internal_band_at_each_simulation_endpoint",
             "production_ramp": "disabled",
             "autonomous_clock": "restart_at_zero",
             "hamiltonian_scope": "autonomous_production_only",
@@ -279,7 +273,7 @@ class TrajectoryExecutionConfig:
     role: ContractRole
     numerical: RolloutConfig
     horizon: TrajectoryHorizonPolicy
-    stored_time_policy: StoredTimePolicy
+    frame_selection: TrajectoryFrameSelectionConfig
     jonswap_quadrature_order: int | None
     jonswap_adjustment: JonswapNonlinearAdjustmentPolicy | None = None
 
@@ -299,13 +293,15 @@ class TrajectoryExecutionConfig:
             ):
                 raise ValueError("JONSWAP/TMA quadrature_order must be at least two")
             if self.horizon.kind != "jonswap_peak_periods_floor_saved_grid":
-                raise ValueError("JONSWAP/TMA requires a per-case peak-period horizon")
+                raise ValueError(
+                    "JONSWAP/TMA requires a per-simulation peak-period horizon"
+                )
         elif self.family == "benjamin_feir":
             if self.jonswap_quadrature_order is not None:
                 raise ValueError("only JONSWAP/TMA may set a quadrature order")
             if self.horizon.kind != "benjamin_feir_carrier_periods_floor_saved_grid":
                 raise ValueError(
-                    "Benjamin--Feir requires a per-case carrier-period horizon"
+                    "Benjamin--Feir requires a per-simulation carrier-period horizon"
                 )
             if self.jonswap_adjustment is not None:
                 raise ValueError(
@@ -326,7 +322,7 @@ class TrajectoryExecutionConfig:
             if (
                 self.numerical != _paper_rollout_config(self.family)
                 or self.horizon != _paper_horizon(self.family)
-                or self.stored_time_policy != PAPER_STORED_TIME_POLICY
+                or self.frame_selection != TrajectoryFrameSelectionConfig()
                 or self.jonswap_quadrature_order != expected_quadrature
                 or self.jonswap_adjustment
                 != (
@@ -349,7 +345,7 @@ class TrajectoryExecutionConfig:
             "role": self.role,
             "numerical": numerical,
             "horizon": self.horizon.to_json_record(),
-            "stored_time_policy": asdict(self.stored_time_policy),
+            "frame_selection": asdict(self.frame_selection),
             "jonswap_quadrature_order": self.jonswap_quadrature_order,
         }
         if self.jonswap_adjustment is not None:
@@ -367,7 +363,7 @@ def paper_trajectory_execution(
         role="paper_dataset",
         numerical=_paper_rollout_config(family),
         horizon=_paper_horizon(family),
-        stored_time_policy=PAPER_STORED_TIME_POLICY,
+        frame_selection=TrajectoryFrameSelectionConfig(),
         jonswap_quadrature_order=16 if family == "jonswap_tma" else None,
         jonswap_adjustment=(
             PAPER_JONSWAP_ADJUSTMENT_POLICY if family == "jonswap_tma" else None
@@ -376,8 +372,8 @@ def paper_trajectory_execution(
 
 
 @dataclass(frozen=True)
-class CaseTimeGrid:
-    """Intended and realized terminal times for one proposed case."""
+class SimulationTimeGrid:
+    """Intended and realized terminal times for one proposed simulation."""
 
     intended_terminal_time: float
     realized_terminal_time: float
@@ -389,6 +385,28 @@ class CaseTimeGrid:
             "realized_terminal_time": self.realized_terminal_time,
             "saved_time_count": int(self.saved_times.size),
         }
+
+
+def floor_saved_time_grid(
+    terminal_time: float,
+    *,
+    saved_dt: float,
+    horizon_name: str,
+) -> np.ndarray:
+    """Return the saved-time prefix ending immediately before a horizon."""
+
+    step_count = math.floor(terminal_time / saved_dt)
+    while step_count * saved_dt > terminal_time:
+        step_count -= 1
+    while (step_count + 1) * saved_dt <= terminal_time:
+        step_count += 1
+    if step_count < 1:
+        raise ValueError(f"{horizon_name} horizon is shorter than one saved step")
+    saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
+    realized = float(saved_times[-1])
+    if not (realized <= terminal_time and terminal_time - realized < saved_dt):
+        raise RuntimeError(f"{horizon_name} saved-grid horizon was not strictly floored")
+    return saved_times
 
 
 @dataclass(frozen=True)
@@ -408,7 +426,7 @@ class ConstructionFailureClassifier(Protocol):
 
 @dataclass(frozen=True)
 class DeclaredFatalFailure:
-    """Explicit terminal failure information for a saved proposal."""
+    """Explicit terminal failure information for a saved batch plan."""
 
     phase: str
     telemetry: Mapping[str, object]
@@ -446,7 +464,7 @@ class DeclaredTrajectoryFatalError(RuntimeError):
 class TrajectoryConstructor(Protocol):
     def __call__(
         self,
-        proposed: PersistedTrajectoryProposal[Any],
+        proposed: PersistedTrajectoryPlan[Any],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch: ...
@@ -517,22 +535,24 @@ def classify_tanaka_construction_failure(
         raise ValueError("unrecognized Tanaka construction-failure schema")
     if record.get("reason") not in _TANAKA_FAILURE_REASONS:
         raise ValueError("unrecognized Tanaka construction-failure reason")
-    indices = record.get("invalid_case_indices")
+    indices = record.get("invalid_simulation_indices")
     if not isinstance(indices, list) or not indices:
-        raise TypeError("Tanaka construction failure must list invalid_case_indices")
+        raise TypeError(
+            "Tanaka construction failure must list invalid_simulation_indices"
+        )
     if (
         any(isinstance(index, bool) or not isinstance(index, int) for index in indices)
         or tuple(sorted(set(indices))) != tuple(indices)
         or indices[0] < 0
     ):
         raise ValueError(
-            "Tanaka invalid_case_indices must be unique, increasing, "
+            "Tanaka invalid_simulation_indices must be unique, increasing, "
             "nonnegative integers"
         )
     components = record.get("components")
     if not isinstance(components, list) or not components:
         raise TypeError("Tanaka construction failure must list invalid components")
-    component_cases: set[int] = set()
+    component_simulations: set[int] = set()
     component_identities: set[tuple[int, int, int]] = set()
     global_component_indices: list[int] = []
     component_failures: list[tuple[bool, bool]] = []
@@ -545,34 +565,34 @@ def classify_tanaka_construction_failure(
             raise ValueError(
                 f"Tanaka invalid component is missing fields: {sorted(missing)}"
             )
-        local_case_index = component.get("local_case_index")
-        component_within_case = component.get("component_within_case")
+        local_simulation_index = component.get("local_simulation_index")
+        component_within_simulation = component.get("component_within_simulation")
         global_component_index = component.get("global_component_index")
-        local_case_index = _nonnegative_json_integer(
-            local_case_index,
-            field_name="local_case_index",
+        local_simulation_index = _nonnegative_json_integer(
+            local_simulation_index,
+            field_name="local_simulation_index",
         )
-        component_within_case = _nonnegative_json_integer(
-            component_within_case,
-            field_name="component_within_case",
+        component_within_simulation = _nonnegative_json_integer(
+            component_within_simulation,
+            field_name="component_within_simulation",
         )
         global_component_index = _nonnegative_json_integer(
             global_component_index,
             field_name="global_component_index",
         )
-        assert local_case_index is not None
-        assert component_within_case is not None
+        assert local_simulation_index is not None
+        assert component_within_simulation is not None
         assert global_component_index is not None
         identity = (
-            local_case_index,
-            component_within_case,
+            local_simulation_index,
+            component_within_simulation,
             global_component_index,
         )
         if identity in component_identities:
             raise ValueError("Tanaka construction failure repeats a component")
         component_identities.add(identity)
         global_component_indices.append(global_component_index)
-        component_cases.add(local_case_index)
+        component_simulations.add(local_simulation_index)
 
         alpha = _finite_json_number(
             component.get("alpha"),
@@ -722,8 +742,10 @@ def classify_tanaka_construction_failure(
         component_failures.append((invalid_speed, invalid_radicand))
         has_unclassified_component |= invalid_speed or nonfinite_count > 0
 
-    if component_cases != set(indices):
-        raise ValueError("Tanaka invalid components do not match invalid_case_indices")
+    if component_simulations != set(indices):
+        raise ValueError(
+            "Tanaka invalid components do not match invalid_simulation_indices"
+        )
     if global_component_indices != sorted(set(global_component_indices)):
         raise ValueError(
             "Tanaka global component indices must be unique and increasing"
@@ -750,7 +772,7 @@ def classify_tanaka_construction_failure(
 def classify_jonswap_construction_failure(
     error: Exception,
 ) -> DeclaredConstructionFailure | None:
-    """Recognize a per-case JONSWAP initial graph-domain failure."""
+    """Recognize a per-simulation JONSWAP initial graph-domain failure."""
 
     if not isinstance(error, JonswapInitialStateDomainError):
         return None
@@ -765,7 +787,7 @@ def classify_jonswap_construction_failure(
     if record.get("index_space") != "constructor_subbatch_local_index":
         raise ValueError("unrecognized JONSWAP construction-failure index space")
 
-    indices = record.get("invalid_case_indices")
+    indices = record.get("invalid_simulation_indices")
     if not isinstance(indices, list) or not indices:
         raise TypeError("JONSWAP construction failure must list invalid indices")
     if (
@@ -774,26 +796,26 @@ def classify_jonswap_construction_failure(
         or indices[0] < 0
     ):
         raise ValueError(
-            "JONSWAP invalid_case_indices must be unique, increasing, "
+            "JONSWAP invalid_simulation_indices must be unique, increasing, "
             "nonnegative integers"
         )
 
-    cases = record.get("cases")
-    if not isinstance(cases, list) or not cases:
-        raise TypeError("JONSWAP construction failure must list invalid cases")
+    simulations = record.get("simulations")
+    if not isinstance(simulations, list) or not simulations:
+        raise TypeError("JONSWAP construction failure must list invalid simulations")
     observed_indices: list[int] = []
-    for case in cases:
-        if not isinstance(case, dict):
-            raise TypeError("every invalid JONSWAP case must be a JSON object")
-        local_index = case.get("local_case_index")
+    for simulation in simulations:
+        if not isinstance(simulation, dict):
+            raise TypeError("every invalid JONSWAP simulation must be a JSON object")
+        local_index = simulation.get("local_simulation_index")
         if isinstance(local_index, bool) or not isinstance(local_index, int):
-            raise TypeError("JONSWAP local_case_index must be an integer")
+            raise TypeError("JONSWAP local_simulation_index must be an integer")
         observed_indices.append(local_index)
-        state_finite = case.get("state_finite")
+        state_finite = simulation.get("state_finite")
         if not isinstance(state_finite, bool):
             raise TypeError("JONSWAP state_finite must be Boolean")
-        minimum = case.get("minimum_water_column")
-        failure_reason = case.get("failure_reason")
+        minimum = simulation.get("minimum_water_column")
+        failure_reason = simulation.get("failure_reason")
         if state_finite:
             if (
                 isinstance(minimum, bool)
@@ -815,7 +837,9 @@ def classify_jonswap_construction_failure(
             if failure_reason != "nonfinite_initial_state":
                 raise ValueError("JONSWAP nonfinite-failure reason is inconsistent")
     if observed_indices != indices:
-        raise ValueError("JONSWAP invalid cases do not match invalid_case_indices")
+        raise ValueError(
+            "JONSWAP invalid simulations do not match invalid_simulation_indices"
+        )
     return DeclaredConstructionFailure(
         local_indices=tuple(indices),
         record=record,
@@ -825,7 +849,7 @@ def classify_jonswap_construction_failure(
 def classify_trajectory_construction_failure(
     error: Exception,
 ) -> DeclaredConstructionFailure | None:
-    """Dispatch the declared per-case constructor failures used in production."""
+    """Dispatch declared per-simulation constructor failures."""
 
     tanaka_failure = classify_tanaka_construction_failure(error)
     if tanaka_failure is not None:
@@ -836,7 +860,7 @@ def classify_trajectory_construction_failure(
 def _fixed_time_grid(
     horizon: TrajectoryHorizonPolicy,
     contract: RolloutConfig,
-) -> CaseTimeGrid:
+) -> SimulationTimeGrid:
     assert horizon.fixed_terminal_time is not None
     terminal = horizon.fixed_terminal_time
     step_count = int(round(terminal / contract.saved_dt))
@@ -851,7 +875,7 @@ def _fixed_time_grid(
         step_count + 1,
         dtype=np.float64,
     )
-    return CaseTimeGrid(
+    return SimulationTimeGrid(
         intended_terminal_time=terminal,
         realized_terminal_time=float(saved_times[-1]),
         saved_times=saved_times,
@@ -861,7 +885,7 @@ def _fixed_time_grid(
 def _jonswap_time_grid(
     sample: JonswapTmaSample,
     execution: TrajectoryExecutionConfig,
-) -> CaseTimeGrid:
+) -> SimulationTimeGrid:
     count = execution.horizon.period_count
     assert count is not None
     parameters = sample.parameters
@@ -873,21 +897,14 @@ def _jonswap_time_grid(
         )[0]
     )
     intended = count * 2.0 * math.pi / angular_frequency
-    saved_dt = execution.numerical.saved_dt
-    step_count = math.floor(intended / saved_dt)
-    while step_count * saved_dt > intended:
-        step_count -= 1
-    while (step_count + 1) * saved_dt <= intended:
-        step_count += 1
-    if step_count < 1:
-        raise ValueError("JONSWAP/TMA horizon is shorter than one saved step")
-    saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
-    realized = float(saved_times[-1])
-    if not (realized <= intended and intended - realized < saved_dt):
-        raise RuntimeError("JONSWAP/TMA saved-grid horizon was not strictly floored")
-    return CaseTimeGrid(
+    saved_times = floor_saved_time_grid(
+        intended,
+        saved_dt=execution.numerical.saved_dt,
+        horizon_name="JONSWAP/TMA",
+    )
+    return SimulationTimeGrid(
         intended_terminal_time=intended,
-        realized_terminal_time=realized,
+        realized_terminal_time=float(saved_times[-1]),
         saved_times=saved_times,
     )
 
@@ -895,7 +912,7 @@ def _jonswap_time_grid(
 def _benjamin_feir_time_grid(
     sample: BenjaminFeirSample,
     execution: TrajectoryExecutionConfig,
-) -> CaseTimeGrid:
+) -> SimulationTimeGrid:
     """Return a strictly floored horizon measured in carrier periods."""
 
     count = execution.horizon.period_count
@@ -904,21 +921,14 @@ def _benjamin_feir_time_grid(
         execution.numerical.gravity * sample.carrier_wavenumber
     )
     intended = count * 2.0 * math.pi / angular_frequency
-    saved_dt = execution.numerical.saved_dt
-    step_count = math.floor(intended / saved_dt)
-    while step_count * saved_dt > intended:
-        step_count -= 1
-    while (step_count + 1) * saved_dt <= intended:
-        step_count += 1
-    if step_count < 1:
-        raise ValueError("Benjamin--Feir horizon is shorter than one saved step")
-    saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
-    realized = float(saved_times[-1])
-    if not (realized <= intended and intended - realized < saved_dt):
-        raise RuntimeError("Benjamin--Feir saved-grid horizon was not strictly floored")
-    return CaseTimeGrid(
+    saved_times = floor_saved_time_grid(
+        intended,
+        saved_dt=execution.numerical.saved_dt,
+        horizon_name="Benjamin--Feir",
+    )
+    return SimulationTimeGrid(
         intended_terminal_time=intended,
-        realized_terminal_time=realized,
+        realized_terminal_time=float(saved_times[-1]),
         saved_times=saved_times,
     )
 
@@ -927,48 +937,45 @@ def _construction_rejection(
     failure: DeclaredConstructionFailure,
     *,
     original_local_index: int,
-) -> CaseOutcome:
-    evaluated = CaseCheck.OUTSIDE_SUPPORT
-    failed = CaseCheck.OUTSIDE_SUPPORT
+) -> SimulationOutcome:
+    evaluated = SimulationCheck.OUTSIDE_SUPPORT
+    failed = SimulationCheck.OUTSIDE_SUPPORT
     failure_reason = failure.record.get("reason")
     if failure.record.get("schema") == "jonswap_initial_state_domain_failure_v1":
-        cases = failure.record.get("cases")
-        if not isinstance(cases, list):
-            raise TypeError("JONSWAP construction failure must list invalid cases")
+        simulations = failure.record.get("simulations")
+        if not isinstance(simulations, list):
+            raise TypeError(
+                "JONSWAP construction failure must list invalid simulations"
+            )
         matching = tuple(
-            case
-            for case in cases
-            if isinstance(case, dict)
-            and case.get("local_case_index") == original_local_index
+            simulation
+            for simulation in simulations
+            if isinstance(simulation, dict)
+            and simulation.get("local_simulation_index") == original_local_index
         )
         if len(matching) != 1:
             raise RuntimeError(
-                "JONSWAP construction failure does not name the rejected case"
+                "JONSWAP construction failure does not name the rejected simulation"
             )
         state_finite = matching[0].get("state_finite")
         if not isinstance(state_finite, bool):
             raise TypeError("JONSWAP state_finite must be Boolean")
-        evaluated |= CaseCheck.NONFINITE_STATE
+        evaluated |= SimulationCheck.NONFINITE_STATE
         if state_finite:
-            evaluated |= CaseCheck.BOTTOM_CLEARANCE
-            failed |= CaseCheck.BOTTOM_CLEARANCE
+            evaluated |= SimulationCheck.BOTTOM_CLEARANCE
+            failed |= SimulationCheck.BOTTOM_CLEARANCE
         else:
-            failed |= CaseCheck.NONFINITE_STATE
+            failed |= SimulationCheck.NONFINITE_STATE
     metrics: dict[str, JsonScalar] = {
         "construction_status": "declared_outside_support",
         "construction_failure_reason": (
             failure_reason if isinstance(failure_reason, str) else ""
         ),
         "original_local_index": original_local_index,
-        "construction_failure_json": json.dumps(
-            dict(failure.record),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ),
+        "construction_failure_json": json_text(dict(failure.record)),
     }
-    return CaseOutcome(
-        decision=CaseCheckResult(
+    return SimulationOutcome(
+        decision=SimulationCheckResult(
             required=TRAJECTORY_REQUIRED_CHECKS,
             evaluated=evaluated,
             failed=failed,
@@ -978,28 +985,28 @@ def _construction_rejection(
     )
 
 
-def _with_support_evaluated(outcome: CaseOutcome) -> CaseOutcome:
+def _finalize_outcome(
+    outcome: SimulationOutcome,
+    grid: SimulationTimeGrid,
+    *,
+    construction_metrics: Mapping[str, JsonScalar] | None = None,
+    support_evaluated: bool = False,
+) -> SimulationOutcome:
+    """Attach execution metadata and mark support checked after construction."""
+
     decision = outcome.decision
-    return CaseOutcome(
-        decision=CaseCheckResult(
-            required=decision.required | CaseCheck.OUTSIDE_SUPPORT,
-            evaluated=decision.evaluated | CaseCheck.OUTSIDE_SUPPORT,
+    if support_evaluated:
+        decision = SimulationCheckResult(
+            required=decision.required | SimulationCheck.OUTSIDE_SUPPORT,
+            evaluated=decision.evaluated | SimulationCheck.OUTSIDE_SUPPORT,
             failed=decision.failed,
-        ),
-        rows=outcome.rows,
-        metrics=outcome.metrics,
-    )
-
-
-def _with_time_grid(
-    outcome: CaseOutcome,
-    grid: CaseTimeGrid,
-) -> CaseOutcome:
-    return CaseOutcome(
-        decision=outcome.decision,
+        )
+    return SimulationOutcome(
+        decision=decision,
         rows=outcome.rows,
         metrics={
             **outcome.metrics,
+            **(construction_metrics or {}),
             "intended_terminal_time": grid.intended_terminal_time,
             "realized_terminal_time": grid.realized_terminal_time,
             "saved_time_count": int(grid.saved_times.size),
@@ -1007,22 +1014,11 @@ def _with_time_grid(
     )
 
 
-def _with_construction_metrics(
-    outcome: CaseOutcome,
-    metrics: Mapping[str, JsonScalar],
-) -> CaseOutcome:
-    return CaseOutcome(
-        decision=outcome.decision,
-        rows=outcome.rows,
-        metrics={**outcome.metrics, **metrics},
-    )
-
-
 @dataclass(frozen=True)
 class TrajectoryBatchExecutor:
-    """Execute one saved proposal batch for a rollout-data family."""
+    """Execute one saved batch plan for a rollout-data family."""
 
-    run_spec: DatasetGenerationSpec
+    chunk_config: DatasetChunkConfig
     execution: TrajectoryExecutionConfig
     metadata: Mapping[str, object] | None = None
     rollout_executor: BatchIntegrator = integrate_batch
@@ -1034,11 +1030,11 @@ class TrajectoryBatchExecutor:
 
     def __post_init__(self) -> None:
         expected_family_id = _FAMILY_IDS[self.execution.family]
-        if self.run_spec.family_name != self.execution.family:
-            raise ValueError("run family name differs from trajectory execution")
-        if self.run_spec.family_id is not expected_family_id:
-            raise ValueError("run family ID differs from trajectory execution")
-        unknown_cells = set(self.run_spec.cell_codes).difference(
+        if self.chunk_config.family_name != self.execution.family:
+            raise ValueError("chunk family name differs from trajectory execution")
+        if self.chunk_config.family_id is not expected_family_id:
+            raise ValueError("chunk family ID differs from trajectory execution")
+        unknown_cells = set(self.chunk_config.cell_codes).difference(
             _FAMILY_CELLS[self.execution.family]
         )
         if unknown_cells:
@@ -1055,12 +1051,12 @@ class TrajectoryBatchExecutor:
                 "paper-dataset JONSWAP/TMA requires the nonlinear-adjustment executor"
             )
 
-        run_configuration = self.run_spec.to_json_record()["configuration"]
-        assert isinstance(run_configuration, dict)
-        configured_execution = run_configuration.get("trajectory_execution")
+        chunk_configuration = self.chunk_config.to_json_record()["configuration"]
+        assert isinstance(chunk_configuration, dict)
+        configured_execution = chunk_configuration.get("trajectory_execution")
         if configured_execution != self.execution.to_json_record():
             raise ValueError(
-                "run configuration differs from the supplied trajectory execution"
+                "chunk configuration differs from the supplied trajectory execution"
             )
         if self.execution.role == "paper_dataset" and (
             self.rollout_executor is not integrate_batch
@@ -1091,22 +1087,22 @@ class TrajectoryBatchExecutor:
     def _sample(
         self,
         assignments: tuple[AttemptAssignment, ...],
-    ) -> SampledTrajectoryCases[Any]:
+    ) -> SampledSimulations[Any]:
         contract = self.execution.numerical
         if self.execution.family == "tanaka":
-            sampled = sample_tanaka_trajectory_cases(
+            sampled = sample_tanaka_simulations(
                 assignments,
                 contract=contract,
             )
         elif self.execution.family == "benjamin_feir":
-            sampled = sample_benjamin_feir_trajectory_cases(
+            sampled = sample_benjamin_feir_simulations(
                 assignments,
                 contract=contract,
             )
         else:
             quadrature_order = self.execution.jonswap_quadrature_order
             assert quadrature_order is not None
-            sampled = sample_jonswap_tma_trajectory_cases(
+            sampled = sample_jonswap_tma_simulations(
                 assignments,
                 contract=contract,
                 quadrature_order=quadrature_order,
@@ -1117,8 +1113,8 @@ class TrajectoryBatchExecutor:
 
     def _time_grids(
         self,
-        sampled: SampledTrajectoryCases[Any],
-    ) -> tuple[CaseTimeGrid, ...]:
+        sampled: SampledSimulations[Any],
+    ) -> tuple[SimulationTimeGrid, ...]:
         if self.execution.family == "tanaka":
             grid = _fixed_time_grid(
                 self.execution.horizon,
@@ -1142,7 +1138,7 @@ class TrajectoryBatchExecutor:
 
     def _construct(
         self,
-        proposed: PersistedTrajectoryProposal[Any],
+        proposed: PersistedTrajectoryPlan[Any],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
@@ -1169,14 +1165,14 @@ class TrajectoryBatchExecutor:
 
     def _construct_tanaka(
         self,
-        proposed: PersistedTrajectoryProposal[Any],
+        proposed: PersistedTrajectoryPlan[Any],
     ) -> tuple[
         tuple[int, ...],
         TrajectoryInitialBatch | None,
-        Mapping[int, CaseOutcome],
+        Mapping[int, SimulationOutcome],
     ]:
         remaining = list(range(len(proposed.sampled.assignments)))
-        rejected: dict[int, CaseOutcome] = {}
+        rejected: dict[int, SimulationOutcome] = {}
         initial: TrajectoryInitialBatch | None = None
         while remaining:
             try:
@@ -1229,16 +1225,16 @@ class TrajectoryBatchExecutor:
 
     def _construct_jonswap(
         self,
-        proposed: PersistedTrajectoryProposal[Any],
+        proposed: PersistedTrajectoryPlan[Any],
     ) -> tuple[
         tuple[int, ...],
         TrajectoryInitialBatch | None,
-        Mapping[int, CaseOutcome],
+        Mapping[int, SimulationOutcome],
     ]:
         """Retain valid siblings when one random-sea realization is invalid."""
 
         remaining = list(range(len(proposed.sampled.assignments)))
-        rejected: dict[int, CaseOutcome] = {}
+        rejected: dict[int, SimulationOutcome] = {}
         initial: TrajectoryInitialBatch | None = None
         while remaining:
             try:
@@ -1294,28 +1290,26 @@ class TrajectoryBatchExecutor:
         remaining: tuple[int, ...],
         failure: DeclaredConstructionFailure,
     ) -> DeclaredConstructionFailure:
-        """Rewrite constructor-subset indices into immutable proposal indices."""
+        """Rewrite constructor-subset indices into immutable batch-plan indices."""
 
-        encoded = json.dumps(
-            dict(failure.record),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        record = json.loads(encoded)
-        record["constructor_subbatch_invalid_case_indices"] = list(
+        record = dict(_strict_json_copy(failure.record))
+        record["constructor_subbatch_invalid_simulation_indices"] = list(
             failure.local_indices
         )
         original_indices = tuple(remaining[index] for index in failure.local_indices)
-        record["invalid_case_indices"] = list(original_indices)
-        record["index_space"] = "original_proposal_local_index"
-        cases = record.get("cases")
-        if not isinstance(cases, list):
-            raise TypeError("JONSWAP construction failure must list invalid cases")
-        for case in cases:
-            if not isinstance(case, dict):
-                raise TypeError("every invalid JONSWAP case must be a JSON object")
-            subbatch_index = case.get("local_case_index")
+        record["invalid_simulation_indices"] = list(original_indices)
+        record["index_space"] = "original_batch_plan_local_index"
+        simulations = record.get("simulations")
+        if not isinstance(simulations, list):
+            raise TypeError(
+                "JONSWAP construction failure must list invalid simulations"
+            )
+        for simulation in simulations:
+            if not isinstance(simulation, dict):
+                raise TypeError(
+                    "every invalid JONSWAP simulation must be a JSON object"
+                )
+            subbatch_index = simulation.get("local_simulation_index")
             if (
                 isinstance(subbatch_index, bool)
                 or not isinstance(subbatch_index, int)
@@ -1323,10 +1317,10 @@ class TrajectoryBatchExecutor:
                 or subbatch_index >= len(remaining)
             ):
                 raise RuntimeError(
-                    "JONSWAP failure refers to an absent constructor-subset case"
+                    "JONSWAP failure refers to an absent constructor-subset simulation"
                 )
-            case["constructor_subbatch_local_case_index"] = subbatch_index
-            case["local_case_index"] = remaining[subbatch_index]
+            simulation["constructor_subbatch_local_simulation_index"] = subbatch_index
+            simulation["local_simulation_index"] = remaining[subbatch_index]
         return DeclaredConstructionFailure(
             local_indices=original_indices,
             record=_strict_json_copy(record),
@@ -1334,12 +1328,12 @@ class TrajectoryBatchExecutor:
 
     @staticmethod
     def _remap_tanaka_failure(
-        proposed: PersistedTrajectoryProposal[Any],
+        proposed: PersistedTrajectoryPlan[Any],
         *,
         remaining: tuple[int, ...],
         failure: DeclaredConstructionFailure,
     ) -> DeclaredConstructionFailure:
-        """Rewrite constructor-subset indices into immutable proposal indices."""
+        """Rewrite constructor-subset indices into immutable batch-plan indices."""
 
         samples = proposed.sampled.samples
         if not all(isinstance(sample, TanakaSample) for sample in samples):
@@ -1357,52 +1351,48 @@ class TrajectoryBatchExecutor:
             subbatch_offsets.append(running)
             running += len(tanaka_samples[original_index].crests)
 
-        encoded = json.dumps(
-            dict(failure.record),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        record = json.loads(encoded)
-        record["constructor_subbatch_invalid_case_indices"] = list(
+        record = dict(_strict_json_copy(failure.record))
+        record["constructor_subbatch_invalid_simulation_indices"] = list(
             failure.local_indices
         )
         original_indices = tuple(remaining[index] for index in failure.local_indices)
-        record["invalid_case_indices"] = list(original_indices)
-        record["index_space"] = "original_proposal_local_index"
+        record["invalid_simulation_indices"] = list(original_indices)
+        record["index_space"] = "original_batch_plan_local_index"
 
         components = record["components"]
         assert isinstance(components, list)
         for component in components:
             assert isinstance(component, dict)
-            subbatch_case = component["local_case_index"]
-            component_within_case = component["component_within_case"]
+            subbatch_simulation = component["local_simulation_index"]
+            component_within_simulation = component["component_within_simulation"]
             subbatch_global = component["global_component_index"]
-            assert isinstance(subbatch_case, int)
-            assert isinstance(component_within_case, int)
+            assert isinstance(subbatch_simulation, int)
+            assert isinstance(component_within_simulation, int)
             assert isinstance(subbatch_global, int)
-            if subbatch_case >= len(remaining):
+            if subbatch_simulation >= len(remaining):
                 raise RuntimeError(
-                    "Tanaka component refers to an absent constructor-subset case"
+                    "Tanaka component refers to an absent constructor-subset simulation"
                 )
-            original_case = remaining[subbatch_case]
-            crest_count = len(tanaka_samples[original_case].crests)
-            if component_within_case >= crest_count:
+            original_simulation = remaining[subbatch_simulation]
+            crest_count = len(tanaka_samples[original_simulation].crests)
+            if component_within_simulation >= crest_count:
                 raise RuntimeError(
-                    "Tanaka component refers to an absent crest within its case"
+                    "Tanaka component refers to an absent crest within its simulation"
                 )
             expected_subbatch_global = (
-                subbatch_offsets[subbatch_case] + component_within_case
+                subbatch_offsets[subbatch_simulation] + component_within_simulation
             )
             if subbatch_global != expected_subbatch_global:
                 raise RuntimeError(
-                    "Tanaka component global index is inconsistent with its case"
+                    "Tanaka component global index is inconsistent with its simulation"
                 )
-            component["constructor_subbatch_local_case_index"] = subbatch_case
+            component[
+                "constructor_subbatch_local_simulation_index"
+            ] = subbatch_simulation
             component["constructor_subbatch_global_component_index"] = subbatch_global
-            component["local_case_index"] = original_case
+            component["local_simulation_index"] = original_simulation
             component["global_component_index"] = (
-                full_offsets[original_case] + component_within_case
+                full_offsets[original_simulation] + component_within_simulation
             )
 
         return DeclaredConstructionFailure(
@@ -1415,45 +1405,43 @@ class TrajectoryBatchExecutor:
         initial: TrajectoryInitialBatch,
         *,
         family: TrajectoryFamily,
-        grid: CaseTimeGrid,
-    ) -> tuple[CaseOutcome, ...]:
+        grid: SimulationTimeGrid,
+    ) -> tuple[SimulationOutcome, ...]:
         minimum_stored = {
-            "tanaka": self.execution.stored_time_policy.tanaka_count,
-            "benjamin_feir": (self.execution.stored_time_policy.benjamin_feir_count),
-            "jonswap_tma": self.execution.stored_time_policy.random_sea_count,
+            "tanaka": self.execution.frame_selection.tanaka_count,
+            "benjamin_feir": self.execution.frame_selection.benjamin_feir_count,
+            "jonswap_tma": self.execution.frame_selection.jonswap_tma_count,
         }[family]
         if grid.saved_times.size < minimum_stored:
             raise ValueError(
                 "trajectory horizon has fewer saved times than the storage policy"
             )
-        cases = execute_trajectory_batch(
+        simulations = execute_trajectory_batch(
             initial.eta0,
             initial.xi0,
             initial.depths,
-            grid.saved_times,
+            (grid.saved_times,) * initial.eta0.shape[0],
             config=self.execution.numerical,
-            rollout_executor=self.rollout_executor,
+            integrator=self.rollout_executor,
         )
         return tuple(
-            _with_time_grid(
-                _with_construction_metrics(
-                    _with_support_evaluated(outcome),
-                    (
-                        initial.construction_metrics[index]
-                        if initial.construction_metrics
-                        else {}
-                    ),
-                ),
+            _finalize_outcome(
+                outcome,
                 grid,
+                construction_metrics=(
+                    initial.construction_metrics[index]
+                    if initial.construction_metrics
+                    else None
+                ),
+                support_evaluated=True,
             )
             for index, outcome in enumerate(
-                outcomes_from_trajectories(
-                    cases,
+                subsample_trajectories(
+                    simulations,
                     initial.depths,
                     family=family,
                     length=self.execution.numerical.length,
-                    integration_dt=self.execution.numerical.dt,
-                    policy=self.execution.stored_time_policy,
+                    frame_selection=self.execution.frame_selection,
                 )
             )
         )
@@ -1461,47 +1449,45 @@ class TrajectoryBatchExecutor:
     def _produce_variable_horizons(
         self,
         initial: TrajectoryInitialBatch,
-        grids: tuple[CaseTimeGrid, ...],
+        grids: tuple[SimulationTimeGrid, ...],
         *,
         family: Literal["benjamin_feir", "jonswap_tma"],
-    ) -> tuple[CaseOutcome, ...]:
+    ) -> tuple[SimulationOutcome, ...]:
         if len(grids) != initial.eta0.shape[0]:
             raise ValueError(f"{family} requires one time grid per initial condition")
         minimum_stored = {
-            "benjamin_feir": self.execution.stored_time_policy.benjamin_feir_count,
-            "jonswap_tma": self.execution.stored_time_policy.random_sea_count,
+            "benjamin_feir": self.execution.frame_selection.benjamin_feir_count,
+            "jonswap_tma": self.execution.frame_selection.jonswap_tma_count,
         }[family]
         if any(grid.saved_times.size < minimum_stored for grid in grids):
             raise ValueError(
                 "trajectory horizon has fewer saved times than the storage policy"
             )
-        cases = execute_variable_horizon_trajectory_batch(
+        simulations = execute_trajectory_batch(
             initial.eta0,
             initial.xi0,
             initial.depths,
             tuple(grid.saved_times for grid in grids),
             config=self.execution.numerical,
-            rollout_executor=self.rollout_executor,
+            integrator=self.rollout_executor,
         )
-        outcomes = outcomes_from_trajectories(
-            cases,
+        outcomes = subsample_trajectories(
+            simulations,
             initial.depths,
             family=family,
             length=self.execution.numerical.length,
-            integration_dt=self.execution.numerical.dt,
-            policy=self.execution.stored_time_policy,
+            frame_selection=self.execution.frame_selection,
         )
         return tuple(
-            _with_time_grid(
-                _with_construction_metrics(
-                    _with_support_evaluated(outcome),
-                    (
-                        initial.construction_metrics[index]
-                        if initial.construction_metrics
-                        else {}
-                    ),
-                ),
+            _finalize_outcome(
+                outcome,
                 grid,
+                construction_metrics=(
+                    initial.construction_metrics[index]
+                    if initial.construction_metrics
+                    else None
+                ),
+                support_evaluated=True,
             )
             for index, (outcome, grid) in enumerate(zip(outcomes, grids))
         )
@@ -1509,9 +1495,9 @@ class TrajectoryBatchExecutor:
     def _produce_jonswap(
         self,
         initial: TrajectoryInitialBatch,
-        grids: tuple[CaseTimeGrid, ...],
-    ) -> tuple[CaseOutcome, ...]:
-        """Produce JONSWAP cases through the subclass adjustment hook."""
+        grids: tuple[SimulationTimeGrid, ...],
+    ) -> tuple[SimulationOutcome, ...]:
+        """Produce JONSWAP simulations through the adjustment hook."""
 
         return self._produce_variable_horizons(
             initial,
@@ -1521,15 +1507,15 @@ class TrajectoryBatchExecutor:
 
     def _ordered_outcomes(
         self,
-        proposed: PersistedTrajectoryProposal[Any],
-        grids: tuple[CaseTimeGrid, ...],
-    ) -> tuple[CaseOutcome, ...]:
-        case_count = len(proposed.sampled.assignments)
-        ordered: list[CaseOutcome | None] = [None] * case_count
+        proposed: PersistedTrajectoryPlan[Any],
+        grids: tuple[SimulationTimeGrid, ...],
+    ) -> tuple[SimulationOutcome, ...]:
+        simulation_count = len(proposed.sampled.assignments)
+        ordered: list[SimulationOutcome | None] = [None] * simulation_count
         if self.execution.family == "tanaka":
             valid_indices, initial, rejected = self._construct_tanaka(proposed)
             for index, outcome in rejected.items():
-                ordered[index] = _with_time_grid(outcome, grids[index])
+                ordered[index] = _finalize_outcome(outcome, grids[index])
             if initial is not None:
                 valid_outcomes = self._produce(
                     initial,
@@ -1541,7 +1527,7 @@ class TrajectoryBatchExecutor:
         elif self.execution.family == "jonswap_tma":
             valid_indices, initial, rejected = self._construct_jonswap(proposed)
             for index, outcome in rejected.items():
-                ordered[index] = _with_time_grid(outcome, grids[index])
+                ordered[index] = _finalize_outcome(outcome, grids[index])
             if initial is not None:
                 valid_grids = tuple(grids[index] for index in valid_indices)
                 valid_outcomes = self._produce_jonswap(initial, valid_grids)
@@ -1552,7 +1538,7 @@ class TrajectoryBatchExecutor:
                 proposed,
                 selected_local_indices=None,
             )
-            if initial.eta0.shape[0] != case_count:
+            if initial.eta0.shape[0] != simulation_count:
                 raise RuntimeError("constructor returned the wrong batch size")
             outcomes = self._produce_variable_horizons(
                 initial,
@@ -1562,7 +1548,9 @@ class TrajectoryBatchExecutor:
             ordered[:] = outcomes
 
         if any(outcome is None for outcome in ordered):
-            raise RuntimeError("every proposed trajectory case must have an outcome")
+            raise RuntimeError(
+                "every proposed trajectory simulation must have an outcome"
+            )
         return tuple(outcome for outcome in ordered if outcome is not None)
 
     def __call__(
@@ -1580,17 +1568,17 @@ class TrajectoryBatchExecutor:
         execution_record = self.execution.to_json_record()
         grid_records = [grid.to_json_record() for grid in grids]
         additional_metadata = dict(self.metadata or {})
-        proposed = persist_sampled_trajectory_proposal(
+        proposed = persist_sampled_trajectory_plan(
             sampled,
-            root=self.run_spec.root,
-            family_name=self.run_spec.family_name,
+            root=self.chunk_config.root,
+            family_name=self.chunk_config.family_name,
             batch_id=batch_id,
-            cell_codes=self.run_spec.cell_codes,
+            cell_codes=self.chunk_config.cell_codes,
             metadata={
                 "family": self.execution.family,
-                "case_kind": "trajectory",
+                "simulation_type": "trajectory",
                 "trajectory_execution": execution_record,
-                "case_time_grids": grid_records,
+                "simulation_time_grids": grid_records,
                 "additional_metadata": additional_metadata,
             },
         )
@@ -1598,17 +1586,17 @@ class TrajectoryBatchExecutor:
         # Construction, rollout, and time selection all follow this write.
         try:
             outcomes = self._ordered_outcomes(proposed, grids)
-            commit_case_outcomes(
+            commit_simulation_outcomes(
                 proposed.paths,
-                proposed.proposal_arrays,
+                proposed.batch_plan,
                 outcomes,
                 metadata={
                     "family": self.execution.family,
-                    "case_kind": "trajectory",
+                    "simulation_type": "trajectory",
                     "trajectory_execution": execution_record,
-                    "case_time_grids": grid_records,
-                    "attempted_cases": len(outcomes),
-                    "accepted_cases": sum(
+                    "simulation_time_grids": grid_records,
+                    "attempted_simulations": len(outcomes),
+                    "accepted_simulations": sum(
                         outcome.decision.accepted for outcome in outcomes
                     ),
                     "additional_metadata": additional_metadata,

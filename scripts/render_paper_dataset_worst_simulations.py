@@ -1,6 +1,6 @@
 """Rank and render diagnostic tails across completed paper-dataset chunks.
 
-The rankings are descriptive and do not alter dataset acceptance.  Each case
+The rankings are descriptive and do not alter dataset acceptance. Each simulation
 is scanned at every retained time, then ranked within its initial-condition
 family by surface slope, high-band content of ``G(eta)xi``, and an
 amplitude-thresholded count of spatial oscillations in ``G(eta)xi``.
@@ -55,16 +55,16 @@ GIF_DIMENSIONS = (1_250, 360)
 GIF_Y_LIMIT_PADDING_FRACTION = 0.06
 QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
 FINAL_PAPER_DATASET_SOURCE_COUNT = 26
-FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES = {
+FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS = {
     "train": 16_384,
     "validation": 1_024,
     "test": 1_024,
 }
-FINAL_PAPER_DATASET_ACCEPTED_CASES = 73_728
+FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS = 73_728
 FINAL_PAPER_DATASET_RETAINED_ROWS = 7_686_144
 DIAGNOSTIC_SCHEMA = "paper_dataset_all_family_diagnostic_tail_v3"
 INTERPRETATION: Final = (
-    "Descriptive full-trajectory ranking only. Every plotted case was accepted "
+    "Descriptive full-trajectory ranking only. Every plotted simulation was accepted "
     "by the frozen dataset construction and trajectory checks. Morphology and "
     "stored-band quadratic-energy diagnostics do not alter dataset acceptance "
     "or constitute release thresholds."
@@ -81,7 +81,7 @@ PARAMETERS: Final = {
     "gif_short_fps": GIF_SHORT_FPS,
     "gif_long_fps": GIF_LONG_FPS,
     "gif_dimensions_pixels": list(GIF_DIMENSIONS),
-    "gif_y_limit_scope": "per_case_all_stored_frames",
+    "gif_y_limit_scope": "per_simulation_all_stored_frames",
     "gif_y_limit_padding_fraction": GIF_Y_LIMIT_PADDING_FRACTION,
     "gif_loop_forever": True,
     "gif_descriptive_only": True,
@@ -158,7 +158,7 @@ class TrajectoryIndex:
 
     accepted_index: int
     trajectory_index: int
-    case_id: int
+    simulation_id: int
     category: str
     shard_index: int
     first_shard_row: int
@@ -186,20 +186,20 @@ class CombinedSummaryBinding:
     path: Path
     source_summary_paths: tuple[Path, ...]
     expected_source_count: int
-    expected_accepted_cases: int
+    expected_accepted_simulations: int
     expected_retained_rows: int
 
 
 @dataclass(frozen=True)
-class CaseMetrics:
-    """Whole-trajectory diagnostic maxima for one accepted case."""
+class SimulationMetrics:
+    """Whole-trajectory diagnostic maxima for one accepted simulation."""
 
     source_index: int
     accepted_index: int
     trajectory_index: int
     family: str
     split: str
-    case_id: int
+    simulation_id: int
     category: str
     shard_index: int
     first_shard_row: int
@@ -330,9 +330,9 @@ def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
 
     if len(set(summary_paths)) != len(summary_paths):
         raise ValueError("combined preflight repeats a chunk summary")
-    expected_accepted_cases = _nonnegative_integer(
-        preflight.get("accepted_cases_total"),
-        context="combined preflight accepted_cases_total",
+    expected_accepted_simulations = _nonnegative_integer(
+        preflight.get("accepted_simulations_total"),
+        context="combined preflight accepted_simulations_total",
     )
     expected_retained_rows = _nonnegative_integer(
         preflight.get("expected_rows"),
@@ -342,7 +342,7 @@ def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
         path=resolved,
         source_summary_paths=tuple(summary_paths),
         expected_source_count=len(summary_paths),
-        expected_accepted_cases=expected_accepted_cases,
+        expected_accepted_simulations=expected_accepted_simulations,
         expected_retained_rows=expected_retained_rows,
     )
 
@@ -366,20 +366,20 @@ def validate_scanned_population(
     binding: CombinedSummaryBinding,
     *,
     source_count: int,
-    accepted_cases: int,
+    accepted_simulations: int,
     retained_rows: int,
 ) -> None:
     """Compare final scan totals with the combined-view plan."""
 
-    observed = (source_count, accepted_cases, retained_rows)
+    observed = (source_count, accepted_simulations, retained_rows)
     expected = (
         binding.expected_source_count,
-        binding.expected_accepted_cases,
+        binding.expected_accepted_simulations,
         binding.expected_retained_rows,
     )
     if observed != expected:
         raise ValueError(
-            "scanned source/case/row counts differ from combined preflight: "
+            "scanned source/simulation/row counts differ from combined preflight: "
             f"observed={observed}, expected={expected}"
         )
 
@@ -387,8 +387,8 @@ def validate_scanned_population(
 def validate_final_paper_dataset_counts(
     *,
     source_count: int,
-    family_split_accepted_cases: Mapping[tuple[str, str], int],
-    accepted_cases: int,
+    family_split_accepted_simulations: Mapping[tuple[str, str], int],
+    accepted_simulations: int,
     retained_rows: int,
 ) -> None:
     """Require the exact, independently recovered paper release population."""
@@ -396,9 +396,9 @@ def validate_final_paper_dataset_counts(
     expected_family_split_counts = {
         (family, split): split_count
         for family in FAMILY_LABELS
-        for split, split_count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES.items()
+        for split, split_count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS.items()
     }
-    observed_family_split_counts = dict(family_split_accepted_cases)
+    observed_family_split_counts = dict(family_split_accepted_simulations)
     mismatches: list[str] = []
     if source_count != FINAL_PAPER_DATASET_SOURCE_COUNT:
         mismatches.append(
@@ -410,10 +410,10 @@ def validate_final_paper_dataset_counts(
             f"observed={observed_family_split_counts}, "
             f"expected={expected_family_split_counts}"
         )
-    if accepted_cases != FINAL_PAPER_DATASET_ACCEPTED_CASES:
+    if accepted_simulations != FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS:
         mismatches.append(
-            f"accepted_cases={accepted_cases}, "
-            f"expected={FINAL_PAPER_DATASET_ACCEPTED_CASES}"
+            f"accepted_simulations={accepted_simulations}, "
+            f"expected={FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS}"
         )
     if retained_rows != FINAL_PAPER_DATASET_RETAINED_ROWS:
         mismatches.append(
@@ -441,8 +441,8 @@ def validate_final_paper_dataset(
         )
     validate_final_paper_dataset_counts(
         source_count=len(sources),
-        family_split_accepted_cases=family_split_counts,
-        accepted_cases=sum(family_split_counts.values()),
+        family_split_accepted_simulations=family_split_counts,
+        accepted_simulations=sum(family_split_counts.values()),
         retained_rows=retained_rows,
     )
 
@@ -548,7 +548,10 @@ def _trajectory_indices(
 
     with np.load(map_path, allow_pickle=False) as archive:
         accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
-        case_ids = np.asarray(archive["trajectory_case_id"], dtype=np.int64)
+        simulation_ids = np.asarray(
+            archive["trajectory_simulation_id"],
+            dtype=np.int64,
+        )
         cell_ids = np.asarray(archive["trajectory_cell_id"], dtype=np.int32)
         first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
         row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
@@ -580,7 +583,7 @@ def _trajectory_indices(
             TrajectoryIndex(
                 accepted_index=accepted_index,
                 trajectory_index=trajectory_index,
-                case_id=int(case_ids[trajectory_index]),
+                simulation_id=int(simulation_ids[trajectory_index]),
                 category=categories[cell_code],
                 shard_index=int(shards[0]),
                 first_shard_row=int(local_rows[0]),
@@ -706,7 +709,7 @@ def _audit_shard(
     shard_path: Path,
     trajectories: tuple[TrajectoryIndex, ...],
     block_rows: int,
-) -> tuple[CaseMetrics, ...]:
+) -> tuple[SimulationMetrics, ...]:
     with np.load(shard_path, allow_pickle=False) as archive:
         eta = np.asarray(archive["eta"])
         xi = np.asarray(archive["xi"])
@@ -775,12 +778,12 @@ def _audit_shard(
             * (np.sum(xi_block * gxi_block, axis=1) + np.sum(eta_block**2, axis=1))
         )
 
-    records: list[CaseMetrics] = []
+    records: list[SimulationMetrics] = []
     for trajectory in trajectories:
         first = trajectory.first_shard_row
         rows = slice(first, first + trajectory.row_count)
-        case_time = time[rows]
-        case_depth = depth[rows]
+        simulation_time = time[rows]
+        simulation_depth = depth[rows]
         slope_value, slope_frame = _argmax(eta_slope[rows])
         high_value, high_frame = _argmax(gxi_high_fraction[rows])
         sign_value, sign_frame = _argmax(thresholded_sign_changes[rows])
@@ -794,25 +797,25 @@ def _audit_shard(
         drift_value, drift_frame = _argmax(relative_drift)
         minimum_water_value = float(np.min(minimum_water[rows]))
         records.append(
-            CaseMetrics(
+            SimulationMetrics(
                 source_index=source_index,
                 accepted_index=trajectory.accepted_index,
                 trajectory_index=trajectory.trajectory_index,
                 family=family,
                 split=split,
-                case_id=trajectory.case_id,
+                simulation_id=trajectory.simulation_id,
                 category=trajectory.category,
                 shard_index=shard_index,
                 first_shard_row=first,
                 row_count=trajectory.row_count,
-                depth=float(case_depth[0]),
+                depth=float(simulation_depth[0]),
                 all_frames_finite=bool(np.all(finite[rows])),
-                constant_depth=bool(np.all(case_depth == case_depth[0])),
+                constant_depth=bool(np.all(simulation_depth == simulation_depth[0])),
                 ordered_time=bool(
-                    case_time.size == 1 or np.all(np.diff(case_time) > 0.0)
+                    simulation_time.size == 1 or np.all(np.diff(simulation_time) > 0.0)
                 ),
                 minimum_water_column=minimum_water_value,
-                minimum_water_fraction=minimum_water_value / float(case_depth[0]),
+                minimum_water_fraction=minimum_water_value / float(simulation_depth[0]),
                 maximum_eta_slope=slope_value,
                 maximum_eta_slope_frame=slope_frame,
                 maximum_gxi_high_band_fraction=high_value,
@@ -836,7 +839,7 @@ def _audit_task(
         tuple[TrajectoryIndex, ...],
         int,
     ],
-) -> tuple[CaseMetrics, ...]:
+) -> tuple[SimulationMetrics, ...]:
     return _audit_shard(*values)
 
 
@@ -856,17 +859,19 @@ def _descending_indices(values: np.ndarray, count: int) -> tuple[int, ...]:
     )
 
 
-def _case_key(case: CaseMetrics) -> tuple[int, int]:
-    return case.source_index, case.accepted_index
+def _simulation_key(simulation: SimulationMetrics) -> tuple[int, int]:
+    return simulation.source_index, simulation.accepted_index
 
 
 def _load_selected(
     sources: tuple[DatasetSource, ...],
-    cases: Sequence[CaseMetrics],
+    simulations: Sequence[SimulationMetrics],
 ) -> dict[tuple[int, int], LoadedTrajectory]:
-    by_shard: dict[tuple[int, int], list[CaseMetrics]] = {}
-    for case in cases:
-        by_shard.setdefault((case.source_index, case.shard_index), []).append(case)
+    by_shard: dict[tuple[int, int], list[SimulationMetrics]] = {}
+    for simulation in simulations:
+        by_shard.setdefault(
+            (simulation.source_index, simulation.shard_index), []
+        ).append(simulation)
 
     loaded: dict[tuple[int, int], LoadedTrajectory] = {}
     for (source_index, shard_index), selected in sorted(by_shard.items()):
@@ -876,9 +881,12 @@ def _load_selected(
                 name: np.asarray(archive[name])
                 for name in (*FIELD_NAMES, "depth", "time")
             }
-        for case in selected:
-            rows = slice(case.first_shard_row, case.first_shard_row + case.row_count)
-            loaded[_case_key(case)] = LoadedTrajectory(
+        for simulation in selected:
+            rows = slice(
+                simulation.first_shard_row,
+                simulation.first_shard_row + simulation.row_count,
+            )
+            loaded[_simulation_key(simulation)] = LoadedTrajectory(
                 eta=np.asarray(arrays["eta"][rows], dtype=np.float64),
                 xi=np.asarray(arrays["xi"][rows], dtype=np.float64),
                 gxi=np.asarray(arrays["gxi"][rows], dtype=np.float64),
@@ -917,8 +925,8 @@ def _normalized_spectrum(field: np.ndarray) -> np.ndarray:
     return amplitude / scale if scale > 0.0 else amplitude
 
 
-def _plot_cases(
-    cases: Sequence[CaseMetrics],
+def _plot_simulations(
+    simulations: Sequence[SimulationMetrics],
     trajectories: Mapping[tuple[int, int], LoadedTrajectory],
     frame_fields: Sequence[int],
     row_labels: Sequence[str],
@@ -926,16 +934,16 @@ def _plot_cases(
     output_stem: Path,
 ) -> tuple[Path, Path]:
     figure, axes = plt.subplots(
-        len(cases),
+        len(simulations),
         4,
-        figsize=(17.5, 2.8 * len(cases)),
+        figsize=(17.5, 2.8 * len(simulations)),
         squeeze=False,
         constrained_layout=True,
     )
-    for row, (case, worst_frame, row_label) in enumerate(
-        zip(cases, frame_fields, row_labels)
+    for row, (simulation, worst_frame, row_label) in enumerate(
+        zip(simulations, frame_fields, row_labels)
     ):
-        trajectory = trajectories[_case_key(case)]
+        trajectory = trajectories[_simulation_key(simulation)]
         x = np.linspace(0.0, 2.0 * np.pi, trajectory.eta.shape[1], endpoint=False)
         fields = (trajectory.eta, trajectory.xi, trajectory.gxi)
         frame_roles = _frame_roles(trajectory, worst_frame)
@@ -957,7 +965,7 @@ def _plot_cases(
             axis.set_xticklabels(("0", r"$\pi$", r"$2\pi$"))
             if row == 0:
                 axis.set_title(field_title)
-            if row == len(cases) - 1:
+            if row == len(simulations) - 1:
                 axis.set_xlabel(r"$x$")
             if column == 0:
                 axis.set_ylabel(
@@ -993,7 +1001,7 @@ def _plot_cases(
         spectrum_axis.grid(alpha=0.2, linewidth=0.5)
         if row == 0:
             spectrum_axis.set_title(r"normalized $|\widehat{G(\eta)\xi}_k|$")
-        if row == len(cases) - 1:
+        if row == len(simulations) - 1:
             spectrum_axis.set_xlabel(r"mode $|k|$")
         spectrum_axis.legend(frameon=False, fontsize=7, loc="best")
 
@@ -1080,7 +1088,7 @@ def _draw_animation_frame(
 
 
 def _render_rank_one_gif(
-    case: CaseMetrics,
+    simulation: SimulationMetrics,
     trajectory: LoadedTrajectory,
     title: str,
     output_path: Path,
@@ -1128,7 +1136,8 @@ def _render_rank_one_gif(
             axis.grid(alpha=0.2, linewidth=0.5)
             lines.append(line)
         figure.suptitle(
-            f"{title}   " rf"($h={case.depth:.3g}$, case {case.case_id})",
+            f"{title}   "
+            rf"($h={simulation.depth:.3g}$, simulation {simulation.simulation_id})",
             fontsize=12,
         )
         time_text = figure.text(
@@ -1198,20 +1207,20 @@ def _quantiles(values: np.ndarray) -> dict[str, float]:
     }
 
 
-def _case_record(
-    case: CaseMetrics,
+def _simulation_record(
+    simulation: SimulationMetrics,
     source: DatasetSource,
     combined_rank: float,
 ) -> dict[str, Any]:
     return {
-        **asdict(case),
+        **asdict(simulation),
         "source_root": str(source.root),
         "combined_empirical_rank": combined_rank,
     }
 
 
 def _family_rankings(
-    cases: tuple[CaseMetrics, ...],
+    simulations: tuple[SimulationMetrics, ...],
     top_count: int,
 ) -> tuple[
     dict[str, tuple[int, ...]],
@@ -1221,14 +1230,18 @@ def _family_rankings(
 ]:
     combined_values = {
         "eta_slope": np.asarray(
-            [case.maximum_eta_slope for case in cases], dtype=np.float64
+            [simulation.maximum_eta_slope for simulation in simulations],
+            dtype=np.float64,
         ),
         "gxi_high_band": np.asarray(
-            [case.maximum_gxi_high_band_fraction for case in cases],
+            [simulation.maximum_gxi_high_band_fraction for simulation in simulations],
             dtype=np.float64,
         ),
         "gxi_sign_changes": np.asarray(
-            [case.maximum_thresholded_gxi_sign_changes for case in cases],
+            [
+                simulation.maximum_thresholded_gxi_sign_changes
+                for simulation in simulations
+            ],
             dtype=np.float64,
         ),
     }
@@ -1240,8 +1253,8 @@ def _family_rankings(
         **combined_values,
         "stored_band_quadratic_energy_drift": np.asarray(
             [
-                case.maximum_relative_stored_band_quadratic_energy_drift
-                for case in cases
+                simulation.maximum_relative_stored_band_quadratic_energy_drift
+                for simulation in simulations
             ],
             dtype=np.float64,
         ),
@@ -1262,7 +1275,7 @@ def _family_rankings(
     rank_names = tuple(combined_values)
     for index in rankings["combined"]:
         dominant = int(np.argmax([rank_fractions[name][index] for name in rank_names]))
-        combined_frames.append(int(getattr(cases[index], frame_fields[dominant])))
+        combined_frames.append(int(getattr(simulations[index], frame_fields[dominant])))
     return rankings, combined, values, tuple(combined_frames)
 
 
@@ -1295,64 +1308,81 @@ def _render_to_directory(
         )
 
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        case_groups = tuple(executor.map(_audit_task, tasks))
-    cases = tuple(case for group in case_groups for case in group)
-    if len(cases) != sum(len(source.trajectories) for source in sources):
+        simulation_groups = tuple(executor.map(_audit_task, tasks))
+    simulations = tuple(
+        simulation for group in simulation_groups for simulation in group
+    )
+    if len(simulations) != sum(len(source.trajectories) for source in sources):
         raise RuntimeError("whole-dataset audit lost trajectories")
-    retained_rows = sum(case.row_count for case in cases)
+    retained_rows = sum(simulation.row_count for simulation in simulations)
     if binding is not None:
         validate_scanned_population(
             binding,
             source_count=len(sources),
-            accepted_cases=len(cases),
+            accepted_simulations=len(simulations),
             retained_rows=retained_rows,
         )
     if args.require_final_paper_dataset:
         validate_final_paper_dataset(sources, retained_rows=retained_rows)
     if any(
-        not (case.all_frames_finite and case.constant_depth and case.ordered_time)
-        or case.minimum_water_column <= 0.0
-        for case in cases
+        not (
+            simulation.all_frames_finite
+            and simulation.constant_depth
+            and simulation.ordered_time
+        )
+        or simulation.minimum_water_column <= 0.0
+        for simulation in simulations
     ):
         raise RuntimeError("a completed accepted trajectory failed a hard audit")
 
     by_family = {
-        family: tuple(case for case in cases if case.family == family)
-        for family in sorted({case.family for case in cases})
+        family: tuple(
+            simulation for simulation in simulations if simulation.family == family
+        )
+        for family in sorted({simulation.family for simulation in simulations})
     }
     family_results: dict[str, Any] = {}
-    all_selected: list[CaseMetrics] = []
+    all_selected: list[SimulationMetrics] = []
     ranking_data: dict[
         str, tuple[dict[str, tuple[int, ...]], np.ndarray, tuple[int, ...]]
     ] = {}
-    for family, family_cases in by_family.items():
+    for family, family_simulations in by_family.items():
         rankings, combined, values, combined_frames = _family_rankings(
-            family_cases,
+            family_simulations,
             args.top_count,
         )
         ranking_data[family] = (rankings, combined, combined_frames)
         selected_indices = tuple(
             dict.fromkeys(index for ranking in rankings.values() for index in ranking)
         )
-        all_selected.extend(family_cases[index] for index in selected_indices)
+        all_selected.extend(family_simulations[index] for index in selected_indices)
         family_results[family] = {
-            "accepted_cases": len(family_cases),
-            "retained_rows": sum(case.row_count for case in family_cases),
+            "accepted_simulations": len(family_simulations),
+            "retained_rows": sum(
+                simulation.row_count for simulation in family_simulations
+            ),
             "splits": {
-                split: sum(case.split == split for case in family_cases)
+                split: sum(
+                    simulation.split == split for simulation in family_simulations
+                )
                 for split in ("train", "validation", "test")
             },
             "quantiles": {
                 **{name: _quantiles(value) for name, value in values.items()},
                 "minimum_water_fraction": _quantiles(
-                    np.asarray([case.minimum_water_fraction for case in family_cases])
+                    np.asarray(
+                        [
+                            simulation.minimum_water_fraction
+                            for simulation in family_simulations
+                        ]
+                    )
                 ),
             },
             "rankings": {
                 name: [
-                    _case_record(
-                        family_cases[index],
-                        sources[family_cases[index].source_index],
+                    _simulation_record(
+                        family_simulations[index],
+                        sources[family_simulations[index].source_index],
                         float(combined[index]),
                     )
                     for index in indices
@@ -1364,7 +1394,7 @@ def _render_to_directory(
     loaded = _load_selected(sources, all_selected)
     figures: list[Path] = []
     animations: dict[str, object] = {}
-    overview_cases: list[CaseMetrics] = []
+    overview_simulations: list[SimulationMetrics] = []
     overview_frames: list[int] = []
     overview_labels: list[str] = []
     plot_definitions = {
@@ -1390,42 +1420,44 @@ def _render_to_directory(
         ),
     }
 
-    for family, family_cases in by_family.items():
+    for family, family_simulations in by_family.items():
         rankings, combined, combined_frames = ranking_data[family]
         family_label = FAMILY_LABELS.get(family, family)
         for ranking_name, (metric_label, frame_field) in plot_definitions.items():
             indices = rankings[ranking_name]
-            selected = tuple(family_cases[index] for index in indices)
+            selected = tuple(family_simulations[index] for index in indices)
             frames = (
                 combined_frames
                 if frame_field is None
-                else tuple(int(getattr(case, frame_field)) for case in selected)
+                else tuple(
+                    int(getattr(simulation, frame_field)) for simulation in selected
+                )
             )
             labels = tuple(
-                f"#{rank} {case.split}; case {case.case_id}\n"
-                f"{case.category}; h={case.depth:.4g}\n"
-                f"slope={case.maximum_eta_slope:.3g}; "
-                f"high={100.0 * case.maximum_gxi_high_band_fraction:.3g}%; "
-                f"signs={case.maximum_thresholded_gxi_sign_changes}; "
+                f"#{rank} {simulation.split}; simulation {simulation.simulation_id}\n"
+                f"{simulation.category}; h={simulation.depth:.4g}\n"
+                f"slope={simulation.maximum_eta_slope:.3g}; "
+                f"high={100.0 * simulation.maximum_gxi_high_band_fraction:.3g}%; "
+                f"signs={simulation.maximum_thresholded_gxi_sign_changes}; "
                 "stored-band dE="
-                f"{case.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
-                for rank, case in enumerate(selected, start=1)
+                f"{simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
+                for rank, simulation in enumerate(selected, start=1)
             )
             figures.extend(
-                _plot_cases(
+                _plot_simulations(
                     selected,
                     loaded,
                     frames,
                     labels,
-                    f"{family_label}: accepted cases with the {metric_label}",
+                    f"{family_label}: accepted simulations with the {metric_label}",
                     output_dir / f"{family}_worst_{ranking_name}",
                 )
             )
-            top_case = selected[0]
+            top_simulation = selected[0]
             gif_path, animation = _render_rank_one_gif(
-                top_case,
-                loaded[_case_key(top_case)],
-                (f"{family_label}: rank-one accepted case by the {metric_label}"),
+                top_simulation,
+                loaded[_simulation_key(top_simulation)],
+                (f"{family_label}: rank-one accepted simulation by the {metric_label}"),
                 output_dir / f"{family}_worst_{ranking_name}.gif",
             )
             figures.append(gif_path)
@@ -1433,32 +1465,33 @@ def _render_to_directory(
                 "family": family,
                 "ranking": ranking_name,
                 "rank": 1,
-                "source_index": top_case.source_index,
-                "accepted_index": top_case.accepted_index,
-                "trajectory_index": top_case.trajectory_index,
-                "case_id": top_case.case_id,
-                "category": top_case.category,
-                "split": top_case.split,
+                "source_index": top_simulation.source_index,
+                "accepted_index": top_simulation.accepted_index,
+                "trajectory_index": top_simulation.trajectory_index,
+                "simulation_id": top_simulation.simulation_id,
+                "category": top_simulation.category,
+                "split": top_simulation.split,
                 **animation,
             }
 
         top_index = rankings["combined"][0]
-        top_case = family_cases[top_index]
-        overview_cases.append(top_case)
+        top_simulation = family_simulations[top_index]
+        overview_simulations.append(top_simulation)
         overview_frames.append(combined_frames[0])
         overview_labels.append(
-            f"{family_label}; {top_case.split}; case {top_case.case_id}\n"
-            f"{top_case.category}; h={top_case.depth:.4g}\n"
-            f"slope={top_case.maximum_eta_slope:.3g}; "
-            f"high={100.0 * top_case.maximum_gxi_high_band_fraction:.3g}%; "
-            f"signs={top_case.maximum_thresholded_gxi_sign_changes}; "
+            f"{family_label}; {top_simulation.split}; "
+            f"simulation {top_simulation.simulation_id}\n"
+            f"{top_simulation.category}; h={top_simulation.depth:.4g}\n"
+            f"slope={top_simulation.maximum_eta_slope:.3g}; "
+            f"high={100.0 * top_simulation.maximum_gxi_high_band_fraction:.3g}%; "
+            f"signs={top_simulation.maximum_thresholded_gxi_sign_changes}; "
             "stored-band dE="
-            f"{top_case.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
+            f"{top_simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
         )
 
     figures.extend(
-        _plot_cases(
-            overview_cases,
+        _plot_simulations(
+            overview_simulations,
             loaded,
             overview_frames,
             overview_labels,
@@ -1476,7 +1509,7 @@ def _render_to_directory(
                 "mode": "combined_summary",
                 "combined_summary_path": str(binding.path),
                 "expected_sources": binding.expected_source_count,
-                "expected_accepted_cases": binding.expected_accepted_cases,
+                "expected_accepted_simulations": binding.expected_accepted_simulations,
                 "expected_retained_rows": binding.expected_retained_rows,
             }
             if binding is not None
@@ -1494,7 +1527,7 @@ def _render_to_directory(
         "definitions": dict(DEFINITIONS),
         "population": {
             "sources": len(sources),
-            "accepted_cases": len(cases),
+            "accepted_simulations": len(simulations),
             "retained_rows": retained_rows,
         },
         "sources": [
@@ -1502,7 +1535,7 @@ def _render_to_directory(
                 "root": str(source.root),
                 "family": source.family,
                 "split": source.split,
-                "accepted_cases": len(source.trajectories),
+                "accepted_simulations": len(source.trajectories),
                 "retained_rows": sum(
                     trajectory.row_count for trajectory in source.trajectories
                 ),
@@ -1525,7 +1558,7 @@ def _render_to_directory(
     }
     summary_path = output_dir / "summary.json"
     _write_diagnostic_summary(summary_path, record)
-    return len(cases), retained_rows, tuple(figures), summary_path
+    return len(simulations), retained_rows, tuple(figures), summary_path
 
 
 def main() -> None:
@@ -1556,7 +1589,7 @@ def main() -> None:
         validate_scanned_population(
             binding,
             source_count=len(sources),
-            accepted_cases=sum(len(source.trajectories) for source in sources),
+            accepted_simulations=sum(len(source.trajectories) for source in sources),
             retained_rows=retained_rows_from_maps,
         )
     if args.require_final_paper_dataset:
@@ -1569,12 +1602,14 @@ def main() -> None:
         staging_output_dir,
         final_output_dir,
     ):
-        accepted_cases, retained_rows, figures, summary_path = _render_to_directory(
-            args=args,
-            binding=binding,
-            sources=sources,
-            output_dir=staging_output_dir,
-            published_output_dir=final_output_dir,
+        accepted_simulations, retained_rows, figures, summary_path = (
+            _render_to_directory(
+                args=args,
+                binding=binding,
+                sources=sources,
+                output_dir=staging_output_dir,
+                published_output_dir=final_output_dir,
+            )
         )
         figure_relative_paths = tuple(
             path.relative_to(staging_output_dir) for path in figures
@@ -1587,7 +1622,7 @@ def main() -> None:
                 "status": "complete",
                 "output_dir": str(final_output_dir),
                 "sources": len(sources),
-                "accepted_cases": accepted_cases,
+                "accepted_simulations": accepted_simulations,
                 "retained_rows": retained_rows,
                 "figures": [
                     str(final_output_dir / path) for path in figure_relative_paths

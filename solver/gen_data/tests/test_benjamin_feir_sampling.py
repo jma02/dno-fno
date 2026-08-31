@@ -28,15 +28,15 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
     find_benjamin_feir_sample_violations,
-    sample_benjamin_feir_case,
+    sample_benjamin_feir_simulation,
 )
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
-    balanced_valid_case_targets,
-    random_generator_for_case,
-    assign_next_cases,
+    balanced_simulation_targets,
+    random_generator_for_simulation,
+    build_next_attempt_batch,
 )
 
 
@@ -56,7 +56,7 @@ def assignment(
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
-        case_key=CaseKey(
+        simulation_key=SimulationKey(
             family_id=family_id,
             revision_id=revision_id,
             split_id=split_id,
@@ -86,10 +86,12 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
 
     def test_common_scheduler_balances_the_pair_cells_exactly(self) -> None:
         cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
-        targets = balanced_valid_case_targets(cell_ids, case_count=20_000)
-        scheduled = assign_next_cases(
+        targets = balanced_simulation_targets(cell_ids, simulation_count=20_000)
+        scheduled = build_next_attempt_batch(
             targets,
             {},
+            {},
+            {target.cell_id: target.simulation_count for target in targets},
             family_id=3,
             revision_id=1,
             split_id=SplitId.TRAIN,
@@ -107,8 +109,8 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         )
 
     def test_replay_is_bitwise_deterministic_and_constructor_ready(self) -> None:
-        first = sample_benjamin_feir_case(assignment(37, attempt_index=91))
-        second = sample_benjamin_feir_case(assignment(37, attempt_index=91))
+        first = sample_benjamin_feir_simulation(assignment(37, attempt_index=91))
+        second = sample_benjamin_feir_simulation(assignment(37, attempt_index=91))
         self.assertEqual(first, second)
         self.assertEqual(first.to_json_record(), second.to_json_record())
         first_arrays = first.to_parameter_arrays()
@@ -118,23 +120,25 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             np.testing.assert_array_equal(first_arrays[name], second_arrays[name])
 
     def test_every_key_coordinate_enters_the_pcg64_seed(self) -> None:
-        base = assignment(0, attempt_index=41).case_key
+        base = assignment(0, attempt_index=41).simulation_key
         expected = np.random.Generator(
             np.random.PCG64(np.random.SeedSequence(base.seed_words))
         ).random(8)
         np.testing.assert_array_equal(
-            random_generator_for_case(base).random(8), expected
+            random_generator_for_simulation(base).random(8), expected
         )
 
         keys = (
             base,
-            CaseKey(4, 4, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 5, SplitId.TRAIN, 0, 41),
-            CaseKey(3, 4, SplitId.VALIDATION, 0, 41),
-            CaseKey(3, 4, SplitId.TRAIN, 1, 41),
-            CaseKey(3, 4, SplitId.TRAIN, 0, 42),
+            SimulationKey(4, 4, SplitId.TRAIN, 0, 41),
+            SimulationKey(3, 5, SplitId.TRAIN, 0, 41),
+            SimulationKey(3, 4, SplitId.VALIDATION, 0, 41),
+            SimulationKey(3, 4, SplitId.TRAIN, 1, 41),
+            SimulationKey(3, 4, SplitId.TRAIN, 0, 42),
         )
-        first_draws = {tuple(random_generator_for_case(key).random(8)) for key in keys}
+        first_draws = {
+            tuple(random_generator_for_simulation(key).random(8)) for key in keys
+        }
         self.assertEqual(len(first_draws), len(keys))
 
     def test_all_cells_remain_in_support_under_many_attempts(self) -> None:
@@ -142,7 +146,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             BENJAMIN_FEIR_SAMPLE_CELLS.values()
         ):
             for local_attempt in range(128):
-                sample = sample_benjamin_feir_case(
+                sample = sample_benjamin_feir_simulation(
                     assignment(
                         cell_index,
                         attempt_index=10_000 * cell_index + local_attempt,
@@ -180,7 +184,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         self,
     ) -> None:
         for cell_index in range(len(BENJAMIN_FEIR_SAMPLE_CELL_IDS)):
-            sample = sample_benjamin_feir_case(assignment(cell_index))
+            sample = sample_benjamin_feir_simulation(assignment(cell_index))
             lower, upper = sample.conditional_steepness_bounds
             self.assertLess(
                 lower,
@@ -191,8 +195,8 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
                 CARRIER_STEEPNESS_MAX,
             )
 
-    def test_json_persists_parameters_phases_and_case_coordinates(self) -> None:
-        sample = sample_benjamin_feir_case(
+    def test_json_persists_parameters_phases_and_simulation_coordinates(self) -> None:
+        sample = sample_benjamin_feir_simulation(
             assignment(
                 65,
                 family_id=17,
@@ -203,9 +207,9 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             )
         )
         record = sample.to_json_record()
-        key = sample.assignment.case_key
+        key = sample.assignment.simulation_key
         self.assertNotIn("schema", record)
-        self.assertEqual(record["case_id"], key.case_id)
+        self.assertEqual(record["simulation_id"], key.simulation_id)
         self.assertEqual(record["family_id"], 17)
         self.assertEqual(record["revision_id"], 6)
         self.assertEqual(record["split_id"], "test")
@@ -244,18 +248,18 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
 
     def test_invalid_cells_parameters_and_lengths_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown Benjamin--Feir"):
-            sample_benjamin_feir_case(
+            sample_benjamin_feir_simulation(
                 AttemptAssignment(
-                    case_key=assignment(0).case_key,
+                    simulation_key=assignment(0).simulation_key,
                     cell_id="not_a_pair",
                 )
             )
         with self.assertRaisesRegex(ValueError, "finite and positive"):
-            sample_benjamin_feir_case(
+            sample_benjamin_feir_simulation(
                 assignment(0),
                 domain_length=math.nan,
             )
-        sample = sample_benjamin_feir_case(assignment(0))
+        sample = sample_benjamin_feir_simulation(assignment(0))
         wrong_cell = replace(sample, carrier_mode=21)
         self.assertIn(
             "sample parameters do not match the assigned cell",

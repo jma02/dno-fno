@@ -6,6 +6,7 @@ Usage:
         --select best,median,worst \\
         --out outputs/.../eval_suite/random_sea_deep_movies/
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,9 @@ import numpy as np
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 
 
-def _select_ic_indices(rel_l2_eta: np.ndarray, select: Sequence[str], n_ics: int) -> list[tuple[str, int]]:
+def _select_ic_indices(
+    rel_l2_eta: np.ndarray, select: Sequence[str], n_ics: int
+) -> list[tuple[str, int]]:
     final = rel_l2_eta[-1].copy()
     valid = np.isfinite(final)
     if valid.any():
@@ -50,13 +53,13 @@ def render_movie(
     *,
     x: np.ndarray,
     times: np.ndarray,
-    truth_eta: np.ndarray,        # (n_t, nx)
+    truth_eta: np.ndarray,  # (n_t, nx)
     pred_eta: np.ndarray,
     truth_xi: np.ndarray,
     pred_xi: np.ndarray,
     truth_gxi: np.ndarray,
     pred_gxi: np.ndarray,
-    rel_l2_eta: np.ndarray,       # (n_t,)
+    rel_l2_eta: np.ndarray,  # (n_t,)
     rel_l2_xi: np.ndarray,
     rel_l2_gxi: np.ndarray,
     title: str,
@@ -68,7 +71,9 @@ def render_movie(
     n_t = truth_eta.shape[0]
     frames = list(range(0, n_t, stride))
 
-    fig, axes = plt.subplots(3, 2, figsize=(11.5, 7.0), gridspec_kw={"width_ratios": [2.2, 1.0]})
+    fig, axes = plt.subplots(
+        3, 2, figsize=(11.5, 7.0), gridspec_kw={"width_ratios": [2.2, 1.0]}
+    )
     fig.suptitle(title, fontsize=12, fontweight="bold")
 
     rows = [
@@ -94,9 +99,16 @@ def render_movie(
         ax_l.set_ylim(-ymax, ymax)
 
         finite_e = e[np.isfinite(e)]
-        floor = max(1e-8, float(np.nanmin(finite_e[finite_e > 0])) if finite_e.size and (finite_e > 0).any() else 1e-8)
+        floor = max(
+            1e-8,
+            float(np.nanmin(finite_e[finite_e > 0]))
+            if finite_e.size and (finite_e > 0).any()
+            else 1e-8,
+        )
         ax_r.semilogy(times, np.maximum(e, floor), color=color, lw=1.0)
-        (dot,) = ax_r.semilogy([times[0]], [max(e[0], floor)], "o", color=color, markersize=5)
+        (dot,) = ax_r.semilogy(
+            [times[0]], [max(e[0], floor)], "o", color=color, markersize=5
+        )
         ax_r.set_xlim(float(times[0]), float(times[-1]))
         emax = float(np.nanmax(e)) if np.isfinite(e).any() else 1.0
         ax_r.set_ylim(floor, max(emax * 1.5, floor * 10))
@@ -140,31 +152,47 @@ def render_movie(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trajs", required=True, help="Path to <regime>_trajs.npz")
-    parser.add_argument("--out", default=None, help="Output dir. Defaults to <trajs_parent>/<stem>_movies/")
-    parser.add_argument("--select", default="best,median,worst",
-                        help="comma-separated: best,median,worst,idx=K,...")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Output dir. Defaults to <trajs_parent>/<stem>_movies/",
+    )
+    parser.add_argument(
+        "--select",
+        default="best,median,worst",
+        help="comma-separated: best,median,worst,idx=K,...",
+    )
     parser.add_argument("--length", type=float, default=2.0 * float(np.pi))
     parser.add_argument("--fps", type=int, default=24)
-    parser.add_argument("--stride", type=int, default=1, help="Frame stride (1 = every saved frame).")
+    parser.add_argument(
+        "--stride", type=int, default=1, help="Frame stride (1 = every saved frame)."
+    )
     parser.add_argument("--format", choices=("mp4", "gif"), default="mp4")
     args = parser.parse_args()
 
     trajs_path = Path(args.trajs).resolve()
     stem = trajs_path.stem.replace("_trajs", "")
-    out_dir = Path(args.out).resolve() if args.out else trajs_path.parent / f"{stem}_movies"
+    out_dir = (
+        Path(args.out).resolve() if args.out else trajs_path.parent / f"{stem}_movies"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with np.load(trajs_path) as d:
         times = np.asarray(d["times"])
         depths = np.asarray(d["depths"])
-        case_ids = np.asarray(d["case_ids"]) if "case_ids" in d.files else np.arange(d["depths"].shape[0])
-        truth_eta = np.asarray(d["truth_eta"])    # (n_t, NB, nx)
+        if "simulation_ids" in d.files:
+            simulation_ids = np.asarray(d["simulation_ids"])
+        elif "simulation_ids" in d.files:
+            simulation_ids = np.asarray(d["simulation_ids"])
+        else:
+            simulation_ids = np.arange(d["depths"].shape[0])
+        truth_eta = np.asarray(d["truth_eta"])  # (n_t, NB, nx)
         truth_xi = np.asarray(d["truth_xi"])
         truth_gxi = np.asarray(d["truth_gxi"])
         pred_eta = np.asarray(d["pred_eta"])
         pred_xi = np.asarray(d["pred_xi"])
         pred_gxi = np.asarray(d["pred_gxi"])
-        re = np.asarray(d["rel_l2_eta"])          # (n_t, NB)
+        re = np.asarray(d["rel_l2_eta"])  # (n_t, NB)
         rx = np.asarray(d["rel_l2_xi"])
         rg = np.asarray(d["rel_l2_gxi"])
 
@@ -173,22 +201,37 @@ def main() -> None:
 
     select = [tok.strip() for tok in args.select.split(",") if tok.strip()]
     picks = _select_ic_indices(re, select, NB)
-    print(f"Animating {len(picks)} cases from {trajs_path.name} (n_t={n_t}, NB={NB})")
+    print(
+        f"Animating {len(picks)} simulations from {trajs_path.name} "
+        f"(n_t={n_t}, NB={NB})"
+    )
     for label, j in picks:
-        out_path = out_dir / f"{stem}_{label}_case{int(case_ids[j])}_h{float(depths[j]):.3f}.{args.format}"
+        out_path = out_dir / (
+            f"{stem}_{label}_simulation{int(simulation_ids[j])}_"
+            f"h{float(depths[j]):.3f}.{args.format}"
+        )
         title = (
-            f"{stem}  {label} (case={int(case_ids[j])}, h={float(depths[j]):.3f})  "
+            f"{stem}  {label} (simulation={int(simulation_ids[j])}, "
+            f"h={float(depths[j]):.3f})  "
             f"final η rel-L2={float(re[-1, j]):.2e}"
         )
         print(f"  rendering {out_path.name}...")
         render_movie(
             out_path,
-            x=x, times=times,
-            truth_eta=truth_eta[:, j, :], pred_eta=pred_eta[:, j, :],
-            truth_xi=truth_xi[:, j, :], pred_xi=pred_xi[:, j, :],
-            truth_gxi=truth_gxi[:, j, :], pred_gxi=pred_gxi[:, j, :],
-            rel_l2_eta=re[:, j], rel_l2_xi=rx[:, j], rel_l2_gxi=rg[:, j],
-            title=title, fps=args.fps, stride=args.stride,
+            x=x,
+            times=times,
+            truth_eta=truth_eta[:, j, :],
+            pred_eta=pred_eta[:, j, :],
+            truth_xi=truth_xi[:, j, :],
+            pred_xi=pred_xi[:, j, :],
+            truth_gxi=truth_gxi[:, j, :],
+            pred_gxi=pred_gxi[:, j, :],
+            rel_l2_eta=re[:, j],
+            rel_l2_xi=rx[:, j],
+            rel_l2_gxi=rg[:, j],
+            title=title,
+            fps=args.fps,
+            stride=args.stride,
         )
     print(f"Done -> {out_dir}")
 

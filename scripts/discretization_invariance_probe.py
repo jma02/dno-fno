@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Discretization invariance probe for a trained CS-DNO checkpoint.
 
-Loads a checkpoint produced by the canonical JAX trainer, picks test cases
+Loads a checkpoint produced by the canonical JAX trainer, picks test simulations
 from a flat .npz dataset, and runs one-step inference at the native grid
 resolution and at an arbitrary other resolution.  The test resolution may be
 finer or coarser than the native 1024 grid.  For refined inputs the test output
@@ -14,6 +14,7 @@ resolved low modes.
 
 Runs on CPU by default so it does not contend with the running GPU workers.
 """
+
 from __future__ import annotations
 
 # Configure JAX to use CPU before any JAX import.
@@ -127,17 +128,17 @@ def parse_args() -> argparse.Namespace:
         help="Directory to write probe_results.json.",
     )
     parser.add_argument(
-        "--n_cases",
+        "--n_simulations",
         type=int,
         default=3,
-        help="Number of test cases to evaluate.",
+        help="Number of test simulations to evaluate.",
     )
     parser.add_argument(
         "--indices",
         type=int,
         nargs="+",
         default=None,
-        help="Explicit case indices to evaluate (overrides --n_cases).",
+        help="Explicit simulation indices (overrides --n_simulations).",
     )
     parser.add_argument(
         "--n_test",
@@ -185,6 +186,7 @@ def main() -> int:
                 np.asarray([log_depth], dtype=np.float32),
             )
         )[0]
+
     load_time = time.perf_counter() - t0
     print(f"Loaded checkpoint from {args.run_dir} in {load_time:.2f}s")
     print(f"Epoch: {loaded.epoch}, config model: {loaded.config.get('model')}")
@@ -198,13 +200,18 @@ def main() -> int:
         x = z["x"]
         n_native = int(eta.shape[-1])
         print(f"Dataset: {args.dataset}")
-        print(f"  cases: {eta.shape[0]}, n_native: {n_native}, domain: [{x[0]}, {x[-1]}]")
+        print(
+            f"  simulations: {eta.shape[0]}, n_native: {n_native}, "
+            f"domain: [{x[0]}, {x[-1]}]"
+        )
 
     if args.indices is not None:
         test_indices = list(args.indices)
     else:
         rng = np.random.default_rng(42)
-        test_indices = rng.choice(eta.shape[0], size=args.n_cases, replace=False).tolist()
+        test_indices = rng.choice(
+            eta.shape[0], size=args.n_simulations, replace=False
+        ).tolist()
 
     rng = np.random.default_rng(43)
     results: list[dict[str, object]] = []
@@ -227,7 +234,9 @@ def main() -> int:
         t_native = time.perf_counter() - t0
         rel_l2_truth_mean = rel_l2_mean_centered(gxi_native, gxi_c)
         rel_l2_truth_raw = rel_l2(gxi_native, gxi_c)
-        print(f"  native {n_native}: time={t_native:.3f}s, rel_l2_truth={rel_l2_truth_raw:.6f}, rel_l2_truth_mean_centered={rel_l2_truth_mean:.6f}")
+        print(
+            f"  native {n_native}: time={t_native:.3f}s, rel_l2_truth={rel_l2_truth_raw:.6f}, rel_l2_truth_mean_centered={rel_l2_truth_mean:.6f}"
+        )
 
         # Test input at the new resolution.
         eta_test = change_resolution_rfft(eta_c, args.n_test)
@@ -255,8 +264,12 @@ def main() -> int:
 
         rel_l2_cross = rel_l2(gxi_native_compare, gxi_test_compare)
         rel_l2_mean_cross = rel_l2_mean_centered(gxi_native_compare, gxi_test_compare)
-        print(f"  {n_native} vs {args.n_test} rel_l2 (at {compare_n}): {rel_l2_cross:.6e}")
-        print(f"  {n_native} vs {args.n_test} rel_l2_mean_centered (at {compare_n}): {rel_l2_mean_cross:.6e}")
+        print(
+            f"  {n_native} vs {args.n_test} rel_l2 (at {compare_n}): {rel_l2_cross:.6e}"
+        )
+        print(
+            f"  {n_native} vs {args.n_test} rel_l2_mean_centered (at {compare_n}): {rel_l2_mean_cross:.6e}"
+        )
 
         # Energy in modes above the native grid, only meaningful for n_test > n_native.
         high_mode_fraction: float = 0.0
@@ -266,7 +279,9 @@ def main() -> int:
             high_mode_energy = np.sum(np.abs(gxi_test_hat[native_freq_count:]) ** 2)
             total_mode_energy = np.sum(np.abs(gxi_test_hat) ** 2)
             high_mode_fraction = float(high_mode_energy / (total_mode_energy + 1e-30))
-            print(f"  high-mode energy fraction above native k-grid: {high_mode_fraction:.6e}")
+            print(
+                f"  high-mode energy fraction above native k-grid: {high_mode_fraction:.6e}"
+            )
 
         record: dict[str, object] = {
             "index": int(idx),
@@ -286,25 +301,41 @@ def main() -> int:
 
         # Optional high-mode injection test.
         if args.high_mode_std > 0 and args.n_test > n_native:
-            eta_test_high = add_high_mode_noise(eta_test, n_native, args.high_mode_std, rng)
-            xi_test_high = add_high_mode_noise(xi_test, n_native, args.high_mode_std, rng)
+            eta_test_high = add_high_mode_noise(
+                eta_test, n_native, args.high_mode_std, rng
+            )
+            xi_test_high = add_high_mode_noise(
+                xi_test, n_native, args.high_mode_std, rng
+            )
             t0 = time.perf_counter()
             gxi_test_high = np.asarray(predict(eta_test_high, xi_test_high, log_h))
             t_test_high = time.perf_counter() - t0
             gxi_test_high_down = change_resolution_rfft(gxi_test_high, n_native)
             rel_l2_with_high = rel_l2(gxi_test_compare, gxi_test_high_down)
-            rel_l2_mean_with_high = rel_l2_mean_centered(gxi_test_compare, gxi_test_high_down)
-            print(f"  high-mode std={args.high_mode_std}: time={t_test_high:.3f}s, rel_l2 vs no-injection: {rel_l2_with_high:.6e}, mean: {rel_l2_mean_with_high:.6e}")
+            rel_l2_mean_with_high = rel_l2_mean_centered(
+                gxi_test_compare, gxi_test_high_down
+            )
+            print(
+                f"  high-mode std={args.high_mode_std}: time={t_test_high:.3f}s, rel_l2 vs no-injection: {rel_l2_with_high:.6e}, mean: {rel_l2_mean_with_high:.6e}"
+            )
 
             gxi_test_high_hat = np.fft.rfft(gxi_test_high, norm="forward")
-            high_mode_energy_high = np.sum(np.abs(gxi_test_high_hat[native_freq_count:]) ** 2)
+            high_mode_energy_high = np.sum(
+                np.abs(gxi_test_high_hat[native_freq_count:]) ** 2
+            )
             total_mode_energy_high = np.sum(np.abs(gxi_test_high_hat) ** 2)
-            high_mode_fraction_high = float(high_mode_energy_high / (total_mode_energy_high + 1e-30))
-            print(f"  high-mode output energy fraction with injection: {high_mode_fraction_high:.6e}")
+            high_mode_fraction_high = float(
+                high_mode_energy_high / (total_mode_energy_high + 1e-30)
+            )
+            print(
+                f"  high-mode output energy fraction with injection: {high_mode_fraction_high:.6e}"
+            )
 
             record["high_mode_std"] = float(args.high_mode_std)
             record["rel_l2_with_high_mode_injection"] = float(rel_l2_with_high)
-            record["rel_l2_mean_with_high_mode_injection"] = float(rel_l2_mean_with_high)
+            record["rel_l2_mean_with_high_mode_injection"] = float(
+                rel_l2_mean_with_high
+            )
             record["high_mode_energy_fraction_with_injection"] = high_mode_fraction_high
 
         results.append(record)

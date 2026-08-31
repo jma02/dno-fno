@@ -2,7 +2,7 @@
 
 The default mode is a read-only preflight.  Numerical generation begins only
 when ``--execute`` is supplied. Existing batches are resumed from their saved
-case assignments and validated numerical outputs.
+simulation assignments and validated numerical outputs.
 """
 
 from __future__ import annotations
@@ -65,21 +65,21 @@ from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
     DatasetViewPaths,
     build_dataset_view,
 )
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     SampleCellTarget,
     PhysicalFamilyId,
     SplitId,
-    balanced_valid_case_targets,
+    balanced_simulation_targets,
     DATASET_REVISION_BY_FAMILY,
 )
-from solver.gen_data.pipeline.case_checks import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
     checks_from_bits,
 )
-from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
-    DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
-    DatasetGenerationSpec,
-    DatasetGenerationState,
-    generate_valid_cases,
+from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
+    MAX_RETRIES_PER_PARAMETER_GROUP,
+    DatasetChunkConfig,
+    DatasetChunkState,
+    generate_simulations,
     scan_dataset_generation,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
@@ -129,18 +129,17 @@ FAMILY_CELL_IDS: dict[PaperFamily, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class GenerationRequest:
-    """User-visible identity and allocation choices for one generation run."""
+    """User-visible identity and allocation choices for one dataset chunk."""
 
     output_root: Path
     family: PaperFamily
     split: SplitId
-    accepted_cases: int
+    accepted_simulations: int
     batch_size: int
-    accepted_cases_before: int = 0
+    accepted_simulations_before: int = 0
     platform: Platform = "cpu"
     stream_id: int = 0
     first_attempt_index: int = 0
-    maximum_attempts_per_accepted_case: int = DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE
 
     def __post_init__(self) -> None:
         if self.family not in FAMILY_IDS:
@@ -148,16 +147,15 @@ class GenerationRequest:
         if not isinstance(self.split, SplitId):
             raise TypeError("split must be a SplitId")
         for value, name, positive in (
-            (self.accepted_cases, "accepted_cases", True),
+            (self.accepted_simulations, "accepted_simulations", True),
             (self.batch_size, "batch_size", True),
-            (self.accepted_cases_before, "accepted_cases_before", False),
+            (
+                self.accepted_simulations_before,
+                "accepted_simulations_before",
+                False,
+            ),
             (self.stream_id, "stream_id", False),
             (self.first_attempt_index, "first_attempt_index", False),
-            (
-                self.maximum_attempts_per_accepted_case,
-                "maximum_attempts_per_accepted_case",
-                True,
-            ),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer")
@@ -179,7 +177,7 @@ class GenerationRunResult:
 
     summary_path: Path
     view: DatasetViewPaths
-    state: DatasetGenerationState
+    state: DatasetChunkState
     summary: dict[str, object]
 
 
@@ -209,28 +207,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--split",
         choices=tuple(split.value for split in SplitId),
         required=True,
-        help="Case-level dataset split.",
+        help="Simulation-level dataset split.",
     )
     parser.add_argument(
-        "--accepted-cases",
+        "--accepted-simulations",
         type=_positive_integer,
         required=True,
-        help="Number of valid cases to generate, balanced across sampling cells.",
+        help="Number of valid simulations to generate across sampling cells.",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
         required=True,
-        help="Root containing saved proposals, shards, results, and views.",
+        help="Root containing saved batch plans, shards, results, and views.",
     )
     parser.add_argument(
         "--batch-size",
         type=_positive_integer,
         required=True,
-        help="Maximum attempted cases in one transaction.",
+        help="Maximum attempted simulations in one transaction.",
     )
     parser.add_argument(
-        "--accepted-cases-before",
+        "--accepted-simulations-before",
         type=_nonnegative_integer,
         default=0,
         help=(
@@ -256,16 +254,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0,
         help="First attempt coordinate in the selected deterministic stream.",
     )
-    parser.add_argument(
-        "--maximum-attempts-per-accepted-case",
-        type=_positive_integer,
-        default=DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE,
-        help=(
-            "Per-cell attempted-case ceiling multiplier; a cell with target "
-            "Q stops the run after this value times Q recorded attempts "
-            f"(default: {DEFAULT_MAXIMUM_ATTEMPTS_PER_VALID_CASE})."
-        ),
-    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--execute",
@@ -285,13 +273,12 @@ def request_from_args(args: argparse.Namespace) -> GenerationRequest:
         output_root=args.output_root,
         family=args.family,
         split=SplitId(args.split),
-        accepted_cases=args.accepted_cases,
+        accepted_simulations=args.accepted_simulations,
         batch_size=args.batch_size,
-        accepted_cases_before=args.accepted_cases_before,
+        accepted_simulations_before=args.accepted_simulations_before,
         platform=args.platform,
         stream_id=args.stream_id,
         first_attempt_index=args.first_attempt_index,
-        maximum_attempts_per_accepted_case=(args.maximum_attempts_per_accepted_case),
     )
 
 
@@ -347,60 +334,62 @@ def _benjamin_feir_sampling_support_record() -> dict[str, object]:
     }
 
 
-def incremental_valid_case_targets(
+def incremental_simulation_targets(
     cell_ids: Sequence[str],
     *,
-    accepted_cases_before: int,
-    case_count: int,
+    accepted_simulations_before: int,
+    simulation_count: int,
 ) -> tuple[SampleCellTarget, ...]:
-    """Return this chunk's balanced valid-case targets."""
+    """Return this chunk's balanced valid-simulation targets."""
 
-    before = balanced_valid_case_targets(
+    before = balanced_simulation_targets(
         cell_ids,
-        case_count=accepted_cases_before,
+        simulation_count=accepted_simulations_before,
     )
-    after = balanced_valid_case_targets(
+    after = balanced_simulation_targets(
         cell_ids,
-        case_count=accepted_cases_before + case_count,
+        simulation_count=accepted_simulations_before + simulation_count,
     )
     targets = tuple(
         SampleCellTarget(
             cell_id=after_target.cell_id,
-            case_count=(after_target.case_count - before_target.case_count),
+            simulation_count=(
+                after_target.simulation_count - before_target.simulation_count
+            ),
         )
         for before_target, after_target in zip(before, after)
     )
-    if any(target.case_count < 0 for target in targets):
+    if any(target.simulation_count < 0 for target in targets):
         raise RuntimeError("balanced cumulative targets must be monotone")
-    if sum(target.case_count for target in targets) != case_count:
-        raise RuntimeError("valid-case targets do not sum to the chunk size")
+    if sum(target.simulation_count for target in targets) != simulation_count:
+        raise RuntimeError("valid-simulation targets do not sum to the chunk size")
     return targets
 
 
-def build_run_spec(
+def build_chunk_config(
     request: GenerationRequest,
     *,
     execution: PaperExecution | None = None,
-) -> DatasetGenerationSpec:
-    """Build the immutable exact-contract allocation for ``request``."""
+) -> DatasetChunkConfig:
+    """Build the immutable configuration for the requested dataset chunk."""
 
     selected_execution = execution or _paper_execution(request.family)
     if selected_execution != _paper_execution(request.family):
         raise ValueError("the paper-dataset launcher requires the exact contract")
     cells = FAMILY_CELL_IDS[request.family]
-    case_targets = incremental_valid_case_targets(
+    simulation_targets = incremental_simulation_targets(
         cells,
-        accepted_cases_before=request.accepted_cases_before,
-        case_count=request.accepted_cases,
+        accepted_simulations_before=request.accepted_simulations_before,
+        simulation_count=request.accepted_simulations,
     )
     common_configuration: dict[str, object] = {
         "schema": "paper_dataset_quota_configuration_v1",
-        "purpose": "exact paper-contract accepted-case generation",
-        "case_kind": "static" if request.family == "stokes" else "trajectory",
-        "accepted_case_count": request.accepted_cases,
-        "accepted_cases_before": request.accepted_cases_before,
-        "accepted_cases_after": (
-            request.accepted_cases_before + request.accepted_cases
+        "purpose": "exact paper-contract accepted-simulation generation",
+        "simulation_type": ("static" if request.family == "stokes" else "trajectory"),
+        "accepted_simulation_count": request.accepted_simulations,
+        "accepted_simulations_before": request.accepted_simulations_before,
+        "accepted_simulations_after": (
+            request.accepted_simulations_before + request.accepted_simulations
         ),
         "ordered_cell_ids": list(cells),
         "execution_platform": request.platform,
@@ -422,18 +411,17 @@ def build_run_spec(
             family_configuration["sampling_support"] = (
                 _benjamin_feir_sampling_support_record()
             )
-    return DatasetGenerationSpec(
+    return DatasetChunkConfig(
         root=request.output_root,
         family_name=request.family,
         family_id=FAMILY_IDS[request.family],
         revision_id=DATASET_REVISION_BY_FAMILY[FAMILY_IDS[request.family]],
         split_id=request.split,
         stream_id=request.stream_id,
-        case_targets=case_targets,
+        simulation_targets=simulation_targets,
         cell_codes={cell_id: cell_code for cell_code, cell_id in enumerate(cells)},
         batch_size=request.batch_size,
         first_attempt_index=request.first_attempt_index,
-        maximum_attempts_per_accepted_case=(request.maximum_attempts_per_accepted_case),
         configuration={
             **common_configuration,
             **family_configuration,
@@ -441,45 +429,25 @@ def build_run_spec(
     )
 
 
-def _stored_rows_per_case(execution: PaperExecution) -> int:
+def _stored_rows_per_simulation(execution: PaperExecution) -> int:
     if isinstance(execution, StaticStokesContract):
         return 1
     return {
-        "tanaka": execution.stored_time_policy.tanaka_count,
-        "benjamin_feir": execution.stored_time_policy.benjamin_feir_count,
-        "jonswap_tma": execution.stored_time_policy.random_sea_count,
+        "tanaka": execution.frame_selection.tanaka_count,
+        "benjamin_feir": execution.frame_selection.benjamin_feir_count,
+        "jonswap_tma": execution.frame_selection.jonswap_tma_count,
     }[execution.family]
 
 
-def _state_record(state: DatasetGenerationState) -> dict[str, object]:
+def _state_record(state: DatasetChunkState) -> dict[str, object]:
     return {
         "complete": state.complete,
-        "accepted_by_cell": dict(state.accepted_by_cell),
-        "attempted_by_cell": dict(state.attempted_by_cell),
+        "accepted_simulation_counts": dict(state.accepted_simulation_counts),
+        "simulation_attempt_counts": dict(state.simulation_attempt_counts),
         "committed_batches": len(state.committed),
         "pending_batch_id": (
-            state.pending.batch_id if state.pending is not None else None
+            state.pending_batch.batch_id if state.pending_batch is not None else None
         ),
-        "pending_status": (
-            state.pending.status.value if state.pending is not None else None
-        ),
-        "terminal_failure": (
-            str(state.terminal_failure.failure)
-            if state.terminal_failure is not None
-            else None
-        ),
-        "attempt_limit_exhausted_cells": (
-            list(state.attempt_limit_failure.exhausted_cells)
-            if state.attempt_limit_failure is not None
-            else []
-        ),
-        "attempt_limit_failure": (
-            state.attempt_limit_failure.message
-            if state.attempt_limit_failure is not None
-            else None
-        ),
-        "next_batch_id": state.next_batch_id,
-        "next_attempt_index": state.next_attempt_index,
     }
 
 
@@ -525,20 +493,20 @@ def _require_runtime(request: GenerationRequest) -> dict[str, object]:
 def preflight(
     request: GenerationRequest,
 ) -> tuple[
-    DatasetGenerationSpec,
+    DatasetChunkConfig,
     PaperExecution,
-    DatasetGenerationState,
+    DatasetChunkState,
     dict[str, object],
 ]:
     """Perform a read-only compatibility scan and return its complete plan."""
 
     execution = _paper_execution(request.family)
-    spec = build_run_spec(request, execution=execution)
+    chunk_config = build_chunk_config(request, execution=execution)
     if request.family == "jonswap_tma":
         assert isinstance(execution, TrajectoryExecutionConfig)
         try:
             TrajectoryBatchExecutor(
-                run_spec=spec,
+                chunk_config=chunk_config,
                 execution=execution,
             )
         except ValueError as error:
@@ -547,42 +515,46 @@ def preflight(
                 "scripts/generate_paper_dataset_jonswap.py so the "
                 "nonlinear adjustment cannot be bypassed"
             ) from error
-    state = scan_dataset_generation(spec)
-    cumulative_before = balanced_valid_case_targets(
+    state = scan_dataset_generation(chunk_config)
+    cumulative_before = balanced_simulation_targets(
         FAMILY_CELL_IDS[request.family],
-        case_count=request.accepted_cases_before,
+        simulation_count=request.accepted_simulations_before,
     )
-    cumulative_after = balanced_valid_case_targets(
+    cumulative_after = balanced_simulation_targets(
         FAMILY_CELL_IDS[request.family],
-        case_count=(request.accepted_cases_before + request.accepted_cases),
+        simulation_count=(
+            request.accepted_simulations_before + request.accepted_simulations
+        ),
     )
-    attempt_ceilings = spec.attempt_ceiling_by_cell
-    case_targets = [
+    maximum_attempts = chunk_config.maximum_attempts_by_parameter_group
+    simulation_targets = [
         {
             "cell_id": target.cell_id,
-            "accepted_before": before.case_count,
-            "chunk_target_accepted": target.case_count,
-            "accepted_after": after.case_count,
-            "attempt_ceiling": attempt_ceilings[target.cell_id],
-            "durable_attempted": state.attempted_by_cell[target.cell_id],
-            "remaining_attempt_capacity": (
-                attempt_ceilings[target.cell_id]
-                - state.attempted_by_cell[target.cell_id]
+            "accepted_before": before.simulation_count,
+            "chunk_target_accepted": target.simulation_count,
+            "accepted_after": after.simulation_count,
+            "maximum_attempts": maximum_attempts[target.cell_id],
+            "durable_attempted": state.simulation_attempt_counts[target.cell_id],
+            "remaining_attempts": (
+                maximum_attempts[target.cell_id]
+                - state.simulation_attempt_counts[target.cell_id]
             ),
         }
         for before, target, after in zip(
             cumulative_before,
-            spec.case_targets,
+            chunk_config.simulation_targets,
             cumulative_after,
         )
     ]
-    nonzero_cells = sum(target.case_count > 0 for target in spec.case_targets)
-    stored_rows_per_case = _stored_rows_per_case(execution)
+    nonzero_cells = sum(
+        target.simulation_count > 0 for target in chunk_config.simulation_targets
+    )
+    stored_rows_per_simulation = _stored_rows_per_simulation(execution)
     plan: dict[str, object] = {
         "schema": "paper_dataset_quota_preflight_v1",
         "mode": "dry_run",
         "no_numerical_generation_performed": True,
-        "revision_id": spec.revision_id,
+        "revision_id": chunk_config.revision_id,
         "output_root": str(request.output_root),
         "artifact_namespace": {
             "family": request.family,
@@ -590,22 +562,24 @@ def preflight(
             "view_name": _view_name(request),
             "summary_path": str(_summary_path(request)),
         },
-        "run_spec": spec.to_json_record(),
+        "run_spec": chunk_config.to_json_record(),
         "execution": _execution_record(execution),
         "allocation": {
-            "chunk_accepted_cases": request.accepted_cases,
-            "accepted_cases_before": request.accepted_cases_before,
-            "accepted_cases_after": (
-                request.accepted_cases_before + request.accepted_cases
+            "chunk_accepted_simulations": request.accepted_simulations,
+            "accepted_simulations_before": request.accepted_simulations_before,
+            "accepted_simulations_after": (
+                request.accepted_simulations_before + request.accepted_simulations
             ),
-            "cell_count": len(spec.case_targets),
+            "cell_count": len(chunk_config.simulation_targets),
             "nonzero_quota_cell_count": nonzero_cells,
-            "quota_minimum": min(target.case_count for target in spec.case_targets),
-            "quota_maximum": max(target.case_count for target in spec.case_targets),
-            "maximum_attempts_per_accepted_case": (
-                spec.maximum_attempts_per_accepted_case
+            "quota_minimum": min(
+                target.simulation_count for target in chunk_config.simulation_targets
             ),
-            "quotas": case_targets,
+            "quota_maximum": max(
+                target.simulation_count for target in chunk_config.simulation_targets
+            ),
+            "maximum_retries_per_parameter_group": (MAX_RETRIES_PER_PARAMETER_GROUP),
+            "quotas": simulation_targets,
             "chunk_identity": {
                 "stream_id": request.stream_id,
                 "first_attempt_index": request.first_attempt_index,
@@ -616,8 +590,8 @@ def preflight(
             },
         },
         "expected_output": {
-            "stored_rows_per_accepted_case": stored_rows_per_case,
-            "retained_rows": request.accepted_cases * stored_rows_per_case,
+            "stored_rows_per_accepted_simulation": stored_rows_per_simulation,
+            "retained_rows": request.accepted_simulations * stored_rows_per_simulation,
             "spatial_points_per_row": (
                 execution.nx
                 if isinstance(execution, StaticStokesContract)
@@ -633,7 +607,7 @@ def preflight(
         "resume_state": _state_record(state),
         "runtime": _runtime_record(),
     }
-    return spec, execution, state, plan
+    return chunk_config, execution, state, plan
 
 
 def _view_name(request: GenerationRequest) -> str:
@@ -664,31 +638,35 @@ def _artifact_record(path: Path, *, root: Path) -> dict[str, object]:
     }
 
 
-def _summarize_committed_cases(
-    state: DatasetGenerationState,
-    spec: DatasetGenerationSpec,
+def _summarize_committed_simulations(
+    state: DatasetChunkState,
+    chunk_config: DatasetChunkConfig,
 ) -> dict[str, object]:
-    code_to_cell = {code: cell for cell, code in spec.cell_codes.items()}
-    attempted = Counter({target.cell_id: 0 for target in spec.case_targets})
-    accepted = Counter({target.cell_id: 0 for target in spec.case_targets})
+    code_to_cell = {code: cell for cell, code in chunk_config.cell_codes.items()}
+    attempted = Counter(
+        {target.cell_id: 0 for target in chunk_config.simulation_targets}
+    )
+    accepted = Counter(
+        {target.cell_id: 0 for target in chunk_config.simulation_targets}
+    )
     rejection_reasons: Counter[str] = Counter()
 
     for paths in state.committed:
-        with np.load(paths.proposal, allow_pickle=False) as proposal:
-            encoded_cells = np.asarray(proposal["cell_id"], dtype=np.int32)
+        with np.load(paths.batch_plan, allow_pickle=False) as batch_plan:
+            encoded_cells = np.asarray(batch_plan["cell_id"], dtype=np.int32)
         result = _read_json_object(paths.result)
-        cases = result.get("cases")
-        if not isinstance(cases, list) or len(cases) != encoded_cells.size:
-            raise RuntimeError("result does not contain every proposed case")
-        for local_index, case in enumerate(cases):
-            if not isinstance(case, dict):
-                raise TypeError("result case must be a JSON object")
+        simulations = result.get("simulations")
+        if not isinstance(simulations, list) or len(simulations) != encoded_cells.size:
+            raise RuntimeError("result does not contain every planned simulation")
+        for local_index, simulation in enumerate(simulations):
+            if not isinstance(simulation, dict):
+                raise TypeError("result simulation must be a JSON object")
             cell_id = code_to_cell[int(encoded_cells[local_index])]
             attempted[cell_id] += 1
-            if bool(case.get("accepted")):
+            if bool(simulation.get("accepted")):
                 accepted[cell_id] += 1
                 continue
-            failed_bits = case.get("failed_bits")
+            failed_bits = simulation.get("failed_bits")
             if isinstance(failed_bits, bool) or not isinstance(failed_bits, int):
                 raise TypeError("result failed_bits must be an integer")
             names = tuple(
@@ -697,18 +675,18 @@ def _summarize_committed_cases(
             )
             rejection_reasons["+".join(names) if names else "missing_check"] += 1
 
-    if dict(accepted) != dict(state.accepted_by_cell):
+    if dict(accepted) != dict(state.accepted_simulation_counts):
         raise RuntimeError("summary counts disagree with generation state")
-    if dict(attempted) != dict(state.attempted_by_cell):
+    if dict(attempted) != dict(state.simulation_attempt_counts):
         raise RuntimeError("summary attempts disagree with generation state")
     by_cell = {
         target.cell_id: {
-            "target_accepted": target.case_count,
+            "target_accepted": target.simulation_count,
             "attempted": attempted[target.cell_id],
             "accepted": accepted[target.cell_id],
             "rejected": attempted[target.cell_id] - accepted[target.cell_id],
         }
-        for target in spec.case_targets
+        for target in chunk_config.simulation_targets
     }
     attempted_total = sum(attempted.values())
     accepted_total = sum(accepted.values())
@@ -726,15 +704,17 @@ def _validate_view(
     *,
     request: GenerationRequest,
     execution: PaperExecution,
-    attempted_cases: int,
+    attempted_simulations: int,
 ) -> dict[str, object]:
     manifest = _read_json_object(view.manifest)
-    expected_rows = request.accepted_cases * _stored_rows_per_case(execution)
+    expected_rows = request.accepted_simulations * _stored_rows_per_simulation(
+        execution
+    )
     expected_values = {
         "schema_version": DATASET_VIEW_SCHEMA_VERSION,
         "n_rows": expected_rows,
-        "n_trajectories": attempted_cases,
-        "n_accepted_trajectories": request.accepted_cases,
+        "n_trajectories": attempted_simulations,
+        "n_accepted_trajectories": request.accepted_simulations,
         "n_accepted_rows": expected_rows,
     }
     for name, expected in expected_values.items():
@@ -770,26 +750,19 @@ def _validate_view(
 
 
 def run_generation(request: GenerationRequest) -> GenerationRunResult:
-    """Generate the requested valid cases, then validate the dataset view."""
+    """Generate the requested valid simulations, then validate the dataset view."""
 
-    spec, execution, initial_state, plan = preflight(request)
+    chunk_config, execution, initial_state, plan = preflight(request)
     runtime = _require_runtime(request)
-    if initial_state.terminal_failure is not None:
-        raise RuntimeError(
-            f"generation already terminated at {initial_state.terminal_failure.failure}"
-        )
-    if initial_state.attempt_limit_failure is not None:
-        raise RuntimeError(initial_state.attempt_limit_failure.message)
-
     invocation_started_at = datetime.now().astimezone()
     total_started = perf_counter()
     metadata = {
         "launcher": "scripts/generate_paper_dataset.py",
-        "run_spec": spec.to_json_record(),
+        "run_spec": chunk_config.to_json_record(),
     }
     if isinstance(execution, StaticStokesContract):
         executor = make_static_stokes_batch_executor(
-            run_spec=spec,
+            chunk_config=chunk_config,
             contract=execution,
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             metadata=metadata,
@@ -797,20 +770,18 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         length = execution.length
     else:
         executor = TrajectoryBatchExecutor(
-            run_spec=spec,
+            chunk_config=chunk_config,
             execution=execution,
             metadata=metadata,
         )
         length = execution.numerical.length
     generation_started = perf_counter()
-    state = generate_valid_cases(spec, executor)
+    state = generate_simulations(chunk_config, executor)
     generation_seconds = perf_counter() - generation_started
-    if state.terminal_failure is not None:
-        raise RuntimeError(f"generation terminated at {state.terminal_failure.failure}")
-    if state.attempt_limit_failure is not None:
-        raise RuntimeError(state.attempt_limit_failure.message)
     if not state.complete:
-        raise RuntimeError("generation stopped before every valid-case target was met")
+        raise RuntimeError(
+            "generation stopped before every valid-simulation target was met"
+        )
 
     view_started = perf_counter()
     view = build_dataset_view(
@@ -821,15 +792,17 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
     )
     view_seconds = perf_counter() - view_started
     validation_started = perf_counter()
-    counts = _summarize_committed_cases(state, spec)
-    attempted_cases = counts["attempted"]
-    if isinstance(attempted_cases, bool) or not isinstance(attempted_cases, int):
-        raise TypeError("attempted case count must be an integer")
+    counts = _summarize_committed_simulations(state, chunk_config)
+    attempted_simulations = counts["attempted"]
+    if isinstance(attempted_simulations, bool) or not isinstance(
+        attempted_simulations, int
+    ):
+        raise TypeError("attempted simulation count must be an integer")
     view_record = _validate_view(
         view,
         request=request,
         execution=execution,
-        attempted_cases=attempted_cases,
+        attempted_simulations=attempted_simulations,
     )
     validation_seconds = perf_counter() - validation_started
 
@@ -837,7 +810,7 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         "schema": "paper_dataset_quota_summary_v1",
         "status": "complete",
         "output_root": str(request.output_root),
-        "run_spec": spec.to_json_record(),
+        "run_spec": chunk_config.to_json_record(),
         "execution": _execution_record(execution),
         "runtime": runtime,
         "preflight": plan,

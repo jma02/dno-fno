@@ -1,35 +1,34 @@
-"""Generate and validate one batch of static Stokes cases."""
+"""Generate and validate one batch of static Stokes simulations."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Protocol, TypeAlias
 
-from solver.gen_data.pipeline.batch_storage import BatchPaths, ensure_proposal
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.batch_storage import BatchPaths, save_batch_plan
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     PhysicalFamilyId,
 )
-from solver.gen_data.pipeline.case_checks import (
-    CaseCheckResult,
-    CaseCheck,
+from solver.gen_data.pipeline.simulation_checks import (
+    SimulationCheckResult,
+    SimulationCheck,
 )
-from solver.gen_data.pipeline.valid_case_generation import (
+from solver.gen_data.pipeline.dataset_generation import (
     BatchExecutor,
-    DatasetGenerationSpec,
+    DatasetChunkConfig,
 )
 from solver.gen_data.pipeline.writer import (
-    CaseOutcome,
-    batch_paths_for_assignments,
-    build_proposal_arrays,
-    commit_case_outcomes,
+    SimulationOutcome,
+    build_batch_plan,
+    commit_simulation_outcomes,
 )
 from solver.gen_data.stokes_sampling import (
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
     STOKES_SAMPLE_CELLS,
     StokesSample,
     UrsellRedrawLimitReached,
-    sample_stokes_case,
+    sample_stokes_simulation,
 )
 from solver.gen_data.stokes_static_pipeline import (
     STATIC_STOKES_REQUIRED_CHECKS,
@@ -61,10 +60,10 @@ class StokesSampler(Protocol):
 
 def _ursell_redraw_failure_outcome(
     contract: StaticStokesContract,
-) -> CaseOutcome:
-    reason = CaseCheck.OUTSIDE_SUPPORT
-    return CaseOutcome(
-        decision=CaseCheckResult(
+) -> SimulationOutcome:
+    reason = SimulationCheck.OUTSIDE_SUPPORT
+    return SimulationOutcome(
+        decision=SimulationCheckResult(
             required=STATIC_STOKES_REQUIRED_CHECKS,
             evaluated=reason,
             failed=reason,
@@ -83,18 +82,18 @@ def _ursell_redraw_failure_outcome(
 
 
 def _validate_static_stokes_executor(
-    run_spec: DatasetGenerationSpec,
+    chunk_config: DatasetChunkConfig,
     contract: StaticStokesContract,
     maximum_ursell_redraws: int,
     sampler: StokesSampler,
     state_constructor: StaticStokesStateConstructor,
     target_evaluator: StaticDnoEvaluator,
 ) -> None:
-    if run_spec.family_name != "stokes":
+    if chunk_config.family_name != "stokes":
         raise ValueError("static Stokes generation must use family_name='stokes'")
-    if run_spec.family_id is not PhysicalFamilyId.STOKES:
+    if chunk_config.family_id is not PhysicalFamilyId.STOKES:
         raise ValueError("static Stokes generation requires the Stokes family ID")
-    unknown_cells = set(run_spec.cell_codes).difference(_STOKES_CELL_IDS)
+    unknown_cells = set(chunk_config.cell_codes).difference(_STOKES_CELL_IDS)
     if unknown_cells:
         raise ValueError(f"unknown Stokes sampling cells: {sorted(unknown_cells)}")
     if (
@@ -104,27 +103,26 @@ def _validate_static_stokes_executor(
     ):
         raise ValueError("maximum_ursell_redraws must be a nonnegative integer")
 
-    configured_contract = run_spec.configuration.get("contract")
+    configured_contract = chunk_config.configuration.get("contract")
     if (
         not isinstance(configured_contract, Mapping)
         or dict(configured_contract) != contract.to_json_record()
     ):
         raise ValueError(
-            "run configuration contract differs from the supplied static Stokes contract"
+            "chunk configuration contract differs from the supplied static Stokes contract"
         )
-    configured_sampler = run_spec.configuration.get("sampler")
+    configured_sampler = chunk_config.configuration.get("sampler")
     if (
         not isinstance(configured_sampler, Mapping)
-        or configured_sampler.get("maximum_ursell_redraws")
-        != maximum_ursell_redraws
+        or configured_sampler.get("maximum_ursell_redraws") != maximum_ursell_redraws
     ):
         raise ValueError(
-            "run configuration sampler redraw limit differs from the supplied "
+            "chunk configuration sampler redraw limit differs from the supplied "
             "static Stokes executor"
         )
     if contract.role == "paper_dataset" and (
         maximum_ursell_redraws != DEFAULT_MAXIMUM_URSELL_REDRAWS
-        or sampler is not sample_stokes_case
+        or sampler is not sample_stokes_simulation
         or state_constructor is not construct_stokes_state
         or target_evaluator is not compute_dno_target
     ):
@@ -140,7 +138,7 @@ def _resolve_stokes_attempt(
     contract: StaticStokesContract,
     maximum_ursell_redraws: int,
     sampler: StokesSampler,
-) -> tuple[JsonRecord, StokesSample | CaseOutcome]:
+) -> tuple[JsonRecord, StokesSample | SimulationOutcome]:
     try:
         sample = sampler(
             assignment,
@@ -160,13 +158,13 @@ def _resolve_stokes_attempt(
 
 
 def _evaluate_stokes_attempt(
-    result: StokesSample | CaseOutcome,
+    result: StokesSample | SimulationOutcome,
     *,
     contract: StaticStokesContract,
     state_constructor: StaticStokesStateConstructor,
     target_evaluator: StaticDnoEvaluator,
-) -> CaseOutcome:
-    if isinstance(result, CaseOutcome):
+) -> SimulationOutcome:
+    if isinstance(result, SimulationOutcome):
         return result
     return evaluate_static_stokes_sample(
         result,
@@ -178,18 +176,18 @@ def _evaluate_stokes_attempt(
 
 def make_static_stokes_batch_executor(
     *,
-    run_spec: DatasetGenerationSpec,
+    chunk_config: DatasetChunkConfig,
     contract: StaticStokesContract,
     maximum_ursell_redraws: int = DEFAULT_MAXIMUM_URSELL_REDRAWS,
     metadata: Mapping[str, object] | None = None,
-    sampler: StokesSampler = sample_stokes_case,
+    sampler: StokesSampler = sample_stokes_simulation,
     state_constructor: StaticStokesStateConstructor = construct_stokes_state,
     target_evaluator: StaticDnoEvaluator = compute_dno_target,
 ) -> BatchExecutor:
     """Build the callback that resolves and commits static Stokes batches."""
 
     _validate_static_stokes_executor(
-        run_spec,
+        chunk_config,
         contract,
         maximum_ursell_redraws,
         sampler,
@@ -198,6 +196,13 @@ def make_static_stokes_batch_executor(
     )
     contract_record = contract.to_json_record()
     additional_metadata = dict(metadata or {})
+    common_metadata = {
+        "family": "stokes",
+        "simulation_type": "static",
+        "contract": contract_record,
+        "sampler": {"maximum_ursell_redraws": maximum_ursell_redraws},
+        "additional_metadata": additional_metadata,
+    }
 
     def execute(
         assignments: tuple[AttemptAssignment, ...],
@@ -215,32 +220,26 @@ def make_static_stokes_batch_executor(
             )
             for assignment in assignments
         )
-        proposal_arrays = build_proposal_arrays(
+        batch_plan = build_batch_plan(
             assignments,
             tuple(specification for specification, _ in resolved),
-            cell_codes=run_spec.cell_codes,
+            cell_codes=chunk_config.cell_codes,
             batch_id=batch_id,
             metadata={
-                "family": "stokes",
-                "case_kind": "static",
-                "contract": contract_record,
-                "sampler": {
-                    "maximum_ursell_redraws": maximum_ursell_redraws,
-                },
+                **common_metadata,
                 "retained_times": [0.0],
                 "selected_dense_indices": [0],
-                "additional_metadata": additional_metadata,
             },
         )
-        paths = batch_paths_for_assignments(
-            run_spec.root,
-            assignments,
-            family_name=run_spec.family_name,
+        paths = BatchPaths.for_batch(
+            chunk_config.root,
+            family=chunk_config.family_name,
+            split=chunk_config.split_id.value,
             batch_id=batch_id,
         )
 
         # No state construction or target evaluation occurs before this write.
-        ensure_proposal(paths, proposal_arrays)
+        save_batch_plan(paths, batch_plan)
         complete_outcomes = tuple(
             _evaluate_stokes_attempt(
                 result,
@@ -250,25 +249,19 @@ def make_static_stokes_batch_executor(
             )
             for _, result in resolved
         )
-        commit_case_outcomes(
+        commit_simulation_outcomes(
             paths,
-            proposal_arrays,
+            batch_plan,
             complete_outcomes,
             metadata={
-                "family": "stokes",
-                "case_kind": "static",
-                "contract": contract_record,
-                "sampler": {
-                    "maximum_ursell_redraws": maximum_ursell_redraws,
-                },
-                "attempted_cases": len(complete_outcomes),
-                "accepted_cases": sum(
+                **common_metadata,
+                "attempted_simulations": len(complete_outcomes),
+                "accepted_simulations": sum(
                     outcome.decision.accepted for outcome in complete_outcomes
                 ),
                 "sampling_exhaustions": sum(
-                    isinstance(result, CaseOutcome) for _, result in resolved
+                    isinstance(result, SimulationOutcome) for _, result in resolved
                 ),
-                "additional_metadata": additional_metadata,
             },
         )
         return paths

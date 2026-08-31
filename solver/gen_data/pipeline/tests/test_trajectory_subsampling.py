@@ -19,32 +19,34 @@ import numpy as np  # noqa: E402
 from solver.gen_data.pipeline.trajectory_checks import (  # noqa: E402
     TrajectoryHealthMetrics,
 )
-from solver.gen_data.pipeline.batch_storage import ensure_proposal  # noqa: E402
+from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
+    BatchPaths,
+    save_batch_plan,
+)
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.case_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
-    CaseKey,
+    SimulationKey,
     SplitId,
 )
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
-    TrajectoryCaseResult,
+    TrajectorySimulationResult,
     TrajectorySamples,
     execute_trajectory_batch,
 )
-from solver.gen_data.pipeline.case_checks import (  # noqa: E402
-    CaseCheckResult,
-    CaseCheck,
+from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
+    SimulationCheckResult,
+    SimulationCheck,
 )
-from solver.gen_data.pipeline.trajectory_writer import (  # noqa: E402
-    StoredTimePolicy,
-    _selected_indices,
-    outcomes_from_trajectories,
+from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
+    TrajectoryFrameSelectionConfig,
+    _select_subsample_time_indices,
+    subsample_trajectories,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
-    batch_paths_for_assignments,
-    build_proposal_arrays,
-    commit_case_outcomes,
+    build_batch_plan,
+    commit_simulation_outcomes,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -61,11 +63,11 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             xi=np.zeros_like(eta),
             gxi=np.zeros_like(eta),
         )
-        indices = _selected_indices(
+        indices = _select_subsample_time_indices(
             trajectory,
             family="benjamin_feir",
             length=2.0 * np.pi,
-            policy=StoredTimePolicy(benjamin_feir_count=4),
+            frame_selection=TrajectoryFrameSelectionConfig(benjamin_feir_count=4),
         )
         np.testing.assert_array_equal(
             indices,
@@ -91,7 +93,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         depths = np.asarray([1.0, 1.5])
         assignments = tuple(
             AttemptAssignment(
-                case_key=CaseKey(
+                simulation_key=SimulationKey(
                     family_id=4,
                     revision_id=1,
                     split_id=SplitId.TEST,
@@ -102,7 +104,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             )
             for index, cell in enumerate(("finite_a", "finite_b"))
         )
-        proposal = build_proposal_arrays(
+        proposal = build_batch_plan(
             assignments,
             ({"amplitude": 0.001}, {"amplitude": 0.0015}),
             cell_codes={"finite_a": 0, "finite_b": 1},
@@ -111,41 +113,35 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            paths = batch_paths_for_assignments(
+            paths = BatchPaths.for_batch(
                 root,
-                assignments,
-                family_name="jonswap_tma",
+                family="jonswap_tma",
+                split=SplitId.TEST.value,
                 batch_id=0,
             )
-            ensure_proposal(paths, proposal)
-            self.assertTrue(paths.proposal.exists())
+            save_batch_plan(paths, proposal)
+            self.assertTrue(paths.batch_plan.exists())
 
+            saved_times = np.asarray([0.0, 0.02, 0.04])
             execution = execute_trajectory_batch(
                 eta0,
                 xi0,
                 depths,
-                np.asarray([0.0, 0.02, 0.04]),
+                (saved_times,) * eta0.shape[0],
                 config=contract,
             )
-            outcomes = outcomes_from_trajectories(
+            outcomes = subsample_trajectories(
                 execution,
                 depths,
                 family="jonswap_tma",
                 length=contract.length,
-                integration_dt=contract.dt,
-                policy=StoredTimePolicy(
+                frame_selection=TrajectoryFrameSelectionConfig(
                     tanaka_count=2,
                     benjamin_feir_count=2,
-                    random_sea_count=3,
+                    jonswap_tma_count=3,
                 ),
             )
             self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
-            self.assertTrue(
-                all(
-                    outcome.metrics["integration_dt"] == contract.dt
-                    for outcome in outcomes
-                )
-            )
             self.assertTrue(
                 all(
                     np.array_equal(
@@ -156,11 +152,11 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                     if outcome.rows is not None
                 )
             )
-            commit_case_outcomes(
+            commit_simulation_outcomes(
                 paths,
                 proposal,
                 outcomes,
-                metadata={"accepted_cases": 2},
+                metadata={"accepted_simulations": 2},
             )
             view = build_dataset_view(
                 root,
@@ -190,27 +186,26 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             xi=xi,
             gxi=gxi,
         )
-        reason = CaseCheck.INCOMPLETE_TRAJECTORY
-        decision = CaseCheckResult(
+        reason = SimulationCheck.INCOMPLETE_TRAJECTORY
+        decision = SimulationCheckResult(
             required=reason,
             evaluated=reason,
-            failed=CaseCheck.NONE,
+            failed=SimulationCheck.NONE,
         )
-        cases = (
-            TrajectoryCaseResult(
+        simulations = (
+            TrajectorySimulationResult(
                 maximum_gl2_stage_residual=0.0,
                 decision=decision,
                 trajectory=trajectory,
             ),
         )
 
-        outcome = outcomes_from_trajectories(
-            cases,
+        outcome = subsample_trajectories(
+            simulations,
             np.asarray([1.0]),
             family="tanaka",
             length=2.0 * math.pi,
-            integration_dt=0.01,
-            policy=StoredTimePolicy(tanaka_count=2),
+            frame_selection=TrajectoryFrameSelectionConfig(tanaka_count=2),
         )[0]
 
         self.assertTrue(outcome.decision.accepted)
@@ -220,17 +215,16 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             outcome.rows.selected_dense_index,
             np.asarray([0, 2], dtype=np.int32),
         )
-        self.assertNotIn("hamiltonian_drift_evaluated", outcome.metrics)
 
-    def test_rejected_case_persists_finite_internal_health_metrics(self) -> None:
-        reason = CaseCheck.HAMILTONIAN_DRIFT
-        decision = CaseCheckResult(
+    def test_rejected_simulation_persists_finite_internal_health_metrics(self) -> None:
+        reason = SimulationCheck.HAMILTONIAN_DRIFT
+        decision = SimulationCheckResult(
             required=reason,
             evaluated=reason,
             failed=reason,
         )
-        cases = (
-            TrajectoryCaseResult(
+        simulations = (
+            TrajectorySimulationResult(
                 maximum_gl2_stage_residual=0.0,
                 decision=decision,
                 trajectory=None,
@@ -245,25 +239,23 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             ),
         )
 
-        outcome = outcomes_from_trajectories(
-            cases,
+        outcome = subsample_trajectories(
+            simulations,
             np.asarray([1.0]),
             family="benjamin_feir",
             length=2.0 * math.pi,
-            integration_dt=0.01,
-            policy=StoredTimePolicy(benjamin_feir_count=2),
+            frame_selection=TrajectoryFrameSelectionConfig(benjamin_feir_count=2),
         )[0]
 
         self.assertFalse(outcome.decision.accepted)
         self.assertIsNone(outcome.rows)
-        self.assertTrue(outcome.metrics["internal_health_evaluated"])
         self.assertEqual(
             outcome.metrics["maximum_internal_hamiltonian_drift"],
             2.0e-3,
         )
         self.assertEqual(
-            outcome.metrics["internal_hamiltonian_drift_threshold"],
-            1.0e-3,
+            outcome.metrics["initial_internal_hamiltonian"],
+            2.5,
         )
         self.assertEqual(
             outcome.metrics["minimum_internal_water_column"],

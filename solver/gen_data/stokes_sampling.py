@@ -26,9 +26,9 @@ from solver.reference_solutions.stokes_wave import (
     FINITE_DEPTH_STOKES_URSELL_LIMIT,
     finite_depth_stokes_ursell_upper_bound,
 )
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 
 
@@ -119,7 +119,7 @@ class StokesSample:
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
-        record = {
+        return {
             **self.assignment.to_json_record(),
             "status": "accepted",
             "constructor": "project_fifth_order_stokes_fixed_phase_v1",
@@ -162,7 +162,6 @@ class StokesSample:
                 for index, (amplitude, ursell) in enumerate(self.amplitude_attempts)
             ],
         }
-        return record
 
 
 class UrsellRedrawLimitReached(ValueError):
@@ -428,7 +427,7 @@ def _failure_record(
     steepness_lower, steepness_upper = PAPER_STOKES_STEEPNESS_CELLS[
         steepness_cell_index
     ]
-    record = {
+    return {
         **assignment.to_json_record(),
         "status": "failed_ursell_redraw_limit",
         "constructor": "project_fifth_order_stokes_fixed_phase_v1",
@@ -469,10 +468,9 @@ def _failure_record(
             for index, (amplitude, ursell) in enumerate(attempts)
         ],
     }
-    return record
 
 
-def sample_stokes_case(
+def sample_stokes_simulation(
     assignment: AttemptAssignment,
     *,
     domain_length: float = PAPER_DOMAIN_LENGTH,
@@ -510,7 +508,7 @@ def sample_stokes_case(
     if not carrier_mode_support:
         raise ValueError("the assigned Stokes cell has no feasible carrier mode")
 
-    rng = random_generator_for_case(assignment.case_key)
+    rng = random_generator_for_simulation(assignment.simulation_key)
     carrier_mode = carrier_mode_support[int(rng.integers(0, len(carrier_mode_support)))]
     wavenumber = 2.0 * math.pi * carrier_mode / domain_length
     depth_draw_bounds = effective_depth_bounds(

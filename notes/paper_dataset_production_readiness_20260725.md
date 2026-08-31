@@ -193,7 +193,7 @@ Seven additional pieces now exist.
 4. `jonswap_tma_sampling.py` implements all 27
    depth-stratum--peak-enhancement--direction cells. It records the two
    realized phase arrays in the pre-numerical case specification.
-5. `pipeline/trajectory_writer.py` is the boundary between numerical
+5. `pipeline/trajectory_subsampling.py` is the boundary between numerical
    acceptance and storage. It selects times only for an accepted result,
    converts the accepted \(h=0.01\) trajectory into rows, and converts
    nonfinite diagnostic scalars to JSON `null`. A CPU integration test runs an

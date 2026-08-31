@@ -5,6 +5,7 @@ Run directly; pytest is not required:
     JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' JAX_ENABLE_X64=True \
       uv run python solver/gen_data/tests/test_tanaka_tangent_hermite.py
 """
+
 from __future__ import annotations
 
 import math
@@ -24,7 +25,7 @@ import numpy as np  # noqa: E402
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_FINE_FACTOR,
     _validate_tanaka_profile_batch,
-    build_per_case_initial_conditions,
+    build_per_simulation_initial_conditions,
     cubic_hermite_zero_exterior,
     place_tanaka_profile_periodic,
     tanaka_periodic_image_radius,
@@ -58,8 +59,8 @@ jax.config.update("jax_enable_x64", True)
 LENGTH = 2.0 * math.pi
 NX = 1024
 FILTER_FRACTION = 0.25
-CASE31_DEPTH = 0.26861433760407505
-CASE31_SPECS = [
+SIMULATION31_DEPTH = 0.26861433760407505
+SIMULATION31_SPECS = [
     TanakaCrest(
         alpha=0.05548354495289499,
         center=3.5548496920089176,
@@ -108,15 +109,15 @@ def build_fixture() -> TanakaFixture:
     )
 
     direction_center = 0.731
-    case_specs = [
-        CASE31_SPECS,
+    simulation_specs = [
+        SIMULATION31_SPECS,
         [TanakaCrest(0.10, direction_center, 1)],
         [TanakaCrest(0.10, direction_center, -1)],
     ]
-    eta, xi = build_per_case_initial_conditions(
+    eta, xi = build_per_simulation_initial_conditions(
         template_params=template,
-        case_h_ref=np.asarray((CASE31_DEPTH, 0.10, 0.10)),
-        case_specs=case_specs,
+        simulation_h_ref=np.asarray((SIMULATION31_DEPTH, 0.10, 0.10)),
+        simulation_specs=simulation_specs,
         length=LENGTH,
         nx=NX,
         gravity=1.0,
@@ -125,7 +126,7 @@ def build_fixture() -> TanakaFixture:
     eta = apply_lowpass(eta, k, FILTER_FRACTION)
     xi = apply_lowpass(xi, k, FILTER_FRACTION)
     xi = xi - jnp.mean(xi, axis=-1, keepdims=True)
-    depths = jnp.asarray((CASE31_DEPTH, 0.10, 0.10))[:, None]
+    depths = jnp.asarray((SIMULATION31_DEPTH, 0.10, 0.10))[:, None]
     gxi = apply_lowpass(
         dno_series_eval(
             eta,
@@ -330,7 +331,7 @@ def test_periodic_placement_translation_and_image_convergence() -> None:
     assert relative_l2(grid_shifted, jnp.roll(place(center, image_radius), 1)) < 1e-11
 
 
-def test_case31_tail_and_direction_regression() -> None:
+def test_simulation31_tail_and_direction_regression() -> None:
     fixture = build_fixture()
     for field in (fixture.eta, fixture.xi, fixture.gxi):
         assert bool(jnp.all(jnp.isfinite(field)))
@@ -359,12 +360,12 @@ def test_case31_tail_and_direction_regression() -> None:
     np.testing.assert_allclose(fixture.gxi[1], -fixture.gxi[2], rtol=2e-11, atol=2e-13)
 
 
-def test_case31_one_interval_production_rollout() -> None:
+def test_simulation31_one_interval_production_rollout() -> None:
     fixture = build_fixture()
     defaults = make_normalized_rollout_settings()._replace(
         filter_fraction=FILTER_FRACTION
     )
-    depth = jnp.asarray(((CASE31_DEPTH,),), dtype=jnp.float64)
+    depth = jnp.asarray(((SIMULATION31_DEPTH,),), dtype=jnp.float64)
     params = SolverParams(
         nx=NX,
         length=LENGTH,
@@ -401,7 +402,7 @@ def test_case31_one_interval_production_rollout() -> None:
     assert np.all(np.isfinite(eta))
     assert np.all(np.isfinite(xi))
     assert np.all(np.isfinite(gxi))
-    assert float(np.min(CASE31_DEPTH + eta)) > 0.1 * CASE31_DEPTH
+    assert float(np.min(SIMULATION31_DEPTH + eta)) > 0.1 * SIMULATION31_DEPTH
     assert float(np.max(np.abs(np.mean(xi, axis=-1)))) < 1e-12
 
     for field in (eta, xi, gxi):
@@ -425,8 +426,8 @@ def main() -> None:
         test_profile_amplitude_validation_rejects_the_old_floor,
         test_profiles_remain_nonnegative_and_monotone,
         test_periodic_placement_translation_and_image_convergence,
-        test_case31_tail_and_direction_regression,
-        test_case31_one_interval_production_rollout,
+        test_simulation31_tail_and_direction_regression,
+        test_simulation31_one_interval_production_rollout,
     )
     for test in tests:
         test()

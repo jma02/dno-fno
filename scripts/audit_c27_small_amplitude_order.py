@@ -93,7 +93,7 @@ class RegisteredStates:
     eta: np.ndarray
     xi: np.ndarray
     depths: np.ndarray
-    case_ids: np.ndarray
+    simulation_ids: np.ndarray
     archive_indices: np.ndarray
     family_indices: np.ndarray
     family_names: np.ndarray
@@ -129,7 +129,7 @@ def trajectory_paths(run_dir: Path) -> dict[str, Path]:
 
 def depth_stratified_indices(
     depths: np.ndarray,
-    case_ids: np.ndarray,
+    simulation_ids: np.ndarray,
     count: int,
 ) -> np.ndarray:
     """Choose one deterministic midpoint from each equal-count depth stratum."""
@@ -137,7 +137,7 @@ def depth_stratified_indices(
         raise ValueError(
             f"invalid state count {count} for archive of size {depths.size}"
         )
-    order = np.lexsort((case_ids, depths))
+    order = np.lexsort((simulation_ids, depths))
     edges = np.linspace(0, depths.size, count + 1, dtype=np.int64)
     positions = np.asarray(
         [
@@ -161,19 +161,21 @@ def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredS
     eta_parts: list[np.ndarray] = []
     xi_parts: list[np.ndarray] = []
     depth_parts: list[np.ndarray] = []
-    case_parts: list[np.ndarray] = []
+    simulation_parts: list[np.ndarray] = []
     archive_index_parts: list[np.ndarray] = []
     family_index_parts: list[np.ndarray] = []
 
     for family_index, family in enumerate(FAMILY_NAMES):
         path = paths[family]
         with np.load(path, allow_pickle=False) as archive:
-            required = {"truth_eta", "truth_xi", "depths", "case_ids"}
+            required = {"truth_eta", "truth_xi", "depths", "simulation_ids"}
             if missing_keys := required.difference(archive.files):
                 raise KeyError(f"{path} is missing {sorted(missing_keys)}")
             depths = np.asarray(archive["depths"], dtype=np.float64)
-            case_ids = np.asarray(archive["case_ids"], dtype=np.int64)
-            selected = depth_stratified_indices(depths, case_ids, states_per_family)
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+            selected = depth_stratified_indices(
+                depths, simulation_ids, states_per_family
+            )
             eta = np.asarray(archive["truth_eta"][0, selected], dtype=np.float64)
             xi = np.asarray(archive["truth_xi"][0, selected], dtype=np.float64)
 
@@ -183,7 +185,7 @@ def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredS
         eta_parts.append(eta)
         xi_parts.append(xi)
         depth_parts.append(depths[selected])
-        case_parts.append(case_ids[selected])
+        simulation_parts.append(simulation_ids[selected])
         archive_index_parts.append(selected)
         family_index_parts.append(
             np.full(states_per_family, family_index, dtype=np.int64)
@@ -194,7 +196,7 @@ def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredS
         eta=np.concatenate(eta_parts),
         xi=np.concatenate(xi_parts),
         depths=np.concatenate(depth_parts),
-        case_ids=np.concatenate(case_parts),
+        simulation_ids=np.concatenate(simulation_parts),
         archive_indices=np.concatenate(archive_index_parts),
         family_indices=family_indices,
         family_names=np.asarray([FAMILY_NAMES[index] for index in family_indices]),
@@ -712,7 +714,7 @@ def main() -> int:
         {
             "family": str(states.family_names[index]),
             "archive_index": int(states.archive_indices[index]),
-            "case_id": int(states.case_ids[index]),
+            "simulation_id": int(states.simulation_ids[index]),
             "depth": float(states.depths[index]),
         }
         for index in range(state_count)
@@ -734,7 +736,7 @@ def main() -> int:
         "family_names": np.asarray(FAMILY_NAMES),
         "state_family_names": states.family_names,
         "family_indices": states.family_indices,
-        "case_ids": states.case_ids,
+        "simulation_ids": states.simulation_ids,
         "archive_indices": states.archive_indices,
         "depths": states.depths,
         "eta_frame0": states.eta,
@@ -783,7 +785,7 @@ def main() -> int:
             "states_per_family": args.states_per_family,
             "state_count": state_count,
             "frame_index": 0,
-            "rule": "sort by (depth, case_id), split each family into equal-count strata, choose each stratum midpoint",
+            "rule": "sort by (depth, simulation_id), split each family into equal-count strata, choose each stratum midpoint",
             "source_paths": list(states.source_paths),
             "selection": selection,
         },

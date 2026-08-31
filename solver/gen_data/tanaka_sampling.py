@@ -10,8 +10,8 @@ Amplitudes are drawn first, then depth is drawn log-uniformly above the
 elementary profile-resolution lower bound.
 
 Here ``alpha_i = a_i / h``, where ``a_i`` is the dimensional crest
-amplitude.  Each attempted case uses one PCG64 stream constructed from all
-five words in ``AttemptAssignment.case_key.seed_words``.
+amplitude. Each attempted simulation uses one PCG64 stream constructed from all
+five words in ``AttemptAssignment.simulation_key.seed_words``.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ from typing import Final, Literal, TypeAlias
 
 import numpy as np
 
-from solver.gen_data.pipeline.case_allocation import (
+from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    random_generator_for_case,
+    random_generator_for_simulation,
 )
 
 
@@ -149,7 +149,7 @@ class TanakaSample:
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
-        key = self.assignment.case_key
+        key = self.assignment.simulation_key
         if key.revision_id != TANAKA_SAMPLING_REVISION_V3:
             raise ValueError(f"unsupported Tanaka sampling revision: {key.revision_id}")
 
@@ -281,7 +281,7 @@ def tanaka_support_violations(
     """Return every violation of the declared Tanaka sampling support."""
 
     violations: list[str] = []
-    revision_id = sample.assignment.case_key.revision_id
+    revision_id = sample.assignment.simulation_key.revision_id
     if revision_id != TANAKA_SAMPLING_REVISION_V3:
         violations.append("unsupported Tanaka sampling revision")
     expected_cell = TANAKA_SAMPLE_CELLS.get(sample.assignment.cell_id)
@@ -329,11 +329,14 @@ def tanaka_support_violations(
         violations.append(
             "number of right-moving crests does not match the parameter category"
         )
-    if math.isfinite(sample.domain_length) and sample.domain_length > 0.0:
-        if any(
+    if (
+        math.isfinite(sample.domain_length)
+        and sample.domain_length > 0.0
+        and any(
             not 0.0 <= crest.center < sample.domain_length for crest in sample.crests
-        ):
-            violations.append("crest centers must lie in [0, L)")
+        )
+    ):
+        violations.append("crest centers must lie in [0, L)")
 
     total_alpha = sample.total_dimensionless_amplitude
     if not math.isfinite(total_alpha) or not (
@@ -388,19 +391,19 @@ def tanaka_support_violations(
     return tuple(violations)
 
 
-def sample_tanaka_case(
+def sample_tanaka_simulation(
     assignment: AttemptAssignment,
     *,
     domain_length: float = 2.0 * np.pi,
 ) -> TanakaSample:
-    """Sample one complete Tanaka specification for an attempted case."""
+    """Sample one complete Tanaka specification for an attempted simulation."""
 
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be positive and finite")
 
-    if assignment.case_key.revision_id != TANAKA_SAMPLING_REVISION_V3:
+    if assignment.simulation_key.revision_id != TANAKA_SAMPLING_REVISION_V3:
         raise ValueError(
-            f"unsupported Tanaka sampling revision: {assignment.case_key.revision_id}"
+            f"unsupported Tanaka sampling revision: {assignment.simulation_key.revision_id}"
         )
     try:
         regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[
@@ -408,7 +411,7 @@ def sample_tanaka_case(
         ]
     except KeyError as error:
         raise ValueError(f"unknown Tanaka sample cell: {assignment.cell_id}") from error
-    rng = random_generator_for_case(assignment.case_key)
+    rng = random_generator_for_simulation(assignment.simulation_key)
     if regime == "main":
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
         if crest_count == 1:

@@ -12,14 +12,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
-from solver.gen_data.pipeline.case_checks import (
-    CaseCheckResult,
-    CaseCheck,
+from solver.gen_data.pipeline.simulation_checks import (
+    SimulationCheckResult,
+    SimulationCheck,
 )
 from solver.gen_data.pipeline.dno_target import compute_dno_target, project_fixed_band
 from solver.gen_data.pipeline.writer import (
-    AcceptedCaseRows,
-    CaseOutcome,
+    AcceptedSimulationRows,
+    SimulationOutcome,
 )
 from solver.gen_data.stokes_sampling import (
     PAPER_GRAVITY,
@@ -37,11 +37,13 @@ ContractRole: TypeAlias = Literal[
 ]
 
 STATIC_STOKES_REQUIRED_CHECKS = (
-    CaseCheck.OUTSIDE_SUPPORT
-    | CaseCheck.NONFINITE_STATE
-    | CaseCheck.BOTTOM_CLEARANCE
-    | CaseCheck.NONFINITE_TARGET
+    SimulationCheck.OUTSIDE_SUPPORT
+    | SimulationCheck.NONFINITE_STATE
+    | SimulationCheck.BOTTOM_CLEARANCE
+    | SimulationCheck.NONFINITE_TARGET
 )
+
+
 @dataclass(frozen=True)
 class StaticStokesContract:
     """Spatial target and explicit role of a static Stokes execution."""
@@ -103,7 +105,7 @@ class StaticStokesContract:
             raise ValueError(f"unknown static Stokes contract role: {self.role}")
 
     def to_json_record(self) -> dict[str, object]:
-        """Return the complete target contract for proposal metadata."""
+        """Return the complete target contract for batch-plan metadata."""
 
         return {
             "role": self.role,
@@ -214,12 +216,6 @@ def _project_static_inputs(
     return eta_input, xi_input
 
 
-def _finite_or_none(value: float) -> float | None:
-    """Return finite diagnostics and encode unavailable values as JSON null."""
-
-    return value if math.isfinite(value) else None
-
-
 def _maximum_absolute_or_none(field: NDArray[np.float64]) -> float | None:
     """Return the maximum absolute field value when the field is finite."""
 
@@ -230,12 +226,12 @@ def _maximum_absolute_or_none(field: NDArray[np.float64]) -> float | None:
 
 def _decision(
     *,
-    evaluated: CaseCheck,
-    failed: CaseCheck,
-) -> CaseCheckResult:
+    evaluated: SimulationCheck,
+    failed: SimulationCheck,
+) -> SimulationCheckResult:
     """Build the common sample-level decision for one static state."""
 
-    return CaseCheckResult(
+    return SimulationCheckResult(
         required=STATIC_STOKES_REQUIRED_CHECKS,
         evaluated=evaluated,
         failed=failed,
@@ -248,12 +244,14 @@ def evaluate_static_stokes_sample(
     contract: StaticStokesContract = PAPER_STATIC_STOKES_CONTRACT,
     state_constructor: StaticStokesStateConstructor = construct_stokes_state,
     target_evaluator: StaticDnoEvaluator = compute_dno_target,
-) -> CaseOutcome:
-    """Construct, validate, and label one static Stokes case."""
+) -> SimulationOutcome:
+    """Construct, validate, and label one static Stokes simulation."""
 
     support_violations = stokes_support_violations(sample)
-    evaluated = CaseCheck.OUTSIDE_SUPPORT
-    failed = CaseCheck.OUTSIDE_SUPPORT if support_violations else CaseCheck.NONE
+    evaluated = SimulationCheck.OUTSIDE_SUPPORT
+    failed = (
+        SimulationCheck.OUTSIDE_SUPPORT if support_violations else SimulationCheck.NONE
+    )
     metrics: dict[str, JsonScalar] = {
         "contract_role": contract.role,
         "support_violation_count": len(support_violations),
@@ -272,7 +270,7 @@ def evaluate_static_stokes_sample(
     }
     if support_violations:
         raise RuntimeError(
-            "Stokes sampler returned a case outside its declared support: "
+            "Stokes sampler returned a simulation outside its declared support: "
             + "; ".join(support_violations)
         )
 
@@ -286,26 +284,31 @@ def evaluate_static_stokes_sample(
     eta_host = np.asarray(jax.device_get(eta_input), dtype=np.float64)
     xi_host = np.asarray(jax.device_get(xi_input), dtype=np.float64)
 
-    evaluated |= CaseCheck.NONFINITE_STATE
+    evaluated |= SimulationCheck.NONFINITE_STATE
     state_finite = bool(np.isfinite(eta_host).all() and np.isfinite(xi_host).all())
     metrics["state_finite"] = state_finite
     metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(eta_host)
     metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(xi_host)
-    metrics["xi_input_mean"] = _finite_or_none(float(np.mean(xi_host)))
+    xi_input_mean = float(np.mean(xi_host))
+    metrics["xi_input_mean"] = (
+        xi_input_mean if math.isfinite(xi_input_mean) else None
+    )
     if not state_finite:
-        failed |= CaseCheck.NONFINITE_STATE
-        return CaseOutcome(
+        failed |= SimulationCheck.NONFINITE_STATE
+        return SimulationOutcome(
             decision=_decision(evaluated=evaluated, failed=failed),
             rows=None,
             metrics=metrics,
         )
 
-    evaluated |= CaseCheck.BOTTOM_CLEARANCE
+    evaluated |= SimulationCheck.BOTTOM_CLEARANCE
     minimum_water_column = float(np.min(sample.depth + eta_host))
-    metrics["minimum_water_column"] = _finite_or_none(minimum_water_column)
+    metrics["minimum_water_column"] = (
+        minimum_water_column if math.isfinite(minimum_water_column) else None
+    )
     if not math.isfinite(minimum_water_column) or minimum_water_column <= 0.0:
-        failed |= CaseCheck.BOTTOM_CLEARANCE
-        return CaseOutcome(
+        failed |= SimulationCheck.BOTTOM_CLEARANCE
+        return SimulationOutcome(
             decision=_decision(evaluated=evaluated, failed=failed),
             rows=None,
             metrics=metrics,
@@ -339,7 +342,7 @@ def evaluate_static_stokes_sample(
     ):
         raise ValueError("target evaluator returned an unexpected shape")
 
-    evaluated |= CaseCheck.NONFINITE_TARGET
+    evaluated |= SimulationCheck.NONFINITE_TARGET
     delivered_state_finite = bool(
         np.isfinite(target_eta_host).all() and np.isfinite(target_xi_host).all()
     )
@@ -349,16 +352,20 @@ def evaluate_static_stokes_sample(
     metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(target_eta_host)
     metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(target_xi_host)
     metrics["maximum_absolute_q_ref"] = _maximum_absolute_or_none(q_ref_host)
-    metrics["xi_input_mean"] = _finite_or_none(float(np.mean(target_xi_host)))
-    metrics["q_ref_mean"] = _finite_or_none(float(np.mean(q_ref_host)))
+    xi_input_mean = float(np.mean(target_xi_host))
+    q_ref_mean = float(np.mean(q_ref_host))
+    metrics["xi_input_mean"] = (
+        xi_input_mean if math.isfinite(xi_input_mean) else None
+    )
+    metrics["q_ref_mean"] = q_ref_mean if math.isfinite(q_ref_mean) else None
     if not delivered_state_finite:
-        failed |= CaseCheck.NONFINITE_STATE
+        failed |= SimulationCheck.NONFINITE_STATE
     if not target_finite:
-        failed |= CaseCheck.NONFINITE_TARGET
+        failed |= SimulationCheck.NONFINITE_TARGET
 
     decision = _decision(evaluated=evaluated, failed=failed)
     rows = (
-        AcceptedCaseRows(
+        AcceptedSimulationRows(
             eta=target_eta_host[None, :],
             xi=target_xi_host[None, :],
             gxi=q_ref_host[None, :],
@@ -369,4 +376,4 @@ def evaluate_static_stokes_sample(
         if decision.accepted
         else None
     )
-    return CaseOutcome(decision=decision, rows=rows, metrics=metrics)
+    return SimulationOutcome(decision=decision, rows=rows, metrics=metrics)

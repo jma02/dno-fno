@@ -12,14 +12,16 @@ import numpy as np
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
-    CaseCommitRecord,
+    SimulationCommitRecord,
     commit_batch,
-    ensure_proposal,
-    ensure_shard,
+    save_batch_plan,
+    save_shard,
     inspect_batch,
     record_fatal_failure,
 )
-def _proposal_arrays() -> dict[str, np.ndarray]:
+
+
+def _batch_plan() -> dict[str, np.ndarray]:
     specifications = [
         json.dumps({"amplitude": value}, sort_keys=True) for value in (0.1, 0.2, 0.3)
     ]
@@ -28,9 +30,12 @@ def _proposal_arrays() -> dict[str, np.ndarray]:
         "revision_id": np.asarray(1, dtype=np.int16),
         "split_id": np.asarray(0, dtype=np.uint8),
         "batch_id": np.asarray(7, dtype=np.int64),
-        "case_id": np.asarray([70, 71, 72], dtype=np.int64),
+        "simulation_id": np.asarray([70, 71, 72], dtype=np.int64),
         "cell_id": np.asarray([0, 1, 0], dtype=np.int32),
-        "case_spec_json": np.asarray(specifications),
+        "root_seed": np.asarray([11, 11, 11], dtype=np.uint64),
+        "stream_id": np.asarray([2, 2, 2], dtype=np.uint32),
+        "attempt_index": np.asarray([0, 1, 2], dtype=np.uint64),
+        "simulation_spec_json": np.asarray(specifications),
         "metadata_json": np.asarray(json.dumps({"seed": 11}, sort_keys=True)),
         "phase_right": np.asarray(
             [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
@@ -40,10 +45,10 @@ def _proposal_arrays() -> dict[str, np.ndarray]:
 
 
 def _shard_arrays() -> dict[str, np.ndarray]:
-    case_local_index = np.asarray([0, 0, 2, 2, 2], dtype=np.int32)
+    simulation_local_index = np.asarray([0, 0, 2, 2, 2], dtype=np.int32)
     frame_index = np.asarray([0, 1, 0, 1, 2], dtype=np.int32)
     selected_dense_index = np.asarray([0, 10, 0, 5, 10], dtype=np.int32)
-    rows = case_local_index.size
+    rows = simulation_local_index.size
     field = np.arange(rows * 4, dtype=np.float32).reshape(rows, 4) / 100.0
     return {
         "eta": field,
@@ -51,16 +56,16 @@ def _shard_arrays() -> dict[str, np.ndarray]:
         "gxi": field - np.float32(0.1),
         "depth": np.asarray([1.0, 1.0, 2.0, 2.0, 2.0], dtype=np.float64),
         "time": np.asarray([0.0, 1.0, 0.0, 0.5, 1.0], dtype=np.float64),
-        "case_local_index": case_local_index,
+        "simulation_local_index": simulation_local_index,
         "frame_index": frame_index,
         "selected_dense_index": selected_dense_index,
     }
 
 
-def _case_records() -> tuple[CaseCommitRecord, ...]:
+def _simulation_records() -> tuple[SimulationCommitRecord, ...]:
     return (
-        CaseCommitRecord(
-            case_id=70,
+        SimulationCommitRecord(
+            simulation_id=70,
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -69,8 +74,8 @@ def _case_records() -> tuple[CaseCommitRecord, ...]:
             row_count=2,
             metrics={"maximum_error": 1e-5},
         ),
-        CaseCommitRecord(
-            case_id=71,
+        SimulationCommitRecord(
+            simulation_id=71,
             accepted=False,
             required_bits=32,
             evaluated_bits=32,
@@ -79,8 +84,8 @@ def _case_records() -> tuple[CaseCommitRecord, ...]:
             row_count=0,
             metrics={"maximum_error": None},
         ),
-        CaseCommitRecord(
-            case_id=72,
+        SimulationCommitRecord(
+            simulation_id=72,
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -107,47 +112,46 @@ class BatchStorageTests(unittest.TestCase):
     def test_interruption_boundaries_replay_to_one_commit(self) -> None:
         self.assertEqual(inspect_batch(self.paths).status, BatchStatus.EMPTY)
 
-        proposal = _proposal_arrays()
-        ensure_proposal(self.paths, proposal)
-        proposal_bytes = self.paths.proposal.read_bytes()
+        proposal = _batch_plan()
+        save_batch_plan(self.paths, proposal)
+        proposal_bytes = self.paths.batch_plan.read_bytes()
         self.assertEqual(
             inspect_batch(self.paths).status,
-            BatchStatus.PROPOSED,
+            BatchStatus.PLAN_SAVED,
         )
-        ensure_proposal(self.paths, proposal)
-        self.assertEqual(self.paths.proposal.read_bytes(), proposal_bytes)
+        save_batch_plan(self.paths, proposal)
+        self.assertEqual(self.paths.batch_plan.read_bytes(), proposal_bytes)
 
         shard = _shard_arrays()
-        ensure_shard(self.paths, shard)
+        save_shard(self.paths, shard)
         shard_bytes = self.paths.shard.read_bytes()
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.SHARD_WRITTEN)
-        ensure_shard(self.paths, shard)
+        save_shard(self.paths, shard)
         self.assertEqual(self.paths.shard.read_bytes(), shard_bytes)
 
         commit_batch(
             self.paths,
-            cases=_case_records(),
+            simulations=_simulation_records(),
             metadata={"elapsed_seconds": 12.5},
         )
-        result_bytes = self.paths.result.read_bytes()
         inspection = inspect_batch(self.paths)
         self.assertEqual(inspection.status, BatchStatus.COMMITTED)
-        self.assertEqual(inspection.cases, _case_records())
-        commit_batch(
-            self.paths,
-            cases=_case_records(),
-            metadata={"elapsed_seconds": 12.5},
-        )
-        self.assertEqual(self.paths.result.read_bytes(), result_bytes)
+        self.assertEqual(inspection.simulations, _simulation_records())
+        with self.assertRaisesRegex(RuntimeError, "already committed"):
+            commit_batch(
+                self.paths,
+                simulations=_simulation_records(),
+                metadata={"elapsed_seconds": 12.5},
+            )
 
-    def test_rejected_cases_never_own_partial_rows(self) -> None:
-        ensure_proposal(self.paths, _proposal_arrays())
-        ensure_shard(self.paths, _shard_arrays())
+    def test_rejected_simulations_never_own_partial_rows(self) -> None:
+        save_batch_plan(self.paths, _batch_plan())
+        save_shard(self.paths, _shard_arrays())
 
-        wrong = list(_case_records())
-        wrong[1] = CaseCommitRecord(
-            case_id=71,
+        wrong = list(_simulation_records())
+        wrong[1] = SimulationCommitRecord(
+            simulation_id=71,
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -157,10 +161,10 @@ class BatchStorageTests(unittest.TestCase):
             metrics={},
         )
         with self.assertRaisesRegex(ValueError, "row ownership"):
-            commit_batch(self.paths, cases=wrong, metadata={})
+            commit_batch(self.paths, simulations=wrong, metadata={})
 
         shard = _shard_arrays()
-        shard["case_local_index"] = np.asarray(
+        shard["simulation_local_index"] = np.asarray(
             [0, 2, 0, 2, 2],
             dtype=np.int32,
         )
@@ -170,17 +174,17 @@ class BatchStorageTests(unittest.TestCase):
             split="train",
             batch_id=8,
         )
-        proposal = _proposal_arrays()
+        proposal = _batch_plan()
         proposal["batch_id"] = np.asarray(8, dtype=np.int64)
-        ensure_proposal(different_paths, proposal)
+        save_batch_plan(different_paths, proposal)
         with self.assertRaisesRegex(ValueError, "ordered block"):
-            ensure_shard(different_paths, shard)
+            save_shard(different_paths, shard)
 
     def test_all_rejected_batch_commits_without_a_shard(self) -> None:
-        ensure_proposal(self.paths, _proposal_arrays())
-        cases = tuple(
-            CaseCommitRecord(
-                case_id=case_id,
+        save_batch_plan(self.paths, _batch_plan())
+        simulations = tuple(
+            SimulationCommitRecord(
+                simulation_id=simulation_id,
                 accepted=False,
                 required_bits=32,
                 evaluated_bits=32,
@@ -189,49 +193,49 @@ class BatchStorageTests(unittest.TestCase):
                 row_count=0,
                 metrics={"maximum_error": None},
             )
-            for case_id in (70, 71, 72)
+            for simulation_id in (70, 71, 72)
         )
-        commit_batch(self.paths, cases=cases, metadata={"accepted": 0})
+        commit_batch(self.paths, simulations=simulations, metadata={"accepted": 0})
         self.assertFalse(self.paths.shard.exists())
         self.assertEqual(inspect_batch(self.paths).status, BatchStatus.COMMITTED)
 
     def test_existing_proposal_or_shard_must_replay_exactly(self) -> None:
-        proposal = _proposal_arrays()
-        ensure_proposal(self.paths, proposal)
-        changed = _proposal_arrays()
+        proposal = _batch_plan()
+        save_batch_plan(self.paths, proposal)
+        changed = _batch_plan()
         changed["cell_id"] = np.asarray([1, 1, 0], dtype=np.int32)
-        with self.assertRaisesRegex(RuntimeError, "proposal differs"):
-            ensure_proposal(self.paths, changed)
+        with self.assertRaisesRegex(RuntimeError, "differs from replayed arrays"):
+            save_batch_plan(self.paths, changed)
 
         shard = _shard_arrays()
-        ensure_shard(self.paths, shard)
+        save_shard(self.paths, shard)
         changed_shard = _shard_arrays()
         changed_shard["eta"] = changed_shard["eta"].copy()
         changed_shard["eta"][0, 0] += np.float32(1.0)
-        with self.assertRaisesRegex(RuntimeError, "shard differs"):
-            ensure_shard(self.paths, changed_shard)
+        with self.assertRaisesRegex(RuntimeError, "differs from replayed arrays"):
+            save_shard(self.paths, changed_shard)
 
     def test_orphan_and_malformed_results_are_detected(self) -> None:
         self.paths.result.parent.mkdir(parents=True, exist_ok=True)
         self.paths.result.write_text("{}\n", encoding="utf-8")
-        with self.assertRaisesRegex(RuntimeError, "without its proposal"):
+        with self.assertRaisesRegex(RuntimeError, "without its batch plan"):
             inspect_batch(self.paths)
 
         self.paths.result.unlink()
-        ensure_proposal(self.paths, _proposal_arrays())
-        ensure_shard(self.paths, _shard_arrays())
-        commit_batch(self.paths, cases=_case_records(), metadata={})
+        save_batch_plan(self.paths, _batch_plan())
+        save_shard(self.paths, _shard_arrays())
+        commit_batch(self.paths, simulations=_simulation_records(), metadata={})
         payload = json.loads(self.paths.result.read_text(encoding="utf-8"))
-        payload["cases"] = payload["cases"][:-1]
+        payload["simulations"] = payload["simulations"][:-1]
         self.paths.result.write_text(
             json.dumps(payload, sort_keys=True),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(RuntimeError, "every proposed case"):
+        with self.assertRaisesRegex(RuntimeError, "every planned simulation"):
             inspect_batch(self.paths)
 
     def test_fatal_failure_is_terminal_and_bound_to_proposal(self) -> None:
-        ensure_proposal(self.paths, _proposal_arrays())
+        save_batch_plan(self.paths, _batch_plan())
         record_fatal_failure(
             self.paths,
             phase="integrate",
@@ -241,19 +245,19 @@ class BatchStorageTests(unittest.TestCase):
         )
         self.assertEqual(inspect_batch(self.paths).status, BatchStatus.FAILED)
         with self.assertRaisesRegex(RuntimeError, "terminal"):
-            ensure_proposal(self.paths, _proposal_arrays())
+            save_batch_plan(self.paths, _batch_plan())
         with self.assertRaisesRegex(RuntimeError, "failed batch"):
-            commit_batch(self.paths, cases=_case_records(), metadata={})
+            commit_batch(self.paths, simulations=_simulation_records(), metadata={})
 
     def test_nonfinite_json_and_invalid_selected_times_are_rejected(self) -> None:
-        ensure_proposal(self.paths, _proposal_arrays())
+        save_batch_plan(self.paths, _batch_plan())
         shard = _shard_arrays()
         shard["selected_dense_index"] = np.asarray(
             [0, 0, 0, 5, 10],
             dtype=np.int32,
         )
         with self.assertRaisesRegex(ValueError, "increase strictly"):
-            ensure_shard(self.paths, shard)
+            save_shard(self.paths, shard)
 
         with self.assertRaises(ValueError):
             record_fatal_failure(

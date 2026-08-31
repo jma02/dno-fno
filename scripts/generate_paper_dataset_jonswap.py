@@ -1,8 +1,8 @@
-"""Generate JONSWAP/TMA cases in horizon-sorted numerical microbatches.
+"""Generate JONSWAP/TMA simulations in rollout-length-sorted microbatches.
 
-This launcher extends the current shared JONSWAP run identity with the
-horizon-bucketing configuration and uses the adjustment-first executor. Each case
-receives a nonlinear burn-in before the autonomous production trajectory begins
+This launcher extends the current shared JONSWAP chunk configuration with the
+horizon-bucketing configuration and uses the adjustment-first executor. Each
+simulation receives a nonlinear burn-in before the autonomous trajectory begins
 from the full internal-band endpoint.
 """
 
@@ -25,8 +25,8 @@ from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
     BucketingConfig,
     HorizonBucketedJonswapBatchExecutor,
 )
-from solver.gen_data.pipeline.valid_case_generation import (  # noqa: E402
-    DatasetGenerationSpec,
+from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
+    DatasetChunkConfig,
 )
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
@@ -49,19 +49,19 @@ def _split_policy_args(
         "--solver-batch-size",
         type=_positive_integer,
         required=True,
-        help="Maximum cases in one numerical rollout after horizon sorting.",
+        help="Maximum simulations in one numerical rollout after sorting.",
     )
     parsed, remaining = parser.parse_known_args(argv)
     return parsed.solver_batch_size, tuple(remaining)
 
 
-def build_bucketed_run_spec(
+def build_bucketed_chunk_config(
     request: base.GenerationRequest,
     *,
     solver_batch_size: int,
     execution: base.PaperExecution | None = None,
-) -> DatasetGenerationSpec:
-    """Extend the exact JONSWAP run identity with its bucketing configuration."""
+) -> DatasetChunkConfig:
+    """Add rollout bucketing to the JONSWAP chunk configuration."""
 
     if request.family != "jonswap_tma":
         raise ValueError("bucketed launcher supports only JONSWAP/TMA")
@@ -72,73 +72,68 @@ def build_bucketed_run_spec(
     ):
         raise ValueError("solver batch size must be a positive integer")
     if solver_batch_size > request.batch_size:
-        raise ValueError("solver batch size cannot exceed proposal batch size")
+        raise ValueError("solver batch size cannot exceed dataset batch size")
 
     selected_execution = (
-        paper_trajectory_execution("jonswap_tma")
-        if execution is None
-        else execution
+        paper_trajectory_execution("jonswap_tma") if execution is None else execution
     )
     if not isinstance(selected_execution, TrajectoryExecutionConfig):
         raise TypeError("JONSWAP/TMA requires a trajectory execution contract")
     adjustment_policy = selected_execution.jonswap_adjustment
     if adjustment_policy is None:
         raise ValueError("JONSWAP/TMA bucketed execution requires adjustment")
-    baseline = _BASE_BUILD_RUN_SPEC(request, execution=selected_execution)
+    baseline = _BASE_BUILD_CHUNK_CONFIG(request, execution=selected_execution)
     record = baseline.to_json_record()
     configuration = record["configuration"]
     assert isinstance(configuration, dict)
     configuration[BUCKETING_CONFIG_KEY] = BucketingConfig(
-        outer_proposal_size=request.batch_size,
+        batch_size=request.batch_size,
         solver_batch_size=solver_batch_size,
         adjustment=adjustment_policy,
     ).to_json_record()
-    return DatasetGenerationSpec(
+    return DatasetChunkConfig(
         root=baseline.root,
         family_name=baseline.family_name,
         family_id=baseline.family_id,
         revision_id=baseline.revision_id,
         split_id=baseline.split_id,
         stream_id=baseline.stream_id,
-        case_targets=baseline.case_targets,
+        simulation_targets=baseline.simulation_targets,
         cell_codes=baseline.cell_codes,
         batch_size=baseline.batch_size,
         first_attempt_index=baseline.first_attempt_index,
-        maximum_attempts_per_accepted_case=(
-            baseline.maximum_attempts_per_accepted_case
-        ),
         configuration=configuration,
     )
 
 
 @contextmanager
 def _bucketed_runtime(solver_batch_size: int) -> Iterator[None]:
-    """Install the JONSWAP-only spec and executor in the shared runner."""
+    """Install the JONSWAP chunk builder and executor in the shared runner."""
 
-    original_builder = base.build_run_spec
+    original_builder = base.build_chunk_config
     original_executor = base.TrajectoryBatchExecutor
 
     def builder(
         request: base.GenerationRequest,
         *,
         execution: base.PaperExecution | None = None,
-    ) -> DatasetGenerationSpec:
-        return build_bucketed_run_spec(
+    ) -> DatasetChunkConfig:
+        return build_bucketed_chunk_config(
             request,
             solver_batch_size=solver_batch_size,
             execution=execution,
         )
 
-    base.build_run_spec = builder
+    base.build_chunk_config = builder
     base.TrajectoryBatchExecutor = HorizonBucketedJonswapBatchExecutor
     try:
         yield
     finally:
-        base.build_run_spec = original_builder
+        base.build_chunk_config = original_builder
         base.TrajectoryBatchExecutor = original_executor
 
 
-_BASE_BUILD_RUN_SPEC = base.build_run_spec
+_BASE_BUILD_CHUNK_CONFIG = base.build_chunk_config
 
 
 def main(argv: Sequence[str] | None = None) -> None:

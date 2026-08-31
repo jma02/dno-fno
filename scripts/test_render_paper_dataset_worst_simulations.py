@@ -10,12 +10,12 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from scripts import render_paper_dataset_worst_cases as renderer
-from scripts.render_paper_dataset_worst_cases import (
-    FINAL_PAPER_DATASET_ACCEPTED_CASES,
+from scripts import render_paper_dataset_worst_simulations as renderer
+from scripts.render_paper_dataset_worst_simulations import (
+    FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
     FINAL_PAPER_DATASET_RETAINED_ROWS,
     FINAL_PAPER_DATASET_SOURCE_COUNT,
-    FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES,
+    FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS,
     SIGN_DIFFERENCE_RELATIVE_THRESHOLD,
     LoadedTrajectory,
     TrajectoryIndex,
@@ -57,7 +57,7 @@ class CombinedSummaryTests(unittest.TestCase):
                     "status": "complete",
                     "preflight": {
                         "chunks": [{"summary_path": str(path)} for path in summaries],
-                        "accepted_cases_total": 3,
+                        "accepted_simulations_total": 3,
                         "expected_rows": 7,
                     },
                 },
@@ -69,7 +69,7 @@ class CombinedSummaryTests(unittest.TestCase):
         validate_scanned_population(
             binding,
             source_count=2,
-            accepted_cases=3,
+            accepted_simulations=3,
             retained_rows=7,
         )
 
@@ -95,7 +95,7 @@ class CombinedSummaryTests(unittest.TestCase):
                         "status": "complete",
                         "preflight": {
                             "chunks": chunks,
-                            "accepted_cases_total": 0,
+                            "accepted_simulations_total": 0,
                             "expected_rows": 0,
                         },
                     },
@@ -116,22 +116,22 @@ class DatasetContractAndPublicationTests(unittest.TestCase):
         return {
             (family, split): count
             for family in ("stokes", "tanaka", "benjamin_feir", "jonswap_tma")
-            for split, count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_CASES.items()
+            for split, count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS.items()
         }
 
     def test_final_contract_accepts_only_exact_counts(self) -> None:
         expected = self._family_split_counts()
         validate_final_paper_dataset_counts(
             source_count=FINAL_PAPER_DATASET_SOURCE_COUNT,
-            family_split_accepted_cases=expected,
-            accepted_cases=FINAL_PAPER_DATASET_ACCEPTED_CASES,
+            family_split_accepted_simulations=expected,
+            accepted_simulations=FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
             retained_rows=FINAL_PAPER_DATASET_RETAINED_ROWS,
         )
         with self.assertRaisesRegex(ValueError, "contract failed"):
             validate_final_paper_dataset_counts(
                 source_count=FINAL_PAPER_DATASET_SOURCE_COUNT,
-                family_split_accepted_cases=expected,
-                accepted_cases=FINAL_PAPER_DATASET_ACCEPTED_CASES,
+                family_split_accepted_simulations=expected,
+                accepted_simulations=FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
                 retained_rows=FINAL_PAPER_DATASET_RETAINED_ROWS - 1,
             )
 
@@ -192,7 +192,7 @@ class MorphologyDiagnosticTests(unittest.TestCase):
             trajectory = TrajectoryIndex(
                 accepted_index=0,
                 trajectory_index=0,
-                case_id=17,
+                simulation_id=17,
                 category="known",
                 shard_index=0,
                 first_shard_row=0,
@@ -228,14 +228,14 @@ class RankOneAnimationTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _case(frames: int) -> renderer.CaseMetrics:
-        return renderer.CaseMetrics(
+    def _simulation(frames: int) -> renderer.SimulationMetrics:
+        return renderer.SimulationMetrics(
             source_index=0,
             accepted_index=0,
             trajectory_index=0,
             family="stokes" if frames == 1 else "jonswap_tma",
             split="train",
-            case_id=17,
+            simulation_id=17,
             category="finite",
             shard_index=0,
             first_shard_row=0,
@@ -270,10 +270,10 @@ class RankOneAnimationTests(unittest.TestCase):
             for frames in (1, 4):
                 trajectory = self._trajectory(frames)
                 path, record = _render_rank_one_gif(
-                    self._case(frames),
+                    self._simulation(frames),
                     trajectory,
                     "Accepted trajectory",
-                    root / f"case_{frames}.gif",
+                    root / f"simulation_{frames}.gif",
                 )
                 self.assertEqual(record, animation_record(trajectory))
                 with Image.open(path) as image:
