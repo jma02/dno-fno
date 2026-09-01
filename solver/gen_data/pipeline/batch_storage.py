@@ -1,15 +1,9 @@
-"""Manage the saved plan, shard, result, and failure for each batch.
-
-The plan is saved before numerical work begins. A result JSON commits the batch;
-a shard without a result can be resumed, while a result that refers to an absent
-shard is corrupt.
-"""
+"""Read and write one complete artifact per simulation batch."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 import re
 from typing import Any, cast
@@ -18,12 +12,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import (
-    ensure_npz,
+    json_text,
     load_npz,
-    read_json_object,
-    write_json_atomic,
+    parse_json,
+    write_npz_atomic,
 )
 from solver.gen_data.pipeline.batch_artifacts import (
+    BATCH_PLAN_FIELDS,
+    SHARD_FIELDS,
     SimulationCommitRecord,
     compute_batch_simulation_ids,
     compute_simulation_row_blocks,
@@ -31,260 +27,163 @@ from solver.gen_data.pipeline.batch_artifacts import (
     validate_batch_plan,
     validate_shard,
 )
-from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
+from solver.gen_data.pipeline.types import (
+    BatchPlanArrays,
+    DatasetShardArrays,
+    JsonObject,
+)
 
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
-
-
-class BatchStatus(str, Enum):
-    """State inferred from the files saved for a batch."""
-
-    EMPTY = "empty"
-    PLAN_SAVED = "plan_saved"
-    SHARD_WRITTEN = "shard_written"
-    COMMITTED = "committed"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True)
-class BatchPaths:
-    """Files belonging to one family, split, and batch."""
-
-    batch_plan: Path
-    shard: Path
-    result: Path
-    failure: Path
-
-    @classmethod
-    def for_batch(
-        cls,
-        root: Path,
-        *,
-        family: str,
-        split: str,
-        batch_id: int,
-    ) -> BatchPaths:
-        """Construct the standard paths without creating any files."""
-
-        for value, field_name in ((family, "family"), (split, "split")):
-            if _PATH_COMPONENT_PATTERN.fullmatch(value) is None:
-                raise ValueError(
-                    f"{field_name} must contain only letters, digits, '_' or '-'"
-                )
-        if batch_id < 0:
-            raise ValueError("batch_id must be nonnegative")
-        filename = f"batch_{batch_id:06d}"
-        return cls(
-            batch_plan=root / "batch_plans" / family / split / f"{filename}.npz",
-            shard=root / "shards" / family / split / f"{filename}.npz",
-            result=root / "results" / family / split / f"{filename}.json",
-            failure=root / "failures" / family / split / f"{filename}.json",
-        )
+_RESULTS_JSON = "simulation_results_json"
+_BATCH_METADATA_JSON = "batch_metadata_json"
+_COMPLETED_BATCH_FIELDS = (
+    BATCH_PLAN_FIELDS
+    | SHARD_FIELDS
+    | {
+        _RESULTS_JSON,
+        _BATCH_METADATA_JSON,
+    }
+)
 
 
 @dataclass(frozen=True)
-class BatchInspection:
-    """Validated state reconstructed from one batch's files."""
+class CompletedBatch:
+    """Validated contents of one finished simulation batch."""
 
-    status: BatchStatus
-    simulations: tuple[SimulationCommitRecord, ...] = ()
-
-
-def _load_batch_arrays(
-    paths: BatchPaths,
-) -> tuple[BatchPlanArrays, DatasetShardArrays | None]:
-    """Load and validate a batch plan and its optional shard."""
-
-    loaded_plan = load_npz(paths.batch_plan)
-    validate_batch_plan(loaded_plan)
-    batch_plan = cast(BatchPlanArrays, loaded_plan)
-    if not paths.shard.exists():
-        return batch_plan, None
-    loaded_shard = load_npz(paths.shard)
-    validate_shard(loaded_shard, batch_plan=loaded_plan)
-    shard = cast(DatasetShardArrays, loaded_shard)
-    return batch_plan, shard
+    plan: BatchPlanArrays
+    shard: DatasetShardArrays | None
+    simulations: tuple[SimulationCommitRecord, ...]
+    metadata: JsonObject
 
 
-def save_batch_plan(
-    paths: BatchPaths,
-    arrays: BatchPlanArrays | Mapping[str, NDArray[Any]],
-) -> None:
-    """Save a batch plan or verify that the existing plan is identical."""
-
-    if paths.result.exists() or paths.failure.exists():
-        raise RuntimeError("cannot replace a terminal batch plan")
-    ensure_npz(
-        paths.batch_plan,
-        cast(Mapping[str, NDArray[Any]], arrays),
-        validate=validate_batch_plan,
-    )
-
-
-def save_shard(
-    paths: BatchPaths,
-    arrays: DatasetShardArrays | Mapping[str, NDArray[Any]],
-) -> None:
-    """Save a shard or verify that the existing shard is identical."""
-
-    if not paths.batch_plan.exists():
-        raise RuntimeError("a batch plan must exist before its shard")
-    if paths.result.exists() or paths.failure.exists():
-        raise RuntimeError("cannot replace a shard after a terminal record")
-    batch_plan = load_npz(paths.batch_plan)
-    validate_batch_plan(batch_plan)
-
-    def validate(candidate: Mapping[str, NDArray[Any]]) -> None:
-        validate_shard(
-            candidate,
-            batch_plan=batch_plan,
-        )
-
-    ensure_npz(
-        paths.shard,
-        cast(Mapping[str, NDArray[Any]], arrays),
-        validate=validate,
-    )
-
-
-def commit_batch(
-    paths: BatchPaths,
+def batch_path(
+    root: Path,
     *,
-    simulations: Sequence[SimulationCommitRecord],
-    metadata: Mapping[str, object],
-) -> None:
-    """Commit the decision for every planned simulation."""
+    family: str,
+    split: str,
+    batch_id: int,
+) -> Path:
+    """Return the standard path for one completed batch."""
 
-    if not paths.batch_plan.exists():
-        raise RuntimeError("a batch plan must exist before its result")
-    if paths.failure.exists():
-        raise RuntimeError("a failed batch cannot be committed")
-    if paths.result.exists():
-        raise RuntimeError("batch is already committed")
-    batch_plan, shard = _load_batch_arrays(paths)
-    planned_simulation_ids = compute_batch_simulation_ids(batch_plan)
-    if len(simulations) != planned_simulation_ids.size:
-        raise ValueError("the result must contain every planned simulation")
+    for value, field_name in ((family, "family"), (split, "split")):
+        if _PATH_COMPONENT_PATTERN.fullmatch(value) is None:
+            raise ValueError(
+                f"{field_name} must contain only letters, digits, '_' or '-'"
+            )
+    if batch_id < 0:
+        raise ValueError("batch_id must be nonnegative")
+    return root / "batches" / family / split / f"batch_{batch_id:06d}.npz"
+
+
+def _validate_simulation_results(
+    plan: BatchPlanArrays,
+    shard: DatasetShardArrays | None,
+    simulations: Sequence[SimulationCommitRecord],
+) -> None:
+    simulation_ids = compute_batch_simulation_ids(plan)
+    if len(simulations) != simulation_ids.size:
+        raise ValueError("results must contain every planned simulation")
     if not np.array_equal(
         np.asarray(
-            [simulation.simulation_id for simulation in simulations], dtype=np.int64
+            [simulation.simulation_id for simulation in simulations],
+            dtype=np.int64,
         ),
-        planned_simulation_ids,
+        simulation_ids,
     ):
-        raise ValueError(
-            "result simulations must preserve batch-plan order and identity"
-        )
+        raise ValueError("results must preserve planned simulation order")
 
-    blocks = (
+    row_blocks = (
         compute_simulation_row_blocks(
             shard["simulation_local_index"],
-            number_of_simulations=int(planned_simulation_ids.size),
+            number_of_simulations=simulation_ids.size,
         )
         if shard is not None
         else {}
     )
     for local_index, simulation in enumerate(simulations):
-        expected = blocks.get(local_index)
-        observed = (
+        declared_rows = (
             (simulation.first_row, simulation.row_count)
             if simulation.accepted
             else None
         )
-        if observed != expected:
+        if declared_rows != row_blocks.get(local_index):
             raise ValueError(
-                f"simulation {simulation.simulation_id} row ownership does not match the shard"
+                f"simulation {simulation.simulation_id} rows do not match the shard"
             )
 
-    payload: dict[str, object] = {
-        "simulations": [simulation.to_json_record() for simulation in simulations],
-        "metadata": dict(metadata),
-    }
-    write_json_atomic(paths.result, payload)
 
-
-def record_fatal_failure(
-    paths: BatchPaths,
+def save_completed_batch(
+    path: Path,
     *,
-    phase: str,
-    exception_type: str,
-    message: str,
-    telemetry: Mapping[str, object],
+    plan: BatchPlanArrays,
+    shard: DatasetShardArrays | None,
+    simulations: Sequence[SimulationCommitRecord],
+    metadata: Mapping[str, object],
 ) -> None:
-    """Record a fatal failure of the exact stored batch plan."""
+    """Atomically save a finished batch; interrupted batches leave no artifact."""
 
-    if not paths.batch_plan.exists():
-        raise RuntimeError("a batch plan must exist before a failure record")
-    if paths.result.exists():
-        raise RuntimeError("a committed batch cannot be marked failed")
-    if paths.failure.exists():
-        raise RuntimeError("batch is already marked failed")
-    if not phase or not exception_type:
-        raise ValueError("phase and exception_type must be nonempty")
-    payload: dict[str, object] = {
-        "phase": phase,
-        "exception_type": exception_type,
-        "message": message,
-        "telemetry": dict(telemetry),
+    if path.exists():
+        raise FileExistsError(f"completed batch already exists: {path}")
+    validate_batch_plan(plan)
+    if shard is not None:
+        validate_shard(shard, batch_plan=plan)
+    _validate_simulation_results(plan, shard, simulations)
+
+    arrays: dict[str, NDArray[Any]] = {
+        name: np.asarray(value) for name, value in plan.items()
     }
-    write_json_atomic(paths.failure, payload)
+    if shard is not None:
+        arrays.update({name: np.asarray(value) for name, value in shard.items()})
+    arrays[_RESULTS_JSON] = np.asarray(
+        json_text([simulation.to_json_record() for simulation in simulations])
+    )
+    arrays[_BATCH_METADATA_JSON] = np.asarray(json_text(metadata))
+    write_npz_atomic(path, arrays)
 
 
-def inspect_batch(paths: BatchPaths) -> BatchInspection:
-    """Validate the batch transaction and classify its restart state."""
+def load_completed_batch(path: Path) -> CompletedBatch:
+    """Load and validate one completed batch artifact."""
 
-    plan_exists = paths.batch_plan.exists()
-    shard_exists = paths.shard.exists()
-    result_exists = paths.result.exists()
-    failure_exists = paths.failure.exists()
-    if not any((plan_exists, shard_exists, result_exists, failure_exists)):
-        return BatchInspection(BatchStatus.EMPTY)
-    if not plan_exists:
-        raise RuntimeError("orphaned batch artifact exists without its batch plan")
-    if result_exists and failure_exists:
-        raise RuntimeError("a batch cannot have both result and failure records")
-
-    batch_plan, shard = _load_batch_arrays(paths)
-
-    if failure_exists:
-        read_json_object(paths.failure)
-        return BatchInspection(BatchStatus.FAILED)
-    if result_exists:
-        result = read_json_object(paths.result)
-        raw_simulations = result.get("simulations")
-        planned_simulation_ids = compute_batch_simulation_ids(batch_plan)
-        if (
-            not isinstance(raw_simulations, list)
-            or len(raw_simulations) != planned_simulation_ids.size
-        ):
-            raise RuntimeError("result must contain every planned simulation")
-        blocks = (
-            compute_simulation_row_blocks(
-                shard["simulation_local_index"],
-                number_of_simulations=int(planned_simulation_ids.size),
-            )
-            if shard is not None
-            else {}
+    arrays = load_npz(path)
+    unexpected = arrays.keys() - _COMPLETED_BATCH_FIELDS
+    if unexpected:
+        raise ValueError(
+            f"completed batch contains unexpected arrays {sorted(unexpected)}"
         )
-        simulations: list[SimulationCommitRecord] = []
-        for local_index, (simulation_id, raw_simulation) in enumerate(
-            zip(planned_simulation_ids, raw_simulations)
-        ):
-            try:
-                simulation = parse_simulation_result(raw_simulation)
-                if simulation.simulation_id != int(simulation_id):
-                    raise ValueError(
-                        "result simulation identity differs from its batch plan"
-                    )
-            except ValueError as error:
-                raise RuntimeError(str(error)) from error
-            declared_block = (
-                (simulation.first_row, simulation.row_count)
-                if simulation.accepted
-                else None
-            )
-            if declared_block != blocks.get(local_index):
-                raise RuntimeError("result row ownership differs from its shard")
-            simulations.append(simulation)
-        return BatchInspection(BatchStatus.COMMITTED, tuple(simulations))
-    status = BatchStatus.SHARD_WRITTEN if shard_exists else BatchStatus.PLAN_SAVED
-    return BatchInspection(status)
+
+    plan = cast(
+        BatchPlanArrays,
+        {name: arrays[name] for name in BATCH_PLAN_FIELDS if name in arrays},
+    )
+    validate_batch_plan(plan)
+
+    present_shard_fields = arrays.keys() & SHARD_FIELDS
+    if present_shard_fields and present_shard_fields != SHARD_FIELDS:
+        missing = SHARD_FIELDS - present_shard_fields
+        raise ValueError(f"completed batch is missing shard arrays {sorted(missing)}")
+    shard = (
+        cast(DatasetShardArrays, {name: arrays[name] for name in SHARD_FIELDS})
+        if present_shard_fields
+        else None
+    )
+    if shard is not None:
+        validate_shard(shard, batch_plan=plan)
+
+    for name in (_RESULTS_JSON, _BATCH_METADATA_JSON):
+        if name not in arrays or arrays[name].ndim != 0:
+            raise ValueError(f"completed batch requires scalar {name}")
+    raw_results = parse_json(str(arrays[_RESULTS_JSON].item()))
+    if not isinstance(raw_results, list):
+        raise ValueError("simulation_results_json must encode a list")
+    simulations = tuple(parse_simulation_result(value) for value in raw_results)
+    _validate_simulation_results(plan, shard, simulations)
+
+    metadata = parse_json(str(arrays[_BATCH_METADATA_JSON].item()))
+    if not isinstance(metadata, dict):
+        raise ValueError("batch_metadata_json must encode an object")
+    return CompletedBatch(
+        plan=plan,
+        shard=shard,
+        simulations=simulations,
+        metadata=cast(JsonObject, metadata),
+    )

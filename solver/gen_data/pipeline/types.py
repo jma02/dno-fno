@@ -14,11 +14,11 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 class BatchPlanArrays(TypedDict):
-    """Arrays stored before a batch's simulations are executed."""
+    """Arrays describing the simulations assigned to one batch."""
 
     family_id: NDArray[np.int16]
     dataset_split: NDArray[np.str_]
-    parameter_group_id: NDArray[np.int32]
+    parameter_group_id: NDArray[np.str_]
     # Distinguishes independently generated chunks within one split.
     worker_stream_id: NDArray[np.uint32]
     # Candidate position in that worker stream, including rejected candidates.
@@ -50,7 +50,7 @@ class SimulationIndexArrays(TypedDict):
     trajectory_family_id: NDArray[np.int16]
     trajectory_dataset_split: NDArray[np.str_]
     trajectory_simulation_id: NDArray[np.int64]
-    trajectory_parameter_group_id: NDArray[np.int32]
+    trajectory_parameter_group_id: NDArray[np.str_]
     trajectory_accepted: NDArray[np.bool_]
     trajectory_required_bits: NDArray[np.uint32]
     trajectory_evaluated_bits: NDArray[np.uint32]

@@ -98,7 +98,6 @@ def build_bucketed_chunk_config(
         dataset_split=baseline.dataset_split,
         worker_stream_id=baseline.worker_stream_id,
         simulation_targets=baseline.simulation_targets,
-        parameter_group_codes=baseline.parameter_group_codes,
         batch_size=baseline.batch_size,
         first_attempt_index=baseline.first_attempt_index,
         configuration=configuration,

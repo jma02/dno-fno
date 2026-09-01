@@ -1,8 +1,8 @@
 """Run JONSWAP simulations in small batches grouped by rollout length.
 
-A batch plan may contain more simulations than fit in GPU memory. Sort them by
+A batch may contain more simulations than fit in GPU memory. Sort them by
 saved timestep count, solve them in smaller groups, then restore the original
-plan order.
+order.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ def _peak_periods(
     *,
     gravity: float,
 ) -> np.ndarray:
-    """Compute each finite-depth peak period from its saved batch plan."""
+    """Compute each simulation's finite-depth peak period."""
 
     depths = np.asarray(initial.depths, dtype=np.float64)
     peak_wavenumbers = np.asarray(
@@ -286,7 +286,7 @@ def _with_adjustment_metrics(
 
 @dataclass(frozen=True)
 class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
-    """Solve one JONSWAP batch plan in groups with similar rollout lengths."""
+    """Solve one JONSWAP batch in groups with similar rollout lengths."""
 
     adjustment_rollout_executor: AdjustmentBatchIntegrator = integrate_adjustment_batch
 

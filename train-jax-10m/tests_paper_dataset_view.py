@@ -10,15 +10,16 @@ import tempfile
 import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import (
-    BatchPaths,
-    SimulationCommitRecord,
-    commit_batch,
-    save_batch_plan,
-    save_shard,
+    batch_path,
+    save_completed_batch,
 )
-from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
+from solver.gen_data.pipeline.batch_artifacts import (
+    SimulationCommitRecord,
+    compute_batch_simulation_ids,
+)
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 TRAIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_DIR))
@@ -39,29 +40,30 @@ def _write_batch(
     dataset_split: DatasetSplit,
     attempt_indices: tuple[int, ...],
     accepted_local_indices: tuple[int, ...],
-) -> BatchPaths:
-    paths = BatchPaths.for_batch(
+) -> Path:
+    path = batch_path(
         root,
         family=family,
         split=split,
         batch_id=0,
     )
-    proposal = {
-        "family_id": np.asarray(family_id, dtype=np.int16),
-        "dataset_split": np.asarray(dataset_split.value),
-        "parameter_group_id": np.arange(len(attempt_indices), dtype=np.int32),
-        "worker_stream_id": np.zeros(len(attempt_indices), dtype=np.uint32),
-        "attempt_index": np.asarray(attempt_indices, dtype=np.uint64),
-        "simulation_spec_json": np.asarray(
+    proposal = BatchPlanArrays(
+        family_id=np.asarray(family_id, dtype=np.int16),
+        dataset_split=np.asarray(dataset_split.value),
+        parameter_group_id=np.asarray(
+            [f"group_{index}" for index in range(len(attempt_indices))]
+        ),
+        worker_stream_id=np.zeros(len(attempt_indices), dtype=np.uint32),
+        attempt_index=np.asarray(attempt_indices, dtype=np.uint64),
+        simulation_spec_json=np.asarray(
             [
                 json.dumps({"attempt_index": attempt_index})
                 for attempt_index in attempt_indices
             ]
         ),
-        "metadata_json": np.asarray("{}"),
-    }
+        metadata_json=np.asarray("{}"),
+    )
     simulation_ids = compute_batch_simulation_ids(proposal)
-    save_batch_plan(paths, proposal)
     frames_per_simulation = 2
     simulation_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
@@ -73,19 +75,18 @@ def _write_batch(
     )
     rows = simulation_local_index.size
     field = np.arange(rows * 4, dtype=np.float32).reshape(rows, 4) / 10.0
-    shard = {
-        "eta": field,
-        "xi": field + np.float32(0.1),
-        "gxi": field - np.float32(0.1),
-        "depth": np.repeat(
+    shard = DatasetShardArrays(
+        eta=field,
+        xi=field + np.float32(0.1),
+        gxi=field - np.float32(0.1),
+        depth=np.repeat(
             np.arange(1, len(accepted_local_indices) + 1, dtype=np.float64),
             frames_per_simulation,
         ),
-        "time": frame_index.astype(np.float64),
-        "simulation_local_index": simulation_local_index,
-        "frame_index": frame_index,
-    }
-    save_shard(paths, shard)
+        time=frame_index.astype(np.float64),
+        simulation_local_index=simulation_local_index,
+        frame_index=frame_index,
+    )
     blocks = {
         local_index: (position * frames_per_simulation, frames_per_simulation)
         for position, local_index in enumerate(accepted_local_indices)
@@ -103,8 +104,14 @@ def _write_batch(
         )
         for local_index, simulation_id in enumerate(simulation_ids)
     )
-    commit_batch(paths, simulations=records, metadata={})
-    return paths
+    save_completed_batch(
+        path,
+        plan=proposal,
+        shard=shard,
+        simulations=records,
+        metadata={},
+    )
+    return path
 
 
 def _build_single_family_view(root: Path) -> Path:

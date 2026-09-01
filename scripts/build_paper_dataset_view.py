@@ -26,7 +26,7 @@ from solver.gen_data.jonswap_horizon_executor import (
 )
 from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.batch_artifacts import parse_batch_plan_metadata
-from solver.gen_data.pipeline.batch_storage import BatchPaths
+from solver.gen_data.pipeline.batch_storage import load_completed_batch
 from solver.gen_data.pipeline.build_dataset_view import (
     DATASET_VIEW_SCHEMA_VERSION,
     DatasetViewPaths,
@@ -69,7 +69,7 @@ ROWS_PER_ACCEPTED_SIMULATION = {
 
 @dataclass(frozen=True)
 class CompletedChunk:
-    """One completed generator invocation and its committed batches."""
+    """One completed generator invocation and its batch files."""
 
     summary_path: Path
     root: Path
@@ -80,7 +80,7 @@ class CompletedChunk:
     accepted_count: int
     accepted_after: int
     attempted_count: int
-    batches: tuple[BatchPaths, ...]
+    batches: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -210,7 +210,6 @@ def _reconstruct_chunk_config(
         for target in raw_targets
         if isinstance(target, Mapping)
     )
-    raw_codes = _required_mapping(record, "parameter_group_codes")
     return DatasetChunkConfig(
         root=root,
         family_name=family,
@@ -218,12 +217,6 @@ def _reconstruct_chunk_config(
         dataset_split=DatasetSplit(_required_string(record, "dataset_split")),
         worker_stream_id=_required_integer(record, "worker_stream_id"),
         simulation_targets=targets,
-        parameter_group_codes={
-            str(parameter_group_id): _required_integer(
-                raw_codes, str(parameter_group_id)
-            )
-            for parameter_group_id in raw_codes
-        },
         batch_size=_required_integer(record, "batch_size", minimum=1),
         first_attempt_index=_required_integer(record, "first_attempt_index"),
         configuration=_required_mapping(record, "configuration"),
@@ -261,24 +254,24 @@ def _validate_current_execution_contract(chunk_config: DatasetChunkConfig) -> No
         raise ValueError("JONSWAP chunk does not use the current bucketing config")
 
 
-def _validate_batch_plan_metadata(
-    paths: BatchPaths,
+def _validate_batch_metadata(
+    path: Path,
     *,
     chunk_config: DatasetChunkConfig,
 ) -> None:
-    with np.load(paths.batch_plan, allow_pickle=False) as batch_plan:
-        encoded = np.asarray(batch_plan["metadata_json"])
-    metadata = parse_batch_plan_metadata(encoded)
+    metadata = parse_batch_plan_metadata(
+        load_completed_batch(path).plan["metadata_json"]
+    )
     if metadata.get("family") != chunk_config.family_name:
-        raise ValueError("batch-plan family differs from its chunk")
+        raise ValueError("batch family differs from its chunk")
     expected_type = "static" if chunk_config.family_name == "stokes" else "trajectory"
     if metadata.get("simulation_type") != expected_type:
-        raise ValueError("batch-plan simulation type differs from its chunk")
+        raise ValueError("batch simulation type differs from its chunk")
     execution_name = "contract" if expected_type == "static" else "trajectory_execution"
     if _required_mapping(metadata, execution_name) != _required_mapping(
         chunk_config.configuration, execution_name
     ):
-        raise ValueError("batch-plan numerical contract differs from its chunk")
+        raise ValueError("batch numerical contract differs from its chunk")
 
 
 def load_completed_chunk(summary_path: Path) -> CompletedChunk:
@@ -328,12 +321,12 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
         raise ValueError("chunk quotas do not match its accepted interval")
 
     state = scan_dataset_generation(chunk_config)
-    if not state.complete or state.pending_batch is not None:
+    if not state.complete:
         raise RuntimeError("chunk batches are not complete")
     if sum(state.accepted_simulation_counts.values()) != accepted_count:
         raise RuntimeError("chunk batches contain the wrong accepted count")
-    for paths in state.committed:
-        _validate_batch_plan_metadata(paths, chunk_config=chunk_config)
+    for batch in state.completed_batches:
+        _validate_batch_metadata(batch, chunk_config=chunk_config)
 
     counts = _required_mapping(summary, "counts")
     if _required_integer(counts, "accepted") != accepted_count:
@@ -352,7 +345,7 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
         accepted_count=accepted_count,
         accepted_after=accepted_after,
         attempted_count=attempted_count,
-        batches=state.committed,
+        batches=state.completed_batches,
     )
 
 
@@ -471,7 +464,7 @@ def preflight(
                 "accepted_after": chunk.accepted_after,
                 "attempted_count": chunk.attempted_count,
                 "summary_path": str(chunk.summary_path),
-                "committed_batches": len(chunk.batches),
+                "completed_batches": len(chunk.batches),
             }
             for chunk in plan.chunks
         ],

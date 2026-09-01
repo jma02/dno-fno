@@ -116,7 +116,6 @@ def _run_spec(
         dataset_split=DatasetSplit.TEST,
         worker_stream_id=13,
         simulation_targets=(ParameterGroupTarget(parameter_group_id, outer_size),),
-        parameter_group_codes={parameter_group_id: 0},
         batch_size=outer_size,
         first_attempt_index=0,
         configuration={
@@ -700,7 +699,6 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 dataset_split=valid.dataset_split,
                 worker_stream_id=valid.worker_stream_id,
                 simulation_targets=valid.simulation_targets,
-                parameter_group_codes=valid.parameter_group_codes,
                 batch_size=valid.batch_size,
                 first_attempt_index=valid.first_attempt_index,
                 configuration=configuration,

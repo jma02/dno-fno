@@ -38,7 +38,7 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_plan,
+    prepare_trajectory_batch,
     sample_tanaka_simulations,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
@@ -256,7 +256,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             atol=2.0e-13,
         )
 
-    def test_durable_proposal_survives_constructor_domain_failure(self) -> None:
+    def test_constructor_domain_failure_leaves_no_completed_batch(self) -> None:
         contract = RolloutConfig(
             nx=64,
             target_nx=64,
@@ -296,13 +296,12 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             }
         )
         with tempfile.TemporaryDirectory() as directory:
-            proposed = persist_sampled_trajectory_plan(
+            proposed = prepare_trajectory_batch(
                 sampled,
                 root=Path(directory),
                 family_name="tanaka",
                 batch_id=0,
-                parameter_group_codes={parameter_group_id: 0},
-                metadata={"test_scope": "saved_batch_plan_before_domain_check"},
+                metadata={"test_scope": "constructor_domain_failure"},
             )
             with patch(
                 "solver.gen_data.trajectory_family_adapters."
@@ -312,10 +311,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
                 with self.assertRaises(TanakaPotentialRadicandError):
                     construct_tanaka_trajectory_batch(proposed)
 
-            self.assertTrue(proposed.paths.batch_plan.is_file())
-            self.assertFalse(proposed.paths.shard.exists())
-            self.assertFalse(proposed.paths.result.exists())
-            self.assertFalse(proposed.paths.failure.exists())
+            self.assertFalse(proposed.path.exists())
 
 
 if __name__ == "__main__":

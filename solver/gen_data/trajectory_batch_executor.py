@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import math
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -20,8 +21,6 @@ from solver.gen_data.jonswap_tma_sampling import (
     JONSWAP_TMA_PARAMETER_GROUPS,
     JonswapTmaSample,
 )
-from solver.gen_data.pipeline.batch_storage import BatchPaths
-from solver.gen_data.pipeline.batch_storage import record_fatal_failure
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     PhysicalFamilyId,
@@ -57,13 +56,13 @@ from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUPS
 from solver.gen_data.tanaka_sampling import TanakaSample
 from solver.gen_data.trajectory_family_adapters import (
     JonswapInitialStateDomainError,
-    PersistedTrajectoryPlan,
+    PreparedTrajectoryBatch,
     SampledSimulations,
     TrajectoryInitialBatch,
     construct_benjamin_feir_trajectory_batch,
     construct_jonswap_tma_trajectory_batch,
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_plan,
+    prepare_trajectory_batch,
     sample_benjamin_feir_simulations,
     sample_jonswap_tma_simulations,
     sample_tanaka_simulations,
@@ -426,60 +425,13 @@ class ConstructionFailureClassifier(Protocol):
     ) -> DeclaredConstructionFailure | None: ...
 
 
-@dataclass(frozen=True)
-class DeclaredFatalFailure:
-    """Explicit terminal failure information for a saved batch plan."""
-
-    phase: str
-    telemetry: Mapping[str, object]
-
-    def __post_init__(self) -> None:
-        if not self.phase:
-            raise ValueError("fatal-failure phase must not be empty")
-        object.__setattr__(self, "telemetry", _strict_json_copy(self.telemetry))
-
-
-class FatalFailureClassifier(Protocol):
-    def __call__(
-        self,
-        error: Exception,
-    ) -> DeclaredFatalFailure | None: ...
-
-
-class DeclaredTrajectoryFatalError(RuntimeError):
-    """An explicitly classified deterministic failure of a proposed batch."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        phase: str,
-        telemetry: Mapping[str, object] | None = None,
-    ) -> None:
-        self.failure = DeclaredFatalFailure(
-            phase=phase,
-            telemetry=telemetry or {},
-        )
-        super().__init__(message)
-
-
 class TrajectoryConstructor(Protocol):
     def __call__(
         self,
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch: ...
-
-
-def classify_declared_fatal_failure(
-    error: Exception,
-) -> DeclaredFatalFailure | None:
-    """Recognize only the executor's explicit deterministic-failure type."""
-
-    if not isinstance(error, DeclaredTrajectoryFatalError):
-        return None
-    return error.failure
 
 
 def _finite_json_number(
@@ -1018,7 +970,7 @@ def _finalize_outcome(
 
 @dataclass(frozen=True)
 class TrajectoryBatchExecutor:
-    """Execute one saved batch plan for a rollout-data family."""
+    """Execute one rollout-data batch."""
 
     chunk_config: DatasetChunkConfig
     execution: TrajectoryExecutionConfig
@@ -1028,7 +980,6 @@ class TrajectoryBatchExecutor:
     construction_failure_classifier: ConstructionFailureClassifier = (
         classify_trajectory_construction_failure
     )
-    fatal_failure_classifier: FatalFailureClassifier = classify_declared_fatal_failure
 
     def __post_init__(self) -> None:
         expected_family_id = _FAMILY_IDS[self.execution.family]
@@ -1036,9 +987,9 @@ class TrajectoryBatchExecutor:
             raise ValueError("chunk family name differs from trajectory execution")
         if self.chunk_config.family_id is not expected_family_id:
             raise ValueError("chunk family ID differs from trajectory execution")
-        unknown_parameter_groups = set(
-            self.chunk_config.parameter_group_codes
-        ).difference(_FAMILY_PARAMETER_GROUPS[self.execution.family])
+        unknown_parameter_groups = {
+            target.parameter_group_id for target in self.chunk_config.simulation_targets
+        }.difference(_FAMILY_PARAMETER_GROUPS[self.execution.family])
         if unknown_parameter_groups:
             raise ValueError(
                 f"unknown {self.execution.family} parameter groups: "
@@ -1068,11 +1019,10 @@ class TrajectoryBatchExecutor:
                 self.construction_failure_classifier
                 is not classify_trajectory_construction_failure
             )
-            or self.fatal_failure_classifier is not classify_declared_fatal_failure
         ):
             raise ValueError(
                 "paper-dataset execution requires the production constructor, "
-                "rollout executor, and failure classifiers"
+                "rollout executor, and construction-failure classifier"
             )
         object.__setattr__(
             self,
@@ -1141,7 +1091,7 @@ class TrajectoryBatchExecutor:
 
     def _construct(
         self,
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
@@ -1168,7 +1118,7 @@ class TrajectoryBatchExecutor:
 
     def _construct_tanaka(
         self,
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
     ) -> tuple[
         tuple[int, ...],
         TrajectoryInitialBatch | None,
@@ -1228,7 +1178,7 @@ class TrajectoryBatchExecutor:
 
     def _construct_jonswap(
         self,
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
     ) -> tuple[
         tuple[int, ...],
         TrajectoryInitialBatch | None,
@@ -1331,7 +1281,7 @@ class TrajectoryBatchExecutor:
 
     @staticmethod
     def _remap_tanaka_failure(
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
         *,
         remaining: tuple[int, ...],
         failure: DeclaredConstructionFailure,
@@ -1510,7 +1460,7 @@ class TrajectoryBatchExecutor:
 
     def _ordered_outcomes(
         self,
-        proposed: PersistedTrajectoryPlan[Any],
+        proposed: PreparedTrajectoryBatch[Any],
         grids: tuple[SimulationTimeGrid, ...],
     ) -> tuple[SimulationOutcome, ...]:
         simulation_count = len(proposed.sampled.assignments)
@@ -1561,8 +1511,8 @@ class TrajectoryBatchExecutor:
         assignments: tuple[AttemptAssignment, ...],
         *,
         batch_id: int,
-    ) -> BatchPaths:
-        """Run the complete sample-to-commit transaction for one batch."""
+    ) -> Path:
+        """Run and save one complete trajectory batch."""
 
         if not assignments:
             raise ValueError("trajectory attempt batches must not be empty")
@@ -1571,12 +1521,11 @@ class TrajectoryBatchExecutor:
         execution_record = self.execution.to_json_record()
         grid_records = [grid.to_json_record() for grid in grids]
         additional_metadata = dict(self.metadata or {})
-        proposed = persist_sampled_trajectory_plan(
+        proposed = prepare_trajectory_batch(
             sampled,
             root=self.chunk_config.root,
             family_name=self.chunk_config.family_name,
             batch_id=batch_id,
-            parameter_group_codes=self.chunk_config.parameter_group_codes,
             metadata={
                 "family": self.execution.family,
                 "simulation_type": "trajectory",
@@ -1586,34 +1535,21 @@ class TrajectoryBatchExecutor:
             },
         )
 
-        # Construction, rollout, and time selection all follow this write.
-        try:
-            outcomes = self._ordered_outcomes(proposed, grids)
-            commit_simulation_outcomes(
-                proposed.paths,
-                proposed.batch_plan,
-                outcomes,
-                metadata={
-                    "family": self.execution.family,
-                    "simulation_type": "trajectory",
-                    "trajectory_execution": execution_record,
-                    "simulation_time_grids": grid_records,
-                    "attempted_simulations": len(outcomes),
-                    "accepted_simulations": sum(
-                        outcome.decision.accepted for outcome in outcomes
-                    ),
-                    "additional_metadata": additional_metadata,
-                },
-            )
-        except Exception as error:
-            fatal = self.fatal_failure_classifier(error)
-            if fatal is None:
-                raise
-            record_fatal_failure(
-                proposed.paths,
-                phase=fatal.phase,
-                exception_type=type(error).__name__,
-                message=str(error),
-                telemetry=fatal.telemetry,
-            )
-        return proposed.paths
+        outcomes = self._ordered_outcomes(proposed, grids)
+        commit_simulation_outcomes(
+            proposed.path,
+            proposed.batch_plan,
+            outcomes,
+            metadata={
+                "family": self.execution.family,
+                "simulation_type": "trajectory",
+                "trajectory_execution": execution_record,
+                "simulation_time_grids": grid_records,
+                "attempted_simulations": len(outcomes),
+                "accepted_simulations": sum(
+                    outcome.decision.accepted for outcome in outcomes
+                ),
+                "additional_metadata": additional_metadata,
+            },
+        )
+        return proposed.path

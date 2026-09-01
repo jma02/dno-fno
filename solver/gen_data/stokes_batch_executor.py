@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Protocol, TypeAlias
 
-from solver.gen_data.pipeline.batch_storage import BatchPaths, save_batch_plan
+from solver.gen_data.pipeline.batch_storage import batch_path
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     PhysicalFamilyId,
@@ -93,9 +94,9 @@ def _validate_static_stokes_executor(
         raise ValueError("static Stokes generation must use family_name='stokes'")
     if chunk_config.family_id is not PhysicalFamilyId.STOKES:
         raise ValueError("static Stokes generation requires the Stokes family ID")
-    unknown_parameter_groups = set(chunk_config.parameter_group_codes).difference(
-        _STOKES_PARAMETER_GROUP_IDS
-    )
+    unknown_parameter_groups = {
+        target.parameter_group_id for target in chunk_config.simulation_targets
+    }.difference(_STOKES_PARAMETER_GROUP_IDS)
     if unknown_parameter_groups:
         raise ValueError(
             f"unknown Stokes parameter groups: {sorted(unknown_parameter_groups)}"
@@ -212,7 +213,7 @@ def make_static_stokes_batch_executor(
         assignments: tuple[AttemptAssignment, ...],
         *,
         batch_id: int,
-    ) -> BatchPaths:
+    ) -> Path:
         if not assignments:
             raise ValueError("static Stokes attempt batches must not be empty")
         resolved = tuple(
@@ -227,22 +228,19 @@ def make_static_stokes_batch_executor(
         batch_plan = build_batch_plan(
             assignments,
             tuple(specification for specification, _ in resolved),
-            parameter_group_codes=chunk_config.parameter_group_codes,
             metadata={
                 **common_metadata,
                 "retained_times": [0.0],
                 "selected_dense_indices": [0],
             },
         )
-        paths = BatchPaths.for_batch(
+        path = batch_path(
             chunk_config.root,
             family=chunk_config.family_name,
             split=chunk_config.dataset_split.value,
             batch_id=batch_id,
         )
 
-        # No state construction or target evaluation occurs before this write.
-        save_batch_plan(paths, batch_plan)
         complete_outcomes = tuple(
             _evaluate_stokes_attempt(
                 result,
@@ -253,7 +251,7 @@ def make_static_stokes_batch_executor(
             for _, result in resolved
         )
         commit_simulation_outcomes(
-            paths,
+            path,
             batch_plan,
             complete_outcomes,
             metadata={
@@ -267,6 +265,6 @@ def make_static_stokes_batch_executor(
                 ),
             },
         )
-        return paths
+        return path
 
     return execute

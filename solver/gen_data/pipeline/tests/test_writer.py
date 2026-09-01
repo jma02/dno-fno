@@ -11,9 +11,8 @@ import numpy as np
 
 from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.batch_storage import (
-    BatchPaths,
-    BatchStatus,
-    inspect_batch,
+    batch_path,
+    load_completed_batch,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import (
@@ -69,7 +68,7 @@ class CommonWriterTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.assignments = _assignments(DatasetSplit.TRAIN)
-        self.paths = BatchPaths.for_batch(
+        self.path = batch_path(
             self.root,
             family="jonswap_tma",
             split=DatasetSplit.TRAIN.value,
@@ -81,7 +80,6 @@ class CommonWriterTests(unittest.TestCase):
                 {"depth": 0.1, "phase_right": [0.1, 0.2]},
                 {"depth": 5.0, "phase_right": [0.3, 0.4]},
             ),
-            parameter_group_codes={"shallow": 0, "deep": 1},
             metadata={"target": "order_6_pad_8_band_128"},
         )
 
@@ -109,40 +107,37 @@ class CommonWriterTests(unittest.TestCase):
         )
 
         commit_simulation_outcomes(
-            self.paths,
+            self.path,
             self.batch_plan,
             outcomes,
             metadata={"accepted_simulations": 1},
         )
 
-        self.assertEqual(
-            inspect_batch(self.paths).status,
-            BatchStatus.COMMITTED,
-        )
-        with np.load(self.paths.batch_plan, allow_pickle=False) as proposal:
-            self.assertTrue(
-                np.array_equal(
-                    compute_batch_simulation_ids(proposal),
-                    np.asarray(
-                        [
-                            assignment.simulation_key.simulation_id
-                            for assignment in self.assignments
-                        ],
-                        dtype=np.int64,
-                    ),
-                )
+        batch = load_completed_batch(self.path)
+        self.assertTrue(
+            np.array_equal(
+                compute_batch_simulation_ids(batch.plan),
+                np.asarray(
+                    [
+                        assignment.simulation_key.simulation_id
+                        for assignment in self.assignments
+                    ],
+                    dtype=np.int64,
+                ),
             )
-            specifications = [
-                json.loads(value) for value in proposal["simulation_spec_json"]
-            ]
-            self.assertEqual(specifications[0]["phase_right"], [0.1, 0.2])
-        with np.load(self.paths.shard, allow_pickle=False) as shard:
-            self.assertEqual(shard["eta"].shape, (3, 4))
-            self.assertTrue(np.all(shard["simulation_local_index"] == 0))
+        )
+        specifications = [
+            json.loads(value) for value in batch.plan["simulation_spec_json"]
+        ]
+        self.assertEqual(specifications[0]["phase_right"], [0.1, 0.2])
+        self.assertIsNotNone(batch.shard)
+        assert batch.shard is not None
+        self.assertEqual(batch.shard["eta"].shape, (3, 4))
+        self.assertTrue(np.all(batch.shard["simulation_local_index"] == 0))
 
         view = build_dataset_view(
             self.root,
-            (self.paths,),
+            (self.path,),
         )
         with np.load(view.trajectory_map, allow_pickle=False) as trajectory_map:
             self.assertTrue(
@@ -169,14 +164,13 @@ class CommonWriterTests(unittest.TestCase):
         )
 
         commit_simulation_outcomes(
-            self.paths,
+            self.path,
             self.batch_plan,
             outcomes,
             metadata={"accepted_simulations": 0},
         )
 
-        self.assertFalse(self.paths.shard.exists())
-        self.assertEqual(inspect_batch(self.paths).status, BatchStatus.COMMITTED)
+        self.assertIsNone(load_completed_batch(self.path).shard)
 
     def test_decision_and_row_presence_cannot_disagree(self) -> None:
         with self.assertRaisesRegex(ValueError, "must have rows"):

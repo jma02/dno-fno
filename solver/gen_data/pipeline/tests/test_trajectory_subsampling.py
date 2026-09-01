@@ -19,10 +19,7 @@ import numpy as np  # noqa: E402
 from solver.gen_data.pipeline.trajectory_checks import (  # noqa: E402
     TrajectoryHealthMetrics,
 )
-from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
-    BatchPaths,
-    save_batch_plan,
-)
+from solver.gen_data.pipeline.batch_storage import batch_path  # noqa: E402
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
@@ -106,19 +103,16 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         proposal = build_batch_plan(
             assignments,
             ({"amplitude": 0.001}, {"amplitude": 0.0015}),
-            parameter_group_codes={"finite_a": 0, "finite_b": 1},
             metadata={"smoke": True},
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            paths = BatchPaths.for_batch(
+            path = batch_path(
                 root,
                 family="jonswap_tma",
                 split=DatasetSplit.TEST.value,
                 batch_id=0,
             )
-            save_batch_plan(paths, proposal)
-            self.assertTrue(paths.batch_plan.exists())
 
             saved_times = np.asarray([0.0, 0.02, 0.04])
             execution = execute_trajectory_batch(
@@ -141,14 +135,15 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             )
             self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
             commit_simulation_outcomes(
-                paths,
+                path,
                 proposal,
                 outcomes,
                 metadata={"accepted_simulations": 2},
             )
+            self.assertTrue(path.exists())
             view = build_dataset_view(
                 root,
-                (paths,),
+                (path,),
             )
             with np.load(view.trajectory_map, allow_pickle=False) as mapping:
                 np.testing.assert_array_equal(

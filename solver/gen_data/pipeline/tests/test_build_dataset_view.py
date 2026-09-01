@@ -11,15 +11,16 @@ import unittest
 import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import (
-    BatchPaths,
-    SimulationCommitRecord,
-    commit_batch,
-    save_batch_plan,
-    save_shard,
+    batch_path,
+    save_completed_batch,
 )
-from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
+from solver.gen_data.pipeline.batch_artifacts import (
+    SimulationCommitRecord,
+    compute_batch_simulation_ids,
+)
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 
 def _target(*, nx: int = 4, maximum_wavenumber: float = 1.0) -> dict[str, object]:
@@ -89,11 +90,13 @@ def _proposal(
     dataset_split: DatasetSplit,
     attempt_indices: tuple[int, ...],
     metadata: dict[str, object],
-) -> dict[str, np.ndarray]:
+) -> BatchPlanArrays:
     return {
         "family_id": np.asarray(family_id, dtype=np.int16),
         "dataset_split": np.asarray(dataset_split.value),
-        "parameter_group_id": np.arange(len(attempt_indices), dtype=np.int32),
+        "parameter_group_id": np.asarray(
+            [f"group_{index}" for index in range(len(attempt_indices))]
+        ),
         "worker_stream_id": np.zeros(len(attempt_indices), dtype=np.uint32),
         "attempt_index": np.asarray(attempt_indices, dtype=np.uint64),
         "simulation_spec_json": np.asarray(
@@ -107,14 +110,13 @@ def _proposal(
 
 
 def _write_batch(
-    paths: BatchPaths,
+    path: Path,
     *,
-    proposal: dict[str, np.ndarray],
+    proposal: BatchPlanArrays,
     accepted_local_indices: tuple[int, ...],
     frames_per_simulation: int,
     spatial_size: int = 4,
 ) -> None:
-    save_batch_plan(paths, proposal)
     simulation_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
         frames_per_simulation,
@@ -127,24 +129,23 @@ def _write_batch(
     field = np.arange(row_count * spatial_size, dtype=np.float32).reshape(
         row_count, spatial_size
     )
-    save_shard(
-        paths,
-        {
-            "eta": field,
-            "xi": field + np.float32(0.1),
-            "gxi": field - np.float32(0.1),
-            "depth": np.ones(row_count, dtype=np.float64),
-            "time": frame_index.astype(np.float64),
-            "simulation_local_index": simulation_local_index,
-            "frame_index": frame_index,
-        },
+    shard = DatasetShardArrays(
+        eta=field,
+        xi=field + np.float32(0.1),
+        gxi=field - np.float32(0.1),
+        depth=np.ones(row_count, dtype=np.float64),
+        time=frame_index.astype(np.float64),
+        simulation_local_index=simulation_local_index,
+        frame_index=frame_index,
     )
     blocks = {
         local_index: (position * frames_per_simulation, frames_per_simulation)
         for position, local_index in enumerate(accepted_local_indices)
     }
-    commit_batch(
-        paths,
+    save_completed_batch(
+        path,
+        plan=proposal,
+        shard=shard,
         simulations=tuple(
             SimulationCommitRecord(
                 simulation_id=int(simulation_id),
@@ -171,12 +172,8 @@ class DatasetViewTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def test_view_preserves_rejected_simulations_and_row_ownership(self) -> None:
-        first = BatchPaths.for_batch(
-            self.root, family="stokes", split="train", batch_id=0
-        )
-        second = BatchPaths.for_batch(
-            self.root, family="tanaka", split="validation", batch_id=0
-        )
+        first = batch_path(self.root, family="stokes", split="train", batch_id=0)
+        second = batch_path(self.root, family="tanaka", split="validation", batch_id=0)
         _write_batch(
             first,
             proposal=_proposal(
@@ -219,12 +216,8 @@ class DatasetViewTests(unittest.TestCase):
             )
 
     def test_training_target_settings_must_match(self) -> None:
-        stokes = BatchPaths.for_batch(
-            self.root, family="stokes", split="train", batch_id=0
-        )
-        tanaka = BatchPaths.for_batch(
-            self.root, family="tanaka", split="validation", batch_id=0
-        )
+        stokes = batch_path(self.root, family="stokes", split="train", batch_id=0)
+        tanaka = batch_path(self.root, family="tanaka", split="validation", batch_id=0)
         _write_batch(
             stokes,
             proposal=_proposal(
@@ -252,7 +245,7 @@ class DatasetViewTests(unittest.TestCase):
 
     def test_one_family_cannot_mix_generator_settings(self) -> None:
         batches = tuple(
-            BatchPaths.for_batch(self.root, family="tanaka", split=split, batch_id=0)
+            batch_path(self.root, family="tanaka", split=split, batch_id=0)
             for split in ("train", "validation")
         )
         for index, (paths, fine_dt, dataset_split) in enumerate(
@@ -277,9 +270,7 @@ class DatasetViewTests(unittest.TestCase):
             build_dataset_view(self.root, batches)
 
     def test_dual_grid_view_uses_target_grid(self) -> None:
-        paths = BatchPaths.for_batch(
-            self.root, family="jonswap_tma", split="test", batch_id=0
-        )
+        paths = batch_path(self.root, family="jonswap_tma", split="test", batch_id=0)
         _write_batch(
             paths,
             proposal=_proposal(
@@ -301,21 +292,10 @@ class DatasetViewTests(unittest.TestCase):
         self.assertEqual(manifest["grid"]["nx"], 4)
         self.assertEqual(manifest["dataset_settings"]["target"]["nx"], 4)
 
-    def test_uncommitted_batch_cannot_enter_view(self) -> None:
-        paths = BatchPaths.for_batch(
-            self.root, family="stokes", split="test", batch_id=0
-        )
-        save_batch_plan(
-            paths,
-            _proposal(
-                family_id=0,
-                dataset_split=DatasetSplit.TEST,
-                attempt_indices=(40,),
-                metadata=_static_metadata(),
-            ),
-        )
-        with self.assertRaisesRegex(RuntimeError, "committed batches"):
-            build_dataset_view(self.root, (paths,))
+    def test_missing_batch_cannot_enter_view(self) -> None:
+        path = batch_path(self.root, family="stokes", split="test", batch_id=0)
+        with self.assertRaises(FileNotFoundError):
+            build_dataset_view(self.root, (path,))
 
 
 if __name__ == "__main__":

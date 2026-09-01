@@ -60,13 +60,13 @@ Shared pipeline:
 - `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
 - `pipeline/trajectory_rollout.py` runs and samples trajectories.
 - `pipeline/dno_target.py` computes the stored DNO target.
-- `pipeline/batch_format.py` validates proposal and shard arrays.
-- `pipeline/batch_storage.py` inspects committed or interrupted batches.
+- `pipeline/batch_artifacts.py` validates assignments, stored rows, and results.
+- `pipeline/batch_storage.py` reads and writes one completed NPZ per batch.
 - `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
 - `pipeline/build_dataset_view.py` creates the manifest and trajectory map used
   by training.
-- `pipeline/dataset_generation.py` resumes a run and continues until each
-  parameter group reaches its accepted-simulation target.
+- `pipeline/dataset_generation.py` counts completed batches and generates the
+  remaining simulations needed by each parameter group.
 
 ## Acceptance
 
@@ -87,17 +87,13 @@ adjustment handling.
 
 ## Stored files
 
-Each batch may contain:
+Each finished batch is one NPZ containing its simulation assignments, sampled
+parameters, acceptance decisions, and any accepted rows. A batch with no
+accepted simulations simply omits the row arrays.
 
-- a proposal NPZ with simulation IDs, sampled parameters, and execution settings;
-- a result JSON with one acceptance decision per attempt;
-- an accepted-row NPZ shard, omitted when the whole batch is rejected;
-- a failure JSON if execution stopped before a result could be committed.
-
-Writes use a temporary sibling file, `fsync`, and `os.replace`. On restart,
-the scanner either recognizes a complete batch, resumes from a stored
-proposal, or reports the incomplete state. It does not rely on file digests or
-source snapshots.
+The NPZ is written to a temporary sibling and renamed only after it is complete.
+If generation stops before that rename, there is no batch artifact; the next run
+restarts the same deterministic batch from the beginning.
 
 The dataset view contains:
 

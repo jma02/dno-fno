@@ -538,23 +538,15 @@ def _dataset_artifact(
 
 
 def _trajectory_indices(
-    summary: Mapping[str, Any],
     map_path: Path,
 ) -> tuple[TrajectoryIndex, ...]:
-    parameter_group_codes = summary["run_spec"]["parameter_group_codes"]
-    if not isinstance(parameter_group_codes, dict):
-        raise TypeError("summary parameter_group_codes must be a dictionary")
-    categories = {int(code): str(name) for name, code in parameter_group_codes.items()}
-
     with np.load(map_path, allow_pickle=False) as archive:
         accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
         simulation_ids = np.asarray(
             archive["trajectory_simulation_id"],
             dtype=np.int64,
         )
-        parameter_group_ids = np.asarray(
-            archive["trajectory_parameter_group_id"], dtype=np.int32
-        )
+        parameter_group_ids = np.asarray(archive["trajectory_parameter_group_id"])
         first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
         row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
         row_trajectories = np.asarray(archive["trajectory_index"], dtype=np.int32)
@@ -580,13 +572,12 @@ def _trajectory_indices(
             np.arange(local_rows[0], local_rows[0] + count),
         ):
             raise RuntimeError("trajectory rows are not contiguous in its shard")
-        parameter_group_code = int(parameter_group_ids[trajectory_index])
         records.append(
             TrajectoryIndex(
                 accepted_index=accepted_index,
                 trajectory_index=trajectory_index,
                 simulation_id=int(simulation_ids[trajectory_index]),
-                category=categories[parameter_group_code],
+                category=str(parameter_group_ids[trajectory_index]),
                 shard_index=int(shards[0]),
                 first_shard_row=int(local_rows[0]),
                 row_count=count,
@@ -667,7 +658,7 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
         # ``batch_index`` is source-batch metadata and may contain gaps.
         shard_paths[shard_index] = shard_path
 
-    trajectories = _trajectory_indices(summary, map_path)
+    trajectories = _trajectory_indices(map_path)
     if len(trajectories) != int(manifest["n_accepted_trajectories"]):
         raise RuntimeError(f"accepted trajectory count mismatch in {resolved}")
     if sum(value.row_count for value in trajectories) != int(

@@ -4,19 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import json_text
-from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
-from solver.gen_data.pipeline.batch_storage import (
-    BatchPaths,
+from solver.gen_data.pipeline.batch_artifacts import (
     SimulationCommitRecord,
-    commit_batch,
-    save_batch_plan,
-    save_shard,
+    compute_batch_simulation_ids,
 )
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
 )
@@ -58,10 +56,9 @@ def build_batch_plan(
     assignments: Sequence[AttemptAssignment],
     specifications: Sequence[Mapping[str, object]],
     *,
-    parameter_group_codes: Mapping[str, int],
     metadata: Mapping[str, object],
 ) -> BatchPlanArrays:
-    """Build the exact batch plan saved before numerical construction."""
+    """Describe the sampled simulations in one batch."""
 
     if not assignments:
         raise ValueError("assignments must not be empty")
@@ -82,30 +79,12 @@ def build_batch_plan(
     ):
         raise ValueError("one batch must have one family and preassigned split")
 
-    unknown_parameter_groups = {
-        assignment.parameter_group_id
-        for assignment in assignments
-        if assignment.parameter_group_id not in parameter_group_codes
-    }
-    if unknown_parameter_groups:
-        raise ValueError(
-            "missing integer codes for parameter groups "
-            f"{sorted(unknown_parameter_groups)}"
-        )
-    encoded_parameter_group_codes = np.asarray(
-        [
-            parameter_group_codes[assignment.parameter_group_id]
-            for assignment in assignments
-        ],
-        dtype=np.int32,
-    )
-    if np.any(encoded_parameter_group_codes < 0):
-        raise ValueError("parameter-group codes must be nonnegative")
-
     return {
         "family_id": np.asarray(first_key.family_id, dtype=np.int16),
         "dataset_split": np.asarray(first_key.dataset_split.value),
-        "parameter_group_id": encoded_parameter_group_codes,
+        "parameter_group_id": np.asarray(
+            [assignment.parameter_group_id for assignment in assignments]
+        ),
         "worker_stream_id": np.asarray(
             [assignment.simulation_key.worker_stream_id for assignment in assignments],
             dtype=np.uint32,
@@ -122,7 +101,7 @@ def build_batch_plan(
 
 
 def commit_simulation_outcomes(
-    paths: BatchPaths,
+    path: Path,
     batch_plan: BatchPlanArrays,
     outcomes: Sequence[SimulationOutcome],
     *,
@@ -133,7 +112,6 @@ def commit_simulation_outcomes(
     simulation_ids = compute_batch_simulation_ids(batch_plan)
     if len(outcomes) != simulation_ids.size:
         raise ValueError("outcomes must contain every planned simulation")
-    save_batch_plan(paths, batch_plan)
 
     eta_parts: list[NDArray[np.float32]] = []
     xi_parts: list[NDArray[np.float32]] = []
@@ -183,8 +161,8 @@ def commit_simulation_outcomes(
             )
         )
 
-    if eta_parts:
-        shard = DatasetShardArrays(
+    shard = (
+        DatasetShardArrays(
             eta=np.concatenate(eta_parts),
             xi=np.concatenate(xi_parts),
             gxi=np.concatenate(gxi_parts),
@@ -193,5 +171,13 @@ def commit_simulation_outcomes(
             simulation_local_index=np.concatenate(simulation_parts),
             frame_index=np.concatenate(frame_parts),
         )
-        save_shard(paths, shard)
-    commit_batch(paths, simulations=records, metadata=metadata)
+        if eta_parts
+        else None
+    )
+    save_completed_batch(
+        path,
+        plan=batch_plan,
+        shard=shard,
+        simulations=records,
+        metadata=metadata,
+    )

@@ -1,4 +1,4 @@
-"""Build a loader-facing view from committed paper-dataset batch shards."""
+"""Build a loader-facing view from completed paper-dataset batches."""
 
 from __future__ import annotations
 
@@ -12,13 +12,8 @@ from typing import Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.batch_storage import (
-    BatchPaths,
-    BatchStatus,
-    inspect_batch,
-)
+from solver.gen_data.pipeline.batch_storage import load_completed_batch
 from solver.gen_data.pipeline.artifact_io import (
-    load_npz,
     write_json_atomic,
     write_npz_atomic,
 )
@@ -30,7 +25,6 @@ from solver.gen_data.pipeline.batch_artifacts import (
 from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.types import (
     BatchPlanArrays,
-    DatasetShardArrays,
     JsonObject,
     JsonValue,
     SimulationIndexArrays,
@@ -175,7 +169,7 @@ def _record_family_settings(
 def _validate_view_request(
     name: str,
     length: float,
-    batches: Sequence[BatchPaths],
+    batches: Sequence[Path],
 ) -> None:
     if not name or any(
         not (character.isascii() and (character.isalnum() or character in "_-"))
@@ -185,7 +179,7 @@ def _validate_view_request(
     if not np.isfinite(length) or length <= 0.0:
         raise ValueError("length must be finite and positive")
     if not batches:
-        raise ValueError("at least one committed batch is required")
+        raise ValueError("at least one completed batch is required")
 
 
 def _dataset_settings(
@@ -269,16 +263,15 @@ def _dataset_settings(
 
 def build_dataset_view(
     root: Path,
-    batches: Sequence[BatchPaths],
+    batches: Sequence[Path],
     *,
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
 ) -> DatasetViewPaths:
     """Write a training manifest and attempted-simulation trajectory map.
 
-    ``batches`` defines the immutable shard order.  Every batch must already
-    be committed, but a batch with no accepted simulations may legitimately have no
-    shard.
+    ``batches`` defines the immutable shard order. A batch with no accepted
+    simulations legitimately contains no row arrays.
     """
 
     _validate_view_request(name, length, batches)
@@ -293,7 +286,7 @@ def build_dataset_view(
     family_ids: list[int] = []
     dataset_splits: list[str] = []
     simulation_ids: list[int] = []
-    parameter_group_ids: list[int] = []
+    parameter_group_ids: list[str] = []
     simulation_results: list[SimulationCommitRecord] = []
     first_rows: list[int] = []
     shard_records: list[JsonValue] = []
@@ -303,13 +296,9 @@ def build_dataset_view(
     trajectory_offset = 0
     spatial_size: int | None = None
 
-    for batch_index, batch in enumerate(batches):
-        inspection = inspect_batch(batch)
-        if inspection.status is not BatchStatus.COMMITTED:
-            raise RuntimeError(
-                f"dataset views require committed batches, got {inspection.status.value}"
-            )
-        batch_plan = cast(BatchPlanArrays, load_npz(batch.batch_plan))
+    for batch_index, batch_path in enumerate(batches):
+        batch = load_completed_batch(batch_path)
+        batch_plan = batch.plan
         current_settings = _batch_settings(batch_plan)
         family_id = int(batch_plan["family_id"])
         batch_settings.append(current_settings)
@@ -319,8 +308,8 @@ def build_dataset_view(
 
         shard_index: int | None = None
         shard_row_count = 0
-        if batch.shard.exists():
-            shard = cast(DatasetShardArrays, load_npz(batch.shard))
+        if batch.shard is not None:
+            shard = batch.shard
             current_spatial_size = int(shard["eta"].shape[1])
             if spatial_size is None:
                 spatial_size = current_spatial_size
@@ -330,7 +319,7 @@ def build_dataset_view(
             shard_row_count = int(shard["eta"].shape[0])
             shard_records.append(
                 {
-                    "path": _relative_path(batch.shard, output_paths.manifest.parent),
+                    "path": _relative_path(batch_path, output_paths.manifest.parent),
                     "n_rows": shard_row_count,
                     "batch_index": batch_index,
                 }
@@ -345,12 +334,12 @@ def build_dataset_view(
             )
             row_shard_row_parts.append(np.arange(shard_row_count, dtype=np.int64))
         dataset_split = DatasetSplit(str(batch_plan["dataset_split"].item()))
-        simulations = inspection.simulations
+        simulations = batch.simulations
         accepted_in_batch = sum(simulation.accepted for simulation in simulations)
         family_ids.extend([family_id] * number_of_simulations)
         dataset_splits.extend([dataset_split.value] * number_of_simulations)
         simulation_ids.extend(map(int, planned_simulation_ids))
-        parameter_group_ids.extend(map(int, batch_plan["parameter_group_id"]))
+        parameter_group_ids.extend(map(str, batch_plan["parameter_group_id"]))
         simulation_results.extend(simulations)
         first_rows.extend(
             global_row_count + simulation.first_row if simulation.accepted else -1
@@ -359,14 +348,7 @@ def build_dataset_view(
 
         batch_records.append(
             {
-                "batch_plan_path": _relative_path(
-                    batch.batch_plan,
-                    output_paths.manifest.parent,
-                ),
-                "result_path": _relative_path(
-                    batch.result,
-                    output_paths.manifest.parent,
-                ),
+                "path": _relative_path(batch_path, output_paths.manifest.parent),
                 "shard_index": shard_index,
                 "family_id": family_id,
                 "dataset_split": dataset_split.value,
@@ -408,9 +390,7 @@ def build_dataset_view(
         "trajectory_family_id": np.asarray(family_ids, dtype=np.int16),
         "trajectory_dataset_split": dataset_split_array,
         "trajectory_simulation_id": np.asarray(simulation_ids, dtype=np.int64),
-        "trajectory_parameter_group_id": np.asarray(
-            parameter_group_ids, dtype=np.int32
-        ),
+        "trajectory_parameter_group_id": np.asarray(parameter_group_ids),
         "trajectory_accepted": accepted_array,
         "trajectory_required_bits": np.asarray(
             [simulation.required_bits for simulation in simulation_results],

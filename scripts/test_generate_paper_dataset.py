@@ -19,16 +19,13 @@ from scripts.generate_paper_dataset import (
     preflight,
     request_from_args,
 )
-from solver.gen_data.pipeline.batch_storage import BatchPaths, save_batch_plan
 from solver.gen_data.pipeline.simulation_allocation import (
     DatasetSplit,
     balanced_simulation_targets,
-    build_next_attempt_batch,
 )
 from solver.gen_data.pipeline.dataset_generation import (
     MAX_RETRIES_PER_PARAMETER_GROUP,
 )
-from solver.gen_data.pipeline.writer import build_batch_plan
 from solver.gen_data.stokes_sampling import DEFAULT_MAXIMUM_URSELL_REDRAWS
 from solver.gen_data.stokes_static_pipeline import (
     PAPER_STATIC_STOKES_CONTRACT,
@@ -272,7 +269,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 [33, 33, 33, 33, 33, 0, 0, 0, 0, 0, 0],
             )
             self.assertEqual(
-                [quota["durable_attempted"] for quota in allocation["quotas"]],
+                [quota["attempted"] for quota in allocation["quotas"]],
                 [0] * 11,
             )
             expected = plan["expected_output"]
@@ -325,11 +322,9 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertEqual(expected["spatial_points_per_row"], 1024)
             self.assertEqual(plan["execution"]["dno_order"], 6)
 
-    def test_pending_proposal_is_detected_without_rewriting_it(
-        self,
-    ) -> None:
+    def test_preflight_reports_only_completed_batches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "resume"
+            output = Path(directory) / "generation"
             request = GenerationRequest(
                 output_root=output,
                 family="tanaka",
@@ -338,45 +333,9 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 batch_size=1,
                 platform=BOOTSTRAP_PLATFORM,
             )
-            chunk_config = build_chunk_config(request)
-            assignments = build_next_attempt_batch(
-                chunk_config.simulation_targets,
-                {},
-                {},
-                chunk_config.maximum_attempts_by_parameter_group,
-                family_id=int(chunk_config.family_id),
-                dataset_split=chunk_config.dataset_split,
-                worker_stream_id=chunk_config.worker_stream_id,
-                first_attempt_index=chunk_config.first_attempt_index,
-                batch_size=chunk_config.batch_size,
-            )
-            records = tuple(
-                {
-                    "schema": "launcher_resume_test_v1",
-                    "parameter_group_id": assignment.parameter_group_id,
-                    "attempt_index": assignment.simulation_key.attempt_index,
-                }
-                for assignment in assignments
-            )
-            paths = BatchPaths.for_batch(
-                chunk_config.root,
-                family=chunk_config.family_name,
-                split=chunk_config.dataset_split.value,
-                batch_id=0,
-            )
-            save_batch_plan(
-                paths,
-                build_batch_plan(
-                    assignments,
-                    records,
-                    parameter_group_codes=chunk_config.parameter_group_codes,
-                    metadata={"test": "no_compute_resume_scan"},
-                ),
-            )
-
             _, _, state, plan = preflight(request)
-            self.assertIsNotNone(state.pending_batch)
-            self.assertEqual(plan["resume_state"]["pending_batch_id"], 0)
+            self.assertEqual(state.completed_batches, ())
+            self.assertEqual(plan["generation_state"]["completed_batches"], 0)
 
 
 if __name__ == "__main__":

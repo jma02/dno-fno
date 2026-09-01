@@ -1,8 +1,8 @@
-"""Preflight, generate, or resume one paper-dataset family.
+"""Preflight or generate one paper-dataset family.
 
 The default mode is a read-only preflight.  Numerical generation begins only
-when ``--execute`` is supplied. Existing batches are resumed from their saved
-simulation assignments and validated numerical outputs.
+when ``--execute`` is supplied. Existing completed batches are reused; an
+interrupted batch is run again from the beginning.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ if BOOTSTRAP_PLATFORM == "cpu":
 
 
 import jax  # noqa: E402
-import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
@@ -60,6 +59,7 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.artifact_io import write_json_atomic  # noqa: E402
+from solver.gen_data.pipeline.batch_storage import load_completed_batch  # noqa: E402
 from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
     DATASET_VIEW_SCHEMA_VERSION,
     DatasetViewPaths,
@@ -218,7 +218,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-root",
         type=Path,
         required=True,
-        help="Root containing saved batch plans, shards, results, and views.",
+        help="Root containing completed batches and dataset views.",
     )
     parser.add_argument(
         "--batch-size",
@@ -257,7 +257,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     mode.add_argument(
         "--execute",
         action="store_true",
-        help="Run or resume numerical generation after the preflight scan.",
+        help="Run numerical generation after the preflight scan.",
     )
     mode.add_argument(
         "--dry-run",
@@ -417,12 +417,6 @@ def build_chunk_config(
         dataset_split=request.split,
         worker_stream_id=request.worker_stream_id,
         simulation_targets=simulation_targets,
-        parameter_group_codes={
-            parameter_group_id: parameter_group_code
-            for parameter_group_code, parameter_group_id in enumerate(
-                parameter_group_ids
-            )
-        },
         batch_size=request.batch_size,
         first_attempt_index=request.first_attempt_index,
         configuration={
@@ -447,10 +441,7 @@ def _state_record(state: DatasetChunkState) -> dict[str, object]:
         "complete": state.complete,
         "accepted_simulation_counts": dict(state.accepted_simulation_counts),
         "simulation_attempt_counts": dict(state.simulation_attempt_counts),
-        "committed_batches": len(state.committed),
-        "pending_batch_id": (
-            state.pending_batch.batch_id if state.pending_batch is not None else None
-        ),
+        "completed_batches": len(state.completed_batches),
     }
 
 
@@ -537,9 +528,7 @@ def preflight(
             "chunk_target_accepted": target.simulation_count,
             "accepted_after": after.simulation_count,
             "maximum_attempts": maximum_attempts[target.parameter_group_id],
-            "durable_attempted": state.simulation_attempt_counts[
-                target.parameter_group_id
-            ],
+            "attempted": state.simulation_attempt_counts[target.parameter_group_id],
             "remaining_attempts": (
                 maximum_attempts[target.parameter_group_id]
                 - state.simulation_attempt_counts[target.parameter_group_id]
@@ -608,7 +597,7 @@ def preflight(
                 else execution.numerical.target_nx
             ),
         },
-        "resume_state": _state_record(state),
+        "generation_state": _state_record(state),
         "runtime": _runtime_record(),
     }
     return chunk_config, execution, state, plan
@@ -642,14 +631,10 @@ def _artifact_record(path: Path, *, root: Path) -> dict[str, object]:
     }
 
 
-def _summarize_committed_simulations(
+def _summarize_completed_simulations(
     state: DatasetChunkState,
     chunk_config: DatasetChunkConfig,
 ) -> dict[str, object]:
-    parameter_group_by_code = {
-        code: parameter_group_id
-        for parameter_group_id, code in chunk_config.parameter_group_codes.items()
-    }
     attempted = Counter(
         {target.parameter_group_id: 0 for target in chunk_config.simulation_targets}
     )
@@ -658,34 +643,23 @@ def _summarize_committed_simulations(
     )
     rejection_reasons: Counter[str] = Counter()
 
-    for paths in state.committed:
-        with np.load(paths.batch_plan, allow_pickle=False) as batch_plan:
-            encoded_parameter_groups = np.asarray(
-                batch_plan["parameter_group_id"], dtype=np.int32
-            )
-        result = _read_json_object(paths.result)
-        simulations = result.get("simulations")
-        if (
-            not isinstance(simulations, list)
-            or len(simulations) != encoded_parameter_groups.size
+    for path in state.completed_batches:
+        batch = load_completed_batch(path)
+        parameter_groups = tuple(
+            str(value) for value in batch.plan["parameter_group_id"]
+        )
+        for parameter_group_id, simulation in zip(
+            parameter_groups,
+            batch.simulations,
+            strict=True,
         ):
-            raise RuntimeError("result does not contain every planned simulation")
-        for local_index, simulation in enumerate(simulations):
-            if not isinstance(simulation, dict):
-                raise TypeError("result simulation must be a JSON object")
-            parameter_group_id = parameter_group_by_code[
-                int(encoded_parameter_groups[local_index])
-            ]
             attempted[parameter_group_id] += 1
-            if bool(simulation.get("accepted")):
+            if simulation.accepted:
                 accepted[parameter_group_id] += 1
                 continue
-            failed_bits = simulation.get("failed_bits")
-            if isinstance(failed_bits, bool) or not isinstance(failed_bits, int):
-                raise TypeError("result failed_bits must be an integer")
             names = tuple(
                 reason.name or str(reason.value)
-                for reason in checks_from_bits(failed_bits)
+                for reason in checks_from_bits(simulation.failed_bits)
             )
             rejection_reasons["+".join(names) if names else "missing_check"] += 1
 
@@ -801,13 +775,13 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
     view_started = perf_counter()
     view = build_dataset_view(
         request.output_root,
-        state.committed,
+        state.completed_batches,
         name=_view_name(request),
         length=length,
     )
     view_seconds = perf_counter() - view_started
     validation_started = perf_counter()
-    counts = _summarize_committed_simulations(state, chunk_config)
+    counts = _summarize_completed_simulations(state, chunk_config)
     attempted_simulations = counts["attempted"]
     if isinstance(attempted_simulations, bool) or not isinstance(
         attempted_simulations, int
@@ -829,7 +803,7 @@ def run_generation(request: GenerationRequest) -> GenerationRunResult:
         "execution": _execution_record(execution),
         "runtime": runtime,
         "preflight": plan,
-        "resume": {
+        "generation_state": {
             "initial": _state_record(initial_state),
             "final": _state_record(state),
         },

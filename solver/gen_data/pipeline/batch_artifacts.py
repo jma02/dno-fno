@@ -17,8 +17,6 @@ from solver.gen_data.pipeline.types import BatchPlanArrays, JsonObject, JsonScal
 _BATCH_PLAN_DTYPES = {
     # physical initial-condition family this batch belongs to.
     "family_id": np.dtype(np.int16),
-    # Compact code for the simulation's named parameter group.
-    "parameter_group_id": np.dtype(np.int32),
     # Separate ID/RNG sequence assigned to this generation worker.
     "worker_stream_id": np.dtype(np.uint32),
     # Candidate position in that sequence; rejected candidates still count.
@@ -26,6 +24,7 @@ _BATCH_PLAN_DTYPES = {
 }
 _BATCH_PLAN_STRING_FIELDS = {
     "dataset_split",
+    "parameter_group_id",
     "simulation_spec_json",
     "metadata_json",
 }
@@ -38,6 +37,8 @@ _SHARD_DTYPES = {
     "simulation_local_index": np.dtype(np.int32),
     "frame_index": np.dtype(np.int32),
 }
+BATCH_PLAN_FIELDS = frozenset((*_BATCH_PLAN_DTYPES, *_BATCH_PLAN_STRING_FIELDS))
+SHARD_FIELDS = frozenset(_SHARD_DTYPES)
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ class SimulationCommitRecord:
             raise ValueError("rejected simulations cannot own stored rows")
 
     def to_json_record(self) -> JsonObject:
-        """Return the existing on-disk result representation."""
+        """Return the result representation stored in a completed batch."""
 
         return {
             "simulation_id": self.simulation_id,
@@ -212,7 +213,7 @@ def compute_batch_simulation_ids(
     )
 
 
-def validate_batch_plan(batch_plan: Mapping[str, NDArray[Any]]) -> None:
+def validate_batch_plan(batch_plan: Mapping[str, Any]) -> None:
     """Validate the simulations that one batch plans to run."""
 
     _validate_required_array_dtypes(batch_plan, _BATCH_PLAN_DTYPES)
@@ -221,6 +222,9 @@ def validate_batch_plan(batch_plan: Mapping[str, NDArray[Any]]) -> None:
         raise ValueError(
             f"batch plan is missing required arrays {sorted(missing_strings)}"
         )
+    unexpected = batch_plan.keys() - BATCH_PLAN_FIELDS
+    if unexpected:
+        raise ValueError(f"batch plan contains unexpected arrays {sorted(unexpected)}")
     if any(array.dtype.kind == "O" for array in batch_plan.values()):
         raise TypeError("batch-plan arrays cannot use object dtype")
     for name in _BATCH_PLAN_STRING_FIELDS:
@@ -254,22 +258,15 @@ def validate_batch_plan(batch_plan: Mapping[str, NDArray[Any]]) -> None:
                 "every simulation_spec_json entry must encode a JSON object"
             )
 
-    if any(
-        array.ndim != 0 and array.shape[0] != simulation_ids.size
-        for array in batch_plan.values()
-    ):
-        raise ValueError(
-            "each optional batch-plan array must be scalar or have one entry per simulation"
-        )
     for name, array in batch_plan.items():
         if array.dtype.kind in {"f", "c"} and not np.isfinite(array).all():
             raise ValueError(f"batch-plan array {name!r} contains nonfinite values")
 
 
 def validate_shard(
-    shard: Mapping[str, NDArray[Any]],
+    shard: Mapping[str, Any],
     *,
-    batch_plan: Mapping[str, NDArray[Any]],
+    batch_plan: Mapping[str, Any],
 ) -> None:
     """Validate one batch's shard against its saved plan."""
 
@@ -277,6 +274,9 @@ def validate_shard(
         shard,
         _SHARD_DTYPES,
     )
+    unexpected = shard.keys() - SHARD_FIELDS
+    if unexpected:
+        raise ValueError(f"shard contains unexpected arrays {sorted(unexpected)}")
     if any(array.dtype.kind == "O" for array in shard.values()):
         raise TypeError("shard arrays cannot use object dtype")
 

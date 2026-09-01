@@ -87,7 +87,7 @@ preflight_chunk() {
     PREFLIGHTS+=("$PREFLIGHT")
 }
 
-# Freeze every remaining plan before either lane resumes numerical work.
+# Validate every remaining chunk before either lane starts numerical work.
 for row in "${CHUNKS[@]}"; do preflight_chunk "$row"; done
 "$PYTHON" -c '
 import json, sys

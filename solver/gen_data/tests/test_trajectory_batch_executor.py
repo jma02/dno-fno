@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import math
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+from typing import cast
 import unittest
 from unittest import mock
 
@@ -33,9 +35,8 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
-    BatchPaths,
-    BatchStatus,
-    inspect_batch,
+    batch_path,
+    load_completed_batch,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
@@ -47,6 +48,7 @@ from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
 from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
     DatasetChunkConfig,
+    DatasetChunkState,
     generate_simulations,
     scan_dataset_generation,
 )
@@ -69,16 +71,15 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     JonswapInitialStateDomainError,
-    PersistedTrajectoryPlan,
+    PreparedTrajectoryBatch,
     TrajectoryInitialBatch,
     construct_tanaka_trajectory_batch,
-    persist_sampled_trajectory_plan,
+    prepare_trajectory_batch,
     sample_tanaka_simulations,
 )
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TRAJECTORY_REQUIRED_CHECKS,
     DeclaredConstructionFailure,
-    DeclaredTrajectoryFatalError,
     TrajectoryExecutionConfig,
     TrajectoryBatchExecutor,
     _benjamin_feir_time_grid,
@@ -172,10 +173,6 @@ def _run_spec(
             ParameterGroupTarget(parameter_group_id, target)
             for parameter_group_id, target in zip(parameter_group_ids, targets)
         ),
-        parameter_group_codes={
-            parameter_group_id: index
-            for index, parameter_group_id in enumerate(parameter_group_ids)
-        },
         batch_size=batch_size,
         first_attempt_index=0,
         configuration={
@@ -220,18 +217,17 @@ def _tanaka_failure_component(
 
 
 class MarkerConstructor:
-    """Construct constant markers after checking the saved batch plan."""
+    """Construct constant marker fields for fast executor tests."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, ...]] = []
 
     def __call__(
         self,
-        proposed: PersistedTrajectoryPlan[object],
+        proposed: PreparedTrajectoryBatch[object],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
-        self.assert_proposed(proposed)
         all_indices = tuple(range(len(proposed.sampled.assignments)))
         selected = selected_local_indices or all_indices
         self.calls.append(selected)
@@ -259,14 +255,6 @@ class MarkerConstructor:
             specification_records=records,
         )
 
-    @staticmethod
-    def assert_proposed(
-        proposed: PersistedTrajectoryPlan[object],
-    ) -> None:
-        status = inspect_batch(proposed.paths).status
-        if status not in (BatchStatus.PLAN_SAVED, BatchStatus.SHARD_WRITTEN):
-            raise AssertionError(f"constructor observed status {status}")
-
 
 class JonswapRejectingConstructor:
     """Declare attempt zero invalid while retaining its proposed siblings."""
@@ -277,11 +265,10 @@ class JonswapRejectingConstructor:
 
     def __call__(
         self,
-        proposed: PersistedTrajectoryPlan[object],
+        proposed: PreparedTrajectoryBatch[object],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
-        MarkerConstructor.assert_proposed(proposed)
         selected = selected_local_indices or tuple(
             range(len(proposed.sampled.assignments))
         )
@@ -410,30 +397,26 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             dict(state.accepted_simulation_counts), {parameter_group_id: 2}
         )
         self.assertEqual(constructor.calls, [(0, 1), (0,)])
-        first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
+        first = load_completed_batch(state.completed_batches[0])
         self.assertEqual(
-            [simulation["accepted"] for simulation in first_result["simulations"]],
+            [simulation.accepted for simulation in first.simulations],
             [False, True],
         )
         self.assertTrue(
             all(
-                simulation["required_bits"] == int(TRAJECTORY_REQUIRED_CHECKS)
-                for simulation in first_result["simulations"]
+                simulation.required_bits == int(TRAJECTORY_REQUIRED_CHECKS)
+                for simulation in first.simulations
             )
         )
         self.assertEqual(
-            first_result["simulations"][0]["evaluated_bits"]
-            & int(TRAJECTORY_REQUIRED_CHECKS),
+            first.simulations[0].evaluated_bits & int(TRAJECTORY_REQUIRED_CHECKS),
             int(TRAJECTORY_REQUIRED_CHECKS),
         )
-        with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
-            self.assertEqual(shard["eta"].shape[0], 3)
-        with np.load(
-            state.committed[1].batch_plan,
-            allow_pickle=False,
-        ) as proposal:
-            replacement = json.loads(str(proposal["simulation_spec_json"][0]))
+        assert first.shard is not None
+        self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
+        self.assertEqual(first.shard["eta"].shape[0], 3)
+        second = load_completed_batch(state.completed_batches[1])
+        replacement = json.loads(str(second.plan["simulation_spec_json"][0]))
         self.assertEqual(replacement["attempt_index"], 2)
         self.assertEqual(replacement["parameter_group_id"], parameter_group_id)
 
@@ -449,7 +432,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         base_constructor = MarkerConstructor()
 
         def declared_constructor(
-            proposed: PersistedTrajectoryPlan[object],
+            proposed: PreparedTrajectoryBatch[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -493,29 +476,29 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         state = generate_simulations(spec, executor)
 
         self.assertTrue(state.complete)
-        first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
+        first = load_completed_batch(state.completed_batches[0])
         self.assertEqual(
-            [simulation["accepted"] for simulation in first_result["simulations"]],
+            [simulation.accepted for simulation in first.simulations],
             [False, True],
         )
         self.assertEqual(
-            first_result["simulations"][0]["metrics"]["construction_status"],
+            first.simulations[0].metrics["construction_status"],
             "declared_outside_support",
         )
         self.assertEqual(
-            first_result["simulations"][0]["required_bits"],
+            first.simulations[0].required_bits,
             int(TRAJECTORY_REQUIRED_CHECKS),
         )
         self.assertEqual(
-            first_result["simulations"][0]["evaluated_bits"],
+            first.simulations[0].evaluated_bits,
             int(SimulationCheck.OUTSIDE_SUPPORT),
         )
         self.assertEqual(
-            first_result["simulations"][0]["failed_bits"],
+            first.simulations[0].failed_bits,
             int(SimulationCheck.OUTSIDE_SUPPORT),
         )
-        with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
+        assert first.shard is not None
+        self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
         unexpected_spec = _run_spec(
             self.root / "unexpected",
@@ -526,7 +509,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def unexpected_constructor(
-            proposed: PersistedTrajectoryPlan[object],
+            proposed: PreparedTrajectoryBatch[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -542,10 +525,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unclassified"):
             generate_simulations(unexpected_spec, unexpected)
-        pending = scan_dataset_generation(unexpected_spec).pending_batch
-        self.assertIsNotNone(pending)
-        assert pending is not None
-        self.assertFalse(pending.paths.result.exists())
+        self.assertEqual(
+            scan_dataset_generation(unexpected_spec).completed_batches,
+            (),
+        )
 
     def test_declared_jonswap_graph_failure_retains_sibling_and_replays(
         self,
@@ -553,7 +536,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         execution = _execution("jonswap_tma")
         parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
 
-        def run(root: Path) -> tuple[object, JonswapRejectingConstructor]:
+        def run(root: Path) -> tuple[DatasetChunkState, JonswapRejectingConstructor]:
             spec = _run_spec(
                 root,
                 execution,
@@ -575,12 +558,12 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         state, constructor = run(self.root / "first")
         self.assertTrue(state.complete)
         self.assertEqual(constructor.calls, [(0, 1), (1,), (0,)])
-        first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
+        first = load_completed_batch(state.completed_batches[0])
         self.assertEqual(
-            [simulation["accepted"] for simulation in first_result["simulations"]],
+            [simulation.accepted for simulation in first.simulations],
             [False, True],
         )
-        rejected = first_result["simulations"][0]
+        rejected = first.simulations[0]
         expected_evaluated = (
             SimulationCheck.OUTSIDE_SUPPORT
             | SimulationCheck.NONFINITE_STATE
@@ -589,30 +572,30 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         expected_failed = (
             SimulationCheck.OUTSIDE_SUPPORT | SimulationCheck.BOTTOM_CLEARANCE
         )
-        self.assertEqual(rejected["required_bits"], int(TRAJECTORY_REQUIRED_CHECKS))
-        self.assertEqual(rejected["evaluated_bits"], int(expected_evaluated))
-        self.assertEqual(rejected["failed_bits"], int(expected_failed))
-        failure = json.loads(rejected["metrics"]["construction_failure_json"])
+        self.assertEqual(rejected.required_bits, int(TRAJECTORY_REQUIRED_CHECKS))
+        self.assertEqual(rejected.evaluated_bits, int(expected_evaluated))
+        self.assertEqual(rejected.failed_bits, int(expected_failed))
+        failure = json.loads(str(rejected.metrics["construction_failure_json"]))
         self.assertEqual(failure["index_space"], "original_batch_plan_local_index")
         self.assertEqual(failure["invalid_simulation_indices"], [0])
         self.assertEqual(
             failure["constructor_subbatch_invalid_simulation_indices"],
             [0],
         )
-        with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertTrue(np.all(shard["simulation_local_index"] == 1))
+        assert first.shard is not None
+        self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
         replay, replay_constructor = run(self.root / "replay")
         self.assertTrue(replay.complete)
         self.assertEqual(replay_constructor.calls, constructor.calls)
         self.assertEqual(
             [
-                json.loads(batch.result.read_text(encoding="utf-8"))["simulations"]
-                for batch in replay.committed
+                load_completed_batch(path).simulations
+                for path in replay.completed_batches
             ],
             [
-                json.loads(batch.result.read_text(encoding="utf-8"))["simulations"]
-                for batch in state.committed
+                load_completed_batch(path).simulations
+                for path in state.completed_batches
             ],
         )
 
@@ -758,7 +741,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         def malformed_constructor(
-            proposed: PersistedTrajectoryPlan[object],
+            proposed: PreparedTrajectoryBatch[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -782,10 +765,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "speed fields"):
             generate_simulations(spec, executor)
-        pending = scan_dataset_generation(spec).pending_batch
-        self.assertIsNotNone(pending)
-        assert pending is not None
-        self.assertFalse(pending.paths.result.exists())
+        self.assertEqual(scan_dataset_generation(spec).completed_batches, ())
 
     def test_default_classifier_accepts_the_constructor_generated_record(
         self,
@@ -853,7 +833,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         base_constructor = MarkerConstructor()
 
         def rejecting_constructor(
-            proposed: PersistedTrajectoryPlan[object],
+            proposed: PreparedTrajectoryBatch[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
@@ -891,15 +871,14 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         )
 
         self.assertTrue(state.complete)
-        first_result = json.loads(state.committed[0].result.read_text())
+        first = load_completed_batch(state.completed_batches[0])
         self.assertEqual(
-            [simulation["accepted"] for simulation in first_result["simulations"]],
+            [simulation.accepted for simulation in first.simulations],
             [False, True, False],
         )
-        second_failure_json = first_result["simulations"][2]["metrics"][
-            "construction_failure_json"
-        ]
-        second_failure = json.loads(second_failure_json)
+        second_failure = json.loads(
+            str(first.simulations[2].metrics["construction_failure_json"])
+        )
         self.assertEqual(second_failure["invalid_simulation_indices"], [2])
         self.assertEqual(
             second_failure["constructor_subbatch_invalid_simulation_indices"],
@@ -913,53 +892,6 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             component["constructor_subbatch_global_component_index"],
             1,
         )
-
-    def test_explicit_fatal_error_writes_terminal_sidecar(self) -> None:
-        execution = _execution("benjamin_feir")
-        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
-        spec = _run_spec(
-            self.root,
-            execution,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(1,),
-            batch_size=1,
-        )
-
-        def fatal_constructor(
-            proposed: PersistedTrajectoryPlan[object],
-            *,
-            selected_local_indices: tuple[int, ...] | None,
-        ) -> TrajectoryInitialBatch:
-            del proposed, selected_local_indices
-            raise DeclaredTrajectoryFatalError(
-                "deterministic test failure",
-                phase="construction",
-                telemetry={"test_code": 17},
-            )
-
-        with self.assertRaisesRegex(RuntimeError, "batch 0 failed"):
-            generate_simulations(
-                spec,
-                TrajectoryBatchExecutor(
-                    chunk_config=spec,
-                    execution=execution,
-                    constructor=fatal_constructor,
-                    rollout_executor=FastRolloutExecutor(),
-                ),
-            )
-        failure_path = BatchPaths.for_batch(
-            spec.root,
-            family=spec.family_name,
-            split=spec.dataset_split.value,
-            batch_id=0,
-        ).failure
-        failure = json.loads(failure_path.read_text())
-        self.assertEqual(failure["phase"], "construction")
-        self.assertEqual(
-            failure["exception_type"],
-            "DeclaredTrajectoryFatalError",
-        )
-        self.assertEqual(failure["telemetry"], {"test_code": 17})
 
     def test_selected_tanaka_adapter_verifies_full_proposal_then_subsets(
         self,
@@ -982,12 +914,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             assignments,
             contract=execution.numerical,
         )
-        proposed = persist_sampled_trajectory_plan(
+        proposed = prepare_trajectory_batch(
             sampled,
             root=self.root,
             family_name="tanaka",
             batch_id=0,
-            parameter_group_codes={parameter_group_id: 0},
             metadata={"test_scope": "selected_tanaka_adapter"},
         )
         observed_depths: list[np.ndarray] = []
@@ -1050,11 +981,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         state = generate_simulations(spec, executor)
         self.assertTrue(state.complete)
 
-        with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
-            records = [
-                json.loads(str(value)) for value in proposal["simulation_spec_json"]
-            ]
-            metadata = json.loads(str(proposal["metadata_json"]))
+        batch = load_completed_batch(state.completed_batches[0])
+        records = [
+            json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
+        ]
         expected_terminal_times = []
         for record in records:
             frequency = float(
@@ -1072,9 +1002,12 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 )
                 * execution.numerical.saved_dt
             )
-        observed_grids = metadata["simulation_time_grids"]
+        observed_grids = cast(
+            list[dict[str, object]],
+            batch.metadata["simulation_time_grids"],
+        )
         np.testing.assert_allclose(
-            [grid["realized_terminal_time"] for grid in observed_grids],
+            [float(grid["realized_terminal_time"]) for grid in observed_grids],
             expected_terminal_times,
             rtol=0.0,
             atol=1.0e-13,
@@ -1085,17 +1018,16 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             [terminal for _, _, terminal in rollouts.calls],
             [max(expected_terminal_times)],
         )
-        with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertEqual(
-                np.bincount(shard["simulation_local_index"]).tolist(),
-                [3, 3],
-            )
-        result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
-        for simulation in result["simulations"]:
-            self.assertIn("initial_discrete_peak_wavenumber", simulation["metrics"])
+        assert batch.shard is not None
+        self.assertEqual(
+            np.bincount(batch.shard["simulation_local_index"]).tolist(),
+            [3, 3],
+        )
+        for simulation in batch.simulations:
+            self.assertIn("initial_discrete_peak_wavenumber", simulation.metrics)
             self.assertIn(
                 "initial_linear_hamiltonian_relative_error",
-                simulation["metrics"],
+                simulation.metrics,
             )
 
     def test_benjamin_feir_simulations_use_distinct_carrier_period_grids(self) -> None:
@@ -1120,11 +1052,10 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         state = generate_simulations(spec, executor)
         self.assertTrue(state.complete)
 
-        with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
-            records = [
-                json.loads(str(value)) for value in proposal["simulation_spec_json"]
-            ]
-            metadata = json.loads(str(proposal["metadata_json"]))
+        batch = load_completed_batch(state.completed_batches[0])
+        records = [
+            json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
+        ]
         expected_terminal_times = []
         for record in records:
             carrier_wavenumber = float(record["carrier_wavenumber"])
@@ -1137,9 +1068,12 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 math.floor(intended / execution.numerical.saved_dt)
                 * execution.numerical.saved_dt
             )
-        observed_grids = metadata["simulation_time_grids"]
+        observed_grids = cast(
+            list[dict[str, object]],
+            batch.metadata["simulation_time_grids"],
+        )
         np.testing.assert_allclose(
-            [grid["realized_terminal_time"] for grid in observed_grids],
+            [float(grid["realized_terminal_time"]) for grid in observed_grids],
             expected_terminal_times,
             rtol=0.0,
             atol=1.0e-13,
@@ -1148,11 +1082,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self.assertEqual(len(rollouts.calls), 1)
         self.assertEqual(rollouts.calls[0][1], 2)
         self.assertEqual(rollouts.calls[0][2], max(expected_terminal_times))
-        with np.load(state.committed[0].shard, allow_pickle=False) as shard:
-            self.assertEqual(
-                np.bincount(shard["simulation_local_index"]).tolist(),
-                [3, 3],
-            )
+        assert batch.shard is not None
+        self.assertEqual(
+            np.bincount(batch.shard["simulation_local_index"]).tolist(),
+            [3, 3],
+        )
 
     def test_jonswap_horizon_is_strictly_floored_at_rounding_boundary(
         self,
@@ -1226,79 +1160,64 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             _benjamin_feir_time_grid(samples[1], execution).realized_terminal_time,
         )
 
-    def test_proposed_and_shard_written_batches_resume_exactly(self) -> None:
+    def test_interrupted_batch_restarts_without_partial_artifacts(self) -> None:
         execution = _execution("benjamin_feir")
         parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[1]
-
-        proposal_spec = _run_spec(
-            self.root / "batch_plan",
+        spec = _run_spec(
+            self.root,
             execution,
             parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
+        interrupted_specs: list[tuple[Mapping[str, object], ...]] = []
 
         def interrupt_constructor(
-            proposed: PersistedTrajectoryPlan[object],
+            proposed: PreparedTrajectoryBatch[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
             del selected_local_indices
-            MarkerConstructor.assert_proposed(proposed)
-            raise InjectedInterruption("after batch plan")
+            interrupted_specs.append(proposed.sampled.specification_records)
+            self.assertFalse(proposed.path.exists())
+            raise InjectedInterruption("during batch construction")
 
         interrupted = TrajectoryBatchExecutor(
-            chunk_config=proposal_spec,
+            chunk_config=spec,
             execution=execution,
             constructor=interrupt_constructor,
             rollout_executor=FastRolloutExecutor(),
         )
-        with self.assertRaisesRegex(InjectedInterruption, "after batch plan"):
-            generate_simulations(proposal_spec, interrupted)
-        proposal_pending = scan_dataset_generation(proposal_spec).pending_batch
-        self.assertIsNotNone(proposal_pending)
-        assert proposal_pending is not None
-        proposal_bytes = proposal_pending.paths.batch_plan.read_bytes()
-        proposal_state = generate_simulations(
-            proposal_spec,
+        with self.assertRaisesRegex(InjectedInterruption, "during batch construction"):
+            generate_simulations(spec, interrupted)
+
+        expected_path = batch_path(
+            self.root,
+            family="benjamin_feir",
+            split="test",
+            batch_id=0,
+        )
+        self.assertFalse(expected_path.exists())
+        self.assertEqual(scan_dataset_generation(spec).completed_batches, ())
+
+        state = generate_simulations(
+            spec,
             TrajectoryBatchExecutor(
-                chunk_config=proposal_spec,
+                chunk_config=spec,
                 execution=execution,
                 constructor=MarkerConstructor(),
                 rollout_executor=FastRolloutExecutor(),
             ),
         )
-        self.assertTrue(proposal_state.complete)
-        self.assertEqual(proposal_pending.paths.batch_plan.read_bytes(), proposal_bytes)
-
-        shard_spec = _run_spec(
-            self.root / "shard",
-            execution,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(1,),
-            batch_size=1,
-        )
-        shard_executor = TrajectoryBatchExecutor(
-            chunk_config=shard_spec,
-            execution=execution,
-            constructor=MarkerConstructor(),
-            rollout_executor=FastRolloutExecutor(),
-        )
-        with (
-            mock.patch(
-                "solver.gen_data.pipeline.writer.commit_batch",
-                side_effect=InjectedInterruption("after shard"),
+        self.assertTrue(state.complete)
+        completed = load_completed_batch(expected_path)
+        self.assertEqual(
+            tuple(
+                json.loads(str(value))
+                for value in completed.plan["simulation_spec_json"]
             ),
-            self.assertRaisesRegex(InjectedInterruption, "after shard"),
-        ):
-            generate_simulations(shard_spec, shard_executor)
-        shard_pending = scan_dataset_generation(shard_spec).pending_batch
-        self.assertIsNotNone(shard_pending)
-        assert shard_pending is not None
-        shard_bytes = shard_pending.paths.shard.read_bytes()
-        shard_state = generate_simulations(shard_spec, shard_executor)
-        self.assertTrue(shard_state.complete)
-        self.assertEqual(shard_pending.paths.shard.read_bytes(), shard_bytes)
+            interrupted_specs[0],
+        )
 
     def test_execution_configuration_must_match_run_record(self) -> None:
         execution = _execution("benjamin_feir")

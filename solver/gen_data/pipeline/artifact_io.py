@@ -85,34 +85,6 @@ def write_npz_atomic(
     _write_file_atomically(path, write_temporary_file)
 
 
-def ensure_npz(
-    path: Path,
-    arrays: Mapping[str, NDArray[Any]],
-    *,
-    validate: Callable[[Mapping[str, NDArray[Any]]], None],
-) -> None:
-    """Write a valid NPZ or verify that an existing artifact is an exact replay."""
-
-    normalized = {name: np.asarray(array) for name, array in arrays.items()}
-    validate(normalized)
-    if path.exists():
-        existing = load_npz(path)
-        validate(existing)
-        arrays_differ = existing.keys() != normalized.keys() or any(
-            existing[name].dtype != array.dtype
-            or not np.array_equal(
-                existing[name],
-                array,
-                equal_nan=array.dtype.kind in {"f", "c"},
-            )
-            for name, array in normalized.items()
-        )
-        if arrays_differ:
-            raise RuntimeError(f"existing {path} differs from replayed arrays")
-    else:
-        write_npz_atomic(path, normalized)
-
-
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     """Atomically write deterministic, finite JSON."""
 
