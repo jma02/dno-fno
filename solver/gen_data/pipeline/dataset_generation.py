@@ -24,12 +24,10 @@ from solver.gen_data.pipeline.batch_storage import (
 from solver.gen_data.pipeline.artifact_io import load_npz
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    SPLIT_CODE_BY_ID,
-    SPLIT_ROOT_SEED_BY_ID,
     PhysicalFamilyId,
-    SampleCellTarget,
+    ParameterGroupTarget,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     build_next_attempt_batch,
 )
 
@@ -43,11 +41,10 @@ class DatasetChunkConfig:
     root: Path
     family_name: str
     family_id: PhysicalFamilyId
-    revision_id: int
-    split_id: SplitId
-    stream_id: int
-    simulation_targets: tuple[SampleCellTarget, ...]
-    cell_codes: Mapping[str, int]
+    dataset_split: DatasetSplit
+    worker_stream_id: int
+    simulation_targets: tuple[ParameterGroupTarget, ...]
+    parameter_group_codes: Mapping[str, int]
     batch_size: int
     configuration: Mapping[str, object]
     first_attempt_index: int = 0
@@ -55,27 +52,31 @@ class DatasetChunkConfig:
     def __post_init__(self) -> None:
         if not self.simulation_targets:
             raise ValueError("simulation_targets must not be empty")
-        cell_ids = tuple(target.cell_id for target in self.simulation_targets)
-        if any(not cell_id for cell_id in cell_ids):
-            raise ValueError("simulation target cell_ids must not be empty")
-        if len(set(cell_ids)) != len(cell_ids):
-            raise ValueError("simulation target cell_ids must be unique")
+        parameter_group_ids = tuple(
+            target.parameter_group_id for target in self.simulation_targets
+        )
+        if any(not parameter_group_id for parameter_group_id in parameter_group_ids):
+            raise ValueError("simulation target parameter_group_ids must not be empty")
+        if len(set(parameter_group_ids)) != len(parameter_group_ids):
+            raise ValueError("simulation target parameter_group_ids must be unique")
         if any(target.simulation_count < 0 for target in self.simulation_targets):
             raise ValueError("simulation target counts must be nonnegative")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
 
-        codes = dict(self.cell_codes)
-        if set(codes) != set(cell_ids):
-            raise ValueError("cell_codes must contain exactly the target cells")
+        codes = dict(self.parameter_group_codes)
+        if set(codes) != set(parameter_group_ids):
+            raise ValueError(
+                "parameter_group_codes must contain exactly the target groups"
+            )
         if any(type(code) is not int for code in codes.values()):
-            raise TypeError("cell codes must be integers")
+            raise TypeError("parameter-group codes must be integers")
         if any(code < 0 for code in codes.values()):
-            raise ValueError("cell codes must be nonnegative")
+            raise ValueError("parameter-group codes must be nonnegative")
         if len(set(codes.values())) != len(codes):
-            raise ValueError("cell codes must be unique")
+            raise ValueError("parameter-group codes must be unique")
 
-        object.__setattr__(self, "cell_codes", codes)
+        object.__setattr__(self, "parameter_group_codes", codes)
         object.__setattr__(self, "configuration", dict(self.configuration))
 
     def to_json_record(self) -> dict[str, object]:
@@ -84,21 +85,21 @@ class DatasetChunkConfig:
         return {
             "family_name": self.family_name,
             "family_id": int(self.family_id),
-            "revision_id": self.revision_id,
-            "split_id": self.split_id.value,
-            "root_seed": SPLIT_ROOT_SEED_BY_ID[self.split_id],
-            "stream_id": self.stream_id,
+            "dataset_split": self.dataset_split.value,
+            "worker_stream_id": self.worker_stream_id,
             "first_attempt_index": self.first_attempt_index,
             "batch_size": self.batch_size,
             "quotas": [
                 {
-                    "cell_id": target.cell_id,
+                    "parameter_group_id": target.parameter_group_id,
                     "target_accepted": target.simulation_count,
                 }
                 for target in self.simulation_targets
             ],
-            "cell_codes": {
-                target.cell_id: self.cell_codes[target.cell_id]
+            "parameter_group_codes": {
+                target.parameter_group_id: self.parameter_group_codes[
+                    target.parameter_group_id
+                ]
                 for target in self.simulation_targets
             },
             "configuration": dict(self.configuration),
@@ -110,7 +111,7 @@ class DatasetChunkConfig:
         """Return the simulation-attempt limit for each parameter group."""
 
         return {
-            target.cell_id: (
+            target.parameter_group_id: (
                 target.simulation_count + MAX_RETRIES_PER_PARAMETER_GROUP
                 if target.simulation_count > 0
                 else 0
@@ -156,7 +157,7 @@ def _find_saved_batch_ids(chunk_config: DatasetChunkConfig) -> tuple[int, ...]:
     template = BatchPaths.for_batch(
         chunk_config.root,
         family=chunk_config.family_name,
-        split=chunk_config.split_id.value,
+        split=chunk_config.dataset_split.value,
         batch_id=0,
     )
     batch_ids: set[int] = set()
@@ -175,7 +176,7 @@ def _find_saved_batch_ids(chunk_config: DatasetChunkConfig) -> tuple[int, ...]:
                 BatchPaths.for_batch(
                     chunk_config.root,
                     family=chunk_config.family_name,
-                    split=chunk_config.split_id.value,
+                    split=chunk_config.dataset_split.value,
                     batch_id=batch_id,
                 ),
                 artifact_name,
@@ -193,69 +194,56 @@ def _find_saved_batch_ids(chunk_config: DatasetChunkConfig) -> tuple[int, ...]:
 def _load_saved_batch_assignments(
     chunk_config: DatasetChunkConfig,
     paths: BatchPaths,
-    *,
-    batch_id: int,
 ) -> tuple[AttemptAssignment, ...]:
     """Load a batch's saved assignments and verify they belong to this chunk."""
 
     batch_plan = load_npz(paths.batch_plan)
-    expected_coordinates = {
-        "batch_id": batch_id,
-        "family_id": int(chunk_config.family_id),
-        "revision_id": chunk_config.revision_id,
-        "split_id": SPLIT_CODE_BY_ID[chunk_config.split_id],
-    }
-    mismatched_coordinates = tuple(
-        name
-        for name, expected in expected_coordinates.items()
-        if int(batch_plan[name].item()) != expected
-    )
+    mismatched_coordinates = []
+    if int(batch_plan["family_id"].item()) != int(chunk_config.family_id):
+        mismatched_coordinates.append("family_id")
+    if str(batch_plan["dataset_split"].item()) != chunk_config.dataset_split.value:
+        mismatched_coordinates.append("dataset_split")
     if mismatched_coordinates:
         raise RuntimeError(
-            f"saved batch has mismatched coordinates: {mismatched_coordinates}"
+            f"saved batch has mismatched coordinates: {tuple(mismatched_coordinates)}"
         )
 
-    simulation_ids = batch_plan["simulation_id"]
     attempts = batch_plan["attempt_index"]
-    if not np.all(
-        batch_plan["root_seed"] == SPLIT_ROOT_SEED_BY_ID[chunk_config.split_id]
-    ):
-        raise RuntimeError("batch-plan root_seed differs from the chunk")
-    if not np.all(batch_plan["stream_id"] == chunk_config.stream_id):
-        raise RuntimeError("batch-plan stream_id differs from the chunk")
+    if not np.all(batch_plan["worker_stream_id"] == chunk_config.worker_stream_id):
+        raise RuntimeError("batch-plan worker_stream_id differs from the chunk")
 
-    cell_id_by_code = {
-        code: cell_id for cell_id, code in chunk_config.cell_codes.items()
+    parameter_group_id_by_code = {
+        code: parameter_group_id
+        for parameter_group_id, code in chunk_config.parameter_group_codes.items()
     }
-    cell_codes = batch_plan["cell_id"]
-    unknown_codes = set(map(int, cell_codes)).difference(cell_id_by_code)
+    parameter_group_codes = batch_plan["parameter_group_id"]
+    unknown_codes = set(map(int, parameter_group_codes)).difference(
+        parameter_group_id_by_code
+    )
     if unknown_codes:
         raise RuntimeError(
-            f"batch plan contains unknown cell codes: {sorted(unknown_codes)}"
+            "batch plan contains unknown parameter-group codes: "
+            f"{sorted(unknown_codes)}"
         )
 
     assignments: list[AttemptAssignment] = []
-    for simulation_id, attempt_index, cell_code in zip(
-        simulation_ids,
+    for attempt_index, parameter_group_code in zip(
         attempts,
-        cell_codes,
+        parameter_group_codes,
         strict=True,
     ):
         simulation_key = SimulationKey(
             family_id=int(chunk_config.family_id),
-            revision_id=chunk_config.revision_id,
-            split_id=chunk_config.split_id,
-            stream_id=chunk_config.stream_id,
+            dataset_split=chunk_config.dataset_split,
+            worker_stream_id=chunk_config.worker_stream_id,
             attempt_index=int(attempt_index),
         )
-        if int(simulation_id) != simulation_key.simulation_id:
-            raise RuntimeError(
-                "batch-plan simulation_id differs from its chunk coordinates"
-            )
         assignments.append(
             AttemptAssignment(
                 simulation_key=simulation_key,
-                cell_id=cell_id_by_code[int(cell_code)],
+                parameter_group_id=parameter_group_id_by_code[
+                    int(parameter_group_code)
+                ],
             )
         )
     return tuple(assignments)
@@ -267,10 +255,10 @@ def scan_dataset_generation(
     """Validate saved batches and determine what the chunk should do next."""
 
     accepted_simulation_counts = {
-        target.cell_id: 0 for target in chunk_config.simulation_targets
+        target.parameter_group_id: 0 for target in chunk_config.simulation_targets
     }
     simulation_attempt_counts = {
-        target.cell_id: 0 for target in chunk_config.simulation_targets
+        target.parameter_group_id: 0 for target in chunk_config.simulation_targets
     }
     committed: list[BatchPaths] = []
     pending_batch: DatasetChunkPendingBatch | None = None
@@ -281,7 +269,7 @@ def scan_dataset_generation(
         paths = BatchPaths.for_batch(
             chunk_config.root,
             family=chunk_config.family_name,
-            split=chunk_config.split_id.value,
+            split=chunk_config.dataset_split.value,
             batch_id=batch_id,
         )
         inspection = inspect_batch(paths)
@@ -289,7 +277,6 @@ def scan_dataset_generation(
         assignments = _load_saved_batch_assignments(
             chunk_config,
             paths,
-            batch_id=batch_id,
         )
         expected = build_next_attempt_batch(
             chunk_config.simulation_targets,
@@ -297,9 +284,8 @@ def scan_dataset_generation(
             simulation_attempt_counts,
             chunk_config.maximum_attempts_by_parameter_group,
             family_id=int(chunk_config.family_id),
-            revision_id=chunk_config.revision_id,
-            split_id=chunk_config.split_id,
-            stream_id=chunk_config.stream_id,
+            dataset_split=chunk_config.dataset_split,
+            worker_stream_id=chunk_config.worker_stream_id,
             first_attempt_index=next_attempt_index,
             batch_size=chunk_config.batch_size,
         )
@@ -309,7 +295,7 @@ def scan_dataset_generation(
             )
         next_attempt_index += len(assignments)
         for assignment in assignments:
-            simulation_attempt_counts[assignment.cell_id] += 1
+            simulation_attempt_counts[assignment.parameter_group_id] += 1
 
         is_last = position == len(batch_ids) - 1
         if inspection.status is BatchStatus.COMMITTED:
@@ -319,7 +305,7 @@ def scan_dataset_generation(
                 strict=True,
             ):
                 if simulation.accepted:
-                    accepted_simulation_counts[assignment.cell_id] += 1
+                    accepted_simulation_counts[assignment.parameter_group_id] += 1
             committed.append(paths)
             continue
         if not is_last:
@@ -339,7 +325,7 @@ def scan_dataset_generation(
             raise RuntimeError(f"unsupported batch status: {inspection.status.value}")
 
     complete = pending_batch is None and all(
-        accepted_simulation_counts[target.cell_id] == target.simulation_count
+        accepted_simulation_counts[target.parameter_group_id] == target.simulation_count
         for target in chunk_config.simulation_targets
     )
     return DatasetChunkState(
@@ -359,7 +345,7 @@ def dataset_generation_lock(chunk_config: DatasetChunkConfig) -> Iterator[None]:
         chunk_config.root
         / ".locks"
         / chunk_config.family_name
-        / f"{chunk_config.split_id.value}.lock"
+        / f"{chunk_config.dataset_split.value}.lock"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(mode=0o600, exist_ok=True)
@@ -409,9 +395,8 @@ def generate_simulations(
                     state.simulation_attempt_counts,
                     chunk_config.maximum_attempts_by_parameter_group,
                     family_id=int(chunk_config.family_id),
-                    revision_id=chunk_config.revision_id,
-                    split_id=chunk_config.split_id,
-                    stream_id=chunk_config.stream_id,
+                    dataset_split=chunk_config.dataset_split,
+                    worker_stream_id=chunk_config.worker_stream_id,
                     first_attempt_index=next_attempt_index,
                     batch_size=chunk_config.batch_size,
                 )
@@ -419,14 +404,14 @@ def generate_simulations(
                     attempt_limits = chunk_config.maximum_attempts_by_parameter_group
                     unfinished_groups = "; ".join(
                         (
-                            f"{target.cell_id}: accepted="
-                            f"{state.accepted_simulation_counts[target.cell_id]}/"
+                            f"{target.parameter_group_id}: accepted="
+                            f"{state.accepted_simulation_counts[target.parameter_group_id]}/"
                             f"{target.simulation_count}, attempts="
-                            f"{state.simulation_attempt_counts[target.cell_id]}/"
-                            f"{attempt_limits[target.cell_id]}"
+                            f"{state.simulation_attempt_counts[target.parameter_group_id]}/"
+                            f"{attempt_limits[target.parameter_group_id]}"
                         )
                         for target in chunk_config.simulation_targets
-                        if state.accepted_simulation_counts[target.cell_id]
+                        if state.accepted_simulation_counts[target.parameter_group_id]
                         < target.simulation_count
                     )
                     raise RuntimeError(
@@ -436,7 +421,7 @@ def generate_simulations(
                 expected_paths = BatchPaths.for_batch(
                     chunk_config.root,
                     family=chunk_config.family_name,
-                    split=chunk_config.split_id.value,
+                    split=chunk_config.dataset_split.value,
                     batch_id=batch_id,
                 )
 
@@ -454,7 +439,6 @@ def generate_simulations(
             persisted_assignments = _load_saved_batch_assignments(
                 chunk_config,
                 expected_paths,
-                batch_id=batch_id,
             )
             if persisted_assignments != assignments:
                 raise RuntimeError(
@@ -468,7 +452,7 @@ def generate_simulations(
             simulation_attempt_counts = dict(state.simulation_attempt_counts)
             if state.pending_batch is None:
                 for assignment in assignments:
-                    simulation_attempt_counts[assignment.cell_id] += 1
+                    simulation_attempt_counts[assignment.parameter_group_id] += 1
             accepted_simulation_counts = dict(state.accepted_simulation_counts)
             for assignment, simulation in zip(
                 assignments,
@@ -476,14 +460,14 @@ def generate_simulations(
                 strict=True,
             ):
                 if simulation.accepted:
-                    accepted_simulation_counts[assignment.cell_id] += 1
+                    accepted_simulation_counts[assignment.parameter_group_id] += 1
             state = DatasetChunkState(
                 accepted_simulation_counts=accepted_simulation_counts,
                 simulation_attempt_counts=simulation_attempt_counts,
                 committed=(*state.committed, expected_paths),
                 pending_batch=None,
                 complete=all(
-                    accepted_simulation_counts[target.cell_id]
+                    accepted_simulation_counts[target.parameter_group_id]
                     == target.simulation_count
                     for target in chunk_config.simulation_targets
                 ),

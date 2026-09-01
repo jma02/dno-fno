@@ -10,14 +10,13 @@ dataset:
 
 The families use different initial-condition formulas, but share the same DNO
 target, split rules, acceptance checks, batch format, and dataset-view format.
-The active revisions are Stokes 2, Tanaka 3, Benjamin--Feir 4, and JONSWAP/TMA
-4. Older implementations remain available in Git history and should not be
-mixed into a new dataset.
+Older implementations remain available in Git history and should not be mixed
+into a new dataset.
 
 ## Generation flow
 
-Each attempted simulation has a deterministic ID derived from its family, revision,
-split, stream, and attempt index. A run then:
+Each attempted simulation has a deterministic ID derived from its family, split,
+worker stream, and attempt index. A run then:
 
 1. samples parameters from one declared parameter group;
 2. writes the proposal;
@@ -57,7 +56,7 @@ Shared pipeline:
 
 - `pipeline/simulation_allocation.py` assigns attempts across parameter groups and
   defines deterministic split IDs.
-- `pipeline/simulation_checks.py` defines the acceptance masks and failure reasons.
+- `pipeline/simulation_checks.py` defines the acceptance checks and failure reasons.
 - `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
 - `pipeline/trajectory_rollout.py` runs and samples trajectories.
 - `pipeline/dno_target.py` computes the stored DNO target.

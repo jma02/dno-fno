@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import json_text
+from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     SimulationCommitRecord,
@@ -19,25 +19,24 @@ from solver.gen_data.pipeline.batch_storage import (
 )
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
-    SPLIT_CODE_BY_ID,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
-
-
-FloatArray: TypeAlias = NDArray[np.floating]
-JsonScalar: TypeAlias = str | int | float | bool | None
+from solver.gen_data.pipeline.types import (
+    BatchPlanArrays,
+    DatasetShardArrays,
+    JsonScalar,
+)
 
 
 @dataclass(frozen=True)
 class AcceptedSimulationRows:
     """Rows retained from one accepted static state or trajectory."""
 
-    eta: FloatArray
-    xi: FloatArray
-    gxi: FloatArray
+    eta: NDArray[np.floating]
+    xi: NDArray[np.floating]
+    gxi: NDArray[np.floating]
     depth: float
-    time: FloatArray
-    selected_dense_index: NDArray[np.integer]
+    time: NDArray[np.floating]
 
 
 @dataclass(frozen=True)
@@ -59,70 +58,56 @@ def build_batch_plan(
     assignments: Sequence[AttemptAssignment],
     specifications: Sequence[Mapping[str, object]],
     *,
-    cell_codes: Mapping[str, int],
-    batch_id: int,
+    parameter_group_codes: Mapping[str, int],
     metadata: Mapping[str, object],
-) -> dict[str, NDArray[Any]]:
+) -> BatchPlanArrays:
     """Build the exact batch plan saved before numerical construction."""
 
     if not assignments:
         raise ValueError("assignments must not be empty")
     if len(assignments) != len(specifications):
         raise ValueError("assignments and specifications must have equal lengths")
-    if batch_id < 0:
-        raise ValueError("batch_id must be nonnegative")
-
     first_key = assignments[0].simulation_key
     shared_coordinates = (
         first_key.family_id,
-        first_key.revision_id,
-        first_key.split_id,
+        first_key.dataset_split,
     )
     if any(
         (
             assignment.simulation_key.family_id,
-            assignment.simulation_key.revision_id,
-            assignment.simulation_key.split_id,
+            assignment.simulation_key.dataset_split,
         )
         != shared_coordinates
         for assignment in assignments
     ):
-        raise ValueError(
-            "one batch must have one family, revision, and preassigned split"
-        )
+        raise ValueError("one batch must have one family and preassigned split")
 
-    unknown_cells = {
-        assignment.cell_id
+    unknown_parameter_groups = {
+        assignment.parameter_group_id
         for assignment in assignments
-        if assignment.cell_id not in cell_codes
+        if assignment.parameter_group_id not in parameter_group_codes
     }
-    if unknown_cells:
-        raise ValueError(f"missing integer codes for cells {sorted(unknown_cells)}")
-    encoded_cell_codes = np.asarray(
-        [cell_codes[assignment.cell_id] for assignment in assignments],
+    if unknown_parameter_groups:
+        raise ValueError(
+            "missing integer codes for parameter groups "
+            f"{sorted(unknown_parameter_groups)}"
+        )
+    encoded_parameter_group_codes = np.asarray(
+        [
+            parameter_group_codes[assignment.parameter_group_id]
+            for assignment in assignments
+        ],
         dtype=np.int32,
     )
-    if np.any(encoded_cell_codes < 0):
-        raise ValueError("cell codes must be nonnegative")
+    if np.any(encoded_parameter_group_codes < 0):
+        raise ValueError("parameter-group codes must be nonnegative")
 
     return {
         "family_id": np.asarray(first_key.family_id, dtype=np.int16),
-        "revision_id": np.asarray(first_key.revision_id, dtype=np.int16),
-        "split_id": np.asarray(
-            SPLIT_CODE_BY_ID[first_key.split_id], dtype=np.uint8
-        ),
-        "batch_id": np.asarray(batch_id, dtype=np.int64),
-        "simulation_id": np.asarray(
-            [assignment.simulation_key.simulation_id for assignment in assignments],
-            dtype=np.int64,
-        ),
-        "cell_id": encoded_cell_codes,
-        "root_seed": np.asarray(
-            [assignment.simulation_key.root_seed for assignment in assignments],
-            dtype=np.uint64,
-        ),
-        "stream_id": np.asarray(
-            [assignment.simulation_key.stream_id for assignment in assignments],
+        "dataset_split": np.asarray(first_key.dataset_split.value),
+        "parameter_group_id": encoded_parameter_group_codes,
+        "worker_stream_id": np.asarray(
+            [assignment.simulation_key.worker_stream_id for assignment in assignments],
             dtype=np.uint32,
         ),
         "attempt_index": np.asarray(
@@ -138,14 +123,14 @@ def build_batch_plan(
 
 def commit_simulation_outcomes(
     paths: BatchPaths,
-    batch_plan: Mapping[str, NDArray[Any]],
+    batch_plan: BatchPlanArrays,
     outcomes: Sequence[SimulationOutcome],
     *,
     metadata: Mapping[str, object],
 ) -> None:
     """Persist accepted whole-simulation rows and every attempted decision."""
 
-    simulation_ids = np.asarray(batch_plan["simulation_id"], dtype=np.int64)
+    simulation_ids = compute_batch_simulation_ids(batch_plan)
     if len(outcomes) != simulation_ids.size:
         raise ValueError("outcomes must contain every planned simulation")
     save_batch_plan(paths, batch_plan)
@@ -157,7 +142,6 @@ def commit_simulation_outcomes(
     time_parts: list[NDArray[np.float64]] = []
     simulation_parts: list[NDArray[np.int32]] = []
     frame_parts: list[NDArray[np.int32]] = []
-    selected_parts: list[NDArray[np.int32]] = []
     records: list[SimulationCommitRecord] = []
     first_row = 0
 
@@ -175,7 +159,6 @@ def commit_simulation_outcomes(
             xi = np.asarray(rows.xi, dtype=np.float32)
             gxi = np.asarray(rows.gxi, dtype=np.float32)
             time = np.asarray(rows.time, dtype=np.float64)
-            selected = np.asarray(rows.selected_dense_index, dtype=np.int32)
             row_count = eta.shape[0]
             simulation_first_row = first_row
             eta_parts.append(eta)
@@ -185,7 +168,6 @@ def commit_simulation_outcomes(
             time_parts.append(time)
             simulation_parts.append(np.full(row_count, local_index, dtype=np.int32))
             frame_parts.append(np.arange(row_count, dtype=np.int32))
-            selected_parts.append(selected)
             first_row += row_count
 
         records.append(
@@ -202,17 +184,14 @@ def commit_simulation_outcomes(
         )
 
     if eta_parts:
-        save_shard(
-            paths,
-            {
-                "eta": np.concatenate(eta_parts),
-                "xi": np.concatenate(xi_parts),
-                "gxi": np.concatenate(gxi_parts),
-                "depth": np.concatenate(depth_parts),
-                "time": np.concatenate(time_parts),
-                "simulation_local_index": np.concatenate(simulation_parts),
-                "frame_index": np.concatenate(frame_parts),
-                "selected_dense_index": np.concatenate(selected_parts),
-            },
+        shard = DatasetShardArrays(
+            eta=np.concatenate(eta_parts),
+            xi=np.concatenate(xi_parts),
+            gxi=np.concatenate(gxi_parts),
+            depth=np.concatenate(depth_parts),
+            time=np.concatenate(time_parts),
+            simulation_local_index=np.concatenate(simulation_parts),
+            frame_index=np.concatenate(frame_parts),
         )
+        save_shard(paths, shard)
     commit_batch(paths, simulations=records, metadata=metadata)

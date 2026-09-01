@@ -4,26 +4,28 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import parse_json
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit, SimulationKey
+from solver.gen_data.pipeline.types import BatchPlanArrays, JsonObject, JsonScalar
 
 
 _BATCH_PLAN_DTYPES = {
+    # physical initial-condition family this batch belongs to.
     "family_id": np.dtype(np.int16),
-    "revision_id": np.dtype(np.int16),
-    "split_id": np.dtype(np.uint8),
-    "batch_id": np.dtype(np.int64),
-    "simulation_id": np.dtype(np.int64),
-    "cell_id": np.dtype(np.int32),
-    "root_seed": np.dtype(np.uint64),
-    "stream_id": np.dtype(np.uint32),
+    # Compact code for the simulation's named parameter group.
+    "parameter_group_id": np.dtype(np.int32),
+    # Separate ID/RNG sequence assigned to this generation worker.
+    "worker_stream_id": np.dtype(np.uint32),
+    # Candidate position in that sequence; rejected candidates still count.
     "attempt_index": np.dtype(np.uint64),
 }
 _BATCH_PLAN_STRING_FIELDS = {
+    "dataset_split",
     "simulation_spec_json",
     "metadata_json",
 }
@@ -35,7 +37,6 @@ _SHARD_DTYPES = {
     "time": np.dtype(np.float64),
     "simulation_local_index": np.dtype(np.int32),
     "frame_index": np.dtype(np.int32),
-    "selected_dense_index": np.dtype(np.int32),
 }
 
 
@@ -50,7 +51,7 @@ class SimulationCommitRecord:
     failed_bits: int
     first_row: int
     row_count: int
-    metrics: Mapping[str, str | float | int | bool | None]
+    metrics: Mapping[str, JsonScalar]
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -72,7 +73,7 @@ class SimulationCommitRecord:
         elif self.first_row != -1 or self.row_count != 0:
             raise ValueError("rejected simulations cannot own stored rows")
 
-    def to_json_record(self) -> dict[str, object]:
+    def to_json_record(self) -> JsonObject:
         """Return the existing on-disk result representation."""
 
         return {
@@ -122,7 +123,7 @@ def parse_simulation_result(value: object) -> SimulationCommitRecord:
     )
 
 
-def parse_batch_plan_metadata(metadata: NDArray[Any]) -> dict[str, object]:
+def parse_batch_plan_metadata(metadata: NDArray[Any]) -> JsonObject:
     """Parse the scalar JSON metadata stored with a batch plan."""
 
     if metadata.ndim != 0 or metadata.dtype.kind not in {"U", "S"}:
@@ -130,7 +131,7 @@ def parse_batch_plan_metadata(metadata: NDArray[Any]) -> dict[str, object]:
     value = parse_json(str(metadata.item()))
     if not isinstance(value, dict):
         raise ValueError("metadata_json must encode a JSON object")
-    return value
+    return cast(JsonObject, value)
 
 
 def _validate_required_array_dtypes(
@@ -175,6 +176,42 @@ def compute_simulation_row_blocks(
     }
 
 
+def compute_batch_simulation_ids(
+    batch_plan: BatchPlanArrays | Mapping[str, NDArray[Any]],
+) -> NDArray[np.int64]:
+    """Derive simulation IDs from the reproducible coordinates in a batch plan."""
+
+    family_id = batch_plan["family_id"]
+    dataset_split = batch_plan["dataset_split"]
+    worker_stream_ids = batch_plan["worker_stream_id"]
+    attempt_indices = batch_plan["attempt_index"]
+    if family_id.ndim != 0 or dataset_split.ndim != 0:
+        raise ValueError("family_id and dataset_split must be scalar")
+    if worker_stream_ids.ndim != 1 or worker_stream_ids.size == 0:
+        raise ValueError("worker_stream_id must be a nonempty one-dimensional array")
+    if attempt_indices.shape != worker_stream_ids.shape:
+        raise ValueError("attempt_index must have the same shape as worker_stream_id")
+
+    split = DatasetSplit(str(dataset_split.item()))
+    return np.fromiter(
+        (
+            SimulationKey(
+                family_id=int(family_id.item()),
+                dataset_split=split,
+                worker_stream_id=int(worker_stream_id),
+                attempt_index=int(attempt_index),
+            ).simulation_id
+            for worker_stream_id, attempt_index in zip(
+                worker_stream_ids,
+                attempt_indices,
+                strict=True,
+            )
+        ),
+        dtype=np.int64,
+        count=worker_stream_ids.size,
+    )
+
+
 def validate_batch_plan(batch_plan: Mapping[str, NDArray[Any]]) -> None:
     """Validate the simulations that one batch plans to run."""
 
@@ -186,22 +223,27 @@ def validate_batch_plan(batch_plan: Mapping[str, NDArray[Any]]) -> None:
         )
     if any(array.dtype.kind == "O" for array in batch_plan.values()):
         raise TypeError("batch-plan arrays cannot use object dtype")
+    for name in _BATCH_PLAN_STRING_FIELDS:
+        if batch_plan[name].dtype.kind not in {"U", "S"}:
+            raise TypeError(f"batch-plan field {name!r} must contain strings")
 
-    for name in ("family_id", "revision_id", "split_id", "batch_id"):
+    for name in ("family_id", "dataset_split"):
         if batch_plan[name].ndim != 0:
             raise ValueError(f"batch-plan field {name!r} must be scalar")
+    try:
+        DatasetSplit(str(batch_plan["dataset_split"].item()))
+    except ValueError as error:
+        raise ValueError(
+            "dataset_split must be 'train', 'validation', or 'test'"
+        ) from error
 
-    simulation_ids = batch_plan["simulation_id"]
+    simulation_ids = compute_batch_simulation_ids(batch_plan)
     specifications = batch_plan["simulation_spec_json"]
-    if simulation_ids.ndim != 1 or simulation_ids.size == 0:
-        raise ValueError("simulation_id must be a nonempty one-dimensional array")
-    for name in ("cell_id", "root_seed", "stream_id", "attempt_index"):
+    for name in ("parameter_group_id", "worker_stream_id", "attempt_index"):
         if batch_plan[name].shape != simulation_ids.shape:
-            raise ValueError(f"{name} must have the same shape as simulation_id")
+            raise ValueError(f"{name} must have one entry per simulation")
     if specifications.shape != simulation_ids.shape:
         raise ValueError("simulation_spec_json must have one string per simulation")
-    if specifications.dtype.kind not in {"U", "S"}:
-        raise TypeError("simulation_spec_json must have a string dtype")
     if np.unique(simulation_ids).size != simulation_ids.size:
         raise ValueError("simulation_id values must be unique within a batch plan")
 
@@ -250,7 +292,6 @@ def validate_shard(
         "time",
         "simulation_local_index",
         "frame_index",
-        "selected_dense_index",
     ):
         if shard[name].shape != (stored_row_count,):
             raise ValueError(f"{name} must have one entry per stored row")
@@ -262,12 +303,11 @@ def validate_shard(
 
     row_blocks_by_simulation = compute_simulation_row_blocks(
         shard["simulation_local_index"],
-        number_of_simulations=int(batch_plan["simulation_id"].size),
+        number_of_simulations=int(batch_plan["attempt_index"].size),
     )
     for first_row, frame_count in row_blocks_by_simulation.values():
         simulation_slice = slice(first_row, first_row + frame_count)
         stored_frame_indices = shard["frame_index"][simulation_slice]
-        source_frame_indices = shard["selected_dense_index"][simulation_slice]
         simulation_times = shard["time"][simulation_slice]
         simulation_depths = shard["depth"][simulation_slice]
         if not np.array_equal(
@@ -275,10 +315,6 @@ def validate_shard(
             np.arange(frame_count, dtype=np.int32),
         ):
             raise ValueError("frame_index must be 0, 1, ... within every simulation")
-        if np.any(np.diff(source_frame_indices) <= 0):
-            raise ValueError(
-                "selected_dense_index must increase strictly within every simulation"
-            )
         if np.any(np.diff(simulation_times) <= 0.0):
             raise ValueError(
                 "stored times must increase strictly within every simulation"

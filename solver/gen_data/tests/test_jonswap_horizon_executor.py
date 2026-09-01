@@ -25,13 +25,12 @@ from solver.gen_data.jonswap_horizon_executor import (  # noqa: E402
     horizon_sorted_groups,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLING_REVISION_V4,
-    JONSWAP_TMA_SAMPLE_CELL_IDS,
+    JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    SampleCellTarget,
+    ParameterGroupTarget,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
@@ -109,16 +108,15 @@ def _run_spec(
     outer_size: int,
     solver_size: int,
 ) -> DatasetChunkConfig:
-    cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[0]
+    parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[0]
     return DatasetChunkConfig(
         root=root,
         family_name="jonswap_tma",
         family_id=PhysicalFamilyId.JONSWAP_TMA,
-        revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
-        split_id=SplitId.TEST,
-        stream_id=13,
-        simulation_targets=(SampleCellTarget(cell_id, outer_size),),
-        cell_codes={cell_id: 0},
+        dataset_split=DatasetSplit.TEST,
+        worker_stream_id=13,
+        simulation_targets=(ParameterGroupTarget(parameter_group_id, outer_size),),
+        parameter_group_codes={parameter_group_id: 0},
         batch_size=outer_size,
         first_attempt_index=0,
         configuration={
@@ -285,7 +283,6 @@ def _jonswap_record(
 ) -> dict[str, object]:
     return {
         "family_id": 3,
-        "revision_id": 4,
         "marker": marker,
         "depth": depth,
         "peak_wavenumber": peak_wavenumber,
@@ -567,7 +564,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             request = base.GenerationRequest(
                 output_root=Path(directory),
                 family="jonswap_tma",
-                split=SplitId.TEST,
+                split=DatasetSplit.TEST,
                 accepted_simulations=1024,
                 batch_size=1024,
                 platform="cpu",
@@ -669,7 +666,7 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
             request = base.GenerationRequest(
                 output_root=Path(directory),
                 family="jonswap_tma",
-                split=SplitId.TEST,
+                split=DatasetSplit.TEST,
                 accepted_simulations=27,
                 batch_size=27,
                 platform="cpu",
@@ -700,11 +697,10 @@ class JonswapHorizonExecutorTests(unittest.TestCase):
                 root=valid.root,
                 family_name=valid.family_name,
                 family_id=valid.family_id,
-                revision_id=valid.revision_id,
-                split_id=valid.split_id,
-                stream_id=valid.stream_id,
+                dataset_split=valid.dataset_split,
+                worker_stream_id=valid.worker_stream_id,
                 simulation_targets=valid.simulation_targets,
-                cell_codes=valid.cell_codes,
+                parameter_group_codes=valid.parameter_group_codes,
                 batch_size=valid.batch_size,
                 first_attempt_index=valid.first_attempt_index,
                 configuration=configuration,

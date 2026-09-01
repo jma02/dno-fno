@@ -841,7 +841,7 @@ uv run python scripts/run_paper_dataset_quota.py \
   --accepted-cases-before 0 \
   --batch-size 4 \
   --maximum-attempts-per-accepted-case 4 \
-  --stream-id 900 \
+  --worker-stream-id 900 \
   --output-root outputs/paper_dataset_all_category_gpu_pilot_20260727/tanaka \
   --platform gpu \
   --execute
@@ -853,7 +853,7 @@ uv run python scripts/run_paper_dataset_quota.py \
   --accepted-cases-before 0 \
   --batch-size 4 \
   --maximum-attempts-per-accepted-case 4 \
-  --stream-id 900 \
+  --worker-stream-id 900 \
   --output-root outputs/paper_dataset_all_category_gpu_pilot_20260727/benjamin_feir \
   --platform gpu \
   --execute
@@ -865,7 +865,7 @@ uv run python scripts/run_paper_dataset_quota.py \
   --accepted-cases-before 0 \
   --batch-size 4 \
   --maximum-attempts-per-accepted-case 4 \
-  --stream-id 900 \
+  --worker-stream-id 900 \
   --output-root outputs/paper_dataset_all_category_gpu_pilot_20260727/jonswap_tma \
   --platform gpu \
   --execute

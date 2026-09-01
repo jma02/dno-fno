@@ -19,6 +19,18 @@ from solver.gen_data.pipeline.batch_storage import (
     inspect_batch,
     record_fatal_failure,
 )
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit, SimulationKey
+
+
+_SIMULATION_IDS = tuple(
+    SimulationKey(
+        family_id=2,
+        dataset_split=DatasetSplit.TRAIN,
+        worker_stream_id=2,
+        attempt_index=attempt_index,
+    ).simulation_id
+    for attempt_index in range(3)
+)
 
 
 def _batch_plan() -> dict[str, np.ndarray]:
@@ -27,13 +39,9 @@ def _batch_plan() -> dict[str, np.ndarray]:
     ]
     return {
         "family_id": np.asarray(2, dtype=np.int16),
-        "revision_id": np.asarray(1, dtype=np.int16),
-        "split_id": np.asarray(0, dtype=np.uint8),
-        "batch_id": np.asarray(7, dtype=np.int64),
-        "simulation_id": np.asarray([70, 71, 72], dtype=np.int64),
-        "cell_id": np.asarray([0, 1, 0], dtype=np.int32),
-        "root_seed": np.asarray([11, 11, 11], dtype=np.uint64),
-        "stream_id": np.asarray([2, 2, 2], dtype=np.uint32),
+        "dataset_split": np.asarray(DatasetSplit.TRAIN.value),
+        "parameter_group_id": np.asarray([0, 1, 0], dtype=np.int32),
+        "worker_stream_id": np.asarray([2, 2, 2], dtype=np.uint32),
         "attempt_index": np.asarray([0, 1, 2], dtype=np.uint64),
         "simulation_spec_json": np.asarray(specifications),
         "metadata_json": np.asarray(json.dumps({"seed": 11}, sort_keys=True)),
@@ -47,7 +55,6 @@ def _batch_plan() -> dict[str, np.ndarray]:
 def _shard_arrays() -> dict[str, np.ndarray]:
     simulation_local_index = np.asarray([0, 0, 2, 2, 2], dtype=np.int32)
     frame_index = np.asarray([0, 1, 0, 1, 2], dtype=np.int32)
-    selected_dense_index = np.asarray([0, 10, 0, 5, 10], dtype=np.int32)
     rows = simulation_local_index.size
     field = np.arange(rows * 4, dtype=np.float32).reshape(rows, 4) / 100.0
     return {
@@ -58,14 +65,13 @@ def _shard_arrays() -> dict[str, np.ndarray]:
         "time": np.asarray([0.0, 1.0, 0.0, 0.5, 1.0], dtype=np.float64),
         "simulation_local_index": simulation_local_index,
         "frame_index": frame_index,
-        "selected_dense_index": selected_dense_index,
     }
 
 
 def _simulation_records() -> tuple[SimulationCommitRecord, ...]:
     return (
         SimulationCommitRecord(
-            simulation_id=70,
+            simulation_id=_SIMULATION_IDS[0],
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -75,7 +81,7 @@ def _simulation_records() -> tuple[SimulationCommitRecord, ...]:
             metrics={"maximum_error": 1e-5},
         ),
         SimulationCommitRecord(
-            simulation_id=71,
+            simulation_id=_SIMULATION_IDS[1],
             accepted=False,
             required_bits=32,
             evaluated_bits=32,
@@ -85,7 +91,7 @@ def _simulation_records() -> tuple[SimulationCommitRecord, ...]:
             metrics={"maximum_error": None},
         ),
         SimulationCommitRecord(
-            simulation_id=72,
+            simulation_id=_SIMULATION_IDS[2],
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -151,7 +157,7 @@ class BatchStorageTests(unittest.TestCase):
 
         wrong = list(_simulation_records())
         wrong[1] = SimulationCommitRecord(
-            simulation_id=71,
+            simulation_id=_SIMULATION_IDS[1],
             accepted=True,
             required_bits=63,
             evaluated_bits=63,
@@ -175,7 +181,6 @@ class BatchStorageTests(unittest.TestCase):
             batch_id=8,
         )
         proposal = _batch_plan()
-        proposal["batch_id"] = np.asarray(8, dtype=np.int64)
         save_batch_plan(different_paths, proposal)
         with self.assertRaisesRegex(ValueError, "ordered block"):
             save_shard(different_paths, shard)
@@ -193,7 +198,7 @@ class BatchStorageTests(unittest.TestCase):
                 row_count=0,
                 metrics={"maximum_error": None},
             )
-            for simulation_id in (70, 71, 72)
+            for simulation_id in _SIMULATION_IDS
         )
         commit_batch(self.paths, simulations=simulations, metadata={"accepted": 0})
         self.assertFalse(self.paths.shard.exists())
@@ -203,7 +208,7 @@ class BatchStorageTests(unittest.TestCase):
         proposal = _batch_plan()
         save_batch_plan(self.paths, proposal)
         changed = _batch_plan()
-        changed["cell_id"] = np.asarray([1, 1, 0], dtype=np.int32)
+        changed["parameter_group_id"] = np.asarray([1, 1, 0], dtype=np.int32)
         with self.assertRaisesRegex(RuntimeError, "differs from replayed arrays"):
             save_batch_plan(self.paths, changed)
 
@@ -249,13 +254,10 @@ class BatchStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "failed batch"):
             commit_batch(self.paths, simulations=_simulation_records(), metadata={})
 
-    def test_nonfinite_json_and_invalid_selected_times_are_rejected(self) -> None:
+    def test_nonfinite_json_and_nonincreasing_times_are_rejected(self) -> None:
         save_batch_plan(self.paths, _batch_plan())
         shard = _shard_arrays()
-        shard["selected_dense_index"] = np.asarray(
-            [0, 0, 0, 5, 10],
-            dtype=np.int32,
-        )
+        shard["time"] = np.asarray([0.0, 0.0, 0.0, 0.5, 1.0], dtype=np.float64)
         with self.assertRaisesRegex(ValueError, "increase strictly"):
             save_shard(self.paths, shard)
 

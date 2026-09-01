@@ -27,7 +27,7 @@ from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # no
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
@@ -95,20 +95,18 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             AttemptAssignment(
                 simulation_key=SimulationKey(
                     family_id=4,
-                    revision_id=1,
-                    split_id=SplitId.TEST,
-                    stream_id=2,
+                    dataset_split=DatasetSplit.TEST,
+                    worker_stream_id=2,
                     attempt_index=index,
                 ),
-                cell_id=cell,
+                parameter_group_id=parameter_group_id,
             )
-            for index, cell in enumerate(("finite_a", "finite_b"))
+            for index, parameter_group_id in enumerate(("finite_a", "finite_b"))
         )
         proposal = build_batch_plan(
             assignments,
             ({"amplitude": 0.001}, {"amplitude": 0.0015}),
-            cell_codes={"finite_a": 0, "finite_b": 1},
-            batch_id=0,
+            parameter_group_codes={"finite_a": 0, "finite_b": 1},
             metadata={"smoke": True},
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -116,7 +114,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             paths = BatchPaths.for_batch(
                 root,
                 family="jonswap_tma",
-                split=SplitId.TEST.value,
+                split=DatasetSplit.TEST.value,
                 batch_id=0,
             )
             save_batch_plan(paths, proposal)
@@ -142,16 +140,6 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                 ),
             )
             self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
-            self.assertTrue(
-                all(
-                    np.array_equal(
-                        outcome.rows.selected_dense_index,
-                        np.asarray([0, 1, 2]),
-                    )
-                    for outcome in outcomes
-                    if outcome.rows is not None
-                )
-            )
             commit_simulation_outcomes(
                 paths,
                 proposal,
@@ -168,8 +156,8 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                     np.asarray([3, 3]),
                 )
                 np.testing.assert_array_equal(
-                    mapping["trajectory_split_id"],
-                    np.asarray([2, 2], dtype=np.uint8),
+                    mapping["trajectory_dataset_split"],
+                    np.asarray([DatasetSplit.TEST.value] * 2),
                 )
 
     def test_large_offline_hamiltonian_drift_does_not_gate_time_selection(
@@ -211,10 +199,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         self.assertTrue(outcome.decision.accepted)
         self.assertIsNotNone(outcome.rows)
         assert outcome.rows is not None
-        np.testing.assert_array_equal(
-            outcome.rows.selected_dense_index,
-            np.asarray([0, 2], dtype=np.int32),
-        )
+        np.testing.assert_array_equal(outcome.rows.time, np.asarray([0.0, 0.16]))
 
     def test_rejected_simulation_persists_finite_internal_health_metrics(self) -> None:
         reason = SimulationCheck.HAMILTONIAN_DRIFT

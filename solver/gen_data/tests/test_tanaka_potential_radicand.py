@@ -27,13 +27,13 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     RolloutConfig,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELL_IDS,
+    TANAKA_PARAMETER_GROUP_IDS,
     TanakaCrest,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -273,16 +273,15 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             gl2_iteration_cap=8,
             target_time_chunk_size=2,
         )
-        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         attempted = AttemptAssignment(
             simulation_key=SimulationKey(
                 family_id=2,
-                revision_id=3,
-                split_id=SplitId.TEST,
-                stream_id=7,
+                dataset_split=DatasetSplit.TEST,
+                worker_stream_id=7,
                 attempt_index=53,
             ),
-            cell_id=cell_id,
+            parameter_group_id=parameter_group_id,
         )
         sampled = sample_tanaka_simulations(
             (attempted,),
@@ -302,7 +301,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="tanaka",
                 batch_id=0,
-                cell_codes={cell_id: 0},
+                parameter_group_codes={parameter_group_id: 0},
                 metadata={"test_scope": "saved_batch_plan_before_domain_check"},
             )
             with patch(

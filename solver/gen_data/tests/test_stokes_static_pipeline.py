@@ -18,11 +18,11 @@ from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
-    STOKES_SAMPLE_CELL_IDS,
+    STOKES_PARAMETER_GROUP_IDS,
     StokesSample,
     sample_stokes_simulation,
 )
@@ -39,19 +39,18 @@ def assignment(
     cell_index: int,
     *,
     attempt_index: int,
-    split_id: SplitId = SplitId.VALIDATION,
+    dataset_split: DatasetSplit = DatasetSplit.VALIDATION,
 ) -> AttemptAssignment:
     """Return a fixed Stokes assignment for integration tests."""
 
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=PhysicalFamilyId.STOKES,
-            revision_id=1,
-            split_id=split_id,
-            stream_id=9,
+            dataset_split=dataset_split,
+            worker_stream_id=9,
             attempt_index=attempt_index,
         ),
-        cell_id=STOKES_SAMPLE_CELL_IDS[cell_index],
+        parameter_group_id=STOKES_PARAMETER_GROUP_IDS[cell_index],
     )
 
 

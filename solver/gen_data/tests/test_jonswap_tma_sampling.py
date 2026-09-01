@@ -19,15 +19,14 @@ from solver.gen_data.jonswap_tma import (
     relative_frequency_interval_fits,
 )
 from solver.gen_data.jonswap_tma_sampling import (
-    JONSWAP_TMA_SAMPLING_REVISION_V4,
-    JONSWAP_TMA_SAMPLE_CELL_IDS,
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_PARAMETER_GROUP_IDS,
+    JONSWAP_TMA_PARAMETER_GROUPS,
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     random_generator_for_simulation,
 )
 
@@ -43,46 +42,46 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 4,
-    revision_id: int = JONSWAP_TMA_SAMPLING_REVISION_V4,
-    split_id: SplitId = SplitId.TRAIN,
-    stream_id: int = 0,
+    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    worker_stream_id: int = 0,
     attempt_index: int | None = None,
 ) -> AttemptAssignment:
-    """Return one deterministic assignment for a declared sample cell."""
+    """Return one deterministic assignment for a declared parameter group."""
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=family_id,
-            revision_id=revision_id,
-            split_id=split_id,
-            stream_id=stream_id,
+            dataset_split=dataset_split,
+            worker_stream_id=worker_stream_id,
             attempt_index=attempt,
         ),
-        cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[cell_index],
+        parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[cell_index],
     )
 
 
 class JonswapTmaSamplingTest(unittest.TestCase):
     def test_cells_are_exact_cartesian_product(self) -> None:
-        coordinates = set(JONSWAP_TMA_SAMPLE_CELLS.values())
+        coordinates = set(JONSWAP_TMA_PARAMETER_GROUPS.values())
         expected = {
             (stratum, gamma, direction)
             for stratum in ("shallow", "finite", "deep")
             for gamma in PAPER_PEAK_ENHANCEMENTS
             for direction in PAPER_RIGHT_MOVING_FRACTIONS
         }
-        self.assertEqual(len(JONSWAP_TMA_SAMPLE_CELL_IDS), 27)
+        self.assertEqual(len(JONSWAP_TMA_PARAMETER_GROUP_IDS), 27)
         self.assertEqual(coordinates, expected)
         self.assertEqual(
-            len(JONSWAP_TMA_SAMPLE_CELL_IDS),
+            len(JONSWAP_TMA_PARAMETER_GROUP_IDS),
             27,
         )
 
     def test_every_cell_samples_inside_declared_support(self) -> None:
-        for index, (cell_id, cell) in enumerate(JONSWAP_TMA_SAMPLE_CELLS.items()):
-            stratum, peak_enhancement, right_moving_fraction = cell
-            with self.subTest(cell=cell_id):
+        for index, (parameter_group_id, parameter_group) in enumerate(
+            JONSWAP_TMA_PARAMETER_GROUPS.items()
+        ):
+            stratum, peak_enhancement, right_moving_fraction = parameter_group
+            with self.subTest(parameter_group=parameter_group_id):
                 sample = sample_jonswap_tma_simulation(
                     assignment(index),
                     band=BAND,
@@ -124,11 +123,10 @@ class JonswapTmaSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            SimulationKey(5, 4, SplitId.TRAIN, 0, 41),
-            SimulationKey(4, 5, SplitId.TRAIN, 0, 41),
-            SimulationKey(4, 4, SplitId.VALIDATION, 0, 41),
-            SimulationKey(4, 4, SplitId.TRAIN, 1, 41),
-            SimulationKey(4, 4, SplitId.TRAIN, 0, 42),
+            SimulationKey(5, DatasetSplit.TRAIN, 0, 41),
+            SimulationKey(4, DatasetSplit.VALIDATION, 0, 41),
+            SimulationKey(4, DatasetSplit.TRAIN, 1, 41),
+            SimulationKey(4, DatasetSplit.TRAIN, 0, 42),
         )
         first_draws = {
             tuple(random_generator_for_simulation(key).random(8)) for key in keys
@@ -149,9 +147,6 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         record = sample.to_json_record()
         self.assertIsInstance(record["phase_right"], list)
         self.assertIsInstance(record["phase_left"], list)
-        self.assertEqual(
-            record["seed_words"], list(sample.assignment.simulation_key.seed_words)
-        )
         json.dumps(record, sort_keys=True, allow_nan=False)
 
     def test_shallow_draws_obey_parameterization_and_constraint(self) -> None:
@@ -177,15 +172,14 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 places=15,
             )
 
-    def test_revision_4_draws_fit_the_published_relative_frequency_interval(
+    def test_draws_fit_the_published_relative_frequency_interval(
         self,
     ) -> None:
         for attempt_index in range(512):
-            cell_index = attempt_index % len(JONSWAP_TMA_SAMPLE_CELL_IDS)
+            cell_index = attempt_index % len(JONSWAP_TMA_PARAMETER_GROUP_IDS)
             sample = sample_jonswap_tma_simulation(
                 assignment(
                     cell_index,
-                    revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
                     attempt_index=attempt_index,
                 ),
                 band=BAND,

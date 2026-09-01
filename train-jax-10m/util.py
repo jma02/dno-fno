@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+
 FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]
 
@@ -19,8 +21,8 @@ DATASET_VIEW_SCHEMA_VERSION = 2
 _TRAINING_MAP_DTYPES = {
     "trajectory_index": np.dtype(np.int32),
     "trajectory_accepted": np.dtype(np.bool_),
-    "trajectory_split_id": np.dtype(np.uint8),
 }
+_TRAINING_MAP_FIELDS = (*_TRAINING_MAP_DTYPES, "trajectory_dataset_split")
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ def _load_trajectory_map_arrays(
 ) -> dict[str, np.ndarray]:
     """Load only the row ownership needed to apply release-defined splits."""
     with np.load(trajectory_map_path, allow_pickle=False) as archive:
-        missing = sorted(set(_TRAINING_MAP_DTYPES) - set(archive.files))
+        missing = sorted(set(_TRAINING_MAP_FIELDS) - set(archive.files))
         if missing:
             raise ValueError(
                 f"Trajectory map {trajectory_map_path} is missing required arrays: {missing}"
@@ -161,7 +163,7 @@ def _load_trajectory_map_arrays(
                     f"Unsupported trajectory-map schema_version in {trajectory_map_path}; "
                     f"expected scalar {DATASET_VIEW_SCHEMA_VERSION}"
                 )
-        arrays = {name: np.asarray(archive[name]) for name in _TRAINING_MAP_DTYPES}
+        arrays = {name: np.asarray(archive[name]) for name in _TRAINING_MAP_FIELDS}
 
     for name, expected_dtype in _TRAINING_MAP_DTYPES.items():
         array = arrays[name]
@@ -181,9 +183,13 @@ def _load_trajectory_map_arrays(
         )
 
     accepted = arrays["trajectory_accepted"]
-    split_id = arrays["trajectory_split_id"]
+    dataset_split = arrays["trajectory_dataset_split"]
+    if dataset_split.ndim != 1 or dataset_split.dtype.kind not in {"U", "S"}:
+        raise TypeError(
+            "trajectory_dataset_split must be a one-dimensional string array"
+        )
     num_trajectories = accepted.shape[0]
-    if split_id.shape[0] != num_trajectories:
+    if dataset_split.shape[0] != num_trajectories:
         raise ValueError(
             "Trajectory acceptance and split tables must have equal lengths"
         )
@@ -194,10 +200,11 @@ def _load_trajectory_map_arrays(
         or int(trajectory_index.max()) >= num_trajectories
     ):
         raise ValueError("trajectory_index contains an out-of-range table index")
-    if np.any(split_id > 2):
-        raise ValueError(
-            "trajectory_split_id must use train=0, validation=1, or test=2"
-        )
+    unknown_splits = set(map(str, dataset_split)).difference(
+        split.value for split in DatasetSplit
+    )
+    if unknown_splits:
+        raise ValueError(f"unknown dataset splits: {sorted(unknown_splits)}")
 
     return arrays
 
@@ -278,7 +285,9 @@ def _load_paper_dataset_shards(
     )
     trajectory_index = trajectory_map["trajectory_index"]
     dataset["accepted_mask"] = trajectory_map["trajectory_accepted"][trajectory_index]
-    dataset["split_id"] = trajectory_map["trajectory_split_id"][trajectory_index]
+    dataset["dataset_split"] = trajectory_map["trajectory_dataset_split"][
+        trajectory_index
+    ]
     return dataset
 
 
@@ -293,23 +302,34 @@ def build_dataset_split_indices(
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return every accepted row from the dataset's preassigned splits."""
-    required = {"split_id", "accepted_mask"}
+    required = {"dataset_split", "accepted_mask"}
     missing = sorted(required - set(dataset))
     if missing:
         raise ValueError(f"Paper-dataset is missing row arrays: {missing}")
-    split_id = np.asarray(dataset["split_id"])
+    dataset_split = np.asarray(dataset["dataset_split"])
     eligible = np.asarray(dataset["accepted_mask"])
-    if split_id.shape != eligible.shape:
-        raise ValueError("split_id and accepted_mask must have matching shapes")
-    if split_id.dtype != np.uint8 or eligible.dtype != np.bool_:
-        raise TypeError("split_id must be uint8 and accepted_mask must be bool")
-    if np.any(split_id > 2):
-        raise ValueError("split_id values must be train=0, validation=1, or test=2")
+    if dataset_split.shape != eligible.shape:
+        raise ValueError("dataset_split and accepted_mask must have matching shapes")
+    if dataset_split.dtype.kind not in {"U", "S"} or eligible.dtype != np.bool_:
+        raise TypeError(
+            "dataset_split must contain strings and accepted_mask must be bool"
+        )
+    unknown_splits = set(map(str, dataset_split)).difference(
+        split.value for split in DatasetSplit
+    )
+    if unknown_splits:
+        raise ValueError(f"unknown dataset splits: {sorted(unknown_splits)}")
     rng = np.random.default_rng(seed)
     return (
-        rng.permutation(np.flatnonzero(eligible & (split_id == 0))),
-        rng.permutation(np.flatnonzero(eligible & (split_id == 1))),
-        rng.permutation(np.flatnonzero(eligible & (split_id == 2))),
+        rng.permutation(
+            np.flatnonzero(eligible & (dataset_split == DatasetSplit.TRAIN.value))
+        ),
+        rng.permutation(
+            np.flatnonzero(eligible & (dataset_split == DatasetSplit.VALIDATION.value))
+        ),
+        rng.permutation(
+            np.flatnonzero(eligible & (dataset_split == DatasetSplit.TEST.value))
+        ),
     )
 
 

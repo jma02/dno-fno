@@ -22,19 +22,23 @@ from solver.gen_data.pipeline.artifact_io import (
     write_json_atomic,
     write_npz_atomic,
 )
-from solver.gen_data.pipeline.batch_artifacts import parse_batch_plan_metadata
+from solver.gen_data.pipeline.batch_artifacts import (
+    SimulationCommitRecord,
+    compute_batch_simulation_ids,
+    parse_batch_plan_metadata,
+)
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import (
+    BatchPlanArrays,
+    DatasetShardArrays,
+    JsonObject,
+    JsonValue,
+    SimulationIndexArrays,
+)
 
 
 DATASET_VIEW_SCHEMA_VERSION = 2
 TRAJECTORY_MAP_SCHEMA_VERSION = 2
-_SHARED_TARGET_FIELDS = (
-    "nx",
-    "length",
-    "gravity",
-    "dno_order",
-    "pad_factor",
-    "maximum_wavenumber",
-)
 _STORED_DTYPES = {
     "eta": "float32",
     "xi": "float32",
@@ -46,154 +50,221 @@ _STORED_DTYPES = {
 
 @dataclass(frozen=True)
 class DatasetViewPaths:
-    """The two derived files consumed by the training loader."""
+    """Files created by :func:`build_dataset_view`."""
 
+    # JSON listing the dataset shards, grid settings, and split sizes.
     manifest: Path
+    # NPZ mapping stored rows to simulations and recording each simulation's result.
     trajectory_map: Path
 
 
 @dataclass(frozen=True)
-class _BatchContract:
-    """Dataset-wide and family-specific contracts recovered from a batch plan."""
+class _TrainingTarget:
+    """Grid and DNO settings shared by every shard in a dataset view."""
 
-    target: Mapping[str, object]
-    family_execution: Mapping[str, object]
-    trajectory_numerical: Mapping[str, object] | None
-
-
-def _object_field(
-    value: Mapping[str, object],
-    name: str,
-    *,
-    context: str,
-) -> dict[str, object]:
-    field = value.get(name)
-    if not isinstance(field, dict):
-        raise ValueError(f"{context} must contain an object field {name!r}")
-    return field
+    role: str
+    nx: int
+    length: float
+    gravity: float
+    dno_order: int
+    pad_factor: int
+    maximum_wavenumber: float
+    dtype: str = "float64"
 
 
-def _finite_positive_real(value: object, *, name: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-    ):
-        raise TypeError(f"{name} must be a finite number")
-    converted = float(value)
-    if converted <= 0.0:
-        raise ValueError(f"{name} must be positive")
-    return converted
+@dataclass(frozen=True)
+class _BatchSettings:
+    """Generator settings read from one batch plan."""
+
+    family_id: int
+    training_target: _TrainingTarget
+    # Full generator settings, compared to prevent mixing unlike batches.
+    generation_record: JsonObject
+    # Trajectory integrator settings copied into the dataset manifest.
+    integration_record: JsonObject | None
 
 
-def _shared_target(
-    numerical: Mapping[str, object],
+def _training_target(
+    numerical: JsonObject,
     *,
     role: object,
-) -> dict[str, object]:
-    if not isinstance(role, str) or not role:
-        raise ValueError("execution contract role must be a nonempty string")
-    missing = set(_SHARED_TARGET_FIELDS).difference(numerical)
+) -> _TrainingTarget:
+    required_fields = {
+        "nx",
+        "length",
+        "gravity",
+        "dno_order",
+        "pad_factor",
+        "maximum_wavenumber",
+    }
+    missing = required_fields.difference(numerical)
     if missing:
         raise ValueError(
-            f"execution contract is missing shared target fields {sorted(missing)}"
+            f"generation settings are missing training target fields {sorted(missing)}"
         )
-    integer_values: dict[str, int] = {}
-    for name in ("nx", "dno_order", "pad_factor"):
-        value = numerical[name]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError("shared target integer fields must be integers")
-        integer_values[name] = value
-    raw_target_nx = numerical.get("target_nx")
-    target_nx = integer_values["nx"]
-    if raw_target_nx is not None:
-        if (
-            isinstance(raw_target_nx, bool)
-            or not isinstance(raw_target_nx, int)
-            or raw_target_nx <= 0
-            or raw_target_nx % 2
-        ):
-            raise ValueError("target_nx must be a positive even integer")
-        target_nx = raw_target_nx
-    length = _finite_positive_real(numerical["length"], name="length")
-    gravity = _finite_positive_real(numerical["gravity"], name="gravity")
-    evolution_maximum_wavenumber = _finite_positive_real(
-        numerical["maximum_wavenumber"],
-        name="maximum_wavenumber",
-    )
-    raw_target_maximum_wavenumber = numerical.get("target_maximum_wavenumber")
-    target_maximum_wavenumber = (
-        evolution_maximum_wavenumber
-        if raw_target_maximum_wavenumber is None
-        else _finite_positive_real(
-            raw_target_maximum_wavenumber,
-            name="target_maximum_wavenumber",
-        )
-    )
-    if target_maximum_wavenumber > evolution_maximum_wavenumber:
-        raise ValueError("target_maximum_wavenumber cannot exceed maximum_wavenumber")
-    raw_target_dno_order = numerical.get("target_dno_order")
-    target_dno_order = integer_values["dno_order"]
-    if raw_target_dno_order is not None:
-        if isinstance(raw_target_dno_order, bool) or not isinstance(
-            raw_target_dno_order,
+    if not isinstance(role, str):
+        raise TypeError("generation role must be a string")
+    return _TrainingTarget(
+        role=role,
+        nx=cast(int, numerical.get("target_nx", numerical["nx"])),
+        length=cast(float, numerical["length"]),
+        gravity=cast(float, numerical["gravity"]),
+        dno_order=cast(
             int,
-        ):
-            raise TypeError("target_dno_order must be an integer")
-        if raw_target_dno_order < 0:
-            raise ValueError("target_dno_order must be nonnegative")
-        target_dno_order = raw_target_dno_order
-    return {
-        "role": role,
-        "nx": target_nx,
-        "length": length,
-        "gravity": gravity,
-        "dno_order": target_dno_order,
-        "pad_factor": integer_values["pad_factor"],
-        "maximum_wavenumber": target_maximum_wavenumber,
-        "dtype": "float64",
-    }
+            numerical.get("target_dno_order", numerical["dno_order"]),
+        ),
+        pad_factor=cast(int, numerical["pad_factor"]),
+        maximum_wavenumber=cast(
+            float,
+            numerical.get(
+                "target_maximum_wavenumber",
+                numerical["maximum_wavenumber"],
+            ),
+        ),
+    )
 
 
-def _batch_contract(
-    batch_plan: Mapping[str, NDArray[Any]],
-) -> _BatchContract | None:
+def _batch_settings(
+    batch_plan: BatchPlanArrays,
+) -> _BatchSettings | None:
     metadata = parse_batch_plan_metadata(batch_plan["metadata_json"])
     simulation_type = metadata.get("simulation_type")
-    if simulation_type == "static":
-        execution = _object_field(metadata, "contract", context="static metadata")
-        target = _shared_target(execution, role=execution.get("role"))
-        return _BatchContract(
-            target=target,
-            family_execution=execution,
-            trajectory_numerical=None,
-        )
-    if simulation_type == "trajectory":
-        execution = _object_field(
-            metadata,
-            "trajectory_execution",
-            context="trajectory metadata",
-        )
-        numerical = _object_field(
-            execution,
-            "numerical",
-            context="trajectory execution",
-        )
-        target = _shared_target(numerical, role=execution.get("role"))
-        return _BatchContract(
-            target=target,
-            family_execution=execution,
-            trajectory_numerical=numerical,
-        )
-    if "contract" in metadata or "trajectory_execution" in metadata:
+    if simulation_type not in ("static", "trajectory"):
+        if "contract" in metadata or "trajectory_execution" in metadata:
+            raise ValueError(
+                "batch-plan metadata has an unknown or missing simulation_type"
+            )
+        return None
+
+    is_trajectory = simulation_type == "trajectory"
+    execution_name = "trajectory_execution" if is_trajectory else "contract"
+    execution = metadata.get(execution_name)
+    if not isinstance(execution, dict):
         raise ValueError(
-            "batch-plan metadata has an unknown or missing simulation_type"
+            f"{simulation_type} metadata must contain an object field {execution_name!r}"
         )
-    return None
+    numerical = execution.get("numerical") if is_trajectory else execution
+    if not isinstance(numerical, dict):
+        raise ValueError(
+            "trajectory execution must contain an object field 'numerical'"
+        )
+    return _BatchSettings(
+        family_id=int(batch_plan["family_id"]),
+        training_target=_training_target(numerical, role=execution.get("role")),
+        generation_record=execution,
+        integration_record=numerical if is_trajectory else None,
+    )
 
 
 def _relative_path(path: Path, start: Path) -> str:
     return os.path.relpath(path.resolve(), start=start.resolve())
+
+
+def _record_family_settings(
+    settings_by_family: dict[int, JsonObject],
+    family_id: int,
+    settings: JsonObject,
+    *,
+    mismatch_message: str,
+) -> None:
+    previous = settings_by_family.setdefault(family_id, settings)
+    if previous != settings:
+        raise ValueError(mismatch_message)
+
+
+def _validate_view_request(
+    name: str,
+    length: float,
+    batches: Sequence[BatchPaths],
+) -> None:
+    if not name or any(
+        not (character.isascii() and (character.isalnum() or character in "_-"))
+        for character in name
+    ):
+        raise ValueError("name must contain only letters, digits, '_' or '-'")
+    if not np.isfinite(length) or length <= 0.0:
+        raise ValueError("length must be finite and positive")
+    if not batches:
+        raise ValueError("at least one committed batch is required")
+
+
+def _dataset_settings(
+    batches: Sequence[_BatchSettings | None],
+    *,
+    spatial_size: int,
+    length: float,
+) -> JsonObject | None:
+    settings = [
+        batch_settings for batch_settings in batches if batch_settings is not None
+    ]
+    if not settings:
+        return None
+    if len(settings) != len(batches):
+        raise ValueError(
+            "all batches must record generator settings when any batch does"
+        )
+
+    shared_target = settings[0].training_target
+    generation_by_family: dict[int, JsonObject] = {}
+    integration_by_family: dict[int, JsonObject] = {}
+    for batch_settings in settings:
+        if batch_settings.training_target != shared_target:
+            raise ValueError(
+                "all batches in one dataset view must use the same DNO target settings"
+            )
+        _record_family_settings(
+            generation_by_family,
+            batch_settings.family_id,
+            batch_settings.generation_record,
+            mismatch_message="one family cannot mix generator settings",
+        )
+        if batch_settings.integration_record is not None:
+            _record_family_settings(
+                integration_by_family,
+                batch_settings.family_id,
+                batch_settings.integration_record,
+                mismatch_message=("one family cannot mix integration settings"),
+            )
+
+    if shared_target.nx != spatial_size:
+        raise ValueError("shared target nx differs from the stored spatial grid")
+    if not math.isclose(
+        shared_target.length,
+        length,
+        rel_tol=0.0,
+        abs_tol=1.0e-15,
+    ):
+        raise ValueError("shared target length differs from the dataset-view length")
+
+    numerical_values = tuple(integration_by_family.values())
+    common_numerical = (
+        dict(numerical_values[0])
+        if numerical_values
+        and all(value == numerical_values[0] for value in numerical_values[1:])
+        else None
+    )
+    return {
+        "target": {
+            "role": shared_target.role,
+            "nx": shared_target.nx,
+            "length": shared_target.length,
+            "gravity": shared_target.gravity,
+            "dno_order": shared_target.dno_order,
+            "pad_factor": shared_target.pad_factor,
+            "maximum_wavenumber": shared_target.maximum_wavenumber,
+            "dtype": shared_target.dtype,
+        },
+        "trajectory_numerical": common_numerical,
+        "trajectory_numerical_by_family": [
+            {
+                "family_id": family_id,
+                "numerical": dict(numerical),
+            }
+            for family_id, numerical in sorted(integration_by_family.items())
+        ],
+        "stored_dtypes": dict(_STORED_DTYPES),
+        "whole_simulation_rows": True,
+    }
 
 
 def build_dataset_view(
@@ -210,16 +281,7 @@ def build_dataset_view(
     shard.
     """
 
-    if not name or any(
-        character
-        not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-        for character in name
-    ):
-        raise ValueError("name must contain only letters, digits, '_' or '-'")
-    if not np.isfinite(length) or length <= 0.0:
-        raise ValueError("length must be finite and positive")
-    if not batches:
-        raise ValueError("at least one committed batch is required")
+    _validate_view_request(name, length, batches)
     output_paths = DatasetViewPaths(
         manifest=root / f"{name}.dataset.json",
         trajectory_map=root / f"{name}.trajectory_map.npz",
@@ -229,28 +291,14 @@ def build_dataset_view(
     row_shard_parts: list[NDArray[np.int32]] = []
     row_shard_row_parts: list[NDArray[np.int64]] = []
     family_ids: list[int] = []
-    revision_ids: list[int] = []
-    split_ids: list[int] = []
+    dataset_splits: list[str] = []
     simulation_ids: list[int] = []
-    cell_ids: list[int] = []
-    accepted_values: list[bool] = []
-    required_bits_values: list[int] = []
-    evaluated_bits_values: list[int] = []
-    failed_bits_values: list[int] = []
+    parameter_group_ids: list[int] = []
+    simulation_results: list[SimulationCommitRecord] = []
     first_rows: list[int] = []
-    row_counts: list[int] = []
-    shard_records: list[dict[str, object]] = []
-    batch_records: list[dict[str, object]] = []
-    batch_contracts: list[_BatchContract | None] = []
-    family_execution_contracts: dict[
-        tuple[int, int],
-        Mapping[str, object],
-    ] = {}
-    family_trajectory_numerical: dict[
-        tuple[int, int],
-        Mapping[str, object],
-    ] = {}
-    shared_target: Mapping[str, object] | None = None
+    shard_records: list[JsonValue] = []
+    batch_records: list[JsonValue] = []
+    batch_settings: list[_BatchSettings | None] = []
     global_row_count = 0
     trajectory_offset = 0
     spatial_size: int | None = None
@@ -261,20 +309,18 @@ def build_dataset_view(
             raise RuntimeError(
                 f"dataset views require committed batches, got {inspection.status.value}"
             )
-        batch_plan = load_npz(batch.batch_plan)
-        contract = _batch_contract(batch_plan)
-        batch_contracts.append(contract)
+        batch_plan = cast(BatchPlanArrays, load_npz(batch.batch_plan))
+        current_settings = _batch_settings(batch_plan)
         family_id = int(batch_plan["family_id"])
-        revision_id = int(batch_plan["revision_id"])
+        batch_settings.append(current_settings)
 
-        planned_simulation_ids = batch_plan["simulation_id"]
+        planned_simulation_ids = compute_batch_simulation_ids(batch_plan)
         number_of_simulations = int(planned_simulation_ids.size)
 
-        shard: dict[str, NDArray[Any]] | None = None
         shard_index: int | None = None
         shard_row_count = 0
         if batch.shard.exists():
-            shard = load_npz(batch.shard)
+            shard = cast(DatasetShardArrays, load_npz(batch.shard))
             current_spatial_size = int(shard["eta"].shape[1])
             if spatial_size is None:
                 spatial_size = current_spatial_size
@@ -298,34 +344,18 @@ def build_dataset_view(
                 np.full(shard_row_count, shard_index, dtype=np.int32)
             )
             row_shard_row_parts.append(np.arange(shard_row_count, dtype=np.int64))
-        split_id = int(batch_plan["split_id"])
-        batch_id = int(batch_plan["batch_id"])
-        accepted_in_batch = 0
-        for local_index, (planned_simulation_id, simulation) in enumerate(
-            zip(planned_simulation_ids, inspection.simulations)
-        ):
-            block = (
-                (simulation.first_row, simulation.row_count)
-                if simulation.accepted
-                else None
-            )
-
-            family_ids.append(family_id)
-            revision_ids.append(revision_id)
-            split_ids.append(split_id)
-            simulation_ids.append(int(planned_simulation_id))
-            cell_ids.append(int(batch_plan["cell_id"][local_index]))
-            accepted_values.append(simulation.accepted)
-            accepted_in_batch += int(simulation.accepted)
-            required_bits_values.append(simulation.required_bits)
-            evaluated_bits_values.append(simulation.evaluated_bits)
-            failed_bits_values.append(simulation.failed_bits)
-            if block is None:
-                first_rows.append(-1)
-                row_counts.append(0)
-            else:
-                first_rows.append(global_row_count + block[0])
-                row_counts.append(block[1])
+        dataset_split = DatasetSplit(str(batch_plan["dataset_split"].item()))
+        simulations = inspection.simulations
+        accepted_in_batch = sum(simulation.accepted for simulation in simulations)
+        family_ids.extend([family_id] * number_of_simulations)
+        dataset_splits.extend([dataset_split.value] * number_of_simulations)
+        simulation_ids.extend(map(int, planned_simulation_ids))
+        parameter_group_ids.extend(map(int, batch_plan["parameter_group_id"]))
+        simulation_results.extend(simulations)
+        first_rows.extend(
+            global_row_count + simulation.first_row if simulation.accepted else -1
+            for simulation in simulations
+        )
 
         batch_records.append(
             {
@@ -339,159 +369,95 @@ def build_dataset_view(
                 ),
                 "shard_index": shard_index,
                 "family_id": family_id,
-                "revision_id": revision_id,
-                "split_id": split_id,
-                "batch_id": batch_id,
+                "dataset_split": dataset_split.value,
                 "n_attempted_trajectories": number_of_simulations,
                 "n_accepted_trajectories": accepted_in_batch,
                 "n_rows": shard_row_count,
             }
         )
 
-        if contract is not None:
-            if shared_target is None:
-                shared_target = contract.target
-            elif contract.target != shared_target:
-                raise ValueError(
-                    "all batches in one dataset view must share the DNO target contract"
-                )
-            family_key = (family_id, revision_id)
-            previous_execution = family_execution_contracts.setdefault(
-                family_key,
-                contract.family_execution,
-            )
-            if previous_execution != contract.family_execution:
-                raise ValueError("one family revision cannot mix execution contracts")
-            if contract.trajectory_numerical is not None:
-                previous_numerical = family_trajectory_numerical.setdefault(
-                    family_key,
-                    contract.trajectory_numerical,
-                )
-                if previous_numerical != contract.trajectory_numerical:
-                    raise ValueError(
-                        "one family revision cannot mix numerical integration contracts"
-                    )
-
-        if shard is not None:
-            global_row_count += int(shard["eta"].shape[0])
+        global_row_count += shard_row_count
         trajectory_offset += number_of_simulations
 
-    has_contract = [contract is not None for contract in batch_contracts]
-    if any(has_contract) and not all(has_contract):
-        raise ValueError(
-            "all batches must record execution contracts when any batch does"
-        )
     if spatial_size is None:
         raise ValueError("a dataset view must contain at least one accepted row")
-    if shared_target is not None:
-        if cast(int, shared_target["nx"]) != spatial_size:
-            raise ValueError("shared target nx differs from the stored spatial grid")
-        if not math.isclose(
-            cast(float, shared_target["length"]),
-            length,
-            rel_tol=0.0,
-            abs_tol=1.0e-15,
-        ):
-            raise ValueError(
-                "shared target length differs from the dataset-view length"
-            )
+    dataset_settings = _dataset_settings(
+        batch_settings,
+        spatial_size=spatial_size,
+        length=length,
+    )
     if trajectory_offset > np.iinfo(np.int32).max:
         raise ValueError("trajectory count exceeds the int32 map capacity")
-    if len(set(zip(family_ids, revision_ids, simulation_ids))) != trajectory_offset:
-        raise ValueError(
-            "compound simulation IDs (family, revision, simulation) must be unique"
-        )
+    if len(set(zip(family_ids, simulation_ids))) != trajectory_offset:
+        raise ValueError("compound simulation IDs (family, simulation) must be unique")
 
-    row_trajectory = np.concatenate(row_trajectory_parts)
-    row_frame = np.concatenate(row_frame_parts)
-    row_shard = np.concatenate(row_shard_parts)
-    row_shard_row = np.concatenate(row_shard_row_parts)
-    trajectory_map: dict[str, NDArray[Any]] = {
+    dataset_split_array = np.asarray(dataset_splits)
+    accepted_array = np.asarray(
+        [simulation.accepted for simulation in simulation_results],
+        dtype=np.bool_,
+    )
+    trajectory_map: SimulationIndexArrays = {
         "schema_version": np.asarray(
             TRAJECTORY_MAP_SCHEMA_VERSION,
             dtype=np.int16,
         ),
-        "trajectory_index": row_trajectory,
-        "frame_index": row_frame,
-        "shard_index": row_shard,
-        "shard_row": row_shard_row,
+        "trajectory_index": np.concatenate(row_trajectory_parts),
+        "frame_index": np.concatenate(row_frame_parts),
+        "shard_index": np.concatenate(row_shard_parts),
+        "shard_row": np.concatenate(row_shard_row_parts),
         "trajectory_family_id": np.asarray(family_ids, dtype=np.int16),
-        "trajectory_revision_id": np.asarray(revision_ids, dtype=np.int16),
-        "trajectory_split_id": np.asarray(split_ids, dtype=np.uint8),
+        "trajectory_dataset_split": dataset_split_array,
         "trajectory_simulation_id": np.asarray(simulation_ids, dtype=np.int64),
-        "trajectory_cell_id": np.asarray(cell_ids, dtype=np.int32),
-        "trajectory_accepted": np.asarray(accepted_values, dtype=np.bool_),
+        "trajectory_parameter_group_id": np.asarray(
+            parameter_group_ids, dtype=np.int32
+        ),
+        "trajectory_accepted": accepted_array,
         "trajectory_required_bits": np.asarray(
-            required_bits_values,
+            [simulation.required_bits for simulation in simulation_results],
             dtype=np.uint32,
         ),
         "trajectory_evaluated_bits": np.asarray(
-            evaluated_bits_values,
+            [simulation.evaluated_bits for simulation in simulation_results],
             dtype=np.uint32,
         ),
         "trajectory_failed_bits": np.asarray(
-            failed_bits_values,
+            [simulation.failed_bits for simulation in simulation_results],
             dtype=np.uint32,
         ),
         "trajectory_first_row": np.asarray(first_rows, dtype=np.int64),
-        "trajectory_row_count": np.asarray(row_counts, dtype=np.int32),
+        "trajectory_row_count": np.asarray(
+            [simulation.row_count for simulation in simulation_results],
+            dtype=np.int32,
+        ),
     }
-    write_npz_atomic(output_paths.trajectory_map, trajectory_map)
+    write_npz_atomic(
+        output_paths.trajectory_map,
+        cast(Mapping[str, NDArray[Any]], trajectory_map),
+    )
 
-    split_counts = {
-        split_name: {
-            "attempted": int(np.count_nonzero(np.asarray(split_ids) == split_id)),
+    split_counts: JsonObject = {
+        dataset_split.value: {
+            "attempted": int(
+                np.count_nonzero(dataset_split_array == dataset_split.value)
+            ),
             "accepted": int(
                 np.count_nonzero(
-                    (np.asarray(split_ids) == split_id) & np.asarray(accepted_values)
+                    (dataset_split_array == dataset_split.value) & accepted_array
                 )
             ),
         }
-        for split_name, split_id in (
-            ("train", 0),
-            ("validation", 1),
-            ("test", 2),
-        )
+        for dataset_split in DatasetSplit
     }
-    dataset_contract: dict[str, object] | None = None
-    if shared_target is not None:
-        trajectory_numerical_records = [
-            {
-                "family_id": family_id,
-                "revision_id": revision_id,
-                "numerical": dict(numerical),
-            }
-            for (family_id, revision_id), numerical in sorted(
-                family_trajectory_numerical.items()
-            )
-        ]
-        trajectory_numerical_values = tuple(family_trajectory_numerical.values())
-        common_trajectory_numerical = (
-            dict(trajectory_numerical_values[0])
-            if trajectory_numerical_values
-            and all(
-                numerical == trajectory_numerical_values[0]
-                for numerical in trajectory_numerical_values[1:]
-            )
-            else None
-        )
-        dataset_contract = {
-            "target": dict(shared_target),
-            "trajectory_numerical": common_trajectory_numerical,
-            "trajectory_numerical_by_family_revision": (trajectory_numerical_records),
-            "stored_dtypes": dict(_STORED_DTYPES),
-            "whole_simulation_rows": True,
-        }
-    manifest: dict[str, object] = {
+    manifest: JsonObject = {
         "schema_version": DATASET_VIEW_SCHEMA_VERSION,
-        "dataset_contract": dataset_contract,
+        "dataset_settings": dataset_settings,
         "dataset_batches": batch_records,
         "dataset_shards": shard_records,
         "trajectory_map_npz": output_paths.trajectory_map.name,
         "requires_trajectory_map": True,
         "n_rows": global_row_count,
         "n_trajectories": trajectory_offset,
-        "n_accepted_trajectories": int(np.count_nonzero(accepted_values)),
+        "n_accepted_trajectories": int(np.count_nonzero(accepted_array)),
         "n_accepted_rows": global_row_count,
         "grid": {
             "length": float(length),

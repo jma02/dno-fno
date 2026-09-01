@@ -14,30 +14,24 @@ from scripts.build_paper_dataset_view import (
     preflight,
     validate_combined_plan,
 )
-from solver.gen_data.pipeline.simulation_allocation import SplitId
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 
 
 def _chunk(
     root: Path,
     *,
     family: str,
-    split: SplitId,
+    split: DatasetSplit,
     accepted_before: int = 0,
     accepted_count: int = 8,
-    stream_id: int = 0,
+    worker_stream_id: int = 0,
 ) -> CompletedChunk:
     return CompletedChunk(
         summary_path=(root / f"{split.value}_{family}_{accepted_before}.summary.json"),
         root=(root / f"{split.value}_{family}_{accepted_before}"),
         family=family,
-        revision_id={
-            "stokes": 2,
-            "tanaka": 3,
-            "benjamin_feir": 4,
-            "jonswap_tma": 4,
-        }[family],
         split=split,
-        stream_id=stream_id,
+        worker_stream_id=worker_stream_id,
         accepted_before=accepted_before,
         accepted_count=accepted_count,
         accepted_after=accepted_before + accepted_count,
@@ -48,7 +42,7 @@ def _chunk(
 
 def _one_split(root: Path, *, count: int = 8) -> tuple[CompletedChunk, ...]:
     return tuple(
-        _chunk(root, family=family, split=SplitId.TRAIN, accepted_count=count)
+        _chunk(root, family=family, split=DatasetSplit.TRAIN, accepted_count=count)
         for family in FAMILY_ORDER
     )
 
@@ -67,7 +61,7 @@ class CombinedPlanTests(unittest.TestCase):
             tuple(chunk.family for chunk in plan.chunks),
             FAMILY_ORDER,
         )
-        self.assertEqual(plan.splits, (SplitId.TRAIN,))
+        self.assertEqual(plan.splits, (DatasetSplit.TRAIN,))
         self.assertEqual(plan.accepted_simulations_per_family_by_split, {"train": 8})
         self.assertEqual(plan.accepted_simulations, 32)
         self.assertEqual(plan.attempted_simulations, 36)
@@ -103,7 +97,7 @@ class CombinedPlanTests(unittest.TestCase):
             accepted_before=8,
             accepted_after=16,
         )
-        with self.assertRaisesRegex(ValueError, "distinct streams and roots"):
+        with self.assertRaisesRegex(ValueError, "distinct worker streams and roots"):
             validate_combined_plan((*chunks, second))
 
     def test_preflight_is_write_free_and_has_plain_chunk_records(self) -> None:

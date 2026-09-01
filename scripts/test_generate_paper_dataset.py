@@ -11,7 +11,7 @@ import numpy as np
 
 from scripts.generate_paper_dataset import (
     BOOTSTRAP_PLATFORM,
-    FAMILY_CELL_IDS,
+    FAMILY_PARAMETER_GROUP_IDS,
     GenerationRequest,
     build_chunk_config,
     incremental_simulation_targets,
@@ -21,7 +21,7 @@ from scripts.generate_paper_dataset import (
 )
 from solver.gen_data.pipeline.batch_storage import BatchPaths, save_batch_plan
 from solver.gen_data.pipeline.simulation_allocation import (
-    SplitId,
+    DatasetSplit,
     balanced_simulation_targets,
     build_next_attempt_batch,
 )
@@ -43,27 +43,29 @@ class PaperDatasetGenerationTests(unittest.TestCase):
         self,
     ) -> None:
         endpoints = (2_048, 4_096, 8_192, 16_384, 32_768)
-        for family in FAMILY_CELL_IDS:
+        for family in FAMILY_PARAMETER_GROUP_IDS:
             with self.subTest(family=family):
-                cells = FAMILY_CELL_IDS[family]
-                cumulative = {cell_id: 0 for cell_id in cells}
+                parameter_group_ids = FAMILY_PARAMETER_GROUP_IDS[family]
+                cumulative = {
+                    parameter_group_id: 0 for parameter_group_id in parameter_group_ids
+                }
                 previous = 0
                 for endpoint in endpoints:
                     chunk = incremental_simulation_targets(
-                        cells,
+                        parameter_group_ids,
                         accepted_simulations_before=previous,
                         simulation_count=endpoint - previous,
                     )
                     for target in chunk:
-                        cumulative[target.cell_id] += target.simulation_count
+                        cumulative[target.parameter_group_id] += target.simulation_count
                     expected = balanced_simulation_targets(
-                        cells,
+                        parameter_group_ids,
                         simulation_count=endpoint,
                     )
                     self.assertEqual(
                         cumulative,
                         {
-                            target.cell_id: target.simulation_count
+                            target.parameter_group_id: target.simulation_count
                             for target in expected
                         },
                     )
@@ -78,28 +80,18 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             "benjamin_feir": 68,
             "jonswap_tma": 29,
         }
-        expected_revision_by_family = {
-            "stokes": 2,
-            "tanaka": 3,
-            "benjamin_feir": 4,
-            "jonswap_tma": 4,
-        }
         with tempfile.TemporaryDirectory() as directory:
             for family, accepted_simulations in accepted_by_family.items():
                 with self.subTest(family=family):
                     request = GenerationRequest(
                         output_root=Path(directory) / family,
                         family=family,  # type: ignore[arg-type]
-                        split=SplitId.VALIDATION,
+                        split=DatasetSplit.VALIDATION,
                         accepted_simulations=accepted_simulations,
                         batch_size=3,
                         platform=BOOTSTRAP_PLATFORM,
                     )
                     chunk_config = build_chunk_config(request)
-                    self.assertEqual(
-                        chunk_config.revision_id,
-                        expected_revision_by_family[family],
-                    )
                     targets = tuple(
                         target.simulation_count
                         for target in chunk_config.simulation_targets
@@ -110,9 +102,10 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                         self.assertEqual(targets, (1,) * 11)
                     self.assertEqual(
                         tuple(
-                            target.cell_id for target in chunk_config.simulation_targets
+                            target.parameter_group_id
+                            for target in chunk_config.simulation_targets
                         ),
-                        FAMILY_CELL_IDS[family],  # type: ignore[index]
+                        FAMILY_PARAMETER_GROUP_IDS[family],  # type: ignore[index]
                     )
                     self.assertEqual(
                         chunk_config.configuration["execution_platform"],
@@ -263,8 +256,6 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(state.complete)
             self.assertTrue(plan["no_numerical_generation_performed"])
-            self.assertEqual(plan["revision_id"], 3)
-            self.assertEqual(plan["run_spec"]["revision_id"], 3)
             allocation = plan["allocation"]
             self.assertEqual(allocation["cell_count"], 11)
             self.assertEqual(allocation["nonzero_quota_cell_count"], 5)
@@ -298,7 +289,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             request = GenerationRequest(
                 output_root=Path(directory) / "jonswap",
                 family="jonswap_tma",
-                split=SplitId.TEST,
+                split=DatasetSplit.TEST,
                 accepted_simulations=27,
                 batch_size=27,
                 platform=BOOTSTRAP_PLATFORM,
@@ -315,7 +306,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             request = GenerationRequest(
                 output_root=Path(directory) / "stokes",
                 family="stokes",
-                split=SplitId.TRAIN,
+                split=DatasetSplit.TRAIN,
                 accepted_simulations=8,
                 batch_size=4,
                 platform=BOOTSTRAP_PLATFORM,
@@ -342,7 +333,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             request = GenerationRequest(
                 output_root=output,
                 family="tanaka",
-                split=SplitId.TEST,
+                split=DatasetSplit.TEST,
                 accepted_simulations=4,
                 batch_size=1,
                 platform=BOOTSTRAP_PLATFORM,
@@ -354,16 +345,15 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 {},
                 chunk_config.maximum_attempts_by_parameter_group,
                 family_id=int(chunk_config.family_id),
-                revision_id=chunk_config.revision_id,
-                split_id=chunk_config.split_id,
-                stream_id=chunk_config.stream_id,
+                dataset_split=chunk_config.dataset_split,
+                worker_stream_id=chunk_config.worker_stream_id,
                 first_attempt_index=chunk_config.first_attempt_index,
                 batch_size=chunk_config.batch_size,
             )
             records = tuple(
                 {
                     "schema": "launcher_resume_test_v1",
-                    "cell_id": assignment.cell_id,
+                    "parameter_group_id": assignment.parameter_group_id,
                     "attempt_index": assignment.simulation_key.attempt_index,
                 }
                 for assignment in assignments
@@ -371,7 +361,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             paths = BatchPaths.for_batch(
                 chunk_config.root,
                 family=chunk_config.family_name,
-                split=chunk_config.split_id.value,
+                split=chunk_config.dataset_split.value,
                 batch_id=0,
             )
             save_batch_plan(
@@ -379,8 +369,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 build_batch_plan(
                     assignments,
                     records,
-                    cell_codes=chunk_config.cell_codes,
-                    batch_id=0,
+                    parameter_group_codes=chunk_config.parameter_group_codes,
                     metadata={"test": "no_compute_resume_scan"},
                 ),
             )

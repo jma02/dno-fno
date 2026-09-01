@@ -1,7 +1,7 @@
 """Cross-family CPU smoke tests for the current dataset constructors.
 
-The Benjamin--Feir rollout exercises the revision-4 JCP09 constructor used by the
-current paper dataset.
+The Benjamin--Feir rollout exercises the JCP09 constructor used by the current
+paper dataset.
 
 Run with:
 

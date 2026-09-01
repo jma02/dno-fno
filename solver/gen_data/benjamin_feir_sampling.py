@@ -1,7 +1,7 @@
 """Parameter sampling for the paper-dataset Benjamin--Feir family.
 
-Each of the 66 feasible integer pairs ``(n_c, Delta n)`` is one allocation
-cell.  Conditional on that pair, the carrier steepness is uniform on the
+Each of the 66 feasible integer pairs ``(n_c, Delta n)`` is one parameter
+group. Conditional on that pair, the carrier steepness is uniform on the
 part of ``[0.05, 0.13]`` inside the leading deep-water instability band and
 below the declared focused-steepness limit.  The sideband-to-carrier amplitude
 ratio is uniform on ``[0.05, 0.10]``, and the global translation is uniform on
@@ -41,7 +41,7 @@ PAPER_FOCUSED_STEEPNESS_LIMIT: Final[float] = (1.0 + math.sqrt(2.0)) / 10.0
 PAPER_PERTURBATION_RATIO_MAX: Final[float] = 0.10
 
 
-BenjaminFeirCell: TypeAlias = tuple[int, int]
+BenjaminFeirParameterGroup: TypeAlias = tuple[int, int]
 
 
 def _conditional_steepness_bounds(
@@ -67,14 +67,14 @@ def _conditional_steepness_bounds(
     return lower, upper
 
 
-BENJAMIN_FEIR_SAMPLE_CELLS: dict[str, BenjaminFeirCell] = {
+BENJAMIN_FEIR_PARAMETER_GROUPS: dict[str, BenjaminFeirParameterGroup] = {
     f"n_c_{carrier_mode:02d}__delta_n_{sideband_offset:02d}": (
         carrier_mode,
         sideband_offset,
     )
     for carrier_mode, sideband_offset in BENJAMIN_FEIR_MODE_PAIRS
 }
-BENJAMIN_FEIR_SAMPLE_CELL_IDS = tuple(BENJAMIN_FEIR_SAMPLE_CELLS)
+BENJAMIN_FEIR_PARAMETER_GROUP_IDS = tuple(BENJAMIN_FEIR_PARAMETER_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -226,9 +226,11 @@ def find_benjamin_feir_sample_violations(
     """Return every violation of the declared sampling law."""
 
     violations: list[str] = []
-    expected_cell = BENJAMIN_FEIR_SAMPLE_CELLS.get(sample.assignment.cell_id)
-    if expected_cell != (sample.carrier_mode, sample.sideband_offset):
-        violations.append("sample parameters do not match the assigned cell")
+    expected_parameter_group = BENJAMIN_FEIR_PARAMETER_GROUPS.get(
+        sample.assignment.parameter_group_id
+    )
+    if expected_parameter_group != (sample.carrier_mode, sample.sideband_offset):
+        violations.append("sample parameters do not match the assigned parameter group")
     if not math.isfinite(sample.domain_length) or sample.domain_length <= 0.0:
         violations.append("domain_length must be finite and positive")
     steepness_lower, steepness_upper = sample.conditional_steepness_bounds
@@ -262,15 +264,17 @@ def sample_benjamin_feir_simulation(
     *,
     domain_length: float = 2.0 * math.pi,
 ) -> BenjaminFeirSample:
-    """Sample one complete specification in the assignment's fixed pair cell."""
+    """Sample one complete specification in the assigned mode-pair group."""
 
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be finite and positive")
 
-    cell = BENJAMIN_FEIR_SAMPLE_CELLS.get(assignment.cell_id)
-    if cell is None:
-        raise ValueError(f"unknown Benjamin--Feir sample cell: {assignment.cell_id}")
-    carrier_mode, sideband_offset = cell
+    parameter_group = BENJAMIN_FEIR_PARAMETER_GROUPS.get(assignment.parameter_group_id)
+    if parameter_group is None:
+        raise ValueError(
+            f"unknown Benjamin--Feir parameter group: {assignment.parameter_group_id}"
+        )
+    carrier_mode, sideband_offset = parameter_group
     rng = random_generator_for_simulation(assignment.simulation_key)
     steepness_lower, steepness_upper = _conditional_steepness_bounds(
         carrier_mode,

@@ -46,7 +46,7 @@ class ComputeMetricsTest(unittest.TestCase):
             )
             with np.load(path, allow_pickle=False) as archive:
                 self.assertIn("simulation_ids", archive.files)
-                self.assertNotIn("simulation_ids", archive.files)
+                self.assertNotIn("case_ids", archive.files)
 
             loaded = _try_load_cached_truth(
                 "tanaka",

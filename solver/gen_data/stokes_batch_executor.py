@@ -25,7 +25,7 @@ from solver.gen_data.pipeline.writer import (
 )
 from solver.gen_data.stokes_sampling import (
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_SAMPLE_CELLS,
+    STOKES_PARAMETER_GROUPS,
     StokesSample,
     UrsellRedrawLimitReached,
     sample_stokes_simulation,
@@ -42,7 +42,7 @@ from solver.gen_data.pipeline.dno_target import compute_dno_target
 
 
 JsonRecord: TypeAlias = Mapping[str, object]
-_STOKES_CELL_IDS = frozenset(STOKES_SAMPLE_CELLS)
+_STOKES_PARAMETER_GROUP_IDS = frozenset(STOKES_PARAMETER_GROUPS)
 
 
 class StokesSampler(Protocol):
@@ -93,9 +93,13 @@ def _validate_static_stokes_executor(
         raise ValueError("static Stokes generation must use family_name='stokes'")
     if chunk_config.family_id is not PhysicalFamilyId.STOKES:
         raise ValueError("static Stokes generation requires the Stokes family ID")
-    unknown_cells = set(chunk_config.cell_codes).difference(_STOKES_CELL_IDS)
-    if unknown_cells:
-        raise ValueError(f"unknown Stokes sampling cells: {sorted(unknown_cells)}")
+    unknown_parameter_groups = set(chunk_config.parameter_group_codes).difference(
+        _STOKES_PARAMETER_GROUP_IDS
+    )
+    if unknown_parameter_groups:
+        raise ValueError(
+            f"unknown Stokes parameter groups: {sorted(unknown_parameter_groups)}"
+        )
     if (
         isinstance(maximum_ursell_redraws, bool)
         or not isinstance(maximum_ursell_redraws, int)
@@ -223,8 +227,7 @@ def make_static_stokes_batch_executor(
         batch_plan = build_batch_plan(
             assignments,
             tuple(specification for specification, _ in resolved),
-            cell_codes=chunk_config.cell_codes,
-            batch_id=batch_id,
+            parameter_group_codes=chunk_config.parameter_group_codes,
             metadata={
                 **common_metadata,
                 "retained_times": [0.0],
@@ -234,7 +237,7 @@ def make_static_stokes_batch_executor(
         paths = BatchPaths.for_batch(
             chunk_config.root,
             family=chunk_config.family_name,
-            split=chunk_config.split_id.value,
+            split=chunk_config.dataset_split.value,
             batch_id=batch_id,
         )
 

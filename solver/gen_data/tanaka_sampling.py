@@ -11,7 +11,7 @@ elementary profile-resolution lower bound.
 
 Here ``alpha_i = a_i / h``, where ``a_i`` is the dimensional crest
 amplitude. Each attempted simulation uses one PCG64 stream constructed from all
-five words in ``AttemptAssignment.simulation_key.seed_words``.
+four words in ``AttemptAssignment.simulation_key.seed_words``.
 """
 
 from __future__ import annotations
@@ -36,15 +36,14 @@ MAIN_TOTAL_ALPHA_BOUNDS = (0.10, 0.35)
 STEEP_DEPTH_BOUNDS = (0.20, 0.35)
 STEEP_ALPHA_BOUNDS = (0.25, 0.45)
 SEPARATION_TO_DEPTH_RATIO = 3.0
-TANAKA_SAMPLING_REVISION_V3: Final[int] = 3
 TANAKA_DELIVERED_MAXIMUM_WAVENUMBER: Final[float] = 128.0
 TANAKA_MINIMUM_RESOLUTION_RATIO: Final[float] = 10.0
 _RESOLUTION_ROUNDOFF_RELATIVE_TOLERANCE: Final[float] = 1.0e-12
 _RESOLUTION_ROUNDOFF_ABSOLUTE_TOLERANCE: Final[float] = 1.0e-12
 
 
-TanakaCell: TypeAlias = tuple[TanakaRegime, int, int]
-TANAKA_SAMPLE_CELLS: dict[str, TanakaCell] = {
+TanakaParameterGroup: TypeAlias = tuple[TanakaRegime, int, int]
+TANAKA_PARAMETER_GROUPS: dict[str, TanakaParameterGroup] = {
     **{
         f"main_m{crest_count}_q{right_moving_count}": (
             "main",
@@ -57,7 +56,7 @@ TANAKA_SAMPLE_CELLS: dict[str, TanakaCell] = {
     "steep_m1_q0": ("steep", 1, 0),
     "steep_m1_q1": ("steep", 1, 1),
 }
-TANAKA_SAMPLE_CELL_IDS = tuple(TANAKA_SAMPLE_CELLS)
+TANAKA_PARAMETER_GROUP_IDS = tuple(TANAKA_PARAMETER_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -115,7 +114,7 @@ class TanakaSample:
 
     @property
     def conditional_depth_lower_bound(self) -> float:
-        """Return the revision-3 lower depth bound for these amplitudes."""
+        """Return the lower depth bound for these amplitudes."""
 
         return tanaka_conditional_depth_bounds(
             self.regime,
@@ -148,10 +147,6 @@ class TanakaSample:
 
     def to_json_record(self) -> JsonRecord:
         """Return a strict-JSON-ready record sufficient for exact replay."""
-
-        key = self.assignment.simulation_key
-        if key.revision_id != TANAKA_SAMPLING_REVISION_V3:
-            raise ValueError(f"unsupported Tanaka sampling revision: {key.revision_id}")
 
         return {
             **self.assignment.to_json_record(),
@@ -212,7 +207,7 @@ def tanaka_conditional_depth_bounds(
     regime: TanakaRegime,
     alphas: tuple[float, ...],
 ) -> tuple[float, float]:
-    """Return the revision-3 depth interval resolved by construction."""
+    """Return the depth interval resolved by construction."""
 
     if regime not in ("main", "steep"):
         raise ValueError(f"unknown Tanaka regime: {regime}")
@@ -281,16 +276,15 @@ def tanaka_support_violations(
     """Return every violation of the declared Tanaka sampling support."""
 
     violations: list[str] = []
-    revision_id = sample.assignment.simulation_key.revision_id
-    if revision_id != TANAKA_SAMPLING_REVISION_V3:
-        violations.append("unsupported Tanaka sampling revision")
-    expected_cell = TANAKA_SAMPLE_CELLS.get(sample.assignment.cell_id)
-    if expected_cell != (
+    expected_parameter_group = TANAKA_PARAMETER_GROUPS.get(
+        sample.assignment.parameter_group_id
+    )
+    if expected_parameter_group != (
         sample.regime,
         sample.crest_count,
         sample.right_moving_count,
     ):
-        violations.append("sample parameters do not match the assigned cell")
+        violations.append("sample parameters do not match the assigned parameter group")
     if not math.isfinite(sample.domain_length) or sample.domain_length <= 0.0:
         violations.append("domain_length must be positive and finite")
     if not math.isfinite(sample.depth) or sample.depth <= 0.0:
@@ -308,7 +302,7 @@ def tanaka_support_violations(
     if math.isfinite(sample.depth) and not (
         depth_bounds[0] <= sample.depth <= depth_bounds[1]
     ):
-        violations.append("depth lies outside the cell support")
+        violations.append("depth lies outside the parameter-group support")
 
     crest_values_are_finite = all(
         math.isfinite(value)
@@ -357,8 +351,7 @@ def tanaka_support_violations(
             violations.append("periodic crest-center separation is below 3h")
 
     resolution_inputs_are_valid = (
-        revision_id == TANAKA_SAMPLING_REVISION_V3
-        and len(sample.crests) == sample.crest_count
+        len(sample.crests) == sample.crest_count
         and all(
             math.isfinite(crest.alpha) and crest.alpha > 0.0 for crest in sample.crests
         )
@@ -401,16 +394,14 @@ def sample_tanaka_simulation(
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be positive and finite")
 
-    if assignment.simulation_key.revision_id != TANAKA_SAMPLING_REVISION_V3:
-        raise ValueError(
-            f"unsupported Tanaka sampling revision: {assignment.simulation_key.revision_id}"
-        )
     try:
-        regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[
-            assignment.cell_id
+        regime, crest_count, right_moving_count = TANAKA_PARAMETER_GROUPS[
+            assignment.parameter_group_id
         ]
     except KeyError as error:
-        raise ValueError(f"unknown Tanaka sample cell: {assignment.cell_id}") from error
+        raise ValueError(
+            f"unknown Tanaka parameter group: {assignment.parameter_group_id}"
+        ) from error
     rng = random_generator_for_simulation(assignment.simulation_key)
     if regime == "main":
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))

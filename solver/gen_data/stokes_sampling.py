@@ -1,12 +1,12 @@
 """Parameter sampling for the paper-dataset fifth-order Stokes family.
 
-The sampling scheme has four allocation cells: finite- and deep-water branches,
+The sampling scheme has four parameter groups: finite- and deep-water branches,
 each crossed with the steepness intervals ``[0.005, 0.03)`` and
-``[0.03, 0.15]``.  An ``AttemptAssignment`` fixes the cell and all five
+``[0.03, 0.15]``. An ``AttemptAssignment`` fixes the group and all five
 PCG64 seed words before any parameter is drawn.
 
-For a finite-depth attempt, the carrier mode, depth, phase, and steepness cell
-remain fixed while the amplitude is redrawn within that cell until the
+For a finite-depth attempt, the carrier mode, depth, phase, and steepness interval
+remain fixed while the amplitude is redrawn within that interval until the
 conservative fifth-order support condition ``Ur_+ <= 26`` holds.  Every
 amplitude and ``Ur_+`` evaluation is retained.  Exhaustion returns no sample:
 it raises an exception carrying a strict-JSON-ready failure record.
@@ -51,15 +51,15 @@ DEEP_DEPTH_WAVENUMBER_MINIMUM = 5.0
 DEFAULT_MAXIMUM_URSELL_REDRAWS = 1000
 
 
-StokesCell: TypeAlias = tuple[StokesBranch, int]
+StokesParameterGroup: TypeAlias = tuple[StokesBranch, int]
 AmplitudeAttempt: TypeAlias = tuple[float, float | None]
-STOKES_SAMPLE_CELLS: dict[str, StokesCell] = {
+STOKES_PARAMETER_GROUPS: dict[str, StokesParameterGroup] = {
     "finite_low": ("finite", 0),
     "finite_moderate": ("finite", 1),
     "deep_low": ("deep", 0),
     "deep_moderate": ("deep", 1),
 }
-STOKES_SAMPLE_CELL_IDS = tuple(STOKES_SAMPLE_CELLS)
+STOKES_PARAMETER_GROUP_IDS = tuple(STOKES_PARAMETER_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -324,11 +324,11 @@ def stokes_support_violations(
     """Return every violation of the declared Stokes sampling support."""
 
     violations: list[str] = []
-    if STOKES_SAMPLE_CELLS.get(sample.assignment.cell_id) != (
+    if STOKES_PARAMETER_GROUPS.get(sample.assignment.parameter_group_id) != (
         sample.branch,
         sample.steepness_cell_index,
     ):
-        violations.append("sample parameters do not match the assigned cell")
+        violations.append("sample parameters do not match the assigned parameter group")
     if not math.isfinite(sample.domain_length) or sample.domain_length <= 0.0:
         violations.append("domain_length must be positive and finite")
     if not math.isfinite(sample.gravity) or sample.gravity <= 0.0:
@@ -345,7 +345,7 @@ def stokes_support_violations(
     if sample.carrier_mode_support != expected_modes:
         violations.append("stored carrier-mode support is inconsistent")
     if sample.carrier_mode not in expected_modes:
-        violations.append("carrier mode lies outside the cell support")
+        violations.append("carrier mode lies outside the parameter-group support")
 
     if expected_modes and sample.carrier_mode in expected_modes:
         expected_depth_bounds = effective_depth_bounds(
@@ -377,7 +377,7 @@ def stokes_support_violations(
             wavenumber=sample.wavenumber,
             amplitude=amplitude,
         ):
-            violations.append("amplitude attempt lies outside its assigned cell")
+            violations.append("amplitude attempt lies outside its steepness interval")
             break
 
     if sample.branch == "finite":
@@ -496,17 +496,21 @@ def sample_stokes_simulation(
     if maximum_ursell_redraws < 0:
         raise ValueError("maximum_ursell_redraws must be nonnegative")
 
-    cell = STOKES_SAMPLE_CELLS.get(assignment.cell_id)
-    if cell is None:
-        raise ValueError(f"unknown Stokes sample cell: {assignment.cell_id}")
-    branch, steepness_cell_index = cell
+    parameter_group = STOKES_PARAMETER_GROUPS.get(assignment.parameter_group_id)
+    if parameter_group is None:
+        raise ValueError(
+            f"unknown Stokes parameter group: {assignment.parameter_group_id}"
+        )
+    branch, steepness_cell_index = parameter_group
     carrier_mode_support = feasible_carrier_modes(
         branch,
         steepness_cell_index,
         domain_length=domain_length,
     )
     if not carrier_mode_support:
-        raise ValueError("the assigned Stokes cell has no feasible carrier mode")
+        raise ValueError(
+            "the assigned Stokes parameter group has no feasible carrier mode"
+        )
 
     rng = random_generator_for_simulation(assignment.simulation_key)
     carrier_mode = carrier_mode_support[int(rng.integers(0, len(carrier_mode_support)))]

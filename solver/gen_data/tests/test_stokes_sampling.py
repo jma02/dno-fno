@@ -22,7 +22,7 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     random_generator_for_simulation,
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
@@ -34,8 +34,8 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     FINITE_DEPTH_WAVENUMBER_BOUNDS,
     PAPER_AMPLITUDE_BOUNDS,
     PAPER_STOKES_STEEPNESS_CELLS,
-    STOKES_SAMPLE_CELL_IDS,
-    STOKES_SAMPLE_CELLS,
+    STOKES_PARAMETER_GROUP_IDS,
+    STOKES_PARAMETER_GROUPS,
     UrsellRedrawLimitReached,
     effective_amplitude_bounds,
     effective_depth_bounds,
@@ -49,23 +49,21 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 1,
-    revision_id: int = 2,
-    split_id: SplitId = SplitId.TRAIN,
-    stream_id: int = 0,
+    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    worker_stream_id: int = 0,
     attempt_index: int | None = None,
 ) -> AttemptAssignment:
-    """Return one deterministic assignment for a Stokes sample cell."""
+    """Return one deterministic assignment for a Stokes parameter group."""
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=family_id,
-            revision_id=revision_id,
-            split_id=split_id,
-            stream_id=stream_id,
+            dataset_split=dataset_split,
+            worker_stream_id=worker_stream_id,
             attempt_index=attempt,
         ),
-        cell_id=STOKES_SAMPLE_CELL_IDS[cell_index],
+        parameter_group_id=STOKES_PARAMETER_GROUP_IDS[cell_index],
     )
 
 
@@ -73,13 +71,15 @@ class StokesSamplingTest(unittest.TestCase):
     def test_cells_are_exactly_branch_by_steepness_product(self) -> None:
         coordinates = tuple(
             (
-                cell_id,
+                parameter_group_id,
                 branch,
                 steepness_cell_index,
                 tuple(PAPER_STOKES_STEEPNESS_CELLS[steepness_cell_index]),
                 steepness_cell_index == 1,
             )
-            for cell_id, (branch, steepness_cell_index) in (STOKES_SAMPLE_CELLS.items())
+            for parameter_group_id, (branch, steepness_cell_index) in (
+                STOKES_PARAMETER_GROUPS.items()
+            )
         )
         self.assertEqual(
             coordinates,
@@ -92,8 +92,8 @@ class StokesSamplingTest(unittest.TestCase):
         )
 
     def test_replay_is_bitwise_deterministic(self) -> None:
-        for cell_index, cell_id in enumerate(STOKES_SAMPLE_CELL_IDS):
-            with self.subTest(cell=cell_id):
+        for cell_index, parameter_group_id in enumerate(STOKES_PARAMETER_GROUP_IDS):
+            with self.subTest(parameter_group=parameter_group_id):
                 first = sample_stokes_simulation(
                     assignment(cell_index, attempt_index=90 + cell_index)
                 )
@@ -114,11 +114,10 @@ class StokesSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            SimulationKey(2, 2, SplitId.TRAIN, 0, 41),
-            SimulationKey(1, 3, SplitId.TRAIN, 0, 41),
-            SimulationKey(1, 2, SplitId.VALIDATION, 0, 41),
-            SimulationKey(1, 2, SplitId.TRAIN, 1, 41),
-            SimulationKey(1, 2, SplitId.TRAIN, 0, 42),
+            SimulationKey(2, DatasetSplit.TRAIN, 0, 41),
+            SimulationKey(1, DatasetSplit.VALIDATION, 0, 41),
+            SimulationKey(1, DatasetSplit.TRAIN, 1, 41),
+            SimulationKey(1, DatasetSplit.TRAIN, 0, 42),
         )
         first_draws = {
             tuple(random_generator_for_simulation(key).random(8)) for key in keys
@@ -157,10 +156,10 @@ class StokesSamplingTest(unittest.TestCase):
         )
 
     def test_many_draws_obey_branch_cell_and_ursell_support(self) -> None:
-        accepted_by_cell = [0] * len(STOKES_SAMPLE_CELL_IDS)
-        failures_by_cell = [0] * len(STOKES_SAMPLE_CELL_IDS)
-        for cell_index, cell_id in enumerate(STOKES_SAMPLE_CELL_IDS):
-            branch, steepness_cell_index = STOKES_SAMPLE_CELLS[cell_id]
+        accepted_by_cell = [0] * len(STOKES_PARAMETER_GROUP_IDS)
+        failures_by_cell = [0] * len(STOKES_PARAMETER_GROUP_IDS)
+        for cell_index, parameter_group_id in enumerate(STOKES_PARAMETER_GROUP_IDS):
+            branch, steepness_cell_index = STOKES_PARAMETER_GROUPS[parameter_group_id]
             for attempt_index in range(96):
                 try:
                     sample = sample_stokes_simulation(
@@ -241,7 +240,7 @@ class StokesSamplingTest(unittest.TestCase):
             amplitude_attempts=((low_upper, None),),
         )
         self.assertIn(
-            "amplitude attempt lies outside its assigned cell",
+            "amplitude attempt lies outside its steepness interval",
             stokes_support_violations(outside_low),
         )
 
@@ -292,10 +291,6 @@ class StokesSamplingTest(unittest.TestCase):
         self.assertEqual(
             [attempt["ursell_upper_bound"] for attempt in record["amplitude_attempts"]],
             [27.0, 25.0],
-        )
-        self.assertEqual(
-            record["seed_words"],
-            list(sample.assignment.simulation_key.seed_words),
         )
         json.dumps(record, sort_keys=True, allow_nan=False)
 
@@ -356,7 +351,7 @@ class StokesSamplingTest(unittest.TestCase):
             amplitude_attempts=((np.nan, None),),
         )
         self.assertIn(
-            "amplitude attempt lies outside its assigned cell",
+            "amplitude attempt lies outside its steepness interval",
             stokes_support_violations(corrupt),
         )
 
@@ -367,7 +362,7 @@ class StokesSamplingTest(unittest.TestCase):
             branch="finite",
         )
         self.assertIn(
-            "sample parameters do not match the assigned cell",
+            "sample parameters do not match the assigned parameter group",
             stokes_support_violations(forged),
         )
 

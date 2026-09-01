@@ -7,18 +7,17 @@ import unittest
 import numpy as np
 
 from solver.gen_data.pipeline.simulation_allocation import (
-    DATASET_REVISION_BY_FAMILY,
-    SPLIT_ROOT_SEED_BY_ID,
+    ROOT_SEED_BY_DATASET_SPLIT,
     PhysicalFamilyId,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     balanced_simulation_targets,
     build_next_attempt_batch,
 )
 
 
 class FamilyIdentityTest(unittest.TestCase):
-    def test_paper_family_ids_and_revisions_are_stable(self) -> None:
+    def test_paper_family_ids_are_stable(self) -> None:
         self.assertEqual(
             tuple((family.name, int(family)) for family in PhysicalFamilyId),
             (
@@ -28,18 +27,9 @@ class FamilyIdentityTest(unittest.TestCase):
                 ("JONSWAP_TMA", 4),
             ),
         )
-        self.assertEqual(
-            DATASET_REVISION_BY_FAMILY,
-            {
-                PhysicalFamilyId.STOKES: 2,
-                PhysicalFamilyId.TANAKA: 3,
-                PhysicalFamilyId.BENJAMIN_FEIR: 4,
-                PhysicalFamilyId.JONSWAP_TMA: 4,
-            },
-        )
 
 
-class BalancedSampleCellTargetsTest(unittest.TestCase):
+class BalancedParameterGroupTargetsTest(unittest.TestCase):
     def test_uses_exact_quotient_and_remainder_balance(self) -> None:
         targets = balanced_simulation_targets(
             ("shallow", "finite", "deep"),
@@ -47,12 +37,15 @@ class BalancedSampleCellTargetsTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            [(target.cell_id, target.simulation_count) for target in targets],
+            [
+                (target.parameter_group_id, target.simulation_count)
+                for target in targets
+            ],
             [("shallow", 3), ("finite", 3), ("deep", 2)],
         )
         self.assertEqual(sum(target.simulation_count for target in targets), 8)
 
-    def test_total_smaller_than_cell_count_is_deterministic(self) -> None:
+    def test_total_smaller_than_group_count_is_deterministic(self) -> None:
         targets = balanced_simulation_targets(
             ("a", "b", "c", "d"),
             simulation_count=2,
@@ -63,7 +56,7 @@ class BalancedSampleCellTargetsTest(unittest.TestCase):
             [1, 1, 0, 0],
         )
 
-    def test_rejects_duplicate_cells(self) -> None:
+    def test_rejects_duplicate_groups(self) -> None:
         with self.assertRaisesRegex(ValueError, "unique"):
             balanced_simulation_targets(("same", "same"), simulation_count=2)
 
@@ -74,14 +67,13 @@ class AttemptScheduleTest(unittest.TestCase):
             ("low", "moderate"),
             simulation_count=4,
         )
-        self.attempt_limits = {target.cell_id: 34 for target in self.targets}
+        self.attempt_limits = {target.parameter_group_id: 34 for target in self.targets}
 
     def test_replay_has_identical_assignments_and_seed_words(self) -> None:
         arguments = {
             "family_id": 2,
-            "revision_id": 1,
-            "split_id": SplitId.VALIDATION,
-            "stream_id": 9,
+            "dataset_split": DatasetSplit.VALIDATION,
+            "worker_stream_id": 9,
             "first_attempt_index": 17,
             "batch_size": 3,
         }
@@ -103,7 +95,7 @@ class AttemptScheduleTest(unittest.TestCase):
 
         self.assertEqual(first, replay)
         self.assertEqual(
-            [assignment.cell_id for assignment in first],
+            [assignment.parameter_group_id for assignment in first],
             ["low", "moderate", "low"],
         )
         self.assertEqual(
@@ -111,31 +103,24 @@ class AttemptScheduleTest(unittest.TestCase):
             [17, 18, 19],
         )
         self.assertTrue(
-            all(
-                (
-                    assignment.simulation_key.family_id,
-                    assignment.simulation_key.revision_id,
-                )
-                == (2, 1)
-                for assignment in first
-            )
+            all(assignment.simulation_key.family_id == 2 for assignment in first)
         )
         self.assertEqual(
             first[0].simulation_key.seed_words,
-            (2026072204, 2, 1, 9, 17),
+            (2026072204, 2, 9, 17),
         )
         self.assertEqual(
             first[0].simulation_key.simulation_id,
             1_152_931_400_211_496_977,
         )
 
-    def test_simulation_id_separates_splits_streams_and_attempts(self) -> None:
+    def test_simulation_id_separates_splits_worker_streams_and_attempts(self) -> None:
         keys = (
-            SimulationKey(2, 1, SplitId.TRAIN, 0, 0),
-            SimulationKey(2, 1, SplitId.VALIDATION, 0, 0),
-            SimulationKey(2, 1, SplitId.TEST, 0, 0),
-            SimulationKey(2, 1, SplitId.TRAIN, 1, 0),
-            SimulationKey(2, 1, SplitId.TRAIN, 0, 1),
+            SimulationKey(2, DatasetSplit.TRAIN, 0, 0),
+            SimulationKey(2, DatasetSplit.VALIDATION, 0, 0),
+            SimulationKey(2, DatasetSplit.TEST, 0, 0),
+            SimulationKey(2, DatasetSplit.TRAIN, 1, 0),
+            SimulationKey(2, DatasetSplit.TRAIN, 0, 1),
         )
 
         self.assertEqual(len({key.simulation_id for key in keys}), len(keys))
@@ -146,44 +131,42 @@ class AttemptScheduleTest(unittest.TestCase):
     def test_simulation_key_rejects_ids_that_do_not_fit_the_archive_layout(
         self,
     ) -> None:
-        with self.assertRaisesRegex(ValueError, "stream_id"):
-            SimulationKey(2, 1, SplitId.TRAIN, 1_048_576, 0)
+        with self.assertRaisesRegex(ValueError, "worker_stream_id"):
+            SimulationKey(2, DatasetSplit.TRAIN, 1_048_576, 0)
         with self.assertRaisesRegex(ValueError, "attempt_index"):
-            SimulationKey(2, 1, SplitId.TRAIN, 0, 1_099_511_627_776)
+            SimulationKey(2, DatasetSplit.TRAIN, 0, 1_099_511_627_776)
 
-    def test_rejection_leaves_the_target_unmet_in_its_original_cell(self) -> None:
+    def test_rejection_leaves_the_target_unmet_in_its_original_group(self) -> None:
         first = build_next_attempt_batch(
             self.targets,
             {},
             {},
             self.attempt_limits,
             family_id=2,
-            revision_id=1,
-            split_id=SplitId.TRAIN,
-            stream_id=3,
+            dataset_split=DatasetSplit.TRAIN,
+            worker_stream_id=3,
             first_attempt_index=0,
             batch_size=2,
         )
         self.assertEqual(
-            [assignment.cell_id for assignment in first],
+            [assignment.parameter_group_id for assignment in first],
             ["low", "moderate"],
         )
 
-        # The low-cell attempt passed; the moderate-cell attempt failed.
+        # The low-group attempt passed; the moderate-group attempt failed.
         replacement = build_next_attempt_batch(
             self.targets,
             {"low": 1, "moderate": 0},
             {"low": 1, "moderate": 1},
             self.attempt_limits,
             family_id=2,
-            revision_id=1,
-            split_id=SplitId.TRAIN,
-            stream_id=3,
+            dataset_split=DatasetSplit.TRAIN,
+            worker_stream_id=3,
             first_attempt_index=2,
             batch_size=1,
         )
 
-        self.assertEqual(replacement[0].cell_id, "moderate")
+        self.assertEqual(replacement[0].parameter_group_id, "moderate")
         self.assertEqual(replacement[0].simulation_key.attempt_index, 2)
 
     def test_split_is_fixed_on_every_pre_outcome_assignment(self) -> None:
@@ -193,23 +176,22 @@ class AttemptScheduleTest(unittest.TestCase):
             {},
             self.attempt_limits,
             family_id=2,
-            revision_id=1,
-            split_id=SplitId.TEST,
-            stream_id=5,
+            dataset_split=DatasetSplit.TEST,
+            worker_stream_id=5,
             first_attempt_index=10,
             batch_size=2,
         )
 
         self.assertTrue(
             all(
-                assignment.simulation_key.split_id is SplitId.TEST
+                assignment.simulation_key.dataset_split is DatasetSplit.TEST
                 for assignment in assignments
             )
         )
         self.assertTrue(
             all(
-                assignment.simulation_key.root_seed
-                == SPLIT_ROOT_SEED_BY_ID[SplitId.TEST]
+                assignment.simulation_key.seed_words[0]
+                == ROOT_SEED_BY_DATASET_SPLIT[DatasetSplit.TEST]
                 for assignment in assignments
             )
         )
@@ -221,22 +203,20 @@ class AttemptScheduleTest(unittest.TestCase):
             {"low": 2, "moderate": 1},
             self.attempt_limits,
             family_id=2,
-            revision_id=1,
-            split_id=SplitId.TRAIN,
-            stream_id=0,
+            dataset_split=DatasetSplit.TRAIN,
+            worker_stream_id=0,
             first_attempt_index=11,
             batch_size=8,
         )
 
         self.assertEqual(len(assignments), 1)
-        self.assertEqual(assignments[0].cell_id, "moderate")
+        self.assertEqual(assignments[0].parameter_group_id, "moderate")
         self.assertEqual(
             assignments[0].simulation_key,
             SimulationKey(
                 family_id=2,
-                revision_id=1,
-                split_id=SplitId.TRAIN,
-                stream_id=0,
+                dataset_split=DatasetSplit.TRAIN,
+                worker_stream_id=0,
                 attempt_index=11,
             ),
         )
@@ -248,9 +228,8 @@ class AttemptScheduleTest(unittest.TestCase):
             {"low": 2, "moderate": 2},
             self.attempt_limits,
             family_id=2,
-            revision_id=1,
-            split_id=SplitId.TRAIN,
-            stream_id=0,
+            dataset_split=DatasetSplit.TRAIN,
+            worker_stream_id=0,
             first_attempt_index=4,
             batch_size=4,
         )

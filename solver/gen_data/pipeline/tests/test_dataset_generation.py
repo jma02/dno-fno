@@ -21,10 +21,11 @@ from solver.gen_data.pipeline.batch_storage import (
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     SimulationKey,
-    SampleCellTarget,
+    ParameterGroupTarget,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
 )
+from solver.gen_data.pipeline.types import BatchPlanArrays
 from solver.gen_data.pipeline.simulation_checks import (
     SimulationCheckResult,
     SimulationCheck,
@@ -51,24 +52,24 @@ class InjectedInterruption(RuntimeError):
 def _chunk_config(
     root: Path,
     *,
-    simulation_targets: tuple[SampleCellTarget, ...] | None = None,
+    simulation_targets: tuple[ParameterGroupTarget, ...] | None = None,
     batch_size: int = 2,
     configuration: Mapping[str, object] | None = None,
 ) -> DatasetChunkConfig:
     target_values = simulation_targets or (
-        SampleCellTarget("low", 2),
-        SampleCellTarget("moderate", 2),
+        ParameterGroupTarget("low", 2),
+        ParameterGroupTarget("moderate", 2),
     )
     return DatasetChunkConfig(
         root=root,
         family_name="tanaka",
         family_id=PhysicalFamilyId.TANAKA,
-        revision_id=1,
-        split_id=SplitId.TRAIN,
-        stream_id=3,
+        dataset_split=DatasetSplit.TRAIN,
+        worker_stream_id=3,
         simulation_targets=target_values,
-        cell_codes={
-            target.cell_id: index for index, target in enumerate(target_values)
+        parameter_group_codes={
+            target.parameter_group_id: index
+            for index, target in enumerate(target_values)
         },
         batch_size=batch_size,
         first_attempt_index=0,
@@ -87,22 +88,19 @@ def _chunk_config(
 def _batch_plan(
     spec: DatasetChunkConfig,
     assignments: Sequence[AttemptAssignment],
-    *,
-    batch_id: int,
-) -> dict[str, np.ndarray]:
+) -> BatchPlanArrays:
     return build_batch_plan(
         assignments,
         tuple(
             {
                 "schema": "fake_simulation_spec_v1",
                 "simulation_id": assignment.simulation_key.simulation_id,
-                "cell_id": assignment.cell_id,
+                "parameter_group_id": assignment.parameter_group_id,
                 "attempt_index": assignment.simulation_key.attempt_index,
             }
             for assignment in assignments
         ),
-        cell_codes=spec.cell_codes,
-        batch_id=batch_id,
+        parameter_group_codes=spec.parameter_group_codes,
         metadata={"run": spec.to_json_record()},
     )
 
@@ -131,7 +129,6 @@ def _outcome(
             gxi=-field,
             depth=1.0,
             time=np.asarray([0.0], dtype=np.float64),
-            selected_dense_index=np.asarray([0], dtype=np.int32),
         )
     return SimulationOutcome(
         decision=_decision(accepted=accepted),
@@ -163,12 +160,11 @@ class FakeExecutor:
         proposal = _batch_plan(
             self.spec,
             assignments,
-            batch_id=batch_id,
         )
         paths = BatchPaths.for_batch(
             self.spec.root,
             family=self.spec.family_name,
-            split=self.spec.split_id.value,
+            split=self.spec.dataset_split.value,
             batch_id=batch_id,
         )
         outcomes = tuple(
@@ -220,7 +216,7 @@ class DatasetGenerationTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                assignment.cell_id
+                assignment.parameter_group_id
                 for _, assignments in executor.calls
                 for assignment in assignments
             ],
@@ -247,7 +243,7 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_generation_stops_after_32_retries(self) -> None:
         spec = _chunk_config(
             self.root,
-            simulation_targets=(SampleCellTarget("low", 32),),
+            simulation_targets=(ParameterGroupTarget("low", 32),),
             batch_size=32,
         )
         executor = FakeExecutor(
@@ -273,7 +269,7 @@ class DatasetGenerationTests(unittest.TestCase):
             BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=2,
             ).batch_plan.exists()
         )
@@ -281,7 +277,7 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_pending_last_allowed_batch_is_replayed(self) -> None:
         spec = _chunk_config(
             self.root,
-            simulation_targets=(SampleCellTarget("low", 32),),
+            simulation_targets=(ParameterGroupTarget("low", 32),),
             batch_size=32,
         )
         reject_first_batch = FakeExecutor(
@@ -296,11 +292,11 @@ class DatasetGenerationTests(unittest.TestCase):
         ) -> BatchPaths:
             if batch_id == 0:
                 return reject_first_batch(assignments, batch_id=batch_id)
-            proposal = _batch_plan(spec, assignments, batch_id=batch_id)
+            proposal = _batch_plan(spec, assignments)
             paths = BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=batch_id,
             )
             save_batch_plan(paths, proposal)
@@ -326,8 +322,8 @@ class DatasetGenerationTests(unittest.TestCase):
         spec = _chunk_config(
             self.root,
             simulation_targets=(
-                SampleCellTarget("low", 1),
-                SampleCellTarget("moderate", 1),
+                ParameterGroupTarget("low", 1),
+                ParameterGroupTarget("moderate", 1),
             ),
         )
         interrupted_calls: list[tuple[AttemptAssignment, ...]] = []
@@ -338,11 +334,11 @@ class DatasetGenerationTests(unittest.TestCase):
             batch_id: int,
         ) -> BatchPaths:
             interrupted_calls.append(assignments)
-            proposal = _batch_plan(spec, assignments, batch_id=batch_id)
+            proposal = _batch_plan(spec, assignments)
             paths = BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=batch_id,
             )
             save_batch_plan(paths, proposal)
@@ -371,8 +367,8 @@ class DatasetGenerationTests(unittest.TestCase):
         spec = _chunk_config(
             self.root,
             simulation_targets=(
-                SampleCellTarget("low", 1),
-                SampleCellTarget("moderate", 1),
+                ParameterGroupTarget("low", 1),
+                ParameterGroupTarget("moderate", 1),
             ),
         )
         interrupted_executor = FakeExecutor(spec)
@@ -404,8 +400,8 @@ class DatasetGenerationTests(unittest.TestCase):
         spec = _chunk_config(
             self.root,
             simulation_targets=(
-                SampleCellTarget("low", 1),
-                SampleCellTarget("moderate", 1),
+                ParameterGroupTarget("low", 1),
+                ParameterGroupTarget("moderate", 1),
             ),
         )
         calls = 0
@@ -417,11 +413,11 @@ class DatasetGenerationTests(unittest.TestCase):
         ) -> BatchPaths:
             nonlocal calls
             calls += 1
-            proposal = _batch_plan(spec, assignments, batch_id=batch_id)
+            proposal = _batch_plan(spec, assignments)
             paths = BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=batch_id,
             )
             save_batch_plan(paths, proposal)
@@ -445,7 +441,7 @@ class DatasetGenerationTests(unittest.TestCase):
             BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=1,
             ).batch_plan.exists()
         )
@@ -454,8 +450,8 @@ class DatasetGenerationTests(unittest.TestCase):
         spec = _chunk_config(
             self.root,
             simulation_targets=(
-                SampleCellTarget("low", 1),
-                SampleCellTarget("moderate", 1),
+                ParameterGroupTarget("low", 1),
+                ParameterGroupTarget("moderate", 1),
             ),
             batch_size=1,
         )
@@ -468,18 +464,18 @@ class DatasetGenerationTests(unittest.TestCase):
             persisted = (
                 AttemptAssignment(
                     simulation_key=assignments[0].simulation_key,
-                    cell_id="moderate",
+                    parameter_group_id="moderate",
                 ),
             )
             paths = BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=batch_id,
             )
             commit_simulation_outcomes(
                 paths,
-                _batch_plan(spec, persisted, batch_id=batch_id),
+                _batch_plan(spec, persisted),
                 (_outcome(persisted[0], accepted=True),),
                 metadata={"injected_wrong_cell": True},
             )
@@ -496,77 +492,74 @@ class DatasetGenerationTests(unittest.TestCase):
         ):
             scan_dataset_generation(spec)
 
-    def test_scanner_rejects_batch_gaps_and_wrong_stream(self) -> None:
+    def test_scanner_rejects_batch_gaps_and_wrong_worker_stream(self) -> None:
         gap_root = self.root / "gap"
         gap_spec = _chunk_config(
             gap_root,
             simulation_targets=(
-                SampleCellTarget("low", 1),
-                SampleCellTarget("moderate", 1),
+                ParameterGroupTarget("low", 1),
+                ParameterGroupTarget("moderate", 1),
             ),
         )
         assignments = (
             AttemptAssignment(
                 simulation_key=SimulationKey(
                     family_id=int(gap_spec.family_id),
-                    revision_id=gap_spec.revision_id,
-                    split_id=gap_spec.split_id,
-                    stream_id=gap_spec.stream_id,
+                    dataset_split=gap_spec.dataset_split,
+                    worker_stream_id=gap_spec.worker_stream_id,
                     attempt_index=0,
                 ),
-                cell_id="low",
+                parameter_group_id="low",
             ),
         )
         gap_paths = BatchPaths.for_batch(
             gap_spec.root,
             family=gap_spec.family_name,
-            split=gap_spec.split_id.value,
+            split=gap_spec.dataset_split.value,
             batch_id=1,
         )
         save_batch_plan(
             gap_paths,
-            _batch_plan(gap_spec, assignments, batch_id=1),
+            _batch_plan(gap_spec, assignments),
         )
         with self.assertRaisesRegex(RuntimeError, "contiguous"):
             scan_dataset_generation(gap_spec)
 
-        stream_root = self.root / "stream"
-        stream_spec = _chunk_config(
-            stream_root,
-            simulation_targets=(SampleCellTarget("low", 1),),
+        worker_stream_root = self.root / "worker_stream"
+        worker_stream_spec = _chunk_config(
+            worker_stream_root,
+            simulation_targets=(ParameterGroupTarget("low", 1),),
             batch_size=1,
         )
         wrong_assignment = AttemptAssignment(
             simulation_key=SimulationKey(
-                family_id=int(stream_spec.family_id),
-                revision_id=stream_spec.revision_id,
-                split_id=stream_spec.split_id,
-                stream_id=stream_spec.stream_id + 1,
+                family_id=int(worker_stream_spec.family_id),
+                dataset_split=worker_stream_spec.dataset_split,
+                worker_stream_id=worker_stream_spec.worker_stream_id + 1,
                 attempt_index=0,
             ),
-            cell_id="low",
+            parameter_group_id="low",
         )
         wrong_proposal = build_batch_plan(
             (wrong_assignment,),
-            ({"schema": "wrong_stream_v1"},),
-            cell_codes=stream_spec.cell_codes,
-            batch_id=0,
+            ({"schema": "wrong_worker_stream_v1"},),
+            parameter_group_codes=worker_stream_spec.parameter_group_codes,
             metadata={},
         )
         wrong_paths = BatchPaths.for_batch(
-            stream_spec.root,
-            family=stream_spec.family_name,
-            split=stream_spec.split_id.value,
+            worker_stream_spec.root,
+            family=worker_stream_spec.family_name,
+            split=worker_stream_spec.dataset_split.value,
             batch_id=0,
         )
         save_batch_plan(wrong_paths, wrong_proposal)
-        with self.assertRaisesRegex(RuntimeError, "stream_id"):
-            scan_dataset_generation(stream_spec)
+        with self.assertRaisesRegex(RuntimeError, "worker_stream_id"):
+            scan_dataset_generation(worker_stream_spec)
 
     def test_scanner_does_not_trust_tampered_result_acceptance(self) -> None:
         spec = _chunk_config(
             self.root,
-            simulation_targets=(SampleCellTarget("low", 1),),
+            simulation_targets=(ParameterGroupTarget("low", 1),),
             batch_size=1,
         )
         state = generate_simulations(spec, FakeExecutor(spec))
@@ -600,7 +593,7 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_executor_must_return_standard_terminal_paths(self) -> None:
         spec = _chunk_config(
             self.root,
-            simulation_targets=(SampleCellTarget("low", 1),),
+            simulation_targets=(ParameterGroupTarget("low", 1),),
             batch_size=1,
         )
 
@@ -609,11 +602,11 @@ class DatasetGenerationTests(unittest.TestCase):
             *,
             batch_id: int,
         ) -> BatchPaths:
-            proposal = _batch_plan(spec, assignments, batch_id=batch_id)
+            proposal = _batch_plan(spec, assignments)
             paths = BatchPaths.for_batch(
                 spec.root,
                 family=spec.family_name,
-                split=spec.split_id.value,
+                split=spec.dataset_split.value,
                 batch_id=batch_id,
             )
             save_batch_plan(paths, proposal)
@@ -626,7 +619,7 @@ class DatasetGenerationTests(unittest.TestCase):
                 BatchPaths.for_batch(
                     spec.root,
                     family=spec.family_name,
-                    split=spec.split_id.value,
+                    split=spec.dataset_split.value,
                     batch_id=0,
                 )
             ).status,

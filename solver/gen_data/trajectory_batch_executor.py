@@ -12,12 +12,12 @@ import numpy as np
 
 from solver.gen_data.pipeline.artifact_io import json_text, parse_json
 from solver.gen_data.benjamin_feir_sampling import (
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_PARAMETER_GROUPS,
     BenjaminFeirSample,
 )
 from solver.gen_data.jonswap_tma import finite_depth_angular_frequency
 from solver.gen_data.jonswap_tma_sampling import (
-    JONSWAP_TMA_SAMPLE_CELLS,
+    JONSWAP_TMA_PARAMETER_GROUPS,
     JonswapTmaSample,
 )
 from solver.gen_data.pipeline.batch_storage import BatchPaths
@@ -53,7 +53,7 @@ from solver.gen_data.pipeline.writer import (
     SimulationOutcome,
     commit_simulation_outcomes,
 )
-from solver.gen_data.tanaka_sampling import TANAKA_SAMPLE_CELLS
+from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUPS
 from solver.gen_data.tanaka_sampling import TanakaSample
 from solver.gen_data.trajectory_family_adapters import (
     JonswapInitialStateDomainError,
@@ -118,10 +118,10 @@ _FAMILY_IDS = {
     "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
-_FAMILY_CELLS = {
-    "tanaka": frozenset(TANAKA_SAMPLE_CELLS),
-    "benjamin_feir": frozenset(BENJAMIN_FEIR_SAMPLE_CELLS),
-    "jonswap_tma": frozenset(JONSWAP_TMA_SAMPLE_CELLS),
+_FAMILY_PARAMETER_GROUPS = {
+    "tanaka": frozenset(TANAKA_PARAMETER_GROUPS),
+    "benjamin_feir": frozenset(BENJAMIN_FEIR_PARAMETER_GROUPS),
+    "jonswap_tma": frozenset(JONSWAP_TMA_PARAMETER_GROUPS),
 }
 
 
@@ -405,7 +405,9 @@ def floor_saved_time_grid(
     saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
     realized = float(saved_times[-1])
     if not (realized <= terminal_time and terminal_time - realized < saved_dt):
-        raise RuntimeError(f"{horizon_name} saved-grid horizon was not strictly floored")
+        raise RuntimeError(
+            f"{horizon_name} saved-grid horizon was not strictly floored"
+        )
     return saved_times
 
 
@@ -1034,12 +1036,13 @@ class TrajectoryBatchExecutor:
             raise ValueError("chunk family name differs from trajectory execution")
         if self.chunk_config.family_id is not expected_family_id:
             raise ValueError("chunk family ID differs from trajectory execution")
-        unknown_cells = set(self.chunk_config.cell_codes).difference(
-            _FAMILY_CELLS[self.execution.family]
-        )
-        if unknown_cells:
+        unknown_parameter_groups = set(
+            self.chunk_config.parameter_group_codes
+        ).difference(_FAMILY_PARAMETER_GROUPS[self.execution.family])
+        if unknown_parameter_groups:
             raise ValueError(
-                f"unknown {self.execution.family} cells: {sorted(unknown_cells)}"
+                f"unknown {self.execution.family} parameter groups: "
+                f"{sorted(unknown_parameter_groups)}"
             )
         if (
             self.execution.role == "paper_dataset"
@@ -1386,9 +1389,9 @@ class TrajectoryBatchExecutor:
                 raise RuntimeError(
                     "Tanaka component global index is inconsistent with its simulation"
                 )
-            component[
-                "constructor_subbatch_local_simulation_index"
-            ] = subbatch_simulation
+            component["constructor_subbatch_local_simulation_index"] = (
+                subbatch_simulation
+            )
             component["constructor_subbatch_global_component_index"] = subbatch_global
             component["local_simulation_index"] = original_simulation
             component["global_component_index"] = (
@@ -1573,7 +1576,7 @@ class TrajectoryBatchExecutor:
             root=self.chunk_config.root,
             family_name=self.chunk_config.family_name,
             batch_id=batch_id,
-            cell_codes=self.chunk_config.cell_codes,
+            parameter_group_codes=self.chunk_config.parameter_group_codes,
             metadata={
                 "family": self.execution.family,
                 "simulation_type": "trajectory",

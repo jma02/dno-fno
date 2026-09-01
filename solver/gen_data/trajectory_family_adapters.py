@@ -17,14 +17,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.artifact_io import json_text
+from solver.gen_data.pipeline.artifact_io import json_text, load_npz
+from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.benjamin_feir_jcp09 import (
     BENJAMIN_FEIR_CONSTRUCTOR,
     ParameterArrays,
@@ -60,6 +61,7 @@ from solver.gen_data.pipeline.batch_storage import (
 from solver.gen_data.pipeline.simulation_allocation import AttemptAssignment
 from solver.gen_data.pipeline.dno_target import project_fixed_band
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig
+from solver.gen_data.pipeline.types import BatchPlanArrays
 from solver.gen_data.pipeline.writer import (
     JsonScalar,
     build_batch_plan,
@@ -75,7 +77,6 @@ from solver.tanaka_ICs.modified_tanaka import make_default_tanaka_template
 FloatArray: TypeAlias = NDArray[np.float64]
 SpecificationRecord: TypeAlias = Mapping[str, object]
 MetricsRecord: TypeAlias = Mapping[str, JsonScalar]
-BatchPlan: TypeAlias = Mapping[str, NDArray[Any]]
 SampleT = TypeVar("SampleT")
 _CONSTRUCTIBLE_BATCH_STATUSES = frozenset(
     (BatchStatus.PLAN_SAVED, BatchStatus.SHARD_WRITTEN)
@@ -118,7 +119,7 @@ class PersistedTrajectoryPlan(Generic[SampleT]):
 
     sampled: SampledSimulations[SampleT]
     paths: BatchPaths
-    batch_plan: BatchPlan
+    batch_plan: BatchPlanArrays
 
     def __post_init__(self) -> None:
         inspection = inspect_batch(self.paths)
@@ -303,7 +304,7 @@ def persist_sampled_trajectory_plan(
     root: Path,
     family_name: str,
     batch_id: int,
-    cell_codes: Mapping[str, int],
+    parameter_group_codes: Mapping[str, int],
     metadata: Mapping[str, object],
 ) -> PersistedTrajectoryPlan[SampleT]:
     """Save sampled simulations before any numerical construction."""
@@ -311,14 +312,13 @@ def persist_sampled_trajectory_plan(
     batch_plan = build_batch_plan(
         sampled.assignments,
         sampled.specification_records,
-        cell_codes=cell_codes,
-        batch_id=batch_id,
+        parameter_group_codes=parameter_group_codes,
         metadata=metadata,
     )
     paths = BatchPaths.for_batch(
         root,
         family=family_name,
-        split=sampled.assignments[0].simulation_key.split_id.value,
+        split=sampled.assignments[0].simulation_key.dataset_split.value,
         batch_id=batch_id,
     )
     save_batch_plan(paths, batch_plan)
@@ -341,9 +341,9 @@ def _verify_saved_batch_plan(
     if expected_records != proposed.sampled.specification_records:
         raise RuntimeError("sampled specification changed after saving the plan")
 
-    with np.load(proposed.paths.batch_plan, allow_pickle=False) as archive:
-        disk_simulation_ids = np.asarray(archive["simulation_id"], dtype=np.int64)
-        disk_records = tuple(str(value) for value in archive["simulation_spec_json"])
+    archive = load_npz(proposed.paths.batch_plan)
+    disk_simulation_ids = compute_batch_simulation_ids(archive)
+    disk_records = tuple(str(value) for value in archive["simulation_spec_json"])
     expected_simulation_ids = np.asarray(
         [
             assignment.simulation_key.simulation_id

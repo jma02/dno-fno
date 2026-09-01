@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON=${PYTHON:-$ROOT/.venv/bin/python}
-OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_dataset_revision3_literature_aligned_v1}
+OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_dataset_tanaka}
 GPU_ZERO=${GPU_ZERO:-0}
 GPU_ONE=${GPU_ONE:-1}
 GPU_ADMISSION_SCRIPT=${GPU_ADMISSION_SCRIPT:-$ROOT/scripts/check_tanaka_gpu_admission.sh}
@@ -12,7 +12,7 @@ lane_one=""
 GPU_ADMISSION_EXIT_AUTHORIZED=false
 GUARDED_EXIT_STATUS=0
 
-# lane split count accepted_before stream relative_root label
+# lane split count accepted_before worker_stream relative_root label
 CHUNKS=(
     "1 train 2048 0 0 train/tanaka/chunk_00000_02048 train_00000_02048"
     "1 train 2048 2048 1 train/tanaka/chunk_02048_02048 train_02048_02048"
@@ -70,11 +70,11 @@ require_gpu_admission_or_exit pre-preflight
 mkdir -p "$OUTPUT_BASE/logs"
 
 declare -a COMMAND PREFLIGHTS
-LANE=""; SPLIT=""; COUNT=""; BEFORE=""; STREAM=""; LEAF=""; LABEL=""
+LANE=""; SPLIT=""; COUNT=""; BEFORE=""; WORKER_STREAM=""; LEAF=""; LABEL=""
 CHUNK_ROOT=""; SUMMARY=""; PREFLIGHT=""; LOG=""; GPU=""
 
 build_chunk() {
-    read -r LANE SPLIT COUNT BEFORE STREAM LEAF LABEL <<<"$1"
+    read -r LANE SPLIT COUNT BEFORE WORKER_STREAM LEAF LABEL <<<"$1"
     GPU=$GPU_ONE
     [[ "$LANE" == 0 ]] && GPU=$GPU_ZERO
     CHUNK_ROOT="$OUTPUT_BASE/$LEAF"
@@ -85,7 +85,7 @@ build_chunk() {
         "$PYTHON" scripts/generate_paper_dataset.py
         --family tanaka --split "$SPLIT"
         --accepted-simulations "$COUNT" --accepted-simulations-before "$BEFORE"
-        --stream-id "$STREAM" --first-attempt-index 0
+        --worker-stream-id "$WORKER_STREAM" --first-attempt-index 0
         --batch-size 256
         --platform gpu --output-root "$CHUNK_ROOT"
     )
@@ -114,7 +114,7 @@ preflight_chunk() {
     build_chunk "$1"
     run_child env CUDA_VISIBLE_DEVICES="$GPU" \
         XLA_PYTHON_CLIENT_PREALLOCATE=false \
-        MPLCONFIGDIR="/tmp/mpl-paper-tanaka-revision3-gpu${GPU}" \
+        MPLCONFIGDIR="/tmp/mpl-paper-tanaka-gpu${GPU}" \
         "${COMMAND[@]}" --dry-run >"$PREFLIGHT"
     PREFLIGHTS+=("$PREFLIGHT")
 }
@@ -134,13 +134,13 @@ for plan in plans:
     if (plan.get("schema") != "paper_dataset_quota_preflight_v1"
             or plan.get("no_numerical_generation_performed") is not True
             or run.get("family_name") != "tanaka"
-            or run.get("revision_id") != 3 or run.get("batch_size") != 256
+            or run.get("batch_size") != 256
             or run.get("maximum_retries_per_parameter_group") != 32
             or config.get("execution_platform") != "gpu"
             or plan.get("execution") != config.get("trajectory_execution")):
-        raise SystemExit("invalid revision-3 Tanaka preflight")
+        raise SystemExit("invalid Tanaka preflight")
     contracts.append(json.dumps({key: config.get(key) for key in (
-        "trajectory_execution", "ordered_cell_ids")},
+        "trajectory_execution", "ordered_parameter_group_ids")},
         sort_keys=True, separators=(",", ":")))
 if len(plans) != 6 or len(set(contracts)) != 1:
     raise SystemExit("Tanaka preflights do not share one numerical contract")
@@ -162,7 +162,7 @@ run_chunk() {
         "$(date --iso-8601=seconds)" "$CHUNK_ROOT" "$GPU" >>"$LOG"
     run_child env CUDA_VISIBLE_DEVICES="$GPU" \
         XLA_PYTHON_CLIENT_PREALLOCATE=false \
-        MPLCONFIGDIR="/tmp/mpl-paper-tanaka-revision3-gpu${GPU}" \
+        MPLCONFIGDIR="/tmp/mpl-paper-tanaka-gpu${GPU}" \
         PYTHONUNBUFFERED=1 "${COMMAND[@]}" --execute >>"$LOG" 2>&1
     check_summary
 }
@@ -229,20 +229,20 @@ observed = {}
 for split, wanted in expected.items():
     selected = sorted((c for c in chunks if c.split.value == split),
                       key=lambda c: c.accepted_before)
-    got = tuple((c.accepted_before, c.accepted_after, c.stream_id)
+    got = tuple((c.accepted_before, c.accepted_after, c.worker_stream_id)
                 for c in selected)
     if got != wanted or len({c.root for c in selected}) != len(selected):
         raise SystemExit(f"invalid Tanaka {split} intervals: {got}")
     observed[split] = got
-if len(chunks) != 6 or len({c.revision_id for c in chunks}) != 1:
-    raise SystemExit("completed Tanaka chunks do not share one revision")
+if len(chunks) != 6:
+    raise SystemExit("expected six completed Tanaka chunks")
 print(json.dumps({"status": "passed", "family": "tanaka",
     "accepted_simulations": {"train": 16384, "validation": 1024, "test": 1024},
-    "intervals_with_stream_id": observed,
+    "intervals_with_worker_stream_id": observed,
     "historical_random_specifications_reused": False,
     "full_four_family_view_preflight_pending": True}, indent=2))
 ' "${summaries[@]}" >"$OUTPUT_BASE/tanaka_view_builder_input_check.json"
 
 trap - EXIT INT TERM
-printf 'revision-3 Tanaka generation complete: %s\n' "$OUTPUT_BASE"
+printf 'Tanaka dataset generation complete: %s\n' "$OUTPUT_BASE"
 printf 'final gate: run the view-builder preflight with all four families\n'

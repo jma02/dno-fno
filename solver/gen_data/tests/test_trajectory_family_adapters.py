@@ -23,7 +23,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
+    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
     PAPER_RELATIVE_FREQUENCY_MAXIMUM,
@@ -32,8 +32,7 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLING_REVISION_V4,
-    JONSWAP_TMA_SAMPLE_CELL_IDS,
+    JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     BatchPaths,
@@ -48,9 +47,7 @@ from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # no
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    PhysicalFamilyId,
-    SplitId,
-    DATASET_REVISION_BY_FAMILY,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     PAPER_JONSWAP_ROLLOUT_CONFIG,
@@ -67,7 +64,7 @@ from solver.gen_data.pipeline.writer import (  # noqa: E402
     commit_simulation_outcomes,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELL_IDS,
+    TANAKA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     TrajectoryInitialBatch,
@@ -108,26 +105,19 @@ def wiring_contract() -> RolloutConfig:
 def assignment(
     *,
     family_id: int,
-    cell_id: str,
+    parameter_group_id: str,
     attempt_index: int,
-    revision_id: int | None = None,
 ) -> AttemptAssignment:
     """Return one deterministic test-split attempt."""
 
-    selected_revision = (
-        DATASET_REVISION_BY_FAMILY[PhysicalFamilyId(family_id)]
-        if revision_id is None
-        else revision_id
-    )
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=family_id,
-            revision_id=selected_revision,
-            split_id=SplitId.TEST,
-            stream_id=7,
+            dataset_split=DatasetSplit.TEST,
+            worker_stream_id=7,
             attempt_index=attempt_index,
         ),
-        cell_id=cell_id,
+        parameter_group_id=parameter_group_id,
     )
 
 
@@ -186,7 +176,6 @@ def write_single_row_shard(
             "time": np.asarray([0.0], dtype=np.float64),
             "simulation_local_index": np.asarray([0], dtype=np.int32),
             "frame_index": np.asarray([0], dtype=np.int32),
-            "selected_dense_index": np.asarray([0], dtype=np.int32),
         },
     )
 
@@ -198,8 +187,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         attempted = assignment(
             family_id=4,
-            revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
-            cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             attempt_index=29,
         )
         sampled = sample_jonswap_tma_simulations(
@@ -231,13 +219,13 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
+                parameter_group_codes={attempted.parameter_group_id: 0},
                 metadata={"test_scope": "paper_target_band_before_evolution"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
 
         metrics = initial.construction_metrics[0]
-        self.assertEqual(metrics["initial_discrete_peak_wavenumber"], 6.0)
+        self.assertEqual(metrics["initial_discrete_peak_wavenumber"], 8.0)
         self.assertGreaterEqual(
             int(metrics["initial_half_maximum_spectral_cell_count"]),
             1,
@@ -272,14 +260,13 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 1.0e-10,
             )
 
-    def test_revision_4_jonswap_uses_the_published_relative_frequency_band(
+    def test_jonswap_uses_the_published_relative_frequency_band(
         self,
     ) -> None:
         contract = PAPER_JONSWAP_ROLLOUT_CONFIG
         attempted = assignment(
             family_id=4,
-            revision_id=JONSWAP_TMA_SAMPLING_REVISION_V4,
-            cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             attempt_index=31,
         )
         sampled = sample_jonswap_tma_simulations(
@@ -310,8 +297,8 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
-                metadata={"test_scope": "revision_4_relative_frequency_band"},
+                parameter_group_codes={attempted.parameter_group_id: 0},
+                metadata={"test_scope": "relative_frequency_band"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
 
@@ -346,18 +333,18 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         tanaka_assignment = assignment(
             family_id=2,
-            cell_id=TANAKA_SAMPLE_CELL_IDS[0],
+            parameter_group_id=TANAKA_PARAMETER_GROUP_IDS[0],
             attempt_index=19,
         )
         bf_assignment = assignment(
             family_id=3,
-            cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
+            parameter_group_id=BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
             attempt_index=23,
         )
-        finite_random_sea_cell = JONSWAP_TMA_SAMPLE_CELL_IDS[9]
+        finite_random_sea_cell = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
         jonswap_assignment = assignment(
             family_id=4,
-            cell_id=finite_random_sea_cell,
+            parameter_group_id=finite_random_sea_cell,
             attempt_index=29,
         )
 
@@ -407,7 +394,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                         root=root,
                         family_name=family,
                         batch_id=batch_id,
-                        cell_codes={attempted.cell_id: 0},
+                        parameter_group_codes={attempted.parameter_group_id: 0},
                         metadata={
                             "test_scope": "reduced_N64_M0_wiring_only",
                         },
@@ -445,7 +432,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             attempt_index=31,
         )
         sampled = sample_jonswap_tma_simulations(
@@ -458,7 +445,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
+                parameter_group_codes={attempted.parameter_group_id: 0},
                 metadata={"test_scope": "transaction_order"},
             )
             proposed.paths.batch_plan.unlink()
@@ -478,7 +465,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
+                parameter_group_codes={attempted.parameter_group_id: 0},
                 metadata={"test_scope": "transaction_order"},
             )
             replayed.samples[0].phase_right[0] += 0.125
@@ -492,7 +479,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             attempt_index=35,
         )
         sampled = sample_jonswap_tma_simulations(
@@ -510,7 +497,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
+                parameter_group_codes={attempted.parameter_group_id: 0},
                 metadata={"test_scope": "density_window_contract"},
             )
             with self.assertRaisesRegex(ValueError, "density window"):
@@ -520,7 +507,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         contract = wiring_contract()
         attempted = assignment(
             family_id=4,
-            cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+            parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             attempt_index=37,
         )
         sampled = sample_jonswap_tma_simulations(
@@ -533,7 +520,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={attempted.cell_id: 0},
+                parameter_group_codes={attempted.parameter_group_id: 0},
                 metadata={"test_scope": "shard_written_replay"},
             )
             initial = construct_jonswap_tma_trajectory_batch(proposed)
@@ -588,11 +575,11 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
     def test_construction_refuses_failed_and_corrupt_batches(self) -> None:
         contract = wiring_contract()
-        cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[9]
+        parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
 
         failed_attempt = assignment(
             family_id=4,
-            cell_id=cell_id,
+            parameter_group_id=parameter_group_id,
             attempt_index=39,
         )
         failed_sampled = sample_jonswap_tma_simulations(
@@ -605,7 +592,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={cell_id: 0},
+                parameter_group_codes={parameter_group_id: 0},
                 metadata={"test_scope": "failed_status"},
             )
             record_fatal_failure(
@@ -626,7 +613,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
         corrupt_attempt = assignment(
             family_id=4,
-            cell_id=cell_id,
+            parameter_group_id=parameter_group_id,
             attempt_index=40,
         )
         corrupt_sampled = sample_jonswap_tma_simulations(
@@ -639,7 +626,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 root=Path(directory),
                 family_name="jonswap_tma",
                 batch_id=0,
-                cell_codes={cell_id: 0},
+                parameter_group_codes={parameter_group_id: 0},
                 metadata={"test_scope": "corrupt_status"},
             )
             initial = construct_jonswap_tma_trajectory_batch(corrupt)
@@ -667,7 +654,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 "benjamin_feir",
                 assignment(
                     family_id=3,
-                    cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
+                    parameter_group_id=BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
                     attempt_index=41,
                 ),
                 sample_benjamin_feir_simulations,
@@ -677,7 +664,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 "jonswap_tma",
                 assignment(
                     family_id=4,
-                    cell_id=JONSWAP_TMA_SAMPLE_CELL_IDS[9],
+                    parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
                     attempt_index=43,
                 ),
                 sample_jonswap_tma_simulations,
@@ -701,7 +688,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     root=root,
                     family_name=family,
                     batch_id=0,
-                    cell_codes={attempted.cell_id: 0},
+                    parameter_group_codes={attempted.parameter_group_id: 0},
                     metadata={
                         "test_scope": "reduced_N64_M0_wiring_only",
                     },

@@ -23,8 +23,8 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     PERTURBATION_RATIO_MIN,
 )
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    BENJAMIN_FEIR_PARAMETER_GROUPS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
     find_benjamin_feir_sample_violations,
@@ -33,7 +33,7 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     balanced_simulation_targets,
     random_generator_for_simulation,
     build_next_attempt_batch,
@@ -47,23 +47,21 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 3,
-    revision_id: int = 4,
-    split_id: SplitId = SplitId.TRAIN,
-    stream_id: int = 0,
+    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    worker_stream_id: int = 0,
     attempt_index: int | None = None,
 ) -> AttemptAssignment:
-    """Return one deterministic assignment for a declared sample cell."""
+    """Return one deterministic assignment for a declared parameter group."""
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=family_id,
-            revision_id=revision_id,
-            split_id=split_id,
-            stream_id=stream_id,
+            dataset_split=dataset_split,
+            worker_stream_id=worker_stream_id,
             attempt_index=attempt,
         ),
-        cell_id=BENJAMIN_FEIR_SAMPLE_CELL_IDS[cell_index],
+        parameter_group_id=BENJAMIN_FEIR_PARAMETER_GROUP_IDS[cell_index],
     )
 
 
@@ -76,32 +74,33 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             if sideband_offset / carrier_mode
             < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
         )
-        realized = tuple(BENJAMIN_FEIR_SAMPLE_CELLS.values())
+        realized = tuple(BENJAMIN_FEIR_PARAMETER_GROUPS.values())
         self.assertEqual(len(realized), 66)
         self.assertEqual(realized, expected)
         self.assertEqual(
-            len(BENJAMIN_FEIR_SAMPLE_CELL_IDS),
+            len(BENJAMIN_FEIR_PARAMETER_GROUP_IDS),
             66,
         )
 
     def test_common_scheduler_balances_the_pair_cells_exactly(self) -> None:
-        cell_ids = BENJAMIN_FEIR_SAMPLE_CELL_IDS
-        targets = balanced_simulation_targets(cell_ids, simulation_count=20_000)
+        parameter_group_ids = BENJAMIN_FEIR_PARAMETER_GROUP_IDS
+        targets = balanced_simulation_targets(
+            parameter_group_ids, simulation_count=20_000
+        )
         scheduled = build_next_attempt_batch(
             targets,
             {},
             {},
-            {target.cell_id: target.simulation_count for target in targets},
+            {target.parameter_group_id: target.simulation_count for target in targets},
             family_id=3,
-            revision_id=1,
-            split_id=SplitId.TRAIN,
-            stream_id=0,
+            dataset_split=DatasetSplit.TRAIN,
+            worker_stream_id=0,
             first_attempt_index=0,
             batch_size=20_000,
         )
-        counts = Counter(item.cell_id for item in scheduled)
+        counts = Counter(item.parameter_group_id for item in scheduled)
         self.assertEqual(len(scheduled), 20_000)
-        self.assertEqual(set(counts), set(cell_ids))
+        self.assertEqual(set(counts), set(parameter_group_ids))
         self.assertEqual(set(counts.values()), {303, 304})
         self.assertEqual(
             sum(count == 304 for count in counts.values()),
@@ -130,11 +129,10 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            SimulationKey(4, 4, SplitId.TRAIN, 0, 41),
-            SimulationKey(3, 5, SplitId.TRAIN, 0, 41),
-            SimulationKey(3, 4, SplitId.VALIDATION, 0, 41),
-            SimulationKey(3, 4, SplitId.TRAIN, 1, 41),
-            SimulationKey(3, 4, SplitId.TRAIN, 0, 42),
+            SimulationKey(4, DatasetSplit.TRAIN, 0, 41),
+            SimulationKey(3, DatasetSplit.VALIDATION, 0, 41),
+            SimulationKey(3, DatasetSplit.TRAIN, 1, 41),
+            SimulationKey(3, DatasetSplit.TRAIN, 0, 42),
         )
         first_draws = {
             tuple(random_generator_for_simulation(key).random(8)) for key in keys
@@ -143,7 +141,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
 
     def test_all_cells_remain_in_support_under_many_attempts(self) -> None:
         for cell_index, (carrier_mode, sideband_offset) in enumerate(
-            BENJAMIN_FEIR_SAMPLE_CELLS.values()
+            BENJAMIN_FEIR_PARAMETER_GROUPS.values()
         ):
             for local_attempt in range(128):
                 sample = sample_benjamin_feir_simulation(
@@ -183,7 +181,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
     def test_every_cell_has_a_nonempty_closed_form_focused_interval(
         self,
     ) -> None:
-        for cell_index in range(len(BENJAMIN_FEIR_SAMPLE_CELL_IDS)):
+        for cell_index in range(len(BENJAMIN_FEIR_PARAMETER_GROUP_IDS)):
             sample = sample_benjamin_feir_simulation(assignment(cell_index))
             lower, upper = sample.conditional_steepness_bounds
             self.assertLess(
@@ -200,9 +198,8 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             assignment(
                 65,
                 family_id=17,
-                revision_id=6,
-                split_id=SplitId.TEST,
-                stream_id=29,
+                dataset_split=DatasetSplit.TEST,
+                worker_stream_id=29,
                 attempt_index=123_456,
             )
         )
@@ -211,12 +208,9 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         self.assertNotIn("schema", record)
         self.assertEqual(record["simulation_id"], key.simulation_id)
         self.assertEqual(record["family_id"], 17)
-        self.assertEqual(record["revision_id"], 6)
-        self.assertEqual(record["split_id"], "test")
-        self.assertEqual(record["root_seed"], key.root_seed)
-        self.assertEqual(record["stream_id"], 29)
+        self.assertEqual(record["dataset_split"], "test")
+        self.assertEqual(record["worker_stream_id"], 29)
         self.assertEqual(record["attempt_index"], 123_456)
-        self.assertEqual(record["seed_words"], list(key.seed_words))
         self.assertEqual(record["carrier_mode"], sample.carrier_mode)
         self.assertEqual(
             record["sideband_offset"],
@@ -251,7 +245,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             sample_benjamin_feir_simulation(
                 AttemptAssignment(
                     simulation_key=assignment(0).simulation_key,
-                    cell_id="not_a_pair",
+                    parameter_group_id="not_a_pair",
                 )
             )
         with self.assertRaisesRegex(ValueError, "finite and positive"):
@@ -262,7 +256,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         sample = sample_benjamin_feir_simulation(assignment(0))
         wrong_cell = replace(sample, carrier_mode=21)
         self.assertIn(
-            "sample parameters do not match the assigned cell",
+            "sample parameters do not match the assigned parameter group",
             find_benjamin_feir_sample_violations(wrong_cell),
         )
         corrupt = replace(sample, carrier_steepness=math.nan)

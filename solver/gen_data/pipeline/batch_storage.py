@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,11 +25,13 @@ from solver.gen_data.pipeline.artifact_io import (
 )
 from solver.gen_data.pipeline.batch_artifacts import (
     SimulationCommitRecord,
+    compute_batch_simulation_ids,
     compute_simulation_row_blocks,
     parse_simulation_result,
     validate_batch_plan,
     validate_shard,
 )
+from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -90,21 +92,23 @@ class BatchInspection:
 
 def _load_batch_arrays(
     paths: BatchPaths,
-) -> tuple[dict[str, NDArray[Any]], dict[str, NDArray[Any]] | None]:
+) -> tuple[BatchPlanArrays, DatasetShardArrays | None]:
     """Load and validate a batch plan and its optional shard."""
 
-    batch_plan = load_npz(paths.batch_plan)
-    validate_batch_plan(batch_plan)
+    loaded_plan = load_npz(paths.batch_plan)
+    validate_batch_plan(loaded_plan)
+    batch_plan = cast(BatchPlanArrays, loaded_plan)
     if not paths.shard.exists():
         return batch_plan, None
-    shard = load_npz(paths.shard)
-    validate_shard(shard, batch_plan=batch_plan)
+    loaded_shard = load_npz(paths.shard)
+    validate_shard(loaded_shard, batch_plan=loaded_plan)
+    shard = cast(DatasetShardArrays, loaded_shard)
     return batch_plan, shard
 
 
 def save_batch_plan(
     paths: BatchPaths,
-    arrays: Mapping[str, NDArray[Any]],
+    arrays: BatchPlanArrays | Mapping[str, NDArray[Any]],
 ) -> None:
     """Save a batch plan or verify that the existing plan is identical."""
 
@@ -112,14 +116,14 @@ def save_batch_plan(
         raise RuntimeError("cannot replace a terminal batch plan")
     ensure_npz(
         paths.batch_plan,
-        arrays,
+        cast(Mapping[str, NDArray[Any]], arrays),
         validate=validate_batch_plan,
     )
 
 
 def save_shard(
     paths: BatchPaths,
-    arrays: Mapping[str, NDArray[Any]],
+    arrays: DatasetShardArrays | Mapping[str, NDArray[Any]],
 ) -> None:
     """Save a shard or verify that the existing shard is identical."""
 
@@ -138,7 +142,7 @@ def save_shard(
 
     ensure_npz(
         paths.shard,
-        arrays,
+        cast(Mapping[str, NDArray[Any]], arrays),
         validate=validate,
     )
 
@@ -158,7 +162,7 @@ def commit_batch(
     if paths.result.exists():
         raise RuntimeError("batch is already committed")
     batch_plan, shard = _load_batch_arrays(paths)
-    planned_simulation_ids = batch_plan["simulation_id"]
+    planned_simulation_ids = compute_batch_simulation_ids(batch_plan)
     if len(simulations) != planned_simulation_ids.size:
         raise ValueError("the result must contain every planned simulation")
     if not np.array_equal(
@@ -247,7 +251,7 @@ def inspect_batch(paths: BatchPaths) -> BatchInspection:
     if result_exists:
         result = read_json_object(paths.result)
         raw_simulations = result.get("simulations")
-        planned_simulation_ids = batch_plan["simulation_id"]
+        planned_simulation_ids = compute_batch_simulation_ids(batch_plan)
         if (
             not isinstance(raw_simulations, list)
             or len(raw_simulations) != planned_simulation_ids.size

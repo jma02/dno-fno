@@ -33,10 +33,9 @@ from solver.gen_data.pipeline.build_dataset_view import (
     build_dataset_view,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
-    DATASET_REVISION_BY_FAMILY,
     PhysicalFamilyId,
-    SampleCellTarget,
-    SplitId,
+    ParameterGroupTarget,
+    DatasetSplit,
     balanced_simulation_targets,
 )
 from solver.gen_data.pipeline.dataset_generation import (
@@ -75,9 +74,8 @@ class CompletedChunk:
     summary_path: Path
     root: Path
     family: str
-    revision_id: int
-    split: SplitId
-    stream_id: int
+    split: DatasetSplit
+    worker_stream_id: int
     accepted_before: int
     accepted_count: int
     accepted_after: int
@@ -90,7 +88,7 @@ class CombinedDatasetPlan:
     """Ordered chunks and expected combined-view sizes."""
 
     chunks: tuple[CompletedChunk, ...]
-    splits: tuple[SplitId, ...]
+    splits: tuple[DatasetSplit, ...]
     accepted_simulations_per_family_by_split: Mapping[str, int]
     attempted_simulations_by_split: Mapping[str, int]
     attempted_simulations: int
@@ -172,14 +170,18 @@ def _required_string(mapping: Mapping[str, object], name: str) -> str:
     return value
 
 
-def _ordered_cell_ids(configuration: Mapping[str, object]) -> tuple[str, ...]:
-    value = configuration.get("ordered_cell_ids")
+def _ordered_parameter_group_ids(
+    configuration: Mapping[str, object],
+) -> tuple[str, ...]:
+    value = configuration.get("ordered_parameter_group_ids")
     if (
         not isinstance(value, (list, tuple))
         or not value
-        or any(not isinstance(cell_id, str) for cell_id in value)
+        or any(not isinstance(parameter_group_id, str) for parameter_group_id in value)
     ):
-        raise TypeError("ordered_cell_ids must be a nonempty string sequence")
+        raise TypeError(
+            "ordered_parameter_group_ids must be a nonempty string sequence"
+        )
     return tuple(value)
 
 
@@ -201,25 +203,26 @@ def _reconstruct_chunk_config(
     if any(not isinstance(target, Mapping) for target in raw_targets):
         raise TypeError("every run_spec quota must be a JSON object")
     targets = tuple(
-        SampleCellTarget(
-            cell_id=_required_string(target, "cell_id"),
+        ParameterGroupTarget(
+            parameter_group_id=_required_string(target, "parameter_group_id"),
             simulation_count=_required_integer(target, "target_accepted"),
         )
         for target in raw_targets
         if isinstance(target, Mapping)
     )
-    raw_codes = _required_mapping(record, "cell_codes")
+    raw_codes = _required_mapping(record, "parameter_group_codes")
     return DatasetChunkConfig(
         root=root,
         family_name=family,
         family_id=family_id,
-        revision_id=_required_integer(record, "revision_id"),
-        split_id=SplitId(_required_string(record, "split_id")),
-        stream_id=_required_integer(record, "stream_id"),
+        dataset_split=DatasetSplit(_required_string(record, "dataset_split")),
+        worker_stream_id=_required_integer(record, "worker_stream_id"),
         simulation_targets=targets,
-        cell_codes={
-            str(cell_id): _required_integer(raw_codes, str(cell_id))
-            for cell_id in raw_codes
+        parameter_group_codes={
+            str(parameter_group_id): _required_integer(
+                raw_codes, str(parameter_group_id)
+            )
+            for parameter_group_id in raw_codes
         },
         batch_size=_required_integer(record, "batch_size", minimum=1),
         first_attempt_index=_required_integer(record, "first_attempt_index"),
@@ -289,12 +292,6 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
     if path.parent != root:
         raise ValueError("chunk summary must live directly in its output root")
     chunk_config = _reconstruct_chunk_config(summary, root=root)
-    current_revision = DATASET_REVISION_BY_FAMILY[FAMILY_IDS[chunk_config.family_name]]
-    if chunk_config.revision_id != current_revision:
-        raise ValueError(
-            f"{chunk_config.family_name} revision {chunk_config.revision_id} is not current "
-            f"revision {current_revision}"
-        )
     _validate_current_execution_contract(chunk_config)
 
     configuration = chunk_config.configuration
@@ -308,20 +305,22 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
     if accepted_after != accepted_before + accepted_count:
         raise ValueError("chunk accepted interval is inconsistent")
 
-    ordered_cells = _ordered_cell_ids(configuration)
+    ordered_parameter_groups = _ordered_parameter_group_ids(configuration)
     before = balanced_simulation_targets(
-        ordered_cells, simulation_count=accepted_before
+        ordered_parameter_groups, simulation_count=accepted_before
     )
-    after = balanced_simulation_targets(ordered_cells, simulation_count=accepted_after)
+    after = balanced_simulation_targets(
+        ordered_parameter_groups, simulation_count=accepted_after
+    )
     expected_increment = tuple(
         end.simulation_count - start.simulation_count
         for start, end in zip(before, after)
     )
     if (
-        tuple(target.cell_id for target in chunk_config.simulation_targets)
-        != ordered_cells
+        tuple(target.parameter_group_id for target in chunk_config.simulation_targets)
+        != ordered_parameter_groups
     ):
-        raise ValueError("chunk quota order differs from ordered_cell_ids")
+        raise ValueError("chunk quota order differs from ordered_parameter_group_ids")
     if (
         tuple(target.simulation_count for target in chunk_config.simulation_targets)
         != expected_increment
@@ -347,9 +346,8 @@ def load_completed_chunk(summary_path: Path) -> CompletedChunk:
         summary_path=path,
         root=root,
         family=chunk_config.family_name,
-        revision_id=chunk_config.revision_id,
-        split=chunk_config.split_id,
-        stream_id=chunk_config.stream_id,
+        split=chunk_config.dataset_split,
+        worker_stream_id=chunk_config.worker_stream_id,
         accepted_before=accepted_before,
         accepted_count=accepted_count,
         accepted_after=accepted_after,
@@ -370,7 +368,7 @@ def validate_combined_plan(
         raise ValueError("chunk summaries must be unique")
     split_order = tuple(
         split
-        for split in (SplitId.TRAIN, SplitId.VALIDATION, SplitId.TEST)
+        for split in (DatasetSplit.TRAIN, DatasetSplit.VALIDATION, DatasetSplit.TEST)
         if any(chunk.split is split for chunk in values)
     )
     accepted_by_split: dict[str, int] = {}
@@ -387,18 +385,19 @@ def validate_combined_plan(
                 key=lambda chunk: chunk.accepted_before,
             )
             cursor = 0
-            streams: set[int] = set()
+            worker_stream_ids: set[int] = set()
             roots: set[Path] = set()
             for chunk in family_chunks:
                 if chunk.accepted_before != cursor:
                     raise ValueError(
                         f"{split.value}/{family} chunks have a gap or overlap at {cursor}"
                     )
-                if chunk.stream_id in streams or chunk.root in roots:
+                if chunk.worker_stream_id in worker_stream_ids or chunk.root in roots:
                     raise ValueError(
-                        f"{split.value}/{family} chunks must use distinct streams and roots"
+                        f"{split.value}/{family} chunks must use distinct worker "
+                        "streams and roots"
                     )
-                streams.add(chunk.stream_id)
+                worker_stream_ids.add(chunk.worker_stream_id)
                 roots.add(chunk.root)
                 cursor = chunk.accepted_after
                 ordered.append(chunk)
@@ -466,9 +465,8 @@ def preflight(
         "chunks": [
             {
                 "family": chunk.family,
-                "revision_id": chunk.revision_id,
                 "split": chunk.split.value,
-                "stream_id": chunk.stream_id,
+                "worker_stream_id": chunk.worker_stream_id,
                 "accepted_before": chunk.accepted_before,
                 "accepted_after": chunk.accepted_after,
                 "attempted_count": chunk.attempted_count,
@@ -505,7 +503,7 @@ def _validate_view(
     split_counts = manifest.get("split_counts")
     if not isinstance(split_counts, Mapping):
         raise TypeError("combined view split_counts must be an object")
-    for split in (SplitId.TRAIN, SplitId.VALIDATION, SplitId.TEST):
+    for split in (DatasetSplit.TRAIN, DatasetSplit.VALIDATION, DatasetSplit.TEST):
         per_family = plan.accepted_simulations_per_family_by_split.get(split.value, 0)
         expected_split = {
             "attempted": plan.attempted_simulations_by_split.get(split.value, 0),

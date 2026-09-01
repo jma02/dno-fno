@@ -12,7 +12,7 @@ import numpy as np
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
     random_generator_for_simulation,
 )
 from solver.gen_data.tanaka_sampling import (
@@ -22,9 +22,8 @@ from solver.gen_data.tanaka_sampling import (
     STEEP_DEPTH_BOUNDS,
     TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
     TANAKA_MINIMUM_RESOLUTION_RATIO,
-    TANAKA_SAMPLE_CELL_IDS,
-    TANAKA_SAMPLE_CELLS,
-    TANAKA_SAMPLING_REVISION_V3,
+    TANAKA_PARAMETER_GROUP_IDS,
+    TANAKA_PARAMETER_GROUPS,
     TanakaCrest,
     sample_tanaka_simulation,
     tanaka_conditional_depth_bounds,
@@ -41,23 +40,21 @@ def assignment(
     cell_index: int,
     *,
     family_id: int = 2,
-    revision_id: int = TANAKA_SAMPLING_REVISION_V3,
-    split_id: SplitId = SplitId.TRAIN,
-    stream_id: int = 0,
+    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    worker_stream_id: int = 0,
     attempt_index: int | None = None,
 ) -> AttemptAssignment:
-    """Return one deterministic assignment for a Tanaka sample cell."""
+    """Return one deterministic assignment for a Tanaka parameter group."""
 
     attempt = cell_index if attempt_index is None else attempt_index
     return AttemptAssignment(
         simulation_key=SimulationKey(
             family_id=family_id,
-            revision_id=revision_id,
-            split_id=split_id,
-            stream_id=stream_id,
+            dataset_split=dataset_split,
+            worker_stream_id=worker_stream_id,
             attempt_index=attempt,
         ),
-        cell_id=TANAKA_SAMPLE_CELL_IDS[cell_index],
+        parameter_group_id=TANAKA_PARAMETER_GROUP_IDS[cell_index],
     )
 
 
@@ -65,13 +62,13 @@ class TanakaSamplingTest(unittest.TestCase):
     def test_cells_are_exactly_the_declared_eleven(self) -> None:
         coordinates = tuple(
             (
-                cell_id,
+                parameter_group_id,
                 regime,
                 crest_count,
                 right_moving_count,
             )
-            for cell_id, (regime, crest_count, right_moving_count) in (
-                TANAKA_SAMPLE_CELLS.items()
+            for parameter_group_id, (regime, crest_count, right_moving_count) in (
+                TANAKA_PARAMETER_GROUPS.items()
             )
         )
         self.assertEqual(
@@ -91,12 +88,11 @@ class TanakaSamplingTest(unittest.TestCase):
             ),
         )
 
-    def test_revision_3_replay_is_bitwise_deterministic(self) -> None:
-        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
-            with self.subTest(cell=cell_id):
+    def test_replay_is_bitwise_deterministic(self) -> None:
+        for cell_index, parameter_group_id in enumerate(TANAKA_PARAMETER_GROUP_IDS):
+            with self.subTest(parameter_group=parameter_group_id):
                 attempted = assignment(
                     cell_index,
-                    revision_id=TANAKA_SAMPLING_REVISION_V3,
                     attempt_index=91,
                 )
                 first = sample_tanaka_simulation(attempted)
@@ -116,11 +112,10 @@ class TanakaSamplingTest(unittest.TestCase):
 
         keys = (
             base,
-            SimulationKey(1, 3, SplitId.TRAIN, 0, 41),
-            SimulationKey(2, 4, SplitId.TRAIN, 0, 41),
-            SimulationKey(2, 3, SplitId.VALIDATION, 0, 41),
-            SimulationKey(2, 3, SplitId.TRAIN, 1, 41),
-            SimulationKey(2, 3, SplitId.TRAIN, 0, 42),
+            SimulationKey(1, DatasetSplit.TRAIN, 0, 41),
+            SimulationKey(2, DatasetSplit.VALIDATION, 0, 41),
+            SimulationKey(2, DatasetSplit.TRAIN, 1, 41),
+            SimulationKey(2, DatasetSplit.TRAIN, 0, 42),
         )
         first_draws = {
             tuple(random_generator_for_simulation(key).random(8)) for key in keys
@@ -128,8 +123,10 @@ class TanakaSamplingTest(unittest.TestCase):
         self.assertEqual(len(first_draws), len(keys))
 
     def test_support_sums_and_separation_over_many_attempts(self) -> None:
-        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
-            regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[cell_id]
+        for cell_index, parameter_group_id in enumerate(TANAKA_PARAMETER_GROUP_IDS):
+            regime, crest_count, right_moving_count = TANAKA_PARAMETER_GROUPS[
+                parameter_group_id
+            ]
             for attempt_index in range(512):
                 sample = sample_tanaka_simulation(
                     assignment(cell_index, attempt_index=attempt_index)
@@ -173,16 +170,15 @@ class TanakaSamplingTest(unittest.TestCase):
                         <= STEEP_ALPHA_BOUNDS[1]
                     )
 
-    def test_revision_3_direct_sampling_satisfies_conditional_support(
+    def test_direct_sampling_satisfies_conditional_support(
         self,
     ) -> None:
-        for cell_index, cell_id in enumerate(TANAKA_SAMPLE_CELL_IDS):
-            regime, _, _ = TANAKA_SAMPLE_CELLS[cell_id]
+        for cell_index, parameter_group_id in enumerate(TANAKA_PARAMETER_GROUP_IDS):
+            regime, _, _ = TANAKA_PARAMETER_GROUPS[parameter_group_id]
             for attempt_index in range(512):
                 sample = sample_tanaka_simulation(
                     assignment(
                         cell_index,
-                        revision_id=TANAKA_SAMPLING_REVISION_V3,
                         attempt_index=attempt_index,
                     )
                 )
@@ -232,17 +228,16 @@ class TanakaSamplingTest(unittest.TestCase):
                     },
                 )
 
-    def test_revision_3_draw_order_is_amplitudes_then_conditional_depth(
+    def test_draw_order_is_amplitudes_then_conditional_depth(
         self,
     ) -> None:
         cell_index = 6
         attempted = assignment(
             cell_index,
-            revision_id=TANAKA_SAMPLING_REVISION_V3,
             attempt_index=314,
         )
-        regime, crest_count, right_moving_count = TANAKA_SAMPLE_CELLS[
-            TANAKA_SAMPLE_CELL_IDS[cell_index]
+        regime, crest_count, right_moving_count = TANAKA_PARAMETER_GROUPS[
+            TANAKA_PARAMETER_GROUP_IDS[cell_index]
         ]
         rng = random_generator_for_simulation(attempted.simulation_key)
 
@@ -297,16 +292,12 @@ class TanakaSamplingTest(unittest.TestCase):
 
     def test_direction_compositions_and_json_are_exact(self) -> None:
         directions: set[int] = set()
-        for cell_index in range(len(TANAKA_SAMPLE_CELL_IDS)):
+        for cell_index in range(len(TANAKA_PARAMETER_GROUP_IDS)):
             sample = sample_tanaka_simulation(
                 assignment(cell_index, attempt_index=700 + cell_index)
             )
             directions.update(crest.direction for crest in sample.crests)
             record = sample.to_json_record()
-            self.assertEqual(
-                record["seed_words"],
-                list(sample.assignment.simulation_key.seed_words),
-            )
             self.assertEqual(record["crest_count"], len(sample.crests))
             self.assertEqual(
                 record["right_moving_count"],
@@ -331,13 +322,12 @@ class TanakaSamplingTest(unittest.TestCase):
             },
         )
 
-    def test_revision_3_boundary_corruption_fails_below_and_passes_above(
+    def test_boundary_corruption_fails_below_and_passes_above(
         self,
     ) -> None:
         sample = sample_tanaka_simulation(
             assignment(
                 0,
-                revision_id=TANAKA_SAMPLING_REVISION_V3,
                 attempt_index=812,
             )
         )
@@ -371,22 +361,6 @@ class TanakaSamplingTest(unittest.TestCase):
             TANAKA_MINIMUM_RESOLUTION_RATIO,
         )
 
-    def test_unknown_revision_fails_closed(self) -> None:
-        for revision_id in (1, 4):
-            with self.subTest(revision_id=revision_id):
-                attempted = assignment(0, revision_id=revision_id)
-                with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
-                    sample_tanaka_simulation(attempted)
-
-                valid = sample_tanaka_simulation(assignment(0))
-                corrupt = replace(valid, assignment=attempted)
-                self.assertIn(
-                    "unsupported Tanaka sampling revision",
-                    tanaka_support_violations(corrupt),
-                )
-                with self.assertRaisesRegex(ValueError, "unsupported.*revision"):
-                    corrupt.to_json_record()
-
     def test_resolution_helpers_fail_closed_on_invalid_inputs(self) -> None:
         self.assertEqual(
             tanaka_inverse_width(alpha=0.25, depth=0.5),
@@ -411,7 +385,7 @@ class TanakaSamplingTest(unittest.TestCase):
         sample = sample_tanaka_simulation(assignment(3))
         mismatched_cell = replace(sample, right_moving_count=0)
         self.assertIn(
-            "sample parameters do not match the assigned cell",
+            "sample parameters do not match the assigned parameter group",
             tanaka_support_violations(mismatched_cell),
         )
         corrupt = replace(

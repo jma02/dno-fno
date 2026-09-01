@@ -17,7 +17,9 @@ from solver.gen_data.pipeline.batch_storage import (
     save_batch_plan,
     save_shard,
 )
+from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 
 
 def _target(*, nx: int = 4, maximum_wavenumber: float = 1.0) -> dict[str, object]:
@@ -84,26 +86,20 @@ def _trajectory_metadata(
 def _proposal(
     *,
     family_id: int,
-    revision_id: int,
-    split_id: int,
-    batch_id: int,
-    simulation_ids: tuple[int, ...],
+    dataset_split: DatasetSplit,
+    attempt_indices: tuple[int, ...],
     metadata: dict[str, object],
 ) -> dict[str, np.ndarray]:
     return {
         "family_id": np.asarray(family_id, dtype=np.int16),
-        "revision_id": np.asarray(revision_id, dtype=np.int16),
-        "split_id": np.asarray(split_id, dtype=np.uint8),
-        "batch_id": np.asarray(batch_id, dtype=np.int64),
-        "simulation_id": np.asarray(simulation_ids, dtype=np.int64),
-        "cell_id": np.arange(len(simulation_ids), dtype=np.int32),
-        "root_seed": np.zeros(len(simulation_ids), dtype=np.uint64),
-        "stream_id": np.zeros(len(simulation_ids), dtype=np.uint32),
-        "attempt_index": np.arange(len(simulation_ids), dtype=np.uint64),
+        "dataset_split": np.asarray(dataset_split.value),
+        "parameter_group_id": np.arange(len(attempt_indices), dtype=np.int32),
+        "worker_stream_id": np.zeros(len(attempt_indices), dtype=np.uint32),
+        "attempt_index": np.asarray(attempt_indices, dtype=np.uint64),
         "simulation_spec_json": np.asarray(
             [
-                json.dumps({"simulation_id": simulation_id})
-                for simulation_id in simulation_ids
+                json.dumps({"attempt_index": attempt_index})
+                for attempt_index in attempt_indices
             ]
         ),
         "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
@@ -141,7 +137,6 @@ def _write_batch(
             "time": frame_index.astype(np.float64),
             "simulation_local_index": simulation_local_index,
             "frame_index": frame_index,
-            "selected_dense_index": frame_index,
         },
     )
     blocks = {
@@ -161,7 +156,9 @@ def _write_batch(
                 row_count=blocks.get(local_index, (-1, 0))[1],
                 metrics={},
             )
-            for local_index, simulation_id in enumerate(proposal["simulation_id"])
+            for local_index, simulation_id in enumerate(
+                compute_batch_simulation_ids(proposal)
+            )
         ),
         metadata={},
     )
@@ -184,10 +181,8 @@ class DatasetViewTests(unittest.TestCase):
             first,
             proposal=_proposal(
                 family_id=0,
-                revision_id=2,
-                split_id=0,
-                batch_id=0,
-                simulation_ids=(10, 11),
+                dataset_split=DatasetSplit.TRAIN,
+                attempt_indices=(10, 11),
                 metadata=_static_metadata(),
             ),
             accepted_local_indices=(0,),
@@ -197,10 +192,8 @@ class DatasetViewTests(unittest.TestCase):
             second,
             proposal=_proposal(
                 family_id=1,
-                revision_id=3,
-                split_id=1,
-                batch_id=0,
-                simulation_ids=(20,),
+                dataset_split=DatasetSplit.VALIDATION,
+                attempt_indices=(20,),
                 metadata=_trajectory_metadata("tanaka"),
             ),
             accepted_local_indices=(0,),
@@ -225,7 +218,7 @@ class DatasetViewTests(unittest.TestCase):
                 np.asarray([0, 2, 2], dtype=np.int32),
             )
 
-    def test_shared_target_contract_must_match(self) -> None:
+    def test_training_target_settings_must_match(self) -> None:
         stokes = BatchPaths.for_batch(
             self.root, family="stokes", split="train", batch_id=0
         )
@@ -236,10 +229,8 @@ class DatasetViewTests(unittest.TestCase):
             stokes,
             proposal=_proposal(
                 family_id=0,
-                revision_id=2,
-                split_id=0,
-                batch_id=0,
-                simulation_ids=(1,),
+                dataset_split=DatasetSplit.TRAIN,
+                attempt_indices=(1,),
                 metadata=_static_metadata(maximum_wavenumber=2.0),
             ),
             accepted_local_indices=(0,),
@@ -249,38 +240,40 @@ class DatasetViewTests(unittest.TestCase):
             tanaka,
             proposal=_proposal(
                 family_id=1,
-                revision_id=3,
-                split_id=1,
-                batch_id=0,
-                simulation_ids=(2,),
+                dataset_split=DatasetSplit.VALIDATION,
+                attempt_indices=(2,),
                 metadata=_trajectory_metadata("tanaka", maximum_wavenumber=1.0),
             ),
             accepted_local_indices=(0,),
             frames_per_simulation=1,
         )
-        with self.assertRaisesRegex(ValueError, "DNO target contract"):
+        with self.assertRaisesRegex(ValueError, "DNO target settings"):
             build_dataset_view(self.root, (stokes, tanaka))
 
-    def test_one_family_revision_cannot_mix_execution_contracts(self) -> None:
+    def test_one_family_cannot_mix_generator_settings(self) -> None:
         batches = tuple(
             BatchPaths.for_batch(self.root, family="tanaka", split=split, batch_id=0)
             for split in ("train", "validation")
         )
-        for index, (paths, fine_dt) in enumerate(zip(batches, (0.01, 0.005))):
+        for index, (paths, fine_dt, dataset_split) in enumerate(
+            zip(
+                batches,
+                (0.01, 0.005),
+                (DatasetSplit.TRAIN, DatasetSplit.VALIDATION),
+            )
+        ):
             _write_batch(
                 paths,
                 proposal=_proposal(
                     family_id=1,
-                    revision_id=3,
-                    split_id=index,
-                    batch_id=0,
-                    simulation_ids=(10 + index,),
+                    dataset_split=dataset_split,
+                    attempt_indices=(10 + index,),
                     metadata=_trajectory_metadata("tanaka", fine_dt=fine_dt),
                 ),
                 accepted_local_indices=(0,),
                 frames_per_simulation=1,
             )
-        with self.assertRaisesRegex(ValueError, "cannot mix execution contracts"):
+        with self.assertRaisesRegex(ValueError, "cannot mix generator settings"):
             build_dataset_view(self.root, batches)
 
     def test_dual_grid_view_uses_target_grid(self) -> None:
@@ -291,10 +284,8 @@ class DatasetViewTests(unittest.TestCase):
             paths,
             proposal=_proposal(
                 family_id=3,
-                revision_id=4,
-                split_id=2,
-                batch_id=0,
-                simulation_ids=(30,),
+                dataset_split=DatasetSplit.TEST,
+                attempt_indices=(30,),
                 metadata=_trajectory_metadata(
                     "jonswap_tma",
                     evolution_nx=8,
@@ -308,7 +299,7 @@ class DatasetViewTests(unittest.TestCase):
         view = build_dataset_view(self.root, (paths,))
         manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
         self.assertEqual(manifest["grid"]["nx"], 4)
-        self.assertEqual(manifest["dataset_contract"]["target"]["nx"], 4)
+        self.assertEqual(manifest["dataset_settings"]["target"]["nx"], 4)
 
     def test_uncommitted_batch_cannot_enter_view(self) -> None:
         paths = BatchPaths.for_batch(
@@ -318,10 +309,8 @@ class DatasetViewTests(unittest.TestCase):
             paths,
             _proposal(
                 family_id=0,
-                revision_id=2,
-                split_id=2,
-                batch_id=0,
-                simulation_ids=(40,),
+                dataset_split=DatasetSplit.TEST,
+                attempt_indices=(40,),
                 metadata=_static_metadata(),
             ),
         )

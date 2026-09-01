@@ -50,10 +50,8 @@ def _source(family: str, root: Path) -> DatasetSource:
 
 
 def _details(family: str, root: Path) -> SourceDetails:
-    revisions = {"stokes": 2, "tanaka": 3, "benjamin_feir": 4, "jonswap_tma": 4}
     return SourceDetails(
         source=_source(family, root),
-        revision_id=revisions[family],
         length=2.0 * np.pi,
         gravity=9.81,
         stored_nx=4,

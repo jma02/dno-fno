@@ -16,7 +16,9 @@ from solver.gen_data.pipeline.batch_storage import (
     save_batch_plan,
     save_shard,
 )
+from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 
 TRAIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_DIR))
@@ -34,8 +36,8 @@ def _write_batch(
     family: str,
     family_id: int,
     split: str,
-    split_id: int,
-    simulation_ids: tuple[int, ...],
+    dataset_split: DatasetSplit,
+    attempt_indices: tuple[int, ...],
     accepted_local_indices: tuple[int, ...],
 ) -> BatchPaths:
     paths = BatchPaths.for_batch(
@@ -46,22 +48,19 @@ def _write_batch(
     )
     proposal = {
         "family_id": np.asarray(family_id, dtype=np.int16),
-        "revision_id": np.asarray(1, dtype=np.int16),
-        "split_id": np.asarray(split_id, dtype=np.uint8),
-        "batch_id": np.asarray(0, dtype=np.int64),
-        "simulation_id": np.asarray(simulation_ids, dtype=np.int64),
-        "cell_id": np.arange(len(simulation_ids), dtype=np.int32),
-        "root_seed": np.zeros(len(simulation_ids), dtype=np.uint64),
-        "stream_id": np.zeros(len(simulation_ids), dtype=np.uint32),
-        "attempt_index": np.arange(len(simulation_ids), dtype=np.uint64),
+        "dataset_split": np.asarray(dataset_split.value),
+        "parameter_group_id": np.arange(len(attempt_indices), dtype=np.int32),
+        "worker_stream_id": np.zeros(len(attempt_indices), dtype=np.uint32),
+        "attempt_index": np.asarray(attempt_indices, dtype=np.uint64),
         "simulation_spec_json": np.asarray(
             [
-                json.dumps({"simulation_id": simulation_id})
-                for simulation_id in simulation_ids
+                json.dumps({"attempt_index": attempt_index})
+                for attempt_index in attempt_indices
             ]
         ),
         "metadata_json": np.asarray("{}"),
     }
+    simulation_ids = compute_batch_simulation_ids(proposal)
     save_batch_plan(paths, proposal)
     frames_per_simulation = 2
     simulation_local_index = np.repeat(
@@ -85,7 +84,6 @@ def _write_batch(
         "time": frame_index.astype(np.float64),
         "simulation_local_index": simulation_local_index,
         "frame_index": frame_index,
-        "selected_dense_index": frame_index * np.int32(4),
     }
     save_shard(paths, shard)
     blocks = {
@@ -94,7 +92,7 @@ def _write_batch(
     }
     records = tuple(
         SimulationCommitRecord(
-            simulation_id=simulation_id,
+            simulation_id=int(simulation_id),
             accepted=local_index in blocks,
             required_bits=63 if local_index in blocks else 32,
             evaluated_bits=63,
@@ -115,8 +113,8 @@ def _build_single_family_view(root: Path) -> Path:
         family="stokes",
         family_id=0,
         split="train",
-        split_id=0,
-        simulation_ids=(10,),
+        dataset_split=DatasetSplit.TRAIN,
+        attempt_indices=(10,),
         accepted_local_indices=(0,),
     )
     return build_dataset_view(
@@ -133,8 +131,8 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family="stokes",
             family_id=0,
             split="train",
-            split_id=0,
-            simulation_ids=(10, 11),
+            dataset_split=DatasetSplit.TRAIN,
+            attempt_indices=(10, 11),
             accepted_local_indices=(0,),
         )
         validation = _write_batch(
@@ -142,8 +140,8 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family="tanaka",
             family_id=1,
             split="validation",
-            split_id=1,
-            simulation_ids=(20,),
+            dataset_split=DatasetSplit.VALIDATION,
+            attempt_indices=(20,),
             accepted_local_indices=(0,),
         )
         paths = build_dataset_view(
@@ -154,8 +152,15 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
         dataset = load_dataset_arrays(paths.manifest)
         assert dataset["eta"].shape == (4, 4)
         assert np.array_equal(
-            dataset["split_id"],
-            np.asarray([0, 0, 1, 1], dtype=np.uint8),
+            dataset["dataset_split"],
+            np.asarray(
+                [
+                    DatasetSplit.TRAIN.value,
+                    DatasetSplit.TRAIN.value,
+                    DatasetSplit.VALIDATION.value,
+                    DatasetSplit.VALIDATION.value,
+                ]
+            ),
         )
         assert np.array_equal(
             dataset["accepted_mask"],

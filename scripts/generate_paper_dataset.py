@@ -46,8 +46,8 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
-    BENJAMIN_FEIR_SAMPLE_CELLS,
+    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    BENJAMIN_FEIR_PARAMETER_GROUPS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
 )
@@ -57,7 +57,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     PERTURBATION_RATIO_MIN,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELL_IDS,
+    JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.artifact_io import write_json_atomic  # noqa: E402
 from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
@@ -66,11 +66,10 @@ from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
     build_dataset_view,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    SampleCellTarget,
+    ParameterGroupTarget,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
     balanced_simulation_targets,
-    DATASET_REVISION_BY_FAMILY,
 )
 from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
     checks_from_bits,
@@ -84,7 +83,7 @@ from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_SAMPLE_CELL_IDS,
+    STOKES_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.stokes_batch_executor import (  # noqa: E402
     make_static_stokes_batch_executor,
@@ -94,7 +93,7 @@ from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
     StaticStokesContract,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELL_IDS,
+    TANAKA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.trajectory_batch_executor import (  # noqa: E402
     TrajectoryExecutionConfig,
@@ -119,11 +118,11 @@ FAMILY_IDS: dict[PaperFamily, PhysicalFamilyId] = {
     "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
-FAMILY_CELL_IDS: dict[PaperFamily, tuple[str, ...]] = {
-    "stokes": STOKES_SAMPLE_CELL_IDS,
-    "tanaka": TANAKA_SAMPLE_CELL_IDS,
-    "benjamin_feir": BENJAMIN_FEIR_SAMPLE_CELL_IDS,
-    "jonswap_tma": JONSWAP_TMA_SAMPLE_CELL_IDS,
+FAMILY_PARAMETER_GROUP_IDS: dict[PaperFamily, tuple[str, ...]] = {
+    "stokes": STOKES_PARAMETER_GROUP_IDS,
+    "tanaka": TANAKA_PARAMETER_GROUP_IDS,
+    "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
 }
 
 
@@ -133,19 +132,19 @@ class GenerationRequest:
 
     output_root: Path
     family: PaperFamily
-    split: SplitId
+    split: DatasetSplit
     accepted_simulations: int
     batch_size: int
     accepted_simulations_before: int = 0
     platform: Platform = "cpu"
-    stream_id: int = 0
+    worker_stream_id: int = 0
     first_attempt_index: int = 0
 
     def __post_init__(self) -> None:
         if self.family not in FAMILY_IDS:
             raise ValueError(f"unknown paper-dataset family: {self.family}")
-        if not isinstance(self.split, SplitId):
-            raise TypeError("split must be a SplitId")
+        if not isinstance(self.split, DatasetSplit):
+            raise TypeError("split must be a DatasetSplit")
         for value, name, positive in (
             (self.accepted_simulations, "accepted_simulations", True),
             (self.batch_size, "batch_size", True),
@@ -154,7 +153,7 @@ class GenerationRequest:
                 "accepted_simulations_before",
                 False,
             ),
-            (self.stream_id, "stream_id", False),
+            (self.worker_stream_id, "worker_stream_id", False),
             (self.first_attempt_index, "first_attempt_index", False),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
@@ -205,7 +204,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--split",
-        choices=tuple(split.value for split in SplitId),
+        choices=tuple(split.value for split in DatasetSplit),
         required=True,
         help="Simulation-level dataset split.",
     )
@@ -213,7 +212,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--accepted-simulations",
         type=_positive_integer,
         required=True,
-        help="Number of valid simulations to generate across sampling cells.",
+        help="Number of valid simulations to generate across parameter groups.",
     )
     parser.add_argument(
         "--output-root",
@@ -243,16 +242,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="JAX execution platform; defaults to the fail-safe CPU path.",
     )
     parser.add_argument(
-        "--stream-id",
+        "--worker-stream-id",
         type=_nonnegative_integer,
         default=0,
-        help="Independent deterministic stream within this family and split.",
+        help="Deterministic ID and RNG stream assigned to this worker.",
     )
     parser.add_argument(
         "--first-attempt-index",
         type=_nonnegative_integer,
         default=0,
-        help="First attempt coordinate in the selected deterministic stream.",
+        help="First attempt index assigned to this worker stream.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -272,12 +271,12 @@ def request_from_args(args: argparse.Namespace) -> GenerationRequest:
     return GenerationRequest(
         output_root=args.output_root,
         family=args.family,
-        split=SplitId(args.split),
+        split=DatasetSplit(args.split),
         accepted_simulations=args.accepted_simulations,
         batch_size=args.batch_size,
         accepted_simulations_before=args.accepted_simulations_before,
         platform=args.platform,
-        stream_id=args.stream_id,
+        worker_stream_id=args.worker_stream_id,
         first_attempt_index=args.first_attempt_index,
     )
 
@@ -299,14 +298,14 @@ def _benjamin_feir_sampling_support_record() -> dict[str, object]:
         "schema": "paper_benjamin_feir_sampling_support_v1",
         "mode_pair_cells": [
             {
-                "cell_id": cell_id,
+                "parameter_group_id": parameter_group_id,
                 "carrier_mode": carrier_mode,
                 "sideband_offset": sideband_offset,
             }
-            for cell_id, (
+            for parameter_group_id, (
                 carrier_mode,
                 sideband_offset,
-            ) in BENJAMIN_FEIR_SAMPLE_CELLS.items()
+            ) in BENJAMIN_FEIR_PARAMETER_GROUPS.items()
         ],
         "conditional_carrier_steepness": {
             "law": "uniform",
@@ -335,24 +334,24 @@ def _benjamin_feir_sampling_support_record() -> dict[str, object]:
 
 
 def incremental_simulation_targets(
-    cell_ids: Sequence[str],
+    parameter_group_ids: Sequence[str],
     *,
     accepted_simulations_before: int,
     simulation_count: int,
-) -> tuple[SampleCellTarget, ...]:
+) -> tuple[ParameterGroupTarget, ...]:
     """Return this chunk's balanced valid-simulation targets."""
 
     before = balanced_simulation_targets(
-        cell_ids,
+        parameter_group_ids,
         simulation_count=accepted_simulations_before,
     )
     after = balanced_simulation_targets(
-        cell_ids,
+        parameter_group_ids,
         simulation_count=accepted_simulations_before + simulation_count,
     )
     targets = tuple(
-        SampleCellTarget(
-            cell_id=after_target.cell_id,
+        ParameterGroupTarget(
+            parameter_group_id=after_target.parameter_group_id,
             simulation_count=(
                 after_target.simulation_count - before_target.simulation_count
             ),
@@ -376,9 +375,9 @@ def build_chunk_config(
     selected_execution = execution or _paper_execution(request.family)
     if selected_execution != _paper_execution(request.family):
         raise ValueError("the paper-dataset launcher requires the exact contract")
-    cells = FAMILY_CELL_IDS[request.family]
+    parameter_group_ids = FAMILY_PARAMETER_GROUP_IDS[request.family]
     simulation_targets = incremental_simulation_targets(
-        cells,
+        parameter_group_ids,
         accepted_simulations_before=request.accepted_simulations_before,
         simulation_count=request.accepted_simulations,
     )
@@ -391,7 +390,7 @@ def build_chunk_config(
         "accepted_simulations_after": (
             request.accepted_simulations_before + request.accepted_simulations
         ),
-        "ordered_cell_ids": list(cells),
+        "ordered_parameter_group_ids": list(parameter_group_ids),
         "execution_platform": request.platform,
     }
     if request.family == "stokes":
@@ -415,11 +414,15 @@ def build_chunk_config(
         root=request.output_root,
         family_name=request.family,
         family_id=FAMILY_IDS[request.family],
-        revision_id=DATASET_REVISION_BY_FAMILY[FAMILY_IDS[request.family]],
-        split_id=request.split,
-        stream_id=request.stream_id,
+        dataset_split=request.split,
+        worker_stream_id=request.worker_stream_id,
         simulation_targets=simulation_targets,
-        cell_codes={cell_id: cell_code for cell_code, cell_id in enumerate(cells)},
+        parameter_group_codes={
+            parameter_group_id: parameter_group_code
+            for parameter_group_code, parameter_group_id in enumerate(
+                parameter_group_ids
+            )
+        },
         batch_size=request.batch_size,
         first_attempt_index=request.first_attempt_index,
         configuration={
@@ -517,11 +520,11 @@ def preflight(
             ) from error
     state = scan_dataset_generation(chunk_config)
     cumulative_before = balanced_simulation_targets(
-        FAMILY_CELL_IDS[request.family],
+        FAMILY_PARAMETER_GROUP_IDS[request.family],
         simulation_count=request.accepted_simulations_before,
     )
     cumulative_after = balanced_simulation_targets(
-        FAMILY_CELL_IDS[request.family],
+        FAMILY_PARAMETER_GROUP_IDS[request.family],
         simulation_count=(
             request.accepted_simulations_before + request.accepted_simulations
         ),
@@ -529,15 +532,17 @@ def preflight(
     maximum_attempts = chunk_config.maximum_attempts_by_parameter_group
     simulation_targets = [
         {
-            "cell_id": target.cell_id,
+            "parameter_group_id": target.parameter_group_id,
             "accepted_before": before.simulation_count,
             "chunk_target_accepted": target.simulation_count,
             "accepted_after": after.simulation_count,
-            "maximum_attempts": maximum_attempts[target.cell_id],
-            "durable_attempted": state.simulation_attempt_counts[target.cell_id],
+            "maximum_attempts": maximum_attempts[target.parameter_group_id],
+            "durable_attempted": state.simulation_attempt_counts[
+                target.parameter_group_id
+            ],
             "remaining_attempts": (
-                maximum_attempts[target.cell_id]
-                - state.simulation_attempt_counts[target.cell_id]
+                maximum_attempts[target.parameter_group_id]
+                - state.simulation_attempt_counts[target.parameter_group_id]
             ),
         }
         for before, target, after in zip(
@@ -554,7 +559,6 @@ def preflight(
         "schema": "paper_dataset_quota_preflight_v1",
         "mode": "dry_run",
         "no_numerical_generation_performed": True,
-        "revision_id": chunk_config.revision_id,
         "output_root": str(request.output_root),
         "artifact_namespace": {
             "family": request.family,
@@ -581,11 +585,11 @@ def preflight(
             "maximum_retries_per_parameter_group": (MAX_RETRIES_PER_PARAMETER_GROUP),
             "quotas": simulation_targets,
             "chunk_identity": {
-                "stream_id": request.stream_id,
+                "worker_stream_id": request.worker_stream_id,
                 "first_attempt_index": request.first_attempt_index,
                 "output_root": str(request.output_root),
                 "rule": (
-                    "use a distinct stream_id and output_root for every additive chunk"
+                    "use a distinct worker_stream_id and output_root for every additive chunk"
                 ),
             },
         },
@@ -642,29 +646,39 @@ def _summarize_committed_simulations(
     state: DatasetChunkState,
     chunk_config: DatasetChunkConfig,
 ) -> dict[str, object]:
-    code_to_cell = {code: cell for cell, code in chunk_config.cell_codes.items()}
+    parameter_group_by_code = {
+        code: parameter_group_id
+        for parameter_group_id, code in chunk_config.parameter_group_codes.items()
+    }
     attempted = Counter(
-        {target.cell_id: 0 for target in chunk_config.simulation_targets}
+        {target.parameter_group_id: 0 for target in chunk_config.simulation_targets}
     )
     accepted = Counter(
-        {target.cell_id: 0 for target in chunk_config.simulation_targets}
+        {target.parameter_group_id: 0 for target in chunk_config.simulation_targets}
     )
     rejection_reasons: Counter[str] = Counter()
 
     for paths in state.committed:
         with np.load(paths.batch_plan, allow_pickle=False) as batch_plan:
-            encoded_cells = np.asarray(batch_plan["cell_id"], dtype=np.int32)
+            encoded_parameter_groups = np.asarray(
+                batch_plan["parameter_group_id"], dtype=np.int32
+            )
         result = _read_json_object(paths.result)
         simulations = result.get("simulations")
-        if not isinstance(simulations, list) or len(simulations) != encoded_cells.size:
+        if (
+            not isinstance(simulations, list)
+            or len(simulations) != encoded_parameter_groups.size
+        ):
             raise RuntimeError("result does not contain every planned simulation")
         for local_index, simulation in enumerate(simulations):
             if not isinstance(simulation, dict):
                 raise TypeError("result simulation must be a JSON object")
-            cell_id = code_to_cell[int(encoded_cells[local_index])]
-            attempted[cell_id] += 1
+            parameter_group_id = parameter_group_by_code[
+                int(encoded_parameter_groups[local_index])
+            ]
+            attempted[parameter_group_id] += 1
             if bool(simulation.get("accepted")):
-                accepted[cell_id] += 1
+                accepted[parameter_group_id] += 1
                 continue
             failed_bits = simulation.get("failed_bits")
             if isinstance(failed_bits, bool) or not isinstance(failed_bits, int):
@@ -680,11 +694,12 @@ def _summarize_committed_simulations(
     if dict(attempted) != dict(state.simulation_attempt_counts):
         raise RuntimeError("summary attempts disagree with generation state")
     by_cell = {
-        target.cell_id: {
+        target.parameter_group_id: {
             "target_accepted": target.simulation_count,
-            "attempted": attempted[target.cell_id],
-            "accepted": accepted[target.cell_id],
-            "rejected": attempted[target.cell_id] - accepted[target.cell_id],
+            "attempted": attempted[target.parameter_group_id],
+            "accepted": accepted[target.parameter_group_id],
+            "rejected": attempted[target.parameter_group_id]
+            - accepted[target.parameter_group_id],
         }
         for target in chunk_config.simulation_targets
     }

@@ -49,15 +49,14 @@ from scripts.render_paper_dataset_worst_simulations import (  # noqa: E402
     validate_scanned_population,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    SPLIT_CODE_BY_ID,
+    DatasetSplit,
     PhysicalFamilyId,
-    SplitId,
 )
 
 
 DESCRIPTION = (
     "Deterministic accepted validation illustrations; these are lower-median "
-    "simulation IDs in fixed central cells, not medoids."
+    "simulation IDs in fixed central parameter groups, not medoids."
 )
 SELECTION_RULE = "sort accepted validation simulation IDs; choose lower median"
 DIMENSIONLESS_VARIABLES: Final = {
@@ -83,12 +82,6 @@ FAMILY_IDS: Final = {
     "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
     "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
 }
-EXPECTED_REVISIONS: Final = {
-    "stokes": 2,
-    "tanaka": 3,
-    "benjamin_feir": 4,
-    "jonswap_tma": 4,
-}
 CENTRAL_VALIDATION_CATEGORIES: Final = {
     "stokes": "finite_moderate",
     "tanaka": "main_m2_q1",
@@ -102,7 +95,6 @@ class SourceDetails:
     """Numerical settings needed to interpret one dataset source."""
 
     source: DatasetSource
-    revision_id: int
     length: float
     gravity: float
     stored_nx: int
@@ -215,24 +207,19 @@ def _source_numerical_scales(
 
 def _validate_source_map(
     source: DatasetSource,
-    *,
-    revision_id: int,
 ) -> None:
     with np.load(source.map_path, allow_pickle=False) as archive:
         accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
         family_ids = np.asarray(archive["trajectory_family_id"], dtype=np.int64)
-        revisions = np.asarray(archive["trajectory_revision_id"], dtype=np.int64)
-        split_ids = np.asarray(archive["trajectory_split_id"], dtype=np.int64)
+        dataset_splits = np.asarray(archive["trajectory_dataset_split"])
     if accepted.ndim != 1 or any(
-        values.shape != accepted.shape for values in (family_ids, revisions, split_ids)
+        values.shape != accepted.shape for values in (family_ids, dataset_splits)
     ):
         raise ValueError("source trajectory arrays have inconsistent shapes")
     if not np.all(family_ids == int(FAMILY_IDS[source.family])):
         raise ValueError(f"{source.family} trajectory map has a wrong family ID")
-    if not np.all(revisions == revision_id):
-        raise ValueError(f"{source.family} trajectory map has a wrong revision")
-    if not np.all(split_ids == SPLIT_CODE_BY_ID[SplitId(source.split)]):
-        raise ValueError(f"{source.family} trajectory map has a wrong split ID")
+    if not np.all(dataset_splits == source.split):
+        raise ValueError(f"{source.family} trajectory map has a wrong dataset split")
 
 
 def load_source_details(source: DatasetSource) -> SourceDetails:
@@ -240,22 +227,15 @@ def load_source_details(source: DatasetSource) -> SourceDetails:
     run_spec = _mapping(summary.get("run_spec"), context="source run_spec")
     if run_spec.get("family_name") != source.family:
         raise ValueError("source run-spec family differs from its summary name")
-    if run_spec.get("split_id") != source.split:
+    if run_spec.get("dataset_split") != source.split:
         raise ValueError("source run-spec split differs from its summary name")
-    revision_id = _nonnegative_integer(
-        run_spec.get("revision_id"),
-        context="source revision_id",
-    )
-    if revision_id != EXPECTED_REVISIONS[source.family]:
-        raise ValueError(f"{source.family} source has the wrong revision")
-    _validate_source_map(source, revision_id=revision_id)
+    _validate_source_map(source)
     length, gravity, stored_nx = _source_numerical_scales(
         summary,
         family=source.family,
     )
     return SourceDetails(
         source=source,
-        revision_id=revision_id,
         length=length,
         gravity=gravity,
         stored_nx=stored_nx,
@@ -294,7 +274,7 @@ def select_validation_trajectories(
                 (item, trajectory)
                 for item in details
                 if item.source.family == family
-                and item.source.split == SplitId.VALIDATION.value
+                and item.source.split == DatasetSplit.VALIDATION.value
                 for trajectory in item.source.trajectories
                 if trajectory.category == category
             ),
@@ -499,7 +479,6 @@ def _simulation_record(illustration: Illustration) -> dict[str, object]:
     trajectory = selected.trajectory
     return {
         "family": source.family,
-        "revision_id": details.revision_id,
         "split": source.split,
         "category": trajectory.category,
         "simulation_id": trajectory.simulation_id,

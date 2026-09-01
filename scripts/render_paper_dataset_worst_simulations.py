@@ -541,10 +541,10 @@ def _trajectory_indices(
     summary: Mapping[str, Any],
     map_path: Path,
 ) -> tuple[TrajectoryIndex, ...]:
-    cell_codes = summary["run_spec"]["cell_codes"]
-    if not isinstance(cell_codes, dict):
-        raise TypeError("summary cell_codes must be a dictionary")
-    categories = {int(code): str(name) for name, code in cell_codes.items()}
+    parameter_group_codes = summary["run_spec"]["parameter_group_codes"]
+    if not isinstance(parameter_group_codes, dict):
+        raise TypeError("summary parameter_group_codes must be a dictionary")
+    categories = {int(code): str(name) for name, code in parameter_group_codes.items()}
 
     with np.load(map_path, allow_pickle=False) as archive:
         accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
@@ -552,7 +552,9 @@ def _trajectory_indices(
             archive["trajectory_simulation_id"],
             dtype=np.int64,
         )
-        cell_ids = np.asarray(archive["trajectory_cell_id"], dtype=np.int32)
+        parameter_group_ids = np.asarray(
+            archive["trajectory_parameter_group_id"], dtype=np.int32
+        )
         first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
         row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
         row_trajectories = np.asarray(archive["trajectory_index"], dtype=np.int32)
@@ -578,13 +580,13 @@ def _trajectory_indices(
             np.arange(local_rows[0], local_rows[0] + count),
         ):
             raise RuntimeError("trajectory rows are not contiguous in its shard")
-        cell_code = int(cell_ids[trajectory_index])
+        parameter_group_code = int(parameter_group_ids[trajectory_index])
         records.append(
             TrajectoryIndex(
                 accepted_index=accepted_index,
                 trajectory_index=trajectory_index,
                 simulation_id=int(simulation_ids[trajectory_index]),
-                category=categories[cell_code],
+                category=categories[parameter_group_code],
                 shard_index=int(shards[0]),
                 first_shard_row=int(local_rows[0]),
                 row_count=count,

@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 import uuid
 
 import numpy as np
 from numpy.typing import NDArray
+
+from solver.gen_data.pipeline.types import JsonObject
 
 
 def load_npz(path: Path) -> dict[str, NDArray[Any]]:
@@ -40,13 +42,13 @@ def parse_json(text: str) -> object:
     return json.loads(text, parse_constant=reject_constant)
 
 
-def read_json_object(path: Path) -> dict[str, object]:
+def read_json_object(path: Path) -> JsonObject:
     """Read a JSON file and require an object at its root."""
 
     value = parse_json(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
-    return value
+    return cast(JsonObject, value)
 
 
 def _write_file_atomically(

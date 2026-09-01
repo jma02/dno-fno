@@ -38,6 +38,7 @@ from solver.evals.model_rollout import (  # noqa: E402
     load_run,
     rollout_surrogate,
 )
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # noqa: E402
 
@@ -127,7 +128,7 @@ def _load_paper_dataset_ics(
             "trajectory_first_row",
             "trajectory_index",
             "trajectory_row_count",
-            "trajectory_split_id",
+            "trajectory_dataset_split",
         }
         missing = sorted(required.difference(mapping.files))
         if missing:
@@ -135,9 +136,11 @@ def _load_paper_dataset_ics(
 
         accepted = np.asarray(mapping["trajectory_accepted"], dtype=bool)
         family_ids = np.asarray(mapping["trajectory_family_id"])
-        split_ids = np.asarray(mapping["trajectory_split_id"])
+        dataset_splits = np.asarray(mapping["trajectory_dataset_split"])
         candidates = np.flatnonzero(
-            accepted & (family_ids == family_id) & (split_ids == 2)
+            accepted
+            & (family_ids == family_id)
+            & (dataset_splits == DatasetSplit.TEST.value)
         )
         if candidates.size < n_ics:
             raise ValueError(
@@ -149,9 +152,9 @@ def _load_paper_dataset_ics(
             np.int64
         )
         row_counts = np.asarray(mapping["trajectory_row_count"])[selected]
-        simulation_ids = np.asarray(mapping["trajectory_simulation_id"])[selected].astype(
-            np.int64
-        )
+        simulation_ids = np.asarray(mapping["trajectory_simulation_id"])[
+            selected
+        ].astype(np.int64)
         trajectory_index = np.asarray(mapping["trajectory_index"])[first_rows]
         frame_indices = np.asarray(mapping["frame_index"])[first_rows]
         shard_indices = np.asarray(mapping["shard_index"])[first_rows].astype(np.int64)
@@ -250,7 +253,7 @@ def _load_paper_dataset_ics(
         "kind": "paper_dataset_test_split",
         "family": family,
         "family_id": family_id,
-        "split_id": 2,
+        "dataset_split": 2,
         "dataset_manifest": str(dataset_path),
         "trajectory_map": str(trajectory_map_path),
         "loaded_shards": loaded_shards,

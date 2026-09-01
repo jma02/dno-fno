@@ -1,6 +1,6 @@
 """Parameter sampling for the paper-dataset JONSWAP/TMA family.
 
-The 27 allocation cells are the Cartesian product of three depth strata,
+The 27 parameter groups are the Cartesian product of three depth strata,
 three peak-enhancement values, and three right-moving energy fractions.
 Each attempted simulation owns one PCG64 stream determined by its complete
 ``SimulationKey.seed_words`` tuple.
@@ -36,8 +36,6 @@ from solver.gen_data.pipeline.simulation_allocation import (
 FloatArray: TypeAlias = NDArray[np.float64]
 JsonRecord: TypeAlias = dict[str, object]
 
-JONSWAP_TMA_SAMPLING_REVISION_V4 = 4
-
 FINITE_PEAK_WAVENUMBER_BOUNDS = (2.0, 12.0)
 FINITE_DEPTH_BOUNDS = (0.1, 1.5)
 DEEP_PEAK_WAVENUMBER_BOUNDS = (2.0, 12.0)
@@ -47,8 +45,8 @@ SHALLOW_DEPTH_WAVENUMBER_BOUNDS = (0.2, 1.5)
 SHALLOW_RELATIVE_HEIGHT_BOUNDS = (0.03, 0.16)
 
 
-JonswapTmaCell: TypeAlias = tuple[RandomSeaStratum, float, float]
-JONSWAP_TMA_SAMPLE_CELLS: dict[str, JonswapTmaCell] = {
+JonswapTmaParameterGroup: TypeAlias = tuple[RandomSeaStratum, float, float]
+JONSWAP_TMA_PARAMETER_GROUPS: dict[str, JonswapTmaParameterGroup] = {
     (
         f"{stratum}__gamma_{format(peak_enhancement, 'g').replace('.', 'p')}"
         f"__right_{format(right_moving_fraction, 'g').replace('.', 'p')}"
@@ -57,7 +55,7 @@ JONSWAP_TMA_SAMPLE_CELLS: dict[str, JonswapTmaCell] = {
     for peak_enhancement in PAPER_PEAK_ENHANCEMENTS
     for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
 }
-JONSWAP_TMA_SAMPLE_CELL_IDS = tuple(JONSWAP_TMA_SAMPLE_CELLS)
+JONSWAP_TMA_PARAMETER_GROUP_IDS = tuple(JONSWAP_TMA_PARAMETER_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -129,7 +127,7 @@ def _sample_finite_or_deep_parameters(
     right_moving_fraction: float,
     band: ResolvedBand,
 ) -> JonswapTmaParameters:
-    """Draw independent uniform variables in a finite- or deep-water cell."""
+    """Draw independent uniform variables for a finite- or deep-water group."""
 
     if stratum == "finite":
         peak_bounds = FINITE_PEAK_WAVENUMBER_BOUNDS
@@ -138,7 +136,7 @@ def _sample_finite_or_deep_parameters(
         peak_bounds = DEEP_PEAK_WAVENUMBER_BOUNDS
         depth_bounds = DEEP_DEPTH_BOUNDS
     else:
-        raise ValueError("parameter sampling requires a finite or deep cell")
+        raise ValueError("parameter sampling requires a finite or deep group")
 
     while True:
         candidate = JonswapTmaParameters(
@@ -168,23 +166,18 @@ def sample_jonswap_tma_simulation(
 ) -> JonswapTmaSample:
     """Sample one complete JONSWAP/TMA specification for an attempted simulation.
 
-    The assignment fixes the allocation cell and random stream before any
+    The assignment fixes the parameter group and random stream before any
     parameter or phase is drawn. The returned specification includes both
     phase arrays and passes the paper-support predicate by construction.
     """
 
-    if assignment.simulation_key.revision_id != JONSWAP_TMA_SAMPLING_REVISION_V4:
-        raise ValueError(
-            "JONSWAP/TMA sampling requires the current revision "
-            f"{JONSWAP_TMA_SAMPLING_REVISION_V4}"
-        )
     try:
-        stratum, peak_enhancement, right_moving_fraction = JONSWAP_TMA_SAMPLE_CELLS[
-            assignment.cell_id
+        stratum, peak_enhancement, right_moving_fraction = JONSWAP_TMA_PARAMETER_GROUPS[
+            assignment.parameter_group_id
         ]
     except KeyError as error:
         raise ValueError(
-            f"unknown JONSWAP/TMA sample cell: {assignment.cell_id}"
+            f"unknown JONSWAP/TMA parameter group: {assignment.parameter_group_id}"
         ) from error
     rng = random_generator_for_simulation(assignment.simulation_key)
     if stratum == "shallow":

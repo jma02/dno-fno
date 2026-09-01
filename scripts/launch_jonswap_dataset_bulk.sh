@@ -3,13 +3,13 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON=${PYTHON:-$ROOT/.venv/bin/python}
-OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_dataset_jonswap_revision4_relative_band_v1}
+OUTPUT_BASE=${OUTPUT_BASE:-$ROOT/outputs/paper_dataset_jonswap}
 GPU_ZERO=${GPU_ZERO:-0}
 GPU_ONE=${GPU_ONE:-1}
 lane_zero=""
 lane_one=""
 
-# lane split count accepted_before stream relative_root label
+# lane split count accepted_before worker_stream relative_root label
 # The last 8,192-simulation learning-curve increment is split into three disjoint
 # execution shards so the two remaining GPU lanes have nearly equal work.
 CHUNKS=(
@@ -37,11 +37,11 @@ done
 mkdir -p "$OUTPUT_BASE/logs"
 
 declare -a COMMAND PREFLIGHTS
-LANE=""; SPLIT=""; COUNT=""; BEFORE=""; STREAM=""; LEAF=""; LABEL=""
+LANE=""; SPLIT=""; COUNT=""; BEFORE=""; WORKER_STREAM=""; LEAF=""; LABEL=""
 CHUNK_ROOT=""; SUMMARY=""; PREFLIGHT=""; LOG=""; GPU=""
 
 build_chunk() {
-    read -r LANE SPLIT COUNT BEFORE STREAM LEAF LABEL <<<"$1"
+    read -r LANE SPLIT COUNT BEFORE WORKER_STREAM LEAF LABEL <<<"$1"
     GPU=$GPU_ONE
     [[ "$LANE" == 0 ]] && GPU=$GPU_ZERO
     CHUNK_ROOT="$OUTPUT_BASE/$LEAF"
@@ -53,7 +53,7 @@ build_chunk() {
         --solver-batch-size 8
         --family jonswap_tma --split "$SPLIT"
         --accepted-simulations "$COUNT" --accepted-simulations-before "$BEFORE"
-        --stream-id "$STREAM" --first-attempt-index 0
+        --worker-stream-id "$WORKER_STREAM" --first-attempt-index 0
         --batch-size 32
         --platform gpu --output-root "$CHUNK_ROOT"
     )
@@ -82,7 +82,7 @@ preflight_chunk() {
     run_child env CUDA_VISIBLE_DEVICES="$GPU" \
         XLA_PYTHON_CLIENT_PREALLOCATE=false \
         JAX_ENABLE_X64=true \
-        MPLCONFIGDIR="/tmp/mpl-paper-jonswap-revision4-gpu${GPU}" \
+        MPLCONFIGDIR="/tmp/mpl-paper-jonswap-gpu${GPU}" \
         "${COMMAND[@]}" --dry-run >"$PREFLIGHT"
     PREFLIGHTS+=("$PREFLIGHT")
 }
@@ -103,7 +103,7 @@ for plan in plans:
     if (plan.get("schema") != "paper_dataset_quota_preflight_v1"
             or plan.get("no_numerical_generation_performed") is not True
             or run.get("family_name") != "jonswap_tma"
-            or run.get("revision_id") != 4 or run.get("batch_size") != 32
+            or run.get("batch_size") != 32
             or run.get("maximum_retries_per_parameter_group") != 32
             or config.get("execution_platform") != "gpu"
             or plan.get("execution") != config.get("trajectory_execution")
@@ -111,9 +111,9 @@ for plan in plans:
             or numerical.get("maximum_wavenumber") != 704.0
             or numerical.get("gl2_iteration_cap") != 5
             or policy.get("solver_batch_size") != 8):
-        raise SystemExit("invalid revision-4 JONSWAP preflight")
+        raise SystemExit("invalid JONSWAP preflight")
     contracts.append(json.dumps({key: config.get(key) for key in (
-        "trajectory_execution", "ordered_cell_ids")},
+        "trajectory_execution", "ordered_parameter_group_ids")},
         sort_keys=True, separators=(",", ":")))
 if len(plans) != 7 or len(set(contracts)) != 1:
     raise SystemExit("JONSWAP preflights do not share one numerical contract")
@@ -136,7 +136,7 @@ run_chunk() {
     run_child env CUDA_VISIBLE_DEVICES="$GPU" \
         XLA_PYTHON_CLIENT_PREALLOCATE=false \
         JAX_ENABLE_X64=true \
-        MPLCONFIGDIR="/tmp/mpl-paper-jonswap-revision4-gpu${GPU}" \
+        MPLCONFIGDIR="/tmp/mpl-paper-jonswap-gpu${GPU}" \
         PYTHONUNBUFFERED=1 "${COMMAND[@]}" --execute >>"$LOG" 2>&1
     check_summary
 }
@@ -200,19 +200,19 @@ observed = {}
 for split, wanted in expected.items():
     selected = sorted((c for c in chunks if c.split.value == split),
                       key=lambda c: c.accepted_before)
-    got = tuple((c.accepted_before, c.accepted_after, c.stream_id)
+    got = tuple((c.accepted_before, c.accepted_after, c.worker_stream_id)
                 for c in selected)
     if got != wanted or len({c.root for c in selected}) != len(selected):
         raise SystemExit(f"invalid JONSWAP {split} intervals: {got}")
     observed[split] = got
-if len(chunks) != 8 or len({c.revision_id for c in chunks}) != 1:
-    raise SystemExit("completed JONSWAP chunks do not share one revision")
+if len(chunks) != 8:
+    raise SystemExit("expected eight completed JONSWAP chunks")
 print(json.dumps({"status": "passed", "family": "jonswap_tma",
     "accepted_simulations": {"train": 16384, "validation": 1024, "test": 1024},
-    "intervals_with_stream_id": observed,
+    "intervals_with_worker_stream_id": observed,
     "full_four_family_view_preflight_pending": True}, indent=2))
 ' "${summaries[@]}" >"$OUTPUT_BASE/jonswap_view_builder_input_check.json"
 
 trap - EXIT INT TERM
-printf 'revision-4 JONSWAP generation complete: %s\n' "$OUTPUT_BASE"
+printf 'JONSWAP dataset generation complete: %s\n' "$OUTPUT_BASE"
 printf 'final gate: run the view-builder preflight with all four families\n'

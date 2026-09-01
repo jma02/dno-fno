@@ -18,11 +18,15 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
+from solver.gen_data.pipeline.artifact_io import load_npz  # noqa: E402
+from solver.gen_data.pipeline.batch_artifacts import (  # noqa: E402
+    compute_batch_simulation_ids,
+)
 from solver.gen_data.pipeline.batch_storage import BatchStatus, inspect_batch  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    SampleCellTarget,
+    ParameterGroupTarget,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
@@ -32,7 +36,7 @@ from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
 )
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_SAMPLE_CELL_IDS,
+    STOKES_PARAMETER_GROUP_IDS,
     StokesSample,
     sample_stokes_simulation,
 )
@@ -66,7 +70,7 @@ def _run_spec(
     root: Path,
     contract: StaticStokesContract,
     *,
-    cell_ids: tuple[str, ...],
+    parameter_group_ids: tuple[str, ...],
     targets: tuple[int, ...],
     maximum_ursell_redraws: int = 0,
     batch_size: int = 2,
@@ -75,14 +79,16 @@ def _run_spec(
         root=root,
         family_name="stokes",
         family_id=PhysicalFamilyId.STOKES,
-        revision_id=1,
-        split_id=SplitId.TEST,
-        stream_id=11,
+        dataset_split=DatasetSplit.TEST,
+        worker_stream_id=11,
         simulation_targets=tuple(
-            SampleCellTarget(cell_id, target)
-            for cell_id, target in zip(cell_ids, targets)
+            ParameterGroupTarget(parameter_group_id, target)
+            for parameter_group_id, target in zip(parameter_group_ids, targets)
         ),
-        cell_codes={cell_id: index for index, cell_id in enumerate(cell_ids)},
+        parameter_group_codes={
+            parameter_group_id: index
+            for index, parameter_group_id in enumerate(parameter_group_ids)
+        },
         batch_size=batch_size,
         first_attempt_index=0,
         configuration={
@@ -96,9 +102,8 @@ def _run_spec(
 
 def _proposal_contains(root: Path, simulation_id: int) -> bool:
     for path in (root / "batch_plans/stokes/test").glob("batch_*.npz"):
-        with np.load(path, allow_pickle=False) as proposal:
-            if simulation_id in set(map(int, proposal["simulation_id"])):
-                return True
+        if simulation_id in set(map(int, compute_batch_simulation_ids(load_npz(path)))):
+            return True
     return False
 
 
@@ -136,12 +141,12 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        finite_cell = STOKES_SAMPLE_CELL_IDS[0]
-        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
+        finite_cell = STOKES_PARAMETER_GROUP_IDS[0]
+        deep_cell = STOKES_PARAMETER_GROUP_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
-            cell_ids=(finite_cell, deep_cell),
+            parameter_group_ids=(finite_cell, deep_cell),
             targets=(1, 1),
         )
         sampled_attempts: list[int] = []
@@ -232,8 +237,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         self.assertFalse(first.failure.exists())
         with np.load(first.batch_plan, allow_pickle=False) as proposal:
             specifications = [
-                json.loads(str(value))
-                for value in proposal["simulation_spec_json"]
+                json.loads(str(value)) for value in proposal["simulation_spec_json"]
             ]
         self.assertEqual(
             [record["status"] for record in specifications],
@@ -265,7 +269,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         second = state.committed[1]
         with np.load(second.batch_plan, allow_pickle=False) as proposal:
             replacement = json.loads(str(proposal["simulation_spec_json"][0]))
-        self.assertEqual(replacement["cell_id"], finite_cell)
+        self.assertEqual(replacement["parameter_group_id"], finite_cell)
         self.assertEqual(replacement["attempt_index"], 2)
 
         prior_sample_count = len(sampled_attempts)
@@ -275,11 +279,11 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
 
     def test_proposal_only_interruption_resamples_exactly_on_replay(self) -> None:
         contract = _contract()
-        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
+        deep_cell = STOKES_PARAMETER_GROUP_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
-            cell_ids=(deep_cell,),
+            parameter_group_ids=(deep_cell,),
             targets=(2,),
         )
         first_records: list[dict[str, object]] = []
@@ -357,16 +361,15 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         self,
     ) -> None:
         contract = _contract()
-        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
+        deep_cell = STOKES_PARAMETER_GROUP_IDS[2]
         wrong_contract_spec = DatasetChunkConfig(
             root=self.root / "contract",
             family_name="stokes",
             family_id=PhysicalFamilyId.STOKES,
-            revision_id=1,
-            split_id=SplitId.TEST,
-            stream_id=11,
-            simulation_targets=(SampleCellTarget(deep_cell, 1),),
-            cell_codes={deep_cell: 0},
+            dataset_split=DatasetSplit.TEST,
+            worker_stream_id=11,
+            simulation_targets=(ParameterGroupTarget(deep_cell, 1),),
+            parameter_group_codes={deep_cell: 0},
             batch_size=1,
             configuration={
                 "contract": {
@@ -386,7 +389,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         wrong_sampler_spec = _run_spec(
             self.root / "sampler",
             contract,
-            cell_ids=(deep_cell,),
+            parameter_group_ids=(deep_cell,),
             targets=(1,),
             maximum_ursell_redraws=1,
             batch_size=1,
@@ -400,11 +403,11 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
 
     def test_paper_role_rejects_injected_implementation_hooks(self) -> None:
         contract = PAPER_STATIC_STOKES_CONTRACT
-        deep_cell = STOKES_SAMPLE_CELL_IDS[2]
+        deep_cell = STOKES_PARAMETER_GROUP_IDS[2]
         spec = _run_spec(
             self.root,
             contract,
-            cell_ids=(deep_cell,),
+            parameter_group_ids=(deep_cell,),
             targets=(1,),
             maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             batch_size=1,
@@ -428,7 +431,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         zero_redraw_spec = _run_spec(
             self.root / "zero_redraw",
             contract,
-            cell_ids=(deep_cell,),
+            parameter_group_ids=(deep_cell,),
             targets=(1,),
             maximum_ursell_redraws=0,
             batch_size=1,

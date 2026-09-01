@@ -290,9 +290,7 @@ def evaluate_static_stokes_sample(
     metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(eta_host)
     metrics["maximum_absolute_xi"] = _maximum_absolute_or_none(xi_host)
     xi_input_mean = float(np.mean(xi_host))
-    metrics["xi_input_mean"] = (
-        xi_input_mean if math.isfinite(xi_input_mean) else None
-    )
+    metrics["xi_input_mean"] = xi_input_mean if math.isfinite(xi_input_mean) else None
     if not state_finite:
         failed |= SimulationCheck.NONFINITE_STATE
         return SimulationOutcome(
@@ -354,9 +352,7 @@ def evaluate_static_stokes_sample(
     metrics["maximum_absolute_q_ref"] = _maximum_absolute_or_none(q_ref_host)
     xi_input_mean = float(np.mean(target_xi_host))
     q_ref_mean = float(np.mean(q_ref_host))
-    metrics["xi_input_mean"] = (
-        xi_input_mean if math.isfinite(xi_input_mean) else None
-    )
+    metrics["xi_input_mean"] = xi_input_mean if math.isfinite(xi_input_mean) else None
     metrics["q_ref_mean"] = q_ref_mean if math.isfinite(q_ref_mean) else None
     if not delivered_state_finite:
         failed |= SimulationCheck.NONFINITE_STATE
@@ -371,7 +367,6 @@ def evaluate_static_stokes_sample(
             gxi=q_ref_host[None, :],
             depth=sample.depth,
             time=np.asarray([0.0], dtype=np.float64),
-            selected_dense_index=np.asarray([0], dtype=np.int32),
         )
         if decision.accepted
         else None

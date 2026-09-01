@@ -99,7 +99,6 @@ def subsample_trajectories(
                 gxi=trajectory.gxi[indices],
                 depth=float(depth),
                 time=trajectory.times[indices],
-                selected_dense_index=indices,
             )
 
         residual = float(simulation.maximum_gl2_stage_residual)

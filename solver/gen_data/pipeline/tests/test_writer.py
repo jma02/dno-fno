@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.batch_storage import (
     BatchPaths,
     BatchStatus,
@@ -18,7 +19,7 @@ from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import (
     AttemptAssignment,
     SimulationKey,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.simulation_checks import (
     SimulationCheckResult,
@@ -39,19 +40,18 @@ REQUIRED = (
 )
 
 
-def _assignments(split_id: SplitId) -> tuple[AttemptAssignment, ...]:
+def _assignments(dataset_split: DatasetSplit) -> tuple[AttemptAssignment, ...]:
     return tuple(
         AttemptAssignment(
             simulation_key=SimulationKey(
                 family_id=3,
-                revision_id=2,
-                split_id=split_id,
-                stream_id=7,
+                dataset_split=dataset_split,
+                worker_stream_id=7,
                 attempt_index=index,
             ),
-            cell_id=cell,
+            parameter_group_id=parameter_group_id,
         )
-        for index, cell in enumerate(("shallow", "deep"))
+        for index, parameter_group_id in enumerate(("shallow", "deep"))
     )
 
 
@@ -68,11 +68,11 @@ class CommonWriterTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.assignments = _assignments(SplitId.TRAIN)
+        self.assignments = _assignments(DatasetSplit.TRAIN)
         self.paths = BatchPaths.for_batch(
             self.root,
             family="jonswap_tma",
-            split=SplitId.TRAIN.value,
+            split=DatasetSplit.TRAIN.value,
             batch_id=4,
         )
         self.batch_plan = build_batch_plan(
@@ -81,8 +81,7 @@ class CommonWriterTests(unittest.TestCase):
                 {"depth": 0.1, "phase_right": [0.1, 0.2]},
                 {"depth": 5.0, "phase_right": [0.3, 0.4]},
             ),
-            cell_codes={"shallow": 0, "deep": 1},
-            batch_id=4,
+            parameter_group_codes={"shallow": 0, "deep": 1},
             metadata={"target": "order_6_pad_8_band_128"},
         )
 
@@ -99,7 +98,6 @@ class CommonWriterTests(unittest.TestCase):
                     gxi=field - 0.1,
                     depth=0.1,
                     time=np.asarray([0.0, 0.5, 1.0]),
-                    selected_dense_index=np.asarray([0, 5, 10]),
                 ),
                 metrics={"maximum_error": 2.0e-5},
             ),
@@ -124,7 +122,7 @@ class CommonWriterTests(unittest.TestCase):
         with np.load(self.paths.batch_plan, allow_pickle=False) as proposal:
             self.assertTrue(
                 np.array_equal(
-                    proposal["simulation_id"],
+                    compute_batch_simulation_ids(proposal),
                     np.asarray(
                         [
                             assignment.simulation_key.simulation_id
@@ -132,12 +130,6 @@ class CommonWriterTests(unittest.TestCase):
                         ],
                         dtype=np.int64,
                     ),
-                )
-            )
-            self.assertTrue(
-                np.array_equal(
-                    proposal["root_seed"],
-                    np.full(2, 2026072210, dtype=np.uint64),
                 )
             )
             specifications = [

@@ -19,7 +19,7 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_SAMPLE_CELL_IDS,
+    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
@@ -30,7 +30,7 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_SAMPLE_CELL_IDS,
+    JONSWAP_TMA_PARAMETER_GROUP_IDS,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     BatchPaths,
@@ -40,10 +40,9 @@ from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
     AttemptAssignment,
     SimulationKey,
-    DATASET_REVISION_BY_FAMILY,
-    SampleCellTarget,
+    ParameterGroupTarget,
     PhysicalFamilyId,
-    SplitId,
+    DatasetSplit,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
@@ -65,7 +64,7 @@ from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
     TrajectoryFrameSelectionConfig,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_SAMPLE_CELL_IDS,
+    TANAKA_PARAMETER_GROUP_IDS,
     TanakaCrest,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -153,7 +152,7 @@ def _run_spec(
     root: Path,
     execution: TrajectoryExecutionConfig,
     *,
-    cell_ids: tuple[str, ...],
+    parameter_group_ids: tuple[str, ...],
     targets: tuple[int, ...],
     batch_size: int = 2,
     execution_record: dict[str, object] | None = None,
@@ -167,14 +166,16 @@ def _run_spec(
         root=root,
         family_name=execution.family,
         family_id=family_id,
-        revision_id=DATASET_REVISION_BY_FAMILY[family_id],
-        split_id=SplitId.TEST,
-        stream_id=13,
+        dataset_split=DatasetSplit.TEST,
+        worker_stream_id=13,
         simulation_targets=tuple(
-            SampleCellTarget(cell_id, target)
-            for cell_id, target in zip(cell_ids, targets)
+            ParameterGroupTarget(parameter_group_id, target)
+            for parameter_group_id, target in zip(parameter_group_ids, targets)
         ),
-        cell_codes={cell_id: index for index, cell_id in enumerate(cell_ids)},
+        parameter_group_codes={
+            parameter_group_id: index
+            for index, parameter_group_id in enumerate(parameter_group_ids)
+        },
         batch_size=batch_size,
         first_attempt_index=0,
         configuration={
@@ -382,15 +383,15 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def test_failed_trajectory_retains_sibling_and_replaces_same_cell(
+    def test_failed_trajectory_retains_sibling_and_replaces_same_parameter_group(
         self,
     ) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
+        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(2,),
         )
         constructor = MarkerConstructor()
@@ -405,7 +406,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         state = generate_simulations(spec, executor)
 
         self.assertTrue(state.complete)
-        self.assertEqual(dict(state.accepted_simulation_counts), {cell_id: 2})
+        self.assertEqual(
+            dict(state.accepted_simulation_counts), {parameter_group_id: 2}
+        )
         self.assertEqual(constructor.calls, [(0, 1), (0,)])
         first_result = json.loads(state.committed[0].result.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -432,15 +435,15 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         ) as proposal:
             replacement = json.loads(str(proposal["simulation_spec_json"][0]))
         self.assertEqual(replacement["attempt_index"], 2)
-        self.assertEqual(replacement["cell_id"], cell_id)
+        self.assertEqual(replacement["parameter_group_id"], parameter_group_id)
 
     def test_declared_tanaka_failure_rejects_only_named_simulation(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root / "declared",
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(2,),
         )
         base_constructor = MarkerConstructor()
@@ -517,7 +520,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         unexpected_spec = _run_spec(
             self.root / "unexpected",
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -548,13 +551,13 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("jonswap_tma")
-        cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[9]
+        parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
 
         def run(root: Path) -> tuple[object, JonswapRejectingConstructor]:
             spec = _run_spec(
                 root,
                 execution,
-                cell_ids=(cell_id,),
+                parameter_group_ids=(parameter_group_id,),
                 targets=(2,),
             )
             constructor = JonswapRejectingConstructor()
@@ -745,11 +748,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_malformed_tanaka_diagnostic_remains_pending(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -839,11 +842,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_two_round_tanaka_rejections_archive_original_indices(self) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(3,),
             batch_size=3,
         )
@@ -913,11 +916,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_explicit_fatal_error_writes_terminal_sidecar(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
+        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -947,7 +950,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         failure_path = BatchPaths.for_batch(
             spec.root,
             family=spec.family_name,
-            split=spec.split_id.value,
+            split=spec.dataset_split.value,
             batch_id=0,
         ).failure
         failure = json.loads(failure_path.read_text())
@@ -962,17 +965,16 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("tanaka")
-        cell_id = TANAKA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         assignments = tuple(
             AttemptAssignment(
                 simulation_key=SimulationKey(
                     family_id=int(PhysicalFamilyId.TANAKA),
-                    revision_id=3,
-                    split_id=SplitId.TEST,
-                    stream_id=21,
+                    dataset_split=DatasetSplit.TEST,
+                    worker_stream_id=21,
                     attempt_index=index,
                 ),
-                cell_id=cell_id,
+                parameter_group_id=parameter_group_id,
             )
             for index in (19, 20)
         )
@@ -985,7 +987,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
             root=self.root,
             family_name="tanaka",
             batch_id=0,
-            cell_codes={cell_id: 0},
+            parameter_group_codes={parameter_group_id: 0},
             metadata={"test_scope": "selected_tanaka_adapter"},
         )
         observed_depths: list[np.ndarray] = []
@@ -1029,14 +1031,14 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         execution = _execution("jonswap_tma")
-        cell_ids = (
-            JONSWAP_TMA_SAMPLE_CELL_IDS[9],
-            JONSWAP_TMA_SAMPLE_CELL_IDS[18],
+        parameter_group_ids = (
+            JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
+            JONSWAP_TMA_PARAMETER_GROUP_IDS[18],
         )
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=cell_ids,
+            parameter_group_ids=parameter_group_ids,
             targets=(1, 1),
         )
         rollouts = FastRolloutExecutor()
@@ -1049,7 +1051,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self.assertTrue(state.complete)
 
         with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
-            records = [json.loads(str(value)) for value in proposal["simulation_spec_json"]]
+            records = [
+                json.loads(str(value)) for value in proposal["simulation_spec_json"]
+            ]
             metadata = json.loads(str(proposal["metadata_json"]))
         expected_terminal_times = []
         for record in records:
@@ -1096,14 +1100,14 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_benjamin_feir_simulations_use_distinct_carrier_period_grids(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_ids = (
-            BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
-            BENJAMIN_FEIR_SAMPLE_CELL_IDS[-1],
+        parameter_group_ids = (
+            BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
+            BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
         )
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=cell_ids,
+            parameter_group_ids=parameter_group_ids,
             targets=(1, 1),
         )
         rollouts = FastRolloutExecutor()
@@ -1117,7 +1121,9 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         self.assertTrue(state.complete)
 
         with np.load(state.committed[0].batch_plan, allow_pickle=False) as proposal:
-            records = [json.loads(str(value)) for value in proposal["simulation_spec_json"]]
+            records = [
+                json.loads(str(value)) for value in proposal["simulation_spec_json"]
+            ]
             metadata = json.loads(str(proposal["metadata_json"]))
         expected_terminal_times = []
         for record in records:
@@ -1181,18 +1187,17 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
                 AttemptAssignment(
                     simulation_key=SimulationKey(
                         family_id=3,
-                        revision_id=4,
-                        split_id=SplitId.TEST,
-                        stream_id=19,
+                        dataset_split=DatasetSplit.TEST,
+                        worker_stream_id=19,
                         attempt_index=index,
                     ),
-                    cell_id=cell_id,
+                    parameter_group_id=parameter_group_id,
                 )
             )
-            for index, cell_id in enumerate(
+            for index, parameter_group_id in enumerate(
                 (
-                    BENJAMIN_FEIR_SAMPLE_CELL_IDS[0],
-                    BENJAMIN_FEIR_SAMPLE_CELL_IDS[-1],
+                    BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
+                    BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
                 )
             )
         )
@@ -1223,12 +1228,12 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_proposed_and_shard_written_batches_resume_exactly(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[1]
+        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[1]
 
         proposal_spec = _run_spec(
             self.root / "batch_plan",
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -1269,7 +1274,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         shard_spec = _run_spec(
             self.root / "shard",
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -1297,7 +1302,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_execution_configuration_must_match_run_record(self) -> None:
         execution = _execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
+        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
         changed_record = execution.to_json_record()
         changed_record["horizon"] = {
             **changed_record["horizon"],
@@ -1306,7 +1311,7 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
             execution_record=changed_record,
@@ -1396,11 +1401,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_paper_role_rejects_injected_numerical_hooks(self) -> None:
         execution = paper_trajectory_execution("benjamin_feir")
-        cell_id = BENJAMIN_FEIR_SAMPLE_CELL_IDS[0]
+        parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
@@ -1423,11 +1428,11 @@ class TrajectoryBatchExecutorTests(unittest.TestCase):
 
     def test_paper_jonswap_requires_adjustment_executor(self) -> None:
         execution = paper_trajectory_execution("jonswap_tma")
-        cell_id = JONSWAP_TMA_SAMPLE_CELL_IDS[0]
+        parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
             execution,
-            cell_ids=(cell_id,),
+            parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
         )
