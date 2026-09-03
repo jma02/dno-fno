@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
+from typing import Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from solver.gen_data.pipeline.artifact_io import json_text, parse_json
+from solver.gen_data.pipeline.artifact_io import json_text
 from solver.gen_data.tanaka_sampling import TanakaCrest
 from solver.solvers.dno_series_jax import build_grid, myfft, myifft
 from solver.solvers.time_integrator import spectral_dx
@@ -22,17 +24,105 @@ TANAKA_FINE_FACTOR = 8
 TANAKA_PROFILE_RECONSTRUCTION = "periodic_tangent_hermite_tan_theta_v1"
 TANAKA_PROFILE_TOLERANCE = 1e-12
 TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA = "tanaka_potential_radicand_failure_v1"
+TanakaPotentialFailureReason: TypeAlias = Literal[
+    "negative_or_nonfinite_surface_potential_radicand",
+    "nonpositive_or_nonfinite_surface_potential_speed_squared",
+]
+
+
+@dataclass(frozen=True)
+class TanakaRadicandFailure:
+    """Diagnostics for one crest whose potential construction failed."""
+
+    local_simulation_index: int
+    component_within_simulation: int
+    global_component_index: int
+    alpha: float | None
+    center: float | None
+    direction: int
+    depth: float | None
+    unsigned_speed: float | None
+    speed_squared: float | None
+    minimum_radicand: float | None
+    minimum_radicand_over_speed_squared: float | None
+    minimum_radicand_grid_index: int | None
+    minimum_radicand_x: float | None
+    negative_count: int
+    nonfinite_count: int
+    first_nonfinite_grid_index: int | None
+    first_nonfinite_x: float | None
+
+    @property
+    def is_finite_negative_radicand(self) -> bool:
+        """Whether this is a recoverable finite square-root domain failure."""
+
+        return (
+            self.speed_squared is not None
+            and self.speed_squared > 0.0
+            and self.negative_count > 0
+            and self.nonfinite_count == 0
+        )
+
+    def to_json_record(self) -> dict[str, object]:
+        return {
+            "local_simulation_index": self.local_simulation_index,
+            "component_within_simulation": self.component_within_simulation,
+            "global_component_index": self.global_component_index,
+            "alpha": self.alpha,
+            "center": self.center,
+            "direction": self.direction,
+            "depth": self.depth,
+            "unsigned_speed": self.unsigned_speed,
+            "speed_squared": self.speed_squared,
+            "minimum_radicand": self.minimum_radicand,
+            "minimum_radicand_over_speed_squared": (
+                self.minimum_radicand_over_speed_squared
+            ),
+            "minimum_radicand_grid_index": self.minimum_radicand_grid_index,
+            "minimum_radicand_x": self.minimum_radicand_x,
+            "negative_count": self.negative_count,
+            "nonfinite_count": self.nonfinite_count,
+            "first_nonfinite_grid_index": self.first_nonfinite_grid_index,
+            "first_nonfinite_x": self.first_nonfinite_x,
+        }
 
 
 class TanakaPotentialRadicandError(ValueError):
     """A rejected real-valued Tanaka surface-potential construction."""
 
-    def __init__(self, failure_record: dict[str, object]) -> None:
-        serialized = json_text(failure_record)
-        parsed = parse_json(serialized)
-        assert isinstance(parsed, dict)
-        self.failure_record = parsed
-        super().__init__(serialized)
+    def __init__(
+        self,
+        reason: TanakaPotentialFailureReason,
+        components: tuple[TanakaRadicandFailure, ...],
+    ) -> None:
+        self.reason = reason
+        self.components = components
+        super().__init__(json_text(self.to_json_record()))
+
+    @property
+    def invalid_simulation_indices(self) -> tuple[int, ...]:
+        return tuple(
+            sorted({component.local_simulation_index for component in self.components})
+        )
+
+    @property
+    def is_recoverable(self) -> bool:
+        """Whether failed simulations may be rejected while siblings continue."""
+
+        return (
+            self.reason == "negative_or_nonfinite_surface_potential_radicand"
+            and all(
+                component.is_finite_negative_radicand for component in self.components
+            )
+        )
+
+    def to_json_record(self) -> dict[str, object]:
+        return {
+            "schema": TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
+            "reason": self.reason,
+            "invalid_simulation_indices": list(self.invalid_simulation_indices),
+            "components": [component.to_json_record() for component in self.components],
+        }
 
 
 def _flatten_simulation_crests(
@@ -207,7 +297,7 @@ def _validate_tanaka_profile_batch(
         )
 
 
-def _tanaka_radicand_component_record(
+def _tanaka_radicand_failure(
     *,
     global_component_index: int,
     component_within_simulation: int,
@@ -218,8 +308,8 @@ def _tanaka_radicand_component_record(
     speed_squared: float,
     radicand: np.ndarray,
     x_grid: np.ndarray,
-) -> dict[str, object]:
-    """Describe one invalid crest without emitting nonstandard JSON numbers."""
+) -> TanakaRadicandFailure:
+    """Describe one invalid crest without retaining nonfinite floats."""
     finite = np.isfinite(radicand)
     negative = finite & (radicand < 0.0)
     nonfinite_indices = np.flatnonzero(~finite)
@@ -248,25 +338,25 @@ def _tanaka_radicand_component_record(
         first_nonfinite_x = nonfinite_x if math.isfinite(nonfinite_x) else None
     alpha = float(spec.alpha)
     center = float(spec.center)
-    return {
-        "local_simulation_index": simulation_index,
-        "component_within_simulation": component_within_simulation,
-        "global_component_index": global_component_index,
-        "alpha": alpha if math.isfinite(alpha) else None,
-        "center": center if math.isfinite(center) else None,
-        "direction": int(spec.direction),
-        "depth": depth if math.isfinite(depth) else None,
-        "unsigned_speed": unsigned_speed if math.isfinite(unsigned_speed) else None,
-        "speed_squared": speed_squared if math.isfinite(speed_squared) else None,
-        "minimum_radicand": minimum_radicand,
-        "minimum_radicand_over_speed_squared": minimum_scaled_radicand,
-        "minimum_radicand_grid_index": minimum_index,
-        "minimum_radicand_x": minimum_radicand_x,
-        "negative_count": int(np.count_nonzero(negative)),
-        "nonfinite_count": int(nonfinite_indices.size),
-        "first_nonfinite_grid_index": first_nonfinite_index,
-        "first_nonfinite_x": first_nonfinite_x,
-    }
+    return TanakaRadicandFailure(
+        local_simulation_index=simulation_index,
+        component_within_simulation=component_within_simulation,
+        global_component_index=global_component_index,
+        alpha=alpha if math.isfinite(alpha) else None,
+        center=center if math.isfinite(center) else None,
+        direction=int(spec.direction),
+        depth=depth if math.isfinite(depth) else None,
+        unsigned_speed=(unsigned_speed if math.isfinite(unsigned_speed) else None),
+        speed_squared=speed_squared if math.isfinite(speed_squared) else None,
+        minimum_radicand=minimum_radicand,
+        minimum_radicand_over_speed_squared=minimum_scaled_radicand,
+        minimum_radicand_grid_index=minimum_index,
+        minimum_radicand_x=minimum_radicand_x,
+        negative_count=int(np.count_nonzero(negative)),
+        nonfinite_count=int(nonfinite_indices.size),
+        first_nonfinite_grid_index=first_nonfinite_index,
+        first_nonfinite_x=first_nonfinite_x,
+    )
 
 
 def _validate_tanaka_surface_potential_radicand(
@@ -329,8 +419,8 @@ def _validate_tanaka_surface_potential_radicand(
         reason = "negative_or_nonfinite_surface_potential_radicand"
         invalid_components = np.flatnonzero(radicand_invalid)
 
-    components = [
-        _tanaka_radicand_component_record(
+    components = tuple(
+        _tanaka_radicand_failure(
             global_component_index=int(component_index),
             component_within_simulation=components_within_simulation[component_index],
             simulation_index=int(simulation_ids_host[component_index]),
@@ -342,19 +432,10 @@ def _validate_tanaka_surface_potential_radicand(
             x_grid=x_host,
         )
         for component_index in invalid_components
-    ]
+    )
     raise TanakaPotentialRadicandError(
-        {
-            "schema": TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
-            "reason": reason,
-            "invalid_simulation_indices": sorted(
-                {
-                    int(simulation_ids_host[component_index])
-                    for component_index in invalid_components
-                }
-            ),
-            "components": components,
-        }
+        reason,
+        components,
     )
 
 

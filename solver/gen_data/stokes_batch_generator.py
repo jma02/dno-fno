@@ -8,15 +8,12 @@ from typing import Protocol, TypeAlias
 
 from solver.gen_data.pipeline.batch_storage import batch_path
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
+    DatasetSplit,
     PhysicalFamilyId,
 )
-from solver.gen_data.pipeline.simulation_checks import (
-    SimulationCheckResult,
-    SimulationCheck,
-)
+from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.dataset_generation import (
-    BatchExecutor,
+    BatchGenerator,
     DatasetChunkConfig,
 )
 from solver.gen_data.pipeline.writer import (
@@ -32,7 +29,6 @@ from solver.gen_data.stokes_sampling import (
     sample_stokes_simulation,
 )
 from solver.gen_data.stokes_static_pipeline import (
-    STATIC_STOKES_REQUIRED_CHECKS,
     StaticDnoEvaluator,
     StaticStokesContract,
     StaticStokesStateConstructor,
@@ -51,8 +47,10 @@ class StokesSampler(Protocol):
 
     def __call__(
         self,
-        assignment: AttemptAssignment,
+        parameter_group_id: str,
         *,
+        dataset_split: DatasetSplit,
+        attempt_number: int,
         domain_length: float,
         gravity: float,
         maximum_ursell_redraws: int,
@@ -62,12 +60,10 @@ class StokesSampler(Protocol):
 def _ursell_redraw_failure_outcome(
     contract: StaticStokesContract,
 ) -> SimulationOutcome:
-    reason = SimulationCheck.OUTSIDE_SUPPORT
     return SimulationOutcome(
         decision=SimulationCheckResult(
-            required=STATIC_STOKES_REQUIRED_CHECKS,
-            evaluated=reason,
-            failed=reason,
+            accepted=False,
+            outside_support=True,
         ),
         rows=None,
         metrics={
@@ -82,7 +78,7 @@ def _ursell_redraw_failure_outcome(
     )
 
 
-def _validate_static_stokes_executor(
+def _validate_static_stokes_generator(
     chunk_config: DatasetChunkConfig,
     contract: StaticStokesContract,
     maximum_ursell_redraws: int,
@@ -94,9 +90,9 @@ def _validate_static_stokes_executor(
         raise ValueError("static Stokes generation must use family_name='stokes'")
     if chunk_config.family_id is not PhysicalFamilyId.STOKES:
         raise ValueError("static Stokes generation requires the Stokes family ID")
-    unknown_parameter_groups = {
-        target.parameter_group_id for target in chunk_config.simulation_targets
-    }.difference(_STOKES_PARAMETER_GROUP_IDS)
+    unknown_parameter_groups = set(chunk_config.simulation_targets).difference(
+        _STOKES_PARAMETER_GROUP_IDS
+    )
     if unknown_parameter_groups:
         raise ValueError(
             f"unknown Stokes parameter groups: {sorted(unknown_parameter_groups)}"
@@ -108,23 +104,6 @@ def _validate_static_stokes_executor(
     ):
         raise ValueError("maximum_ursell_redraws must be a nonnegative integer")
 
-    configured_contract = chunk_config.configuration.get("contract")
-    if (
-        not isinstance(configured_contract, Mapping)
-        or dict(configured_contract) != contract.to_json_record()
-    ):
-        raise ValueError(
-            "chunk configuration contract differs from the supplied static Stokes contract"
-        )
-    configured_sampler = chunk_config.configuration.get("sampler")
-    if (
-        not isinstance(configured_sampler, Mapping)
-        or configured_sampler.get("maximum_ursell_redraws") != maximum_ursell_redraws
-    ):
-        raise ValueError(
-            "chunk configuration sampler redraw limit differs from the supplied "
-            "static Stokes executor"
-        )
     if contract.role == "paper_dataset" and (
         maximum_ursell_redraws != DEFAULT_MAXIMUM_URSELL_REDRAWS
         or sampler is not sample_stokes_simulation
@@ -138,15 +117,19 @@ def _validate_static_stokes_executor(
 
 
 def _resolve_stokes_attempt(
-    assignment: AttemptAssignment,
+    parameter_group_id: str,
     *,
+    dataset_split: DatasetSplit,
+    attempt_number: int,
     contract: StaticStokesContract,
     maximum_ursell_redraws: int,
     sampler: StokesSampler,
 ) -> tuple[JsonRecord, StokesSample | SimulationOutcome]:
     try:
         sample = sampler(
-            assignment,
+            parameter_group_id,
+            dataset_split=dataset_split,
+            attempt_number=attempt_number,
             domain_length=contract.length,
             gravity=contract.gravity,
             maximum_ursell_redraws=maximum_ursell_redraws,
@@ -157,8 +140,8 @@ def _resolve_stokes_attempt(
             _ursell_redraw_failure_outcome(contract),
         )
 
-    if sample.assignment != assignment:
-        raise RuntimeError("Stokes sampler returned a different assignment")
+    if sample.parameter_group_id != parameter_group_id:
+        raise RuntimeError("Stokes sampler returned a different parameter group")
     return sample.to_json_record(), sample
 
 
@@ -179,19 +162,18 @@ def _evaluate_stokes_attempt(
     )
 
 
-def make_static_stokes_batch_executor(
+def make_static_stokes_batch_generator(
     *,
     chunk_config: DatasetChunkConfig,
     contract: StaticStokesContract,
     maximum_ursell_redraws: int = DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    metadata: Mapping[str, object] | None = None,
     sampler: StokesSampler = sample_stokes_simulation,
     state_constructor: StaticStokesStateConstructor = construct_stokes_state,
     target_evaluator: StaticDnoEvaluator = compute_dno_target,
-) -> BatchExecutor:
+) -> BatchGenerator:
     """Build the callback that resolves and commits static Stokes batches."""
 
-    _validate_static_stokes_executor(
+    _validate_static_stokes_generator(
         chunk_config,
         contract,
         maximum_ursell_redraws,
@@ -199,40 +181,31 @@ def make_static_stokes_batch_executor(
         state_constructor,
         target_evaluator,
     )
-    contract_record = contract.to_json_record()
-    additional_metadata = dict(metadata or {})
-    common_metadata = {
-        "family": "stokes",
-        "simulation_type": "static",
-        "contract": contract_record,
-        "sampler": {"maximum_ursell_redraws": maximum_ursell_redraws},
-        "additional_metadata": additional_metadata,
-    }
 
-    def execute(
-        assignments: tuple[AttemptAssignment, ...],
+    def generate(
+        parameter_group_ids: tuple[str, ...],
         *,
+        first_attempt_number: int,
         batch_id: int,
     ) -> Path:
-        if not assignments:
+        if not parameter_group_ids:
             raise ValueError("static Stokes attempt batches must not be empty")
         resolved = tuple(
             _resolve_stokes_attempt(
-                assignment,
+                parameter_group_id,
+                dataset_split=chunk_config.dataset_split,
+                attempt_number=first_attempt_number + offset,
                 contract=contract,
                 maximum_ursell_redraws=maximum_ursell_redraws,
                 sampler=sampler,
             )
-            for assignment in assignments
+            for offset, parameter_group_id in enumerate(parameter_group_ids)
         )
         batch_plan = build_batch_plan(
-            assignments,
+            parameter_group_ids,
             tuple(specification for specification, _ in resolved),
-            metadata={
-                **common_metadata,
-                "retained_times": [0.0],
-                "selected_dense_indices": [0],
-            },
+            family_id=chunk_config.family_id,
+            dataset_split=chunk_config.dataset_split,
         )
         path = batch_path(
             chunk_config.root,
@@ -254,17 +227,7 @@ def make_static_stokes_batch_executor(
             path,
             batch_plan,
             complete_outcomes,
-            metadata={
-                **common_metadata,
-                "attempted_simulations": len(complete_outcomes),
-                "accepted_simulations": sum(
-                    outcome.decision.accepted for outcome in complete_outcomes
-                ),
-                "sampling_exhaustions": sum(
-                    isinstance(result, SimulationOutcome) for _, result in resolved
-                ),
-            },
         )
         return path
 
-    return execute
+    return generate

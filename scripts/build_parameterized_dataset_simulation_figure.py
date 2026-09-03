@@ -132,17 +132,6 @@ class Illustration:
     profile: DimensionlessProfile
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--combined-summary", type=Path, required=True)
-    parser.add_argument(
-        "--output-stem",
-        type=Path,
-        default=ROOT / "notes/figures/parameterized_dataset_simulation_examples",
-    )
-    return parser.parse_args(argv)
-
-
 def _mapping(value: object, *, context: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{context} must be a JSON object")
@@ -240,25 +229,6 @@ def load_source_details(source: DatasetSource) -> SourceDetails:
         gravity=gravity,
         stored_nx=stored_nx,
     )
-
-
-def validate_dataset_sources(
-    binding: CombinedSummaryBinding,
-    sources: Sequence[DatasetSource],
-) -> tuple[SourceDetails, ...]:
-    validate_bound_sources(binding, sources)
-    accepted_simulations = sum(len(source.trajectories) for source in sources)
-    retained_rows = sum(
-        trajectory.row_count for source in sources for trajectory in source.trajectories
-    )
-    validate_scanned_population(
-        binding,
-        source_count=len(sources),
-        accepted_simulations=accepted_simulations,
-        retained_rows=retained_rows,
-    )
-    validate_final_paper_dataset(sources, retained_rows=retained_rows)
-    return tuple(load_source_details(source) for source in sources)
 
 
 def select_validation_trajectories(
@@ -400,78 +370,6 @@ def load_illustration(selected: SelectedTrajectory) -> Illustration:
     )
 
 
-def _render_figure(
-    illustrations: Sequence[Illustration],
-    *,
-    pdf_path: Path,
-    png_path: Path,
-) -> None:
-    if tuple(item.selected.details.source.family for item in illustrations) != (
-        FAMILY_ORDER
-    ):
-        raise ValueError("illustrations must follow the four-family order")
-    figure, axes = plt.subplots(
-        4,
-        2,
-        figsize=(8.3, 8.8),
-        sharex="col",
-        constrained_layout=True,
-    )
-    colors = ("#3366a6", "#b54a3a", "#6b4c9a", "#2a8c6a")
-    for row, (illustration, color) in enumerate(zip(illustrations, colors)):
-        source = illustration.selected.details.source
-        trajectory = illustration.selected.trajectory
-        profile = illustration.profile
-        axes[row, 0].plot(
-            profile.x_over_length,
-            profile.eta_over_depth,
-            color=color,
-            linewidth=1.05,
-        )
-        axes[row, 1].plot(
-            profile.x_over_length,
-            profile.xi_over_depth_speed,
-            color=color,
-            linewidth=1.05,
-        )
-        axes[row, 0].set_ylabel(r"$\eta/h$")
-        axes[row, 1].set_ylabel(r"$\xi/(h\sqrt{gh})$")
-        axes[row, 0].text(
-            0.02,
-            0.92,
-            (
-                f"{FAMILY_LABELS[source.family]}\n"
-                f"{trajectory.category}; simulation {trajectory.simulation_id}"
-            ),
-            transform=axes[row, 0].transAxes,
-            va="top",
-            fontsize=8.1,
-        )
-        for axis in axes[row]:
-            axis.grid(alpha=0.22, linewidth=0.5)
-    axes[0, 0].set_title("surface elevation")
-    axes[0, 1].set_title("surface potential")
-    axes[-1, 0].set_xlabel(r"$x/L$")
-    axes[-1, 1].set_xlabel(r"$x/L$")
-    figure.suptitle("Deterministic validation illustrations", fontsize=10)
-    figure.savefig(
-        pdf_path,
-        bbox_inches="tight",
-        metadata={
-            "Creator": "build_parameterized_dataset_simulation_figure.py",
-            "CreationDate": None,
-            "ModDate": None,
-        },
-    )
-    figure.savefig(
-        png_path,
-        dpi=220,
-        bbox_inches="tight",
-        metadata={"Software": "build_parameterized_dataset_simulation_figure.py"},
-    )
-    plt.close(figure)
-
-
 def _simulation_record(illustration: Illustration) -> dict[str, object]:
     selected = illustration.selected
     details = selected.details
@@ -504,13 +402,6 @@ def _simulation_record(illustration: Illustration) -> dict[str, object]:
     }
 
 
-def _write_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
 def publish_outputs(
     illustrations: Sequence[Illustration],
     *,
@@ -534,19 +425,94 @@ def publish_outputs(
         staged_pdf = staging_root / final_pdf.name
         staged_png = staging_root / final_png.name
         staged_json = staging_root / final_json.name
-        _render_figure(illustrations, pdf_path=staged_pdf, png_path=staged_png)
-        _write_json(
-            staged_json,
-            {
-                "status": "complete",
-                "description": DESCRIPTION,
-                "combined_summary": str(binding.path),
-                "simulations": [_simulation_record(item) for item in illustrations],
-                "artifacts": {
-                    "pdf": {"path": str(final_pdf), "bytes": staged_pdf.stat().st_size},
-                    "png": {"path": str(final_png), "bytes": staged_png.stat().st_size},
-                },
+        if tuple(item.selected.details.source.family for item in illustrations) != (
+            FAMILY_ORDER
+        ):
+            raise ValueError("illustrations must follow the four-family order")
+        figure, axes = plt.subplots(
+            4,
+            2,
+            figsize=(8.3, 8.8),
+            sharex="col",
+            constrained_layout=True,
+        )
+        colors = ("#3366a6", "#b54a3a", "#6b4c9a", "#2a8c6a")
+        for row, (illustration, color) in enumerate(zip(illustrations, colors)):
+            source = illustration.selected.details.source
+            trajectory = illustration.selected.trajectory
+            profile = illustration.profile
+            axes[row, 0].plot(
+                profile.x_over_length,
+                profile.eta_over_depth,
+                color=color,
+                linewidth=1.05,
+            )
+            axes[row, 1].plot(
+                profile.x_over_length,
+                profile.xi_over_depth_speed,
+                color=color,
+                linewidth=1.05,
+            )
+            axes[row, 0].set_ylabel(r"$\eta/h$")
+            axes[row, 1].set_ylabel(r"$\xi/(h\sqrt{gh})$")
+            axes[row, 0].text(
+                0.02,
+                0.92,
+                (
+                    f"{FAMILY_LABELS[source.family]}\n"
+                    f"{trajectory.category}; simulation {trajectory.simulation_id}"
+                ),
+                transform=axes[row, 0].transAxes,
+                va="top",
+                fontsize=8.1,
+            )
+            for axis in axes[row]:
+                axis.grid(alpha=0.22, linewidth=0.5)
+        axes[0, 0].set_title("surface elevation")
+        axes[0, 1].set_title("surface potential")
+        axes[-1, 0].set_xlabel(r"$x/L$")
+        axes[-1, 1].set_xlabel(r"$x/L$")
+        figure.suptitle("Deterministic validation illustrations", fontsize=10)
+        figure.savefig(
+            staged_pdf,
+            bbox_inches="tight",
+            metadata={
+                "Creator": "build_parameterized_dataset_simulation_figure.py",
+                "CreationDate": None,
+                "ModDate": None,
             },
+        )
+        figure.savefig(
+            staged_png,
+            dpi=220,
+            bbox_inches="tight",
+            metadata={"Software": "build_parameterized_dataset_simulation_figure.py"},
+        )
+        plt.close(figure)
+        staged_json.write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "description": DESCRIPTION,
+                    "combined_summary": str(binding.path),
+                    "simulations": [_simulation_record(item) for item in illustrations],
+                    "artifacts": {
+                        "pdf": {
+                            "path": str(final_pdf),
+                            "bytes": staged_pdf.stat().st_size,
+                        },
+                        "png": {
+                            "path": str(final_png),
+                            "bytes": staged_png.stat().st_size,
+                        },
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         os.replace(staged_pdf, final_pdf)
         os.replace(staged_png, final_png)
@@ -556,28 +522,37 @@ def publish_outputs(
     return final_pdf, final_png, final_json
 
 
-def build_figure(
-    combined_summary: Path,
-    *,
-    output_stem: Path,
-) -> tuple[Path, Path, Path]:
-    binding = load_combined_summary_binding(combined_summary)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--combined-summary", type=Path, required=True)
+    parser.add_argument(
+        "--output-stem",
+        type=Path,
+        default=ROOT / "notes/figures/parameterized_dataset_simulation_examples",
+    )
+    args = parser.parse_args()
+
+    binding = load_combined_summary_binding(args.combined_summary)
     sources = tuple(load_source_summary(path) for path in binding.source_summary_paths)
-    details = validate_dataset_sources(binding, sources)
+    validate_bound_sources(binding, sources)
+    accepted_simulations = sum(len(source.trajectories) for source in sources)
+    retained_rows = sum(
+        trajectory.row_count for source in sources for trajectory in source.trajectories
+    )
+    validate_scanned_population(
+        binding,
+        source_count=len(sources),
+        accepted_simulations=accepted_simulations,
+        retained_rows=retained_rows,
+    )
+    validate_final_paper_dataset(sources, retained_rows=retained_rows)
+    details = tuple(load_source_details(source) for source in sources)
     selected = select_validation_trajectories(details)
     illustrations = tuple(load_illustration(item) for item in selected)
-    return publish_outputs(
+    pdf_path, png_path, json_path = publish_outputs(
         illustrations,
-        output_stem=output_stem,
-        binding=binding,
-    )
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
-    pdf_path, png_path, json_path = build_figure(
-        args.combined_summary,
         output_stem=args.output_stem,
+        binding=binding,
     )
     print(
         json.dumps(
@@ -591,7 +566,3 @@ def main(argv: Sequence[str] | None = None) -> None:
             sort_keys=True,
         )
     )
-
-
-if __name__ == "__main__":
-    main()

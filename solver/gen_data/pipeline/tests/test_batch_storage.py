@@ -9,13 +9,13 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_artifacts import SimulationCommitRecord
+from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     load_completed_batch,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit, SimulationKey
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 
@@ -24,22 +24,10 @@ def _plan() -> BatchPlanArrays:
         "family_id": np.asarray(2, dtype=np.int16),
         "dataset_split": np.asarray(DatasetSplit.TRAIN.value),
         "parameter_group_id": np.asarray(["low", "high", "low"]),
-        "worker_stream_id": np.asarray([2, 2, 2], dtype=np.uint32),
-        "attempt_index": np.asarray([0, 1, 2], dtype=np.uint64),
         "simulation_spec_json": np.asarray(
             [json.dumps({"amplitude": value}) for value in (0.1, 0.2, 0.3)]
         ),
-        "metadata_json": np.asarray(json.dumps({"seed": 11})),
     }
-
-
-def _simulation_id(attempt_index: int) -> int:
-    return SimulationKey(
-        family_id=2,
-        dataset_split=DatasetSplit.TRAIN,
-        worker_stream_id=2,
-        attempt_index=attempt_index,
-    ).simulation_id
 
 
 def _shard() -> DatasetShardArrays:
@@ -57,36 +45,21 @@ def _shard() -> DatasetShardArrays:
     }
 
 
-def _records() -> tuple[SimulationCommitRecord, ...]:
+def _records() -> tuple[SimulationResult, ...]:
     return (
-        SimulationCommitRecord(
-            simulation_id=_simulation_id(0),
+        SimulationResult(
             accepted=True,
-            required_bits=63,
-            evaluated_bits=63,
-            failed_bits=0,
-            first_row=0,
-            row_count=2,
+            failed_checks=(),
             metrics={"maximum_error": 1e-5},
         ),
-        SimulationCommitRecord(
-            simulation_id=_simulation_id(1),
+        SimulationResult(
             accepted=False,
-            required_bits=32,
-            evaluated_bits=32,
-            failed_bits=32,
-            first_row=-1,
-            row_count=0,
+            failed_checks=("integration_failure",),
             metrics={"maximum_error": None},
         ),
-        SimulationCommitRecord(
-            simulation_id=_simulation_id(2),
+        SimulationResult(
             accepted=True,
-            required_bits=63,
-            evaluated_bits=63,
-            failed_bits=0,
-            first_row=2,
-            row_count=3,
+            failed_checks=(),
             metrics={"maximum_error": 2e-5},
         ),
     )
@@ -109,12 +82,10 @@ class BatchStorageTests(unittest.TestCase):
             plan=_plan(),
             shard=_shard(),
             simulations=_records(),
-            metadata={"elapsed_seconds": 12.5},
         )
 
         batch = load_completed_batch(self.path)
         self.assertEqual(batch.simulations, _records())
-        self.assertEqual(batch.metadata, {"elapsed_seconds": 12.5})
         self.assertIsNotNone(batch.shard)
         assert batch.shard is not None
         np.testing.assert_array_equal(batch.shard["eta"], _shard()["eta"])
@@ -124,42 +95,48 @@ class BatchStorageTests(unittest.TestCase):
                 plan=_plan(),
                 shard=_shard(),
                 simulations=_records(),
-                metadata={},
             )
 
     def test_all_rejected_batch_needs_no_row_arrays(self) -> None:
         simulations = tuple(
-            SimulationCommitRecord(
-                simulation_id=_simulation_id(attempt_index),
+            SimulationResult(
                 accepted=False,
-                required_bits=32,
-                evaluated_bits=32,
-                failed_bits=32,
-                first_row=-1,
-                row_count=0,
+                failed_checks=("integration_failure",),
                 metrics={},
             )
-            for attempt_index in range(3)
+            for _ in range(3)
         )
         save_completed_batch(
             self.path,
             plan=_plan(),
             shard=None,
             simulations=simulations,
-            metadata={},
         )
         self.assertIsNone(load_completed_batch(self.path).shard)
 
+    def test_failed_check_names_are_validated_and_ordered(self) -> None:
+        result = SimulationResult(
+            accepted=False,
+            failed_checks=("outside_support", "nonfinite_state"),
+            metrics={},
+        )
+
+        self.assertEqual(
+            result.failed_checks,
+            ("nonfinite_state", "outside_support"),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown failed checks"):
+            SimulationResult(
+                accepted=False,
+                failed_checks=("made_up_failure",),
+                metrics={},
+            )
+
     def test_inconsistent_rows_are_rejected_before_writing(self) -> None:
         wrong = list(_records())
-        wrong[1] = SimulationCommitRecord(
-            simulation_id=_simulation_id(1),
+        wrong[1] = SimulationResult(
             accepted=True,
-            required_bits=63,
-            evaluated_bits=63,
-            failed_bits=0,
-            first_row=2,
-            row_count=1,
+            failed_checks=(),
             metrics={},
         )
         with self.assertRaisesRegex(ValueError, "rows do not match"):
@@ -168,7 +145,6 @@ class BatchStorageTests(unittest.TestCase):
                 plan=_plan(),
                 shard=_shard(),
                 simulations=wrong,
-                metadata={},
             )
         self.assertFalse(self.path.exists())
 

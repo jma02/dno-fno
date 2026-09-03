@@ -124,21 +124,6 @@ def aligned_fields(
     ).real
 
 
-def fitted_displacements(
-    prediction: Array,
-    truth: Array,
-    length: float,
-) -> Array:
-    """Compute the continuous best periodic displacement for every row."""
-    return np.asarray(
-        [
-            optimal_displacement(prediction_i, truth_i, length)
-            for prediction_i, truth_i in zip(prediction, truth)
-        ],
-        dtype=np.float64,
-    )
-
-
 def parse_float_list(value: str) -> tuple[float, ...]:
     """Parse a comma-separated finite float list."""
     values = tuple(float(part.strip()) for part in value.split(",") if part.strip())
@@ -169,21 +154,6 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     if not values or any(item < 0 for item in values):
         raise argparse.ArgumentTypeError("expected nonnegative simulation indices")
     return tuple(dict.fromkeys(values))
-
-
-def resolve_length(archive: np.lib.npyio.NpzFile, requested: float | None) -> float:
-    """Return the requested or archived periodic domain length."""
-    if requested is not None:
-        length = float(requested)
-    elif "domain_length" in archive.files:
-        length = float(np.asarray(archive["domain_length"]).reshape(()))
-    elif "length" in archive.files:
-        length = float(np.asarray(archive["length"]).reshape(()))
-    else:
-        length = 2.0 * np.pi
-    if not np.isfinite(length) or length <= 0.0:
-        raise ValueError(f"periodic length must be positive and finite, got {length}")
-    return length
 
 
 def validate_field_pair(
@@ -238,10 +208,14 @@ def compute_eta_alignment(
     for frame in range(n_times):
         frame_mask = finite[frame]
         if np.any(frame_mask):
-            wrapped[frame, frame_mask] = fitted_displacements(
-                np.asarray(pred_eta[frame, frame_mask], dtype=np.float64),
-                np.asarray(truth_eta[frame, frame_mask], dtype=np.float64),
-                length,
+            prediction_rows = np.asarray(pred_eta[frame, frame_mask], dtype=np.float64)
+            truth_rows = np.asarray(truth_eta[frame, frame_mask], dtype=np.float64)
+            wrapped[frame, frame_mask] = np.asarray(
+                [
+                    optimal_displacement(prediction, truth, length)
+                    for prediction, truth in zip(prediction_rows, truth_rows)
+                ],
+                dtype=np.float64,
             )
         if progress and (frame == 0 or (frame + 1) % 10 == 0 or frame + 1 == n_times):
             print(
@@ -257,36 +231,6 @@ def compute_eta_alignment(
         axis=1,
     )
     return wrapped, unwrapped, finite
-
-
-def displacement_drift(unwrapped: Array) -> Array:
-    """Subtract each simulation's first finite displacement from its trajectory."""
-    drift = np.asarray(unwrapped, dtype=np.float64).copy()
-    for simulation in range(drift.shape[1]):
-        finite_indices = np.flatnonzero(np.isfinite(drift[:, simulation]))
-        if finite_indices.size:
-            drift[:, simulation] -= drift[finite_indices[0], simulation]
-    return drift
-
-
-def differentiate_finite_segments(values: Array, times: Array) -> Array:
-    """Differentiate every contiguous finite segment along the time axis."""
-    derivative = np.full(values.shape, np.nan, dtype=np.float64)
-    for simulation in range(values.shape[1]):
-        finite_indices = np.flatnonzero(np.isfinite(values[:, simulation]))
-        if not finite_indices.size:
-            continue
-        split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
-        for segment in np.split(finite_indices, split_points):
-            if segment.size < 2:
-                continue
-            edge_order = 2 if segment.size >= 3 else 1
-            derivative[segment, simulation] = np.gradient(
-                values[segment, simulation],
-                times[segment],
-                edge_order=edge_order,
-            )
-    return derivative
 
 
 def integrate_finite_segments(values: Array, times: Array) -> Array:
@@ -436,7 +380,27 @@ def compute_alignment_velocity_identity(
         ],
         axis=1,
     )
-    numerical_velocity = differentiate_finite_segments(unwrapped_displacement, times)
+    numerical_velocity = np.full(
+        unwrapped_displacement.shape,
+        np.nan,
+        dtype=np.float64,
+    )
+    for simulation in range(unwrapped_displacement.shape[1]):
+        finite_indices = np.flatnonzero(
+            np.isfinite(unwrapped_displacement[:, simulation])
+        )
+        if not finite_indices.size:
+            continue
+        split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
+        for segment in np.split(finite_indices, split_points):
+            if segment.size < 2:
+                continue
+            edge_order = 2 if segment.size >= 3 else 1
+            numerical_velocity[segment, simulation] = np.gradient(
+                unwrapped_displacement[segment, simulation],
+                times[segment],
+                edge_order=edge_order,
+            )
     integrated_velocity = integrate_finite_segments(result["identity_velocity"], times)
     result["numerical_velocity"] = numerical_velocity
     result["integrated_identity_velocity"] = integrated_velocity
@@ -548,12 +512,6 @@ def first_crossing_index(values: Array, threshold: float) -> int | None:
     return int(indices[0]) if indices.size else None
 
 
-def first_false_index(values: Array) -> int | None:
-    """Return the first false index, or ``None`` when all entries are true."""
-    indices = np.flatnonzero(~values)
-    return int(indices[0]) if indices.size else None
-
-
 def _finite_float(value: float) -> float | None:
     """Convert a NumPy scalar to a JSON-safe float."""
     result = float(value)
@@ -596,7 +554,8 @@ def build_simulation_records(
     records: list[dict[str, Any]] = []
     for simulation, simulation_id in enumerate(simulation_ids):
         one_grid_index = first_crossing_index(np.abs(drift[:, simulation]) / dx, 1.0)
-        nonfinite_index = first_false_index(alignment_finite[:, simulation])
+        nonfinite_indices = np.flatnonzero(~alignment_finite[:, simulation])
+        nonfinite_index = int(nonfinite_indices[0]) if nonfinite_indices.size else None
         record: dict[str, Any] = {
             "simulation_index": simulation,
             "simulation_id": int(simulation_id),
@@ -802,74 +761,6 @@ def _correlation(x: Array, y: Array, mask: Array) -> dict[str, float | int | Non
     }
 
 
-def correlation_frames(
-    times: Array, requested_times: tuple[float, ...] | None
-) -> list[int]:
-    """Return unique nearest saved frames for requested or default times."""
-    if requested_times is None:
-        start, stop = float(times[0]), float(times[-1])
-        requested_times = tuple(
-            start + fraction * (stop - start)
-            for fraction in (0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
-        )
-    frames = [
-        int(np.argmin(np.abs(times - requested))) for requested in requested_times
-    ]
-    return list(dict.fromkeys(frames))
-
-
-def build_correlation_table(
-    times: Array,
-    truth_valid: Array,
-    drift: Array,
-    dx: float,
-    field_metrics: dict[str, dict[str, Array]],
-    velocity_metrics: dict[str, Array] | None,
-    requested_times: tuple[float, ...] | None,
-) -> list[dict[str, Any]]:
-    """Correlate saved-frame diagnostics with the three terminal eta errors."""
-    targets = {
-        "terminal_eta_raw": field_metrics["eta"]["raw_relative_error"][-1],
-        "terminal_eta_shape": field_metrics["eta"]["aligned_relative_error"][-1],
-        "terminal_eta_translation": field_metrics["eta"]["translation_relative_error"][
-            -1
-        ],
-    }
-    rows: list[dict[str, Any]] = []
-    for frame in correlation_frames(times, requested_times):
-        predictors: dict[str, Array] = {
-            "abs_displacement_drift_grid_points": np.abs(drift[frame]) / dx,
-        }
-        for field, metrics in field_metrics.items():
-            predictors[f"{field}_raw"] = metrics["raw_relative_error"][frame]
-            predictors[f"{field}_aligned"] = metrics["aligned_relative_error"][frame]
-            predictors[f"{field}_translation"] = metrics["translation_relative_error"][
-                frame
-            ]
-        if velocity_metrics is not None:
-            predictors["abs_alignment_velocity_identity"] = np.abs(
-                velocity_metrics["identity_velocity"][frame]
-            )
-            predictors["abs_alignment_velocity_direct"] = np.abs(
-                velocity_metrics["direct_velocity"][frame]
-            )
-            predictors["abs_alignment_velocity_geometry"] = np.abs(
-                velocity_metrics["geometry_velocity"][frame]
-            )
-        for predictor_name, predictor in predictors.items():
-            for target_name, target in targets.items():
-                rows.append(
-                    {
-                        "frame": frame,
-                        "time": float(times[frame]),
-                        "predictor": predictor_name,
-                        "target": target_name,
-                        **_correlation(predictor, target, truth_valid),
-                    }
-                )
-    return rows
-
-
 def summarize_terminal(values: Array, valid: Array) -> dict[str, float | int | None]:
     """Return finite terminal quantiles on the truth-valid population."""
     selected = values[-1, valid]
@@ -882,41 +773,6 @@ def summarize_terminal(values: Array, valid: Array) -> dict[str, float | int | N
         "p90": float(np.percentile(selected, 90)),
         "p95": float(np.percentile(selected, 95)),
         "maximum": float(np.max(selected)),
-    }
-
-
-def velocity_validation_summary(
-    truth_valid: Array,
-    drift: Array,
-    dx: float,
-    velocity_metrics: dict[str, Array] | None,
-) -> dict[str, Any] | None:
-    """Summarize the alignment identity over simulations and frames."""
-    if velocity_metrics is None:
-        return None
-    frame_mask = np.broadcast_to(truth_valid[None, :], drift.shape)
-    pooled = _correlation(
-        velocity_metrics["identity_velocity"].reshape(-1),
-        velocity_metrics["numerical_velocity"].reshape(-1),
-        frame_mask.reshape(-1),
-    )
-    integrated = velocity_metrics["integrated_identity_velocity"][-1]
-    observed = drift[-1]
-    closure = integrated - observed
-    closure_keep = truth_valid & np.isfinite(closure)
-    return {
-        "pooled_identity_vs_numerical_velocity": pooled,
-        "terminal_closure_n": int(np.count_nonzero(closure_keep)),
-        "terminal_closure_median_abs_grid_points": (
-            None
-            if not np.any(closure_keep)
-            else float(np.median(np.abs(closure[closure_keep])) / dx)
-        ),
-        "terminal_closure_max_abs_grid_points": (
-            None
-            if not np.any(closure_keep)
-            else float(np.max(np.abs(closure[closure_keep])) / dx)
-        ),
     }
 
 
@@ -970,7 +826,17 @@ def analyze_archive(
             )
         if times.size > 1 and np.any(np.diff(times) <= 0.0):
             raise ValueError("times must be strictly increasing")
-        periodic_length = resolve_length(archive, length)
+        periodic_length = 2.0 * np.pi
+        if length is not None:
+            periodic_length = float(length)
+        elif "domain_length" in archive.files:
+            periodic_length = float(np.asarray(archive["domain_length"]).reshape(()))
+        elif "length" in archive.files:
+            periodic_length = float(np.asarray(archive["length"]).reshape(()))
+        if not np.isfinite(periodic_length) or periodic_length <= 0.0:
+            raise ValueError(
+                f"periodic length must be positive and finite, got {periodic_length}"
+            )
         truth_eta = np.asarray(archive["truth_eta"])
         pred_eta = np.asarray(archive["pred_eta"])
         if truth_eta.ndim != 3:
@@ -1002,7 +868,9 @@ def analyze_archive(
             else np.ones(n_simulations, dtype=bool)
         )
         if simulation_ids.shape != (n_simulations,) or depths.shape != (n_simulations,):
-            raise ValueError("simulation_ids and depths must each have shape (simulation,)")
+            raise ValueError(
+                "simulation_ids and depths must each have shape (simulation,)"
+            )
         if truth_valid.shape != (n_simulations,):
             raise ValueError("truth_valid must have shape (simulation,)")
 
@@ -1012,7 +880,11 @@ def analyze_archive(
             periodic_length,
             progress=progress,
         )
-        drift = displacement_drift(unwrapped)
+        drift = np.asarray(unwrapped, dtype=np.float64).copy()
+        for simulation in range(drift.shape[1]):
+            finite_indices = np.flatnonzero(np.isfinite(drift[:, simulation]))
+            if finite_indices.size:
+                drift[:, simulation] -= drift[finite_indices[0], simulation]
         requested_and_available: list[str] = []
         missing_fields: list[str] = []
         field_metrics: dict[str, dict[str, Array]] = {}
@@ -1069,29 +941,231 @@ def analyze_archive(
             del truth_eta, pred_eta
 
     dx = periodic_length / nx
-    simulation_records = build_simulation_records(
-        times,
-        simulation_ids,
-        depths,
-        truth_valid,
-        alignment_finite,
-        drift,
-        dx,
-        field_metrics,
-        velocity_metrics,
-        thresholds,
-        dominance_fraction,
+    eta_metrics = field_metrics["eta"]
+    simulation_records: list[dict[str, Any]] = []
+    for simulation, simulation_id in enumerate(simulation_ids):
+        one_grid_index = first_crossing_index(np.abs(drift[:, simulation]) / dx, 1.0)
+        nonfinite_indices = np.flatnonzero(~alignment_finite[:, simulation])
+        nonfinite_index = (
+            int(nonfinite_indices[0]) if nonfinite_indices.size else None
+        )
+        record: dict[str, Any] = {
+            "simulation_index": simulation,
+            "simulation_id": int(simulation_id),
+            "depth": _finite_float(depths[simulation]),
+            "truth_valid": bool(truth_valid[simulation]),
+            "first_nonfinite_time": _time_at(times, nonfinite_index),
+            "one_grid_displacement_onset_time": _time_at(times, one_grid_index),
+            "final_displacement_grid_points": _finite_float(
+                drift[-1, simulation] / dx
+            ),
+            "max_abs_displacement_grid_points": _finite_extreme(
+                np.abs(drift[:, simulation]) / dx, "max"
+            ),
+        }
+        for field, metrics in field_metrics.items():
+            for metric in (
+                "raw_relative_error",
+                "aligned_relative_error",
+                "translation_relative_error",
+                "signed_squared_error_removed",
+            ):
+                record[f"final_{field}_{metric}"] = _finite_float(
+                    metrics[metric][-1, simulation]
+                )
+        if velocity_metrics is not None:
+            identity_velocity = velocity_metrics["identity_velocity"][:, simulation]
+            numerical_velocity = velocity_metrics["numerical_velocity"][:, simulation]
+            velocity_correlation = _correlation(
+                identity_velocity,
+                numerical_velocity,
+                np.ones(times.shape, dtype=bool),
+            )
+            integrated = velocity_metrics["integrated_identity_velocity"][
+                -1, simulation
+            ]
+            record.update(
+                {
+                    "alignment_velocity_correlation_n": velocity_correlation["n"],
+                    "alignment_velocity_pearson": velocity_correlation["pearson"],
+                    "alignment_velocity_spearman": velocity_correlation["spearman"],
+                    "final_observed_displacement_drift": _finite_float(
+                        drift[-1, simulation]
+                    ),
+                    "final_integrated_identity_velocity": _finite_float(integrated),
+                    "final_integrated_direct_velocity": _finite_float(
+                        velocity_metrics["integrated_direct_velocity"][-1, simulation]
+                    ),
+                    "final_integrated_geometry_velocity": _finite_float(
+                        velocity_metrics["integrated_geometry_velocity"][-1, simulation]
+                    ),
+                    "final_velocity_integration_residual": _finite_float(
+                        integrated - drift[-1, simulation]
+                    ),
+                    "final_velocity_integration_residual_grid_points": _finite_float(
+                        (integrated - drift[-1, simulation]) / dx
+                    ),
+                    "max_abs_alignment_stationarity_correction_grid_points": (
+                        _finite_extreme(
+                            np.abs(
+                                velocity_metrics["stationarity_correction"][
+                                    :, simulation
+                                ]
+                            )
+                            / dx,
+                            "max",
+                        )
+                    ),
+                    "min_abs_velocity_denominator_over_tangent_energy": (
+                        _finite_extreme(
+                            np.abs(
+                                velocity_metrics[
+                                    "denominator_over_tangent_energy"
+                                ][:, simulation]
+                            ),
+                            "min",
+                        )
+                    ),
+                }
+            )
+        for threshold in thresholds:
+            label = threshold_label(threshold)
+            raw_index = first_crossing_index(
+                eta_metrics["raw_relative_error"][:, simulation], threshold
+            )
+            shape_index = first_crossing_index(
+                eta_metrics["aligned_relative_error"][:, simulation], threshold
+            )
+            translation_index = first_crossing_index(
+                eta_metrics["translation_relative_error"][:, simulation], threshold
+            )
+            record[f"eta_raw_gt_{label}_onset_time"] = _time_at(times, raw_index)
+            record[f"eta_shape_gt_{label}_onset_time"] = _time_at(times, shape_index)
+            record[f"eta_translation_gt_{label}_onset_time"] = _time_at(
+                times, translation_index
+            )
+            record[f"eta_raw_gt_{label}_translation_dominated_at_onset"] = (
+                None
+                if raw_index is None
+                else bool(
+                    eta_metrics["signed_squared_error_removed"][raw_index, simulation]
+                    >= dominance_fraction
+                )
+            )
+            record[f"one_grid_lead_to_eta_raw_gt_{label}"] = (
+                None
+                if raw_index is None or one_grid_index is None
+                else float(times[raw_index] - times[one_grid_index])
+            )
+        simulation_records.append(record)
+
+    valid_records = [record for record in simulation_records if record["truth_valid"]]
+    onset_table: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        label = threshold_label(threshold)
+        raw_key = f"eta_raw_gt_{label}_onset_time"
+        shape_key = f"eta_shape_gt_{label}_onset_time"
+        translation_key = f"eta_translation_gt_{label}_onset_time"
+        dominated_key = f"eta_raw_gt_{label}_translation_dominated_at_onset"
+        lead_key = f"one_grid_lead_to_eta_raw_gt_{label}"
+        raw_crossers = [
+            record for record in valid_records if record[raw_key] is not None
+        ]
+        onset_table.append(
+            {
+                "threshold": threshold,
+                "n_truth_valid": len(valid_records),
+                "n_raw_crossings": len(raw_crossers),
+                "n_shape_crossings": sum(
+                    record[shape_key] is not None for record in valid_records
+                ),
+                "n_translation_crossings": sum(
+                    record[translation_key] is not None for record in valid_records
+                ),
+                "n_raw_crossings_without_shape_crossing": sum(
+                    record[shape_key] is None for record in raw_crossers
+                ),
+                "n_translation_dominated_at_raw_onset": sum(
+                    record[dominated_key] is True for record in raw_crossers
+                ),
+                "median_raw_onset_time": _median_or_none(
+                    [record[raw_key] for record in raw_crossers]
+                ),
+                "median_shape_onset_time": _median_or_none(
+                    [
+                        record[shape_key]
+                        for record in valid_records
+                        if record[shape_key] is not None
+                    ]
+                ),
+                "median_translation_onset_time": _median_or_none(
+                    [
+                        record[translation_key]
+                        for record in valid_records
+                        if record[translation_key] is not None
+                    ]
+                ),
+                "median_one_grid_lead_to_raw_onset": _median_or_none(
+                    [
+                        record[lead_key]
+                        for record in raw_crossers
+                        if record[lead_key] is not None
+                    ]
+                ),
+            }
+        )
+    correlation_times = correlation_times_requested
+    if correlation_times is None:
+        start, stop = float(times[0]), float(times[-1])
+        correlation_times = tuple(
+            start + fraction * (stop - start)
+            for fraction in (0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0)
+        )
+    correlation_frames = list(
+        dict.fromkeys(
+            int(np.argmin(np.abs(times - requested)))
+            for requested in correlation_times
+        )
     )
-    onset_table = build_onset_table(simulation_records, thresholds)
-    correlation_table = build_correlation_table(
-        times,
-        truth_valid,
-        drift,
-        dx,
-        field_metrics,
-        velocity_metrics,
-        correlation_times_requested,
-    )
+    correlation_targets = {
+        "terminal_eta_raw": field_metrics["eta"]["raw_relative_error"][-1],
+        "terminal_eta_shape": field_metrics["eta"]["aligned_relative_error"][-1],
+        "terminal_eta_translation": field_metrics["eta"][
+            "translation_relative_error"
+        ][-1],
+    }
+    correlation_table: list[dict[str, Any]] = []
+    for frame in correlation_frames:
+        predictors: dict[str, Array] = {
+            "abs_displacement_drift_grid_points": np.abs(drift[frame]) / dx,
+        }
+        for field, metrics in field_metrics.items():
+            predictors[f"{field}_raw"] = metrics["raw_relative_error"][frame]
+            predictors[f"{field}_aligned"] = metrics["aligned_relative_error"][frame]
+            predictors[f"{field}_translation"] = metrics[
+                "translation_relative_error"
+            ][frame]
+        if velocity_metrics is not None:
+            predictors["abs_alignment_velocity_identity"] = np.abs(
+                velocity_metrics["identity_velocity"][frame]
+            )
+            predictors["abs_alignment_velocity_direct"] = np.abs(
+                velocity_metrics["direct_velocity"][frame]
+            )
+            predictors["abs_alignment_velocity_geometry"] = np.abs(
+                velocity_metrics["geometry_velocity"][frame]
+            )
+        for predictor_name, predictor in predictors.items():
+            for target_name, target in correlation_targets.items():
+                correlation_table.append(
+                    {
+                        "frame": frame,
+                        "time": float(times[frame]),
+                        "predictor": predictor_name,
+                        "target": target_name,
+                        **_correlation(predictor, target, truth_valid),
+                    }
+                )
 
     framewise_path = output_path.with_suffix(".framewise.npz")
     simulations_path = output_path.with_suffix(".simulations.csv")
@@ -1129,6 +1203,33 @@ def analyze_archive(
         )
     focus_records = [simulation_records[index] for index in focus_simulation_indices]
     write_csv(focus_path, focus_records)
+
+    alignment_velocity_validation: dict[str, Any] | None = None
+    if velocity_metrics is not None:
+        frame_mask = np.broadcast_to(truth_valid[None, :], drift.shape)
+        pooled = _correlation(
+            velocity_metrics["identity_velocity"].reshape(-1),
+            velocity_metrics["numerical_velocity"].reshape(-1),
+            frame_mask.reshape(-1),
+        )
+        integrated = velocity_metrics["integrated_identity_velocity"][-1]
+        observed = drift[-1]
+        closure = integrated - observed
+        closure_keep = truth_valid & np.isfinite(closure)
+        alignment_velocity_validation = {
+            "pooled_identity_vs_numerical_velocity": pooled,
+            "terminal_closure_n": int(np.count_nonzero(closure_keep)),
+            "terminal_closure_median_abs_grid_points": (
+                None
+                if not np.any(closure_keep)
+                else float(np.median(np.abs(closure[closure_keep])) / dx)
+            ),
+            "terminal_closure_max_abs_grid_points": (
+                None
+                if not np.any(closure_keep)
+                else float(np.max(np.abs(closure[closure_keep])) / dx)
+            ),
+        }
 
     result: dict[str, Any] = {
         "definition": {
@@ -1174,12 +1275,7 @@ def analyze_archive(
             }
             for field, metrics in field_metrics.items()
         },
-        "alignment_velocity_validation": velocity_validation_summary(
-            truth_valid,
-            drift,
-            dx,
-            velocity_metrics,
-        ),
+        "alignment_velocity_validation": alignment_velocity_validation,
         "onset_table": onset_table,
         "correlation_table": correlation_table,
         "simulation_records": simulation_records,
@@ -1203,7 +1299,7 @@ def analyze_archive(
     return result
 
 
-def main() -> None:
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path, help="Saved rollout trajectory NPZ.")
     parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
@@ -1286,7 +1382,3 @@ def main() -> None:
             allow_nan=False,
         )
     )
-
-
-if __name__ == "__main__":
-    main()

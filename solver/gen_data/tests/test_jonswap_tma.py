@@ -211,6 +211,7 @@ class JonswapTmaFormulaTest(unittest.TestCase):
                 ),
             )
 
+
 class JonswapTmaSupportTest(unittest.TestCase):
     def test_three_declared_strata(self) -> None:
         examples = {

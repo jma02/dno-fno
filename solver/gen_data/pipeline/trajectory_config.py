@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Literal, TypeAlias
+
+
+TrajectoryFamily: TypeAlias = Literal[
+    "tanaka",
+    "benjamin_feir",
+    "jonswap_tma",
+]
+JONSWAP_ADJUSTMENT_SCHEMA = "dommermuth_nonlinear_adjustment_v1"
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,87 @@ class RolloutConfig:
         return substeps
 
 
+@dataclass(frozen=True)
+class TrajectoryFrameSelectionConfig:
+    """Number and weighting parameters for retained trajectory frames."""
+
+    tanaka_count: int = 200
+    tanaka_alpha: float = 0.5
+    tanaka_sigma_steps: float = 50.0
+    benjamin_feir_count: int = 200
+    jonswap_tma_count: int = 16
+
+
+@dataclass(frozen=True)
+class JonswapNonlinearAdjustmentConfig:
+    """Ramp and warm-up lengths for JONSWAP/TMA initial states."""
+
+    ramp_order: int
+    ramp_time_peak_periods: int
+    burn_peak_periods: int
+
+    def __post_init__(self) -> None:
+        values = (
+            self.ramp_order,
+            self.ramp_time_peak_periods,
+            self.burn_peak_periods,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in values
+        ):
+            raise ValueError("JONSWAP nonlinear-adjustment values must be positive")
+        if self.burn_peak_periods < self.ramp_time_peak_periods:
+            raise ValueError("JONSWAP adjustment burn must cover the ramp time")
+
+
+@dataclass(frozen=True)
+class TrajectoryExecutionConfig:
+    """Numerical, duration, and row-selection settings for one trajectory family."""
+
+    family: TrajectoryFamily
+    numerical: RolloutConfig
+    frame_selection: TrajectoryFrameSelectionConfig
+    fixed_terminal_time: float | None = None
+    period_count: int | None = None
+    jonswap_quadrature_order: int | None = None
+    jonswap_adjustment: JonswapNonlinearAdjustmentConfig | None = None
+
+    def __post_init__(self) -> None:
+        if self.family not in ("tanaka", "benjamin_feir", "jonswap_tma"):
+            raise ValueError(f"unknown trajectory family: {self.family}")
+        if self.family == "tanaka":
+            if (
+                self.fixed_terminal_time is None
+                or not math.isfinite(self.fixed_terminal_time)
+                or self.fixed_terminal_time <= 0.0
+            ):
+                raise ValueError("Tanaka terminal time must be finite and positive")
+            if self.period_count is not None:
+                raise ValueError("Tanaka does not use a period-count duration")
+        else:
+            if self.fixed_terminal_time is not None:
+                raise ValueError(f"{self.family} does not use a fixed terminal time")
+            if (
+                isinstance(self.period_count, bool)
+                or not isinstance(self.period_count, int)
+                or self.period_count <= 0
+            ):
+                raise ValueError(f"{self.family} period_count must be positive")
+
+        if self.family == "jonswap_tma":
+            if (
+                isinstance(self.jonswap_quadrature_order, bool)
+                or not isinstance(self.jonswap_quadrature_order, int)
+                or self.jonswap_quadrature_order < 2
+            ):
+                raise ValueError("JONSWAP/TMA quadrature_order must be at least two")
+        elif self.jonswap_quadrature_order is not None:
+            raise ValueError("only JONSWAP/TMA may set a quadrature order")
+        elif self.jonswap_adjustment is not None:
+            raise ValueError("only JONSWAP/TMA may set nonlinear adjustment settings")
+
+
 PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG = RolloutConfig(
     dno_order=4,
     internal_hamiltonian_drift_threshold=1.0e-3,
@@ -104,3 +194,38 @@ PAPER_JONSWAP_ROLLOUT_CONFIG = RolloutConfig(
     internal_hamiltonian_drift_threshold=1.0e-3,
 )
 PAPER_TANAKA_ROLLOUT_CONFIG = RolloutConfig()
+
+PAPER_JONSWAP_ADJUSTMENT_CONFIG = JonswapNonlinearAdjustmentConfig(
+    ramp_order=4,
+    ramp_time_peak_periods=10,
+    burn_peak_periods=20,
+)
+
+
+def paper_trajectory_execution(
+    family: TrajectoryFamily,
+) -> TrajectoryExecutionConfig:
+    """Return the paper-dataset settings for one trajectory family."""
+
+    if family == "tanaka":
+        return TrajectoryExecutionConfig(
+            family=family,
+            numerical=PAPER_TANAKA_ROLLOUT_CONFIG,
+            frame_selection=TrajectoryFrameSelectionConfig(),
+            fixed_terminal_time=200.0,
+        )
+    if family == "benjamin_feir":
+        return TrajectoryExecutionConfig(
+            family=family,
+            numerical=PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
+            frame_selection=TrajectoryFrameSelectionConfig(),
+            period_count=100,
+        )
+    return TrajectoryExecutionConfig(
+        family=family,
+        numerical=PAPER_JONSWAP_ROLLOUT_CONFIG,
+        frame_selection=TrajectoryFrameSelectionConfig(),
+        period_count=16,
+        jonswap_quadrature_order=16,
+        jonswap_adjustment=PAPER_JONSWAP_ADJUSTMENT_CONFIG,
+    )

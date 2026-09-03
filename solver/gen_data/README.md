@@ -15,17 +15,17 @@ into a new dataset.
 
 ## Generation flow
 
-Each attempted simulation has a deterministic ID derived from its family, split,
-worker stream, and attempt index. A run then:
+Each attempted simulation is numbered in order within one family/split run. Its
+family, split, and number determine its random draws. A run then:
 
 1. samples parameters from one declared parameter group;
-2. writes the proposal;
-3. constructs the initial state;
-4. runs the nonlinear adjustment when the JONSWAP family requires it;
-5. evolves a complete trajectory for rollout families;
-6. computes the common Craig--Sulem DNO target;
-7. applies the required numerical checks;
-8. stores a complete accepted simulation or a zero-row rejection decision.
+2. constructs the initial state;
+3. runs the nonlinear adjustment when the JONSWAP family requires it;
+4. evolves a complete trajectory for rollout families;
+5. computes the common Craig--Sulem DNO target;
+6. applies the required numerical checks;
+7. selects the retained times from accepted trajectories;
+8. atomically writes the completed batch, including zero-row rejection decisions.
 
 Errors in the constructor or solver stop the run. They are not silently turned
 into rejected data. A rejected simulation is tied to an explicit failed check.
@@ -45,12 +45,12 @@ Family definitions:
 
 Execution:
 
-- `stokes_batch_executor.py` evaluates one static Stokes batch.
-- `trajectory_batch_executor.py` evaluates one rollout batch.
-- `jonswap_horizon_executor.py` groups JONSWAP simulations by compatible integration
+- `stokes_batch_generator.py` evaluates one static Stokes batch.
+- `trajectory_batch_generator.py` evaluates one rollout batch.
+- `jonswap_horizon_generator.py` groups JONSWAP simulations by compatible integration
   length so they can run efficiently together.
 - `trajectory_family_adapters.py` connects each rollout family to the shared
-  executor.
+  generator.
 
 Shared pipeline:
 
@@ -60,7 +60,8 @@ Shared pipeline:
 - `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
 - `pipeline/trajectory_rollout.py` runs and samples trajectories.
 - `pipeline/dno_target.py` computes the stored DNO target.
-- `pipeline/batch_artifacts.py` validates assignments, stored rows, and results.
+- `pipeline/batch_artifacts.py` validates sampled specifications, stored rows, and
+  results.
 - `pipeline/batch_storage.py` reads and writes one completed NPZ per batch.
 - `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
 - `pipeline/build_dataset_view.py` creates the manifest and trajectory map used
@@ -70,19 +71,14 @@ Shared pipeline:
 
 ## Acceptance
 
-`SimulationCheckResult` carries three masks:
-
-- `required`: checks that must pass for this family and revision;
-- `evaluated`: checks that actually ran;
-- `failed`: evaluated checks that failed.
-
-A simulation is accepted only when every required check ran and none failed. The
-shared checks cover finite values, positive water depth, complete time grids,
-stage convergence, DNO residuals, and internal energy drift where applicable.
+`SimulationCheckResult` records the acceptance decision and names each failure
+condition with a Boolean field. The checks cover finite values, positive water
+height, complete time grids, integration convergence, DNO residuals, and
+internal energy drift where applicable.
 
 JONSWAP uses two separate decisions: the nonlinear adjustment must first
 produce a valid handoff, then the autonomous production rollout must pass its
-own checks. This separation is why the JONSWAP executor has explicit
+own checks. This separation is why the JONSWAP generator has explicit
 adjustment handling.
 
 ## Stored files
@@ -97,8 +93,7 @@ restarts the same deterministic batch from the beginning.
 
 The dataset view contains:
 
-- a JSON manifest listing shards, counts, grid settings, and numerical target
-  settings;
+- a JSON manifest listing shards, counts, grid settings, and splits;
 - a trajectory-map NPZ mapping every attempted simulation to its acceptance decision
   and every stored row to its trajectory, frame, and shard row.
 
@@ -108,14 +103,9 @@ The training loader uses those two files directly.
 
 The supported generation entrypoints live in `scripts/`:
 
-- `generate_paper_dataset.py` handles Stokes, Tanaka, and Benjamin--Feir runs;
-- `generate_paper_dataset_jonswap.py` handles JONSWAP/TMA runs;
-- `build_paper_dataset_view.py` combines completed chunks into one training
+- `generate_paper_dataset.py` handles all four families;
+- `build_paper_dataset_view.py` combines completed family/split runs into one training
   view.
-
-The launch shell scripts are recipes for the completed paper dataset. They
-delegate to these Python entrypoints rather than implementing another
-generator.
 
 ## Development checks
 
@@ -123,8 +113,8 @@ From the repository root:
 
 ```bash
 uv run ruff check solver/gen_data scripts/generate_paper_dataset.py \
-  scripts/generate_paper_dataset_jonswap.py scripts/build_paper_dataset_view.py
+  scripts/build_paper_dataset_view.py
 uv run pyright solver/gen_data scripts/generate_paper_dataset.py \
-  scripts/generate_paper_dataset_jonswap.py scripts/build_paper_dataset_view.py
+  scripts/build_paper_dataset_view.py
 uv run pytest solver/gen_data/tests solver/gen_data/pipeline/tests
 ```

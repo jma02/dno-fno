@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -28,6 +29,7 @@ from scripts.render_paper_dataset_worst_simulations import (
     animation_record,
     atomic_output_directory,
     load_combined_summary_binding,
+    load_source_summary,
     padded_animation_limits,
     validate_final_paper_dataset_counts,
     validate_scanned_population,
@@ -55,11 +57,9 @@ class CombinedSummaryTests(unittest.TestCase):
                 combined,
                 {
                     "status": "complete",
-                    "preflight": {
-                        "chunks": [{"summary_path": str(path)} for path in summaries],
-                        "accepted_simulations_total": 3,
-                        "expected_rows": 7,
-                    },
+                    "run_summaries": [str(path) for path in summaries],
+                    "accepted_simulations": 3,
+                    "rows": 7,
                 },
             )
 
@@ -78,13 +78,10 @@ class CombinedSummaryTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source.summary.json"
             _write_json(source, {})
-            for chunks, message in (
-                ([{"summary_path": source.name}], "not absolute"),
+            for run_summaries, message in (
+                ([source.name], "not absolute"),
                 (
-                    [
-                        {"summary_path": str(source.resolve())},
-                        {"summary_path": str(source.resolve())},
-                    ],
+                    [str(source.resolve()), str(source.resolve())],
                     "repeats",
                 ),
             ):
@@ -93,11 +90,9 @@ class CombinedSummaryTests(unittest.TestCase):
                     combined,
                     {
                         "status": "complete",
-                        "preflight": {
-                            "chunks": chunks,
-                            "accepted_simulations_total": 0,
-                            "expected_rows": 0,
-                        },
+                        "run_summaries": run_summaries,
+                        "accepted_simulations": 0,
+                        "rows": 0,
                     },
                 )
                 with (
@@ -108,6 +103,49 @@ class CombinedSummaryTests(unittest.TestCase):
                     ),
                 ):
                     load_combined_summary_binding(combined)
+
+    def test_loads_new_generation_summary_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            manifest = root / "paper_dataset_tanaka_train.dataset.json"
+            trajectory_map = root / "paper_dataset_tanaka_train.trajectory_map.npz"
+            trajectory_map.touch()
+            _write_json(
+                manifest,
+                {
+                    "trajectory_map_npz": trajectory_map.name,
+                    "dataset_shards": [],
+                    "n_accepted_trajectories": 0,
+                    "n_accepted_rows": 0,
+                },
+            )
+            summary = root / "paper_dataset_tanaka_train.summary.json"
+            _write_json(
+                summary,
+                {
+                    "status": "complete",
+                    "output_root": str(root),
+                    "run_spec": {
+                        "family_name": "tanaka",
+                        "dataset_split": "train",
+                    },
+                    "dataset_view": {
+                        "manifest": str(manifest),
+                        "trajectory_map": str(trajectory_map),
+                    },
+                },
+            )
+            with mock.patch.object(
+                renderer,
+                "_trajectory_indices",
+                return_value=(),
+            ):
+                source = load_source_summary(summary)
+
+        self.assertEqual(source.family, "tanaka")
+        self.assertEqual(source.split, "train")
+        self.assertEqual(source.manifest_path, manifest)
+        self.assertEqual(source.map_path, trajectory_map)
 
 
 class DatasetContractAndPublicationTests(unittest.TestCase):

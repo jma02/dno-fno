@@ -8,10 +8,7 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.simulation_checks import (
-    SimulationCheck,
-    SimulationCheckResult,
-)
+from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig
 from solver.gen_data.pipeline.trajectory_integration import (
     AdjustmentBatchIntegrator,
@@ -156,13 +153,30 @@ def _evaluate_trajectory_simulation(
             solver_grid.minimum_water_column[:count, simulation_index],
             hamiltonian_drift_threshold=drift_threshold,
         )
-        failed = decision.failed | health_decision.failed
-        if health_decision.failed:
-            failed |= SimulationCheck.INCOMPLETE_TRAJECTORY
         decision = SimulationCheckResult(
-            required=decision.required | health_decision.required,
-            evaluated=decision.evaluated | health_decision.evaluated,
-            failed=failed,
+            accepted=decision.accepted and health_decision.accepted,
+            nonfinite_state=(
+                decision.nonfinite_state or health_decision.nonfinite_state
+            ),
+            nonfinite_target=(
+                decision.nonfinite_target or health_decision.nonfinite_target
+            ),
+            nonpositive_water_height=(
+                decision.nonpositive_water_height
+                or health_decision.nonpositive_water_height
+            ),
+            hamiltonian_drift=(
+                decision.hamiltonian_drift or health_decision.hamiltonian_drift
+            ),
+            integration_failure=(
+                decision.integration_failure or health_decision.integration_failure
+            ),
+            outside_support=(
+                decision.outside_support or health_decision.outside_support
+            ),
+            incomplete_trajectory=(
+                decision.incomplete_trajectory or not health_decision.accepted
+            ),
         )
 
     return TrajectorySimulationResult(

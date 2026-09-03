@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,98 +13,30 @@ from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.batch_artifacts import (
-    SimulationCommitRecord,
-    compute_batch_simulation_ids,
-)
+from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
-
-
-def _target(*, nx: int = 4, maximum_wavenumber: float = 1.0) -> dict[str, object]:
-    return {
-        "nx": nx,
-        "length": 2.0 * math.pi,
-        "gravity": 1.0,
-        "dno_order": 2,
-        "pad_factor": 2,
-        "maximum_wavenumber": maximum_wavenumber,
-        "dtype": "float64",
-    }
-
-
-def _static_metadata(*, maximum_wavenumber: float = 1.0) -> dict[str, object]:
-    return {
-        "family": "stokes",
-        "simulation_type": "static",
-        "contract": {
-            "role": "test",
-            **_target(maximum_wavenumber=maximum_wavenumber),
-        },
-    }
-
-
-def _trajectory_metadata(
-    family: str,
-    *,
-    evolution_nx: int = 4,
-    target_nx: int | None = None,
-    fine_dt: float = 0.01,
-    maximum_wavenumber: float = 1.0,
-    target_maximum_wavenumber: float | None = None,
-) -> dict[str, object]:
-    numerical = {
-        **_target(nx=evolution_nx, maximum_wavenumber=maximum_wavenumber),
-        "coarse_dt": 2.0 * fine_dt,
-        "fine_dt": fine_dt,
-        "retry_dt": 0.5 * fine_dt,
-        "saved_dt": 0.02,
-        "gl2_residual_tolerance": 1.0e-8,
-        "gl2_iteration_cap": 8,
-        "refinement_tolerance": 1.0e-3,
-        "relative_floor": 1.0e-12,
-        "target_time_chunk_size": 2,
-    }
-    if target_nx is not None:
-        numerical["target_nx"] = target_nx
-    if target_maximum_wavenumber is not None:
-        numerical["target_maximum_wavenumber"] = target_maximum_wavenumber
-    return {
-        "family": family,
-        "simulation_type": "trajectory",
-        "trajectory_execution": {
-            "family": family,
-            "role": "test",
-            "numerical": numerical,
-            "horizon": {"kind": "fixed_terminal_time"},
-            "frame_selection": {"count": 2},
-        },
-    }
 
 
 def _proposal(
     *,
     family_id: int,
     dataset_split: DatasetSplit,
-    attempt_indices: tuple[int, ...],
-    metadata: dict[str, object],
+    attempt_numbers: tuple[int, ...],
 ) -> BatchPlanArrays:
     return {
         "family_id": np.asarray(family_id, dtype=np.int16),
         "dataset_split": np.asarray(dataset_split.value),
         "parameter_group_id": np.asarray(
-            [f"group_{index}" for index in range(len(attempt_indices))]
+            [f"group_{index}" for index in range(len(attempt_numbers))]
         ),
-        "worker_stream_id": np.zeros(len(attempt_indices), dtype=np.uint32),
-        "attempt_index": np.asarray(attempt_indices, dtype=np.uint64),
         "simulation_spec_json": np.asarray(
             [
-                json.dumps({"attempt_index": attempt_index})
-                for attempt_index in attempt_indices
+                json.dumps({"attempt_number": attempt_number})
+                for attempt_number in attempt_numbers
             ]
         ),
-        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
     }
 
 
@@ -147,21 +78,13 @@ def _write_batch(
         plan=proposal,
         shard=shard,
         simulations=tuple(
-            SimulationCommitRecord(
-                simulation_id=int(simulation_id),
+            SimulationResult(
                 accepted=local_index in blocks,
-                required_bits=63,
-                evaluated_bits=63,
-                failed_bits=0 if local_index in blocks else 1,
-                first_row=blocks.get(local_index, (-1, 0))[0],
-                row_count=blocks.get(local_index, (-1, 0))[1],
+                failed_checks=() if local_index in blocks else ("nonfinite_state",),
                 metrics={},
             )
-            for local_index, simulation_id in enumerate(
-                compute_batch_simulation_ids(proposal)
-            )
+            for local_index in range(int(proposal["simulation_spec_json"].size))
         ),
-        metadata={},
     )
 
 
@@ -179,8 +102,7 @@ class DatasetViewTests(unittest.TestCase):
             proposal=_proposal(
                 family_id=0,
                 dataset_split=DatasetSplit.TRAIN,
-                attempt_indices=(10, 11),
-                metadata=_static_metadata(),
+                attempt_numbers=(10, 11),
             ),
             accepted_local_indices=(0,),
             frames_per_simulation=1,
@@ -190,8 +112,7 @@ class DatasetViewTests(unittest.TestCase):
             proposal=_proposal(
                 family_id=1,
                 dataset_split=DatasetSplit.VALIDATION,
-                attempt_indices=(20,),
-                metadata=_trajectory_metadata("tanaka"),
+                attempt_numbers=(20,),
             ),
             accepted_local_indices=(0,),
             frames_per_simulation=2,
@@ -214,60 +135,51 @@ class DatasetViewTests(unittest.TestCase):
                 trajectory_map["trajectory_index"],
                 np.asarray([0, 2, 2], dtype=np.int32),
             )
+            np.testing.assert_array_equal(
+                trajectory_map["trajectory_simulation_id"],
+                np.asarray([0, 1, 0], dtype=np.int64),
+            )
 
-    def test_training_target_settings_must_match(self) -> None:
-        stokes = batch_path(self.root, family="stokes", split="train", batch_id=0)
-        tanaka = batch_path(self.root, family="tanaka", split="validation", batch_id=0)
+    def test_simulation_ids_continue_across_batches_in_the_same_split(self) -> None:
+        first = batch_path(self.root, family="stokes", split="train", batch_id=0)
+        second = batch_path(self.root, family="stokes", split="train", batch_id=1)
+        for path, attempt_numbers in ((first, (10, 11)), (second, (20,))):
+            _write_batch(
+                path,
+                proposal=_proposal(
+                    family_id=1,
+                    dataset_split=DatasetSplit.TRAIN,
+                    attempt_numbers=attempt_numbers,
+                ),
+                accepted_local_indices=tuple(range(len(attempt_numbers))),
+                frames_per_simulation=1,
+            )
+
+        view = build_dataset_view(self.root, (first, second))
+        with np.load(view.trajectory_map, allow_pickle=False) as trajectory_map:
+            np.testing.assert_array_equal(
+                trajectory_map["trajectory_simulation_id"],
+                np.asarray([0, 1, 2], dtype=np.int64),
+            )
+
+    def test_duplicate_batch_path_is_rejected(self) -> None:
+        path = batch_path(self.root, family="stokes", split="train", batch_id=0)
         _write_batch(
-            stokes,
+            path,
             proposal=_proposal(
                 family_id=0,
                 dataset_split=DatasetSplit.TRAIN,
-                attempt_indices=(1,),
-                metadata=_static_metadata(maximum_wavenumber=2.0),
+                attempt_numbers=(10, 11),
             ),
-            accepted_local_indices=(0,),
+            accepted_local_indices=(0, 1),
             frames_per_simulation=1,
         )
-        _write_batch(
-            tanaka,
-            proposal=_proposal(
-                family_id=1,
-                dataset_split=DatasetSplit.VALIDATION,
-                attempt_indices=(2,),
-                metadata=_trajectory_metadata("tanaka", maximum_wavenumber=1.0),
-            ),
-            accepted_local_indices=(0,),
-            frames_per_simulation=1,
-        )
-        with self.assertRaisesRegex(ValueError, "DNO target settings"):
-            build_dataset_view(self.root, (stokes, tanaka))
 
-    def test_one_family_cannot_mix_generator_settings(self) -> None:
-        batches = tuple(
-            batch_path(self.root, family="tanaka", split=split, batch_id=0)
-            for split in ("train", "validation")
-        )
-        for index, (paths, fine_dt, dataset_split) in enumerate(
-            zip(
-                batches,
-                (0.01, 0.005),
-                (DatasetSplit.TRAIN, DatasetSplit.VALIDATION),
-            )
-        ):
-            _write_batch(
-                paths,
-                proposal=_proposal(
-                    family_id=1,
-                    dataset_split=dataset_split,
-                    attempt_indices=(10 + index,),
-                    metadata=_trajectory_metadata("tanaka", fine_dt=fine_dt),
-                ),
-                accepted_local_indices=(0,),
-                frames_per_simulation=1,
-            )
-        with self.assertRaisesRegex(ValueError, "cannot mix generator settings"):
-            build_dataset_view(self.root, batches)
+        with self.assertRaisesRegex(ValueError, "batch paths must be unique"):
+            build_dataset_view(self.root, (path, path))
+
+        self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
+        self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())
 
     def test_dual_grid_view_uses_target_grid(self) -> None:
         paths = batch_path(self.root, family="jonswap_tma", split="test", batch_id=0)
@@ -276,12 +188,7 @@ class DatasetViewTests(unittest.TestCase):
             proposal=_proposal(
                 family_id=3,
                 dataset_split=DatasetSplit.TEST,
-                attempt_indices=(30,),
-                metadata=_trajectory_metadata(
-                    "jonswap_tma",
-                    evolution_nx=8,
-                    target_nx=4,
-                ),
+                attempt_numbers=(30,),
             ),
             accepted_local_indices=(0,),
             frames_per_simulation=2,
@@ -290,7 +197,6 @@ class DatasetViewTests(unittest.TestCase):
         view = build_dataset_view(self.root, (paths,))
         manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
         self.assertEqual(manifest["grid"]["nx"], 4)
-        self.assertEqual(manifest["dataset_settings"]["target"]["nx"], 4)
 
     def test_missing_batch_cannot_enter_view(self) -> None:
         path = batch_path(self.root, family="stokes", split="test", batch_id=0)

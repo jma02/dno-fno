@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import replace
 import json
 import math
@@ -27,41 +26,33 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     BENJAMIN_FEIR_PARAMETER_GROUPS,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
+    BenjaminFeirSample,
     find_benjamin_feir_sample_violations,
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    AttemptAssignment,
-    SimulationKey,
     DatasetSplit,
-    balanced_simulation_targets,
-    random_generator_for_simulation,
-    build_next_attempt_batch,
 )
 
 
 DOMAIN_LENGTH = 2.0 * math.pi
 
 
-def assignment(
+def sample_benjamin_feir(
     cell_index: int,
     *,
-    family_id: int = 3,
     dataset_split: DatasetSplit = DatasetSplit.TRAIN,
-    worker_stream_id: int = 0,
-    attempt_index: int | None = None,
-) -> AttemptAssignment:
-    """Return one deterministic assignment for a declared parameter group."""
+    attempt_number: int | None = None,
+    domain_length: float = DOMAIN_LENGTH,
+) -> BenjaminFeirSample:
+    """Sample one Benjamin--Feir parameter group for a test."""
 
-    attempt = cell_index if attempt_index is None else attempt_index
-    return AttemptAssignment(
-        simulation_key=SimulationKey(
-            family_id=family_id,
-            dataset_split=dataset_split,
-            worker_stream_id=worker_stream_id,
-            attempt_index=attempt,
-        ),
-        parameter_group_id=BENJAMIN_FEIR_PARAMETER_GROUP_IDS[cell_index],
+    identifier = cell_index if attempt_number is None else attempt_number
+    return sample_benjamin_feir_simulation(
+        BENJAMIN_FEIR_PARAMETER_GROUP_IDS[cell_index],
+        dataset_split=dataset_split,
+        attempt_number=identifier,
+        domain_length=domain_length,
     )
 
 
@@ -82,34 +73,9 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             66,
         )
 
-    def test_common_scheduler_balances_the_pair_cells_exactly(self) -> None:
-        parameter_group_ids = BENJAMIN_FEIR_PARAMETER_GROUP_IDS
-        targets = balanced_simulation_targets(
-            parameter_group_ids, simulation_count=20_000
-        )
-        scheduled = build_next_attempt_batch(
-            targets,
-            {},
-            {},
-            {target.parameter_group_id: target.simulation_count for target in targets},
-            family_id=3,
-            dataset_split=DatasetSplit.TRAIN,
-            worker_stream_id=0,
-            first_attempt_index=0,
-            batch_size=20_000,
-        )
-        counts = Counter(item.parameter_group_id for item in scheduled)
-        self.assertEqual(len(scheduled), 20_000)
-        self.assertEqual(set(counts), set(parameter_group_ids))
-        self.assertEqual(set(counts.values()), {303, 304})
-        self.assertEqual(
-            sum(count == 304 for count in counts.values()),
-            2,
-        )
-
     def test_replay_is_bitwise_deterministic_and_constructor_ready(self) -> None:
-        first = sample_benjamin_feir_simulation(assignment(37, attempt_index=91))
-        second = sample_benjamin_feir_simulation(assignment(37, attempt_index=91))
+        first = sample_benjamin_feir(37, attempt_number=91)
+        second = sample_benjamin_feir(37, attempt_number=91)
         self.assertEqual(first, second)
         self.assertEqual(first.to_json_record(), second.to_json_record())
         first_arrays = first.to_parameter_arrays()
@@ -118,37 +84,14 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         for name in first_arrays:
             np.testing.assert_array_equal(first_arrays[name], second_arrays[name])
 
-    def test_every_key_coordinate_enters_the_pcg64_seed(self) -> None:
-        base = assignment(0, attempt_index=41).simulation_key
-        expected = np.random.Generator(
-            np.random.PCG64(np.random.SeedSequence(base.seed_words))
-        ).random(8)
-        np.testing.assert_array_equal(
-            random_generator_for_simulation(base).random(8), expected
-        )
-
-        keys = (
-            base,
-            SimulationKey(4, DatasetSplit.TRAIN, 0, 41),
-            SimulationKey(3, DatasetSplit.VALIDATION, 0, 41),
-            SimulationKey(3, DatasetSplit.TRAIN, 1, 41),
-            SimulationKey(3, DatasetSplit.TRAIN, 0, 42),
-        )
-        first_draws = {
-            tuple(random_generator_for_simulation(key).random(8)) for key in keys
-        }
-        self.assertEqual(len(first_draws), len(keys))
-
     def test_all_cells_remain_in_support_under_many_attempts(self) -> None:
         for cell_index, (carrier_mode, sideband_offset) in enumerate(
             BENJAMIN_FEIR_PARAMETER_GROUPS.values()
         ):
             for local_attempt in range(128):
-                sample = sample_benjamin_feir_simulation(
-                    assignment(
-                        cell_index,
-                        attempt_index=10_000 * cell_index + local_attempt,
-                    )
+                sample = sample_benjamin_feir(
+                    cell_index,
+                    attempt_number=10_000 * cell_index + local_attempt,
                 )
                 self.assertEqual(find_benjamin_feir_sample_violations(sample), ())
                 self.assertEqual(sample.carrier_mode, carrier_mode)
@@ -182,7 +125,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         self,
     ) -> None:
         for cell_index in range(len(BENJAMIN_FEIR_PARAMETER_GROUP_IDS)):
-            sample = sample_benjamin_feir_simulation(assignment(cell_index))
+            sample = sample_benjamin_feir(cell_index)
             lower, upper = sample.conditional_steepness_bounds
             self.assertLess(
                 lower,
@@ -193,24 +136,14 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
                 CARRIER_STEEPNESS_MAX,
             )
 
-    def test_json_persists_parameters_phases_and_simulation_coordinates(self) -> None:
-        sample = sample_benjamin_feir_simulation(
-            assignment(
-                65,
-                family_id=17,
-                dataset_split=DatasetSplit.TEST,
-                worker_stream_id=29,
-                attempt_index=123_456,
-            )
+    def test_json_persists_sampled_parameters_and_phases(self) -> None:
+        sample = sample_benjamin_feir(
+            65,
+            dataset_split=DatasetSplit.TEST,
+            attempt_number=123_456,
         )
         record = sample.to_json_record()
-        key = sample.assignment.simulation_key
         self.assertNotIn("schema", record)
-        self.assertEqual(record["simulation_id"], key.simulation_id)
-        self.assertEqual(record["family_id"], 17)
-        self.assertEqual(record["dataset_split"], "test")
-        self.assertEqual(record["worker_stream_id"], 29)
-        self.assertEqual(record["attempt_index"], 123_456)
         self.assertEqual(record["carrier_mode"], sample.carrier_mode)
         self.assertEqual(
             record["sideband_offset"],
@@ -243,17 +176,13 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
     def test_invalid_cells_parameters_and_lengths_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown Benjamin--Feir"):
             sample_benjamin_feir_simulation(
-                AttemptAssignment(
-                    simulation_key=assignment(0).simulation_key,
-                    parameter_group_id="not_a_pair",
-                )
+                "not_a_pair",
+                dataset_split=DatasetSplit.TRAIN,
+                attempt_number=0,
             )
         with self.assertRaisesRegex(ValueError, "finite and positive"):
-            sample_benjamin_feir_simulation(
-                assignment(0),
-                domain_length=math.nan,
-            )
-        sample = sample_benjamin_feir_simulation(assignment(0))
+            sample_benjamin_feir(0, domain_length=math.nan)
+        sample = sample_benjamin_feir(0)
         wrong_cell = replace(sample, carrier_mode=21)
         self.assertIn(
             "sample parameters do not match the assigned parameter group",

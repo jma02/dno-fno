@@ -10,8 +10,7 @@ Amplitudes are drawn first, then depth is drawn log-uniformly above the
 elementary profile-resolution lower bound.
 
 Here ``alpha_i = a_i / h``, where ``a_i`` is the dimensional crest
-amplitude. Each attempted simulation uses one PCG64 stream constructed from all
-four words in ``AttemptAssignment.simulation_key.seed_words``.
+amplitude.
 """
 
 from __future__ import annotations
@@ -23,8 +22,9 @@ from typing import Final, Literal, TypeAlias
 import numpy as np
 
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    random_generator_for_simulation,
+    DatasetSplit,
+    PhysicalFamilyId,
+    random_generator_for_attempt,
 )
 
 
@@ -72,7 +72,7 @@ class TanakaCrest:
 class TanakaSample:
     """One complete sampled Tanaka parameter specification."""
 
-    assignment: AttemptAssignment
+    parameter_group_id: str
     regime: TanakaRegime
     crest_count: int
     right_moving_count: int
@@ -149,7 +149,6 @@ class TanakaSample:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
         return {
-            **self.assignment.to_json_record(),
             "regime": self.regime,
             "domain_length": self.domain_length,
             "depth": self.depth,
@@ -276,9 +275,7 @@ def tanaka_support_violations(
     """Return every violation of the declared Tanaka sampling support."""
 
     violations: list[str] = []
-    expected_parameter_group = TANAKA_PARAMETER_GROUPS.get(
-        sample.assignment.parameter_group_id
-    )
+    expected_parameter_group = TANAKA_PARAMETER_GROUPS.get(sample.parameter_group_id)
     if expected_parameter_group != (
         sample.regime,
         sample.crest_count,
@@ -385,8 +382,10 @@ def tanaka_support_violations(
 
 
 def sample_tanaka_simulation(
-    assignment: AttemptAssignment,
+    parameter_group_id: str,
     *,
+    dataset_split: DatasetSplit,
+    attempt_number: int,
     domain_length: float = 2.0 * np.pi,
 ) -> TanakaSample:
     """Sample one complete Tanaka specification for an attempted simulation."""
@@ -396,13 +395,17 @@ def sample_tanaka_simulation(
 
     try:
         regime, crest_count, right_moving_count = TANAKA_PARAMETER_GROUPS[
-            assignment.parameter_group_id
+            parameter_group_id
         ]
     except KeyError as error:
         raise ValueError(
-            f"unknown Tanaka parameter group: {assignment.parameter_group_id}"
+            f"unknown Tanaka parameter group: {parameter_group_id}"
         ) from error
-    rng = random_generator_for_simulation(assignment.simulation_key)
+    rng = random_generator_for_attempt(
+        family_id=PhysicalFamilyId.TANAKA,
+        dataset_split=dataset_split,
+        attempt_number=attempt_number,
+    )
     if regime == "main":
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
         if crest_count == 1:
@@ -441,7 +444,7 @@ def sample_tanaka_simulation(
         int(direction) for direction in rng.permutation(direction_multiset)
     )
     sample = TanakaSample(
-        assignment=assignment,
+        parameter_group_id=parameter_group_id,
         regime=regime,
         crest_count=crest_count,
         right_moving_count=right_moving_count,

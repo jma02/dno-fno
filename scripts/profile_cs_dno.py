@@ -13,10 +13,12 @@ Reports median of many measurements for:
 
 Uses ``time.perf_counter`` around ``jax.block_until_ready``.
 """
+
 from __future__ import annotations
 
 # XLA flags MUST be set before importing jax.
 import os
+
 os.environ.setdefault(
     "XLA_FLAGS",
     "--xla_gpu_triton_gemm_any=true --xla_gpu_enable_latency_hiding_scheduler=true",
@@ -45,10 +47,10 @@ for _d in (REPO_ROOT, DNO_DIR, FNO_DIR, TRAIN_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from util import replicate_pytree_from_host
+from util import replicate_pytree_from_host  # noqa: E402
 
-from dno_net_v2 import CraigSulemDNO, CraigSulemBlock
-from losses import count_params, relative_l2_loss
+from dno_net_v2 import CraigSulemDNO, CraigSulemBlock  # noqa: E402
+from losses import count_params, relative_l2_loss  # noqa: E402
 
 
 # ----- match the training CLI ------------------------------------------------
@@ -69,26 +71,9 @@ DOMAIN_LENGTH = 2.0 * float(np.pi)
 # profiling — actual values only shift constant folds, not FFT/matmul time.
 
 
-def build_model() -> CraigSulemDNO:
-    return CraigSulemDNO(
-        width=WIDTH,
-        n_blocks=N_BLOCKS,
-        latent=LATENT,
-        n_polys=N_POLYS,
-        use_first_deriv=True,
-        use_second_deriv=True,
-        use_half_deriv=True,
-        use_hilbert=True,
-        mult_hidden=MULT_HIDDEN,
-        domain_length=DOMAIN_LENGTH,
-        xi_scale=1.0,
-        eta_scale=1.0,
-        target_scale=1.0,
-        h_clip_max=5.0,
-    )
-
-
-def median_ms(fn, *args, warmup: int = 5, iters: int = 20) -> tuple[float, float, float]:
+def median_ms(
+    fn, *args, warmup: int = 5, iters: int = 20
+) -> tuple[float, float, float]:
     """Median / p90 / min of ``fn(*args)`` in milliseconds."""
     for _ in range(warmup):
         out = fn(*args)
@@ -105,7 +90,7 @@ def median_ms(fn, *args, warmup: int = 5, iters: int = 20) -> tuple[float, float
     return med, p90, samples[0]
 
 
-def main() -> None:
+if __name__ == "__main__":
     devices = jax.devices()
     n_devices = len(devices)
     print(f"jax backend: {jax.default_backend()}  devices: {n_devices}")
@@ -113,14 +98,31 @@ def main() -> None:
         print(f"  {d}")
     assert n_devices >= 2, "This script expects both RTX 6000 Ada visible."
     if BATCH_SIZE % n_devices != 0:
-        raise ValueError(f"batch {BATCH_SIZE} not divisible by device count {n_devices}")
+        raise ValueError(
+            f"batch {BATCH_SIZE} not divisible by device count {n_devices}"
+        )
 
     mesh = Mesh(np.array(devices), axis_names=("batch",))
     data_sharding = NamedSharding(mesh, P("batch"))
     replicated = NamedSharding(mesh, P())
 
     compute_dtype = jnp.float32
-    model = build_model()
+    model = CraigSulemDNO(
+        width=WIDTH,
+        n_blocks=N_BLOCKS,
+        latent=LATENT,
+        n_polys=N_POLYS,
+        use_first_deriv=True,
+        use_second_deriv=True,
+        use_half_deriv=True,
+        use_hilbert=True,
+        mult_hidden=MULT_HIDDEN,
+        domain_length=DOMAIN_LENGTH,
+        xi_scale=1.0,
+        eta_scale=1.0,
+        target_scale=1.0,
+        h_clip_max=5.0,
+    )
 
     # Init on device 0 (matches trainer).
     with jax.default_device(devices[0]):
@@ -157,6 +159,7 @@ def main() -> None:
         def _loss(p):
             pred = state.apply_fn({"params": p}, x, d_)
             return loss_fn(pred, y)
+
         loss_v, grads = jax.value_and_grad(_loss)(state.params)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_v = jax.lax.pmean(loss_v, axis_name="batch")
@@ -187,6 +190,7 @@ def main() -> None:
         def _loss(p):
             pred = model.apply({"params": p}, x, d_)
             return loss_fn(pred, y)
+
         loss_v, grads = jax.value_and_grad(_loss)(params_)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_v = jax.lax.pmean(loss_v, axis_name="batch")
@@ -232,10 +236,22 @@ def main() -> None:
     xi_phys_shape = (B_local, NX)
     depth_shape = (B_local, 1)
     with jax.default_device(devices[0]):
-        eta_feats0 = jax.random.normal(jax.random.PRNGKey(1), eta_feats_shape, dtype=compute_dtype)
-        xi_phys0 = jax.random.normal(jax.random.PRNGKey(2), xi_phys_shape, dtype=compute_dtype)
-        depth0 = jnp.log(0.5 + jax.random.uniform(jax.random.PRNGKey(3), depth_shape, dtype=compute_dtype) * 2.5)
-        block_params = block.init(jax.random.PRNGKey(4), eta_feats0, xi_phys0, depth0)["params"]
+        eta_feats0 = jax.random.normal(
+            jax.random.PRNGKey(1), eta_feats_shape, dtype=compute_dtype
+        )
+        xi_phys0 = jax.random.normal(
+            jax.random.PRNGKey(2), xi_phys_shape, dtype=compute_dtype
+        )
+        depth0 = jnp.log(
+            0.5
+            + jax.random.uniform(
+                jax.random.PRNGKey(3), depth_shape, dtype=compute_dtype
+            )
+            * 2.5
+        )
+        block_params = block.init(jax.random.PRNGKey(4), eta_feats0, xi_phys0, depth0)[
+            "params"
+        ]
 
     @jax.jit
     def block_fwd(bp, ef, xp, dp):
@@ -254,10 +270,16 @@ def main() -> None:
     # These bracket the actual FFT cost in a step.
     # ------------------------------------------------------------------
     with jax.default_device(devices[0]):
-        rfft_small = jax.random.normal(jax.random.PRNGKey(5), (B_local, NX), dtype=compute_dtype)
-        rfft_big = jax.random.normal(jax.random.PRNGKey(6), (B_local * N_BLOCKS, NX), dtype=compute_dtype)
+        rfft_small = jax.random.normal(
+            jax.random.PRNGKey(5), (B_local, NX), dtype=compute_dtype
+        )
+        rfft_big = jax.random.normal(
+            jax.random.PRNGKey(6), (B_local * N_BLOCKS, NX), dtype=compute_dtype
+        )
         rfft_branched = jax.random.normal(
-            jax.random.PRNGKey(7), (B_local, NX, LATENT), dtype=compute_dtype,
+            jax.random.PRNGKey(7),
+            (B_local, NX, LATENT),
+            dtype=compute_dtype,
         )
 
     @jax.jit
@@ -294,33 +316,47 @@ def main() -> None:
     iters = 40
     results: dict[str, tuple[float, float, float]] = {}
 
-    def _run_full_step(state):
-        return train_step(state, inputs, depth, targets)
-    results["full_step (fwd+bwd+adamw+all_gather)"] = median_ms(_run_full_step, ts, iters=iters)
+    results["full_step (fwd+bwd+adamw+all_gather)"] = median_ms(
+        lambda state: train_step(state, inputs, depth, targets),
+        ts,
+        iters=iters,
+    )
 
-    def _run_fwdbwd(params_):
-        return fwdbwd_step(params_, inputs, depth, targets)
-    results["fwd+bwd (loss+grad, no opt)"] = median_ms(_run_fwdbwd, ts.params, iters=iters)
+    results["fwd+bwd (loss+grad, no opt)"] = median_ms(
+        lambda params_: fwdbwd_step(params_, inputs, depth, targets),
+        ts.params,
+        iters=iters,
+    )
 
-    def _run_fwd(params_):
-        return fwd_step(params_, inputs, depth)
-    results["fwd only"] = median_ms(_run_fwd, ts.params, iters=iters)
+    results["fwd only"] = median_ms(
+        lambda params_: fwd_step(params_, inputs, depth),
+        ts.params,
+        iters=iters,
+    )
 
-    def _run_block(bp):
-        return block_fwd(bp, eta_feats0, xi_phys0, depth0)
-    results["single CraigSulemBlock fwd (128x1024, dev0)"] = median_ms(_run_block, block_params, iters=iters)
+    results["single CraigSulemBlock fwd (128x1024, dev0)"] = median_ms(
+        lambda bp: block_fwd(bp, eta_feats0, xi_phys0, depth0),
+        block_params,
+        iters=iters,
+    )
 
-    def _run_rfft_small(x):
-        return rfft_roundtrip(x)
-    results["rfft roundtrip (128, 1024) dev0"] = median_ms(_run_rfft_small, rfft_small, iters=iters)
+    results["rfft roundtrip (128, 1024) dev0"] = median_ms(
+        rfft_roundtrip,
+        rfft_small,
+        iters=iters,
+    )
 
-    def _run_rfft_big(x):
-        return rfft_roundtrip(x)
-    results[f"rfft roundtrip ({B_local*N_BLOCKS}, 1024) dev0"] = median_ms(_run_rfft_big, rfft_big, iters=iters)
+    results[f"rfft roundtrip ({B_local * N_BLOCKS}, 1024) dev0"] = median_ms(
+        rfft_roundtrip,
+        rfft_big,
+        iters=iters,
+    )
 
-    def _run_rfft_branched(x):
-        return rfft_roundtrip_branched(x)
-    results[f"rfft branched ({B_local}, 1024, {LATENT}) dev0"] = median_ms(_run_rfft_branched, rfft_branched, iters=iters)
+    results[f"rfft branched ({B_local}, 1024, {LATENT}) dev0"] = median_ms(
+        rfft_roundtrip_branched,
+        rfft_branched,
+        iters=iters,
+    )
 
     # ------------------------------------------------------------------
     # Report
@@ -335,13 +371,9 @@ def main() -> None:
     med_full = results["full_step (fwd+bwd+adamw+all_gather)"][0]
     med_fb = results["fwd+bwd (loss+grad, no opt)"][0]
     med_fw = results["fwd only"][0]
-    print(f"\nDerived:")
+    print("\nDerived:")
     print(f"  bwd + comm + adamw ≈ full_step - fwd = {med_full - med_fw:.3f} ms")
     print(f"  bwd (from fwdbwd - fwd) ≈ {med_fb - med_fw:.3f} ms")
     print(f"  opt + all_gather ≈ full_step - fwdbwd = {med_full - med_fb:.3f} ms")
     print(f"  fwd fraction ≈ {100.0 * med_fw / med_full:.1f} %")
     print(f"  observed it/s (steady-state) ≈ {1000.0 / med_full:.2f}")
-
-
-if __name__ == "__main__":
-    main()

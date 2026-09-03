@@ -7,6 +7,7 @@ Run with:
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
       uv run python -m unittest solver.gen_data.tests.test_stokes_spatial_smoke
 """
+
 from __future__ import annotations
 
 import os
@@ -47,8 +48,7 @@ def _fixed_band_relative_error(
     def real_field_norm(coefficients: np.ndarray) -> float:
         return float(
             np.sqrt(
-                abs(coefficients[0]) ** 2
-                + 2.0 * np.sum(np.abs(coefficients[1:]) ** 2)
+                abs(coefficients[0]) ** 2 + 2.0 * np.sum(np.abs(coefficients[1:]) ** 2)
             )
         )
 
@@ -79,10 +79,7 @@ def _build_stokes_fields(nx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         pad_factor=8,
     )
     jax.block_until_ready(gxi)
-    return tuple(
-        np.asarray(field, dtype=np.float64)
-        for field in (eta, xi, gxi)
-    )
+    return tuple(np.asarray(field, dtype=np.float64) for field in (eta, xi, gxi))
 
 
 class StokesSpatialRefinementSmokeTest(unittest.TestCase):

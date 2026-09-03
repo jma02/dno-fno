@@ -13,10 +13,7 @@ from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.batch_artifacts import (
-    SimulationCommitRecord,
-    compute_batch_simulation_ids,
-)
+from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
@@ -38,7 +35,7 @@ def _write_batch(
     family_id: int,
     split: str,
     dataset_split: DatasetSplit,
-    attempt_indices: tuple[int, ...],
+    attempt_numbers: tuple[int, ...],
     accepted_local_indices: tuple[int, ...],
 ) -> Path:
     path = batch_path(
@@ -51,19 +48,15 @@ def _write_batch(
         family_id=np.asarray(family_id, dtype=np.int16),
         dataset_split=np.asarray(dataset_split.value),
         parameter_group_id=np.asarray(
-            [f"group_{index}" for index in range(len(attempt_indices))]
+            [f"group_{index}" for index in range(len(attempt_numbers))]
         ),
-        worker_stream_id=np.zeros(len(attempt_indices), dtype=np.uint32),
-        attempt_index=np.asarray(attempt_indices, dtype=np.uint64),
         simulation_spec_json=np.asarray(
             [
-                json.dumps({"attempt_index": attempt_index})
-                for attempt_index in attempt_indices
+                json.dumps({"attempt_number": attempt_number})
+                for attempt_number in attempt_numbers
             ]
         ),
-        metadata_json=np.asarray("{}"),
     )
-    simulation_ids = compute_batch_simulation_ids(proposal)
     frames_per_simulation = 2
     simulation_local_index = np.repeat(
         np.asarray(accepted_local_indices, dtype=np.int32),
@@ -92,24 +85,18 @@ def _write_batch(
         for position, local_index in enumerate(accepted_local_indices)
     }
     records = tuple(
-        SimulationCommitRecord(
-            simulation_id=int(simulation_id),
+        SimulationResult(
             accepted=local_index in blocks,
-            required_bits=63 if local_index in blocks else 32,
-            evaluated_bits=63,
-            failed_bits=0 if local_index in blocks else 32,
-            first_row=blocks.get(local_index, (-1, 0))[0],
-            row_count=blocks.get(local_index, (-1, 0))[1],
+            failed_checks=() if local_index in blocks else ("integration_failure",),
             metrics={},
         )
-        for local_index, simulation_id in enumerate(simulation_ids)
+        for local_index in range(len(attempt_numbers))
     )
     save_completed_batch(
         path,
         plan=proposal,
         shard=shard,
         simulations=records,
-        metadata={},
     )
     return path
 
@@ -121,7 +108,7 @@ def _build_single_family_view(root: Path) -> Path:
         family_id=0,
         split="train",
         dataset_split=DatasetSplit.TRAIN,
-        attempt_indices=(10,),
+        attempt_numbers=(10,),
         accepted_local_indices=(0,),
     )
     return build_dataset_view(
@@ -139,7 +126,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family_id=0,
             split="train",
             dataset_split=DatasetSplit.TRAIN,
-            attempt_indices=(10, 11),
+            attempt_numbers=(10, 11),
             accepted_local_indices=(0,),
         )
         validation = _write_batch(
@@ -148,7 +135,7 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
             family_id=1,
             split="validation",
             dataset_split=DatasetSplit.VALIDATION,
-            attempt_indices=(20,),
+            attempt_numbers=(20,),
             accepted_local_indices=(0,),
         )
         paths = build_dataset_view(
@@ -175,7 +162,6 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
         )
         assert "trajectory_index" not in dataset
         assert "family_id" not in dataset
-        assert "quality_required_bits" not in dataset
 
         train_rows, validation_rows, test_rows = build_dataset_split_indices(
             dataset,
@@ -225,13 +211,13 @@ def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
 
 def test_direct_npz_dataset_is_rejected() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
-        legacy_path = Path(raw_directory) / "legacy.npz"
+        flat_dataset_path = Path(raw_directory) / "flat_dataset.npz"
         try:
-            load_dataset_arrays(legacy_path)
+            load_dataset_arrays(flat_dataset_path)
         except ValueError as error:
             assert "schema-v2" in str(error)
         else:
-            raise AssertionError("direct legacy NPZ dataset did not fail closed")
+            raise AssertionError("direct NPZ dataset did not fail closed")
 
 
 def main() -> int:

@@ -15,12 +15,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    AttemptAssignment,
-    SimulationKey,
-    PhysicalFamilyId,
     DatasetSplit,
 )
-from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     STOKES_PARAMETER_GROUP_IDS,
     StokesSample,
@@ -33,25 +29,6 @@ from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
 )
 
 jax.config.update("jax_enable_x64", True)
-
-
-def assignment(
-    cell_index: int,
-    *,
-    attempt_index: int,
-    dataset_split: DatasetSplit = DatasetSplit.VALIDATION,
-) -> AttemptAssignment:
-    """Return a fixed Stokes assignment for integration tests."""
-
-    return AttemptAssignment(
-        simulation_key=SimulationKey(
-            family_id=PhysicalFamilyId.STOKES,
-            dataset_split=dataset_split,
-            worker_stream_id=9,
-            attempt_index=attempt_index,
-        ),
-        parameter_group_id=STOKES_PARAMETER_GROUP_IDS[cell_index],
-    )
 
 
 def reduced_contract() -> StaticStokesContract:
@@ -92,7 +69,11 @@ class StokesStaticPipelineTest(unittest.TestCase):
         )
 
     def test_nonfinite_target_is_a_zero_row_rejection(self) -> None:
-        sample = sample_stokes_simulation(assignment(2, attempt_index=30))
+        sample = sample_stokes_simulation(
+            STOKES_PARAMETER_GROUP_IDS[2],
+            dataset_split=DatasetSplit.VALIDATION,
+            attempt_number=30,
+        )
         contract = reduced_contract()
 
         def nonfinite_target(
@@ -118,11 +99,15 @@ class StokesStaticPipelineTest(unittest.TestCase):
         )
         self.assertFalse(outcome.decision.accepted)
         self.assertIsNone(outcome.rows)
-        self.assertTrue(outcome.decision.failed & SimulationCheck.NONFINITE_TARGET)
+        self.assertTrue(outcome.decision.nonfinite_target)
         self.assertEqual(outcome.metrics["target_finite"], False)
 
     def test_constructor_and_target_exceptions_propagate(self) -> None:
-        sample = sample_stokes_simulation(assignment(2, attempt_index=31))
+        sample = sample_stokes_simulation(
+            STOKES_PARAMETER_GROUP_IDS[2],
+            dataset_split=DatasetSplit.VALIDATION,
+            attempt_number=31,
+        )
         contract = reduced_contract()
 
         def failing_constructor(

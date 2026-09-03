@@ -6,8 +6,7 @@ part of ``[0.05, 0.13]`` inside the leading deep-water instability band and
 below the declared focused-steepness limit.  The sideband-to-carrier amplitude
 ratio is uniform on ``[0.05, 0.10]``, and the global translation is uniform on
 ``[0, L)``.  Relative to the translated coordinate, both sidebands have the
-fixed JCP09 phase shift ``-pi/4``. Each attempted simulation uses one PCG64 stream
-constructed from every word in ``SimulationKey.seed_words``.
+fixed JCP09 phase shift ``-pi/4``.
 """
 
 from __future__ import annotations
@@ -31,8 +30,9 @@ from solver.gen_data.benjamin_feir_jcp09 import (
     instability_band_fraction,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    random_generator_for_simulation,
+    DatasetSplit,
+    PhysicalFamilyId,
+    random_generator_for_attempt,
 )
 
 
@@ -81,7 +81,7 @@ BENJAMIN_FEIR_PARAMETER_GROUP_IDS = tuple(BENJAMIN_FEIR_PARAMETER_GROUPS)
 class BenjaminFeirSample:
     """One complete sampled Benjamin--Feir parameter specification."""
 
-    assignment: AttemptAssignment
+    parameter_group_id: str
     domain_length: float
     carrier_mode: int
     sideband_offset: int
@@ -196,7 +196,6 @@ class BenjaminFeirSample:
 
         fundamental = self.fundamental_wavenumber
         return {
-            **self.assignment.to_json_record(),
             "domain_length": self.domain_length,
             "depth": self.depth,
             "carrier_mode": self.carrier_mode,
@@ -227,7 +226,7 @@ def find_benjamin_feir_sample_violations(
 
     violations: list[str] = []
     expected_parameter_group = BENJAMIN_FEIR_PARAMETER_GROUPS.get(
-        sample.assignment.parameter_group_id
+        sample.parameter_group_id
     )
     if expected_parameter_group != (sample.carrier_mode, sample.sideband_offset):
         violations.append("sample parameters do not match the assigned parameter group")
@@ -260,8 +259,10 @@ def find_benjamin_feir_sample_violations(
 
 
 def sample_benjamin_feir_simulation(
-    assignment: AttemptAssignment,
+    parameter_group_id: str,
     *,
+    dataset_split: DatasetSplit,
+    attempt_number: int,
     domain_length: float = 2.0 * math.pi,
 ) -> BenjaminFeirSample:
     """Sample one complete specification in the assigned mode-pair group."""
@@ -269,13 +270,17 @@ def sample_benjamin_feir_simulation(
     if not math.isfinite(domain_length) or domain_length <= 0.0:
         raise ValueError("domain_length must be finite and positive")
 
-    parameter_group = BENJAMIN_FEIR_PARAMETER_GROUPS.get(assignment.parameter_group_id)
+    parameter_group = BENJAMIN_FEIR_PARAMETER_GROUPS.get(parameter_group_id)
     if parameter_group is None:
         raise ValueError(
-            f"unknown Benjamin--Feir parameter group: {assignment.parameter_group_id}"
+            f"unknown Benjamin--Feir parameter group: {parameter_group_id}"
         )
     carrier_mode, sideband_offset = parameter_group
-    rng = random_generator_for_simulation(assignment.simulation_key)
+    rng = random_generator_for_attempt(
+        family_id=PhysicalFamilyId.BENJAMIN_FEIR,
+        dataset_split=dataset_split,
+        attempt_number=attempt_number,
+    )
     steepness_lower, steepness_upper = _conditional_steepness_bounds(
         carrier_mode,
         sideband_offset,
@@ -290,7 +295,7 @@ def sample_benjamin_feir_simulation(
     )
     translation = float(rng.uniform(0.0, domain_length))
     sample = BenjaminFeirSample(
-        assignment=assignment,
+        parameter_group_id=parameter_group_id,
         domain_length=domain_length,
         carrier_mode=carrier_mode,
         sideband_offset=sideband_offset,

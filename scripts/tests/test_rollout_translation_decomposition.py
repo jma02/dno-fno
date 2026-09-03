@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from analyze_rollout_translation_decomposition import (
+from scripts.analyze_rollout_translation_decomposition import (
     analyze_archive,
     compute_alignment_velocity_identity,
     compute_eta_alignment,

@@ -43,8 +43,11 @@ for _d in (
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from model_rollout import build_predict_gxi_batched, load_run  # noqa: E402
-from util import compute_log_depth  # noqa: E402
+from model_rollout import (  # type: ignore[reportMissingImports]  # noqa: E402
+    build_predict_gxi_batched,
+    load_run,
+)
+from util import compute_log_depth  # type: ignore[reportMissingImports]  # noqa: E402
 
 
 def change_resolution_rfft(f: np.ndarray, n_new: int) -> np.ndarray:
@@ -107,7 +110,7 @@ def rel_l2_mean_centered(a: np.ndarray, b: np.ndarray) -> float:
     return rel_l2(a0, b0)
 
 
-def parse_args() -> argparse.Namespace:
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--run_dir",
@@ -158,11 +161,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override the model's domain_length for the test resolution (tests k-grid scaling).",
     )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
+    args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -273,9 +272,9 @@ def main() -> int:
 
         # Energy in modes above the native grid, only meaningful for n_test > n_native.
         high_mode_fraction: float = 0.0
+        native_freq_count = n_native // 2 + 1
         if args.n_test > n_native:
             gxi_test_hat = np.fft.rfft(gxi_test, norm="forward")
-            native_freq_count = n_native // 2 + 1
             high_mode_energy = np.sum(np.abs(gxi_test_hat[native_freq_count:]) ** 2)
             total_mode_energy = np.sum(np.abs(gxi_test_hat) ** 2)
             high_mode_fraction = float(high_mode_energy / (total_mode_energy + 1e-30))
@@ -344,8 +343,4 @@ def main() -> int:
     out_path.write_text(json.dumps(results, indent=2))
     print(f"\nWrote {out_path}")
 
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(0)

@@ -2,8 +2,6 @@
 
 The 27 parameter groups are the Cartesian product of three depth strata,
 three peak-enhancement values, and three right-moving energy fractions.
-Each attempted simulation owns one PCG64 stream determined by its complete
-``SimulationKey.seed_words`` tuple.
 """
 
 from __future__ import annotations
@@ -28,8 +26,9 @@ from solver.gen_data.jonswap_tma import (
     sample_jonswap_tma_phases,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    random_generator_for_simulation,
+    DatasetSplit,
+    PhysicalFamilyId,
+    random_generator_for_attempt,
 )
 
 
@@ -62,7 +61,7 @@ JONSWAP_TMA_PARAMETER_GROUP_IDS = tuple(JONSWAP_TMA_PARAMETER_GROUPS)
 class JonswapTmaSample:
     """One sampled parameter specification and its two explicit phase arrays."""
 
-    assignment: AttemptAssignment
+    parameter_group_id: str
     stratum: RandomSeaStratum
     parameters: JonswapTmaParameters
     phase_right: FloatArray
@@ -72,7 +71,6 @@ class JonswapTmaSample:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
         return {
-            **self.assignment.to_json_record(),
             "stratum": self.stratum,
             "depth": self.parameters.depth,
             "significant_height": self.parameters.significant_height,
@@ -160,26 +158,31 @@ def _sample_finite_or_deep_parameters(
 
 
 def sample_jonswap_tma_simulation(
-    assignment: AttemptAssignment,
+    parameter_group_id: str,
     *,
+    dataset_split: DatasetSplit,
+    attempt_number: int,
     band: ResolvedBand,
 ) -> JonswapTmaSample:
     """Sample one complete JONSWAP/TMA specification for an attempted simulation.
 
-    The assignment fixes the parameter group and random stream before any
-    parameter or phase is drawn. The returned specification includes both
-    phase arrays and passes the paper-support predicate by construction.
+    The returned specification includes both phase arrays and passes the
+    paper-support predicate by construction.
     """
 
     try:
         stratum, peak_enhancement, right_moving_fraction = JONSWAP_TMA_PARAMETER_GROUPS[
-            assignment.parameter_group_id
+            parameter_group_id
         ]
     except KeyError as error:
         raise ValueError(
-            f"unknown JONSWAP/TMA parameter group: {assignment.parameter_group_id}"
+            f"unknown JONSWAP/TMA parameter group: {parameter_group_id}"
         ) from error
-    rng = random_generator_for_simulation(assignment.simulation_key)
+    rng = random_generator_for_attempt(
+        family_id=PhysicalFamilyId.JONSWAP_TMA,
+        dataset_split=dataset_split,
+        attempt_number=attempt_number,
+    )
     if stratum == "shallow":
         parameters = _sample_shallow_parameters(
             rng,
@@ -211,7 +214,7 @@ def sample_jonswap_tma_simulation(
             + "; ".join(violations)
         )
     return JonswapTmaSample(
-        assignment=assignment,
+        parameter_group_id=parameter_group_id,
         stratum=stratum,
         parameters=parameters,
         phase_right=phase_right,

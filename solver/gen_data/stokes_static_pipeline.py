@@ -12,10 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
-from solver.gen_data.pipeline.simulation_checks import (
-    SimulationCheckResult,
-    SimulationCheck,
-)
+from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.dno_target import compute_dno_target, project_fixed_band
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,
@@ -35,13 +32,6 @@ ContractRole: TypeAlias = Literal[
     "paper_dataset",
     "reduced_wiring_evidence_only",
 ]
-
-STATIC_STOKES_REQUIRED_CHECKS = (
-    SimulationCheck.OUTSIDE_SUPPORT
-    | SimulationCheck.NONFINITE_STATE
-    | SimulationCheck.BOTTOM_CLEARANCE
-    | SimulationCheck.NONFINITE_TARGET
-)
 
 
 @dataclass(frozen=True)
@@ -224,20 +214,6 @@ def _maximum_absolute_or_none(field: NDArray[np.float64]) -> float | None:
     return float(np.max(np.abs(field)))
 
 
-def _decision(
-    *,
-    evaluated: SimulationCheck,
-    failed: SimulationCheck,
-) -> SimulationCheckResult:
-    """Build the common sample-level decision for one static state."""
-
-    return SimulationCheckResult(
-        required=STATIC_STOKES_REQUIRED_CHECKS,
-        evaluated=evaluated,
-        failed=failed,
-    )
-
-
 def evaluate_static_stokes_sample(
     sample: StokesSample,
     *,
@@ -248,10 +224,6 @@ def evaluate_static_stokes_sample(
     """Construct, validate, and label one static Stokes simulation."""
 
     support_violations = stokes_support_violations(sample)
-    evaluated = SimulationCheck.OUTSIDE_SUPPORT
-    failed = (
-        SimulationCheck.OUTSIDE_SUPPORT if support_violations else SimulationCheck.NONE
-    )
     metrics: dict[str, JsonScalar] = {
         "contract_role": contract.role,
         "support_violation_count": len(support_violations),
@@ -284,7 +256,6 @@ def evaluate_static_stokes_sample(
     eta_host = np.asarray(jax.device_get(eta_input), dtype=np.float64)
     xi_host = np.asarray(jax.device_get(xi_input), dtype=np.float64)
 
-    evaluated |= SimulationCheck.NONFINITE_STATE
     state_finite = bool(np.isfinite(eta_host).all() and np.isfinite(xi_host).all())
     metrics["state_finite"] = state_finite
     metrics["maximum_absolute_eta"] = _maximum_absolute_or_none(eta_host)
@@ -292,22 +263,25 @@ def evaluate_static_stokes_sample(
     xi_input_mean = float(np.mean(xi_host))
     metrics["xi_input_mean"] = xi_input_mean if math.isfinite(xi_input_mean) else None
     if not state_finite:
-        failed |= SimulationCheck.NONFINITE_STATE
         return SimulationOutcome(
-            decision=_decision(evaluated=evaluated, failed=failed),
+            decision=SimulationCheckResult(
+                accepted=False,
+                nonfinite_state=True,
+            ),
             rows=None,
             metrics=metrics,
         )
 
-    evaluated |= SimulationCheck.BOTTOM_CLEARANCE
     minimum_water_column = float(np.min(sample.depth + eta_host))
     metrics["minimum_water_column"] = (
         minimum_water_column if math.isfinite(minimum_water_column) else None
     )
     if not math.isfinite(minimum_water_column) or minimum_water_column <= 0.0:
-        failed |= SimulationCheck.BOTTOM_CLEARANCE
         return SimulationOutcome(
-            decision=_decision(evaluated=evaluated, failed=failed),
+            decision=SimulationCheckResult(
+                accepted=False,
+                nonpositive_water_height=True,
+            ),
             rows=None,
             metrics=metrics,
         )
@@ -340,7 +314,6 @@ def evaluate_static_stokes_sample(
     ):
         raise ValueError("target evaluator returned an unexpected shape")
 
-    evaluated |= SimulationCheck.NONFINITE_TARGET
     delivered_state_finite = bool(
         np.isfinite(target_eta_host).all() and np.isfinite(target_xi_host).all()
     )
@@ -354,12 +327,11 @@ def evaluate_static_stokes_sample(
     q_ref_mean = float(np.mean(q_ref_host))
     metrics["xi_input_mean"] = xi_input_mean if math.isfinite(xi_input_mean) else None
     metrics["q_ref_mean"] = q_ref_mean if math.isfinite(q_ref_mean) else None
-    if not delivered_state_finite:
-        failed |= SimulationCheck.NONFINITE_STATE
-    if not target_finite:
-        failed |= SimulationCheck.NONFINITE_TARGET
-
-    decision = _decision(evaluated=evaluated, failed=failed)
+    decision = SimulationCheckResult(
+        accepted=delivered_state_finite and target_finite,
+        nonfinite_state=not delivered_state_finite,
+        nonfinite_target=not target_finite,
+    )
     rows = (
         AcceptedSimulationRows(
             eta=target_eta_host[None, :],

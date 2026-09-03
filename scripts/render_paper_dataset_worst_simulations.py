@@ -1,4 +1,4 @@
-"""Rank and render diagnostic tails across completed paper-dataset chunks.
+"""Rank and render diagnostic tails across completed paper-dataset runs.
 
 The rankings are descriptive and do not alter dataset acceptance. Each simulation
 is scanned at every retained time, then ranked within its initial-condition
@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import re
 import shutil
 import tempfile
 from typing import Any, Final
@@ -32,10 +31,6 @@ from matplotlib.animation import FuncAnimation, PillowWriter  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 
 
-SUMMARY_PATTERN = re.compile(
-    r"^paper_dataset_(?P<family>.+)_(?P<split>train|validation|test)"
-    r"\.summary\.json$"
-)
 FIELD_NAMES = ("eta", "xi", "gxi")
 FIELD_TITLES = (r"$\eta(x)$", r"$\xi(x)$", r"$G(\eta)\xi(x)$")
 FAMILY_LABELS = {
@@ -54,7 +49,7 @@ GIF_LONG_FPS = 12
 GIF_DIMENSIONS = (1_250, 360)
 GIF_Y_LIMIT_PADDING_FRACTION = 0.06
 QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
-FINAL_PAPER_DATASET_SOURCE_COUNT = 26
+FINAL_PAPER_DATASET_SOURCE_COUNT = 12
 FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS = {
     "train": 16_384,
     "validation": 1_024,
@@ -167,7 +162,7 @@ class TrajectoryIndex:
 
 @dataclass(frozen=True)
 class DatasetSource:
-    """One complete immutable dataset chunk."""
+    """One completed family/split generation run."""
 
     root: Path
     family: str
@@ -181,7 +176,7 @@ class DatasetSource:
 
 @dataclass(frozen=True)
 class CombinedSummaryBinding:
-    """Source population recorded by one completed combined view."""
+    """Generation runs recorded by one completed combined view."""
 
     path: Path
     source_summary_paths: tuple[Path, ...]
@@ -241,7 +236,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         type=Path,
         help=(
-            "Completed dataset chunk root. Repeat for development scans; final "
+            "Completed family/split run root. Repeat for development scans; final "
             "dataset review should use --combined-summary."
         ),
     )
@@ -249,8 +244,7 @@ def parse_args() -> argparse.Namespace:
         "--combined-summary",
         type=Path,
         help=(
-            "Completed combined-view summary whose preflight record binds the "
-            "exact canonical chunk population."
+            "Completed combined-view summary listing the family/split runs it combines."
         ),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -301,42 +295,40 @@ def _nonnegative_integer(value: object, *, context: str) -> int:
 
 
 def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
-    """Load the chunk population recorded by a completed combined view."""
+    """Load the generation runs and counts recorded by a combined view."""
 
     resolved = path.expanduser().resolve(strict=True)
     summary = read_json(resolved)
     if summary.get("status") != "complete":
         raise ValueError("combined summary is not complete")
-    preflight = _mapping(summary.get("preflight"), context="combined preflight")
-    chunks = _sequence(preflight.get("chunks"), context="combined preflight chunks")
-    if not chunks:
-        raise ValueError("combined preflight contains no chunks")
+    raw_summary_paths = _sequence(
+        summary.get("run_summaries"),
+        context="combined run_summaries",
+    )
+    if not raw_summary_paths:
+        raise ValueError("combined summary contains no generation runs")
 
     summary_paths: list[Path] = []
-    for chunk_index, raw_chunk in enumerate(chunks):
-        chunk = _mapping(raw_chunk, context=f"combined preflight chunk {chunk_index}")
-        raw_summary_path = chunk.get("summary_path")
+    for run_index, raw_summary_path in enumerate(raw_summary_paths):
         if not isinstance(raw_summary_path, str) or not raw_summary_path:
-            raise ValueError(
-                f"combined preflight chunk {chunk_index} has no summary path"
-            )
+            raise ValueError(f"combined generation run {run_index} has no summary path")
         summary_path = Path(raw_summary_path).expanduser()
         if not summary_path.is_absolute():
             raise ValueError(
-                f"combined preflight chunk {chunk_index} summary path is not absolute"
+                f"combined generation run {run_index} summary path is not absolute"
             )
         summary_path = summary_path.resolve(strict=True)
         summary_paths.append(summary_path)
 
     if len(set(summary_paths)) != len(summary_paths):
-        raise ValueError("combined preflight repeats a chunk summary")
+        raise ValueError("combined summary repeats a generation run")
     expected_accepted_simulations = _nonnegative_integer(
-        preflight.get("accepted_simulations_total"),
-        context="combined preflight accepted_simulations_total",
+        summary.get("accepted_simulations"),
+        context="combined accepted_simulations",
     )
     expected_retained_rows = _nonnegative_integer(
-        preflight.get("expected_rows"),
-        context="combined preflight expected_rows",
+        summary.get("rows"),
+        context="combined rows",
     )
     return CombinedSummaryBinding(
         path=resolved,
@@ -354,11 +346,11 @@ def validate_bound_sources(
     """Require loaded sources to be exactly those named by the combined view."""
 
     if len(sources) != binding.expected_source_count:
-        raise ValueError("scanned source count differs from combined preflight")
+        raise ValueError("scanned source count differs from combined summary")
     observed_paths = tuple(source.summary_path.resolve() for source in sources)
     if observed_paths != binding.source_summary_paths:
         raise ValueError(
-            "scanned source order or identity differs from combined preflight"
+            "scanned source order or identity differs from combined summary"
         )
 
 
@@ -379,7 +371,7 @@ def validate_scanned_population(
     )
     if observed != expected:
         raise ValueError(
-            "scanned source/simulation/row counts differ from combined preflight: "
+            "scanned source/simulation/row counts differ from combined summary: "
             f"observed={observed}, expected={expected}"
         )
 
@@ -501,13 +493,6 @@ def _artifact_record(
     }
 
 
-def _summary_identity(path: Path) -> tuple[str, str]:
-    match = SUMMARY_PATTERN.match(path.name)
-    if match is None:
-        raise ValueError(f"unrecognized dataset summary name: {path}")
-    return match.group("family"), match.group("split")
-
-
 def _artifact_path(root: Path, value: object, *, context: str) -> Path:
     """Resolve one named source artifact without allowing root escape."""
 
@@ -516,24 +501,6 @@ def _artifact_path(root: Path, value: object, *, context: str) -> Path:
     path = (root / value).resolve(strict=True)
     if not path.is_relative_to(root):
         raise ValueError(f"{context} path escapes its source root")
-    return path
-
-
-def _dataset_artifact(
-    root: Path,
-    record: Mapping[str, Any],
-    *,
-    context: str,
-) -> Path:
-    """Resolve one dataset-view artifact and check its recorded size."""
-
-    path = _artifact_path(root, record.get("path"), context=context)
-    expected_bytes = _nonnegative_integer(
-        record.get("bytes"),
-        context=f"{context} bytes",
-    )
-    if path.stat().st_size != expected_bytes:
-        raise ValueError(f"{context} byte count differs from its source summary")
     return path
 
 
@@ -587,14 +554,11 @@ def _trajectory_indices(
 
 
 def load_source_summary(summary_path: Path) -> DatasetSource:
-    """Load one completed chunk summary and its dataset view."""
+    """Load one completed generation-run summary and its dataset view."""
 
     summary_path = summary_path.expanduser().resolve(strict=True)
     resolved = summary_path.parent
-    family, split = _summary_identity(summary_path)
     summary = read_json(summary_path)
-    if summary.get("schema") != "paper_dataset_quota_summary_v1":
-        raise RuntimeError(f"source has an unknown summary schema: {summary_path}")
     if summary.get("status") != "complete":
         raise RuntimeError(f"source is not complete: {resolved}")
     raw_output_root = summary.get("output_root")
@@ -603,23 +567,23 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
     ):
         raise RuntimeError(f"source summary has the wrong output root: {summary_path}")
 
+    run_spec = _mapping(summary.get("run_spec"), context="source run_spec")
+    family = run_spec.get("family_name")
+    split = run_spec.get("dataset_split")
+    if not isinstance(family, str) or family not in FAMILY_LABELS:
+        raise ValueError("source run_spec has an unknown family_name")
+    if not isinstance(split, str) or split not in ("train", "validation", "test"):
+        raise ValueError("source run_spec has an unknown dataset_split")
+
     view = _mapping(summary.get("dataset_view"), context="source dataset_view")
-    manifest_record = _mapping(
-        view.get("manifest"),
-        context="source dataset_view manifest",
-    )
-    map_record = _mapping(
-        view.get("trajectory_map"),
-        context="source dataset_view trajectory map",
-    )
-    manifest_path = _dataset_artifact(
+    manifest_path = _artifact_path(
         resolved,
-        manifest_record,
+        view.get("manifest"),
         context="source dataset manifest",
     )
-    map_path = _dataset_artifact(
+    map_path = _artifact_path(
         resolved,
-        map_record,
+        view.get("trajectory_map"),
         context="source trajectory map",
     )
     manifest = read_json(manifest_path)
@@ -636,26 +600,16 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
         context="dataset manifest shards",
     )
     shard_paths: dict[int, Path] = {}
-    batch_indices: set[int] = set()
     for shard_index, raw_record in enumerate(raw_shards):
         record = _mapping(
             raw_record,
             context=f"dataset manifest shard {shard_index}",
         )
-        batch_index = _nonnegative_integer(
-            record.get("batch_index"),
-            context=f"dataset manifest shard {shard_index} batch_index",
-        )
-        if batch_index in batch_indices:
-            raise RuntimeError("dataset manifest repeats a shard batch index")
-        batch_indices.add(batch_index)
         shard_path = _artifact_path(
             resolved,
             record.get("path"),
             context=f"dataset manifest shard {shard_index}",
         )
-        # ``trajectory_map.shard_index`` is the dense ordinal in this list;
-        # ``batch_index`` is source-batch metadata and may contain gaps.
         shard_paths[shard_index] = shard_path
 
     trajectories = _trajectory_indices(map_path)
@@ -1300,8 +1254,8 @@ def _render_to_directory(
             for shard_index, trajectories in sorted(by_shard.items())
         )
 
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        simulation_groups = tuple(executor.map(_audit_task, tasks))
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        simulation_groups = tuple(pool.map(_audit_task, tasks))
     simulations = tuple(
         simulation for group in simulation_groups for simulation in group
     )

@@ -19,12 +19,7 @@ class BatchPlanArrays(TypedDict):
     family_id: NDArray[np.int16]
     dataset_split: NDArray[np.str_]
     parameter_group_id: NDArray[np.str_]
-    # Distinguishes independently generated chunks within one split.
-    worker_stream_id: NDArray[np.uint32]
-    # Candidate position in that worker stream, including rejected candidates.
-    attempt_index: NDArray[np.uint64]
     simulation_spec_json: NDArray[np.str_]
-    metadata_json: NDArray[np.str_]
 
 
 class DatasetShardArrays(TypedDict):
@@ -52,8 +47,5 @@ class SimulationIndexArrays(TypedDict):
     trajectory_simulation_id: NDArray[np.int64]
     trajectory_parameter_group_id: NDArray[np.str_]
     trajectory_accepted: NDArray[np.bool_]
-    trajectory_required_bits: NDArray[np.uint32]
-    trajectory_evaluated_bits: NDArray[np.uint32]
-    trajectory_failed_bits: NDArray[np.uint32]
     trajectory_first_row: NDArray[np.int64]
     trajectory_row_count: NDArray[np.int32]

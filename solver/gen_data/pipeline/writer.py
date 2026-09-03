@@ -1,4 +1,4 @@
-"""Save simulation assignments, accepted rows, and quality decisions by batch."""
+"""Save simulation specifications, accepted rows, and decisions by batch."""
 
 from __future__ import annotations
 
@@ -10,14 +10,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import json_text
-from solver.gen_data.pipeline.batch_artifacts import (
-    SimulationCommitRecord,
-    compute_batch_simulation_ids,
-)
+from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
-from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-)
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.types import (
     BatchPlanArrays,
@@ -53,50 +48,28 @@ class SimulationOutcome:
 
 
 def build_batch_plan(
-    assignments: Sequence[AttemptAssignment],
+    parameter_group_ids: Sequence[str],
     specifications: Sequence[Mapping[str, object]],
     *,
-    metadata: Mapping[str, object],
+    family_id: int,
+    dataset_split: DatasetSplit,
 ) -> BatchPlanArrays:
     """Describe the sampled simulations in one batch."""
 
-    if not assignments:
-        raise ValueError("assignments must not be empty")
-    if len(assignments) != len(specifications):
-        raise ValueError("assignments and specifications must have equal lengths")
-    first_key = assignments[0].simulation_key
-    shared_coordinates = (
-        first_key.family_id,
-        first_key.dataset_split,
-    )
-    if any(
-        (
-            assignment.simulation_key.family_id,
-            assignment.simulation_key.dataset_split,
+    if not parameter_group_ids:
+        raise ValueError("parameter_group_ids must not be empty")
+    if len(parameter_group_ids) != len(specifications):
+        raise ValueError(
+            "parameter_group_ids and specifications must have equal lengths"
         )
-        != shared_coordinates
-        for assignment in assignments
-    ):
-        raise ValueError("one batch must have one family and preassigned split")
 
     return {
-        "family_id": np.asarray(first_key.family_id, dtype=np.int16),
-        "dataset_split": np.asarray(first_key.dataset_split.value),
-        "parameter_group_id": np.asarray(
-            [assignment.parameter_group_id for assignment in assignments]
-        ),
-        "worker_stream_id": np.asarray(
-            [assignment.simulation_key.worker_stream_id for assignment in assignments],
-            dtype=np.uint32,
-        ),
-        "attempt_index": np.asarray(
-            [assignment.simulation_key.attempt_index for assignment in assignments],
-            dtype=np.uint64,
-        ),
+        "family_id": np.asarray(family_id, dtype=np.int16),
+        "dataset_split": np.asarray(dataset_split.value),
+        "parameter_group_id": np.asarray(parameter_group_ids),
         "simulation_spec_json": np.asarray(
             [json_text(specification) for specification in specifications]
         ),
-        "metadata_json": np.asarray(json_text(metadata)),
     }
 
 
@@ -104,13 +77,10 @@ def commit_simulation_outcomes(
     path: Path,
     batch_plan: BatchPlanArrays,
     outcomes: Sequence[SimulationOutcome],
-    *,
-    metadata: Mapping[str, object],
 ) -> None:
     """Persist accepted whole-simulation rows and every attempted decision."""
 
-    simulation_ids = compute_batch_simulation_ids(batch_plan)
-    if len(outcomes) != simulation_ids.size:
+    if len(outcomes) != int(batch_plan["simulation_spec_json"].size):
         raise ValueError("outcomes must contain every planned simulation")
 
     eta_parts: list[NDArray[np.float32]] = []
@@ -120,15 +90,10 @@ def commit_simulation_outcomes(
     time_parts: list[NDArray[np.float64]] = []
     simulation_parts: list[NDArray[np.int32]] = []
     frame_parts: list[NDArray[np.int32]] = []
-    records: list[SimulationCommitRecord] = []
-    first_row = 0
+    records: list[SimulationResult] = []
 
-    for local_index, (simulation_id, outcome) in enumerate(
-        zip(simulation_ids, outcomes, strict=True)
-    ):
+    for local_index, outcome in enumerate(outcomes):
         decision = outcome.decision
-        row_count = 0
-        simulation_first_row = -1
         rows = outcome.rows
         if rows is not None:
             eta = np.asarray(rows.eta, dtype=np.float32)
@@ -138,7 +103,6 @@ def commit_simulation_outcomes(
             gxi = np.asarray(rows.gxi, dtype=np.float32)
             time = np.asarray(rows.time, dtype=np.float64)
             row_count = eta.shape[0]
-            simulation_first_row = first_row
             eta_parts.append(eta)
             xi_parts.append(xi)
             gxi_parts.append(gxi)
@@ -146,17 +110,11 @@ def commit_simulation_outcomes(
             time_parts.append(time)
             simulation_parts.append(np.full(row_count, local_index, dtype=np.int32))
             frame_parts.append(np.arange(row_count, dtype=np.int32))
-            first_row += row_count
 
         records.append(
-            SimulationCommitRecord(
-                simulation_id=int(simulation_id),
+            SimulationResult(
                 accepted=decision.accepted,
-                required_bits=int(decision.required),
-                evaluated_bits=int(decision.evaluated),
-                failed_bits=int(decision.failed),
-                first_row=simulation_first_row,
-                row_count=row_count,
+                failed_checks=decision.failed_checks,
                 metrics=dict(outcome.metrics),
             )
         )
@@ -179,5 +137,4 @@ def commit_simulation_outcomes(
         plan=batch_plan,
         shard=shard,
         simulations=records,
-        metadata=metadata,
     )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -20,30 +20,16 @@ from solver.gen_data.pipeline.artifact_io import (
 from solver.gen_data.pipeline.batch_artifacts import (
     BATCH_PLAN_FIELDS,
     SHARD_FIELDS,
-    SimulationCommitRecord,
-    compute_batch_simulation_ids,
+    SimulationResult,
     compute_simulation_row_blocks,
     parse_simulation_result,
     validate_batch_plan,
     validate_shard,
 )
-from solver.gen_data.pipeline.types import (
-    BatchPlanArrays,
-    DatasetShardArrays,
-    JsonObject,
-)
+from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 _RESULTS_JSON = "simulation_results_json"
-_BATCH_METADATA_JSON = "batch_metadata_json"
-_COMPLETED_BATCH_FIELDS = (
-    BATCH_PLAN_FIELDS
-    | SHARD_FIELDS
-    | {
-        _RESULTS_JSON,
-        _BATCH_METADATA_JSON,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -52,8 +38,7 @@ class CompletedBatch:
 
     plan: BatchPlanArrays
     shard: DatasetShardArrays | None
-    simulations: tuple[SimulationCommitRecord, ...]
-    metadata: JsonObject
+    simulations: tuple[SimulationResult, ...]
 
 
 def batch_path(
@@ -78,37 +63,24 @@ def batch_path(
 def _validate_simulation_results(
     plan: BatchPlanArrays,
     shard: DatasetShardArrays | None,
-    simulations: Sequence[SimulationCommitRecord],
+    simulations: Sequence[SimulationResult],
 ) -> None:
-    simulation_ids = compute_batch_simulation_ids(plan)
-    if len(simulations) != simulation_ids.size:
+    simulation_count = int(plan["simulation_spec_json"].size)
+    if len(simulations) != simulation_count:
         raise ValueError("results must contain every planned simulation")
-    if not np.array_equal(
-        np.asarray(
-            [simulation.simulation_id for simulation in simulations],
-            dtype=np.int64,
-        ),
-        simulation_ids,
-    ):
-        raise ValueError("results must preserve planned simulation order")
 
     row_blocks = (
         compute_simulation_row_blocks(
             shard["simulation_local_index"],
-            number_of_simulations=simulation_ids.size,
+            number_of_simulations=simulation_count,
         )
         if shard is not None
         else {}
     )
     for local_index, simulation in enumerate(simulations):
-        declared_rows = (
-            (simulation.first_row, simulation.row_count)
-            if simulation.accepted
-            else None
-        )
-        if declared_rows != row_blocks.get(local_index):
+        if simulation.accepted != (local_index in row_blocks):
             raise ValueError(
-                f"simulation {simulation.simulation_id} rows do not match the shard"
+                f"simulation at local index {local_index}: rows do not match its result"
             )
 
 
@@ -117,8 +89,7 @@ def save_completed_batch(
     *,
     plan: BatchPlanArrays,
     shard: DatasetShardArrays | None,
-    simulations: Sequence[SimulationCommitRecord],
-    metadata: Mapping[str, object],
+    simulations: Sequence[SimulationResult],
 ) -> None:
     """Atomically save a finished batch; interrupted batches leave no artifact."""
 
@@ -137,7 +108,6 @@ def save_completed_batch(
     arrays[_RESULTS_JSON] = np.asarray(
         json_text([simulation.to_json_record() for simulation in simulations])
     )
-    arrays[_BATCH_METADATA_JSON] = np.asarray(json_text(metadata))
     write_npz_atomic(path, arrays)
 
 
@@ -145,12 +115,6 @@ def load_completed_batch(path: Path) -> CompletedBatch:
     """Load and validate one completed batch artifact."""
 
     arrays = load_npz(path)
-    unexpected = arrays.keys() - _COMPLETED_BATCH_FIELDS
-    if unexpected:
-        raise ValueError(
-            f"completed batch contains unexpected arrays {sorted(unexpected)}"
-        )
-
     plan = cast(
         BatchPlanArrays,
         {name: arrays[name] for name in BATCH_PLAN_FIELDS if name in arrays},
@@ -169,21 +133,16 @@ def load_completed_batch(path: Path) -> CompletedBatch:
     if shard is not None:
         validate_shard(shard, batch_plan=plan)
 
-    for name in (_RESULTS_JSON, _BATCH_METADATA_JSON):
-        if name not in arrays or arrays[name].ndim != 0:
-            raise ValueError(f"completed batch requires scalar {name}")
+    if _RESULTS_JSON not in arrays or arrays[_RESULTS_JSON].ndim != 0:
+        raise ValueError(f"completed batch requires scalar {_RESULTS_JSON}")
     raw_results = parse_json(str(arrays[_RESULTS_JSON].item()))
     if not isinstance(raw_results, list):
         raise ValueError("simulation_results_json must encode a list")
     simulations = tuple(parse_simulation_result(value) for value in raw_results)
     _validate_simulation_results(plan, shard, simulations)
 
-    metadata = parse_json(str(arrays[_BATCH_METADATA_JSON].item()))
-    if not isinstance(metadata, dict):
-        raise ValueError("batch_metadata_json must encode an object")
     return CompletedBatch(
         plan=plan,
         shard=shard,
         simulations=simulations,
-        metadata=cast(JsonObject, metadata),
     )

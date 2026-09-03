@@ -10,13 +10,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import math
+from typing import ClassVar
 
 import numpy as np
 
 from solver.gen_data.jonswap_tma import finite_depth_angular_frequency
-from solver.gen_data.pipeline.simulation_checks import (
-    SimulationCheckResult,
-    SimulationCheck,
+from solver.gen_data.pipeline.trajectory_config import (
+    JONSWAP_ADJUSTMENT_SCHEMA,
+    JonswapNonlinearAdjustmentConfig,
 )
 from solver.gen_data.pipeline.trajectory_integration import (
     AdjustmentBatchIntegrator,
@@ -28,17 +29,11 @@ from solver.gen_data.pipeline.trajectory_rollout import (
 )
 from solver.gen_data.pipeline.writer import SimulationOutcome, JsonScalar
 from solver.gen_data.trajectory_family_adapters import TrajectoryInitialBatch
-from solver.gen_data.trajectory_batch_executor import (
+from solver.gen_data.trajectory_batch_generator import (
     SimulationTimeGrid,
-    JONSWAP_ADJUSTMENT_SCHEMA,
-    JonswapNonlinearAdjustmentPolicy,
-    PAPER_JONSWAP_ADJUSTMENT_POLICY,
-    TrajectoryBatchExecutor,
+    TrajectoryBatchGenerator,
     floor_saved_time_grid,
 )
-
-
-BUCKETING_CONFIG_KEY = "jonswap_horizon_bucketing"
 
 
 def horizon_sorted_groups(
@@ -67,39 +62,6 @@ def horizon_sorted_groups(
         ordered[start : start + solver_batch_size]
         for start in range(0, len(ordered), solver_batch_size)
     )
-
-
-@dataclass(frozen=True)
-class BucketingConfig:
-    """Batch sizes used to execute one plan without exhausting GPU memory."""
-
-    batch_size: int
-    solver_batch_size: int
-    adjustment: JonswapNonlinearAdjustmentPolicy = PAPER_JONSWAP_ADJUSTMENT_POLICY
-
-    def __post_init__(self) -> None:
-        for value, name in (
-            (self.batch_size, "batch_size"),
-            (self.solver_batch_size, "solver_batch_size"),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        if self.solver_batch_size > self.batch_size:
-            raise ValueError("solver_batch_size cannot exceed batch_size")
-
-    def to_json_record(self) -> dict[str, object]:
-        return {
-            "batch_size": self.batch_size,
-            "solver_batch_size": self.solver_batch_size,
-            "nonlinear_adjustment": self.adjustment.to_json_record(),
-        }
-
-    def matches_record(self, record: Mapping[str, object]) -> bool:
-        """Return whether a stored record has the configured execution fields."""
-
-        return all(
-            record.get(key) == value for key, value in self.to_json_record().items()
-        )
 
 
 def _select_initial_batch(
@@ -188,38 +150,33 @@ def _adjustment_metrics(
     *,
     peak_period: float,
     saved_times: np.ndarray,
-    policy: JonswapNonlinearAdjustmentPolicy,
+    adjustment_config: JonswapNonlinearAdjustmentConfig,
 ) -> dict[str, float | int | bool | str | None]:
-    intended_terminal = policy.burn_peak_periods * peak_period
-    failed = simulation.decision.failed
-    clearance_evaluated = bool(
-        simulation.decision.evaluated & SimulationCheck.BOTTOM_CLEARANCE
-    )
+    intended_terminal = adjustment_config.burn_peak_periods * peak_period
+    decision = simulation.decision
     return {
         "nonlinear_adjustment_schema": JONSWAP_ADJUSTMENT_SCHEMA,
-        "nonlinear_adjustment_accepted": simulation.decision.accepted,
-        "nonlinear_adjustment_complete_admissible_handoff": not bool(
-            failed & SimulationCheck.INCOMPLETE_TRAJECTORY
+        "nonlinear_adjustment_accepted": decision.accepted,
+        "nonlinear_adjustment_complete_admissible_handoff": (
+            not decision.incomplete_trajectory
         ),
-        "nonlinear_adjustment_state_finite": not bool(
-            failed & SimulationCheck.NONFINITE_STATE
-        ),
+        "nonlinear_adjustment_state_finite": not decision.nonfinite_state,
         "nonlinear_adjustment_positive_water_column": (
-            not bool(failed & SimulationCheck.BOTTOM_CLEARANCE)
-            if clearance_evaluated
+            not decision.nonpositive_water_height
+            if simulation.minimum_water_column is not None
             else None
         ),
-        "nonlinear_adjustment_all_stages_solved": not bool(
-            failed & SimulationCheck.GL2_STAGE_RESIDUAL
-        ),
+        "nonlinear_adjustment_all_stages_solved": not decision.integration_failure,
         "nonlinear_adjustment_maximum_stage_residual": (
             simulation.maximum_gl2_stage_residual
             if math.isfinite(simulation.maximum_gl2_stage_residual)
             else None
         ),
         "nonlinear_adjustment_minimum_water_column": simulation.minimum_water_column,
-        "nonlinear_adjustment_ramp_order": policy.ramp_order,
-        "nonlinear_adjustment_ramp_time": (policy.ramp_time_peak_periods * peak_period),
+        "nonlinear_adjustment_ramp_order": adjustment_config.ramp_order,
+        "nonlinear_adjustment_ramp_time": (
+            adjustment_config.ramp_time_peak_periods * peak_period
+        ),
         "nonlinear_adjustment_intended_terminal_time": intended_terminal,
         "nonlinear_adjustment_realized_terminal_time": float(saved_times[-1]),
         "nonlinear_adjustment_saved_time_count": int(saved_times.size),
@@ -234,15 +191,10 @@ def _failed_adjustment_outcome(
     peak_period: float,
     saved_times: np.ndarray,
     production_grid: SimulationTimeGrid,
-    policy: JonswapNonlinearAdjustmentPolicy,
+    adjustment_config: JonswapNonlinearAdjustmentConfig,
 ) -> SimulationOutcome:
-    decision = simulation.decision
     return SimulationOutcome(
-        decision=SimulationCheckResult(
-            required=decision.required | SimulationCheck.OUTSIDE_SUPPORT,
-            evaluated=decision.evaluated | SimulationCheck.OUTSIDE_SUPPORT,
-            failed=decision.failed,
-        ),
+        decision=simulation.decision,
         rows=None,
         metrics={
             **construction_metrics,
@@ -250,7 +202,7 @@ def _failed_adjustment_outcome(
                 simulation,
                 peak_period=peak_period,
                 saved_times=saved_times,
-                policy=policy,
+                adjustment_config=adjustment_config,
             ),
             "production_status": "not_run_adjustment_failed",
             "intended_terminal_time": production_grid.intended_terminal_time,
@@ -266,7 +218,7 @@ def _with_adjustment_metrics(
     *,
     peak_period: float,
     saved_times: np.ndarray,
-    policy: JonswapNonlinearAdjustmentPolicy,
+    adjustment_config: JonswapNonlinearAdjustmentConfig,
 ) -> SimulationOutcome:
     return SimulationOutcome(
         decision=outcome.decision,
@@ -277,7 +229,7 @@ def _with_adjustment_metrics(
                 simulation,
                 peak_period=peak_period,
                 saved_times=saved_times,
-                policy=policy,
+                adjustment_config=adjustment_config,
             ),
             "production_status": "completed",
         },
@@ -285,78 +237,31 @@ def _with_adjustment_metrics(
 
 
 @dataclass(frozen=True)
-class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
+class HorizonBucketedJonswapBatchGenerator(TrajectoryBatchGenerator):
     """Solve one JONSWAP batch in groups with similar rollout lengths."""
 
-    adjustment_rollout_executor: AdjustmentBatchIntegrator = integrate_adjustment_batch
+    adjustment_rollout_integrator: AdjustmentBatchIntegrator = (
+        integrate_adjustment_batch
+    )
+    runs_jonswap_adjustment: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         if self.execution.family != "jonswap_tma":
             raise ValueError("horizon bucketing is implemented only for JONSWAP/TMA")
-        adjustment_policy = self.execution.jonswap_adjustment
-        if adjustment_policy is None:
+        if self.execution.jonswap_adjustment is None:
             raise ValueError(
-                "horizon-bucketed JONSWAP execution requires an adjustment policy"
+                "horizon-bucketed JONSWAP execution requires adjustment settings"
             )
-        raw_config = self.chunk_config.configuration.get(BUCKETING_CONFIG_KEY)
-        if not isinstance(raw_config, Mapping):
-            raise ValueError("run configuration omits JONSWAP bucketing config")
-        solver_size = raw_config.get("solver_batch_size")
-        if (
-            isinstance(solver_size, bool)
-            or not isinstance(solver_size, int)
-            or solver_size <= 0
-        ):
-            raise ValueError("configured solver_batch_size must be a positive integer")
-        expected = BucketingConfig(
-            batch_size=self.chunk_config.batch_size,
-            solver_batch_size=solver_size,
-            adjustment=adjustment_policy,
-        )
-        if not expected.matches_record(raw_config):
-            raise ValueError("configured JONSWAP bucketing config is inconsistent")
-        if (
-            self.execution.role == "paper_dataset"
-            and self.adjustment_rollout_executor is not integrate_adjustment_batch
-        ):
-            raise ValueError(
-                "paper-dataset execution requires the production adjustment executor"
-            )
+        if self.chunk_config.solver_batch_size is None:
+            raise ValueError("JONSWAP generation requires solver_batch_size")
 
-        metadata = dict(self.metadata or {})
-        metadata["launcher"] = "scripts/generate_paper_dataset_jonswap.py"
-        metadata[BUCKETING_CONFIG_KEY] = expected.to_json_record()
-        object.__setattr__(self, "metadata", metadata)
         super().__post_init__()
-
-    def _implemented_jonswap_adjustment(
-        self,
-    ) -> JonswapNonlinearAdjustmentPolicy | None:
-        """Return the policy implemented by the adjustment-first rollout."""
-
-        return self.execution.jonswap_adjustment
-
-    @property
-    def solver_batch_size(self) -> int:
-        """Return the numerical rollout width recorded in the bucketing config."""
-
-        raw_config = self.chunk_config.configuration[BUCKETING_CONFIG_KEY]
-        if not isinstance(raw_config, Mapping):
-            raise RuntimeError("validated JONSWAP bucketing config is missing")
-        solver_batch_size = raw_config.get("solver_batch_size")
-        if (
-            isinstance(solver_batch_size, bool)
-            or not isinstance(solver_batch_size, int)
-            or solver_batch_size <= 0
-        ):
-            raise RuntimeError("validated solver_batch_size is invalid")
-        return solver_batch_size
 
     def _produce_adjusted_group(
         self,
         initial: TrajectoryInitialBatch,
-        grids: tuple[SimulationTimeGrid, ...],
-        policy: JonswapNonlinearAdjustmentPolicy,
+        time_grids: tuple[SimulationTimeGrid, ...],
+        adjustment_config: JonswapNonlinearAdjustmentConfig,
     ) -> tuple[SimulationOutcome, ...]:
         """Adjust one horizon-near group, then run accepted simulations."""
 
@@ -366,7 +271,7 @@ class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
         )
         adjustment_grids = tuple(
             floor_saved_time_grid(
-                policy.burn_peak_periods * peak_period,
+                adjustment_config.burn_peak_periods * peak_period,
                 saved_dt=self.execution.numerical.saved_dt,
                 horizon_name="nonlinear-adjustment",
             )
@@ -377,10 +282,12 @@ class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
             initial.xi0,
             initial.depths,
             adjustment_grids,
-            nonlinear_ramp_times=policy.ramp_time_peak_periods * peak_periods,
-            nonlinear_ramp_order=policy.ramp_order,
+            nonlinear_ramp_times=(
+                adjustment_config.ramp_time_peak_periods * peak_periods
+            ),
+            nonlinear_ramp_order=adjustment_config.ramp_order,
             config=self.execution.numerical,
-            integrator=self.adjustment_rollout_executor,
+            integrator=self.adjustment_rollout_integrator,
         )
         accepted_indices, adjusted_initial = _accepted_adjustment_batch(
             initial,
@@ -388,9 +295,9 @@ class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
         )
         production_by_index: dict[int, SimulationOutcome] = {}
         if adjusted_initial is not None:
-            production = super()._produce_jonswap(
+            production = super()._integrate_and_subsample_jonswap(
                 adjusted_initial,
-                tuple(grids[index] for index in accepted_indices),
+                tuple(time_grids[index] for index in accepted_indices),
             )
             production_by_index = dict(zip(accepted_indices, production))
 
@@ -400,7 +307,7 @@ class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
                 simulation,
                 peak_period=float(peak_periods[index]),
                 saved_times=adjustment_grids[index],
-                policy=policy,
+                adjustment_config=adjustment_config,
             )
             if simulation.decision.accepted
             else _failed_adjustment_outcome(
@@ -412,37 +319,39 @@ class HorizonBucketedJonswapBatchExecutor(TrajectoryBatchExecutor):
                 ),
                 peak_period=float(peak_periods[index]),
                 saved_times=adjustment_grids[index],
-                production_grid=grids[index],
-                policy=policy,
+                production_grid=time_grids[index],
+                adjustment_config=adjustment_config,
             )
             for index, simulation in enumerate(adjustment_simulations)
         )
 
-    def _produce_jonswap(
+    def _integrate_and_subsample_jonswap(
         self,
         initial: TrajectoryInitialBatch,
-        grids: tuple[SimulationTimeGrid, ...],
+        time_grids: tuple[SimulationTimeGrid, ...],
     ) -> tuple[SimulationOutcome, ...]:
-        if len(grids) != initial.eta0.shape[0]:
+        if len(time_grids) != initial.eta0.shape[0]:
             raise ValueError("JONSWAP/TMA requires one time grid per initial condition")
         minimum_stored = self.execution.frame_selection.jonswap_tma_count
-        adjustment_policy = self.execution.jonswap_adjustment
-        assert adjustment_policy is not None
-        if any(grid.saved_times.size < minimum_stored for grid in grids):
+        adjustment_config = self.execution.jonswap_adjustment
+        assert adjustment_config is not None
+        if any(grid.saved_times.size < minimum_stored for grid in time_grids):
             raise ValueError(
                 "trajectory horizon has fewer saved times than the storage policy"
             )
 
+        solver_batch_size = self.chunk_config.solver_batch_size
+        assert solver_batch_size is not None
         groups = horizon_sorted_groups(
-            grids,
-            solver_batch_size=self.solver_batch_size,
+            time_grids,
+            solver_batch_size=solver_batch_size,
         )
-        ordered_outcomes: list[SimulationOutcome | None] = [None] * len(grids)
+        ordered_outcomes: list[SimulationOutcome | None] = [None] * len(time_grids)
         for indices in groups:
             outcomes = self._produce_adjusted_group(
                 _select_initial_batch(initial, indices),
-                tuple(grids[index] for index in indices),
-                adjustment_policy,
+                tuple(time_grids[index] for index in indices),
+                adjustment_config,
             )
             for index, outcome in zip(indices, outcomes):
                 ordered_outcomes[index] = outcome

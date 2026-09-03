@@ -5,6 +5,7 @@ Run with:
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
       uv run python -m unittest solver.gen_data.tests.test_benjamin_feir_jcp09
 """
+
 from __future__ import annotations
 
 import os
@@ -58,11 +59,7 @@ def _canonical_carrier(x: jax.Array) -> tuple[jax.Array, jax.Array, float]:
     bare_amplitude = carrier_amplitude
     for _ in range(8):
         bare_steepness = carrier_wavenumber * bare_amplitude
-        factor = (
-            1.0
-            + bare_steepness**2 / 8.0
-            + 121.0 * bare_steepness**4 / 192.0
-        )
+        factor = 1.0 + bare_steepness**2 / 8.0 + 121.0 * bare_steepness**4 / 192.0
         bare_amplitude = carrier_amplitude / factor
     eta, xi = stokes_eta_xi(
         x=x,
@@ -84,17 +81,15 @@ def _fixed_band_relative_error(
 ) -> float:
     coarse_coefficients = np.fft.rfft(coarse) / coarse.shape[-1]
     fine_coefficients = np.fft.rfft(fine) / fine.shape[-1]
-    difference = coarse_coefficients[: maximum_mode + 1] - fine_coefficients[
-        : maximum_mode + 1
-    ]
+    difference = (
+        coarse_coefficients[: maximum_mode + 1] - fine_coefficients[: maximum_mode + 1]
+    )
     reference = fine_coefficients[: maximum_mode + 1]
     numerator = np.sqrt(
-        np.abs(difference[0]) ** 2
-        + 2.0 * np.sum(np.abs(difference[1:]) ** 2)
+        np.abs(difference[0]) ** 2 + 2.0 * np.sum(np.abs(difference[1:]) ** 2)
     )
     denominator = np.sqrt(
-        np.abs(reference[0]) ** 2
-        + 2.0 * np.sum(np.abs(reference[1:]) ** 2)
+        np.abs(reference[0]) ** 2 + 2.0 * np.sum(np.abs(reference[1:]) ** 2)
     )
     return float(numerator / denominator)
 
@@ -304,6 +299,7 @@ class BenjaminFeirJCP09Test(unittest.TestCase):
             for index in range(3)
         )
         self.assertLess(max(errors), 1e-7, msg=f"fixed-band errors: {errors}")
+
 
 if __name__ == "__main__":
     unittest.main()

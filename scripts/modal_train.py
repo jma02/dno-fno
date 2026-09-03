@@ -25,6 +25,7 @@ Workflow:
 The volume keeps both the input files and the run outputs, so re-running
 ``train`` re-uses the same dataset upload.
 """
+
 from __future__ import annotations
 
 import json
@@ -60,35 +61,13 @@ image = (
     .add_local_dir(REPO_ROOT / "models" / "fno-jax", remote_path="/repo/models/fno-jax")
     .add_local_dir(REPO_ROOT / "models" / "dno-net", remote_path="/repo/models/dno-net")
     .add_local_dir(REPO_ROOT / "solver", remote_path="/repo/solver")
-    .add_local_file(REPO_ROOT / "jax_training_util.py", remote_path="/repo/jax_training_util.py")
+    .add_local_file(
+        REPO_ROOT / "jax_training_util.py", remote_path="/repo/jax_training_util.py"
+    )
 )
 
 app = modal.App(APP_NAME, image=image)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-
-
-def _setup_repo_layout() -> Path:
-    """Symlink /repo/data -> /data and /repo/outputs -> /data/outputs so the trainer's
-    REPO_ROOT-relative paths land on the persistent volume."""
-    import os
-    import sys
-
-    repo = Path("/repo")
-    data_link = repo / "data"
-    out_link = repo / "outputs"
-    out_dir = Path(VOLUME_MOUNT) / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if not data_link.exists():
-        data_link.symlink_to(VOLUME_MOUNT)
-    if not out_link.exists():
-        out_link.symlink_to(out_dir)
-
-    os.environ["PYTHONPATH"] = "/repo:/repo/models/fno-jax:/repo/models/dno-net:/repo/train-jax-10m"
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    for p in ("/repo", "/repo/models/fno-jax", "/repo/models/dno-net", "/repo/train-jax-10m"):
-        if p not in sys.path:
-            sys.path.insert(0, p)
-    return repo
 
 
 @app.function(volumes={VOLUME_MOUNT: volume}, timeout=600)
@@ -173,7 +152,9 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
         try:
             relative = path.relative_to(repo_root)
         except ValueError as exc:
-            raise ValueError(f"dataset-view file is outside repository: {path}") from exc
+            raise ValueError(
+                f"dataset-view file is outside repository: {path}"
+            ) from exc
         relative_targets.append((path, f"/{relative.as_posix()}"))
 
     total_bytes = sum(path.stat().st_size for path, _ in relative_targets)
@@ -231,22 +212,58 @@ def run_training(
     import time
     from time import perf_counter
 
-    _setup_repo_layout()
+    repo = Path("/repo")
+    data_link = repo / "data"
+    out_link = repo / "outputs"
+    out_dir = Path(VOLUME_MOUNT) / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not data_link.exists():
+        data_link.symlink_to(VOLUME_MOUNT)
+    if not out_link.exists():
+        out_link.symlink_to(out_dir)
+
+    os.environ["PYTHONPATH"] = (
+        "/repo:/repo/models/fno-jax:/repo/models/dno-net:/repo/train-jax-10m"
+    )
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    for repo_path in (
+        "/repo",
+        "/repo/models/fno-jax",
+        "/repo/models/dno-net",
+        "/repo/train-jax-10m",
+    ):
+        if repo_path not in sys.path:
+            sys.path.insert(0, repo_path)
+
     cmd = [
-        sys.executable, "/repo/train-jax-10m/1d_dno_fno_jax.py",
-        "--dataset", dataset,
-        "--epochs", str(epochs),
-        "--batch_size", str(batch_size),
-        "--lr", str(lr),
-        "--weight_decay", str(weight_decay),
-        "--width", str(width),
-        "--n_blocks", str(n_blocks),
-        "--norm", norm,
-        "--model", model_kind,
-        "--seed", str(seed),
-        "--run_name", run_name,
-        "--latent", str(latent),
-        "--cs_mult_hidden", str(cs_mult_hidden),
+        sys.executable,
+        "/repo/train-jax-10m/1d_dno_fno_jax.py",
+        "--dataset",
+        dataset,
+        "--epochs",
+        str(epochs),
+        "--batch_size",
+        str(batch_size),
+        "--lr",
+        str(lr),
+        "--weight_decay",
+        str(weight_decay),
+        "--width",
+        str(width),
+        "--n_blocks",
+        str(n_blocks),
+        "--norm",
+        norm,
+        "--model",
+        model_kind,
+        "--seed",
+        str(seed),
+        "--run_name",
+        run_name,
+        "--latent",
+        str(latent),
+        "--cs_mult_hidden",
+        str(cs_mult_hidden),
     ]
     if model_kind == "fno":
         cmd.extend(["--modes", str(modes)])
@@ -266,7 +283,7 @@ def run_training(
     try:
         while True:
             try:
-                rc = proc.wait(timeout=30.0)
+                proc.wait(timeout=30.0)
                 break
             except subprocess.TimeoutExpired:
                 if time.monotonic() >= next_commit:
@@ -340,7 +357,7 @@ def train(
     from datetime import datetime
 
     if not run_name:
-        run_name = datetime.now().strftime(f"fno_jax_10m_%Y%m%d_%H%M%S")
+        run_name = datetime.now().strftime("fno_jax_10m_%Y%m%d_%H%M%S")
     print(f"run_name = {run_name}")
     print(f"gpu      = {DEFAULT_GPU}")
 
@@ -369,6 +386,7 @@ def train(
 
     result = run_training.remote(**call_kwargs)
     import json
+
     print(json.dumps(result, indent=2, default=str))
 
 
@@ -381,7 +399,7 @@ def download_run(run_name: str, target_dir: str = "outputs") -> None:
     print(f"Downloading {prefix} -> {out}/")
     pulled = 0
     for entry in volume.iterdir(prefix):
-        rel = entry.path[len(prefix):].lstrip("/")
+        rel = entry.path[len(prefix) :].lstrip("/")
         local = out / rel
         local.parent.mkdir(parents=True, exist_ok=True)
         size_gb = (entry.size or 0) / 1e9

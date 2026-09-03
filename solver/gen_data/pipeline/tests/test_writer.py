@@ -9,21 +9,13 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_artifacts import compute_batch_simulation_ids
 from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     load_completed_batch,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    SimulationKey,
-    DatasetSplit,
-)
-from solver.gen_data.pipeline.simulation_checks import (
-    SimulationCheckResult,
-    SimulationCheck,
-)
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,
     SimulationOutcome,
@@ -32,33 +24,10 @@ from solver.gen_data.pipeline.writer import (
 )
 
 
-REQUIRED = (
-    SimulationCheck.NONFINITE_STATE
-    | SimulationCheck.NONFINITE_TARGET
-    | SimulationCheck.BOTTOM_CLEARANCE
-)
-
-
-def _assignments(dataset_split: DatasetSplit) -> tuple[AttemptAssignment, ...]:
-    return tuple(
-        AttemptAssignment(
-            simulation_key=SimulationKey(
-                family_id=3,
-                dataset_split=dataset_split,
-                worker_stream_id=7,
-                attempt_index=index,
-            ),
-            parameter_group_id=parameter_group_id,
-        )
-        for index, parameter_group_id in enumerate(("shallow", "deep"))
-    )
-
-
 def _decision(*, accepted: bool) -> SimulationCheckResult:
     return SimulationCheckResult(
-        required=REQUIRED,
-        evaluated=REQUIRED,
-        failed=SimulationCheck.NONE if accepted else SimulationCheck.NONFINITE_TARGET,
+        accepted=accepted,
+        nonfinite_target=not accepted,
     )
 
 
@@ -67,7 +36,7 @@ class CommonWriterTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.assignments = _assignments(DatasetSplit.TRAIN)
+        self.parameter_group_ids = ("shallow", "deep")
         self.path = batch_path(
             self.root,
             family="jonswap_tma",
@@ -75,15 +44,16 @@ class CommonWriterTests(unittest.TestCase):
             batch_id=4,
         )
         self.batch_plan = build_batch_plan(
-            self.assignments,
+            self.parameter_group_ids,
             (
                 {"depth": 0.1, "phase_right": [0.1, 0.2]},
                 {"depth": 5.0, "phase_right": [0.3, 0.4]},
             ),
-            metadata={"target": "order_6_pad_8_band_128"},
+            family_id=3,
+            dataset_split=DatasetSplit.TRAIN,
         )
 
-    def test_proposal_preassigns_identity_and_commit_keeps_whole_simulations(
+    def test_commit_keeps_whole_simulations(
         self,
     ) -> None:
         field = np.arange(12, dtype=np.float64).reshape(3, 4) / 100.0
@@ -110,22 +80,11 @@ class CommonWriterTests(unittest.TestCase):
             self.path,
             self.batch_plan,
             outcomes,
-            metadata={"accepted_simulations": 1},
         )
 
         batch = load_completed_batch(self.path)
-        self.assertTrue(
-            np.array_equal(
-                compute_batch_simulation_ids(batch.plan),
-                np.asarray(
-                    [
-                        assignment.simulation_key.simulation_id
-                        for assignment in self.assignments
-                    ],
-                    dtype=np.int64,
-                ),
-            )
-        )
+        self.assertEqual(batch.simulations[0].failed_checks, ())
+        self.assertEqual(batch.simulations[1].failed_checks, ("nonfinite_target",))
         specifications = [
             json.loads(value) for value in batch.plan["simulation_spec_json"]
         ]
@@ -146,12 +105,6 @@ class CommonWriterTests(unittest.TestCase):
                     np.asarray([True, False]),
                 )
             )
-            self.assertTrue(
-                np.array_equal(
-                    trajectory_map["trajectory_required_bits"],
-                    np.full(2, int(REQUIRED), dtype=np.uint32),
-                )
-            )
 
     def test_all_rejected_batch_commits_without_a_shard(self) -> None:
         outcomes = tuple(
@@ -160,14 +113,13 @@ class CommonWriterTests(unittest.TestCase):
                 rows=None,
                 metrics={"maximum_error": None},
             )
-            for _ in self.assignments
+            for _ in self.parameter_group_ids
         )
 
         commit_simulation_outcomes(
             self.path,
             self.batch_plan,
             outcomes,
-            metadata={"accepted_simulations": 0},
         )
 
         self.assertIsNone(load_completed_batch(self.path).shard)

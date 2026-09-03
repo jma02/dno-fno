@@ -21,12 +21,11 @@ from solver.gen_data.pipeline.trajectory_checks import (  # noqa: E402
 )
 from solver.gen_data.pipeline.batch_storage import batch_path  # noqa: E402
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    AttemptAssignment,
-    SimulationKey,
-    DatasetSplit,
+from solver.gen_data.pipeline.simulation_allocation import DatasetSplit  # noqa: E402
+from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
+    RolloutConfig,
+    TrajectoryFrameSelectionConfig,
 )
-from solver.gen_data.pipeline.trajectory_config import RolloutConfig  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
     TrajectorySimulationResult,
     TrajectorySamples,
@@ -34,10 +33,8 @@ from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
 )
 from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
     SimulationCheckResult,
-    SimulationCheck,
 )
 from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
-    TrajectoryFrameSelectionConfig,
     _select_subsample_time_indices,
     subsample_trajectories,
 )
@@ -88,22 +85,11 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         eta0 = np.stack((0.001 * np.cos(x), 0.0015 * np.cos(2.0 * x)))
         xi0 = np.stack((0.002 * np.sin(2.0 * x), 0.001 * np.sin(x)))
         depths = np.asarray([1.0, 1.5])
-        assignments = tuple(
-            AttemptAssignment(
-                simulation_key=SimulationKey(
-                    family_id=4,
-                    dataset_split=DatasetSplit.TEST,
-                    worker_stream_id=2,
-                    attempt_index=index,
-                ),
-                parameter_group_id=parameter_group_id,
-            )
-            for index, parameter_group_id in enumerate(("finite_a", "finite_b"))
-        )
         proposal = build_batch_plan(
-            assignments,
+            ("finite_a", "finite_b"),
             ({"amplitude": 0.001}, {"amplitude": 0.0015}),
-            metadata={"smoke": True},
+            family_id=4,
+            dataset_split=DatasetSplit.TEST,
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -138,7 +124,6 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                 path,
                 proposal,
                 outcomes,
-                metadata={"accepted_simulations": 2},
             )
             self.assertTrue(path.exists())
             view = build_dataset_view(
@@ -169,12 +154,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             xi=xi,
             gxi=gxi,
         )
-        reason = SimulationCheck.INCOMPLETE_TRAJECTORY
-        decision = SimulationCheckResult(
-            required=reason,
-            evaluated=reason,
-            failed=SimulationCheck.NONE,
-        )
+        decision = SimulationCheckResult(accepted=True)
         simulations = (
             TrajectorySimulationResult(
                 maximum_gl2_stage_residual=0.0,
@@ -197,11 +177,9 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
         np.testing.assert_array_equal(outcome.rows.time, np.asarray([0.0, 0.16]))
 
     def test_rejected_simulation_persists_finite_internal_health_metrics(self) -> None:
-        reason = SimulationCheck.HAMILTONIAN_DRIFT
         decision = SimulationCheckResult(
-            required=reason,
-            evaluated=reason,
-            failed=reason,
+            accepted=False,
+            hamiltonian_drift=True,
         )
         simulations = (
             TrajectorySimulationResult(

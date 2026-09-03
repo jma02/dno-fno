@@ -10,7 +10,6 @@ from solver.gen_data.pipeline.trajectory_checks import (
     evaluate_trajectory_health,
     evaluate_trajectory,
 )
-from solver.gen_data.pipeline.simulation_checks import SimulationCheck
 
 
 def make_trajectory() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -36,10 +35,7 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
         )
 
         self.assertTrue(decision.accepted)
-        self.assertEqual(
-            decision.required,
-            SimulationCheck.INCOMPLETE_TRAJECTORY,
-        )
+        self.assertFalse(decision.incomplete_trajectory)
 
     def test_numerical_failure_is_a_diagnostic_cause_of_incompleteness(
         self,
@@ -57,9 +53,9 @@ class CompleteNumericalTrajectoryTest(unittest.TestCase):
         )
 
         self.assertFalse(decision.accepted)
-        self.assertTrue(decision.failed & SimulationCheck.INCOMPLETE_TRAJECTORY)
-        self.assertTrue(decision.failed & SimulationCheck.NONFINITE_TARGET)
-        self.assertTrue(decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL)
+        self.assertTrue(decision.incomplete_trajectory)
+        self.assertTrue(decision.nonfinite_target)
+        self.assertTrue(decision.integration_failure)
 
 
 class InternalTrajectoryHealthTest(unittest.TestCase):
@@ -84,24 +80,24 @@ class InternalTrajectoryHealthTest(unittest.TestCase):
             5.0e-4,
         )
         defects = (
-            ("hamiltonian", np.asarray([2.0, 2.01]), SimulationCheck.HAMILTONIAN_DRIFT),
+            ("hamiltonian", np.asarray([2.0, 2.01]), "hamiltonian_drift"),
             (
                 "state_finite",
                 np.asarray([True, False]),
-                SimulationCheck.NONFINITE_STATE,
+                "nonfinite_state",
             ),
             (
                 "dno_output_finite",
                 np.asarray([True, False]),
-                SimulationCheck.NONFINITE_TARGET,
+                "nonfinite_target",
             ),
             (
                 "minimum_water_column",
                 np.asarray([1.0, 0.0]),
-                SimulationCheck.BOTTOM_CLEARANCE,
+                "nonpositive_water_height",
             ),
         )
-        for name, value, reason in defects:
+        for name, value, failed_check in defects:
             inputs = {**healthy, name: value}
             with self.subTest(name=name):
                 _, failed = evaluate_trajectory_health(
@@ -109,7 +105,7 @@ class InternalTrajectoryHealthTest(unittest.TestCase):
                     hamiltonian_drift_threshold=1.0e-3,
                 )
                 self.assertFalse(failed.accepted)
-                self.assertTrue(failed.failed & reason)
+                self.assertTrue(getattr(failed, failed_check))
 
 
 if __name__ == "__main__":

@@ -25,9 +25,8 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     build_per_simulation_initial_conditions,
 )
 from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    AttemptAssignment,
-    SimulationKey,
     DatasetSplit,
+    PhysicalFamilyId,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     RolloutConfig,
@@ -97,7 +96,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 components_within_simulation=(0,),
             )
 
-        record = caught.exception.failure_record
+        record = caught.exception.to_json_record()
         self.assertEqual(
             record["reason"],
             "negative_or_nonfinite_surface_potential_radicand",
@@ -133,7 +132,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 components_within_simulation=(0, 1, 0),
             )
 
-        record = caught.exception.failure_record
+        record = caught.exception.to_json_record()
         self.assertEqual(
             record["schema"],
             TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
@@ -185,7 +184,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
                 components_within_simulation=(0, 1, 0),
             )
 
-        record = caught.exception.failure_record
+        record = caught.exception.to_json_record()
         self.assertEqual(
             record["reason"],
             "nonpositive_or_nonfinite_surface_potential_speed_squared",
@@ -274,34 +273,24 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             target_time_chunk_size=2,
         )
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
-        attempted = AttemptAssignment(
-            simulation_key=SimulationKey(
-                family_id=2,
-                dataset_split=DatasetSplit.TEST,
-                worker_stream_id=7,
-                attempt_index=53,
-            ),
-            parameter_group_id=parameter_group_id,
-        )
         sampled = sample_tanaka_simulations(
-            (attempted,),
+            (parameter_group_id,),
+            dataset_split=DatasetSplit.TEST,
+            first_attempt_number=53,
             contract=contract,
         )
         failure = TanakaPotentialRadicandError(
-            {
-                "schema": TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
-                "reason": ("negative_or_nonfinite_surface_potential_radicand"),
-                "invalid_simulation_indices": [0],
-                "components": [],
-            }
+            "negative_or_nonfinite_surface_potential_radicand",
+            (),
         )
         with tempfile.TemporaryDirectory() as directory:
             proposed = prepare_trajectory_batch(
                 sampled,
                 root=Path(directory),
                 family_name="tanaka",
+                family_id=PhysicalFamilyId.TANAKA,
+                dataset_split=DatasetSplit.TEST,
                 batch_id=0,
-                metadata={"test_scope": "constructor_domain_failure"},
             )
             with patch(
                 "solver.gen_data.trajectory_family_adapters."

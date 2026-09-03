@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,6 +16,10 @@ from solver.gen_data.pipeline.time_selection import (
     select_tanaka_times,
     select_uniform_times,
 )
+from solver.gen_data.pipeline.trajectory_config import (
+    TrajectoryFamily,
+    TrajectoryFrameSelectionConfig,
+)
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,
     SimulationOutcome,
@@ -24,22 +27,6 @@ from solver.gen_data.pipeline.writer import (
 
 
 FloatArray: TypeAlias = NDArray[np.float64]
-TrajectoryFamily: TypeAlias = Literal[
-    "tanaka",
-    "benjamin_feir",
-    "jonswap_tma",
-]
-
-
-@dataclass(frozen=True)
-class TrajectoryFrameSelectionConfig:
-    """Number and weighting parameters for retained trajectory frames."""
-
-    tanaka_count: int = 200
-    tanaka_alpha: float = 0.5
-    tanaka_sigma_steps: float = 50.0
-    benjamin_feir_count: int = 200
-    jonswap_tma_count: int = 16
 
 
 def _select_subsample_time_indices(

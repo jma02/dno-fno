@@ -5,6 +5,7 @@ Run with:
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True CUDA_VISIBLE_DEVICES='' \
       uv run python -m unittest solver.gen_data.tests.test_paper_acceptance_smoke
 """
+
 from __future__ import annotations
 
 import os
@@ -24,6 +25,7 @@ from solver.reference_solutions.stokes_wave import (  # noqa: E402
     finite_depth_stokes_wave_height,
     stokes_eta_xi,
 )
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -53,9 +55,7 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
 
     def test_finite_stokes_harmonics_vectorize_over_parameter_draws(self) -> None:
         k0 = 2.0 * np.pi * np.asarray([14.0, 14.0]) / 164.0
-        amplitudes = np.asarray(
-            [0.22543466384990768, 0.09589740544385852]
-        )
+        amplitudes = np.asarray([0.22543466384990768, 0.09589740544385852])
         harmonics = finite_depth_eta_harmonics(
             k0=k0,
             depth=np.ones(2),
@@ -205,6 +205,7 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
             atol=1e-13,
         )
         self.assertGreater(float(jnp.min(parameters["depth"] + eta)), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

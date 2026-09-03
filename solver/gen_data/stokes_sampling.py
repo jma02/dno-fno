@@ -2,8 +2,7 @@
 
 The sampling scheme has four parameter groups: finite- and deep-water branches,
 each crossed with the steepness intervals ``[0.005, 0.03)`` and
-``[0.03, 0.15]``. An ``AttemptAssignment`` fixes the group and all five
-PCG64 seed words before any parameter is drawn.
+``[0.03, 0.15]``.
 
 For a finite-depth attempt, the carrier mode, depth, phase, and steepness interval
 remain fixed while the amplitude is redrawn within that interval until the
@@ -27,8 +26,9 @@ from solver.reference_solutions.stokes_wave import (
     finite_depth_stokes_ursell_upper_bound,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    random_generator_for_simulation,
+    DatasetSplit,
+    PhysicalFamilyId,
+    random_generator_for_attempt,
 )
 
 
@@ -66,7 +66,7 @@ STOKES_PARAMETER_GROUP_IDS = tuple(STOKES_PARAMETER_GROUPS)
 class StokesSample:
     """One complete accepted Stokes parameter specification."""
 
-    assignment: AttemptAssignment
+    parameter_group_id: str
     branch: StokesBranch
     steepness_cell_index: int
     domain_length: float
@@ -120,7 +120,6 @@ class StokesSample:
         """Return a strict-JSON-ready record sufficient for exact replay."""
 
         return {
-            **self.assignment.to_json_record(),
             "status": "accepted",
             "constructor": "project_fifth_order_stokes_fixed_phase_v1",
             "branch": self.branch,
@@ -147,7 +146,7 @@ class StokesSample:
             "support_resampling_count": self.support_resampling_count,
             "amplitude_attempts": [
                 {
-                    "attempt_index": index,
+                    "attempt_number": index,
                     "amplitude": amplitude,
                     "steepness": self.wavenumber * amplitude,
                     "ursell_was_evaluated": self.branch == "finite",
@@ -324,7 +323,7 @@ def stokes_support_violations(
     """Return every violation of the declared Stokes sampling support."""
 
     violations: list[str] = []
-    if STOKES_PARAMETER_GROUPS.get(sample.assignment.parameter_group_id) != (
+    if STOKES_PARAMETER_GROUPS.get(sample.parameter_group_id) != (
         sample.branch,
         sample.steepness_cell_index,
     ):
@@ -408,7 +407,6 @@ def stokes_support_violations(
 
 def _failure_record(
     *,
-    assignment: AttemptAssignment,
     branch: StokesBranch,
     steepness_cell_index: int,
     domain_length: float,
@@ -428,7 +426,6 @@ def _failure_record(
         steepness_cell_index
     ]
     return {
-        **assignment.to_json_record(),
         "status": "failed_ursell_redraw_limit",
         "constructor": "project_fifth_order_stokes_fixed_phase_v1",
         "branch": branch,
@@ -453,7 +450,7 @@ def _failure_record(
         "support_resampling_count": len(attempts) - 1,
         "amplitude_attempts": [
             {
-                "attempt_index": index,
+                "attempt_number": index,
                 "amplitude": amplitude,
                 "steepness": wavenumber * amplitude,
                 "ursell_was_evaluated": True,
@@ -471,8 +468,10 @@ def _failure_record(
 
 
 def sample_stokes_simulation(
-    assignment: AttemptAssignment,
+    parameter_group_id: str,
     *,
+    dataset_split: DatasetSplit,
+    attempt_number: int,
     domain_length: float = PAPER_DOMAIN_LENGTH,
     gravity: float = PAPER_GRAVITY,
     maximum_ursell_redraws: int = DEFAULT_MAXIMUM_URSELL_REDRAWS,
@@ -496,11 +495,9 @@ def sample_stokes_simulation(
     if maximum_ursell_redraws < 0:
         raise ValueError("maximum_ursell_redraws must be nonnegative")
 
-    parameter_group = STOKES_PARAMETER_GROUPS.get(assignment.parameter_group_id)
+    parameter_group = STOKES_PARAMETER_GROUPS.get(parameter_group_id)
     if parameter_group is None:
-        raise ValueError(
-            f"unknown Stokes parameter group: {assignment.parameter_group_id}"
-        )
+        raise ValueError(f"unknown Stokes parameter group: {parameter_group_id}")
     branch, steepness_cell_index = parameter_group
     carrier_mode_support = feasible_carrier_modes(
         branch,
@@ -512,7 +509,11 @@ def sample_stokes_simulation(
             "the assigned Stokes parameter group has no feasible carrier mode"
         )
 
-    rng = random_generator_for_simulation(assignment.simulation_key)
+    rng = random_generator_for_attempt(
+        family_id=PhysicalFamilyId.STOKES,
+        dataset_split=dataset_split,
+        attempt_number=attempt_number,
+    )
     carrier_mode = carrier_mode_support[int(rng.integers(0, len(carrier_mode_support)))]
     wavenumber = 2.0 * math.pi * carrier_mode / domain_length
     depth_draw_bounds = effective_depth_bounds(
@@ -552,7 +553,7 @@ def sample_stokes_simulation(
         attempts.append((amplitude, ursell_upper_bound))
         if accepted:
             sample = StokesSample(
-                assignment=assignment,
+                parameter_group_id=parameter_group_id,
                 branch=branch,
                 steepness_cell_index=steepness_cell_index,
                 domain_length=float(domain_length),
@@ -574,7 +575,6 @@ def sample_stokes_simulation(
             return sample
 
     failure_record = _failure_record(
-        assignment=assignment,
         branch=branch,
         steepness_cell_index=steepness_cell_index,
         domain_length=float(domain_length),

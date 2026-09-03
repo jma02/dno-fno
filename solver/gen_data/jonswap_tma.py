@@ -28,8 +28,7 @@ PAPER_RELATIVE_FREQUENCY_WINDOW = "sharp_relative_frequency_interval_v1"
 PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER = 128.0
 PAPER_RESOLVED_BAND_TRANSITION_WAVENUMBER = 96.0
 PAPER_RESOLVED_BAND_TRANSITION_FRACTION = (
-    PAPER_RESOLVED_BAND_TRANSITION_WAVENUMBER
-    / PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER
+    PAPER_RESOLVED_BAND_TRANSITION_WAVENUMBER / PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER
 )
 PAPER_RESOLVED_BAND_QUADRATURE_ORDER = 16
 PAPER_RESOLVED_BAND_WINDOW = "cosine_squared_density_v1"
@@ -262,8 +261,7 @@ def find_jonswap_parameter_violations(
     peak_steepness = peak_wavenumber * significant_height / 2.0
     if peak_steepness > PAPER_PEAK_STEEPNESS_MAXIMUM:
         violations.append(
-            "JONSWAP/TMA k_p H_s/2 must not exceed "
-            f"{PAPER_PEAK_STEEPNESS_MAXIMUM:g}"
+            f"JONSWAP/TMA k_p H_s/2 must not exceed {PAPER_PEAK_STEEPNESS_MAXIMUM:g}"
         )
     if (band is None) != (relative_frequency_maximum is None):
         raise ValueError(

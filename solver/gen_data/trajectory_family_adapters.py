@@ -40,7 +40,10 @@ from solver.gen_data.jonswap_tma_sampling import (
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.batch_storage import batch_path
-from solver.gen_data.pipeline.simulation_allocation import AttemptAssignment
+from solver.gen_data.pipeline.simulation_allocation import (
+    DatasetSplit,
+    PhysicalFamilyId,
+)
 from solver.gen_data.pipeline.dno_target import project_fixed_band
 from solver.gen_data.pipeline.trajectory_config import RolloutConfig
 from solver.gen_data.pipeline.types import BatchPlanArrays
@@ -66,19 +69,19 @@ SampleT = TypeVar("SampleT")
 class SampledSimulations(Generic[SampleT]):
     """Complete sampled simulations and strict records, before numerical work."""
 
-    assignments: tuple[AttemptAssignment, ...]
+    parameter_group_ids: tuple[str, ...]
     samples: tuple[SampleT, ...]
     specification_records: tuple[SpecificationRecord, ...]
     contract: RolloutConfig
     construction_settings: SpecificationRecord
 
     def __post_init__(self) -> None:
-        count = len(self.assignments)
+        count = len(self.parameter_group_ids)
         if count == 0:
             raise ValueError("sampled trajectory simulations must not be empty")
         if len(self.samples) != count or len(self.specification_records) != count:
             raise ValueError(
-                "assignments, samples, and records must have equal lengths"
+                "parameter groups, samples, and records must have equal lengths"
             )
         for record in self.specification_records:
             json_text(record)
@@ -132,16 +135,49 @@ class TrajectoryInitialBatch:
             raise ValueError("initial surfaces must remain above the bottom")
 
 
+@dataclass(frozen=True)
+class JonswapInitialStateFailure:
+    """One JONSWAP initial state outside the graph domain."""
+
+    local_simulation_index: int
+    state_finite: bool
+    minimum_water_column: float | None
+
+    def to_json_record(self) -> dict[str, object]:
+        return {
+            "local_simulation_index": self.local_simulation_index,
+            "failure_reason": (
+                "nonpositive_initial_water_column"
+                if self.state_finite
+                else "nonfinite_initial_state"
+            ),
+            "state_finite": self.state_finite,
+            "minimum_water_column": self.minimum_water_column,
+        }
+
+
 class JonswapInitialStateDomainError(ValueError):
     """Per-simulation failure of the JONSWAP initial graph-domain conditions."""
 
-    def __init__(self, failure_record: dict[str, object]) -> None:
-        self.failure_record = failure_record
-        invalid = failure_record.get("invalid_simulation_indices")
+    def __init__(self, failures: tuple[JonswapInitialStateFailure, ...]) -> None:
+        self.failures = failures
         super().__init__(
             "JONSWAP/TMA initial states violate the graph domain at "
-            f"constructor-sub-batch indices {invalid}"
+            f"constructor-sub-batch indices {self.invalid_simulation_indices}"
         )
+
+    @property
+    def invalid_simulation_indices(self) -> tuple[int, ...]:
+        return tuple(failure.local_simulation_index for failure in self.failures)
+
+    def to_json_record(self) -> dict[str, object]:
+        return {
+            "schema": "jonswap_initial_state_domain_failure_v1",
+            "reason": "invalid_initial_graph_state",
+            "index_space": "constructor_subbatch_local_index",
+            "invalid_simulation_indices": list(self.invalid_simulation_indices),
+            "simulations": [failure.to_json_record() for failure in self.failures],
+        }
 
 
 def _jonswap_initial_metrics(
@@ -215,14 +251,14 @@ def resolved_band_for_contract(
     )
 
 
-def _require_assignments(
-    assignments: Sequence[AttemptAssignment],
-) -> tuple[AttemptAssignment, ...]:
+def _require_parameter_group_ids(
+    parameter_group_ids: Sequence[str],
+) -> tuple[str, ...]:
     if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("trajectory constructors require JAX float64 mode")
-    values = tuple(assignments)
+    values = tuple(parameter_group_ids)
     if not values:
-        raise ValueError("assignments must not be empty")
+        raise ValueError("parameter_group_ids must not be empty")
     return values
 
 
@@ -249,7 +285,7 @@ def _strict_record(
 
 
 def _sampled_simulations(
-    assignments: tuple[AttemptAssignment, ...],
+    parameter_group_ids: tuple[str, ...],
     samples: tuple[SampleT, ...],
     records: tuple[SpecificationRecord, ...],
     *,
@@ -257,7 +293,7 @@ def _sampled_simulations(
     construction_settings: SpecificationRecord,
 ) -> SampledSimulations[SampleT]:
     return SampledSimulations(
-        assignments=assignments,
+        parameter_group_ids=parameter_group_ids,
         samples=samples,
         specification_records=records,
         contract=contract,
@@ -270,20 +306,22 @@ def prepare_trajectory_batch(
     *,
     root: Path,
     family_name: str,
+    family_id: PhysicalFamilyId,
+    dataset_split: DatasetSplit,
     batch_id: int,
-    metadata: Mapping[str, object],
 ) -> PreparedTrajectoryBatch[SampleT]:
     """Build the in-memory description for one sampled trajectory batch."""
 
     batch_plan = build_batch_plan(
-        sampled.assignments,
+        sampled.parameter_group_ids,
         sampled.specification_records,
-        metadata=metadata,
+        family_id=family_id,
+        dataset_split=dataset_split,
     )
     path = batch_path(
         root,
         family=family_name,
-        split=sampled.assignments[0].simulation_key.dataset_split.value,
+        split=dataset_split.value,
         batch_id=batch_id,
     )
     return PreparedTrajectoryBatch(
@@ -365,19 +403,23 @@ def _batch(
 
 
 def sample_tanaka_simulations(
-    assignments: Sequence[AttemptAssignment],
+    parameter_group_ids: Sequence[str],
     *,
+    dataset_split: DatasetSplit,
+    first_attempt_number: int,
     contract: RolloutConfig,
 ) -> SampledSimulations[TanakaSample]:
     """Sample complete Tanaka simulations without running the Tanaka solver."""
 
-    attempted = _require_assignments(assignments)
+    attempted_groups = _require_parameter_group_ids(parameter_group_ids)
     samples = tuple(
         sample_tanaka_simulation(
-            assignment,
+            parameter_group_id,
+            dataset_split=dataset_split,
+            attempt_number=first_attempt_number + offset,
             domain_length=contract.length,
         )
-        for assignment in attempted
+        for offset, parameter_group_id in enumerate(attempted_groups)
     )
     settings: SpecificationRecord = {
         "dimensionless_template_depth": 1.0,
@@ -393,7 +435,7 @@ def sample_tanaka_simulations(
         for sample in samples
     )
     return _sampled_simulations(
-        attempted,
+        attempted_groups,
         samples,
         records,
         contract=contract,
@@ -458,19 +500,23 @@ def construct_tanaka_trajectory_batch(
 
 
 def sample_benjamin_feir_simulations(
-    assignments: Sequence[AttemptAssignment],
+    parameter_group_ids: Sequence[str],
     *,
+    dataset_split: DatasetSplit,
+    first_attempt_number: int,
     contract: RolloutConfig,
 ) -> SampledSimulations[BenjaminFeirSample]:
     """Sample complete Benjamin--Feir simulations without numerical construction."""
 
-    attempted = _require_assignments(assignments)
+    attempted_groups = _require_parameter_group_ids(parameter_group_ids)
     samples = tuple(
         sample_benjamin_feir_simulation(
-            assignment,
+            parameter_group_id,
+            dataset_split=dataset_split,
+            attempt_number=first_attempt_number + offset,
             domain_length=contract.length,
         )
-        for assignment in attempted
+        for offset, parameter_group_id in enumerate(attempted_groups)
     )
     records = tuple(
         _strict_record(
@@ -481,7 +527,7 @@ def sample_benjamin_feir_simulations(
         for sample in samples
     )
     return _sampled_simulations(
-        attempted,
+        attempted_groups,
         samples,
         records,
         contract=contract,
@@ -532,20 +578,28 @@ def construct_benjamin_feir_trajectory_batch(
 
 
 def sample_jonswap_tma_simulations(
-    assignments: Sequence[AttemptAssignment],
+    parameter_group_ids: Sequence[str],
     *,
+    dataset_split: DatasetSplit,
+    first_attempt_number: int,
     contract: RolloutConfig,
     quadrature_order: int = 16,
 ) -> SampledSimulations[JonswapTmaSample]:
     """Sample complete JONSWAP/TMA simulations and both phase arrays."""
 
-    attempted = _require_assignments(assignments)
+    attempted_groups = _require_parameter_group_ids(parameter_group_ids)
     band = resolved_band_for_contract(
         contract,
         quadrature_order=quadrature_order,
     )
     samples = tuple(
-        sample_jonswap_tma_simulation(assignment, band=band) for assignment in attempted
+        sample_jonswap_tma_simulation(
+            parameter_group_id,
+            dataset_split=dataset_split,
+            attempt_number=first_attempt_number + offset,
+            band=band,
+        )
+        for offset, parameter_group_id in enumerate(attempted_groups)
     )
     constructor = "relative_frequency_jonswap_tma_linear_state_v2"
     settings: SpecificationRecord = {
@@ -564,7 +618,7 @@ def sample_jonswap_tma_simulations(
         for sample in samples
     )
     return _sampled_simulations(
-        attempted,
+        attempted_groups,
         samples,
         records,
         contract=contract,
@@ -651,32 +705,17 @@ def construct_jonswap_tma_trajectory_batch(
         | (minimum_water_columns <= 0.0)
     )
     if invalid.size:
-        simulations: list[dict[str, object]] = []
-        for index in invalid:
-            local_index = int(index)
-            finite = bool(state_finite[local_index])
-            simulations.append(
-                {
-                    "local_simulation_index": local_index,
-                    "failure_reason": (
-                        "nonpositive_initial_water_column"
-                        if finite
-                        else "nonfinite_initial_state"
-                    ),
-                    "state_finite": finite,
-                    "minimum_water_column": (
-                        float(minimum_water_columns[local_index]) if finite else None
-                    ),
-                }
+        failures = tuple(
+            JonswapInitialStateFailure(
+                local_simulation_index=int(index),
+                state_finite=bool(state_finite[index]),
+                minimum_water_column=(
+                    float(minimum_water_columns[index]) if state_finite[index] else None
+                ),
             )
-        failure_record: dict[str, object] = {
-            "schema": "jonswap_initial_state_domain_failure_v1",
-            "reason": "invalid_initial_graph_state",
-            "index_space": "constructor_subbatch_local_index",
-            "invalid_simulation_indices": [int(index) for index in invalid],
-            "simulations": simulations,
-        }
-        raise JonswapInitialStateDomainError(failure_record)
+            for index in invalid
+        )
+        raise JonswapInitialStateDomainError(failures)
 
     return TrajectoryInitialBatch(
         eta0=eta0,

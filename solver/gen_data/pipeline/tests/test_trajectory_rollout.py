@@ -16,7 +16,6 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.simulation_checks import SimulationCheck  # noqa: E402
 from solver.gen_data.pipeline.dno_target import (  # noqa: E402
     compute_dno_target,
 )
@@ -77,7 +76,7 @@ def cheap_contract(
     )
 
 
-class InjectedRolloutExecutor:
+class InjectedRolloutIntegrator:
     """Return deterministic finite trajectory batches."""
 
     def __init__(self) -> None:
@@ -113,7 +112,7 @@ class InjectedRolloutExecutor:
         )
 
 
-class VariableHorizonRolloutExecutor:
+class VariableHorizonRolloutIntegrator:
     """Independent synthetic simulations with deliberate post-horizon failures."""
 
     def __init__(self) -> None:
@@ -190,7 +189,7 @@ class VariableHorizonRolloutExecutor:
         )
 
 
-class InternalHealthRolloutExecutor:
+class InternalHealthRolloutIntegrator:
     """Return five simulations that isolate the four required internal gates."""
 
     def __call__(
@@ -237,7 +236,7 @@ class InternalHealthRolloutExecutor:
         )
 
 
-class InjectedAdjustmentRolloutExecutor:
+class InjectedAdjustmentRolloutIntegrator:
     """Return per-simulation endpoints and one deliberate within-horizon failure."""
 
     def __init__(self) -> None:
@@ -541,7 +540,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.ones(5, dtype=np.float64),
             (np.asarray([0.0, contract.saved_dt]),) * 5,
             config=contract,
-            integrator=InternalHealthRolloutExecutor(),
+            integrator=InternalHealthRolloutIntegrator(),
         )
 
         self.assertEqual(
@@ -549,15 +548,13 @@ class TrajectoryRolloutTest(unittest.TestCase):
             (True, False, False, False, False),
         )
         expected_failures = (
-            SimulationCheck.HAMILTONIAN_DRIFT,
-            SimulationCheck.NONFINITE_STATE,
-            SimulationCheck.NONFINITE_TARGET,
-            SimulationCheck.BOTTOM_CLEARANCE,
+            "hamiltonian_drift",
+            "nonfinite_state",
+            "nonfinite_target",
+            "nonpositive_water_height",
         )
-        for simulation, reason in zip(execution[1:], expected_failures):
-            self.assertTrue(simulation.decision.required & reason)
-            self.assertTrue(simulation.decision.evaluated & reason)
-            self.assertTrue(simulation.decision.failed & reason)
+        for simulation, failed_check in zip(execution[1:], expected_failures):
+            self.assertTrue(getattr(simulation.decision, failed_check))
             self.assertIsNone(simulation.trajectory)
 
     def test_target_delivers_only_the_declared_lower_band(self) -> None:
@@ -617,7 +614,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
 
     def test_trajectory_uses_only_the_validated_rollout(self) -> None:
         contract = cheap_contract(nx=8, maximum_wavenumber=2.0)
-        executor = InjectedRolloutExecutor()
+        generator = InjectedRolloutIntegrator()
         eta0 = np.stack(tuple(marker * np.ones(contract.nx) for marker in (0, 1)))
 
         execution = execute_trajectory_batch(
@@ -626,11 +623,11 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.full(2, 10.0),
             (np.asarray([0.0, 0.02]),) * 2,
             config=contract,
-            integrator=executor,
+            integrator=generator,
         )
 
-        self.assertEqual(len(executor.calls), 1)
-        self.assertEqual(executor.calls[0][0], contract.dt)
+        self.assertEqual(len(generator.calls), 1)
+        self.assertEqual(generator.calls[0][0], contract.dt)
         self.assertEqual(
             tuple(simulation.decision.accepted for simulation in execution),
             (True, True),
@@ -653,7 +650,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.arange(4, dtype=np.float64) * contract.saved_dt,
             np.arange(5, dtype=np.float64) * contract.saved_dt,
         )
-        executor = VariableHorizonRolloutExecutor()
+        generator = VariableHorizonRolloutIntegrator()
 
         execution = execute_trajectory_batch(
             eta0,
@@ -661,11 +658,11 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.full(3, 10.0),
             grids,
             config=contract,
-            integrator=executor,
+            integrator=generator,
         )
 
         self.assertEqual(
-            executor.calls,
+            generator.calls,
             [(contract.dt, (1, 2, 3), 0.08)],
         )
         self.assertEqual(
@@ -673,9 +670,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
             (True, True, True),
         )
         for simulation in execution:
-            self.assertTrue(
-                simulation.decision.required & SimulationCheck.HAMILTONIAN_DRIFT
-            )
+            self.assertFalse(simulation.decision.hamiltonian_drift)
             self.assertIsNotNone(simulation.health_metrics)
             assert simulation.health_metrics is not None
             self.assertEqual(
@@ -695,7 +690,7 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.arange(5, dtype=np.float64) * contract.saved_dt,
         )
         ramp_times = np.asarray([0.4, 0.6, 0.8], dtype=np.float64)
-        rollout_executor = InjectedAdjustmentRolloutExecutor()
+        rollout_integrator = InjectedAdjustmentRolloutIntegrator()
 
         execution = execute_adjustment_batch(
             eta0,
@@ -705,12 +700,12 @@ class TrajectoryRolloutTest(unittest.TestCase):
             nonlinear_ramp_times=ramp_times,
             nonlinear_ramp_order=4,
             config=contract,
-            integrator=rollout_executor,
+            integrator=rollout_integrator,
         )
 
-        self.assertEqual(len(rollout_executor.calls), 1)
-        np.testing.assert_array_equal(rollout_executor.calls[0][0], ramp_times)
-        self.assertEqual(rollout_executor.calls[0][1], 4)
+        self.assertEqual(len(rollout_integrator.calls), 1)
+        np.testing.assert_array_equal(rollout_integrator.calls[0][0], ramp_times)
+        self.assertEqual(rollout_integrator.calls[0][1], 4)
         self.assertEqual(
             tuple(simulation.decision.accepted for simulation in execution),
             (True, True, False),
@@ -726,17 +721,13 @@ class TrajectoryRolloutTest(unittest.TestCase):
                 simulation.terminal_xi,
                 -float(grids[index][-1]),
             )
-            self.assertFalse(
-                simulation.decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL
-            )
+            self.assertFalse(simulation.decision.integration_failure)
             self.assertEqual(simulation.maximum_gl2_stage_residual, 0.0)
         rejected = execution[2]
         self.assertIsNone(rejected.terminal_eta)
         self.assertIsNone(rejected.terminal_xi)
-        self.assertTrue(rejected.decision.failed & SimulationCheck.GL2_STAGE_RESIDUAL)
-        self.assertTrue(
-            rejected.decision.failed & SimulationCheck.INCOMPLETE_TRAJECTORY
-        )
+        self.assertTrue(rejected.decision.integration_failure)
+        self.assertTrue(rejected.decision.incomplete_trajectory)
 
 
 if __name__ == "__main__":

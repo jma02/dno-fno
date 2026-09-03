@@ -21,13 +21,11 @@ from solver.gen_data.jonswap_tma import (
 from solver.gen_data.jonswap_tma_sampling import (
     JONSWAP_TMA_PARAMETER_GROUP_IDS,
     JONSWAP_TMA_PARAMETER_GROUPS,
+    JonswapTmaSample,
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.simulation_allocation import (
-    AttemptAssignment,
-    SimulationKey,
     DatasetSplit,
-    random_generator_for_simulation,
 )
 
 
@@ -38,25 +36,20 @@ BAND = ResolvedBand(
 )
 
 
-def assignment(
+def sample_jonswap_tma(
     cell_index: int,
     *,
-    family_id: int = 4,
     dataset_split: DatasetSplit = DatasetSplit.TRAIN,
-    worker_stream_id: int = 0,
-    attempt_index: int | None = None,
-) -> AttemptAssignment:
-    """Return one deterministic assignment for a declared parameter group."""
+    attempt_number: int | None = None,
+) -> JonswapTmaSample:
+    """Sample one JONSWAP/TMA parameter group for a test."""
 
-    attempt = cell_index if attempt_index is None else attempt_index
-    return AttemptAssignment(
-        simulation_key=SimulationKey(
-            family_id=family_id,
-            dataset_split=dataset_split,
-            worker_stream_id=worker_stream_id,
-            attempt_index=attempt,
-        ),
-        parameter_group_id=JONSWAP_TMA_PARAMETER_GROUP_IDS[cell_index],
+    identifier = cell_index if attempt_number is None else attempt_number
+    return sample_jonswap_tma_simulation(
+        JONSWAP_TMA_PARAMETER_GROUP_IDS[cell_index],
+        dataset_split=dataset_split,
+        attempt_number=identifier,
+        band=BAND,
     )
 
 
@@ -82,10 +75,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         ):
             stratum, peak_enhancement, right_moving_fraction = parameter_group
             with self.subTest(parameter_group=parameter_group_id):
-                sample = sample_jonswap_tma_simulation(
-                    assignment(index),
-                    band=BAND,
-                )
+                sample = sample_jonswap_tma(index)
                 self.assertEqual(
                     find_jonswap_parameter_violations(
                         sample.parameters,
@@ -104,37 +94,16 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 )
 
     def test_replay_is_bitwise_deterministic(self) -> None:
-        first = sample_jonswap_tma_simulation(assignment(13), band=BAND)
-        second = sample_jonswap_tma_simulation(assignment(13), band=BAND)
+        first = sample_jonswap_tma(13)
+        second = sample_jonswap_tma(13)
 
         self.assertEqual(first.parameters, second.parameters)
         np.testing.assert_array_equal(first.phase_right, second.phase_right)
         np.testing.assert_array_equal(first.phase_left, second.phase_left)
         self.assertEqual(first.to_json_record(), second.to_json_record())
 
-    def test_pcg64_uses_all_simulation_key_seed_words(self) -> None:
-        base = assignment(0, attempt_index=41).simulation_key
-        expected = np.random.Generator(
-            np.random.PCG64(np.random.SeedSequence(base.seed_words))
-        ).random(8)
-        np.testing.assert_array_equal(
-            random_generator_for_simulation(base).random(8), expected
-        )
-
-        keys = (
-            base,
-            SimulationKey(5, DatasetSplit.TRAIN, 0, 41),
-            SimulationKey(4, DatasetSplit.VALIDATION, 0, 41),
-            SimulationKey(4, DatasetSplit.TRAIN, 1, 41),
-            SimulationKey(4, DatasetSplit.TRAIN, 0, 42),
-        )
-        first_draws = {
-            tuple(random_generator_for_simulation(key).random(8)) for key in keys
-        }
-        self.assertEqual(len(first_draws), len(keys))
-
     def test_phases_are_explicit_independent_and_json_ready(self) -> None:
-        sample = sample_jonswap_tma_simulation(assignment(8), band=BAND)
+        sample = sample_jonswap_tma(8)
         expected_shape = positive_mode_wavenumbers(band=BAND).shape
         self.assertEqual(sample.phase_right.shape, expected_shape)
         self.assertEqual(sample.phase_left.shape, expected_shape)
@@ -151,10 +120,10 @@ class JonswapTmaSamplingTest(unittest.TestCase):
 
     def test_shallow_draws_obey_parameterization_and_constraint(self) -> None:
         shallow_cell_index = 4
-        for attempt_index in range(256):
-            sample = sample_jonswap_tma_simulation(
-                assignment(shallow_cell_index, attempt_index=attempt_index),
-                band=BAND,
+        for attempt_number in range(256):
+            sample = sample_jonswap_tma(
+                shallow_cell_index,
+                attempt_number=attempt_number,
             )
             parameters = sample.parameters
             peak_mode = parameters.peak_wavenumber * BAND.length / (2.0 * np.pi)
@@ -175,14 +144,11 @@ class JonswapTmaSamplingTest(unittest.TestCase):
     def test_draws_fit_the_published_relative_frequency_interval(
         self,
     ) -> None:
-        for attempt_index in range(512):
-            cell_index = attempt_index % len(JONSWAP_TMA_PARAMETER_GROUP_IDS)
-            sample = sample_jonswap_tma_simulation(
-                assignment(
-                    cell_index,
-                    attempt_index=attempt_index,
-                ),
-                band=BAND,
+        for attempt_number in range(512):
+            cell_index = attempt_number % len(JONSWAP_TMA_PARAMETER_GROUP_IDS)
+            sample = sample_jonswap_tma(
+                cell_index,
+                attempt_number=attempt_number,
             )
             self.assertTrue(
                 relative_frequency_interval_fits(

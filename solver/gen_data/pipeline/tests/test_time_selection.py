@@ -18,7 +18,7 @@ class TemporalSelectionTest(unittest.TestCase):
         nx = 64
         times = np.linspace(0.0, 1.0, 301)
         x = 2.0 * np.pi * np.arange(nx) / nx
-        amplitude = 0.01 + 0.02 * np.exp(-((times - 0.63) / 0.08) ** 2)
+        amplitude = 0.01 + 0.02 * np.exp(-(((times - 0.63) / 0.08) ** 2))
         eta = amplitude[:, None] * np.cos(5.0 * x)[None, :]
         shifted = np.roll(eta, 17, axis=-1)
 

@@ -427,7 +427,7 @@ def validate_adjustment_rollout(
     saved_time_count: int,
     config: RolloutConfig,
 ) -> None:
-    """Validate the arrays returned by a nonlinear-adjustment executor."""
+    """Validate the arrays returned by a nonlinear-adjustment generator."""
 
     field_shape = (saved_time_count, batch_size, config.nx)
     for name, field in (("eta", rollout.eta), ("xi", rollout.xi)):
