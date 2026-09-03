@@ -16,9 +16,9 @@ MODEL_DIR = REPO_ROOT / "models" / "fno-jax"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-from fno1d import FNO1d
-from losses import count_params
-from util import (
+from fno1d import FNO1d  # noqa: E402
+from losses import count_params  # noqa: E402
+from util import (  # noqa: E402
     denormalize_from_range,
     load_training_arrays,
     normalize_to_range,
@@ -27,7 +27,9 @@ from util import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a JAX FNO checkpoint on the held-out DNO test split")
+    parser = argparse.ArgumentParser(
+        description="Evaluate a JAX FNO checkpoint on the held-out DNO test split"
+    )
     parser.add_argument("--dataset", default="dno_dataset.npz")
     parser.add_argument("--sources", default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -50,13 +52,19 @@ def choose_carbs_root(raw_carbs_root: str | None) -> Path:
         (
             path
             for path in outputs_dir.glob("carbs_jax*")
-            if path.is_dir() and ((path / "best_result.json").exists() or (path / "carbs_history.json").exists())
+            if path.is_dir()
+            and (
+                (path / "best_result.json").exists()
+                or (path / "carbs_history.json").exists()
+            )
         ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     if not candidates:
-        raise FileNotFoundError("Could not find a JAX CARBS output directory under outputs/")
+        raise FileNotFoundError(
+            "Could not find a JAX CARBS output directory under outputs/"
+        )
     return candidates[0]
 
 
@@ -76,26 +84,34 @@ def resolve_run_dir(args: argparse.Namespace) -> tuple[Path, Path | None]:
 
     history_path = carbs_root / "carbs_history.json"
     if not history_path.exists():
-        raise FileNotFoundError(f"Could not find best_result.json or carbs_history.json in {carbs_root}")
+        raise FileNotFoundError(
+            f"Could not find best_result.json or carbs_history.json in {carbs_root}"
+        )
 
     with open(history_path, "r", encoding="utf-8") as handle:
         history = json.load(handle)
     successes = [record for record in history if record["result"].get("success")]
     if not successes:
         raise ValueError(f"No successful CARBS trials found in {history_path}")
-    best_record = min(successes, key=lambda record: float(record["result"]["best_val_loss"]))
+    best_record = min(
+        successes, key=lambda record: float(record["result"]["best_val_loss"])
+    )
     return Path(best_record["result"]["run_dir"]).resolve(), carbs_root
 
 
 def require_backend(allow_cpu: bool) -> str:
     backend = jax.default_backend()
     if backend != "gpu" and not allow_cpu:
-        raise RuntimeError(f"JAX GPU backend is required for this evaluator. Found {backend!r}.")
+        raise RuntimeError(
+            f"JAX GPU backend is required for this evaluator. Found {backend!r}."
+        )
     return backend
 
 
 def load_checkpoint(run_dir: Path, checkpoint_name: str):
-    checkpoint_file = "best_val_ckpt.pkl" if checkpoint_name == "best" else "final_ckpt.pkl"
+    checkpoint_file = (
+        "best_val_ckpt.pkl" if checkpoint_name == "best" else "final_ckpt.pkl"
+    )
     checkpoint_path = run_dir / checkpoint_file
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -112,7 +128,7 @@ def evaluate_model(
     targets_normalized: np.ndarray,
     target_stats: dict[str, float],
     batch_size: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     predictions_raw: list[np.ndarray] = []
     targets_raw: list[np.ndarray] = []
     rel_l2_batches: list[np.ndarray] = []
@@ -198,7 +214,9 @@ def plot_representative_samples(
         l1_error = float(rel_l1[sample_idx])
 
         axes[0, column].plot(x, eta_values[sample_idx], color="tab:blue", linewidth=1.0)
-        axes[0, column].set_title(f"{label.title()} eta(x)", fontdict={"weight": "bold", "size": 12})
+        axes[0, column].set_title(
+            f"{label.title()} eta(x)", fontdict={"weight": "bold", "size": 12}
+        )
         axes[0, column].grid(True, alpha=0.3)
 
         axes[1, column].plot(x, xi_values[sample_idx], color="tab:green", linewidth=1.0)
@@ -278,7 +296,9 @@ def main() -> None:
         args.batch_size,
     )
 
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else run_dir / "eval_jax"
+    output_dir = (
+        Path(args.output_dir).resolve() if args.output_dir else run_dir / "eval_jax"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     overall_metrics = summarize_errors(rel_l2, rel_l1)

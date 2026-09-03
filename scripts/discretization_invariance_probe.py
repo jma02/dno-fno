@@ -30,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,11 +44,11 @@ for _d in (
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from model_rollout import (  # type: ignore[reportMissingImports]  # noqa: E402
+from model_rollout import (  # noqa: E402
     build_predict_gxi_batched,
     load_run,
 )
-from util import compute_log_depth  # type: ignore[reportMissingImports]  # noqa: E402
+from util import compute_log_depth  # noqa: E402
 
 
 def change_resolution_rfft(f: np.ndarray, n_new: int) -> np.ndarray:
@@ -180,9 +181,9 @@ if __name__ == "__main__":
     ) -> np.ndarray:
         return np.asarray(
             predict_batched(
-                np.asarray(eta, dtype=np.float32)[None, :],
-                np.asarray(xi, dtype=np.float32)[None, :],
-                np.asarray([log_depth], dtype=np.float32),
+                jnp.asarray(eta, dtype=jnp.float32)[None, :],
+                jnp.asarray(xi, dtype=jnp.float32)[None, :],
+                jnp.asarray([log_depth], dtype=jnp.float32),
             )
         )[0]
 

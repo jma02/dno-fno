@@ -70,6 +70,22 @@ def validate(
     )
 
 
+def serialized_components(record: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow the serialized component records after checking their shape."""
+    raw_components = record["components"]
+    if not isinstance(raw_components, list):
+        raise AssertionError("serialized components must be a list")
+    components = [
+        component
+        for component in raw_components
+        if isinstance(component, dict)
+        and all(isinstance(key, str) for key in component)
+    ]
+    if len(components) != len(raw_components):
+        raise AssertionError("serialized components must be string-keyed objects")
+    return components
+
+
 class TanakaPotentialRadicandValidationTest(unittest.TestCase):
     def test_positive_exact_zero_and_negative_zero_are_accepted(self) -> None:
         validate(
@@ -101,7 +117,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             record["reason"],
             "negative_or_nonfinite_surface_potential_radicand",
         )
-        component = record["components"][0]
+        component = serialized_components(record)[0]
         self.assertEqual(component["minimum_radicand"], smallest_negative)
         self.assertEqual(component["minimum_radicand_grid_index"], 2)
         self.assertEqual(component["minimum_radicand_x"], 1.0)
@@ -138,7 +154,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
         )
         self.assertEqual(record["invalid_simulation_indices"], [0, 1])
-        components = record["components"]
+        components = serialized_components(record)
         self.assertEqual(
             [component["global_component_index"] for component in components],
             [1, 2],
@@ -190,7 +206,7 @@ class TanakaPotentialRadicandValidationTest(unittest.TestCase):
             "nonpositive_or_nonfinite_surface_potential_speed_squared",
         )
         self.assertEqual(record["invalid_simulation_indices"], [0, 1])
-        components = record["components"]
+        components = serialized_components(record)
         self.assertEqual(components[0]["speed_squared"], 0.0)
         self.assertIsNone(components[1]["unsigned_speed"])
         self.assertIsNone(components[1]["speed_squared"])

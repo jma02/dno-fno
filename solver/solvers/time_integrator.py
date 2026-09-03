@@ -217,16 +217,29 @@ def _hat_to_state(state_hat: SpectralState) -> State:
     )
 
 
-def _tree_add(a, b):
-    return jax.tree_util.tree_map(lambda x, y: x + y, a, b)
+def _tree_add(a: SpectralState, b: SpectralState) -> SpectralState:
+    return SpectralState(
+        eta_hat=a.eta_hat + b.eta_hat,
+        xi_hat=a.xi_hat + b.xi_hat,
+    )
 
 
-def _tree_scale(a, scale: float):
-    return jax.tree_util.tree_map(lambda x: scale * x, a)
+def _tree_scale(state: SpectralState, scale: float | jax.Array) -> SpectralState:
+    return SpectralState(
+        eta_hat=scale * state.eta_hat,
+        xi_hat=scale * state.xi_hat,
+    )
 
 
-def _tree_axpy(base, scale: float, delta):
-    return jax.tree_util.tree_map(lambda x, y: x + scale * y, base, delta)
+def _tree_axpy(
+    base: SpectralState,
+    scale: float | jax.Array,
+    delta: SpectralState,
+) -> SpectralState:
+    return SpectralState(
+        eta_hat=base.eta_hat + scale * delta.eta_hat,
+        xi_hat=base.xi_hat + scale * delta.xi_hat,
+    )
 
 
 def _sample_l2_norm(field: jnp.ndarray) -> jnp.ndarray:
@@ -392,7 +405,12 @@ def rhs_nonlinear_if(
     return apply_linear_flow_hat(nonlinear_hat, -t, params)
 
 
-def rk4_if_step(state: State, t: float, dt: float, params: SolverParams) -> State:
+def rk4_if_step(
+    state: State,
+    t: float | jax.Array,
+    dt: float | jax.Array,
+    params: SolverParams,
+) -> State:
     state_hat = _state_to_hat(state, params.nx)
     v0 = apply_linear_flow_hat(state_hat, -t, params)
 
@@ -423,8 +441,8 @@ def rk4_if_step(state: State, t: float, dt: float, params: SolverParams) -> Stat
 
 def implicit_midpoint_if_step(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     iterations: int = 8,
     relaxation: float = 1.0,
@@ -507,8 +525,8 @@ def _finish_gauss_legendre_2_step(
 
 def _gauss_legendre_2_if_step_result(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     *,
     max_iterations: int,
@@ -553,7 +571,7 @@ def _gauss_legendre_2_if_step_result(
     )
 
     def loop_body(
-        _: int,
+        _iteration: int,
         carry: _GL2IterationCarry,
     ) -> _GL2IterationCarry:
         if relaxation == 1.0:
@@ -689,8 +707,8 @@ def _gauss_legendre_2_if_step_result(
 
 def gauss_legendre_2_if_step(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     iterations: int = 4,
     relaxation: float = 1.0,
@@ -716,7 +734,7 @@ def gauss_legendre_2_if_step(
         stages: tuple[SpectralState, SpectralState],
     ) -> tuple[SpectralState, SpectralState]:
         stage1, stage2 = stages
-        candidate1, candidate2, _, _ = _gauss_legendre_2_stage_map(
+        candidate1, candidate2, _f1, _f2 = _gauss_legendre_2_stage_map(
             stage1,
             stage2,
             v0=v0,
@@ -775,8 +793,8 @@ def gauss_legendre_2_if_step(
 
 def gauss_legendre_2_if_step_with_telemetry(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     *,
     max_iterations: int = 8,
@@ -808,8 +826,8 @@ def gauss_legendre_2_if_step_with_telemetry(
 
 def take_step(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     method: str = "gl2_if",
     implicit_iterations: int = 8,
@@ -840,8 +858,8 @@ def take_step(
 
 def take_step_with_telemetry(
     state: State,
-    t: float,
-    dt: float,
+    t: float | jax.Array,
+    dt: float | jax.Array,
     params: SolverParams,
     *,
     method: str = "gl2_if",

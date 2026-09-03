@@ -8,136 +8,20 @@ batch is run again from the beginning.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import sys
 from time import perf_counter
-from typing import Literal, Sequence, TypeAlias
+from typing import Sequence
 
 
-ComputePlatform: TypeAlias = Literal["cpu", "gpu"]
-
-_bootstrap_parser = argparse.ArgumentParser(add_help=False)
-_bootstrap_parser.add_argument("--platform", choices=("cpu", "gpu"), default="cpu")
-_bootstrap_args, _ = _bootstrap_parser.parse_known_args(sys.argv[1:])
-BOOTSTRAP_PLATFORM: ComputePlatform = _bootstrap_args.platform
-os.environ["JAX_ENABLE_X64"] = "true"
-os.environ["DNO_TANAKA_DTYPE"] = "float64"
-os.environ["JAX_PLATFORMS"] = "cpu" if BOOTSTRAP_PLATFORM == "cpu" else "cuda"
-if BOOTSTRAP_PLATFORM == "cpu":
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-
-import jax  # noqa: E402
-
-from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-)
-from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_PARAMETER_GROUP_IDS,
-)
-from solver.gen_data.jonswap_horizon_generator import (  # noqa: E402
-    HorizonBucketedJonswapBatchGenerator,
-)
-from solver.gen_data.pipeline.artifact_io import write_json_atomic  # noqa: E402
-from solver.gen_data.pipeline.build_dataset_view import (  # noqa: E402
-    build_dataset_view,
-)
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    PhysicalFamilyId,
-    DatasetSplit,
-    balanced_simulation_targets,
-)
-from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
-    DatasetChunkConfig,
-    generate_simulations,
-    scan_dataset_generation,
-)
-from solver.gen_data.stokes_sampling import (  # noqa: E402
-    DEFAULT_MAXIMUM_URSELL_REDRAWS,
-    STOKES_PARAMETER_GROUP_IDS,
-)
-from solver.gen_data.stokes_batch_generator import (  # noqa: E402
-    make_static_stokes_batch_generator,
-)
-from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
-    PAPER_STATIC_STOKES_CONTRACT,
-    StaticStokesContract,
-)
-from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_PARAMETER_GROUP_IDS,
-)
-from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    TrajectoryExecutionConfig,
-    paper_trajectory_execution,
-)
-from solver.gen_data.trajectory_batch_generator import TrajectoryBatchGenerator  # noqa: E402
-
-
-jax.config.update("jax_enable_x64", True)
-
-
-PaperFamily: TypeAlias = Literal[
+FAMILIES = (
     "stokes",
     "tanaka",
     "benjamin_feir",
     "jonswap_tma",
-]
-FAMILY_IDS: dict[PaperFamily, PhysicalFamilyId] = {
-    "stokes": PhysicalFamilyId.STOKES,
-    "tanaka": PhysicalFamilyId.TANAKA,
-    "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
-    "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
-}
-FAMILY_PARAMETER_GROUP_IDS: dict[PaperFamily, tuple[str, ...]] = {
-    "stokes": STOKES_PARAMETER_GROUP_IDS,
-    "tanaka": TANAKA_PARAMETER_GROUP_IDS,
-    "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-    "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
-}
-
-
-@dataclass(frozen=True)
-class GenerationRequest:
-    """Inputs for one family/split generation run."""
-
-    output_root: Path
-    family: PaperFamily
-    split: DatasetSplit
-    accepted_simulations: int
-    batch_size: int
-    platform: ComputePlatform = "cpu"
-    solver_batch_size: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.family not in FAMILY_IDS:
-            raise ValueError(f"unknown paper-dataset family: {self.family}")
-        if not isinstance(self.split, DatasetSplit):
-            raise TypeError("split must be a DatasetSplit")
-        for value, name in (
-            (self.accepted_simulations, "accepted_simulations"),
-            (self.batch_size, "batch_size"),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{name} must be an integer")
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if self.platform not in ("cpu", "gpu"):
-            raise ValueError(f"unsupported platform: {self.platform}")
-        if self.family == "jonswap_tma":
-            if self.solver_batch_size is None:
-                raise ValueError("JONSWAP/TMA requires solver_batch_size")
-            if not 0 < self.solver_batch_size <= self.batch_size:
-                raise ValueError("solver_batch_size must be between 1 and batch_size")
-        elif self.solver_batch_size is not None:
-            raise ValueError("solver_batch_size is only used for JONSWAP/TMA")
-        object.__setattr__(
-            self,
-            "output_root",
-            Path(self.output_root).expanduser().resolve(),
-        )
+)
+SPLITS = ("train", "validation", "test")
 
 
 def _positive_integer(text: str) -> int:
@@ -147,36 +31,17 @@ def _positive_integer(text: str) -> int:
     return value
 
 
-def build_chunk_config(request: GenerationRequest) -> DatasetChunkConfig:
-    """Build the immutable configuration for the requested dataset chunk."""
-
-    parameter_group_ids = FAMILY_PARAMETER_GROUP_IDS[request.family]
-    simulation_targets = balanced_simulation_targets(
-        parameter_group_ids,
-        simulation_count=request.accepted_simulations,
-    )
-    return DatasetChunkConfig(
-        root=request.output_root,
-        family_name=request.family,
-        family_id=FAMILY_IDS[request.family],
-        dataset_split=request.split,
-        simulation_targets=simulation_targets,
-        batch_size=request.batch_size,
-        solver_batch_size=request.solver_batch_size,
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--family",
-        choices=tuple(FAMILY_IDS),
+        choices=FAMILIES,
         required=True,
         help="Physical paper-dataset family to generate.",
     )
     parser.add_argument(
         "--split",
-        choices=tuple(split.value for split in DatasetSplit),
+        choices=SPLITS,
         required=True,
         help="Simulation-level dataset split.",
     )
@@ -215,37 +80,98 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Run numerical generation; without this flag, print the plan.",
     )
     args = parser.parse_args(argv)
-    request = GenerationRequest(
-        output_root=args.output_root,
-        family=args.family,
-        split=DatasetSplit(args.split),
-        accepted_simulations=args.accepted_simulations,
+    if args.family == "jonswap_tma":
+        if args.solver_batch_size is None:
+            raise ValueError("JONSWAP/TMA requires solver_batch_size")
+        if args.solver_batch_size > args.batch_size:
+            raise ValueError("solver_batch_size must not exceed batch_size")
+    elif args.solver_batch_size is not None:
+        raise ValueError("solver_batch_size is only used for JONSWAP/TMA")
+
+    os.environ["JAX_ENABLE_X64"] = "true"
+    os.environ["DNO_TANAKA_DTYPE"] = "float64"
+    os.environ["JAX_PLATFORMS"] = "cpu" if args.platform == "cpu" else "cuda"
+    if args.platform == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+    import jax
+
+    from solver.gen_data.benjamin_feir_sampling import (
+        BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    )
+    from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUP_IDS
+    from solver.gen_data.pipeline.artifact_io import write_json_atomic
+    from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+    from solver.gen_data.pipeline.dataset_generation import (
+        DatasetChunkConfig,
+        generate_simulations,
+        scan_dataset_generation,
+    )
+    from solver.gen_data.pipeline.simulation_allocation import (
+        DatasetSplit,
+        PhysicalFamilyId,
+        balanced_simulation_targets,
+    )
+    from solver.gen_data.pipeline.trajectory_config import (
+        TrajectoryExecutionConfig,
+        paper_trajectory_execution,
+    )
+    from solver.gen_data.stokes_sampling import STOKES_PARAMETER_GROUP_IDS
+    from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
+
+    family_ids = {
+        "stokes": PhysicalFamilyId.STOKES,
+        "tanaka": PhysicalFamilyId.TANAKA,
+        "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
+        "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
+    }
+    parameter_group_ids = {
+        "stokes": STOKES_PARAMETER_GROUP_IDS,
+        "tanaka": TANAKA_PARAMETER_GROUP_IDS,
+        "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+        "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
+    }[args.family]
+    output_root = args.output_root.expanduser().resolve()
+    dataset_split = DatasetSplit(args.split)
+    chunk_config = DatasetChunkConfig(
+        root=output_root,
+        family_name=args.family,
+        family_id=family_ids[args.family],
+        dataset_split=dataset_split,
+        simulation_targets=balanced_simulation_targets(
+            parameter_group_ids,
+            simulation_count=args.accepted_simulations,
+        ),
         batch_size=args.batch_size,
-        platform=args.platform,
         solver_batch_size=args.solver_batch_size,
     )
-    chunk_config = build_chunk_config(request)
+
     if args.execute:
+        from solver.gen_data.jonswap_horizon_generator import (
+            HorizonBucketedJonswapBatchGenerator,
+        )
+        from solver.gen_data.stokes_batch_generator import (
+            make_static_stokes_batch_generator,
+        )
+        from solver.gen_data.stokes_sampling import DEFAULT_MAXIMUM_URSELL_REDRAWS
+        from solver.gen_data.stokes_static_pipeline import (
+            PAPER_STATIC_STOKES_CONTRACT,
+            StaticStokesContract,
+        )
+        from solver.gen_data.trajectory_batch_generator import (
+            TrajectoryBatchGenerator,
+        )
+
         execution = (
             PAPER_STATIC_STOKES_CONTRACT
-            if request.family == "stokes"
-            else paper_trajectory_execution(request.family)
+            if args.family == "stokes"
+            else paper_trajectory_execution(args.family)
         )
-        if request.platform != BOOTSTRAP_PLATFORM:
-            raise RuntimeError(
-                "the requested platform differs from the platform selected before "
-                "JAX initialization; invoke this script in a fresh process"
-            )
-        if not jax.config.read("jax_enable_x64"):
-            raise RuntimeError("paper generation requires JAX float64 mode")
         backend = jax.default_backend()
-        if backend != request.platform:
+        if backend != args.platform:
             raise RuntimeError(
-                f"requested {request.platform}, but JAX initialized {backend}"
+                f"requested {args.platform}, but JAX initialized {backend}"
             )
-        if not jax.devices():
-            raise RuntimeError("JAX reported no execution devices")
-
         total_started = perf_counter()
         if isinstance(execution, StaticStokesContract):
             generator = make_static_stokes_batch_generator(
@@ -254,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             )
             length = execution.length
-        elif request.family == "jonswap_tma":
+        elif args.family == "jonswap_tma":
             assert isinstance(execution, TrajectoryExecutionConfig)
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=chunk_config,
@@ -271,10 +197,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         generation_started = perf_counter()
         state = generate_simulations(chunk_config, generator)
         generation_seconds = perf_counter() - generation_started
-        view_name = f"paper_dataset_{request.family}_{request.split.value}"
+        view_name = f"paper_dataset_{args.family}_{dataset_split.value}"
         view_started = perf_counter()
         view = build_dataset_view(
-            request.output_root,
+            output_root,
             state.completed_batches,
             name=view_name,
             length=length,
@@ -308,10 +234,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         }
         summary: dict[str, object] = {
             "status": "complete",
-            "output_root": str(request.output_root),
+            "output_root": str(output_root),
             "run_spec": chunk_config.to_json_record(),
             "batch_paths": [
-                str(path.resolve().relative_to(request.output_root))
+                str(path.resolve().relative_to(output_root))
                 for path in state.completed_batches
             ],
             "counts": counts,
@@ -322,7 +248,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "total": perf_counter() - total_started,
             },
         }
-        summary_path = request.output_root / f"{view_name}.summary.json"
+        summary_path = output_root / f"{view_name}.summary.json"
         write_json_atomic(summary_path, summary)
         output: dict[str, object] = {
             "mode": "execute",

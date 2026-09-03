@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+from typing import cast
 import unittest
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -320,7 +321,12 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             ],
             [
                 marker
-                + float(outcome.metrics["nonlinear_adjustment_realized_terminal_time"])
+                + float(
+                    cast(
+                        float,
+                        outcome.metrics["nonlinear_adjustment_realized_terminal_time"],
+                    )
+                )
                 for marker, outcome in zip(markers, outcomes)
             ],
         )
@@ -531,7 +537,8 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         self.assertTrue(outcome.metrics["nonlinear_adjustment_accepted"])
         self.assertEqual(outcome.metrics["production_status"], "completed")
         self.assertAlmostEqual(
-            outcome.metrics["maximum_internal_hamiltonian_drift"], 1.0e-2
+            cast(float, outcome.metrics["maximum_internal_hamiltonian_drift"]),
+            1.0e-2,
         )
 
     def test_paper_generator_uses_configured_solver_batch_size(self) -> None:

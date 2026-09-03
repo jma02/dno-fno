@@ -20,9 +20,9 @@ MODEL_DIR = REPO_ROOT / "models" / "fno-jax"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-from fno1d import FNO1d
-from losses import build_loss, count_params
-from util import (
+from fno1d import FNO1d  # noqa: E402
+from losses import build_loss, count_params  # noqa: E402
+from util import (  # noqa: E402
     iterate_batches,
     load_training_arrays,
     normalize_to_range,
@@ -35,7 +35,9 @@ from util import (
 def require_gpu_backend() -> str:
     backend = jax.default_backend()
     if backend != "gpu":
-        raise RuntimeError(f"JAX GPU backend is required for this trainer. Found {backend!r}.")
+        raise RuntimeError(
+            f"JAX GPU backend is required for this trainer. Found {backend!r}."
+        )
     return backend
 
 
@@ -51,7 +53,9 @@ def save_checkpoint(
 ) -> None:
     payload = {
         "epoch": epoch,
-        "params": jax.tree_util.tree_map(lambda value: np.asarray(value), jax.device_get(params)),
+        "params": jax.tree_util.tree_map(
+            lambda value: np.asarray(value), jax.device_get(params)
+        ),
         "train_loss": train_loss,
         "val_loss": val_loss,
         "history": history,
@@ -88,7 +92,9 @@ def evaluate(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a 1D JAX FNO on the DNO dataset")
+    parser = argparse.ArgumentParser(
+        description="Train a 1D JAX FNO on the DNO dataset"
+    )
     parser.add_argument("--dataset", default="dno_dataset.npz")
     parser.add_argument("--sources", default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -134,7 +140,9 @@ def main() -> None:
     train_targets = targets_normalized[train_indices]
     val_inputs = features_normalized[val_indices]
     val_targets = targets_normalized[val_indices]
-    fixed_random_idx = int(np.random.default_rng(args.seed).integers(0, len(val_inputs)))
+    fixed_random_idx = int(
+        np.random.default_rng(args.seed).integers(0, len(val_inputs))
+    )
 
     model = FNO1d(args.modes, args.width, args.n_blocks)
     init_inputs = jnp.asarray(train_inputs[:1])
@@ -168,7 +176,9 @@ def main() -> None:
     @jax.jit
     def train_step(current_state, batch_inputs, batch_targets):
         def loss_for_params(current_params):
-            predictions = current_state.apply_fn({"params": current_params}, batch_inputs)
+            predictions = current_state.apply_fn(
+                {"params": current_params}, batch_inputs
+            )
             return loss_fn(predictions, batch_targets)
 
         loss_value, grads = jax.value_and_grad(loss_for_params)(current_state.params)
@@ -257,7 +267,7 @@ def main() -> None:
 
     save_checkpoint(
         run_dir / "final_ckpt.pkl",
-        epoch=history[-1]["epoch"],
+        epoch=int(history[-1]["epoch"]),
         params=state.params,
         train_loss=train_loss,
         val_loss=history[-1]["val_loss"],

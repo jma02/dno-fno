@@ -36,7 +36,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from solver.evals.model_rollout import (  # noqa: E402
-    LoadedRun,
     build_predict_gxi_batched,
     load_run,
 )
@@ -100,33 +99,6 @@ class RegisteredStates:
     source_paths: tuple[str, ...]
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--states-per-family", type=int, default=8)
-    parser.add_argument("--chunk-size", type=int, default=8)
-    parser.add_argument("--projection-k-max", type=float, default=128.0)
-    parser.add_argument("--bootstrap-samples", type=int, default=5000)
-    parser.add_argument("--bootstrap-seed", type=int, default=20260720)
-    return parser.parse_args()
-
-
-def trajectory_paths(run_dir: Path) -> dict[str, Path]:
-    """Return the ten registered C27 trajectory archives."""
-    tanaka_root = run_dir / TANAKA_EVAL
-    non_tanaka_root = run_dir / NON_TANAKA_EVAL
-    return {
-        family: (
-            tanaka_root / family / f"{family}_trajs.npz"
-            if family.startswith("tanaka_")
-            else non_tanaka_root / family / f"{family}_trajs.npz"
-        )
-        for family in FAMILY_NAMES
-    }
-
-
 def depth_stratified_indices(
     depths: np.ndarray,
     simulation_ids: np.ndarray,
@@ -149,95 +121,6 @@ def depth_stratified_indices(
     if np.unique(positions).size != count:
         raise RuntimeError("depth-stratified positions are not unique")
     return order[positions]
-
-
-def load_registered_states(run_dir: Path, states_per_family: int) -> RegisteredStates:
-    """Load frame-zero truth states, stratified by depth within each family."""
-    paths = trajectory_paths(run_dir)
-    missing = [str(path) for path in paths.values() if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"missing trajectory archives: {missing}")
-
-    eta_parts: list[np.ndarray] = []
-    xi_parts: list[np.ndarray] = []
-    depth_parts: list[np.ndarray] = []
-    simulation_parts: list[np.ndarray] = []
-    archive_index_parts: list[np.ndarray] = []
-    family_index_parts: list[np.ndarray] = []
-
-    for family_index, family in enumerate(FAMILY_NAMES):
-        path = paths[family]
-        with np.load(path, allow_pickle=False) as archive:
-            required = {"truth_eta", "truth_xi", "depths", "simulation_ids"}
-            if missing_keys := required.difference(archive.files):
-                raise KeyError(f"{path} is missing {sorted(missing_keys)}")
-            depths = np.asarray(archive["depths"], dtype=np.float64)
-            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
-            selected = depth_stratified_indices(
-                depths, simulation_ids, states_per_family
-            )
-            eta = np.asarray(archive["truth_eta"][0, selected], dtype=np.float64)
-            xi = np.asarray(archive["truth_xi"][0, selected], dtype=np.float64)
-
-        arrays = (eta, xi, depths[selected])
-        if not all(np.isfinite(array).all() for array in arrays):
-            raise FloatingPointError(f"nonfinite frame-zero state in {path}")
-        eta_parts.append(eta)
-        xi_parts.append(xi)
-        depth_parts.append(depths[selected])
-        simulation_parts.append(simulation_ids[selected])
-        archive_index_parts.append(selected)
-        family_index_parts.append(
-            np.full(states_per_family, family_index, dtype=np.int64)
-        )
-
-    family_indices = np.concatenate(family_index_parts)
-    return RegisteredStates(
-        eta=np.concatenate(eta_parts),
-        xi=np.concatenate(xi_parts),
-        depths=np.concatenate(depth_parts),
-        simulation_ids=np.concatenate(simulation_parts),
-        archive_indices=np.concatenate(archive_index_parts),
-        family_indices=family_indices,
-        family_names=np.asarray([FAMILY_NAMES[index] for index in family_indices]),
-        source_paths=tuple(
-            str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES
-        ),
-    )
-
-
-def validate_loaded_run(loaded: LoadedRun) -> None:
-    """Require the intended C27 structural checkpoint."""
-    expected: Mapping[str, object] = {
-        "model": "cs_dno",
-        "norm": "scale",
-        "cs_use_g1_baseline": True,
-        "cs_g1_k_cut": 0,
-        "cs_g1_fft_fp64": True,
-        "cs_residual_eta_order": 2,
-    }
-    mismatches = {
-        key: (loaded.config.get(key), value)
-        for key, value in expected.items()
-        if loaded.config.get(key) != value
-    }
-    if mismatches:
-        raise ValueError(
-            f"checkpoint does not match C27 structural config: {mismatches}"
-        )
-    if loaded.epoch != 40:
-        raise ValueError(
-            f"expected epoch-40 final checkpoint, got epoch {loaded.epoch}"
-        )
-
-
-def chunk_slices(size: int, chunk_size: int) -> tuple[slice, ...]:
-    """Split a fixed-size array into equal chunks to avoid JAX recompilation."""
-    if chunk_size <= 0 or size % chunk_size != 0:
-        raise ValueError(f"chunk size {chunk_size} must divide state count {size}")
-    return tuple(
-        slice(start, start + chunk_size) for start in range(0, size, chunk_size)
-    )
 
 
 def make_reference_evaluator(
@@ -304,41 +187,6 @@ def evaluate_model(
         for chunk in slices
     ]
     return np.concatenate(outputs)
-
-
-def evaluate_model_jvp(
-    predict: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
-    eta_directions: np.ndarray,
-    xi: np.ndarray,
-    log_depths: np.ndarray,
-    slices: Sequence[slice],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``G_theta(0)xi`` and its eta directional derivative."""
-
-    @jax.jit
-    def one_batch(
-        eta_direction: jnp.ndarray,
-        xi_batch: jnp.ndarray,
-        log_depth_batch: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        eta_zero = jnp.zeros_like(eta_direction)
-
-        def surface_map(surface: jnp.ndarray) -> jnp.ndarray:
-            return predict(surface, xi_batch, log_depth_batch)
-
-        return jax.jvp(surface_map, (eta_zero,), (eta_direction,))
-
-    pairs = [
-        one_batch(
-            jnp.asarray(eta_directions[chunk], dtype=jnp.float64),
-            jnp.asarray(xi[chunk], dtype=jnp.float64),
-            jnp.asarray(log_depths[chunk], dtype=jnp.float64),
-        )
-        for chunk in slices
-    ]
-    primals = np.concatenate([np.asarray(pair[0]) for pair in pairs])
-    tangents = np.concatenate([np.asarray(pair[1]) for pair in pairs])
-    return primals, tangents
 
 
 def projected_rms(fields: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -452,128 +300,16 @@ def metric_summary(
     )
 
 
-def write_figure(
-    path_base: Path,
-    metrics: Mapping[str, np.ndarray],
-    summaries: Mapping[str, Mapping[str, Any]],
-    epsilons: np.ndarray,
-    family_indices: np.ndarray,
-    jvp_relative_error: np.ndarray,
-) -> None:
-    """Write a two-panel paper-ready scaling figure as PNG and PDF."""
-    plt.rcParams.update(
-        {
-            "font.size": 9,
-            "axes.labelsize": 10,
-            "axes.titlesize": 10,
-            "legend.fontsize": 7.5,
-            "figure.dpi": 150,
-            "savefig.dpi": 300,
-        }
-    )
-    figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.1), constrained_layout=True)
-
-    for metric_name, values in metrics.items():
-        summary = summaries[metric_name]
-        median = np.asarray(summary["pooled_median_curve"], dtype=np.float64)
-        q25 = np.asarray(summary["pooled_q25_curve"], dtype=np.float64)
-        q75 = np.asarray(summary["pooled_q75_curve"], dtype=np.float64)
-        slope = float(summary["pooled_state_slope_median"])
-        ci_low, ci_high = summary["stratified_bootstrap_state_slope_median_ci95"]
-        axes[0].loglog(
-            epsilons,
-            median,
-            marker="o",
-            markersize=4,
-            linewidth=1.8,
-            color=COLORS[metric_name],
-            label=f"{METRIC_LABELS[metric_name]}: p={slope:.2f} [{ci_low:.2f}, {ci_high:.2f}]",
-        )
-        axes[0].fill_between(epsilons, q25, q75, color=COLORS[metric_name], alpha=0.12)
-
-    guide_eps = np.asarray([EPSILONS[-1], EPSILONS[2]], dtype=np.float64)
-    guide_anchor = float(np.median(metrics["g01_truncation"][2]))
-    axes[0].loglog(
-        guide_eps,
-        guide_anchor * (guide_eps / guide_eps[-1]),
-        color="0.35",
-        linestyle=":",
-        linewidth=1.0,
-        label=r"reference $\varepsilon$",
-    )
-    axes[0].loglog(
-        guide_eps,
-        guide_anchor * (guide_eps / guide_eps[-1]) ** 2,
-        color="0.35",
-        linestyle="--",
-        linewidth=1.0,
-        label=r"reference $\varepsilon^2$",
-    )
-    axes[0].set_xlabel(r"surface scale $\varepsilon$")
-    axes[0].set_ylabel(r"projected relative $L^2$ norm")
-    axes[0].set_title(r"(a) Small-amplitude convergence, $|k|\leq128$")
-    axes[0].grid(True, which="both", alpha=0.2)
-    axes[0].legend(loc="best", frameon=False)
-
-    metric_names = tuple(metrics)
-    offsets = np.linspace(-0.22, 0.22, len(FAMILY_NAMES))
-    for metric_index, metric_name in enumerate(metric_names):
-        family_slopes = summaries[metric_name]["family_median_state_slopes"]
-        values = np.asarray(
-            [family_slopes[family] for family in FAMILY_NAMES], dtype=np.float64
-        )
-        axes[1].scatter(
-            metric_index + offsets,
-            values,
-            s=18,
-            color=COLORS[metric_name],
-            alpha=0.7,
-            edgecolors="none",
-        )
-        center = float(summaries[metric_name]["pooled_state_slope_median"])
-        low, high = summaries[metric_name][
-            "stratified_bootstrap_state_slope_median_ci95"
-        ]
-        axes[1].errorbar(
-            metric_index,
-            center,
-            yerr=np.asarray([[max(0.0, center - low)], [max(0.0, high - center)]]),
-            fmt="D",
-            markersize=5,
-            capsize=4,
-            linewidth=1.5,
-            color="black",
-            zorder=5,
-        )
-    axes[1].axhline(1.0, color="0.45", linestyle=":", linewidth=1.0)
-    axes[1].axhline(2.0, color="0.45", linestyle="--", linewidth=1.0)
-    axes[1].set_xticks(range(len(metric_names)))
-    axes[1].set_xticklabels(["$G_0$\ntrunc.", "$G_0+G_1$\ntrunc.", "C27\nremainder"])
-    axes[1].set_ylabel("fitted log--log slope")
-    axes[1].set_title("(b) Family slopes; black diamonds are pooled fits")
-    axes[1].grid(True, axis="y", alpha=0.2)
-
-    jvp_median = float(np.median(jvp_relative_error))
-    jvp_p95 = float(np.quantile(jvp_relative_error, 0.95))
-    figure.suptitle(
-        "C27 preserves the first-order Craig--Sulem expansion on 80 registered states\n"
-        + rf"$D_\eta G_\theta(0)$ versus $G_1$: median relative error {jvp_median:.2e}, p95 {jvp_p95:.2e}",
-        fontsize=11,
-    )
-    for suffix in ("png", "pdf"):
-        figure.savefig(path_base.with_suffix(f".{suffix}"), bbox_inches="tight")
-    plt.close(figure)
-
-
-def strict_json_dump(payload: Mapping[str, Any], path: Path) -> None:
-    """Write strict, sorted JSON after rejecting NaN and infinity."""
-    encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
-    path.write_text(encoded + "\n", encoding="utf-8")
-
-
-def main() -> int:
-    """Run the complete C27 small-amplitude audit."""
-    args = parse_args()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--states-per-family", type=int, default=8)
+    parser.add_argument("--chunk-size", type=int, default=8)
+    parser.add_argument("--projection-k-max", type=float, default=128.0)
+    parser.add_argument("--bootstrap-samples", type=int, default=5000)
+    parser.add_argument("--bootstrap-seed", type=int, default=20260720)
+    args = parser.parse_args()
     start = time.perf_counter()
     run_dir = args.run_dir.resolve()
     output_dir = args.output_dir.resolve()
@@ -581,15 +317,102 @@ def main() -> int:
 
     if jax.default_backend() != "cpu":
         raise RuntimeError(f"CPU backend required, got {jax.default_backend()}")
-    states = load_registered_states(run_dir, args.states_per_family)
+    tanaka_root = run_dir / TANAKA_EVAL
+    non_tanaka_root = run_dir / NON_TANAKA_EVAL
+    paths = {
+        family: (
+            tanaka_root / family / f"{family}_trajs.npz"
+            if family.startswith("tanaka_")
+            else non_tanaka_root / family / f"{family}_trajs.npz"
+        )
+        for family in FAMILY_NAMES
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"missing trajectory archives: {missing}")
+
+    eta_parts: list[np.ndarray] = []
+    xi_parts: list[np.ndarray] = []
+    depth_parts: list[np.ndarray] = []
+    simulation_parts: list[np.ndarray] = []
+    archive_index_parts: list[np.ndarray] = []
+    family_index_parts: list[np.ndarray] = []
+    for family_index, family in enumerate(FAMILY_NAMES):
+        path = paths[family]
+        with np.load(path, allow_pickle=False) as archive:
+            required = {"truth_eta", "truth_xi", "depths", "simulation_ids"}
+            if missing_keys := required.difference(archive.files):
+                raise KeyError(f"{path} is missing {sorted(missing_keys)}")
+            depths = np.asarray(archive["depths"], dtype=np.float64)
+            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+            selected = depth_stratified_indices(
+                depths,
+                simulation_ids,
+                args.states_per_family,
+            )
+            eta = np.asarray(archive["truth_eta"][0, selected], dtype=np.float64)
+            xi = np.asarray(archive["truth_xi"][0, selected], dtype=np.float64)
+
+        arrays = (eta, xi, depths[selected])
+        if not all(np.isfinite(array).all() for array in arrays):
+            raise FloatingPointError(f"nonfinite frame-zero state in {path}")
+        eta_parts.append(eta)
+        xi_parts.append(xi)
+        depth_parts.append(depths[selected])
+        simulation_parts.append(simulation_ids[selected])
+        archive_index_parts.append(selected)
+        family_index_parts.append(
+            np.full(args.states_per_family, family_index, dtype=np.int64)
+        )
+
+    family_indices = np.concatenate(family_index_parts)
+    states = RegisteredStates(
+        eta=np.concatenate(eta_parts),
+        xi=np.concatenate(xi_parts),
+        depths=np.concatenate(depth_parts),
+        simulation_ids=np.concatenate(simulation_parts),
+        archive_indices=np.concatenate(archive_index_parts),
+        family_indices=family_indices,
+        family_names=np.asarray([FAMILY_NAMES[index] for index in family_indices]),
+        source_paths=tuple(
+            str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES
+        ),
+    )
     state_count, nx = states.eta.shape
     expected_count = len(FAMILY_NAMES) * args.states_per_family
     if state_count != expected_count:
         raise RuntimeError(f"expected {expected_count} states, loaded {state_count}")
-    slices = chunk_slices(state_count, args.chunk_size)
+    if args.chunk_size <= 0 or state_count % args.chunk_size != 0:
+        raise ValueError(
+            f"chunk size {args.chunk_size} must divide state count {state_count}"
+        )
+    slices = tuple(
+        slice(start, start + args.chunk_size)
+        for start in range(0, state_count, args.chunk_size)
+    )
 
     loaded = load_run(run_dir, checkpoint="final")
-    validate_loaded_run(loaded)
+    expected_config: Mapping[str, object] = {
+        "model": "cs_dno",
+        "norm": "scale",
+        "cs_use_g1_baseline": True,
+        "cs_g1_k_cut": 0,
+        "cs_g1_fft_fp64": True,
+        "cs_residual_eta_order": 2,
+    }
+    mismatches = {
+        key: (loaded.config.get(key), value)
+        for key, value in expected_config.items()
+        if loaded.config.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(
+            f"checkpoint does not match C27 structural config: {mismatches}"
+        )
+    if loaded.epoch != 40:
+        raise ValueError(
+            f"expected epoch-40 final checkpoint, got epoch {loaded.epoch}"
+        )
     predict = build_predict_gxi_batched(loaded)
     _, k = build_grid(nx, float(loaded.config["domain_length"]))
     reference0 = make_reference_evaluator(k.astype(jnp.float64), order=0)
@@ -600,12 +423,31 @@ def main() -> int:
     q01 = evaluate_reference(reference1, states.eta, states.xi, states.depths, slices)
     q1 = q01 - q0
     log_depths = np.log(states.depths)
-    model_zero, model_eta_derivative = evaluate_model_jvp(
-        predict,
-        states.eta,
-        states.xi,
-        log_depths,
-        slices,
+
+    @jax.jit
+    def evaluate_model_jvp_batch(
+        eta_direction: jnp.ndarray,
+        xi_batch: jnp.ndarray,
+        log_depth_batch: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        eta_zero = jnp.zeros_like(eta_direction)
+
+        def surface_map(surface: jnp.ndarray) -> jnp.ndarray:
+            return predict(surface, xi_batch, log_depth_batch)
+
+        return jax.jvp(surface_map, (eta_zero,), (eta_direction,))
+
+    model_jvp_pairs = [
+        evaluate_model_jvp_batch(
+            jnp.asarray(states.eta[chunk], dtype=jnp.float64),
+            jnp.asarray(states.xi[chunk], dtype=jnp.float64),
+            jnp.asarray(log_depths[chunk], dtype=jnp.float64),
+        )
+        for chunk in slices
+    ]
+    model_zero = np.concatenate([np.asarray(pair[0]) for pair in model_jvp_pairs])
+    model_eta_derivative = np.concatenate(
+        [np.asarray(pair[1]) for pair in model_jvp_pairs]
     )
 
     reference_order6 = np.stack(
@@ -721,14 +563,108 @@ def main() -> int:
     ]
     elapsed = time.perf_counter() - start
     figure_base = output_dir / "c27_small_amplitude_order"
-    write_figure(
-        figure_base,
-        metrics,
-        summaries,
-        EPSILONS,
-        states.family_indices,
-        jvp_relative_error,
+    plt.rcParams.update(
+        {
+            "font.size": 9,
+            "axes.labelsize": 10,
+            "axes.titlesize": 10,
+            "legend.fontsize": 7.5,
+            "figure.dpi": 150,
+            "savefig.dpi": 300,
+        }
     )
+    figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.1), constrained_layout=True)
+
+    for metric_name, values in metrics.items():
+        summary = summaries[metric_name]
+        median = np.asarray(summary["pooled_median_curve"], dtype=np.float64)
+        q25 = np.asarray(summary["pooled_q25_curve"], dtype=np.float64)
+        q75 = np.asarray(summary["pooled_q75_curve"], dtype=np.float64)
+        slope = float(summary["pooled_state_slope_median"])
+        ci_low, ci_high = summary["stratified_bootstrap_state_slope_median_ci95"]
+        axes[0].loglog(
+            EPSILONS,
+            median,
+            marker="o",
+            markersize=4,
+            linewidth=1.8,
+            color=COLORS[metric_name],
+            label=f"{METRIC_LABELS[metric_name]}: p={slope:.2f} [{ci_low:.2f}, {ci_high:.2f}]",
+        )
+        axes[0].fill_between(EPSILONS, q25, q75, color=COLORS[metric_name], alpha=0.12)
+
+    guide_eps = np.asarray([EPSILONS[-1], EPSILONS[2]], dtype=np.float64)
+    guide_anchor = float(np.median(metrics["g01_truncation"][2]))
+    axes[0].loglog(
+        guide_eps,
+        guide_anchor * (guide_eps / guide_eps[-1]),
+        color="0.35",
+        linestyle=":",
+        linewidth=1.0,
+        label=r"reference $\varepsilon$",
+    )
+    axes[0].loglog(
+        guide_eps,
+        guide_anchor * (guide_eps / guide_eps[-1]) ** 2,
+        color="0.35",
+        linestyle="--",
+        linewidth=1.0,
+        label=r"reference $\varepsilon^2$",
+    )
+    axes[0].set_xlabel(r"surface scale $\varepsilon$")
+    axes[0].set_ylabel(r"projected relative $L^2$ norm")
+    axes[0].set_title(r"(a) Small-amplitude convergence, $|k|\leq128$")
+    axes[0].grid(True, which="both", alpha=0.2)
+    axes[0].legend(loc="best", frameon=False)
+
+    metric_names = tuple(metrics)
+    offsets = np.linspace(-0.22, 0.22, len(FAMILY_NAMES))
+    for metric_index, metric_name in enumerate(metric_names):
+        family_slopes = summaries[metric_name]["family_median_state_slopes"]
+        values = np.asarray(
+            [family_slopes[family] for family in FAMILY_NAMES], dtype=np.float64
+        )
+        axes[1].scatter(
+            metric_index + offsets,
+            values,
+            s=18,
+            color=COLORS[metric_name],
+            alpha=0.7,
+            edgecolors="none",
+        )
+        center = float(summaries[metric_name]["pooled_state_slope_median"])
+        low, high = summaries[metric_name][
+            "stratified_bootstrap_state_slope_median_ci95"
+        ]
+        axes[1].errorbar(
+            metric_index,
+            center,
+            yerr=np.asarray([[max(0.0, center - low)], [max(0.0, high - center)]]),
+            fmt="D",
+            markersize=5,
+            capsize=4,
+            linewidth=1.5,
+            color="black",
+            zorder=5,
+        )
+    axes[1].axhline(1.0, color="0.45", linestyle=":", linewidth=1.0)
+    axes[1].axhline(2.0, color="0.45", linestyle="--", linewidth=1.0)
+    axes[1].set_xticks(range(len(metric_names)))
+    axes[1].set_xticklabels(["$G_0$\ntrunc.", "$G_0+G_1$\ntrunc.", "C27\nremainder"])
+    axes[1].set_ylabel("fitted log--log slope")
+    axes[1].set_title("(b) Family slopes; black diamonds are pooled fits")
+    axes[1].grid(True, axis="y", alpha=0.2)
+
+    jvp_median = float(np.median(jvp_relative_error))
+    jvp_p95 = float(np.quantile(jvp_relative_error, 0.95))
+    figure.suptitle(
+        "C27 preserves the first-order Craig--Sulem expansion on 80 registered states\n"
+        + rf"$D_\eta G_\theta(0)$ versus $G_1$: median relative error {jvp_median:.2e}, p95 {jvp_p95:.2e}",
+        fontsize=11,
+    )
+    for suffix in ("png", "pdf"):
+        figure.savefig(figure_base.with_suffix(f".{suffix}"), bbox_inches="tight")
+    plt.close(figure)
 
     npz_payload: ArrayMap = {
         "epsilons": EPSILONS,
@@ -756,7 +692,11 @@ def main() -> int:
     npz_payload.update(
         {f"bootstrap_slope_{name}": values for name, values in bootstrap_slopes.items()}
     )
-    np.savez_compressed(output_dir / "c27_small_amplitude_order.npz", **npz_payload)
+    np.savez_compressed(
+        output_dir / "c27_small_amplitude_order.npz",
+        allow_pickle=False,
+        **npz_payload,
+    )
 
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -775,7 +715,7 @@ def main() -> int:
         },
         "execution": {
             "jax_backend": jax.default_backend(),
-            "jax_enable_x64": bool(jax.config.jax_enable_x64),
+            "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),
             "cpu_affinity": sorted(os.sched_getaffinity(0)),
             "nice": os.getpriority(os.PRIO_PROCESS, 0),
             "wall_seconds": elapsed,
@@ -845,7 +785,11 @@ def main() -> int:
             "This is an empirical structural/order audit on registered initial states, not a causal training-loss or full no-G1 retraining ablation.",
         ],
     }
-    strict_json_dump(payload, output_dir / "c27_small_amplitude_order.json")
+    encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+    (output_dir / "c27_small_amplitude_order.json").write_text(
+        encoded + "\n",
+        encoding="utf-8",
+    )
 
     print(
         json.dumps(
@@ -857,8 +801,4 @@ def main() -> int:
             allow_nan=False,
         )
     )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(0)

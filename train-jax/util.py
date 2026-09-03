@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TypedDict
 
 import matplotlib
 
@@ -12,6 +12,15 @@ import numpy as np
 
 ALL_SOURCES = ("soliton", "stokes", "linear")
 TITLE_FONT = {"weight": "bold", "size": 12}
+
+
+class TrainingArrays(TypedDict):
+    eta: np.ndarray
+    xi: np.ndarray
+    gxi: np.ndarray
+    x: np.ndarray
+    source_names: tuple[str, ...]
+
 
 matplotlib.rcParams.update(
     {
@@ -36,7 +45,9 @@ def parse_sources(raw: str | Sequence[str] | None) -> tuple[str, ...]:
 
     invalid = sorted(set(parts).difference(ALL_SOURCES))
     if invalid:
-        raise ValueError(f"Unknown sources {invalid}; expected a subset of {ALL_SOURCES}")
+        raise ValueError(
+            f"Unknown sources {invalid}; expected a subset of {ALL_SOURCES}"
+        )
 
     ordered_unique: list[str] = []
     seen: set[str] = set()
@@ -50,7 +61,7 @@ def parse_sources(raw: str | Sequence[str] | None) -> tuple[str, ...]:
 def load_training_arrays(
     path: Path,
     sources: Sequence[str] | str | None,
-) -> dict[str, np.ndarray | tuple[str, ...]]:
+) -> TrainingArrays:
     if not path.exists():
         raise FileNotFoundError(f"Could not find dataset at {path}")
 
@@ -64,15 +75,23 @@ def load_training_arrays(
             eta_key = f"{source_name}_eta"
             xi_key = f"{source_name}_xi"
             gxi_key = f"{source_name}_Gxi"
-            missing = [key for key in (eta_key, xi_key, gxi_key) if key not in npz.files]
+            missing = [
+                key for key in (eta_key, xi_key, gxi_key) if key not in npz.files
+            ]
             if missing:
-                raise KeyError(f"Dataset missing keys for source {source_name}: {missing}")
+                raise KeyError(
+                    f"Dataset missing keys for source {source_name}: {missing}"
+                )
 
             eta_parts.append(npz[eta_key])
             xi_parts.append(npz[xi_key])
             gxi_parts.append(npz[gxi_key])
 
-        x = npz["x"] if "x" in npz.files else np.arange(eta_parts[0].shape[1], dtype=np.float64)
+        x = (
+            npz["x"]
+            if "x" in npz.files
+            else np.arange(eta_parts[0].shape[1], dtype=np.float64)
+        )
 
     return {
         "eta": np.concatenate(eta_parts, axis=0),
@@ -101,10 +120,14 @@ def denormalize_from_range(
     lower: float = -1.0,
     upper: float = 1.0,
 ) -> np.ndarray:
-    return (array - lower) / (upper - lower) * (stats["max"] - stats["min"] + 1e-8) + stats["min"]
+    return (array - lower) / (upper - lower) * (
+        stats["max"] - stats["min"] + 1e-8
+    ) + stats["min"]
 
 
-def split_indices(num_examples: int, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def split_indices(
+    num_examples: int, seed: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     permutation = np.random.default_rng(seed).permutation(num_examples)
     val_count = int(num_examples * 0.1)
     test_count = int(num_examples * 0.1)

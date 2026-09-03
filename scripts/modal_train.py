@@ -31,8 +31,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Protocol, cast
 
-import modal
+import modal  # pyright: ignore[reportMissingImports]
 
 APP_NAME = "dno-fno-train"
 VOLUME_NAME = "dno-fno-train-data"
@@ -41,6 +42,17 @@ VOLUME_NAME = "dno-fno-train-data"
 DEFAULT_GPU = os.environ.get("MODAL_GPU", "H100:1")
 TIMEOUT_SECONDS = 24 * 3600
 VOLUME_MOUNT = "/data"
+
+
+class _ModalFunctionCall(Protocol):
+    object_id: str
+
+
+class _ModalTrainingFunction(Protocol):
+    def spawn(self, **kwargs: object) -> _ModalFunctionCall: ...
+
+    def remote(self, **kwargs: object) -> object: ...
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -361,7 +373,7 @@ def train(
     print(f"run_name = {run_name}")
     print(f"gpu      = {DEFAULT_GPU}")
 
-    call_kwargs = dict(
+    call_kwargs: dict[str, object] = dict(
         dataset=dataset,
         run_name=run_name,
         epochs=epochs,
@@ -379,12 +391,13 @@ def train(
         total_epochs=total_epochs,
         trainer_args=trainer_args,
     )
+    remote_training = cast(_ModalTrainingFunction, run_training)
     if spawn:
-        call = run_training.spawn(**call_kwargs)
+        call = remote_training.spawn(**call_kwargs)
         print(f"function_call_id = {call.object_id}")
         return
 
-    result = run_training.remote(**call_kwargs)
+    result = remote_training.remote(**call_kwargs)
     import json
 
     print(json.dumps(result, indent=2, default=str))

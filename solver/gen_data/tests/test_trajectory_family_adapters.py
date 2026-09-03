@@ -6,12 +6,14 @@ are not spatial-, order-, or full-horizon validation of the paper contract.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 import json
 import math
 import os
 from pathlib import Path
 import tempfile
+from typing import TypeAlias
 import unittest
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -42,6 +44,7 @@ from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     PAPER_JONSWAP_ROLLOUT_CONFIG,
     RolloutConfig,
+    TrajectoryFamily,
     TrajectoryFrameSelectionConfig,
 )
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
@@ -53,6 +56,7 @@ from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
 from solver.gen_data.pipeline.writer import (  # noqa: E402
     commit_simulation_outcomes,
 )
+from solver.gen_data.pipeline.types import BatchPlanArrays  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_PARAMETER_GROUP_IDS,
 )
@@ -69,6 +73,27 @@ from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
 )
 
 jax.config.update("jax_enable_x64", True)
+
+
+SpecificationRecords: TypeAlias = tuple[Mapping[str, object], ...]
+
+
+def _require_mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError("expected a JSON object")
+    return value
+
+
+def _require_list(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise TypeError("expected a JSON array")
+    return value
+
+
+def _require_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("expected a JSON number")
+    return float(value)
 
 
 def wiring_contract() -> RolloutConfig:
@@ -130,6 +155,74 @@ def assert_valid_initial_batch(
     )
 
 
+def _sample_and_construct_family(
+    family: TrajectoryFamily,
+    *,
+    parameter_group_id: str,
+    attempt_number: int,
+    contract: RolloutConfig,
+    root: Path,
+    batch_id: int,
+) -> tuple[TrajectoryInitialBatch, SpecificationRecords, Path, BatchPlanArrays]:
+    """Sample and construct one simulation without writing its batch."""
+
+    if family == "tanaka":
+        sampled = sample_tanaka_simulations(
+            (parameter_group_id,),
+            dataset_split=DatasetSplit.TEST,
+            first_attempt_number=attempt_number,
+            contract=contract,
+        )
+        proposed = prepare_trajectory_batch(
+            sampled,
+            root=root,
+            family_name=family,
+            family_id=PhysicalFamilyId.TANAKA,
+            dataset_split=DatasetSplit.TEST,
+            batch_id=batch_id,
+        )
+        initial = construct_tanaka_trajectory_batch(proposed)
+    elif family == "benjamin_feir":
+        sampled = sample_benjamin_feir_simulations(
+            (parameter_group_id,),
+            dataset_split=DatasetSplit.TEST,
+            first_attempt_number=attempt_number,
+            contract=contract,
+        )
+        proposed = prepare_trajectory_batch(
+            sampled,
+            root=root,
+            family_name=family,
+            family_id=PhysicalFamilyId.BENJAMIN_FEIR,
+            dataset_split=DatasetSplit.TEST,
+            batch_id=batch_id,
+        )
+        initial = construct_benjamin_feir_trajectory_batch(proposed)
+    else:
+        sampled = sample_jonswap_tma_simulations(
+            (parameter_group_id,),
+            dataset_split=DatasetSplit.TEST,
+            first_attempt_number=attempt_number,
+            contract=contract,
+        )
+        proposed = prepare_trajectory_batch(
+            sampled,
+            root=root,
+            family_name=family,
+            family_id=PhysicalFamilyId.JONSWAP_TMA,
+            dataset_split=DatasetSplit.TEST,
+            batch_id=batch_id,
+        )
+        initial = construct_jonswap_tma_trajectory_batch(proposed)
+
+    return (
+        initial,
+        sampled.specification_records,
+        proposed.path,
+        proposed.batch_plan,
+    )
+
+
 class TrajectoryFamilyAdapterTest(unittest.TestCase):
     def test_paper_jonswap_constructs_on_target_band_before_wide_evolution(
         self,
@@ -151,14 +244,16 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         self.assertEqual(contract.target_maximum_wavenumber, 128.0)
         self.assertEqual(band.maximum_wavenumber, 128.0)
         self.assertEqual(band.transition_wavenumber, 96.0)
-        self.assertEqual(len(record["phase_right"]), 128)
-        self.assertEqual(len(record["phase_left"]), 128)
+        self.assertEqual(len(_require_list(record["phase_right"])), 128)
+        self.assertEqual(len(_require_list(record["phase_left"])), 128)
+        initial_projection = _require_mapping(record["initial_projection"])
         self.assertEqual(
-            record["initial_projection"]["maximum_wavenumber"],
+            initial_projection["maximum_wavenumber"],
             128.0,
         )
+        constructor_settings = _require_mapping(record["constructor_settings"])
         self.assertEqual(
-            record["constructor_settings"]["density_window"],
+            constructor_settings["density_window"],
             PAPER_RELATIVE_FREQUENCY_WINDOW,
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -178,20 +273,20 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             round(sampled.samples[0].parameters.peak_wavenumber),
         )
         self.assertGreaterEqual(
-            int(metrics["initial_half_maximum_spectral_cell_count"]),
+            _require_number(metrics["initial_half_maximum_spectral_cell_count"]),
             1,
         )
         self.assertAlmostEqual(
-            float(metrics["initial_realized_height_ratio"]),
+            _require_number(metrics["initial_realized_height_ratio"]),
             1.0,
             places=13,
         )
         self.assertLess(
-            float(metrics["initial_linear_hamiltonian_relative_error"]),
+            _require_number(metrics["initial_linear_hamiltonian_relative_error"]),
             1.0e-12,
         )
         self.assertGreater(
-            float(metrics["initial_minimum_water_column"]),
+            _require_number(metrics["initial_minimum_water_column"]),
             0.0,
         )
 
@@ -227,16 +322,17 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             record["initial_condition_constructor"],
             "relative_frequency_jonswap_tma_linear_state_v2",
         )
+        constructor_settings = _require_mapping(record["constructor_settings"])
         self.assertEqual(
-            record["constructor_settings"]["density_window"],
+            constructor_settings["density_window"],
             PAPER_RELATIVE_FREQUENCY_WINDOW,
         )
         self.assertEqual(
-            record["constructor_settings"]["relative_frequency_minimum"],
+            constructor_settings["relative_frequency_minimum"],
             PAPER_RELATIVE_FREQUENCY_MINIMUM,
         )
         self.assertEqual(
-            record["constructor_settings"]["relative_frequency_maximum"],
+            constructor_settings["relative_frequency_maximum"],
             PAPER_RELATIVE_FREQUENCY_MAXIMUM,
         )
 
@@ -252,13 +348,14 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             initial = construct_jonswap_tma_trajectory_batch(proposed)
 
         parameters = sampled.samples[0].parameters
-        wavenumbers = (
+        wavenumbers = np.asarray(
             2.0
             * np.pi
             * np.fft.rfftfreq(
                 contract.nx,
                 d=contract.length / contract.nx,
-            )
+            ),
+            dtype=np.float64,
         )
         frequencies = finite_depth_angular_frequency(
             wavenumbers,
@@ -280,81 +377,46 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         self,
     ) -> None:
         contract = wiring_contract()
-        finite_random_sea_cell = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
-
-        families = (
-            (
-                "tanaka",
-                PhysicalFamilyId.TANAKA,
-                sample_tanaka_simulations,
-                construct_tanaka_trajectory_batch,
-                TANAKA_PARAMETER_GROUP_IDS[0],
-                19,
-            ),
-            (
-                "benjamin_feir",
-                PhysicalFamilyId.BENJAMIN_FEIR,
-                sample_benjamin_feir_simulations,
-                construct_benjamin_feir_trajectory_batch,
-                BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
-                23,
-            ),
-            (
-                "jonswap_tma",
-                PhysicalFamilyId.JONSWAP_TMA,
-                sample_jonswap_tma_simulations,
-                construct_jonswap_tma_trajectory_batch,
-                finite_random_sea_cell,
-                29,
-            ),
+        families: tuple[tuple[TrajectoryFamily, str, int], ...] = (
+            ("tanaka", TANAKA_PARAMETER_GROUP_IDS[0], 19),
+            ("benjamin_feir", BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0], 23),
+            ("jonswap_tma", JONSWAP_TMA_PARAMETER_GROUP_IDS[9], 29),
         )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            constructed: dict[str, TrajectoryInitialBatch] = {}
-            for batch_id, (
-                family,
-                family_id,
-                sampler,
-                constructor,
-                parameter_group_id,
-                attempt_number,
-            ) in enumerate(families):
+            constructed: dict[TrajectoryFamily, TrajectoryInitialBatch] = {}
+            for batch_id, (family, parameter_group_id, attempt_number) in enumerate(
+                families
+            ):
                 with self.subTest(family=family):
-                    first_sampled = sampler(
-                        (parameter_group_id,),
-                        dataset_split=DatasetSplit.TEST,
-                        first_attempt_number=attempt_number,
+                    first, first_records, proposed_path, _ = (
+                        _sample_and_construct_family(
+                            family,
+                            parameter_group_id=parameter_group_id,
+                            attempt_number=attempt_number,
+                            contract=contract,
+                            root=root,
+                            batch_id=batch_id,
+                        )
+                    )
+                    second, replayed_records, _, _ = _sample_and_construct_family(
+                        family,
+                        parameter_group_id=parameter_group_id,
+                        attempt_number=attempt_number,
                         contract=contract,
+                        root=root,
+                        batch_id=batch_id,
                     )
-                    replayed_sampled = sampler(
-                        (parameter_group_id,),
-                        dataset_split=DatasetSplit.TEST,
-                        first_attempt_number=attempt_number,
-                        contract=contract,
-                    )
-                    self.assertEqual(
-                        first_sampled.specification_records,
-                        replayed_sampled.specification_records,
-                    )
+                    self.assertEqual(first_records, replayed_records)
                     if family == "benjamin_feir":
-                        bf_record = first_sampled.specification_records[0]
+                        bf_record = first_records[0]
                         self.assertNotIn("schema", bf_record)
                         self.assertEqual(
                             bf_record["initial_condition_constructor"],
                             ("jcp09_equation_33_with_project_fifth_order_carrier_v2"),
                         )
-                    proposed = prepare_trajectory_batch(
-                        first_sampled,
-                        root=root,
-                        family_name=family,
-                        family_id=family_id,
-                        dataset_split=DatasetSplit.TEST,
-                        batch_id=batch_id,
-                    )
-                    self.assertFalse(proposed.path.exists())
-                    first = constructor(proposed)
-                    second = constructor(proposed)
+                    self.assertFalse(proposed_path.exists())
                     assert_valid_initial_batch(self, first, contract=contract)
                     np.testing.assert_array_equal(first.eta0, second.eta0)
                     np.testing.assert_array_equal(first.xi0, second.xi0)
@@ -368,16 +430,16 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             random_sea = constructed["jonswap_tma"]
             record = random_sea.specification_records[0]
             band = resolved_band_for_contract(contract)
+            phase_right = _require_list(record["phase_right"])
+            phase_left = _require_list(record["phase_left"])
             self.assertEqual(
-                len(record["phase_right"]),
+                len(phase_right),
                 int(np.floor(band.maximum_wavenumber)),
             )
+            self.assertEqual(len(phase_left), len(phase_right))
+            constructor_settings = _require_mapping(record["constructor_settings"])
             self.assertEqual(
-                len(record["phase_left"]),
-                len(record["phase_right"]),
-            )
-            self.assertEqual(
-                record["constructor_settings"]["density_window"],
+                constructor_settings["density_window"],
                 PAPER_RELATIVE_FREQUENCY_WINDOW,
             )
 
@@ -412,23 +474,9 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         """Exercise the real CPU generator; numerical settings are smoke-only."""
 
         contract = wiring_contract()
-        simulations = (
-            (
-                "benjamin_feir",
-                PhysicalFamilyId.BENJAMIN_FEIR,
-                BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
-                41,
-                sample_benjamin_feir_simulations,
-                construct_benjamin_feir_trajectory_batch,
-            ),
-            (
-                "jonswap_tma",
-                PhysicalFamilyId.JONSWAP_TMA,
-                JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
-                43,
-                sample_jonswap_tma_simulations,
-                construct_jonswap_tma_trajectory_batch,
-            ),
+        simulations: tuple[tuple[TrajectoryFamily, str, int], ...] = (
+            ("benjamin_feir", BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0], 41),
+            ("jonswap_tma", JONSWAP_TMA_PARAMETER_GROUP_IDS[9], 43),
         )
         saved_times = np.asarray([0.0, 0.02, 0.04], dtype=np.float64)
         selection = TrajectoryFrameSelectionConfig(
@@ -439,31 +487,19 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            paths = []
-            for (
-                family,
-                family_id,
-                parameter_group_id,
-                attempt_number,
-                sampler,
-                constructor,
-            ) in simulations:
-                sampled = sampler(
-                    (parameter_group_id,),
-                    dataset_split=DatasetSplit.TEST,
-                    first_attempt_number=attempt_number,
+            paths: list[Path] = []
+            for batch_id, (family, parameter_group_id, attempt_number) in enumerate(
+                simulations
+            ):
+                initial, _, batch_path, batch_plan = _sample_and_construct_family(
+                    family,
+                    parameter_group_id=parameter_group_id,
+                    attempt_number=attempt_number,
                     contract=contract,
-                )
-                proposed = prepare_trajectory_batch(
-                    sampled,
                     root=root,
-                    family_name=family,
-                    family_id=family_id,
-                    dataset_split=DatasetSplit.TEST,
-                    batch_id=0,
+                    batch_id=batch_id,
                 )
-                self.assertFalse(proposed.path.exists())
-                initial = constructor(proposed)
+                self.assertFalse(batch_path.exists())
                 execution = execute_trajectory_batch(
                     initial.eta0,
                     initial.xi0,
@@ -480,11 +516,11 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                     frame_selection=selection,
                 )
                 commit_simulation_outcomes(
-                    proposed.path,
-                    proposed.batch_plan,
+                    batch_path,
+                    batch_plan,
                     outcomes,
                 )
-                paths.append(proposed.path)
+                paths.append(batch_path)
 
             view = build_dataset_view(
                 root,

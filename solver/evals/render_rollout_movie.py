@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+from matplotlib.artist import Artist
 import numpy as np
 
 matplotlib.rcParams["mathtext.fontset"] = "cm"
@@ -24,7 +25,9 @@ PRED_LINE_ALPHA = 0.98
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render a rollout-vs-truth movie from a saved comparison NPZ.")
+    parser = argparse.ArgumentParser(
+        description="Render a rollout-vs-truth movie from a saved comparison NPZ."
+    )
     parser.add_argument("--comparison_npz", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--title", default=None)
@@ -38,7 +41,9 @@ def padded_limits(*series: np.ndarray, frame_idx: np.ndarray) -> tuple[float, fl
     values = np.concatenate([values[frame_idx] for values in series], axis=0)
     finite = values[np.isfinite(values)]
     if finite.size == 0:
-        finite = np.concatenate([values[np.isfinite(values)] for values in series], axis=0)
+        finite = np.concatenate(
+            [values[np.isfinite(values)] for values in series], axis=0
+        )
     vmin = float(np.min(finite))
     vmax = float(np.max(finite))
     span = vmax - vmin
@@ -192,7 +197,9 @@ def render_rollout_gif(
     ax_xi.set_ylim(*xi_limits)
     ax_xi.set_ylabel(r"$\xi$", color=AXIS_COLOR, fontsize=12, rotation=0, labelpad=14)
     ax_gxi.set_ylim(*gxi_limits)
-    ax_gxi.set_ylabel(r"$G(\eta)\xi$", color=AXIS_COLOR, fontsize=12, rotation=0, labelpad=18)
+    ax_gxi.set_ylabel(
+        r"$G(\eta)\xi$", color=AXIS_COLOR, fontsize=12, rotation=0, labelpad=18
+    )
     ax_gxi.set_xlabel("x", color=AXIS_COLOR, fontsize=10)
 
     for ax in axes:
@@ -209,7 +216,7 @@ def render_rollout_gif(
 
     plt.tight_layout(pad=0.8, h_pad=0.7)
 
-    def update(frame_idx: int):
+    def update(frame_idx: int) -> tuple[Artist, ...]:
         eta_true = truth_eta[idx[frame_idx]]
         eta_pred = pred_eta[idx[frame_idx]]
         xi_true = truth_xi[idx[frame_idx]]
@@ -226,6 +233,19 @@ def render_rollout_gif(
             truth_gxi_line.set_ydata(finite_curve(gxi_true))
         pred_gxi_line.set_ydata(finite_curve(gxi_pred))
         time_text.set_text(f"t = {t[idx[frame_idx]]:.2f}")
+        return tuple(
+            artist
+            for artist in (
+                truth_line,
+                pred_line,
+                truth_xi_line,
+                pred_xi_line,
+                truth_gxi_line,
+                pred_gxi_line,
+                time_text,
+            )
+            if artist is not None
+        )
 
     anim = animation.FuncAnimation(
         fig,
@@ -246,7 +266,9 @@ def main() -> None:
     args = parse_args()
     npz_path = Path(args.comparison_npz).resolve()
     payload = np.load(npz_path)
-    output_path = Path(args.output).resolve() if args.output else npz_path.with_suffix(".gif")
+    output_path = (
+        Path(args.output).resolve() if args.output else npz_path.with_suffix(".gif")
+    )
     written = render_rollout_gif(
         payload,
         output_path=output_path,

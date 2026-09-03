@@ -7,7 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ..reference_solutions.solitary_wave import DEFAULT_SOLITON_ROOT, load_soliton_dataset
+from ..reference_solutions.solitary_wave import (
+    DEFAULT_SOLITON_ROOT,
+    load_soliton_dataset,
+)
 from .modified_tanaka import (
     DEFAULT_OUTER_ITERATIONS,
     DEFAULT_QC_UPPER,
@@ -19,11 +22,15 @@ import jax.numpy as jnp
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a canonical Tanaka solitary-wave branch sampled uniformly in amplitude.")
+    parser = argparse.ArgumentParser(
+        description="Build a canonical Tanaka solitary-wave branch sampled uniformly in amplitude."
+    )
     parser.add_argument("--soliton_root", default=str(DEFAULT_SOLITON_ROOT))
     parser.add_argument("--num_samples", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--output", default="outputs/tanaka_branch/tanaka_branch_uniform.npz")
+    parser.add_argument(
+        "--output", default="outputs/tanaka_branch/tanaka_branch_uniform.npz"
+    )
     parser.add_argument("--depth", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=1.0)
     parser.add_argument("--direction", type=int, default=1, choices=(-1, 1))
@@ -53,7 +60,10 @@ def parse_args() -> argparse.Namespace:
 
 def _dataset_amplitude_range(soliton_root: str | Path) -> tuple[float, float]:
     trajectories = load_soliton_dataset(soliton_root)
-    amplitudes = [float(np.max(np.asarray(traj["eta"][0], dtype=np.float64))) for traj in trajectories]
+    amplitudes = [
+        float(np.max(np.asarray(trajectory["eta"], dtype=np.float64)[0]))
+        for trajectory in trajectories
+    ]
     return min(amplitudes), max(amplitudes)
 
 
@@ -87,11 +97,16 @@ def main() -> None:
 
     batches = []
     for start in range(0, amplitudes.shape[0], args.batch_size):
-        amplitude_batch = jnp.asarray(amplitudes[start : start + args.batch_size], dtype=REAL_DTYPE)
+        amplitude_batch = jnp.asarray(
+            amplitudes[start : start + args.batch_size], dtype=REAL_DTYPE
+        )
         batches.append(solve_modified_tanaka_batched(base_params, amplitude_batch))
 
     def cat(name: str) -> np.ndarray:
-        return np.concatenate([np.asarray(getattr(batch, name), dtype=np.float64) for batch in batches], axis=0)
+        return np.concatenate(
+            [np.asarray(getattr(batch, name), dtype=np.float64) for batch in batches],
+            axis=0,
+        )
 
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)

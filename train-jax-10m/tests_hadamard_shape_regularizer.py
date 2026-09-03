@@ -5,6 +5,7 @@ Run directly; pytest is not required:
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True \
       .venv/bin/python train-jax-10m/tests_hadamard_shape_regularizer.py
 """
+
 from __future__ import annotations
 
 import os
@@ -51,9 +52,7 @@ def _spectral_dx(field: Array, k: Array) -> Array:
 
 
 def _g0(field: Array, k: Array) -> Array:
-    return jnp.real(
-        jnp.fft.ifft(jnp.abs(k) * jnp.fft.fft(field, axis=-1), axis=-1)
-    )
+    return jnp.real(jnp.fft.ifft(jnp.abs(k) * jnp.fft.fft(field, axis=-1), axis=-1))
 
 
 def _g01(eta: Array, xi: Array) -> Array:
@@ -73,16 +72,12 @@ def _identity_targets(values: Array) -> Array:
     return values
 
 
-def _g01_apply(
-    variables: dict[str, Any], inputs: Array, depth: Array
-) -> Array:
+def _g01_apply(variables: dict[str, Any], inputs: Array, depth: Array) -> Array:
     del variables, depth
     return _g01(inputs[..., 0], inputs[..., 1])[..., None]
 
 
-def _g0_apply(
-    variables: dict[str, Any], inputs: Array, depth: Array
-) -> Array:
+def _g0_apply(variables: dict[str, Any], inputs: Array, depth: Array) -> Array:
     del variables, depth
     k = _wavenumbers(inputs.shape[-2])
     return _g0(inputs[..., 1], k)[..., None]
@@ -95,24 +90,29 @@ def _base_inputs(
     eta = jnp.zeros((batch_size, nx), dtype=jnp.float64)
     amplitudes = jnp.linspace(0.7, 1.1, batch_size)[:, None]
     xi = amplitudes * (
-        0.08 * jnp.cos(3.0 * x)[None, :]
-        + 0.03 * jnp.sin(7.0 * x)[None, :]
+        0.08 * jnp.cos(3.0 * x)[None, :] + 0.03 * jnp.sin(7.0 * x)[None, :]
     )
     depth = jnp.zeros((batch_size, 1), dtype=jnp.float64)
     return eta, xi, depth, _wavenumbers(nx)
 
 
-def _config(**overrides: float | int) -> HadamardRegConfig:
-    values: dict[str, float | int] = {
-        "k_max": 20.0,
-        "sobolev_order": 1,
-        "relative_eps_min": 1e-3,
-        "relative_eps_max": 1e-3,
-        "eta_scale_floor": 2e-2,
-        "denominator_floor": 1e-24,
-    }
-    values.update(overrides)
-    return HadamardRegConfig(**values)
+def _config(
+    *,
+    k_max: float = 20.0,
+    sobolev_order: int = 1,
+    relative_eps_min: float = 1e-3,
+    relative_eps_max: float = 1e-3,
+    eta_scale_floor: float = 2e-2,
+    denominator_floor: float = 1e-24,
+) -> HadamardRegConfig:
+    return HadamardRegConfig(
+        k_max=k_max,
+        sobolev_order=sobolev_order,
+        relative_eps_min=relative_eps_min,
+        relative_eps_max=relative_eps_max,
+        eta_scale_floor=eta_scale_floor,
+        denominator_floor=denominator_floor,
+    )
 
 
 def test_projected_sobolev_energy_matches_known_mode() -> None:
@@ -238,7 +238,9 @@ def test_normalizers_and_output_mean_match_production() -> None:
         denorm_targets,
         jnp.float64,
     )
-    np.testing.assert_allclose(np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14)
+    np.testing.assert_allclose(
+        np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14
+    )
 
     loss, _ = compute_hadamard_reg(
         jax.random.PRNGKey(3),
@@ -258,9 +260,7 @@ def test_normalizers_and_output_mean_match_production() -> None:
 
 def test_loss_is_jittable_and_differentiable() -> None:
     eta, xi, depth, k = _base_inputs(batch_size=2)
-    x = jnp.arange(eta.shape[-1], dtype=jnp.float64) * (
-        2.0 * jnp.pi / eta.shape[-1]
-    )
+    x = jnp.arange(eta.shape[-1], dtype=jnp.float64) * (2.0 * jnp.pi / eta.shape[-1])
     eta = 0.015 * jnp.cos(2.0 * x)[None, :] * jnp.ones((2, 1))
     cfg = _config(relative_eps_min=2e-3, relative_eps_max=2e-3)
 
@@ -301,9 +301,7 @@ def test_invalid_config_is_rejected() -> None:
     eta, _, _, k = _base_inputs(batch_size=1)
     bad = _config(relative_eps_min=0.0)
     try:
-        construct_relative_eta_probe(
-            jax.random.PRNGKey(0), eta, k, bad, jnp.float64
-        )
+        construct_relative_eta_probe(jax.random.PRNGKey(0), eta, k, bad, jnp.float64)
     except ValueError as error:
         assert "relative eps bounds" in str(error)
     else:
@@ -312,10 +310,16 @@ def test_invalid_config_is_rejected() -> None:
 
 TESTS: list[tuple[str, TestFn]] = [
     ("math/projected_sobolev_energy", test_projected_sobolev_energy_matches_known_mode),
-    ("probe/relative_scaled_bandlimited", test_relative_probe_is_scaled_and_bandlimited),
+    (
+        "probe/relative_scaled_bandlimited",
+        test_relative_probe_is_scaled_and_bandlimited,
+    ),
     ("identity/exact_g01_flat", test_exact_g01_has_zero_flat_surface_defect),
     ("identity/g0_detects_missing_g1", test_g0_only_detects_missing_shape_derivative),
-    ("integration/normalizers_and_mean", test_normalizers_and_output_mean_match_production),
+    (
+        "integration/normalizers_and_mean",
+        test_normalizers_and_output_mean_match_production,
+    ),
     ("integration/jit_and_grad", test_loss_is_jittable_and_differentiable),
     ("validation/invalid_config", test_invalid_config_is_rejected),
 ]

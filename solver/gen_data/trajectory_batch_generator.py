@@ -98,6 +98,7 @@ class TrajectoryConstructor(Protocol):
     def __call__(
         self,
         batch: PreparedTrajectoryBatch[Any],
+        /,
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch: ...

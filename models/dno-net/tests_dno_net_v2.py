@@ -5,10 +5,13 @@ Run with::
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True .venv/bin/python \
         models/dno-net/tests_dno_net_v2.py
 """
+
 from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from math import pi
+from typing import Any, cast
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -16,23 +19,36 @@ os.environ.setdefault("JAX_ENABLE_X64", "True")
 import jax
 import jax.numpy as jnp
 from flax.core import freeze, unfreeze
+from flax.typing import FrozenVariableDict
 
 from dno_net_v2 import CraigSulemDNO, validate_fixed_craig_sulem_config
 
 jax.config.update("jax_enable_x64", True)
 
 
-def _model(**overrides: object) -> CraigSulemDNO:
-    config: dict[str, object] = {
-        "width": 32,
-        "n_blocks": 2,
-        "latent": 8,
-        "n_polys": 3,
-        "mult_hidden": 16,
-        "domain_length": 2.0 * jnp.pi,
-    }
-    config.update(overrides)
-    return CraigSulemDNO(**config)
+VariableState = FrozenVariableDict | dict[str, Any]
+
+
+def _model(
+    *,
+    n_polys: int = 3,
+    use_first_deriv: bool = True,
+    use_second_deriv: bool = True,
+    use_half_deriv: bool = True,
+    use_hilbert: bool = True,
+) -> CraigSulemDNO:
+    return CraigSulemDNO(
+        width=32,
+        n_blocks=2,
+        latent=8,
+        n_polys=n_polys,
+        use_first_deriv=use_first_deriv,
+        use_second_deriv=use_second_deriv,
+        use_half_deriv=use_half_deriv,
+        use_hilbert=use_hilbert,
+        mult_hidden=16,
+        domain_length=2.0 * pi,
+    )
 
 
 def _state(nx: int = 64) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -43,7 +59,7 @@ def _state(nx: int = 64) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     return eta, xi, depth
 
 
-def _activate_residual(variables: dict[str, object]) -> dict[str, object]:
+def _activate_residual(variables: VariableState) -> FrozenVariableDict:
     """Replace zero-init block projections to mimic a trained checkpoint."""
     mutable = unfreeze(variables)
     for block_idx in range(2):
@@ -57,13 +73,13 @@ def _activate_residual(variables: dict[str, object]) -> dict[str, object]:
 
 def _learned_residual(
     model: CraigSulemDNO,
-    variables: dict[str, object],
+    variables: VariableState,
     eta: jnp.ndarray,
     xi: jnp.ndarray,
     depth: jnp.ndarray,
 ) -> jnp.ndarray:
     inputs = jnp.stack((eta, xi), axis=-1)
-    output = model.apply(variables, inputs, depth)[..., 0]
+    output = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
     baseline = model._linear_baseline(xi, depth) + model._g1_baseline(eta, xi, depth)
     return output - baseline
 
@@ -104,9 +120,13 @@ def test_order_two_is_quadratic_near_zero() -> None:
 def test_order_two_residual_is_self_adjoint() -> None:
     """Tied real multiplier sandwiches remain self-adjoint after the lift."""
     eta, xi, depth = _state()
-    psi = jnp.roll(xi, 9, axis=-1) + 0.03 * jnp.sin(
-        jnp.linspace(0.0, 6.0 * jnp.pi, xi.shape[-1], endpoint=False)
-    )[None, :]
+    psi = (
+        jnp.roll(xi, 9, axis=-1)
+        + 0.03
+        * jnp.sin(jnp.linspace(0.0, 6.0 * jnp.pi, xi.shape[-1], endpoint=False))[
+            None, :
+        ]
+    )
     model = _model()
     inputs = jnp.stack((eta, xi), axis=-1)
     variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
@@ -124,22 +144,25 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
     configurations = (
-        ({"n_polys": 1}, 5),
-        ({"n_polys": 2, "use_second_deriv": False}, 5),
-        ({
-            "n_polys": 3,
-            "use_first_deriv": False,
-            "use_second_deriv": False,
-            "use_half_deriv": False,
-            "use_hilbert": False,
-        }, 3),
+        (_model(n_polys=1), 5),
+        (_model(n_polys=2, use_second_deriv=False), 5),
+        (
+            _model(
+                n_polys=3,
+                use_first_deriv=False,
+                use_second_deriv=False,
+                use_half_deriv=False,
+                use_hilbert=False,
+            ),
+            3,
+        ),
     )
-    for overrides, expected_channels in configurations:
-        model = _model(**overrides)
+    for model, expected_channels in configurations:
         variables = model.init(jax.random.PRNGKey(expected_channels), inputs, depth)
-        kernel = variables["params"]["eta_feat_proj"]["kernel"]
+        kernel = cast(jax.Array, variables["params"]["eta_feat_proj"]["kernel"])
         assert kernel.shape[0] == expected_channels
-        assert jnp.all(jnp.isfinite(model.apply(variables, inputs, depth)))
+        output = cast(jax.Array, model.apply(variables, inputs, depth))
+        assert jnp.all(jnp.isfinite(output))
 
 
 def test_legacy_config_guard_accepts_only_c27_architecture() -> None:

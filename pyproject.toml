@@ -34,3 +34,11 @@ fno_jax = "models/fno-jax"
 pythonVersion = "3.11"
 venvPath = "."
 venv = ".venv"
+extraPaths = ["models/fno-jax", "models/dno-net"]
+executionEnvironments = [
+    { root = "train-jax", extraPaths = [".", "train-jax", "models/fno-jax"] },
+    { root = "train-jax-10m", extraPaths = [".", "train-jax-10m", "models/fno-jax", "models/dno-net"] },
+    { root = "scripts", extraPaths = [".", "train-jax-10m", "solver/evals", "models/fno-jax", "models/dno-net"] },
+    { root = "solver/evals", extraPaths = [".", "models/fno-jax", "models/dno-net"] },
+    { root = ".", extraPaths = [".", "models/fno-jax", "models/dno-net"] },
+]

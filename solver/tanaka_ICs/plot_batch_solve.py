@@ -25,7 +25,9 @@ from .modified_tanaka import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run and plot a batched Tanaka solve.")
     parser.add_argument("--output_dir", default="outputs/tanaka_batch")
-    parser.add_argument("--mode", choices=("centers", "amplitudes"), default="amplitudes")
+    parser.add_argument(
+        "--mode", choices=("centers", "amplitudes"), default="amplitudes"
+    )
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--amplitude", type=float, default=0.1)
     parser.add_argument("--amplitude_min", type=float, default=0.05)
@@ -74,7 +76,9 @@ def _save_field_figure(
     output_path: Path,
 ) -> None:
     fig, ax = plt.subplots(figsize=(13, 4.5))
-    colors = plt.cm.viridis(np.linspace(0.1, 0.95, sample_indices.size))
+    colors = matplotlib.colormaps["viridis"](
+        np.linspace(0.1, 0.95, sample_indices.size)
+    )
     for color, idx in zip(colors, sample_indices):
         label = f"#{idx}  {value_label}={varying_values[idx]:.3f}"
         ax.plot(x, field[idx], color=color, linewidth=1.8, label=label)
@@ -118,24 +122,35 @@ def main() -> None:
     )
 
     if args.mode == "centers":
-        centers = jnp.linspace(0.0, params.length - params.length / params.nx, args.batch_size, dtype=jnp.float64)
+        centers = jnp.linspace(
+            0.0,
+            params.length - params.length / params.nx,
+            args.batch_size,
+            dtype=jnp.float64,
+        )
         amplitudes = jnp.full((args.batch_size,), args.amplitude, dtype=jnp.float64)
         varying_values = np.asarray(centers)
         value_label = "x0"
     else:
-        amplitudes = jnp.linspace(args.amplitude_min, args.amplitude_max, args.batch_size, dtype=jnp.float64)
+        amplitudes = jnp.linspace(
+            args.amplitude_min, args.amplitude_max, args.batch_size, dtype=jnp.float64
+        )
         centers = jnp.full((args.batch_size,), params.center, dtype=jnp.float64)
         varying_values = np.asarray(amplitudes)
         value_label = "a"
     directions = jnp.full((args.batch_size,), args.direction, dtype=jnp.float64)
 
     start = time.perf_counter()
-    batch = solve_modified_tanaka_batched(params, amplitudes, centers=centers, directions=directions)
+    batch = solve_modified_tanaka_batched(
+        params, amplitudes, centers=centers, directions=directions
+    )
     _block(batch)
     cold_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    batch = solve_modified_tanaka_batched(params, amplitudes, centers=centers, directions=directions)
+    batch = solve_modified_tanaka_batched(
+        params, amplitudes, centers=centers, directions=directions
+    )
     _block(batch)
     warm_seconds = time.perf_counter() - start
 
@@ -181,11 +196,37 @@ def main() -> None:
         "qc_last": float(qc[-1]),
         "eta_shape": list(eta.shape),
     }
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
 
-    _save_field_figure(x, eta, varying_values, sample_indices, r"$\eta$", value_label, output_dir / "eta_lines.png")
-    _save_field_figure(x, xi, varying_values, sample_indices, r"$\xi$", value_label, output_dir / "xi_lines.png")
-    _save_field_figure(x, gxi, varying_values, sample_indices, r"$G(\eta)\xi$", value_label, output_dir / "gxi_lines.png")
+    _save_field_figure(
+        x,
+        eta,
+        varying_values,
+        sample_indices,
+        r"$\eta$",
+        value_label,
+        output_dir / "eta_lines.png",
+    )
+    _save_field_figure(
+        x,
+        xi,
+        varying_values,
+        sample_indices,
+        r"$\xi$",
+        value_label,
+        output_dir / "xi_lines.png",
+    )
+    _save_field_figure(
+        x,
+        gxi,
+        varying_values,
+        sample_indices,
+        r"$G(\eta)\xi$",
+        value_label,
+        output_dir / "gxi_lines.png",
+    )
 
     print(json.dumps(summary, indent=2))
 

@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from typing import TypedDict, cast
 
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
@@ -30,10 +31,7 @@ for _d in (REPO_ROOT, FNO_DIR, DNO_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from fno1d import FNO1d
-from dno_net_v2 import CraigSulemDNO
-from losses import count_params, relative_l2_loss
-from util import (
+from util import (  # noqa: E402
     FlatParams,
     NormStats,
     assert_pytree_replicated,
@@ -46,20 +44,34 @@ from util import (
     replicate_pytree_from_host,
     require_jax_devices,
 )
-from solver.solvers.dno_series_jax import build_grid
-from hadamard_shape_regularizer import (
+from solver.solvers.dno_series_jax import build_grid  # noqa: E402
+from hadamard_shape_regularizer import (  # noqa: E402
     HadamardRegConfig,
     compute_hadamard_reg,
     sample_microbatch,
 )
-from translation_tangent_regularizer import (
+from translation_tangent_regularizer import (  # noqa: E402
     TranslationTangentConfig,
     compute_translation_tangent_loss,
 )
-from mode_balanced_regularizer import (
+from mode_balanced_regularizer import (  # noqa: E402
     ModeBalancedConfig,
     compute_mode_balanced_loss,
 )
+
+from dno_net_v2 import CraigSulemDNO  # noqa: E402
+from fno1d import FNO1d  # noqa: E402
+from losses import count_params, relative_l2_loss  # noqa: E402
+
+
+class CheckpointMetadata(TypedDict):
+    epoch: int
+    train_loss: float
+    val_loss: float
+    history: list[dict[str, float]]
+    best_val_loss: float
+    best_epoch: int
+    stats: dict[str, object]
 
 
 def save_checkpoint(
@@ -76,7 +88,10 @@ def save_checkpoint(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     host_state = jax.device_get(state)
-    to_np = lambda v: np.asarray(v)
+
+    def to_np(value: object) -> np.ndarray:
+        return np.asarray(value)
+
     payload = {
         "params": jax.tree_util.tree_map(to_np, host_state.params),
         "opt_state": jax.tree_util.tree_map(to_np, host_state.opt_state),
@@ -112,13 +127,66 @@ def save_checkpoint(
     metadata_tmp.replace(metadata_path)
 
 
-def read_committed_checkpoint_metadata(checkpoint_dir: Path) -> dict[str, object]:
+def read_committed_checkpoint_metadata(checkpoint_dir: Path) -> CheckpointMetadata:
     """Read metadata only when its exact, committed Orbax payload exists."""
     metadata_path = checkpoint_dir / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"no metadata.json under {checkpoint_dir}")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    epoch = int(metadata["epoch"])
+    decoded = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(decoded, dict) or not all(
+        isinstance(key, str) for key in decoded
+    ):
+        raise ValueError(f"invalid checkpoint metadata object: {metadata_path}")
+    record = cast(dict[str, object], decoded)
+
+    def require_int(key: str) -> int:
+        value = record.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"checkpoint metadata {key!r} must be an integer")
+        return value
+
+    def require_float(key: str) -> float:
+        value = record.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"checkpoint metadata {key!r} must be numeric")
+        return float(value)
+
+    history_value = record.get("history")
+    if not isinstance(history_value, list):
+        raise ValueError("checkpoint metadata 'history' must be a list")
+    history: list[dict[str, float]] = []
+    for index, entry in enumerate(history_value):
+        if not isinstance(entry, dict):
+            raise ValueError(f"checkpoint history entry {index} must be an object")
+        parsed_entry: dict[str, float] = {}
+        for key, value in entry.items():
+            if (
+                not isinstance(key, str)
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+            ):
+                raise ValueError(
+                    f"checkpoint history entry {index} must contain numeric values"
+                )
+            parsed_entry[key] = value
+        history.append(parsed_entry)
+
+    stats_value = record.get("stats")
+    if not isinstance(stats_value, dict) or not all(
+        isinstance(key, str) for key in stats_value
+    ):
+        raise ValueError("checkpoint metadata 'stats' must be an object")
+
+    metadata = CheckpointMetadata(
+        epoch=require_int("epoch"),
+        train_loss=require_float("train_loss"),
+        val_loss=require_float("val_loss"),
+        history=history,
+        best_val_loss=require_float("best_val_loss"),
+        best_epoch=require_int("best_epoch"),
+        stats=cast(dict[str, object], stats_value),
+    )
+    epoch = metadata["epoch"]
     payload_path = checkpoint_dir / f"ckpt_{epoch}"
     if not payload_path.is_dir():
         raise RuntimeError(
@@ -145,13 +213,20 @@ def training_counter_values(
     announce: bool = False,
 ) -> tuple[int, int]:
     """Validate replicated TrainState/Adam/schedule counters."""
-    state_step = replicated_scalar_value(state.step, name=f"{context} TrainState.step")
+    state_step = replicated_scalar_value(
+        cast(jax.Array, state.step),
+        name=f"{context} TrainState.step",
+    )
+    optimizer_state = cast(
+        tuple[optax.ScaleByAdamState, object, optax.ScaleByScheduleState],
+        state.opt_state,
+    )
     adam_step = replicated_scalar_value(
-        state.opt_state[0].count,
+        cast(jax.Array, optimizer_state[0].count),
         name=f"{context} Adam count",
     )
     schedule_step = replicated_scalar_value(
-        state.opt_state[-1].count,
+        cast(jax.Array, optimizer_state[-1].count),
         name=f"{context} LR schedule count",
     )
     if adam_step != schedule_step:
@@ -170,15 +245,31 @@ def training_counter_values(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
-    parser.add_argument("--cs_n_polys", type=int, default=3,
-                        help="Highest power of η used in the CS-DNO spatial features. "
-                             "n_polys=3 includes η, η², η³.")
-    parser.add_argument("--cs_use_first_deriv", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--cs_use_second_deriv", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--cs_use_half_deriv", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--cs_use_hilbert", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--cs_mult_hidden", type=int, default=32,
-                        help="Hidden size of the depth-aware Fourier-multiplier MLP.")
+    parser.add_argument(
+        "--cs_n_polys",
+        type=int,
+        default=3,
+        help="Highest power of η used in the CS-DNO spatial features. "
+        "n_polys=3 includes η, η², η³.",
+    )
+    parser.add_argument(
+        "--cs_use_first_deriv", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--cs_use_second_deriv", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--cs_use_half_deriv", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--cs_use_hilbert", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--cs_mult_hidden",
+        type=int,
+        default=32,
+        help="Hidden size of the depth-aware Fourier-multiplier MLP.",
+    )
     parser.add_argument("--norm", choices=("minmax", "scale"), default="minmax")
     parser.add_argument(
         "--dataset",
@@ -192,61 +283,140 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--total_epochs", type=int, default=None,
-                        help="LR-schedule budget in epochs (decay_steps = total_epochs * "
-                             "steps_per_epoch). Defaults to --epochs. Use when resuming a "
-                             "partial run to keep the cosine shape matched to the original "
-                             "budget — e.g. resume from ep 13 of a 40-epoch run with "
-                             "--epochs 27 --total_epochs 40.")
+    parser.add_argument(
+        "--total_epochs",
+        type=int,
+        default=None,
+        help="LR-schedule budget in epochs (decay_steps = total_epochs * "
+        "steps_per_epoch). Defaults to --epochs. Use when resuming a "
+        "partial run to keep the cosine shape matched to the original "
+        "budget — e.g. resume from ep 13 of a 40-epoch run with "
+        "--epochs 27 --total_epochs 40.",
+    )
     parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--lr_warmup_steps", type=int, default=0,
-                        help="Linear learning-rate warmup from zero before cosine decay. "
-                             "Useful when a zero-initialized residual sits on top of a strong "
-                             "analytic baseline. 0 preserves the original schedule.")
+    parser.add_argument(
+        "--lr_warmup_steps",
+        type=int,
+        default=0,
+        help="Linear learning-rate warmup from zero before cosine decay. "
+        "Useful when a zero-initialized residual sits on top of a strong "
+        "analytic baseline. 0 preserves the original schedule.",
+    )
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
-    parser.add_argument("--translation_tangent_weight", type=float, default=0.0,
-                        help="Weight of the localized translation-tangent error. Projects "
-                             "the DNO error onto eta_x in periodic windows and normalizes "
-                             "by sqrt(g*h). 0 disables.")
-    parser.add_argument("--translation_tangent_window_depths", type=float, default=1.0,
-                        help="Gaussian localization width as a multiple of physical depth h.")
-    parser.add_argument("--translation_tangent_energy_floor_relative", type=float, default=1e-3,
-                        help="Local eta_x-energy denominator floor relative to its sample maximum.")
-    parser.add_argument("--mode_balanced_weight", type=float, default=0.0,
-                        help="Weight of the universal mode-balanced complex spectral loss. "
-                             "0 disables.")
-    parser.add_argument("--mode_balanced_warmup_steps", type=int, default=500,
-                        help="Linear ramp of mode_balanced_weight over this many optimizer steps.")
-    parser.add_argument("--mode_balanced_k_max", type=float, default=128.0,
-                        help="Largest positive physical wavenumber included in the mode-balanced loss.")
-    parser.add_argument("--mode_balanced_active_scale_relative", type=float, default=1e-4,
-                        help="Soft activity threshold relative to each sample's strongest modal energy.")
-    parser.add_argument("--mode_balanced_denominator_floor_relative", type=float, default=1e-6,
-                        help="Relative floor in the physical modal-error denominator.")
-    parser.add_argument("--hadamard_weight", type=float, default=0.0,
-                        help="Weight of the randomized finite-secant DNO Hadamard shape-identity "
-                             "loss. 0 disables the regularizer.")
-    parser.add_argument("--hadamard_interval", type=int, default=4,
-                        help="Evaluate the Hadamard regularizer every this-many optimizer steps.")
-    parser.add_argument("--hadamard_microbatch", type=int, default=8,
-                        help="Global Hadamard microbatch size, split evenly across devices.")
-    parser.add_argument("--hadamard_warmup_steps", type=int, default=500,
-                        help="Linear ramp of hadamard_weight from zero to its configured value.")
-    parser.add_argument("--hadamard_k_max", type=float, default=128.0,
-                        help="Maximum retained |k| in the Hadamard defect and probe.")
-    parser.add_argument("--hadamard_sobolev_order", type=int, default=1,
-                        help="Sobolev order used to scale probes and weight the Hadamard defect.")
-    parser.add_argument("--hadamard_relative_eps_min", type=float, default=1e-3,
-                        help="Minimum relative surface perturbation for the finite secant.")
-    parser.add_argument("--hadamard_relative_eps_max", type=float, default=3e-3,
-                        help="Maximum relative surface perturbation for the finite secant.")
-    parser.add_argument("--hadamard_eta_scale_floor", type=float, default=1e-3,
-                        help="Physical RMS floor used when scaling a probe relative to eta.")
-    parser.add_argument("--hadamard_denominator_floor", type=float, default=1e-12,
-                        help="Floor in the normalized Hadamard response denominator.")
+    parser.add_argument(
+        "--translation_tangent_weight",
+        type=float,
+        default=0.0,
+        help="Weight of the localized translation-tangent error. Projects "
+        "the DNO error onto eta_x in periodic windows and normalizes "
+        "by sqrt(g*h). 0 disables.",
+    )
+    parser.add_argument(
+        "--translation_tangent_window_depths",
+        type=float,
+        default=1.0,
+        help="Gaussian localization width as a multiple of physical depth h.",
+    )
+    parser.add_argument(
+        "--translation_tangent_energy_floor_relative",
+        type=float,
+        default=1e-3,
+        help="Local eta_x-energy denominator floor relative to its sample maximum.",
+    )
+    parser.add_argument(
+        "--mode_balanced_weight",
+        type=float,
+        default=0.0,
+        help="Weight of the universal mode-balanced complex spectral loss. 0 disables.",
+    )
+    parser.add_argument(
+        "--mode_balanced_warmup_steps",
+        type=int,
+        default=500,
+        help="Linear ramp of mode_balanced_weight over this many optimizer steps.",
+    )
+    parser.add_argument(
+        "--mode_balanced_k_max",
+        type=float,
+        default=128.0,
+        help="Largest positive physical wavenumber included in the mode-balanced loss.",
+    )
+    parser.add_argument(
+        "--mode_balanced_active_scale_relative",
+        type=float,
+        default=1e-4,
+        help="Soft activity threshold relative to each sample's strongest modal energy.",
+    )
+    parser.add_argument(
+        "--mode_balanced_denominator_floor_relative",
+        type=float,
+        default=1e-6,
+        help="Relative floor in the physical modal-error denominator.",
+    )
+    parser.add_argument(
+        "--hadamard_weight",
+        type=float,
+        default=0.0,
+        help="Weight of the randomized finite-secant DNO Hadamard shape-identity "
+        "loss. 0 disables the regularizer.",
+    )
+    parser.add_argument(
+        "--hadamard_interval",
+        type=int,
+        default=4,
+        help="Evaluate the Hadamard regularizer every this-many optimizer steps.",
+    )
+    parser.add_argument(
+        "--hadamard_microbatch",
+        type=int,
+        default=8,
+        help="Global Hadamard microbatch size, split evenly across devices.",
+    )
+    parser.add_argument(
+        "--hadamard_warmup_steps",
+        type=int,
+        default=500,
+        help="Linear ramp of hadamard_weight from zero to its configured value.",
+    )
+    parser.add_argument(
+        "--hadamard_k_max",
+        type=float,
+        default=128.0,
+        help="Maximum retained |k| in the Hadamard defect and probe.",
+    )
+    parser.add_argument(
+        "--hadamard_sobolev_order",
+        type=int,
+        default=1,
+        help="Sobolev order used to scale probes and weight the Hadamard defect.",
+    )
+    parser.add_argument(
+        "--hadamard_relative_eps_min",
+        type=float,
+        default=1e-3,
+        help="Minimum relative surface perturbation for the finite secant.",
+    )
+    parser.add_argument(
+        "--hadamard_relative_eps_max",
+        type=float,
+        default=3e-3,
+        help="Maximum relative surface perturbation for the finite secant.",
+    )
+    parser.add_argument(
+        "--hadamard_eta_scale_floor",
+        type=float,
+        default=1e-3,
+        help="Physical RMS floor used when scaling a probe relative to eta.",
+    )
+    parser.add_argument(
+        "--hadamard_denominator_floor",
+        type=float,
+        default=1e-12,
+        help="Floor in the normalized Hadamard response denominator.",
+    )
     return parser.parse_args()
 
 
@@ -285,11 +455,13 @@ def main() -> None:
     dataset = load_dataset_arrays(dataset_path)
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
-    stats = dict(load_or_compute_stats(
-        dataset_path,
-        dataset=dataset,
-        indices=train_indices,
-    ))
+    stats = dict(
+        load_or_compute_stats(
+            dataset_path,
+            dataset=dataset,
+            indices=train_indices,
+        )
+    )
     stats["target_kind"] = "gxi"
     ns = NormStats.from_dict(stats, mode=args.norm)
     if train_indices.size % args.batch_size != 0:
@@ -305,7 +477,11 @@ def main() -> None:
         )
     train_steps_per_epoch = train_indices.shape[0] // args.batch_size
 
-    domain_length = float(stats.get("domain_length", dataset.get("domain_length", 2.0 * np.pi)))
+    domain_length = float(
+        np.asarray(
+            stats.get("domain_length", dataset.get("domain_length", 2.0 * np.pi))
+        ).item()
+    )
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
     # input channel. That's only exact under norm=scale, where the channel is divided
     # by feature_absmax. norm=minmax shifts as well, so the baseline is approximate.
@@ -345,7 +521,9 @@ def main() -> None:
         )["params"]
     loss_fn = relative_l2_loss
 
-    schedule_epochs = args.total_epochs if args.total_epochs is not None else args.epochs
+    schedule_epochs = (
+        args.total_epochs if args.total_epochs is not None else args.epochs
+    )
     total_steps = schedule_epochs * train_steps_per_epoch
     if args.lr_warmup_steps > 0:
         if args.lr_warmup_steps >= total_steps:
@@ -366,7 +544,9 @@ def main() -> None:
             decay_steps=total_steps,
         )
     optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
-    training_state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
+    training_state = train_state.TrainState.create(
+        apply_fn=model.apply, params=params, tx=optimizer
+    )
 
     training_state = replicate_pytree_from_host(training_state, replicated)
     checkpoint_async_manager = checkpoints.AsyncManager(max_workers=1)
@@ -394,7 +574,9 @@ def main() -> None:
     config_payload["xi_scale"] = xi_scale
     config_payload["eta_scale"] = eta_scale
     config_payload["target_scale"] = target_scale
-    config_payload["translation_tangent_weight"] = float(args.translation_tangent_weight)
+    config_payload["translation_tangent_weight"] = float(
+        args.translation_tangent_weight
+    )
     config_payload["translation_tangent_window_depths"] = float(
         args.translation_tangent_window_depths
     )
@@ -403,9 +585,7 @@ def main() -> None:
     )
     config_payload["translation_tangent_scope"] = "all_nonflat_rows"
     config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
-    config_payload["mode_balanced_warmup_steps"] = int(
-        args.mode_balanced_warmup_steps
-    )
+    config_payload["mode_balanced_warmup_steps"] = int(args.mode_balanced_warmup_steps)
     config_payload["mode_balanced_k_max"] = float(args.mode_balanced_k_max)
     config_payload["mode_balanced_active_scale_relative"] = float(
         args.mode_balanced_active_scale_relative
@@ -422,7 +602,9 @@ def main() -> None:
     config_payload["hadamard_relative_eps_min"] = float(args.hadamard_relative_eps_min)
     config_payload["hadamard_relative_eps_max"] = float(args.hadamard_relative_eps_max)
     config_payload["hadamard_eta_scale_floor"] = float(args.hadamard_eta_scale_floor)
-    config_payload["hadamard_denominator_floor"] = float(args.hadamard_denominator_floor)
+    config_payload["hadamard_denominator_floor"] = float(
+        args.hadamard_denominator_floor
+    )
     if args.model == "fno":
         config_payload["modes"] = args.modes
     if args.model == "cs_dno":
@@ -452,9 +634,7 @@ def main() -> None:
         k_max=float(args.mode_balanced_k_max),
         gravity=gravity,
         active_scale_relative=float(args.mode_balanced_active_scale_relative),
-        denominator_floor_relative=float(
-            args.mode_balanced_denominator_floor_relative
-        ),
+        denominator_floor_relative=float(args.mode_balanced_denominator_floor_relative),
     )
     hadamard_weight = float(args.hadamard_weight)
     hadamard_interval = int(args.hadamard_interval)
@@ -530,13 +710,16 @@ def main() -> None:
             extra = jnp.asarray(0.0, dtype=training_dtype)
             zero = jnp.asarray(0.0, dtype=training_dtype)
             hadamard_metrics = jnp.zeros(
-                (len(hadamard_metric_names),), dtype=training_dtype,
+                (len(hadamard_metric_names),),
+                dtype=training_dtype,
             )
             translation_tangent_metrics = jnp.zeros(
-                (len(translation_tangent_metric_names),), dtype=training_dtype,
+                (len(translation_tangent_metric_names),),
+                dtype=training_dtype,
             )
             mode_balanced_metrics = jnp.zeros(
-                (len(mode_balanced_metric_names),), dtype=training_dtype,
+                (len(mode_balanced_metric_names),),
+                dtype=training_dtype,
             )
 
             if mode_balanced_weight > 0.0:
@@ -571,9 +754,7 @@ def main() -> None:
                         mode_extra,
                         mode_weight_eff,
                         mode_diagnostics["unweighted_loss"],
-                        mode_diagnostics[
-                            "effective_frequency_squared_mean"
-                        ],
+                        mode_diagnostics["effective_frequency_squared_mean"],
                         mode_diagnostics["relative_error_rms"],
                         mode_diagnostics["active_modes"],
                         mode_diagnostics["clipped_mode_fraction"],
@@ -598,7 +779,9 @@ def main() -> None:
                 shard_weight = (
                     device_count
                     * local_selected
-                    / jnp.maximum(global_selected, jnp.asarray(1.0, dtype=training_dtype))
+                    / jnp.maximum(
+                        global_selected, jnp.asarray(1.0, dtype=training_dtype)
+                    )
                 )
                 loss_tangent = loss_tangent * shard_weight
                 tangent_extra = translation_tangent_weight * loss_tangent
@@ -614,20 +797,26 @@ def main() -> None:
                     )
                 )
             if hadamard_weight > 0.0:
+                current_step = jnp.asarray(current_state.step)
                 step_active = jnp.equal(
-                    current_state.step
-                    % jnp.asarray(hadamard_interval, dtype=current_state.step.dtype),
-                    jnp.asarray(0, dtype=current_state.step.dtype),
+                    current_step
+                    % jnp.asarray(hadamard_interval, dtype=current_step.dtype),
+                    jnp.asarray(0, dtype=current_step.dtype),
                 )
 
                 def _hadamard_active_branch(_):
                     rng_base = jax.random.fold_in(
-                        rng_key, jax.lax.axis_index("batch") * 53 + 127,
+                        rng_key,
+                        jax.lax.axis_index("batch") * 53 + 127,
                     )
                     rng_hadamard = jax.random.fold_in(rng_base, current_state.step)
                     rng_perm, rng_probe = jax.random.split(rng_hadamard)
                     eta_sub, xi_sub, depth_sub = sample_microbatch(
-                        rng_perm, eta, xi, h_phys, hadamard_microbatch_local,
+                        rng_perm,
+                        eta,
+                        xi,
+                        h_phys,
+                        hadamard_microbatch_local,
                     )
                     batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
                     loss_hadamard, diagnostics = compute_hadamard_reg(
@@ -649,7 +838,9 @@ def main() -> None:
                         / jnp.asarray(max(hadamard_warmup_steps, 1), dtype=jnp.float64),
                         jnp.asarray(1.0, dtype=jnp.float64),
                     )
-                    weight_eff = jnp.asarray(hadamard_weight, dtype=jnp.float64) * warmup
+                    weight_eff = (
+                        jnp.asarray(hadamard_weight, dtype=jnp.float64) * warmup
+                    )
                     hadamard_extra = weight_eff * loss_hadamard
                     metrics = jnp.stack(
                         [
@@ -670,7 +861,8 @@ def main() -> None:
 
                 def _hadamard_skip_branch(_):
                     return zero, jnp.zeros(
-                        (len(hadamard_metric_names),), dtype=training_dtype,
+                        (len(hadamard_metric_names),),
+                        dtype=training_dtype,
                     )
 
                 hadamard_extra, hadamard_metrics = jax.lax.cond(
@@ -688,21 +880,26 @@ def main() -> None:
             )
 
         (
-            loss_value,
             (
-                hadamard_metrics,
-                translation_tangent_metrics,
-                mode_balanced_metrics,
+                loss_value,
+                (
+                    hadamard_metrics,
+                    translation_tangent_metrics,
+                    mode_balanced_metrics,
+                ),
             ),
-        ), grads = jax.value_and_grad(loss_for_params, has_aux=True)(current_state.params)
+            grads,
+        ) = jax.value_and_grad(loss_for_params, has_aux=True)(current_state.params)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
         hadamard_metrics = jax.lax.pmean(hadamard_metrics, axis_name="batch")
         translation_tangent_metrics = jax.lax.pmean(
-            translation_tangent_metrics, axis_name="batch",
+            translation_tangent_metrics,
+            axis_name="batch",
         )
         mode_balanced_metrics = jax.lax.pmean(
-            mode_balanced_metrics, axis_name="batch",
+            mode_balanced_metrics,
+            axis_name="batch",
         )
         next_state = current_state.apply_gradients(grads=grads)
         next_state = next_state.replace(
@@ -719,13 +916,15 @@ def main() -> None:
             mode_balanced_metrics,
         )
 
-    train_step = jax.jit(shard_map(
-        _train_step_body,
-        mesh=mesh,
-        in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch")),
-        out_specs=(P(), P(), P(), P(), P()),
-        check_rep=False,
-    ))
+    train_step = jax.jit(
+        shard_map(
+            _train_step_body,
+            mesh=mesh,
+            in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch")),
+            out_specs=(P(), P(), P(), P(), P()),
+            check_rep=False,
+        )
+    )
 
     def _eval_loss_body(
         current_params: FlatParams,
@@ -740,7 +939,10 @@ def main() -> None:
         batch_depth = batch_depth.astype(training_dtype)
         batch_inputs = norm_inputs_jax(eta, xi)
         batch_targets = norm_targets_jax(gxi)
-        predictions = model.apply({"params": current_params}, batch_inputs, batch_depth)
+        predictions = cast(
+            jax.Array,
+            model.apply({"params": current_params}, batch_inputs, batch_depth),
+        )
         data_loss = loss_fn(predictions, batch_targets)
         log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
         h_phys = jnp.exp(log_h)
@@ -784,19 +986,21 @@ def main() -> None:
             jax.lax.pmean(tangent_loss, axis_name="batch"),
         )
 
-    eval_loss_step = jax.jit(shard_map(
-        _eval_loss_body,
-        mesh=mesh,
-        in_specs=(
-            P(),
-            P("batch"),
-            P("batch"),
-            P("batch"),
-            P("batch"),
-        ),
-        out_specs=(P(), P(), P()),
-        check_rep=False,
-    ))
+    eval_loss_step = jax.jit(
+        shard_map(
+            _eval_loss_body,
+            mesh=mesh,
+            in_specs=(
+                P(),
+                P("batch"),
+                P("batch"),
+                P("batch"),
+                P("batch"),
+            ),
+            out_specs=(P(), P(), P()),
+            check_rep=False,
+        )
+    )
 
     best_val_loss = float("inf")
     best_epoch = 0
@@ -817,7 +1021,10 @@ def main() -> None:
             "step": int(training_state.step),
         }
         restored = checkpoints.restore_checkpoint(
-            ckpt_dir=latest_ckpt_dir, target=template, step=resume_epoch, prefix="ckpt_",
+            ckpt_dir=latest_ckpt_dir,
+            target=template,
+            step=resume_epoch,
+            prefix="ckpt_",
             orbax_checkpointer=ocp.PyTreeCheckpointer(),
         )
         training_state = training_state.replace(
@@ -826,12 +1033,14 @@ def main() -> None:
             step=jnp.asarray(int(restored["step"]), dtype=jnp.int32),
         )
         training_state = replicate_pytree_from_host(training_state, replicated)
-        history = list(meta.get("history", []))
-        best_val_loss = float(meta.get("best_val_loss", float("inf")))
-        best_epoch = int(meta.get("best_epoch", 0))
+        history = list(meta["history"])
+        best_val_loss = meta["best_val_loss"]
+        best_epoch = meta["best_epoch"]
         start_epoch = int(meta["epoch"]) + 1
-        print(f"auto-resume: restored from {latest_ckpt_dir} at epoch {meta['epoch']}, "
-              f"resuming at epoch {start_epoch}")
+        print(
+            f"auto-resume: restored from {latest_ckpt_dir} at epoch {meta['epoch']}, "
+            f"resuming at epoch {start_epoch}"
+        )
 
     training_counter_values(
         training_state,
@@ -852,8 +1061,13 @@ def main() -> None:
         )
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
         batch_iter = get_batches(
-            dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            train_indices, args.batch_size, epoch_rng,
+            dataset["eta"],
+            dataset["xi"],
+            dataset["gxi"],
+            dataset["depth"],
+            train_indices,
+            args.batch_size,
+            epoch_rng,
             shuffle=True,
             drop_last=True,
         )
@@ -867,8 +1081,22 @@ def main() -> None:
             data_sharding,
             data_sharding,
         )
-        batch_iter = device_prefetch(batch_iter, destinations=train_destinations, depth=2)
+        batch_iter = device_prefetch(
+            batch_iter, destinations=train_destinations, depth=2
+        )
         batch_losses: list[float] = []
+        hadamard_metric_sums = np.zeros(
+            (len(hadamard_metric_names),),
+            dtype=np.float64,
+        )
+        translation_tangent_metric_sums = np.zeros(
+            (len(translation_tangent_metric_names),),
+            dtype=np.float64,
+        )
+        mode_balanced_metric_sums = np.zeros(
+            (len(mode_balanced_metric_names),),
+            dtype=np.float64,
+        )
         train_bar = tqdm(
             batch_iter,
             total=train_steps_per_epoch,
@@ -877,16 +1105,6 @@ def main() -> None:
         )
         for eta_b, xi_b, gxi_b, depth_b in train_bar:
             train_rng, step_key = jax.random.split(train_rng)
-            if len(batch_losses) == 0:
-                hadamard_metric_sums = np.zeros(
-                    (len(hadamard_metric_names),), dtype=np.float64,
-                )
-                translation_tangent_metric_sums = np.zeros(
-                    (len(translation_tangent_metric_names),), dtype=np.float64,
-                )
-                mode_balanced_metric_sums = np.zeros(
-                    (len(mode_balanced_metric_names),), dtype=np.float64,
-                )
             (
                 training_state,
                 batch_loss,
@@ -897,13 +1115,16 @@ def main() -> None:
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             hadamard_metrics_np = np.asarray(
-                jax.device_get(batch_hadamard_metrics), dtype=np.float64,
+                jax.device_get(batch_hadamard_metrics),
+                dtype=np.float64,
             )
             tangent_metrics_np = np.asarray(
-                jax.device_get(batch_translation_tangent_metrics), dtype=np.float64,
+                jax.device_get(batch_translation_tangent_metrics),
+                dtype=np.float64,
             )
             mode_metrics_np = np.asarray(
-                jax.device_get(batch_mode_balanced_metrics), dtype=np.float64,
+                jax.device_get(batch_mode_balanced_metrics),
+                dtype=np.float64,
             )
             if translation_tangent_weight > 0.0:
                 translation_tangent_metric_sums += tangent_metrics_np
@@ -952,8 +1173,13 @@ def main() -> None:
         train_loss = float(np.mean(batch_losses)) if batch_losses else float("inf")
 
         val_batches = get_batches(
-            dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"],
-            val_indices, args.batch_size, None,
+            dataset["eta"],
+            dataset["xi"],
+            dataset["gxi"],
+            dataset["depth"],
+            val_indices,
+            args.batch_size,
+            None,
             shuffle=False,
             drop_last=False,
         )
@@ -967,7 +1193,9 @@ def main() -> None:
             data_sharding,
             data_sharding,
         )
-        val_batches = device_prefetch(val_batches, destinations=val_destinations, depth=2)
+        val_batches = device_prefetch(
+            val_batches, destinations=val_destinations, depth=2
+        )
         val_data_losses: list[float] = []
         val_mode_losses: list[float] = []
         val_tangent_losses: list[float] = []
@@ -1022,9 +1250,7 @@ def main() -> None:
             )
             if active_hadamard_batches > 0.0:
                 hadamard_means = hadamard_metric_sums / active_hadamard_batches
-                for name, value in zip(
-                    hadamard_metric_names[1:], hadamard_means[1:]
-                ):
+                for name, value in zip(hadamard_metric_names[1:], hadamard_means[1:]):
                     epoch_record[name] = float(value)
         if translation_tangent_weight > 0.0:
             n_batches = float(len(batch_losses)) if batch_losses else 1.0
@@ -1039,9 +1265,7 @@ def main() -> None:
         if mode_balanced_weight > 0.0:
             n_batches = float(len(batch_losses)) if batch_losses else 1.0
             mode_means = mode_balanced_metric_sums / n_batches
-            for name, value in zip(
-                mode_balanced_metric_names[1:], mode_means[1:]
-            ):
+            for name, value in zip(mode_balanced_metric_names[1:], mode_means[1:]):
                 epoch_record[name] = float(value)
         history.append(epoch_record)
         epoch_bar.set_postfix(train_loss=train_loss, val_loss=val_loss)
@@ -1090,7 +1314,7 @@ def main() -> None:
 
     save_checkpoint(
         run_dir / "final_ckpt",
-        epoch=history[-1]["epoch"],
+        epoch=int(history[-1]["epoch"]),
         state=training_state,
         train_loss=train_loss,
         val_loss=history[-1]["val_loss"],

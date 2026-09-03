@@ -5,11 +5,42 @@ import json
 import subprocess
 from pathlib import Path
 from time import perf_counter
+from typing import NotRequired, TypedDict, cast
 
 from carbs.carbs import CARBS
-from carbs.utils import CARBSParams, LinearSpace, LogSpace, ObservationInParam, Param
+from carbs.utils import (
+    CARBSParams,
+    LinearSpace,
+    LogSpace,
+    ObservationInParam,
+    Param,
+    ParamDictType,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+class TrialResult(TypedDict):
+    success: bool
+    run_dir: str
+    runtime_seconds: float
+    run_name: NotRequired[str]
+    stdout: NotRequired[str]
+    stderr: NotRequired[str]
+    best_val_loss: NotRequired[float]
+
+
+class TrialRecord(TypedDict):
+    trial_idx: int
+    suggestion: ParamDictType
+    result: TrialResult
+
+
+def _required_result_number(result: TrialResult, key: str) -> float:
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"trial result {key!r} must be numeric")
+    return float(value)
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,12 +102,12 @@ def build_carbs(
 
 
 def run_trial(
-    suggestion: dict[str, float | int],
+    suggestion: ParamDictType,
     dataset: str,
     sources: str,
     output_root: str,
     trial_idx: int,
-) -> dict[str, object]:
+) -> TrialResult:
     run_name = f"carbs_jax_trial_{trial_idx:03d}"
     run_dir = REPO_ROOT / output_root / run_name
     command = [
@@ -131,7 +162,7 @@ def run_trial(
         }
 
     with open(run_dir / "summary.json", "r", encoding="utf-8") as handle:
-        summary = json.load(handle)
+        summary = cast(TrialResult, json.load(handle))
     summary["success"] = True
     return summary
 
@@ -147,7 +178,7 @@ def main() -> None:
         max_suggestion_cost=args.max_suggestion_cost,
     )
 
-    trial_records: list[dict[str, object]] = []
+    trial_records: list[TrialRecord] = []
     for trial_idx in range(args.trials):
         suggestion = carbs.suggest().suggestion
         result = run_trial(
@@ -169,8 +200,8 @@ def main() -> None:
             carbs.observe(
                 ObservationInParam(
                     input=suggestion,
-                    output=float(result["best_val_loss"]),
-                    cost=float(result["runtime_seconds"]),
+                    output=_required_result_number(result, "best_val_loss"),
+                    cost=result["runtime_seconds"],
                 )
             )
         else:
@@ -178,7 +209,7 @@ def main() -> None:
                 ObservationInParam(
                     input=suggestion,
                     output=float("inf"),
-                    cost=float(result["runtime_seconds"]),
+                    cost=result["runtime_seconds"],
                     is_failure=True,
                 )
             )
@@ -186,13 +217,19 @@ def main() -> None:
         with open(output_root / "carbs_history.json", "w", encoding="utf-8") as handle:
             json.dump(trial_records, handle, indent=2)
 
-        best_successes = [record for record in trial_records if record["result"]["success"]]
+        best_successes = [
+            record for record in trial_records if record["result"]["success"]
+        ]
         if best_successes:
             best_record = min(
                 best_successes,
-                key=lambda record: float(record["result"]["best_val_loss"]),
+                key=lambda record: _required_result_number(
+                    record["result"], "best_val_loss"
+                ),
             )
-            with open(output_root / "best_result.json", "w", encoding="utf-8") as handle:
+            with open(
+                output_root / "best_result.json", "w", encoding="utf-8"
+            ) as handle:
                 json.dump(best_record, handle, indent=2)
 
         print(

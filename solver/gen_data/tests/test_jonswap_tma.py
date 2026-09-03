@@ -19,6 +19,7 @@ from solver.gen_data.jonswap_tma import (
     PAPER_SHALLOW_PEAK_MODES,
     JonswapTmaParameters,
     JonswapTmaState,
+    RandomSeaStratum,
     ResolvedBand,
     build_jonswap_tma_initial_condition,
     finite_depth_angular_frequency,
@@ -214,7 +215,7 @@ class JonswapTmaFormulaTest(unittest.TestCase):
 
 class JonswapTmaSupportTest(unittest.TestCase):
     def test_three_declared_strata(self) -> None:
-        examples = {
+        examples: dict[RandomSeaStratum, JonswapTmaParameters] = {
             "shallow": JonswapTmaParameters(0.04, 0.008, 20.0, 3.3, 0.5),
             "finite": JonswapTmaParameters(0.2, 0.016, 9.0, 1.0, 1.0),
             "deep": JonswapTmaParameters(10.0, 0.016, 9.0, 5.0, 0.0),
@@ -233,11 +234,12 @@ class JonswapTmaSupportTest(unittest.TestCase):
                 )
 
     def test_global_peak_steepness_boundary_is_closed(self) -> None:
-        for stratum, template in {
+        templates: dict[RandomSeaStratum, JonswapTmaParameters] = {
             "shallow": JonswapTmaParameters(0.05, 0.008, 20.0, 3.3, 0.5),
             "finite": JonswapTmaParameters(0.5, 0.02, 8.0, 3.3, 0.5),
             "deep": JonswapTmaParameters(10.0, 0.02, 8.0, 3.3, 0.5),
-        }.items():
+        }
+        for stratum, template in templates.items():
             boundary_height = (
                 2.0 * PAPER_PEAK_STEEPNESS_MAXIMUM / template.peak_wavenumber
             )

@@ -12,7 +12,9 @@ import numpy as np
 
 TANAKA_DTYPE_NAME = os.environ.get("DNO_TANAKA_DTYPE", "float64").strip().lower()
 if TANAKA_DTYPE_NAME not in {"float32", "float64"}:
-    raise ValueError(f"Unsupported DNO_TANAKA_DTYPE={TANAKA_DTYPE_NAME!r}; expected 'float32' or 'float64'.")
+    raise ValueError(
+        f"Unsupported DNO_TANAKA_DTYPE={TANAKA_DTYPE_NAME!r}; expected 'float32' or 'float64'."
+    )
 
 jax.config.update("jax_enable_x64", TANAKA_DTYPE_NAME == "float64")
 import jax.numpy as jnp  # noqa: E402
@@ -30,6 +32,29 @@ DEFAULT_QC_UPPER = 1.0 - 1.0e-12
 DEFAULT_OUTER_ITERATIONS = 48
 AMPLITUDE_RELATIVE_TOLERANCE = 1.0e-6
 AMPLITUDE_ABSOLUTE_TOLERANCE = 1.0e-14
+_TanakaIterationPayload = tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+]
+_TanakaBatchCoreResult = tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+]
 
 
 def validate_solved_amplitudes(
@@ -225,16 +250,20 @@ def _phi_from_gamma(gamma: jnp.ndarray, params: ModifiedTanakaParams) -> jnp.nda
     return alpha * gamma + gamma**transform_power
 
 
-def _jacobian_from_gamma(gamma: jnp.ndarray, params: ModifiedTanakaParams) -> jnp.ndarray:
+def _jacobian_from_gamma(
+    gamma: jnp.ndarray, params: ModifiedTanakaParams
+) -> jnp.ndarray:
     alpha, transform_power, _ = _effective_grid_params(params)
     return alpha + transform_power * gamma ** (transform_power - 1)
 
 
-def _build_phi_grid(params: ModifiedTanakaParams) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def _build_phi_grid(
+    params: ModifiedTanakaParams,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     alpha, transform_power, s_max = _effective_grid_params(params)
     s_pos = jnp.linspace(0.0, s_max, params.collocation_points)
     s_full = jnp.concatenate((-s_pos[:0:-1], s_pos))
-    phi = alpha * s_full + s_full ** transform_power
+    phi = alpha * s_full + s_full**transform_power
     jacobian = alpha + transform_power * s_full ** (transform_power - 1)
     gamma_weights = _trapz_weights(s_full)
     positive = jnp.arange(params.collocation_points - 1, phi.shape[0])
@@ -275,7 +304,11 @@ def _lagrange_interp_uniform(
         for m in range(stencil_size):
             if m == k:
                 continue
-            weight_k = weight_k * (x_eval[:, 0] - x_nodes[:, m]) / (x_nodes[:, k] - x_nodes[:, m])
+            weight_k = (
+                weight_k
+                * (x_eval[:, 0] - x_nodes[:, m])
+                / (x_nodes[:, k] - x_nodes[:, m])
+            )
         weights = weights.at[:, k].set(weight_k)
     return jnp.sum(weights * y_nodes, axis=-1)
 
@@ -287,7 +320,9 @@ def _strip_hilbert_transform(
     params: ModifiedTanakaParams,
 ) -> jnp.ndarray:
     gamma_refined = _refine_uniform_grid(gamma, params.quadrature_substeps)
-    tau_refined = _lagrange_interp_uniform(gamma, tau, gamma_refined, params.interpolation_degree)
+    tau_refined = _lagrange_interp_uniform(
+        gamma, tau, gamma_refined, params.interpolation_degree
+    )
     phi_refined = _phi_from_gamma(gamma_refined, params)
     jacobian_refined = _jacobian_from_gamma(gamma_refined, params)
     phi_weights_refined = jacobian_refined * _trapz_weights(gamma_refined)
@@ -295,7 +330,9 @@ def _strip_hilbert_transform(
     delta = phi_refined[None, :] - phi[:, None]
     denom = 2.0 * jnp.sinh(0.5 * jnp.pi * delta)
     tau_phi_refined = _gradient_last_axis(tau_refined, phi_refined)
-    tau_phi_at_nodes = _lagrange_interp_uniform(gamma_refined, tau_phi_refined, gamma, params.interpolation_degree)
+    tau_phi_at_nodes = _lagrange_interp_uniform(
+        gamma_refined, tau_phi_refined, gamma, params.interpolation_degree
+    )
 
     kernel = jnp.where(delta != 0.0, 1.0 / denom, 0.0)
     regularized = (tau_refined[..., None, :] - tau[..., :, None]) * kernel
@@ -310,27 +347,35 @@ def _integrate_sin_theta(
     params: ModifiedTanakaParams,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     gamma_refined = _refine_uniform_grid(gamma_pos, params.quadrature_substeps)
-    theta_refined = _lagrange_interp_uniform(gamma_pos, theta_pos, gamma_refined, params.interpolation_degree)
+    theta_refined = _lagrange_interp_uniform(
+        gamma_pos, theta_pos, gamma_refined, params.interpolation_degree
+    )
     jacobian_refined = _jacobian_from_gamma(gamma_refined, params)
-    cumulative = _cumulative_trapezoid(jnp.sin(theta_refined) * jacobian_refined, gamma_refined)
+    cumulative = _cumulative_trapezoid(
+        jnp.sin(theta_refined) * jacobian_refined, gamma_refined
+    )
     sample_step = max(1, params.quadrature_substeps)
     cumulative_nodes = cumulative[..., ::sample_step]
     return cumulative[..., -1], cumulative_nodes
 
 
-def _initial_tau(phi: jnp.ndarray, qc: float, tau_seed: jnp.ndarray | None = None) -> jnp.ndarray:
-    qc = jnp.asarray(qc, dtype=phi.dtype)
-    qc_column = qc[..., None]
+def _initial_tau(
+    phi: jnp.ndarray,
+    qc: float | jax.Array,
+    tau_seed: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    qc_array = jnp.asarray(qc, dtype=phi.dtype)
+    qc_column = qc_array[..., None]
     if tau_seed is not None:
         q_seed = jnp.exp(tau_seed)
         q_seed_center = q_seed[..., phi.shape[0] // 2]
-        deficit_scale = (1.0 - qc) / jnp.maximum(1.0 - q_seed_center, 1e-12)
+        deficit_scale = (1.0 - qc_array) / jnp.maximum(1.0 - q_seed_center, 1e-12)
         q = 1.0 - deficit_scale[..., None] * (1.0 - q_seed)
         q = jnp.clip(q, 1e-12, None)
         return jnp.log(q)
 
     width = 2.0
-    q = 1.0 - (1.0 - qc_column) * jnp.exp(-(phi / width) ** 2)
+    q = 1.0 - (1.0 - qc_column) * jnp.exp(-((phi / width) ** 2))
     return jnp.log(q)
 
 
@@ -339,20 +384,20 @@ def _reflect_even(values_pos: jnp.ndarray) -> jnp.ndarray:
 
 
 def _single_qc_iteration(
-    qc: float,
+    qc: float | jax.Array,
     params: ModifiedTanakaParams,
     gamma: jnp.ndarray,
     phi: jnp.ndarray,
     jacobian: jnp.ndarray,
     positive: jnp.ndarray,
     tau_seed: jnp.ndarray | None = None,
-    f2_seed: float | None = None,
+    f2_seed: float | jax.Array | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    qc = jnp.asarray(qc, dtype=phi.dtype)
+    qc_array = jnp.asarray(qc, dtype=phi.dtype)
     gamma_pos = gamma[positive]
-    tau = _initial_tau(phi, qc, tau_seed=tau_seed)
+    tau = _initial_tau(phi, qc_array, tau_seed=tau_seed)
     if f2_seed is None:
-        f2 = jnp.ones_like(qc, dtype=phi.dtype)
+        f2 = jnp.ones_like(qc_array, dtype=phi.dtype)
     else:
         f2 = jnp.asarray(f2_seed, dtype=phi.dtype)
 
@@ -361,12 +406,12 @@ def _single_qc_iteration(
         theta_pos = jnp.take(theta, positive, axis=-1)
 
         integral, cumulative_nodes = _integrate_sin_theta(theta_pos, gamma_pos, params)
-        f2_new = -3.0 * integral / (1.0 - qc**3)
+        f2_new = -3.0 * integral / (1.0 - qc_array**3)
 
-        q3_pos = qc[..., None] ** 3 - (3.0 / f2_new[..., None]) * cumulative_nodes
+        q3_pos = qc_array[..., None] ** 3 - (3.0 / f2_new[..., None]) * cumulative_nodes
         q_pos = jnp.cbrt(jnp.maximum(q3_pos, 1e-12))
         tau = _reflect_even(jnp.log(q_pos))
-        if qc.ndim == 0 and float(jnp.abs(f2_new - f2)) < params.f2_tolerance:
+        if qc_array.ndim == 0 and float(jnp.abs(f2_new - f2)) < params.f2_tolerance:
             f2 = f2_new
             break
         f2 = f2_new
@@ -374,8 +419,8 @@ def _single_qc_iteration(
     theta = _strip_hilbert_transform(tau, gamma, phi, params)
     theta_pos = jnp.take(theta, positive, axis=-1)
     integral, cumulative_nodes = _integrate_sin_theta(theta_pos, gamma_pos, params)
-    f2 = -3.0 * integral / (1.0 - qc**3)
-    q3_pos = qc[..., None] ** 3 - (3.0 / f2[..., None]) * cumulative_nodes
+    f2 = -3.0 * integral / (1.0 - qc_array**3)
+    q3_pos = qc_array[..., None] ** 3 - (3.0 / f2[..., None]) * cumulative_nodes
     q_pos = jnp.cbrt(jnp.maximum(q3_pos, 1e-12))
     q = _reflect_even(q_pos)
     return tau, theta, q, f2
@@ -395,7 +440,9 @@ def _single_qc_iteration_fixed(
     tau = _initial_tau(phi, qc)
     f2 = jnp.ones_like(qc, dtype=phi.dtype)
 
-    def body_fn(_: int, state: tuple[jnp.ndarray, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+    def body_fn(
+        _: int, state: tuple[jnp.ndarray, jnp.ndarray]
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         tau, f2 = state
         theta = _strip_hilbert_transform(tau, gamma, phi, params)
         theta_pos = jnp.take(theta, positive, axis=-1)
@@ -448,7 +495,10 @@ def _amplitude_for_qc(
     jacobian: jnp.ndarray,
     positive: jnp.ndarray,
     seed: ModifiedTanakaSeed | None = None,
-) -> tuple[float, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[
+    jax.Array,
+    _TanakaIterationPayload,
+]:
     tau_seed = None
     f2_seed = None
     if seed is not None:
@@ -476,8 +526,13 @@ def _amplitude_for_qc_batched(
     phi: jnp.ndarray,
     jacobian: jnp.ndarray,
     positive: jnp.ndarray,
-) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
-    tau, theta, q, f2 = _single_qc_iteration_fixed(qc, params, gamma, phi, jacobian, positive)
+) -> tuple[
+    jnp.ndarray,
+    tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+]:
+    tau, theta, q, f2 = _single_qc_iteration_fixed(
+        qc, params, gamma, phi, jacobian, positive
+    )
     x_profile, eta_profile, amplitude = _reconstruct_profile(q, theta, phi, positive)
     return amplitude, (tau, theta, q, f2, x_profile, eta_profile)
 
@@ -489,7 +544,7 @@ def _solve_for_qc(
     jacobian: jnp.ndarray,
     positive: jnp.ndarray,
     seed: ModifiedTanakaSeed | None = None,
-) -> tuple[float, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[float, _TanakaIterationPayload]:
     target = params.amplitude / params.depth
     if seed is None:
         low = params.qc_lower
@@ -498,24 +553,34 @@ def _solve_for_qc(
         low = max(params.qc_lower, seed.qc - 0.08)
         high = min(params.qc_upper, seed.qc + 0.08)
 
-    amp_low, payload_low = _amplitude_for_qc(low, params, gamma, phi, jacobian, positive, seed=seed)
-    amp_high, payload_high = _amplitude_for_qc(high, params, gamma, phi, jacobian, positive, seed=seed)
+    amp_low, payload_low = _amplitude_for_qc(
+        low, params, gamma, phi, jacobian, positive, seed=seed
+    )
+    amp_high, payload_high = _amplitude_for_qc(
+        high, params, gamma, phi, jacobian, positive, seed=seed
+    )
 
     while amp_low < target and low > params.qc_lower:
         high = low
         amp_high, payload_high = amp_low, payload_low
         low = max(params.qc_lower, low - 0.08)
-        amp_low, payload_low = _amplitude_for_qc(low, params, gamma, phi, jacobian, positive, seed=seed)
+        amp_low, payload_low = _amplitude_for_qc(
+            low, params, gamma, phi, jacobian, positive, seed=seed
+        )
 
     while amp_high > target and high < params.qc_upper:
         low = high
         amp_low, payload_low = amp_high, payload_high
         high = min(params.qc_upper, high + 0.08)
-        amp_high, payload_high = _amplitude_for_qc(high, params, gamma, phi, jacobian, positive, seed=seed)
+        amp_high, payload_high = _amplitude_for_qc(
+            high, params, gamma, phi, jacobian, positive, seed=seed
+        )
 
     for _ in range(params.outer_iterations):
         mid = 0.5 * (low + high)
-        amp_mid, payload_mid = _amplitude_for_qc(mid, params, gamma, phi, jacobian, positive, seed=seed)
+        amp_mid, payload_mid = _amplitude_for_qc(
+            mid, params, gamma, phi, jacobian, positive, seed=seed
+        )
         if amp_mid > target:
             low = mid
             amp_low, payload_low = amp_mid, payload_mid
@@ -535,18 +600,20 @@ def _solve_for_qc_batched(
     phi: jnp.ndarray,
     jacobian: jnp.ndarray,
     positive: jnp.ndarray,
-) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+) -> tuple[jax.Array, _TanakaIterationPayload]:
     targets = jnp.asarray(amplitudes, dtype=phi.dtype) / params.depth
     low = jnp.full_like(targets, params.qc_lower)
     high = jnp.full_like(targets, params.qc_upper)
 
     def body_fn(
-        _: int,
+        _iteration: int,
         state: tuple[jnp.ndarray, jnp.ndarray],
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         low, high = state
         mid = 0.5 * (low + high)
-        amp_mid, _ = _amplitude_for_qc_batched(mid, params, gamma, phi, jacobian, positive)
+        amp_mid, _payload = _amplitude_for_qc_batched(
+            mid, params, gamma, phi, jacobian, positive
+        )
         go_lower = amp_mid > targets
         low = jnp.where(go_lower, mid, low)
         high = jnp.where(go_lower, high, mid)
@@ -554,18 +621,34 @@ def _solve_for_qc_batched(
 
     low, high = jax.lax.fori_loop(0, params.outer_iterations, body_fn, (low, high))
 
-    amp_low, payload_low = _amplitude_for_qc_batched(low, params, gamma, phi, jacobian, positive)
-    amp_high, payload_high = _amplitude_for_qc_batched(high, params, gamma, phi, jacobian, positive)
+    amp_low, payload_low = _amplitude_for_qc_batched(
+        low, params, gamma, phi, jacobian, positive
+    )
+    amp_high, payload_high = _amplitude_for_qc_batched(
+        high, params, gamma, phi, jacobian, positive
+    )
     choose_low = jnp.abs(amp_low - targets) < jnp.abs(amp_high - targets)
     qc = jnp.where(choose_low, low, high)
 
-    def select_payload_component(low_component: jnp.ndarray, high_component: jnp.ndarray) -> jnp.ndarray:
+    def select_payload_component(
+        low_component: jnp.ndarray, high_component: jnp.ndarray
+    ) -> jnp.ndarray:
         if low_component.ndim == 1:
             return jnp.where(choose_low, low_component, high_component)
         return jnp.where(choose_low[:, None], low_component, high_component)
 
-    payload = tuple(select_payload_component(low_component, high_component) for low_component, high_component in zip(payload_low, payload_high))
-    return qc, payload
+    payload = tuple(
+        select_payload_component(payload_low[index], payload_high[index])
+        for index in range(6)
+    )
+    return qc, (
+        payload[0],
+        payload[1],
+        payload[2],
+        payload[3],
+        payload[4],
+        payload[5],
+    )
 
 
 def _interpolate_to_periodic_grid(
@@ -576,7 +659,9 @@ def _interpolate_to_periodic_grid(
     dx = params.length / params.nx
     x_periodic = dx * jnp.arange(params.nx)
     x_shifted = x_profile * params.depth + params.center
-    eta_periodic = jnp.interp(x_periodic, x_shifted, eta_profile * params.depth, left=0.0, right=0.0)
+    eta_periodic = jnp.interp(
+        x_periodic, x_shifted, eta_profile * params.depth, left=0.0, right=0.0
+    )
     return x_periodic, eta_periodic
 
 
@@ -590,9 +675,13 @@ def _interpolate_to_periodic_grid_batched(
     x_periodic = dx * jnp.arange(params.nx, dtype=x_profile.dtype)
     centers = jnp.asarray(centers, dtype=x_profile.dtype)
 
-    def interp_one(x_profile_row: jnp.ndarray, eta_profile_row: jnp.ndarray, center: jnp.ndarray) -> jnp.ndarray:
+    def interp_one(
+        x_profile_row: jnp.ndarray, eta_profile_row: jnp.ndarray, center: jnp.ndarray
+    ) -> jnp.ndarray:
         x_shifted = x_profile_row * params.depth + center
-        return jnp.interp(x_periodic, x_shifted, eta_profile_row * params.depth, left=0.0, right=0.0)
+        return jnp.interp(
+            x_periodic, x_shifted, eta_profile_row * params.depth, left=0.0, right=0.0
+        )
 
     eta_periodic = jax.vmap(interp_one)(x_profile, eta_profile, centers)
     return x_periodic, eta_periodic
@@ -600,7 +689,7 @@ def _interpolate_to_periodic_grid_batched(
 
 def _solve_surface_potential(
     eta_periodic: jnp.ndarray,
-    speed: float,
+    speed: float | jax.Array,
     params: ModifiedTanakaParams,
     direction: int | jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -613,7 +702,9 @@ def _solve_surface_potential(
         pad_factor=params.pad_factor,
         filter_fraction=1.0,
     )
-    direction_arr = jnp.asarray(params.direction if direction is None else direction, dtype=eta_periodic.dtype)
+    direction_arr = jnp.asarray(
+        params.direction if direction is None else direction, dtype=eta_periodic.dtype
+    )
     speed_arr = jnp.asarray(speed, dtype=eta_periodic.dtype)
     signed_speed = direction_arr * speed_arr
     signed_speed_column = signed_speed[..., None]
@@ -621,7 +712,9 @@ def _solve_surface_potential(
     eta_x = spectral_dx(eta_periodic, solver_params.k)
     rhs = -signed_speed_column * eta_x
 
-    radical = (1.0 + eta_x**2) * (signed_speed_column**2 - 2.0 * params.gravity * eta_periodic)
+    radical = (1.0 + eta_x**2) * (
+        signed_speed_column**2 - 2.0 * params.gravity * eta_periodic
+    )
     xi_x = signed_speed_column - direction_column * jnp.sqrt(jnp.maximum(radical, 0.0))
 
     inv_ik = jnp.where(solver_params.k != 0.0, 1.0 / (1j * solver_params.k), 0.0)
@@ -637,19 +730,41 @@ def _solve_modified_tanaka_batched_core(
     centers: jnp.ndarray,
     directions: jnp.ndarray,
     params: ModifiedTanakaParams,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> _TanakaBatchCoreResult:
     gamma, phi, jacobian, _, positive = _build_phi_grid(params)
-    qc, payload = _solve_for_qc_batched(amplitudes, params, gamma, phi, jacobian, positive)
+    qc, payload = _solve_for_qc_batched(
+        amplitudes, params, gamma, phi, jacobian, positive
+    )
     tau, theta, q, f2, x_profile, eta_profile = payload
 
-    x_periodic, eta_periodic = _interpolate_to_periodic_grid_batched(x_profile, eta_profile, centers, params)
+    x_periodic, eta_periodic = _interpolate_to_periodic_grid_batched(
+        x_profile, eta_profile, centers, params
+    )
     froude = jnp.sqrt(f2)
     speed = froude * jnp.sqrt(params.gravity * params.depth)
-    xi_periodic, gxi_periodic = _solve_surface_potential(eta_periodic, speed, params, direction=directions)
-    return qc, froude, speed, tau, x_profile, eta_profile, phi, q, theta, x_periodic, eta_periodic, xi_periodic, gxi_periodic
+    xi_periodic, gxi_periodic = _solve_surface_potential(
+        eta_periodic, speed, params, direction=directions
+    )
+    return (
+        qc,
+        froude,
+        speed,
+        tau,
+        x_profile,
+        eta_profile,
+        phi,
+        q,
+        theta,
+        x_periodic,
+        eta_periodic,
+        xi_periodic,
+        gxi_periodic,
+    )
 
 
-def solve_modified_tanaka(params: ModifiedTanakaParams, seed: ModifiedTanakaSeed | None = None) -> ModifiedTanakaSolution:
+def solve_modified_tanaka(
+    params: ModifiedTanakaParams, seed: ModifiedTanakaSeed | None = None
+) -> ModifiedTanakaSolution:
     if seed is None:
         batched = solve_modified_tanaka_batched(
             params,
@@ -678,9 +793,13 @@ def solve_modified_tanaka(params: ModifiedTanakaParams, seed: ModifiedTanakaSeed
     qc, payload = _solve_for_qc(params, gamma, phi, jacobian, positive, seed=seed)
     tau, theta, q, f2, x_profile, eta_profile = payload
 
-    x_periodic, eta_periodic = _interpolate_to_periodic_grid(x_profile, eta_profile, params)
+    x_periodic, eta_periodic = _interpolate_to_periodic_grid(
+        x_profile, eta_profile, params
+    )
     speed = float(jnp.sqrt(f2) * jnp.sqrt(params.gravity * params.depth))
-    xi_periodic, gxi_periodic = _solve_surface_potential(eta_periodic, speed, params, direction=params.direction)
+    xi_periodic, gxi_periodic = _solve_surface_potential(
+        eta_periodic, speed, params, direction=params.direction
+    )
     validate_solved_amplitudes(
         (eta_profile * params.depth)[None, :],
         jnp.asarray((params.amplitude,), dtype=eta_profile.dtype),
@@ -720,12 +839,28 @@ def solve_modified_tanaka_batched(
         centers = jnp.asarray(centers, dtype=amplitudes.dtype)
 
     if directions is None:
-        directions = jnp.full(amplitudes.shape, template_params.direction, dtype=amplitudes.dtype)
+        directions = jnp.full(
+            amplitudes.shape, template_params.direction, dtype=amplitudes.dtype
+        )
     else:
         directions = jnp.asarray(directions, dtype=amplitudes.dtype)
 
     jit_params = replace(template_params, amplitude=0.0, center=0.0, direction=1)
-    qc, froude, speed, tau, x_profile, eta_profile, phi, q, theta, x_periodic, eta_periodic, xi_periodic, gxi_periodic = _solve_modified_tanaka_batched_core(
+    (
+        qc,
+        froude,
+        speed,
+        tau,
+        x_profile,
+        eta_profile,
+        phi,
+        q,
+        theta,
+        x_periodic,
+        eta_periodic,
+        xi_periodic,
+        gxi_periodic,
+    ) = _solve_modified_tanaka_batched_core(
         amplitudes,
         centers,
         directions,
@@ -763,7 +898,9 @@ def make_tanaka_seed(solution: ModifiedTanakaSolution) -> ModifiedTanakaSeed:
     )
 
 
-def solve_tanaka_branch(amplitudes: list[float] | tuple[float, ...], template_params: ModifiedTanakaParams) -> list[ModifiedTanakaSolution]:
+def solve_tanaka_branch(
+    amplitudes: list[float] | tuple[float, ...], template_params: ModifiedTanakaParams
+) -> list[ModifiedTanakaSolution]:
     seed: ModifiedTanakaSeed | None = None
     branch: list[ModifiedTanakaSolution] = []
     for amplitude in amplitudes:
@@ -775,7 +912,9 @@ def solve_tanaka_branch(amplitudes: list[float] | tuple[float, ...], template_pa
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute a solitary-wave initial condition with the modified Tanaka iteration in JAX.")
+    parser = argparse.ArgumentParser(
+        description="Compute a solitary-wave initial condition with the modified Tanaka iteration in JAX."
+    )
     parser.add_argument("--amplitude", type=float, required=True)
     parser.add_argument("--depth", type=float, default=1.0)
     parser.add_argument("--gravity", type=float, default=1.0)

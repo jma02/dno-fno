@@ -30,6 +30,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -188,7 +189,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     def _fwdbwd_body(params_, x, d_, y):
         def _loss(p):
-            pred = model.apply({"params": p}, x, d_)
+            pred = cast(jax.Array, model.apply({"params": p}, x, d_))
             return loss_fn(pred, y)
 
         loss_v, grads = jax.value_and_grad(_loss)(params_)

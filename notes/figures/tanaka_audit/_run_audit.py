@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,10 +21,7 @@ OUT_DIR = ROOT / "notes" / "figures" / "tanaka_audit"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TRAJS_DIR = (
-    ROOT
-    / "outputs"
-    / "cs_dno_w512b8_l256_v5_2gpu_20260615_141717"
-    / "eval_suite_f64h"
+    ROOT / "outputs" / "cs_dno_w512b8_l256_v5_2gpu_20260615_141717" / "eval_suite_f64h"
 )
 
 # Failing-IC manifest. tag -> {simulation_ids in trajs.npz}, file paths, dataset name.
@@ -101,6 +99,7 @@ def physical_params(eta_t0: np.ndarray, depth: float, x: np.ndarray) -> dict:
     # walk outward from pk_i to find where |eta| < half_amp
     n = eta_t0.size
     abs_eta = np.abs(eta_t0)
+
     # Walk in both directions on circular array
     def walk(start: int, step: int) -> int:
         i = start
@@ -112,6 +111,7 @@ def physical_params(eta_t0: np.ndarray, depth: float, x: np.ndarray) -> dict:
             i = j
             cnt += 1
         return -1
+
     left = walk(pk_i, -1)
     right = walk(pk_i, +1)
     dx = float(x[1] - x[0])
@@ -149,7 +149,9 @@ def physical_params(eta_t0: np.ndarray, depth: float, x: np.ndarray) -> dict:
     }
 
 
-def tanaka_reference_shape(depth: float, target_a_over_h: float, x: np.ndarray) -> np.ndarray | None:
+def tanaka_reference_shape(
+    depth: float, target_a_over_h: float, x: np.ndarray
+) -> tuple[float, float] | None:
     """Return a reference Tanaka-like sech^2 shape with the requested a/h on the same grid.
 
     We don't have a Tanaka solver in scope here — use a sech^2 KdV-like profile
@@ -158,7 +160,7 @@ def tanaka_reference_shape(depth: float, target_a_over_h: float, x: np.ndarray) 
     a = target_a_over_h * depth
     if a <= 0.0 or depth <= 0.0:
         return None
-    kappa = np.sqrt(3.0 * a / (4.0 * depth**3))
+    kappa = float(np.sqrt(3.0 * a / (4.0 * depth**3)))
     # center at the same x as the dataset's IC peak
     return a, kappa  # caller will produce a shifted copy on the requested grid
 
@@ -188,7 +190,9 @@ def plot_ic_physical(case_info: list[dict]) -> None:
         ax.set_ylabel("eta(t=0)")
     axes[1, 0].set_xlabel("x")
     axes[1, 1].set_xlabel("x")
-    fig.suptitle("Failing-Tanaka ICs vs KdV-soliton reference (matched a/h)", fontsize=12)
+    fig.suptitle(
+        "Failing-Tanaka ICs vs KdV-soliton reference (matched a/h)", fontsize=12
+    )
     fig.tight_layout()
     out = OUT_DIR / "ic_profiles.png"
     fig.savefig(out, dpi=120)
@@ -205,7 +209,14 @@ def plot_truth_energy_drift(case_info: list[dict]) -> None:
         # mask NaN
         ax.plot(t, edt, "C0-", lw=1.2, label="truth")
         ax.plot(t, edp, "C3--", lw=1.2, label="pred")
-        ax.axvline(c["nan_t"], color="red", lw=0.8, ls=":", alpha=0.6, label=f"NaN/div @ t={c['nan_t']:.1f}") if c["nan_t"] is not None else None
+        ax.axvline(
+            c["nan_t"],
+            color="red",
+            lw=0.8,
+            ls=":",
+            alpha=0.6,
+            label=f"NaN/div @ t={c['nan_t']:.1f}",
+        ) if c["nan_t"] is not None else None
         ax.set_yscale("symlog", linthresh=1e-8)
         ax.set_title(f"{c['label']}: energy drift vs t", fontsize=10)
         ax.set_xlabel("t")
@@ -244,6 +255,7 @@ def spectral_attribution(c: dict) -> dict:
     low = k_idx < 10
     carrier = (k_idx >= 10) & (k_idx < 30)
     high = k_idx >= 30
+
     def band_norm(hat: np.ndarray, mask: np.ndarray) -> np.ndarray:
         # L2 norm reconstructed from spectrum: 2*sum |hat|^2 for k>0, plus |hat[0]|^2
         # (Parseval for rfft norm=forward: 2 * sum_{k>0} |hat[k]|^2 + |hat[0]|^2 = mean(x^2))
@@ -252,6 +264,7 @@ def spectral_attribution(c: dict) -> dict:
         if mask[0]:
             sq_corrected = sq_corrected + (np.abs(hat[:, 0]) ** 2)
         return np.sqrt(sq_corrected)
+
     err_low = band_norm(hat_err, low)
     err_carr = band_norm(hat_err, carrier)
     err_high = band_norm(hat_err, high)
@@ -420,8 +433,12 @@ def main() -> dict:
             "energy_drift_pred": edp,
             "energy_drift_truth": edt,
             "nan_t": nan_t,
-            "max_truth_drift": float(np.nanmax(np.abs(np.where(np.isfinite(edt), edt, 0.0)))),
-            "max_pred_drift": float(np.nanmax(np.abs(np.where(np.isfinite(edp), edp, 0.0)))),
+            "max_truth_drift": float(
+                np.nanmax(np.abs(np.where(np.isfinite(edt), edt, 0.0)))
+            ),
+            "max_pred_drift": float(
+                np.nanmax(np.abs(np.where(np.isfinite(edp), edp, 0.0)))
+            ),
             "max_rl2": float(np.nanmax(np.where(np.isfinite(rl2), rl2, 0.0))),
             "eta_t0": truth_eta[0],
             "xi_t0": ic_data["xi_t0"],  # used only for ka info
@@ -447,16 +464,18 @@ def main() -> dict:
     for c, sp in zip(case_info, specs):
         # Determine dominant band at end of usable trajectory
         end_i = sp["t_cut"] - 1
-        bands = {
-            "low": sp["err_low"][end_i],
-            "carrier": sp["err_carr"][end_i],
-            "high": sp["err_high"][end_i],
+        bands: dict[str, float] = {
+            "low": float(sp["err_low"][end_i]),
+            "carrier": float(sp["err_carr"][end_i]),
+            "high": float(sp["err_high"][end_i]),
         }
-        dom = max(bands, key=bands.get)
+        dom = max(bands, key=bands.__getitem__)
+
         # Growth ratios per band (end / start)
-        def growth(arr):
-            start_val = max(arr[0], 1e-16)
-            return arr[end_i] / start_val
+        def growth(arr: np.ndarray) -> float:
+            start_val = max(float(arr[0]), 1e-16)
+            return float(arr[end_i]) / start_val
+
         gr = {
             "low": growth(sp["err_low"]),
             "carrier": growth(sp["err_carr"]),

@@ -79,7 +79,11 @@ def _build_stokes_fields(nx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         pad_factor=8,
     )
     jax.block_until_ready(gxi)
-    return tuple(np.asarray(field, dtype=np.float64) for field in (eta, xi, gxi))
+    return (
+        np.asarray(eta, dtype=np.float64),
+        np.asarray(xi, dtype=np.float64),
+        np.asarray(gxi, dtype=np.float64),
+    )
 
 
 class StokesSpatialRefinementSmokeTest(unittest.TestCase):

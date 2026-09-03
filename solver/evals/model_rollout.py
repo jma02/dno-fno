@@ -23,11 +23,11 @@ for _directory in (
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 
-from dno_net_v2 import (  # pyright: ignore[reportMissingImports]  # noqa: E402
+from dno_net_v2 import (  # noqa: E402
     CraigSulemDNO,
     validate_fixed_craig_sulem_config,
 )
-from fno1d import FNO1d  # pyright: ignore[reportMissingImports]  # noqa: E402
+from fno1d import FNO1d  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import myfft, myifft  # noqa: E402
 

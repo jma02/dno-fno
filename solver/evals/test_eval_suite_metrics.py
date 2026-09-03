@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+from typing import cast
 import unittest
 
 import numpy as np
@@ -238,7 +239,11 @@ class MacroSummaryTest(unittest.TestCase):
         self.assertEqual(macro["terminal_eta_failure_rate_tau_0p25_micro"], 0.1)
         self.assertEqual(macro["n_families"], 2)
         self.assertAlmostEqual(
-            macro["rel_l2_eta_median_conditional_finite_tfinal_macro_mean"], 0.2
+            cast(
+                float,
+                macro["rel_l2_eta_median_conditional_finite_tfinal_macro_mean"],
+            ),
+            0.2,
         )
 
     def test_null_metrics_from_empty_cohort_remain_standard_json(self) -> None:

@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from itertools import product
 from pathlib import Path
+from typing import TypedDict
 
 import matplotlib
 
@@ -12,6 +13,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import NDArray
 
 from ..reference_solutions.solitary_wave import DEFAULT_SOLITON_ROOT, load_soliton_file
 from .modified_tanaka import (
@@ -26,6 +28,64 @@ from .modified_tanaka import (
     solve_tanaka_branch,
 )
 import jax.numpy as jnp
+
+
+FloatArray = NDArray[np.float64]
+
+
+class InitialSnapshot(TypedDict):
+    name: str
+    x: FloatArray
+    eta: FloatArray
+    xi: FloatArray
+    gxi: FloatArray
+    amplitude: float
+    center: float
+    nx: int
+    length: float
+
+
+class SolvedComponent(TypedDict):
+    amplitude: float
+    center: float
+    direction: int
+    solution: ModifiedTanakaSolution
+
+
+class ComponentSummary(TypedDict):
+    amplitude: float
+    center: float
+    direction: int
+    qc: float
+    froude: float
+    speed: float
+
+
+class FittedModel(TypedDict):
+    family: str
+    pred_eta: FloatArray
+    pred_xi: FloatArray
+    pred_gxi: FloatArray
+    score: float
+    components: list[ComponentSummary]
+
+
+class SimulationSummary(TypedDict):
+    name: str
+    family: str
+    n_components: int
+    amplitude: float
+    center: float
+    component_amplitudes: list[float]
+    component_centers: list[float]
+    component_directions: list[int]
+    component_qc: list[float]
+    component_froude: list[float]
+    component_speed: list[float]
+    eta_rel_l2: float
+    xi_zero_mean_rel_l2: float
+    gxi_rel_l2: float
+    score: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,11 +129,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_initial_snapshot(path: Path) -> dict[str, np.ndarray | float | str]:
+def _load_initial_snapshot(path: Path) -> InitialSnapshot:
     trajectory = load_soliton_file(path)
-    eta = np.asarray(trajectory["eta"][0], dtype=np.float64)
-    xi = np.asarray(trajectory["xi"][0], dtype=np.float64)
-    gxi = np.asarray(trajectory["gxi"][0], dtype=np.float64)
+    eta = np.asarray(trajectory["eta"], dtype=np.float64)[0]
+    xi = np.asarray(trajectory["xi"], dtype=np.float64)[0]
+    gxi = np.asarray(trajectory["gxi"], dtype=np.float64)[0]
     x = np.asarray(trajectory["x"], dtype=np.float64)
     crest_index = int(np.argmax(eta))
     return {
@@ -107,7 +167,7 @@ def _relative_l2(pred: np.ndarray, truth: np.ndarray, eps: float = 1e-16) -> flo
 
 
 def _objective(
-    snapshot: dict[str, np.ndarray | float | str],
+    snapshot: InitialSnapshot,
     pred_eta: np.ndarray,
     pred_xi: np.ndarray,
     pred_gxi: np.ndarray,
@@ -123,7 +183,7 @@ def _objective(
 
 
 def _build_params(
-    snapshot: dict[str, np.ndarray | float | str],
+    snapshot: InitialSnapshot,
     args: argparse.Namespace,
     amplitude: float,
     center: float,
@@ -190,10 +250,10 @@ def _select_crest_indices(
 
 
 def _assemble_model(
-    snapshot: dict[str, np.ndarray | float | str],
+    snapshot: InitialSnapshot,
     family: str,
-    components: list[dict[str, object]],
-) -> dict[str, object]:
+    components: list[SolvedComponent],
+) -> FittedModel:
     pred_eta = np.sum(
         [
             np.asarray(component["solution"].eta_periodic, dtype=np.float64)
@@ -222,24 +282,24 @@ def _assemble_model(
     )
 
     score = _objective(snapshot, pred_eta, pred_xi, pred_gxi)
-    return {
-        "family": family,
-        "pred_eta": pred_eta,
-        "pred_xi": pred_xi,
-        "pred_gxi": pred_gxi,
-        "score": float(score),
-        "components": [
-            {
-                "amplitude": float(component["amplitude"]),
-                "center": float(component["center"]),
-                "direction": int(component["direction"]),
-                "qc": float(component["solution"].qc),
-                "froude": float(component["solution"].froude),
-                "speed": float(component["solution"].speed),
-            }
+    return FittedModel(
+        family=family,
+        pred_eta=pred_eta,
+        pred_xi=pred_xi,
+        pred_gxi=pred_gxi,
+        score=float(score),
+        components=[
+            ComponentSummary(
+                amplitude=component["amplitude"],
+                center=component["center"],
+                direction=component["direction"],
+                qc=float(component["solution"].qc),
+                froude=float(component["solution"].froude),
+                speed=float(component["solution"].speed),
+            )
             for component in components
         ],
-    }
+    )
 
 
 def _components_from_batch(
@@ -247,8 +307,8 @@ def _components_from_batch(
     centers: list[float],
     directions: list[int],
     batch: ModifiedTanakaBatchSolution,
-) -> list[dict[str, object]]:
-    components: list[dict[str, object]] = []
+) -> list[SolvedComponent]:
+    components: list[SolvedComponent] = []
     for idx, (amplitude, center, direction) in enumerate(
         zip(amplitudes, centers, directions)
     ):
@@ -269,19 +329,17 @@ def _components_from_batch(
             gxi_periodic=batch.gxi_periodic[idx],
         )
         components.append(
-            {
-                "amplitude": float(amplitude),
-                "center": float(center),
-                "direction": int(direction),
-                "solution": solution,
-            }
+            SolvedComponent(
+                amplitude=float(amplitude),
+                center=float(center),
+                direction=int(direction),
+                solution=solution,
+            )
         )
     return components
 
 
-def _fit_simulation(
-    snapshot: dict[str, np.ndarray | float | str], args: argparse.Namespace
-) -> dict[str, object]:
+def _fit_simulation(snapshot: InitialSnapshot, args: argparse.Namespace) -> FittedModel:
     family = _infer_family(str(snapshot["name"]))
     eta = np.asarray(snapshot["eta"], dtype=np.float64)
     x = np.asarray(snapshot["x"], dtype=np.float64)
@@ -350,9 +408,7 @@ def _fit_simulation(
     return min(models, key=lambda model: model["score"])
 
 
-def _make_summary(
-    snapshot: dict[str, np.ndarray | float | str], model: dict[str, object]
-) -> dict[str, object]:
+def _make_summary(snapshot: InitialSnapshot, model: FittedModel) -> SimulationSummary:
     eta_true = np.asarray(snapshot["eta"], dtype=np.float64)
     xi_true = np.asarray(snapshot["xi"], dtype=np.float64)
     gxi_true = np.asarray(snapshot["gxi"], dtype=np.float64)
@@ -364,36 +420,32 @@ def _make_summary(
     xi_true_zero = xi_true - xi_true.mean()
     xi_pred_zero = xi_pred - xi_pred.mean()
 
-    components = list(model["components"])
-    return {
-        "name": str(snapshot["name"]),
-        "family": str(model["family"]),
-        "n_components": len(components),
-        "amplitude": float(snapshot["amplitude"]),
-        "center": float(snapshot["center"]),
-        "component_amplitudes": [
-            float(component["amplitude"]) for component in components
-        ],
-        "component_centers": [float(component["center"]) for component in components],
-        "component_directions": [
-            int(component["direction"]) for component in components
-        ],
-        "component_qc": [float(component["qc"]) for component in components],
-        "component_froude": [float(component["froude"]) for component in components],
-        "component_speed": [float(component["speed"]) for component in components],
-        "eta_rel_l2": _relative_l2(eta_pred, eta_true),
-        "xi_zero_mean_rel_l2": _relative_l2(xi_pred_zero, xi_true_zero),
-        "gxi_rel_l2": _relative_l2(gxi_pred, gxi_true),
-        "score": float(model["score"]),
-    }
+    components = model["components"]
+    return SimulationSummary(
+        name=snapshot["name"],
+        family=model["family"],
+        n_components=len(components),
+        amplitude=snapshot["amplitude"],
+        center=snapshot["center"],
+        component_amplitudes=[component["amplitude"] for component in components],
+        component_centers=[component["center"] for component in components],
+        component_directions=[component["direction"] for component in components],
+        component_qc=[component["qc"] for component in components],
+        component_froude=[component["froude"] for component in components],
+        component_speed=[component["speed"] for component in components],
+        eta_rel_l2=_relative_l2(eta_pred, eta_true),
+        xi_zero_mean_rel_l2=_relative_l2(xi_pred_zero, xi_true_zero),
+        gxi_rel_l2=_relative_l2(gxi_pred, gxi_true),
+        score=model["score"],
+    )
 
 
 def _plot_simulation(
-    snapshot: dict[str, np.ndarray | float | str],
-    model: dict[str, object],
+    snapshot: InitialSnapshot,
+    model: FittedModel,
     png_path: Path,
     grid_mode: str,
-) -> dict[str, object]:
+) -> SimulationSummary:
     x = np.asarray(snapshot["x"], dtype=np.float64)
     eta_true = np.asarray(snapshot["eta"], dtype=np.float64)
     xi_true = np.asarray(snapshot["xi"], dtype=np.float64)
@@ -482,7 +534,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     soliton_root = Path(args.soliton_root).expanduser().resolve()
 
-    summaries: list[dict[str, float | str]] = []
+    summaries: list[SimulationSummary] = []
 
     snapshots = [
         _load_initial_snapshot(_resolve_simulation_path(soliton_root, simulation_name))
@@ -506,12 +558,12 @@ def main() -> None:
                 snapshot,
                 "s",
                 [
-                    {
-                        "amplitude": float(snapshot["amplitude"]),
-                        "center": float(snapshot["center"]),
-                        "direction": args.direction,
-                        "solution": solution,
-                    }
+                    SolvedComponent(
+                        amplitude=snapshot["amplitude"],
+                        center=snapshot["center"],
+                        direction=args.direction,
+                        solution=solution,
+                    )
                 ],
             )
             for snapshot, solution in zip(snapshots, branch)

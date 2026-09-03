@@ -54,11 +54,11 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
         )
 
     def test_finite_stokes_harmonics_vectorize_over_parameter_draws(self) -> None:
-        k0 = 2.0 * np.pi * np.asarray([14.0, 14.0]) / 164.0
-        amplitudes = np.asarray([0.22543466384990768, 0.09589740544385852])
+        k0 = 2.0 * np.pi * jnp.asarray([14.0, 14.0]) / 164.0
+        amplitudes = jnp.asarray([0.22543466384990768, 0.09589740544385852])
         harmonics = finite_depth_eta_harmonics(
             k0=k0,
-            depth=np.ones(2),
+            depth=jnp.ones(2),
             gravity=1.0,
             a0=amplitudes,
         )
@@ -121,8 +121,8 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(upper_bound, dense_height)
 
     def test_finite_stokes_support_depends_only_on_kh_and_ka(self) -> None:
-        wavenumbers = np.asarray([0.6, 1.2], dtype=np.float64)
-        depths = np.asarray([1.0, 0.5], dtype=np.float64)
+        wavenumbers = jnp.asarray([0.6, 1.2], dtype=jnp.float64)
+        depths = jnp.asarray([1.0, 0.5], dtype=jnp.float64)
         amplitudes = 0.05 / wavenumbers
         harmonics = np.asarray(
             finite_depth_eta_harmonics(
@@ -151,10 +151,10 @@ class PaperDatasetAcceptanceSmokeTest(unittest.TestCase):
         )
 
         near_shallow_boundary = finite_depth_stokes_in_ursell_support(
-            k0=np.asarray([0.5, 0.5]),
-            depth=np.ones(2),
+            k0=jnp.asarray([0.5, 0.5]),
+            depth=jnp.ones(2),
             gravity=1.0,
-            a0=np.asarray([0.075, 0.08]),
+            a0=jnp.asarray([0.075, 0.08]),
         )
         np.testing.assert_array_equal(
             np.asarray(near_shallow_boundary),

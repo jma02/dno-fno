@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+from typing import cast
 import unittest
 from unittest import mock
 
@@ -733,7 +734,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
         np.testing.assert_allclose(
             [
-                float(simulation.metrics["realized_terminal_time"])
+                float(cast(float, simulation.metrics["realized_terminal_time"]))
                 for simulation in batch.simulations
             ],
             expected_terminal_times,
@@ -798,7 +799,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
         np.testing.assert_allclose(
             [
-                float(simulation.metrics["realized_terminal_time"])
+                float(cast(float, simulation.metrics["realized_terminal_time"]))
                 for simulation in batch.simulations
             ],
             expected_terminal_times,

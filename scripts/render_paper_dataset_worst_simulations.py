@@ -106,47 +106,6 @@ DEFINITIONS: Final = {
 }
 
 
-def _count_thresholded_sign_changes(
-    differences: np.ndarray,
-    relative_threshold: float,
-) -> np.ndarray:
-    """Count cyclic sign changes after ignoring small differences in each row."""
-
-    row_scales = np.max(np.abs(differences), axis=1, keepdims=True)
-    thresholds = relative_threshold * row_scales
-    signs = np.where(
-        differences > thresholds,
-        1,
-        np.where(differences < -thresholds, -1, 0),
-    ).astype(np.int8)
-    nonzero = signs != 0
-    nonzero_counts = np.count_nonzero(nonzero, axis=1)
-
-    max_nonzero = int(np.max(nonzero_counts))
-    if max_nonzero == 0:
-        return np.zeros(differences.shape[0], dtype=np.int32)
-
-    nonzero_signs = np.zeros(
-        (differences.shape[0], max_nonzero),
-        dtype=np.int8,
-    )
-    order = np.cumsum(nonzero, axis=1) - 1
-    row_ids, column_ids = np.nonzero(nonzero)
-    nonzero_signs[row_ids, order[row_ids, column_ids]] = signs[
-        row_ids,
-        column_ids,
-    ]
-
-    valid_next = np.arange(max_nonzero - 1)[None, :] < (nonzero_counts[:, None] - 1)
-    adjacent_changes = (nonzero_signs[:, 1:] != nonzero_signs[:, :-1]) & valid_next
-    final_indices = np.maximum(nonzero_counts - 1, 0)
-    wrap_changes = (nonzero_counts > 1) & (
-        nonzero_signs[:, 0]
-        != nonzero_signs[np.arange(differences.shape[0]), final_indices]
-    )
-    return adjacent_changes.sum(axis=1).astype(np.int32) + wrap_changes.astype(np.int32)
-
-
 @dataclass(frozen=True)
 class TrajectoryIndex:
     """Location of one accepted trajectory in a dataset shard."""
@@ -224,47 +183,6 @@ class LoadedTrajectory:
     gxi: np.ndarray
     depth: np.ndarray
     time: np.ndarray
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    sources = parser.add_mutually_exclusive_group(required=True)
-    sources.add_argument(
-        "--source",
-        action="append",
-        type=Path,
-        help=(
-            "Completed family/split run root. Repeat for development scans; final "
-            "dataset review should use --combined-summary."
-        ),
-    )
-    sources.add_argument(
-        "--combined-summary",
-        type=Path,
-        help=(
-            "Completed combined-view summary listing the family/split runs it combines."
-        ),
-    )
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--block-rows", type=int, default=256)
-    parser.add_argument("--top-count", type=int, default=6)
-    parser.add_argument(
-        "--require-final-paper-dataset",
-        action="store_true",
-        help=(
-            "Require the exact four-family paper release population. Valid only "
-            "with --combined-summary."
-        ),
-    )
-    args = parser.parse_args()
-    if min(args.workers, args.block_rows, args.top_count) < 1:
-        parser.error("--workers, --block-rows, and --top-count must be positive")
-    if args.require_final_paper_dataset and args.combined_summary is None:
-        parser.error("--require-final-paper-dataset requires --combined-summary")
-    return args
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -631,18 +549,6 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
     )
 
 
-def load_source(root: Path) -> DatasetSource:
-    """Load the only completed dataset summary in a development source root."""
-
-    resolved = root.expanduser().resolve(strict=True)
-    summaries = tuple(resolved.glob("paper_dataset_*_*.summary.json"))
-    if len(summaries) != 1:
-        raise RuntimeError(
-            f"expected one dataset summary in {resolved}, found {len(summaries)}"
-        )
-    return load_source_summary(summaries[0])
-
-
 def _argmax(values: np.ndarray) -> tuple[float, int]:
     index = int(np.argmax(values))
     return float(values[index]), index
@@ -715,10 +621,44 @@ def _audit_shard(
             tiny,
         )
         difference = np.roll(gxi_block, -1, axis=1) - gxi_block
-        thresholded_sign_changes[rows] = _count_thresholded_sign_changes(
-            difference,
-            SIGN_DIFFERENCE_RELATIVE_THRESHOLD,
-        )
+        row_scales = np.max(np.abs(difference), axis=1, keepdims=True)
+        thresholds = SIGN_DIFFERENCE_RELATIVE_THRESHOLD * row_scales
+        signs = np.where(
+            difference > thresholds,
+            1,
+            np.where(difference < -thresholds, -1, 0),
+        ).astype(np.int8)
+        nonzero = signs != 0
+        nonzero_counts = np.count_nonzero(nonzero, axis=1)
+        max_nonzero = int(np.max(nonzero_counts))
+        if max_nonzero == 0:
+            sign_change_counts = np.zeros(difference.shape[0], dtype=np.int32)
+        else:
+            nonzero_signs = np.zeros(
+                (difference.shape[0], max_nonzero),
+                dtype=np.int8,
+            )
+            order = np.cumsum(nonzero, axis=1) - 1
+            row_ids, column_ids = np.nonzero(nonzero)
+            nonzero_signs[row_ids, order[row_ids, column_ids]] = signs[
+                row_ids,
+                column_ids,
+            ]
+            valid_next = np.arange(max_nonzero - 1)[None, :] < (
+                nonzero_counts[:, None] - 1
+            )
+            adjacent_changes = (
+                nonzero_signs[:, 1:] != nonzero_signs[:, :-1]
+            ) & valid_next
+            final_indices = np.maximum(nonzero_counts - 1, 0)
+            wrap_changes = (nonzero_counts > 1) & (
+                nonzero_signs[:, 0]
+                != nonzero_signs[np.arange(difference.shape[0]), final_indices]
+            )
+            sign_change_counts = adjacent_changes.sum(axis=1).astype(
+                np.int32
+            ) + wrap_changes.astype(np.int32)
+        thresholded_sign_changes[rows] = sign_change_counts
         stored_band_quadratic_energy[rows] = (
             0.5
             * dx
@@ -790,13 +730,6 @@ def _audit_task(
     return _audit_shard(*values)
 
 
-def _rank_fraction(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(values, kind="stable")
-    ranks = np.empty(values.size, dtype=np.float64)
-    ranks[order] = np.arange(values.size, dtype=np.float64)
-    return ranks / max(values.size - 1, 1)
-
-
 def _descending_indices(values: np.ndarray, count: int) -> tuple[int, ...]:
     return tuple(
         map(
@@ -810,66 +743,12 @@ def _simulation_key(simulation: SimulationMetrics) -> tuple[int, int]:
     return simulation.source_index, simulation.accepted_index
 
 
-def _load_selected(
-    sources: tuple[DatasetSource, ...],
-    simulations: Sequence[SimulationMetrics],
-) -> dict[tuple[int, int], LoadedTrajectory]:
-    by_shard: dict[tuple[int, int], list[SimulationMetrics]] = {}
-    for simulation in simulations:
-        by_shard.setdefault(
-            (simulation.source_index, simulation.shard_index), []
-        ).append(simulation)
-
-    loaded: dict[tuple[int, int], LoadedTrajectory] = {}
-    for (source_index, shard_index), selected in sorted(by_shard.items()):
-        source = sources[source_index]
-        with np.load(source.shard_paths[shard_index], allow_pickle=False) as archive:
-            arrays = {
-                name: np.asarray(archive[name])
-                for name in (*FIELD_NAMES, "depth", "time")
-            }
-        for simulation in selected:
-            rows = slice(
-                simulation.first_shard_row,
-                simulation.first_shard_row + simulation.row_count,
-            )
-            loaded[_simulation_key(simulation)] = LoadedTrajectory(
-                eta=np.asarray(arrays["eta"][rows], dtype=np.float64),
-                xi=np.asarray(arrays["xi"][rows], dtype=np.float64),
-                gxi=np.asarray(arrays["gxi"][rows], dtype=np.float64),
-                depth=np.asarray(arrays["depth"][rows], dtype=np.float64),
-                time=np.asarray(arrays["time"][rows], dtype=np.float64),
-            )
-    return loaded
-
-
-def _frame_roles(
-    trajectory: LoadedTrajectory,
-    worst_frame: int,
-) -> tuple[tuple[int, str], ...]:
-    roles: dict[int, list[str]] = {}
-    for frame, role in (
-        (0, "initial"),
-        (worst_frame, "worst"),
-        (trajectory.time.size - 1, "terminal"),
-    ):
-        roles.setdefault(frame, []).append(role)
-    return tuple((frame, "/".join(value)) for frame, value in sorted(roles.items()))
-
-
 def _line_style(role: str) -> tuple[str, str, float]:
     if "worst" in role:
         return "#d97706", "-", 1.45
     if "terminal" in role:
         return "#2563eb", "--", 1.15
     return "#64748b", ":", 1.05
-
-
-def _normalized_spectrum(field: np.ndarray) -> np.ndarray:
-    amplitude = np.abs(np.fft.rfft(field - float(np.mean(field))))
-    upper = min(DELIVERED_MODE + 1, amplitude.size)
-    scale = float(np.max(amplitude[1:upper])) if upper > 1 else 0.0
-    return amplitude / scale if scale > 0.0 else amplitude
 
 
 def _plot_simulations(
@@ -893,7 +772,16 @@ def _plot_simulations(
         trajectory = trajectories[_simulation_key(simulation)]
         x = np.linspace(0.0, 2.0 * np.pi, trajectory.eta.shape[1], endpoint=False)
         fields = (trajectory.eta, trajectory.xi, trajectory.gxi)
-        frame_roles = _frame_roles(trajectory, worst_frame)
+        roles: dict[int, list[str]] = {}
+        for frame, role in (
+            (0, "initial"),
+            (worst_frame, "worst"),
+            (trajectory.time.size - 1, "terminal"),
+        ):
+            roles.setdefault(frame, []).append(role)
+        frame_roles = tuple(
+            (frame, "/".join(value)) for frame, value in sorted(roles.items())
+        )
         for column, (field, field_title) in enumerate(zip(fields, FIELD_TITLES)):
             axis = axes[row, column]
             for frame, role in frame_roles:
@@ -927,7 +815,11 @@ def _plot_simulations(
         spectrum_axis = axes[row, 3]
         for frame, role in frame_roles:
             color, style, width = _line_style(role)
-            spectrum = _normalized_spectrum(trajectory.gxi[frame])
+            field = trajectory.gxi[frame]
+            amplitude = np.abs(np.fft.rfft(field - float(np.mean(field))))
+            upper = min(DELIVERED_MODE + 1, amplitude.size)
+            scale = float(np.max(amplitude[1:upper])) if upper > 1 else 0.0
+            spectrum = amplitude / scale if scale > 0.0 else amplitude
             modes = np.arange(min(DELIVERED_MODE + 1, spectrum.size))
             spectrum_axis.semilogy(
                 modes,
@@ -1154,380 +1046,65 @@ def _quantiles(values: np.ndarray) -> dict[str, float]:
     }
 
 
-def _simulation_record(
-    simulation: SimulationMetrics,
-    source: DatasetSource,
-    combined_rank: float,
-) -> dict[str, Any]:
-    return {
-        **asdict(simulation),
-        "source_root": str(source.root),
-        "combined_empirical_rank": combined_rank,
-    }
-
-
-def _family_rankings(
-    simulations: tuple[SimulationMetrics, ...],
-    top_count: int,
-) -> tuple[
-    dict[str, tuple[int, ...]],
-    np.ndarray,
-    dict[str, np.ndarray],
-    tuple[int, ...],
-]:
-    combined_values = {
-        "eta_slope": np.asarray(
-            [simulation.maximum_eta_slope for simulation in simulations],
-            dtype=np.float64,
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--source",
+        action="append",
+        type=Path,
+        help=(
+            "Completed family/split run root. Repeat for development scans; final "
+            "dataset review should use --combined-summary."
         ),
-        "gxi_high_band": np.asarray(
-            [simulation.maximum_gxi_high_band_fraction for simulation in simulations],
-            dtype=np.float64,
-        ),
-        "gxi_sign_changes": np.asarray(
-            [
-                simulation.maximum_thresholded_gxi_sign_changes
-                for simulation in simulations
-            ],
-            dtype=np.float64,
-        ),
-    }
-    rank_fractions = {
-        name: _rank_fraction(value) for name, value in combined_values.items()
-    }
-    combined = np.mean(np.stack(tuple(rank_fractions.values())), axis=0)
-    values = {
-        **combined_values,
-        "stored_band_quadratic_energy_drift": np.asarray(
-            [
-                simulation.maximum_relative_stored_band_quadratic_energy_drift
-                for simulation in simulations
-            ],
-            dtype=np.float64,
-        ),
-    }
-    rankings = {
-        "combined": _descending_indices(combined, top_count),
-        **{
-            name: _descending_indices(value, top_count)
-            for name, value in values.items()
-        },
-    }
-    combined_frames: list[int] = []
-    frame_fields = (
-        "maximum_eta_slope_frame",
-        "maximum_gxi_high_band_fraction_frame",
-        "maximum_thresholded_gxi_sign_changes_frame",
     )
-    rank_names = tuple(combined_values)
-    for index in rankings["combined"]:
-        dominant = int(np.argmax([rank_fractions[name][index] for name in rank_names]))
-        combined_frames.append(int(getattr(simulations[index], frame_fields[dominant])))
-    return rankings, combined, values, tuple(combined_frames)
-
-
-def _render_to_directory(
-    *,
-    args: argparse.Namespace,
-    binding: CombinedSummaryBinding | None,
-    sources: tuple[DatasetSource, ...],
-    output_dir: Path,
-    published_output_dir: Path,
-) -> tuple[int, int, tuple[Path, ...], Path]:
-    """Audit dataset sources and render into one owned directory."""
-
-    tasks = []
-    for source_index, source in enumerate(sources):
-        by_shard: dict[int, list[TrajectoryIndex]] = {}
-        for trajectory in source.trajectories:
-            by_shard.setdefault(trajectory.shard_index, []).append(trajectory)
-        tasks.extend(
-            (
-                source_index,
-                source.family,
-                source.split,
-                shard_index,
-                source.shard_paths[shard_index],
-                tuple(trajectories),
-                args.block_rows,
-            )
-            for shard_index, trajectories in sorted(by_shard.items())
-        )
-
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        simulation_groups = tuple(pool.map(_audit_task, tasks))
-    simulations = tuple(
-        simulation for group in simulation_groups for simulation in group
+    source_group.add_argument(
+        "--combined-summary",
+        type=Path,
+        help=(
+            "Completed combined-view summary listing the family/split runs it combines."
+        ),
     )
-    if len(simulations) != sum(len(source.trajectories) for source in sources):
-        raise RuntimeError("whole-dataset audit lost trajectories")
-    retained_rows = sum(simulation.row_count for simulation in simulations)
-    if binding is not None:
-        validate_scanned_population(
-            binding,
-            source_count=len(sources),
-            accepted_simulations=len(simulations),
-            retained_rows=retained_rows,
-        )
-    if args.require_final_paper_dataset:
-        validate_final_paper_dataset(sources, retained_rows=retained_rows)
-    if any(
-        not (
-            simulation.all_frames_finite
-            and simulation.constant_depth
-            and simulation.ordered_time
-        )
-        or simulation.minimum_water_column <= 0.0
-        for simulation in simulations
-    ):
-        raise RuntimeError("a completed accepted trajectory failed a hard audit")
-
-    by_family = {
-        family: tuple(
-            simulation for simulation in simulations if simulation.family == family
-        )
-        for family in sorted({simulation.family for simulation in simulations})
-    }
-    family_results: dict[str, Any] = {}
-    all_selected: list[SimulationMetrics] = []
-    ranking_data: dict[
-        str, tuple[dict[str, tuple[int, ...]], np.ndarray, tuple[int, ...]]
-    ] = {}
-    for family, family_simulations in by_family.items():
-        rankings, combined, values, combined_frames = _family_rankings(
-            family_simulations,
-            args.top_count,
-        )
-        ranking_data[family] = (rankings, combined, combined_frames)
-        selected_indices = tuple(
-            dict.fromkeys(index for ranking in rankings.values() for index in ranking)
-        )
-        all_selected.extend(family_simulations[index] for index in selected_indices)
-        family_results[family] = {
-            "accepted_simulations": len(family_simulations),
-            "retained_rows": sum(
-                simulation.row_count for simulation in family_simulations
-            ),
-            "splits": {
-                split: sum(
-                    simulation.split == split for simulation in family_simulations
-                )
-                for split in ("train", "validation", "test")
-            },
-            "quantiles": {
-                **{name: _quantiles(value) for name, value in values.items()},
-                "minimum_water_fraction": _quantiles(
-                    np.asarray(
-                        [
-                            simulation.minimum_water_fraction
-                            for simulation in family_simulations
-                        ]
-                    )
-                ),
-            },
-            "rankings": {
-                name: [
-                    _simulation_record(
-                        family_simulations[index],
-                        sources[family_simulations[index].source_index],
-                        float(combined[index]),
-                    )
-                    for index in indices
-                ]
-                for name, indices in rankings.items()
-            },
-        }
-
-    loaded = _load_selected(sources, all_selected)
-    figures: list[Path] = []
-    animations: dict[str, object] = {}
-    overview_simulations: list[SimulationMetrics] = []
-    overview_frames: list[int] = []
-    overview_labels: list[str] = []
-    plot_definitions = {
-        "combined": (
-            "combined diagnostic rank",
-            None,
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--block-rows", type=int, default=256)
+    parser.add_argument("--top-count", type=int, default=6)
+    parser.add_argument(
+        "--require-final-paper-dataset",
+        action="store_true",
+        help=(
+            "Require the exact four-family paper release population. Valid only "
+            "with --combined-summary."
         ),
-        "eta_slope": (
-            r"maximum $|\partial_x\eta|$",
-            "maximum_eta_slope_frame",
-        ),
-        "gxi_high_band": (
-            rf"maximum $G(\eta)\xi$ energy fraction in {HIGH_BAND_START}--{DELIVERED_MODE}",
-            "maximum_gxi_high_band_fraction_frame",
-        ),
-        "gxi_sign_changes": (
-            r"most amplitude-thresholded sign changes of $\Delta_xG(\eta)\xi$",
-            "maximum_thresholded_gxi_sign_changes_frame",
-        ),
-        "stored_band_quadratic_energy_drift": (
-            "maximum relative stored-band quadratic-energy drift",
-            "maximum_relative_stored_band_quadratic_energy_drift_frame",
-        ),
-    }
-
-    for family, family_simulations in by_family.items():
-        rankings, combined, combined_frames = ranking_data[family]
-        family_label = FAMILY_LABELS.get(family, family)
-        for ranking_name, (metric_label, frame_field) in plot_definitions.items():
-            indices = rankings[ranking_name]
-            selected = tuple(family_simulations[index] for index in indices)
-            frames = (
-                combined_frames
-                if frame_field is None
-                else tuple(
-                    int(getattr(simulation, frame_field)) for simulation in selected
-                )
-            )
-            labels = tuple(
-                f"#{rank} {simulation.split}; simulation {simulation.simulation_id}\n"
-                f"{simulation.category}; h={simulation.depth:.4g}\n"
-                f"slope={simulation.maximum_eta_slope:.3g}; "
-                f"high={100.0 * simulation.maximum_gxi_high_band_fraction:.3g}%; "
-                f"signs={simulation.maximum_thresholded_gxi_sign_changes}; "
-                "stored-band dE="
-                f"{simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
-                for rank, simulation in enumerate(selected, start=1)
-            )
-            figures.extend(
-                _plot_simulations(
-                    selected,
-                    loaded,
-                    frames,
-                    labels,
-                    f"{family_label}: accepted simulations with the {metric_label}",
-                    output_dir / f"{family}_worst_{ranking_name}",
-                )
-            )
-            top_simulation = selected[0]
-            gif_path, animation = _render_rank_one_gif(
-                top_simulation,
-                loaded[_simulation_key(top_simulation)],
-                (f"{family_label}: rank-one accepted simulation by the {metric_label}"),
-                output_dir / f"{family}_worst_{ranking_name}.gif",
-            )
-            figures.append(gif_path)
-            animations[gif_path.name] = {
-                "family": family,
-                "ranking": ranking_name,
-                "rank": 1,
-                "source_index": top_simulation.source_index,
-                "accepted_index": top_simulation.accepted_index,
-                "trajectory_index": top_simulation.trajectory_index,
-                "simulation_id": top_simulation.simulation_id,
-                "category": top_simulation.category,
-                "split": top_simulation.split,
-                **animation,
-            }
-
-        top_index = rankings["combined"][0]
-        top_simulation = family_simulations[top_index]
-        overview_simulations.append(top_simulation)
-        overview_frames.append(combined_frames[0])
-        overview_labels.append(
-            f"{family_label}; {top_simulation.split}; "
-            f"simulation {top_simulation.simulation_id}\n"
-            f"{top_simulation.category}; h={top_simulation.depth:.4g}\n"
-            f"slope={top_simulation.maximum_eta_slope:.3g}; "
-            f"high={100.0 * top_simulation.maximum_gxi_high_band_fraction:.3g}%; "
-            f"signs={top_simulation.maximum_thresholded_gxi_sign_changes}; "
-            "stored-band dE="
-            f"{top_simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
-        )
-
-    figures.extend(
-        _plot_simulations(
-            overview_simulations,
-            loaded,
-            overview_frames,
-            overview_labels,
-            "Largest combined diagnostic rank in each completed dataset family",
-            output_dir / "all_families_worst_overview",
-        )
     )
+    args = parser.parse_args()
+    if min(args.workers, args.block_rows, args.top_count) < 1:
+        parser.error("--workers, --block-rows, and --top-count must be positive")
+    if args.require_final_paper_dataset and args.combined_summary is None:
+        parser.error("--require-final-paper-dataset requires --combined-summary")
 
-    record = {
-        "schema": DIAGNOSTIC_SCHEMA,
-        "status": "complete",
-        "interpretation": INTERPRETATION,
-        "dataset": (
-            {
-                "mode": "combined_summary",
-                "combined_summary_path": str(binding.path),
-                "expected_sources": binding.expected_source_count,
-                "expected_accepted_simulations": binding.expected_accepted_simulations,
-                "expected_retained_rows": binding.expected_retained_rows,
-            }
-            if binding is not None
-            else {
-                "mode": "explicit_sources_development_fallback",
-                "combined_summary_path": None,
-            }
-        ),
-        "parameters": {
-            **PARAMETERS,
-            "final_paper_dataset_contract_required": bool(
-                args.require_final_paper_dataset
-            ),
-        },
-        "definitions": dict(DEFINITIONS),
-        "population": {
-            "sources": len(sources),
-            "accepted_simulations": len(simulations),
-            "retained_rows": retained_rows,
-        },
-        "sources": [
-            {
-                "root": str(source.root),
-                "family": source.family,
-                "split": source.split,
-                "accepted_simulations": len(source.trajectories),
-                "retained_rows": sum(
-                    trajectory.row_count for trajectory in source.trajectories
-                ),
-                "summary_path": str(source.summary_path),
-                "manifest_path": str(source.manifest_path),
-                "trajectory_map_path": str(source.map_path),
-            }
-            for source in sources
-        ],
-        "families": family_results,
-        "animations": animations,
-        "artifacts": {
-            path.name: _artifact_record(
-                path,
-                staging_output_dir=output_dir,
-                published_output_dir=published_output_dir,
-            )
-            for path in figures
-        },
-    }
-    summary_path = output_dir / "summary.json"
-    _write_diagnostic_summary(summary_path, record)
-    return len(simulations), retained_rows, tuple(figures), summary_path
-
-
-def main() -> None:
-    """Audit all sources and atomically publish diagnostic-tail figures."""
-
-    args = parse_args()
     binding = (
         load_combined_summary_binding(args.combined_summary)
         if args.combined_summary is not None
         else None
     )
-    sources = (
-        tuple(
+    if binding is not None:
+        sources = tuple(
             load_source_summary(summary_path)
             for summary_path in binding.source_summary_paths
         )
-        if binding is not None
-        else tuple(
-            load_source(source)
-            for source in tuple(args.source if args.source is not None else ())
-        )
-    )
+    else:
+        loaded_sources: list[DatasetSource] = []
+        for source_root in tuple(args.source if args.source is not None else ()):
+            resolved = source_root.expanduser().resolve(strict=True)
+            summaries = tuple(resolved.glob("paper_dataset_*_*.summary.json"))
+            if len(summaries) != 1:
+                raise RuntimeError(
+                    f"expected one dataset summary in {resolved}, "
+                    f"found {len(summaries)}"
+                )
+            loaded_sources.append(load_source_summary(summaries[0]))
+        sources = tuple(loaded_sources)
     retained_rows_from_maps = sum(
         trajectory.row_count for source in sources for trajectory in source.trajectories
     )
@@ -1549,15 +1126,366 @@ def main() -> None:
         staging_output_dir,
         final_output_dir,
     ):
-        accepted_simulations, retained_rows, figures, summary_path = (
-            _render_to_directory(
-                args=args,
-                binding=binding,
-                sources=sources,
-                output_dir=staging_output_dir,
-                published_output_dir=final_output_dir,
+        output_dir = staging_output_dir
+        published_output_dir = final_output_dir
+        tasks = []
+        for source_index, source in enumerate(sources):
+            by_shard: dict[int, list[TrajectoryIndex]] = {}
+            for trajectory in source.trajectories:
+                by_shard.setdefault(trajectory.shard_index, []).append(trajectory)
+            tasks.extend(
+                (
+                    source_index,
+                    source.family,
+                    source.split,
+                    shard_index,
+                    source.shard_paths[shard_index],
+                    tuple(trajectories),
+                    args.block_rows,
+                )
+                for shard_index, trajectories in sorted(by_shard.items())
+            )
+
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            simulation_groups = tuple(pool.map(_audit_task, tasks))
+        simulations = tuple(
+            simulation for group in simulation_groups for simulation in group
+        )
+        if len(simulations) != sum(len(source.trajectories) for source in sources):
+            raise RuntimeError("whole-dataset audit lost trajectories")
+        retained_rows = sum(simulation.row_count for simulation in simulations)
+        if binding is not None:
+            validate_scanned_population(
+                binding,
+                source_count=len(sources),
+                accepted_simulations=len(simulations),
+                retained_rows=retained_rows,
+            )
+        if args.require_final_paper_dataset:
+            validate_final_paper_dataset(sources, retained_rows=retained_rows)
+        if any(
+            not (
+                simulation.all_frames_finite
+                and simulation.constant_depth
+                and simulation.ordered_time
+            )
+            or simulation.minimum_water_column <= 0.0
+            for simulation in simulations
+        ):
+            raise RuntimeError("a completed accepted trajectory failed a hard audit")
+
+        by_family = {
+            family: tuple(
+                simulation for simulation in simulations if simulation.family == family
+            )
+            for family in sorted({simulation.family for simulation in simulations})
+        }
+        family_results: dict[str, Any] = {}
+        all_selected: list[SimulationMetrics] = []
+        ranking_data: dict[
+            str, tuple[dict[str, tuple[int, ...]], np.ndarray, tuple[int, ...]]
+        ] = {}
+        for family, family_simulations in by_family.items():
+            combined_values = {
+                "eta_slope": np.asarray(
+                    [simulation.maximum_eta_slope for simulation in family_simulations],
+                    dtype=np.float64,
+                ),
+                "gxi_high_band": np.asarray(
+                    [
+                        simulation.maximum_gxi_high_band_fraction
+                        for simulation in family_simulations
+                    ],
+                    dtype=np.float64,
+                ),
+                "gxi_sign_changes": np.asarray(
+                    [
+                        simulation.maximum_thresholded_gxi_sign_changes
+                        for simulation in family_simulations
+                    ],
+                    dtype=np.float64,
+                ),
+            }
+            rank_fractions: dict[str, np.ndarray] = {}
+            for name, value in combined_values.items():
+                order = np.argsort(value, kind="stable")
+                ranks = np.empty(value.size, dtype=np.float64)
+                ranks[order] = np.arange(value.size, dtype=np.float64)
+                rank_fractions[name] = ranks / max(value.size - 1, 1)
+            combined = np.mean(np.stack(tuple(rank_fractions.values())), axis=0)
+            values = {
+                **combined_values,
+                "stored_band_quadratic_energy_drift": np.asarray(
+                    [
+                        simulation.maximum_relative_stored_band_quadratic_energy_drift
+                        for simulation in family_simulations
+                    ],
+                    dtype=np.float64,
+                ),
+            }
+            rankings = {
+                "combined": _descending_indices(combined, args.top_count),
+                **{
+                    name: _descending_indices(value, args.top_count)
+                    for name, value in values.items()
+                },
+            }
+            combined_frames: list[int] = []
+            frame_fields = (
+                "maximum_eta_slope_frame",
+                "maximum_gxi_high_band_fraction_frame",
+                "maximum_thresholded_gxi_sign_changes_frame",
+            )
+            rank_names = tuple(combined_values)
+            for index in rankings["combined"]:
+                dominant = int(
+                    np.argmax([rank_fractions[name][index] for name in rank_names])
+                )
+                combined_frames.append(
+                    int(getattr(family_simulations[index], frame_fields[dominant]))
+                )
+            combined_frame_indices = tuple(combined_frames)
+            ranking_data[family] = (rankings, combined, combined_frame_indices)
+            selected_indices = tuple(
+                dict.fromkeys(
+                    index for ranking in rankings.values() for index in ranking
+                )
+            )
+            all_selected.extend(family_simulations[index] for index in selected_indices)
+            family_results[family] = {
+                "accepted_simulations": len(family_simulations),
+                "retained_rows": sum(
+                    simulation.row_count for simulation in family_simulations
+                ),
+                "splits": {
+                    split: sum(
+                        simulation.split == split for simulation in family_simulations
+                    )
+                    for split in ("train", "validation", "test")
+                },
+                "quantiles": {
+                    **{name: _quantiles(value) for name, value in values.items()},
+                    "minimum_water_fraction": _quantiles(
+                        np.asarray(
+                            [
+                                simulation.minimum_water_fraction
+                                for simulation in family_simulations
+                            ]
+                        )
+                    ),
+                },
+                "rankings": {
+                    name: [
+                        {
+                            **asdict(family_simulations[index]),
+                            "source_root": str(
+                                sources[family_simulations[index].source_index].root
+                            ),
+                            "combined_empirical_rank": float(combined[index]),
+                        }
+                        for index in indices
+                    ]
+                    for name, indices in rankings.items()
+                },
+            }
+
+        selected_by_shard: dict[tuple[int, int], list[SimulationMetrics]] = {}
+        for simulation in all_selected:
+            selected_by_shard.setdefault(
+                (simulation.source_index, simulation.shard_index), []
+            ).append(simulation)
+
+        loaded: dict[tuple[int, int], LoadedTrajectory] = {}
+        for (source_index, shard_index), selected in sorted(selected_by_shard.items()):
+            source = sources[source_index]
+            with np.load(
+                source.shard_paths[shard_index], allow_pickle=False
+            ) as archive:
+                arrays = {
+                    name: np.asarray(archive[name])
+                    for name in (*FIELD_NAMES, "depth", "time")
+                }
+            for simulation in selected:
+                rows = slice(
+                    simulation.first_shard_row,
+                    simulation.first_shard_row + simulation.row_count,
+                )
+                loaded[_simulation_key(simulation)] = LoadedTrajectory(
+                    eta=np.asarray(arrays["eta"][rows], dtype=np.float64),
+                    xi=np.asarray(arrays["xi"][rows], dtype=np.float64),
+                    gxi=np.asarray(arrays["gxi"][rows], dtype=np.float64),
+                    depth=np.asarray(arrays["depth"][rows], dtype=np.float64),
+                    time=np.asarray(arrays["time"][rows], dtype=np.float64),
+                )
+        figures: list[Path] = []
+        animations: dict[str, object] = {}
+        overview_simulations: list[SimulationMetrics] = []
+        overview_frames: list[int] = []
+        overview_labels: list[str] = []
+        plot_definitions = {
+            "combined": (
+                "combined diagnostic rank",
+                None,
+            ),
+            "eta_slope": (
+                r"maximum $|\partial_x\eta|$",
+                "maximum_eta_slope_frame",
+            ),
+            "gxi_high_band": (
+                rf"maximum $G(\eta)\xi$ energy fraction in {HIGH_BAND_START}--{DELIVERED_MODE}",
+                "maximum_gxi_high_band_fraction_frame",
+            ),
+            "gxi_sign_changes": (
+                r"most amplitude-thresholded sign changes of $\Delta_xG(\eta)\xi$",
+                "maximum_thresholded_gxi_sign_changes_frame",
+            ),
+            "stored_band_quadratic_energy_drift": (
+                "maximum relative stored-band quadratic-energy drift",
+                "maximum_relative_stored_band_quadratic_energy_drift_frame",
+            ),
+        }
+
+        for family, family_simulations in by_family.items():
+            rankings, combined, combined_frame_indices = ranking_data[family]
+            family_label = FAMILY_LABELS.get(family, family)
+            for ranking_name, (metric_label, frame_field) in plot_definitions.items():
+                indices = rankings[ranking_name]
+                selected = tuple(family_simulations[index] for index in indices)
+                frames = (
+                    combined_frame_indices
+                    if frame_field is None
+                    else tuple(
+                        int(getattr(simulation, frame_field)) for simulation in selected
+                    )
+                )
+                labels = tuple(
+                    f"#{rank} {simulation.split}; simulation {simulation.simulation_id}\n"
+                    f"{simulation.category}; h={simulation.depth:.4g}\n"
+                    f"slope={simulation.maximum_eta_slope:.3g}; "
+                    f"high={100.0 * simulation.maximum_gxi_high_band_fraction:.3g}%; "
+                    f"signs={simulation.maximum_thresholded_gxi_sign_changes}; "
+                    "stored-band dE="
+                    f"{simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
+                    for rank, simulation in enumerate(selected, start=1)
+                )
+                figures.extend(
+                    _plot_simulations(
+                        selected,
+                        loaded,
+                        frames,
+                        labels,
+                        f"{family_label}: accepted simulations with the {metric_label}",
+                        output_dir / f"{family}_worst_{ranking_name}",
+                    )
+                )
+                top_simulation = selected[0]
+                gif_path, animation = _render_rank_one_gif(
+                    top_simulation,
+                    loaded[_simulation_key(top_simulation)],
+                    (
+                        f"{family_label}: rank-one accepted simulation by the {metric_label}"
+                    ),
+                    output_dir / f"{family}_worst_{ranking_name}.gif",
+                )
+                figures.append(gif_path)
+                animations[gif_path.name] = {
+                    "family": family,
+                    "ranking": ranking_name,
+                    "rank": 1,
+                    "source_index": top_simulation.source_index,
+                    "accepted_index": top_simulation.accepted_index,
+                    "trajectory_index": top_simulation.trajectory_index,
+                    "simulation_id": top_simulation.simulation_id,
+                    "category": top_simulation.category,
+                    "split": top_simulation.split,
+                    **animation,
+                }
+
+            top_index = rankings["combined"][0]
+            top_simulation = family_simulations[top_index]
+            overview_simulations.append(top_simulation)
+            overview_frames.append(combined_frame_indices[0])
+            overview_labels.append(
+                f"{family_label}; {top_simulation.split}; "
+                f"simulation {top_simulation.simulation_id}\n"
+                f"{top_simulation.category}; h={top_simulation.depth:.4g}\n"
+                f"slope={top_simulation.maximum_eta_slope:.3g}; "
+                f"high={100.0 * top_simulation.maximum_gxi_high_band_fraction:.3g}%; "
+                f"signs={top_simulation.maximum_thresholded_gxi_sign_changes}; "
+                "stored-band dE="
+                f"{top_simulation.maximum_relative_stored_band_quadratic_energy_drift:.3g}"
+            )
+
+        figures.extend(
+            _plot_simulations(
+                overview_simulations,
+                loaded,
+                overview_frames,
+                overview_labels,
+                "Largest combined diagnostic rank in each completed dataset family",
+                output_dir / "all_families_worst_overview",
             )
         )
+
+        record = {
+            "schema": DIAGNOSTIC_SCHEMA,
+            "status": "complete",
+            "interpretation": INTERPRETATION,
+            "dataset": (
+                {
+                    "mode": "combined_summary",
+                    "combined_summary_path": str(binding.path),
+                    "expected_sources": binding.expected_source_count,
+                    "expected_accepted_simulations": binding.expected_accepted_simulations,
+                    "expected_retained_rows": binding.expected_retained_rows,
+                }
+                if binding is not None
+                else {
+                    "mode": "explicit_sources_development_fallback",
+                    "combined_summary_path": None,
+                }
+            ),
+            "parameters": {
+                **PARAMETERS,
+                "final_paper_dataset_contract_required": bool(
+                    args.require_final_paper_dataset
+                ),
+            },
+            "definitions": dict(DEFINITIONS),
+            "population": {
+                "sources": len(sources),
+                "accepted_simulations": len(simulations),
+                "retained_rows": retained_rows,
+            },
+            "sources": [
+                {
+                    "root": str(source.root),
+                    "family": source.family,
+                    "split": source.split,
+                    "accepted_simulations": len(source.trajectories),
+                    "retained_rows": sum(
+                        trajectory.row_count for trajectory in source.trajectories
+                    ),
+                    "summary_path": str(source.summary_path),
+                    "manifest_path": str(source.manifest_path),
+                    "trajectory_map_path": str(source.map_path),
+                }
+                for source in sources
+            ],
+            "families": family_results,
+            "animations": animations,
+            "artifacts": {
+                path.name: _artifact_record(
+                    path,
+                    staging_output_dir=output_dir,
+                    published_output_dir=published_output_dir,
+                )
+                for path in figures
+            },
+        }
+        summary_path = output_dir / "summary.json"
+        _write_diagnostic_summary(summary_path, record)
+        accepted_simulations = len(simulations)
         figure_relative_paths = tuple(
             path.relative_to(staging_output_dir) for path in figures
         )
@@ -1579,7 +1507,3 @@ def main() -> None:
             indent=2,
         )
     )
-
-
-if __name__ == "__main__":
-    main()
