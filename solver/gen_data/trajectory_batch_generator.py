@@ -20,7 +20,7 @@ from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.dataset_generation import DatasetChunkConfig
 from solver.gen_data.pipeline.trajectory_config import (
     RolloutConfig,
-    TrajectoryExecutionConfig,
+    TrajectoryGenerationConfig,
     TrajectoryFamily,
 )
 from solver.gen_data.pipeline.trajectory_integration import (
@@ -129,13 +129,13 @@ def _fixed_time_grid(
 
 def _floored_time_grid(
     intended: float,
-    execution: TrajectoryExecutionConfig,
+    trajectory_config: TrajectoryGenerationConfig,
     *,
     horizon_name: str,
 ) -> SimulationTimeGrid:
     saved_times = floor_saved_time_grid(
         intended,
-        saved_dt=execution.numerical.saved_dt,
+        saved_dt=trajectory_config.numerical.saved_dt,
         horizon_name=horizon_name,
     )
     return SimulationTimeGrid(
@@ -147,41 +147,41 @@ def _floored_time_grid(
 
 def _jonswap_time_grid(
     sample: JonswapTmaSample,
-    execution: TrajectoryExecutionConfig,
+    trajectory_config: TrajectoryGenerationConfig,
 ) -> SimulationTimeGrid:
     """Return a strictly floored horizon measured in peak periods."""
 
-    count = execution.period_count
+    count = trajectory_config.period_count
     assert count is not None
     parameters = sample.parameters
     angular_frequency = float(
         finite_depth_angular_frequency(
             np.asarray([parameters.peak_wavenumber], dtype=np.float64),
             depth=parameters.depth,
-            gravity=execution.numerical.gravity,
+            gravity=trajectory_config.numerical.gravity,
         )[0]
     )
     return _floored_time_grid(
         count * 2.0 * math.pi / angular_frequency,
-        execution,
+        trajectory_config,
         horizon_name="JONSWAP/TMA",
     )
 
 
 def _benjamin_feir_time_grid(
     sample: BenjaminFeirSample,
-    execution: TrajectoryExecutionConfig,
+    trajectory_config: TrajectoryGenerationConfig,
 ) -> SimulationTimeGrid:
     """Return a strictly floored horizon measured in carrier periods."""
 
-    count = execution.period_count
+    count = trajectory_config.period_count
     assert count is not None
     angular_frequency = math.sqrt(
-        execution.numerical.gravity * sample.carrier_wavenumber
+        trajectory_config.numerical.gravity * sample.carrier_wavenumber
     )
     return _floored_time_grid(
         count * 2.0 * math.pi / angular_frequency,
-        execution,
+        trajectory_config,
         horizon_name="Benjamin--Feir",
     )
 
@@ -218,7 +218,7 @@ def _finalize_outcome(
     *,
     construction_metrics: Mapping[str, JsonScalar] | None = None,
 ) -> SimulationOutcome:
-    """Attach execution metadata to a simulation outcome."""
+    """Attach rollout metadata to a simulation outcome."""
 
     return SimulationOutcome(
         decision=outcome.decision,
@@ -335,21 +335,21 @@ class TrajectoryBatchGenerator:
     """Generate, validate, and commit one rollout-data batch."""
 
     chunk_config: DatasetChunkConfig
-    execution: TrajectoryExecutionConfig
+    trajectory_config: TrajectoryGenerationConfig
     rollout_integrator: BatchIntegrator = integrate_batch
     constructor: TrajectoryConstructor | None = None
     # Subclasses that run the JONSWAP nonlinear-adjustment stage set this True.
     runs_jonswap_adjustment: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
-        expected_family_id = _FAMILY_IDS[self.execution.family]
-        if self.chunk_config.family_name != self.execution.family:
-            raise ValueError("chunk family name differs from trajectory execution")
+        expected_family_id = _FAMILY_IDS[self.trajectory_config.family]
+        if self.chunk_config.family_name != self.trajectory_config.family:
+            raise ValueError("chunk family name differs from trajectory configuration")
         if self.chunk_config.family_id is not expected_family_id:
-            raise ValueError("chunk family ID differs from trajectory execution")
+            raise ValueError("chunk family ID differs from trajectory configuration")
         if (
-            self.execution.family == "jonswap_tma"
-            and self.execution.jonswap_adjustment is not None
+            self.trajectory_config.family == "jonswap_tma"
+            and self.trajectory_config.jonswap_adjustment is not None
             and not self.runs_jonswap_adjustment
         ):
             raise ValueError(
@@ -362,16 +362,16 @@ class TrajectoryBatchGenerator:
         *,
         first_attempt_number: int,
     ) -> SampledSimulations[Any]:
-        execution = self.execution
-        contract = execution.numerical
-        if execution.family == "tanaka":
+        trajectory_config = self.trajectory_config
+        contract = trajectory_config.numerical
+        if trajectory_config.family == "tanaka":
             sampled = sample_tanaka_simulations(
                 parameter_group_ids,
                 dataset_split=self.chunk_config.dataset_split,
                 first_attempt_number=first_attempt_number,
                 contract=contract,
             )
-        elif execution.family == "benjamin_feir":
+        elif trajectory_config.family == "benjamin_feir":
             sampled = sample_benjamin_feir_simulations(
                 parameter_group_ids,
                 dataset_split=self.chunk_config.dataset_split,
@@ -379,13 +379,13 @@ class TrajectoryBatchGenerator:
                 contract=contract,
             )
         else:
-            assert execution.jonswap_quadrature_order is not None
+            assert trajectory_config.jonswap_quadrature_order is not None
             sampled = sample_jonswap_tma_simulations(
                 parameter_group_ids,
                 dataset_split=self.chunk_config.dataset_split,
                 first_attempt_number=first_attempt_number,
                 contract=contract,
-                quadrature_order=execution.jonswap_quadrature_order,
+                quadrature_order=trajectory_config.jonswap_quadrature_order,
             )
         return sampled
 
@@ -393,22 +393,24 @@ class TrajectoryBatchGenerator:
         self,
         sampled: SampledSimulations[Any],
     ) -> tuple[SimulationTimeGrid, ...]:
-        execution = self.execution
+        trajectory_config = self.trajectory_config
         samples = sampled.samples
-        if execution.family == "tanaka":
-            assert execution.fixed_terminal_time is not None
+        if trajectory_config.family == "tanaka":
+            assert trajectory_config.fixed_terminal_time is not None
             grid = _fixed_time_grid(
-                execution.fixed_terminal_time,
-                execution.numerical,
+                trajectory_config.fixed_terminal_time,
+                trajectory_config.numerical,
             )
             return tuple(grid for _ in samples)
-        if execution.family == "benjamin_feir":
+        if trajectory_config.family == "benjamin_feir":
             if not all(isinstance(sample, BenjaminFeirSample) for sample in samples):
                 raise TypeError("Benjamin--Feir sampler returned an unexpected sample")
-            return tuple(_benjamin_feir_time_grid(s, execution) for s in samples)
+            return tuple(
+                _benjamin_feir_time_grid(s, trajectory_config) for s in samples
+            )
         if not all(isinstance(sample, JonswapTmaSample) for sample in samples):
             raise TypeError("JONSWAP/TMA sampler returned an unexpected sample")
-        return tuple(_jonswap_time_grid(s, execution) for s in samples)
+        return tuple(_jonswap_time_grid(s, trajectory_config) for s in samples)
 
     def _construct_initial_states(
         self,
@@ -420,7 +422,7 @@ class TrajectoryBatchGenerator:
             return self.constructor(
                 batch, selected_local_indices=selected_local_indices
             )
-        family = self.execution.family
+        family = self.trajectory_config.family
         if family == "benjamin_feir":
             if selected_local_indices is not None:
                 raise ValueError(
@@ -448,7 +450,7 @@ class TrajectoryBatchGenerator:
         retry on the surviving subset until the constructor succeeds.
         """
 
-        family = self.execution.family
+        family = self.trajectory_config.family
         active_indices = tuple(range(len(batch.sampled.parameter_group_ids)))
         if family == "benjamin_feir":
             initial = self._construct_initial_states(batch, selected_local_indices=None)
@@ -543,9 +545,9 @@ class TrajectoryBatchGenerator:
         if len(time_grids) != initial.eta0.shape[0]:
             raise ValueError(f"{family} requires one time grid per initial condition")
         minimum_stored_frames = {
-            "tanaka": self.execution.frame_selection.tanaka_count,
-            "benjamin_feir": self.execution.frame_selection.benjamin_feir_count,
-            "jonswap_tma": self.execution.frame_selection.jonswap_tma_count,
+            "tanaka": self.trajectory_config.frame_selection.tanaka_count,
+            "benjamin_feir": self.trajectory_config.frame_selection.benjamin_feir_count,
+            "jonswap_tma": self.trajectory_config.frame_selection.jonswap_tma_count,
         }[family]
         if any(grid.saved_times.size < minimum_stored_frames for grid in time_grids):
             raise ValueError(
@@ -556,15 +558,15 @@ class TrajectoryBatchGenerator:
             initial.xi0,
             initial.depths,
             tuple(grid.saved_times for grid in time_grids),
-            config=self.execution.numerical,
+            config=self.trajectory_config.numerical,
             integrator=self.rollout_integrator,
         )
         outcomes = subsample_trajectories(
             simulations,
             initial.depths,
             family=family,
-            length=self.execution.numerical.length,
-            frame_selection=self.execution.frame_selection,
+            length=self.trajectory_config.numerical.length,
+            frame_selection=self.trajectory_config.frame_selection,
         )
         return tuple(
             _finalize_outcome(
@@ -597,7 +599,7 @@ class TrajectoryBatchGenerator:
         batch: PreparedTrajectoryBatch[Any],
         time_grids: tuple[SimulationTimeGrid, ...],
     ) -> tuple[SimulationOutcome, ...]:
-        family = self.execution.family
+        family = self.trajectory_config.family
         valid_indices, initial, rejected = self._construct_surviving_initial_states(
             batch
         )

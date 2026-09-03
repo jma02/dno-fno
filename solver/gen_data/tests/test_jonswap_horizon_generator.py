@@ -34,9 +34,9 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     PAPER_JONSWAP_ADJUSTMENT_CONFIG,
     PAPER_JONSWAP_ROLLOUT_CONFIG,
     RolloutConfig,
-    TrajectoryExecutionConfig,
+    TrajectoryGenerationConfig,
     TrajectoryFrameSelectionConfig,
-    paper_trajectory_execution,
+    paper_trajectory_config,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     IntegratedAdjustmentBatch,
@@ -71,10 +71,10 @@ def _contract() -> RolloutConfig:
     )
 
 
-def _execution(
+def _trajectory_config(
     contract: RolloutConfig | None = None,
-) -> TrajectoryExecutionConfig:
-    return TrajectoryExecutionConfig(
+) -> TrajectoryGenerationConfig:
+    return TrajectoryGenerationConfig(
         family="jonswap_tma",
         numerical=_contract() if contract is None else contract,
         frame_selection=TrajectoryFrameSelectionConfig(
@@ -92,7 +92,7 @@ def _execution(
 
 def _run_spec(
     root: Path,
-    execution: TrajectoryExecutionConfig,
+    trajectory_config: TrajectoryGenerationConfig,
     *,
     outer_size: int,
     solver_size: int,
@@ -278,11 +278,11 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         self.assertEqual(groups, ((1, 3), (2, 0), (4,)))
 
     def test_generator_preserves_base_decisions_rows_and_time_metrics(self) -> None:
-        execution = _execution()
+        trajectory_config = _trajectory_config()
         with tempfile.TemporaryDirectory() as directory:
             spec = _run_spec(
                 Path(directory),
-                execution,
+                trajectory_config,
                 outer_size=5,
                 solver_size=2,
             )
@@ -290,7 +290,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=rollouts,
                 adjustment_rollout_integrator=adjustment_rollouts,
             )
@@ -338,14 +338,16 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         )
 
     def test_mixed_burn_horizons_use_each_simulations_own_endpoint(self) -> None:
-        execution = _execution()
+        trajectory_config = _trajectory_config()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(Path(directory), execution, outer_size=3, solver_size=3)
+            spec = _run_spec(
+                Path(directory), trajectory_config, outer_size=3, solver_size=3
+            )
             production_rollouts = RecordingRolloutIntegrator()
             adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=production_rollouts,
                 adjustment_rollout_integrator=adjustment_rollouts,
             )
@@ -392,15 +394,17 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         self,
     ) -> None:
         contract = PAPER_JONSWAP_ROLLOUT_CONFIG
-        execution = _execution(contract)
+        trajectory_config = _trajectory_config(contract)
         x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
         high_mode = 0.001 * np.cos(600.0 * x)
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
+            spec = _run_spec(
+                Path(directory), trajectory_config, outer_size=1, solver_size=1
+            )
             production_rollouts = RecordingRolloutIntegrator(hamiltonian_drift=0.0)
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=production_rollouts,
                 adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(
                     terminal_addition=high_mode
@@ -424,16 +428,18 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         self.assertTrue(outcomes[0].decision.accepted)
 
     def test_burn_failure_skips_production_and_restores_proposal_order(self) -> None:
-        execution = _execution()
+        trajectory_config = _trajectory_config()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(Path(directory), execution, outer_size=5, solver_size=2)
+            spec = _run_spec(
+                Path(directory), trajectory_config, outer_size=5, solver_size=2
+            )
             production_rollouts = RecordingRolloutIntegrator()
             adjustment_rollouts = RecordingAdjustmentRolloutIntegrator(
                 failing_markers=(0.02, 0.05)
             )
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=production_rollouts,
                 adjustment_rollout_integrator=adjustment_rollouts,
             )
@@ -475,13 +481,15 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
     def test_burn_hamiltonian_is_not_an_acceptance_check_and_production_is_unramped(
         self,
     ) -> None:
-        execution = _execution()
+        trajectory_config = _trajectory_config()
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
+            spec = _run_spec(
+                Path(directory), trajectory_config, outer_size=1, solver_size=1
+            )
             production_rollouts = RecordingRolloutIntegrator()
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=production_rollouts,
                 adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(),
             )
@@ -510,12 +518,14 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             _contract(),
             internal_hamiltonian_drift_threshold=1.0e-3,
         )
-        execution = _execution(contract)
+        trajectory_config = _trajectory_config(contract)
         with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(Path(directory), execution, outer_size=1, solver_size=1)
+            spec = _run_spec(
+                Path(directory), trajectory_config, outer_size=1, solver_size=1
+            )
             generator = HorizonBucketedJonswapBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 rollout_integrator=RecordingRolloutIntegrator(hamiltonian_drift=1.0e-2),
                 adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(),
             )
@@ -543,16 +553,16 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
 
     def test_paper_generator_uses_configured_solver_batch_size(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            execution = paper_trajectory_execution("jonswap_tma")
+            trajectory_config = paper_trajectory_config("jonswap_tma")
             config = _run_spec(
                 Path(directory),
-                execution,
+                trajectory_config,
                 outer_size=1024,
                 solver_size=256,
             )
 
         self.assertEqual(config.solver_batch_size, 256)
-        numerical = execution.numerical
+        numerical = trajectory_config.numerical
         self.assertEqual(
             (
                 numerical.nx,
@@ -567,7 +577,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         )
         generator = HorizonBucketedJonswapBatchGenerator(
             chunk_config=config,
-            execution=execution,
+            trajectory_config=trajectory_config,
         )
         self.assertEqual(generator.chunk_config.solver_batch_size, 256)
 

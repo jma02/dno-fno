@@ -246,11 +246,11 @@ class HorizonBucketedJonswapBatchGenerator(TrajectoryBatchGenerator):
     runs_jonswap_adjustment: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
-        if self.execution.family != "jonswap_tma":
+        if self.trajectory_config.family != "jonswap_tma":
             raise ValueError("horizon bucketing is implemented only for JONSWAP/TMA")
-        if self.execution.jonswap_adjustment is None:
+        if self.trajectory_config.jonswap_adjustment is None:
             raise ValueError(
-                "horizon-bucketed JONSWAP execution requires adjustment settings"
+                "horizon-bucketed JONSWAP generation requires adjustment settings"
             )
         if self.chunk_config.solver_batch_size is None:
             raise ValueError("JONSWAP generation requires solver_batch_size")
@@ -267,12 +267,12 @@ class HorizonBucketedJonswapBatchGenerator(TrajectoryBatchGenerator):
 
         peak_periods = _peak_periods(
             initial,
-            gravity=self.execution.numerical.gravity,
+            gravity=self.trajectory_config.numerical.gravity,
         )
         adjustment_grids = tuple(
             floor_saved_time_grid(
                 adjustment_config.burn_peak_periods * peak_period,
-                saved_dt=self.execution.numerical.saved_dt,
+                saved_dt=self.trajectory_config.numerical.saved_dt,
                 horizon_name="nonlinear-adjustment",
             )
             for peak_period in peak_periods
@@ -286,7 +286,7 @@ class HorizonBucketedJonswapBatchGenerator(TrajectoryBatchGenerator):
                 adjustment_config.ramp_time_peak_periods * peak_periods
             ),
             nonlinear_ramp_order=adjustment_config.ramp_order,
-            config=self.execution.numerical,
+            config=self.trajectory_config.numerical,
             integrator=self.adjustment_rollout_integrator,
         )
         accepted_indices, adjusted_initial = _accepted_adjustment_batch(
@@ -332,8 +332,8 @@ class HorizonBucketedJonswapBatchGenerator(TrajectoryBatchGenerator):
     ) -> tuple[SimulationOutcome, ...]:
         if len(time_grids) != initial.eta0.shape[0]:
             raise ValueError("JONSWAP/TMA requires one time grid per initial condition")
-        minimum_stored = self.execution.frame_selection.jonswap_tma_count
-        adjustment_config = self.execution.jonswap_adjustment
+        minimum_stored = self.trajectory_config.frame_selection.jonswap_tma_count
+        adjustment_config = self.trajectory_config.jonswap_adjustment
         assert adjustment_config is not None
         if any(grid.saved_times.size < minimum_stored for grid in time_grids):
             raise ValueError(

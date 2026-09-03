@@ -54,9 +54,9 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     PAPER_JONSWAP_ROLLOUT_CONFIG,
     PAPER_TANAKA_ROLLOUT_CONFIG,
     RolloutConfig,
-    TrajectoryExecutionConfig,
+    TrajectoryGenerationConfig,
     TrajectoryFrameSelectionConfig,
-    paper_trajectory_execution,
+    paper_trajectory_config,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     IntegratedTrajectoryBatch,
@@ -107,8 +107,8 @@ def _contract() -> RolloutConfig:
     )
 
 
-def _execution(family: str) -> TrajectoryExecutionConfig:
-    return TrajectoryExecutionConfig(
+def _trajectory_config(family: str) -> TrajectoryGenerationConfig:
+    return TrajectoryGenerationConfig(
         family=family,  # type: ignore[arg-type]
         numerical=_contract(),
         frame_selection=TrajectoryFrameSelectionConfig(
@@ -128,7 +128,7 @@ def _execution(family: str) -> TrajectoryExecutionConfig:
 
 def _run_spec(
     root: Path,
-    execution: TrajectoryExecutionConfig,
+    trajectory_config: TrajectoryGenerationConfig,
     *,
     parameter_group_ids: tuple[str, ...],
     targets: tuple[int, ...],
@@ -138,10 +138,10 @@ def _run_spec(
         "tanaka": PhysicalFamilyId.TANAKA,
         "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
         "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
-    }[execution.family]
+    }[trajectory_config.family]
     return DatasetChunkConfig(
         root=root,
-        family_name=execution.family,
+        family_name=trajectory_config.family,
         family_id=family_id,
         dataset_split=DatasetSplit.TEST,
         simulation_targets=dict(zip(parameter_group_ids, targets, strict=True)),
@@ -325,11 +325,11 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_failed_trajectory_retains_sibling_and_replaces_same_parameter_group(
         self,
     ) -> None:
-        execution = _execution("benjamin_feir")
+        trajectory_config = _trajectory_config("benjamin_feir")
         parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(2,),
         )
@@ -337,7 +337,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         rollouts = FastRolloutIntegrator(failed_production_markers=frozenset({1}))
         generator = TrajectoryBatchGenerator(
             chunk_config=spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             constructor=constructor,
             rollout_integrator=rollouts,
         )
@@ -364,11 +364,11 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         )
 
     def test_declared_tanaka_failure_rejects_only_named_simulation(self) -> None:
-        execution = _execution("tanaka")
+        trajectory_config = _trajectory_config("tanaka")
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root / "declared",
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(2,),
         )
@@ -401,7 +401,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
 
         generator = TrajectoryBatchGenerator(
             chunk_config=spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             constructor=declared_constructor,
             rollout_integrator=FastRolloutIntegrator(),
         )
@@ -426,7 +426,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
 
         unexpected_spec = _run_spec(
             self.root / "unexpected",
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
@@ -442,7 +442,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
 
         unexpected = TrajectoryBatchGenerator(
             chunk_config=unexpected_spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             constructor=unexpected_constructor,
             rollout_integrator=FastRolloutIntegrator(),
         )
@@ -456,13 +456,13 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_declared_jonswap_graph_failure_retains_sibling_and_replays(
         self,
     ) -> None:
-        execution = _execution("jonswap_tma")
+        trajectory_config = _trajectory_config("jonswap_tma")
         parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
 
         def run(root: Path) -> tuple[DatasetChunkState, JonswapRejectingConstructor]:
             spec = _run_spec(
                 root,
-                execution,
+                trajectory_config,
                 parameter_group_ids=(parameter_group_id,),
                 targets=(2,),
             )
@@ -471,7 +471,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                 spec,
                 TrajectoryBatchGenerator(
                     chunk_config=spec,
-                    execution=execution,
+                    trajectory_config=trajectory_config,
                     constructor=constructor,
                     rollout_integrator=FastRolloutIntegrator(),
                 ),
@@ -566,11 +566,11 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         self.assertFalse(caught.exception.is_recoverable)
 
     def test_two_round_tanaka_rejections_archive_original_indices(self) -> None:
-        execution = _execution("tanaka")
+        trajectory_config = _trajectory_config("tanaka")
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(3,),
             batch_size=3,
@@ -603,7 +603,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             spec,
             TrajectoryBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 constructor=rejecting_constructor,
                 rollout_integrator=FastRolloutIntegrator(),
             ),
@@ -635,13 +635,13 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_selected_tanaka_adapter_verifies_full_proposal_then_subsets(
         self,
     ) -> None:
-        execution = _execution("tanaka")
+        trajectory_config = _trajectory_config("tanaka")
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         sampled = sample_tanaka_simulations(
             (parameter_group_id, parameter_group_id),
             dataset_split=DatasetSplit.TEST,
             first_attempt_number=19,
-            contract=execution.numerical,
+            contract=trajectory_config.numerical,
         )
         proposed = prepare_trajectory_batch(
             sampled,
@@ -659,7 +659,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             self.assertEqual(len(simulation_specs), 1)
             observed_depths.append(depths.copy())
             zeros = np.zeros(
-                (depths.size, execution.numerical.nx),
+                (depths.size, trajectory_config.numerical.nx),
                 dtype=np.float64,
             )
             return zeros, zeros
@@ -673,7 +673,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                 proposed,
                 selected_local_indices=(1,),
             )
-        self.assertEqual(selected.eta0.shape, (1, execution.numerical.nx))
+        self.assertEqual(selected.eta0.shape, (1, trajectory_config.numerical.nx))
         self.assertEqual(
             selected.specification_records,
             (sampled.specification_records[1],),
@@ -691,21 +691,21 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_jonswap_simulations_use_distinct_per_simulation_peak_period_grids(
         self,
     ) -> None:
-        execution = _execution("jonswap_tma")
+        trajectory_config = _trajectory_config("jonswap_tma")
         parameter_group_ids = (
             JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             JONSWAP_TMA_PARAMETER_GROUP_IDS[18],
         )
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=parameter_group_ids,
             targets=(1, 1),
         )
         rollouts = FastRolloutIntegrator()
         generator = TrajectoryBatchGenerator(
             chunk_config=spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             rollout_integrator=rollouts,
         )
         state = generate_simulations(spec, generator)
@@ -721,16 +721,16 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                 finite_depth_angular_frequency(
                     np.asarray([record["peak_wavenumber"]], dtype=np.float64),
                     depth=float(record["depth"]),
-                    gravity=execution.numerical.gravity,
+                    gravity=trajectory_config.numerical.gravity,
                 )[0]
             )
             intended = 16.0 * 2.0 * math.pi / frequency
             expected_terminal_times.append(
                 math.floor(
-                    (intended + 1.0e-12 * execution.numerical.saved_dt)
-                    / execution.numerical.saved_dt
+                    (intended + 1.0e-12 * trajectory_config.numerical.saved_dt)
+                    / trajectory_config.numerical.saved_dt
                 )
-                * execution.numerical.saved_dt
+                * trajectory_config.numerical.saved_dt
             )
         np.testing.assert_allclose(
             [
@@ -760,21 +760,21 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
 
     def test_benjamin_feir_simulations_use_distinct_carrier_period_grids(self) -> None:
-        execution = _execution("benjamin_feir")
+        trajectory_config = _trajectory_config("benjamin_feir")
         parameter_group_ids = (
             BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
             BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
         )
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=parameter_group_ids,
             targets=(1, 1),
         )
         rollouts = FastRolloutIntegrator()
         generator = TrajectoryBatchGenerator(
             chunk_config=spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             constructor=MarkerConstructor(),
             rollout_integrator=rollouts,
         )
@@ -791,11 +791,11 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             intended = (
                 2.0
                 * math.pi
-                / math.sqrt(execution.numerical.gravity * carrier_wavenumber)
+                / math.sqrt(trajectory_config.numerical.gravity * carrier_wavenumber)
             )
             expected_terminal_times.append(
-                math.floor(intended / execution.numerical.saved_dt)
-                * execution.numerical.saved_dt
+                math.floor(intended / trajectory_config.numerical.saved_dt)
+                * trajectory_config.numerical.saved_dt
             )
         np.testing.assert_allclose(
             [
@@ -819,7 +819,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_jonswap_horizon_is_strictly_floored_at_rounding_boundary(
         self,
     ) -> None:
-        execution = _execution("jonswap_tma")
+        trajectory_config = _trajectory_config("jonswap_tma")
         intended = 7.99999999999996
         angular_frequency = 16.0 * 2.0 * math.pi / intended
         sample = SimpleNamespace(
@@ -832,18 +832,18 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             "solver.gen_data.trajectory_batch_generator.finite_depth_angular_frequency",
             return_value=np.asarray([angular_frequency], dtype=np.float64),
         ):
-            grid = _jonswap_time_grid(sample, execution)  # type: ignore[arg-type]
+            grid = _jonswap_time_grid(sample, trajectory_config)  # type: ignore[arg-type]
         self.assertLessEqual(grid.realized_terminal_time, intended)
         self.assertLess(
             intended - grid.realized_terminal_time,
-            execution.numerical.saved_dt,
+            trajectory_config.numerical.saved_dt,
         )
         self.assertEqual(grid.realized_terminal_time, 7.92)
 
     def test_benjamin_feir_horizon_is_one_hundred_carrier_periods(
         self,
     ) -> None:
-        execution = paper_trajectory_execution("benjamin_feir")
+        trajectory_config = paper_trajectory_config("benjamin_feir")
         samples = tuple(
             sample_benjamin_feir_simulation(
                 parameter_group_id,
@@ -858,36 +858,42 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
         )
         for sample in samples:
-            grid = _benjamin_feir_time_grid(sample, execution)
+            grid = _benjamin_feir_time_grid(sample, trajectory_config)
             carrier_period = (
                 2.0
                 * math.pi
-                / math.sqrt(execution.numerical.gravity * sample.carrier_wavenumber)
+                / math.sqrt(
+                    trajectory_config.numerical.gravity * sample.carrier_wavenumber
+                )
             )
             intended = 100.0 * carrier_period
             self.assertEqual(grid.intended_terminal_time, intended)
             self.assertLessEqual(grid.realized_terminal_time, intended)
             self.assertLess(
                 intended - grid.realized_terminal_time,
-                execution.numerical.saved_dt,
+                trajectory_config.numerical.saved_dt,
             )
 
-        self.assertEqual(execution.period_count, 100)
+        self.assertEqual(trajectory_config.period_count, 100)
         self.assertNotEqual(
             samples[0].carrier_wavenumber,
             samples[1].carrier_wavenumber,
         )
         self.assertNotEqual(
-            _benjamin_feir_time_grid(samples[0], execution).realized_terminal_time,
-            _benjamin_feir_time_grid(samples[1], execution).realized_terminal_time,
+            _benjamin_feir_time_grid(
+                samples[0], trajectory_config
+            ).realized_terminal_time,
+            _benjamin_feir_time_grid(
+                samples[1], trajectory_config
+            ).realized_terminal_time,
         )
 
     def test_interrupted_batch_restarts_without_partial_artifacts(self) -> None:
-        execution = _execution("benjamin_feir")
+        trajectory_config = _trajectory_config("benjamin_feir")
         parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[1]
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
@@ -906,7 +912,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
 
         interrupted = TrajectoryBatchGenerator(
             chunk_config=spec,
-            execution=execution,
+            trajectory_config=trajectory_config,
             constructor=interrupt_constructor,
             rollout_integrator=FastRolloutIntegrator(),
         )
@@ -926,7 +932,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             spec,
             TrajectoryBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
                 constructor=MarkerConstructor(),
                 rollout_integrator=FastRolloutIntegrator(),
             ),
@@ -942,23 +948,23 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         )
 
     def test_paper_numerical_contract_is_family_specific(self) -> None:
-        tanaka_execution = paper_trajectory_execution("tanaka")
-        tanaka = tanaka_execution.numerical
+        tanaka_trajectory_config = paper_trajectory_config("tanaka")
+        tanaka = tanaka_trajectory_config.numerical
         self.assertEqual(tanaka, PAPER_TANAKA_ROLLOUT_CONFIG)
         self.assertEqual(tanaka.maximum_wavenumber, 256.0)
         self.assertEqual(tanaka.target_maximum_wavenumber, 128.0)
         self.assertIsNone(tanaka.internal_hamiltonian_drift_threshold)
-        self.assertEqual(tanaka_execution.fixed_terminal_time, 200.0)
+        self.assertEqual(tanaka_trajectory_config.fixed_terminal_time, 200.0)
 
-        benjamin_feir_execution = paper_trajectory_execution("benjamin_feir")
-        benjamin_feir = benjamin_feir_execution.numerical
+        benjamin_feir_trajectory_config = paper_trajectory_config("benjamin_feir")
+        benjamin_feir = benjamin_feir_trajectory_config.numerical
         self.assertEqual(benjamin_feir, PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG)
         self.assertEqual(benjamin_feir.nx, 1024)
         self.assertEqual(benjamin_feir.maximum_wavenumber, 256.0)
         self.assertEqual(benjamin_feir.target_nx, 1024)
-        self.assertEqual(benjamin_feir_execution.period_count, 100)
+        self.assertEqual(benjamin_feir_trajectory_config.period_count, 100)
 
-        jonswap = paper_trajectory_execution("jonswap_tma")
+        jonswap = paper_trajectory_config("jonswap_tma")
         jonswap_numerical = jonswap.numerical
         self.assertEqual(jonswap_numerical, PAPER_JONSWAP_ROLLOUT_CONFIG)
         self.assertEqual(jonswap_numerical.nx, 2048)
@@ -981,16 +987,14 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(jonswap.jonswap_adjustment)
-        self.assertIsNone(
-            paper_trajectory_execution("benjamin_feir").jonswap_adjustment
-        )
+        self.assertIsNone(paper_trajectory_config("benjamin_feir").jonswap_adjustment)
 
     def test_paper_jonswap_requires_adjustment_generator(self) -> None:
-        execution = paper_trajectory_execution("jonswap_tma")
+        trajectory_config = paper_trajectory_config("jonswap_tma")
         parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[0]
         spec = _run_spec(
             self.root,
-            execution,
+            trajectory_config,
             parameter_group_ids=(parameter_group_id,),
             targets=(1,),
             batch_size=1,
@@ -999,7 +1003,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dedicated generator"):
             TrajectoryBatchGenerator(
                 chunk_config=spec,
-                execution=execution,
+                trajectory_config=trajectory_config,
             )
 
 

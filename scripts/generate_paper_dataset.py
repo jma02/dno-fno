@@ -112,10 +112,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         PhysicalFamilyId,
         balanced_simulation_targets,
     )
-    from solver.gen_data.pipeline.trajectory_config import (
-        TrajectoryExecutionConfig,
-        paper_trajectory_execution,
-    )
+    from solver.gen_data.pipeline.trajectory_config import paper_trajectory_config
     from solver.gen_data.stokes_sampling import STOKES_PARAMETER_GROUP_IDS
     from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
 
@@ -162,37 +159,33 @@ def main(argv: Sequence[str] | None = None) -> None:
             TrajectoryBatchGenerator,
         )
 
-        execution = (
-            PAPER_STATIC_STOKES_CONTRACT
-            if args.family == "stokes"
-            else paper_trajectory_execution(args.family)
-        )
         backend = jax.default_backend()
         if backend != args.platform:
             raise RuntimeError(
                 f"requested {args.platform}, but JAX initialized {backend}"
             )
         total_started = perf_counter()
-        if isinstance(execution, StaticStokesContract):
+        if args.family == "stokes":
+            stokes_contract: StaticStokesContract = PAPER_STATIC_STOKES_CONTRACT
             generator = make_static_stokes_batch_generator(
                 chunk_config=chunk_config,
-                contract=execution,
+                contract=stokes_contract,
                 maximum_ursell_redraws=DEFAULT_MAXIMUM_URSELL_REDRAWS,
             )
-            length = execution.length
-        elif args.family == "jonswap_tma":
-            assert isinstance(execution, TrajectoryExecutionConfig)
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=chunk_config,
-                execution=execution,
-            )
-            length = execution.numerical.length
+            length = stokes_contract.length
         else:
-            generator = TrajectoryBatchGenerator(
-                chunk_config=chunk_config,
-                execution=execution,
-            )
-            length = execution.numerical.length
+            trajectory_config = paper_trajectory_config(args.family)
+            if args.family == "jonswap_tma":
+                generator = HorizonBucketedJonswapBatchGenerator(
+                    chunk_config=chunk_config,
+                    trajectory_config=trajectory_config,
+                )
+            else:
+                generator = TrajectoryBatchGenerator(
+                    chunk_config=chunk_config,
+                    trajectory_config=trajectory_config,
+                )
+            length = trajectory_config.numerical.length
 
         generation_started = perf_counter()
         state = generate_simulations(chunk_config, generator)

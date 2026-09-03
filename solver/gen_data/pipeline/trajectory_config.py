@@ -136,7 +136,7 @@ class JonswapNonlinearAdjustmentConfig:
 
 
 @dataclass(frozen=True)
-class TrajectoryExecutionConfig:
+class TrajectoryGenerationConfig:
     """Numerical, duration, and row-selection settings for one trajectory family."""
 
     family: TrajectoryFamily
@@ -202,26 +202,26 @@ PAPER_JONSWAP_ADJUSTMENT_CONFIG = JonswapNonlinearAdjustmentConfig(
 )
 
 
-def paper_trajectory_execution(
+def paper_trajectory_config(
     family: TrajectoryFamily,
-) -> TrajectoryExecutionConfig:
+) -> TrajectoryGenerationConfig:
     """Return the paper-dataset settings for one trajectory family."""
 
     if family == "tanaka":
-        return TrajectoryExecutionConfig(
+        return TrajectoryGenerationConfig(
             family=family,
             numerical=PAPER_TANAKA_ROLLOUT_CONFIG,
             frame_selection=TrajectoryFrameSelectionConfig(),
             fixed_terminal_time=200.0,
         )
     if family == "benjamin_feir":
-        return TrajectoryExecutionConfig(
+        return TrajectoryGenerationConfig(
             family=family,
             numerical=PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
             frame_selection=TrajectoryFrameSelectionConfig(),
             period_count=100,
         )
-    return TrajectoryExecutionConfig(
+    return TrajectoryGenerationConfig(
         family=family,
         numerical=PAPER_JONSWAP_ROLLOUT_CONFIG,
         frame_selection=TrajectoryFrameSelectionConfig(),
