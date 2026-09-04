@@ -15,9 +15,9 @@ skimmed.
 - [x] `solver/gen_data/jonswap_tma_sampling.py` — JONSWAP/TMA parameter distribution
 - [x] `solver/gen_data/stokes_static_pipeline.py` — static Stokes construction, target, and checks
 - [x] `solver/gen_data/stokes_batch_generator.py` — one function that samples, checks, and saves a Stokes batch
-- [ ] `solver/gen_data/trajectory_batch_generator.py` — functional Tanaka/BF/JONSWAP batch flow
-- [ ] `solver/gen_data/trajectory_family_adapters.py` — sampled parameters to solver-ready initial states
-- [ ] `solver/gen_data/jonswap_horizon_generator.py` — JONSWAP adjustment and memory-bounded grouping by rollout length
+- [x] `solver/gen_data/trajectory_batch_generator.py` — functional Tanaka/BF/JONSWAP batch flow
+- [x] `solver/gen_data/trajectory_family_adapters.py` — sampled parameters to solver-ready initial states
+- [x] `solver/gen_data/jonswap_horizon_generator.py` — JONSWAP adjustment and memory-bounded grouping by rollout length
 - [ ] `solver/gen_data/pipeline/trajectory_integration.py` — batched GL2 integration
 - [ ] `solver/gen_data/pipeline/dno_target.py` — supervised DNO target construction
 - [ ] `solver/gen_data/pipeline/trajectory_rollout.py` — rollout assembly and per-simulation results

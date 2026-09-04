@@ -31,10 +31,10 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_PARAMETER_GROUP_IDS,
     TanakaCrest,
+    sample_tanaka_simulation,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
-    sample_tanaka_simulations,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
     make_default_tanaka_template,
@@ -285,11 +285,10 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             internal_hamiltonian_drift_threshold=None,
         )
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
-        sampled = sample_tanaka_simulations(
-            (parameter_group_id,),
+        sample = sample_tanaka_simulation(
+            parameter_group_id,
             dataset_split=DatasetSplit.TEST,
-            first_attempt_number=53,
-            config=config,
+            attempt_number=53,
         )
         failure = TanakaPotentialRadicandError(
             "negative_or_nonfinite_surface_potential_radicand",
@@ -301,7 +300,7 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             side_effect=failure,
         ):
             with self.assertRaises(TanakaPotentialRadicandError):
-                construct_tanaka_trajectory_batch(sampled)
+                construct_tanaka_trajectory_batch((sample,), config)
 
 
 if __name__ == "__main__":
