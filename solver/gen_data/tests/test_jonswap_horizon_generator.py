@@ -23,10 +23,9 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     RolloutNumerics,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
-    GL2BatchTelemetry,
     IntegratedAdjustmentBatch,
     IntegratedTrajectoryBatch,
-    InternalHealthTelemetry,
+    SolverGridHealth,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     TrajectoryInitialBatch,
@@ -93,31 +92,28 @@ def _production_integrator(
             delivered_xi0 = np.repeat(
                 np.mean(xi0, axis=-1)[:, None], config.target_nx, axis=1
             )
-        step_shape = (
-            (saved_count - 1) * config.substeps_per_saved_frame,
-            batch_size,
-        )
         internal = None
         if hamiltonian_drift is not None:
             hamiltonian = np.ones((saved_count, batch_size), dtype=np.float64)
             hamiltonian[-1] += hamiltonian_drift
-            internal = InternalHealthTelemetry(
-                hamiltonian=hamiltonian,
-                state_finite=np.ones_like(hamiltonian, dtype=np.bool_),
-                dno_output_finite=np.ones_like(hamiltonian, dtype=np.bool_),
-                minimum_water_column=np.ones_like(hamiltonian),
+            internal = SolverGridHealth(
+                hamiltonian,
+                np.ones_like(hamiltonian, dtype=np.bool_),
+                np.ones_like(hamiltonian, dtype=np.bool_),
+                np.ones_like(hamiltonian),
             )
         return IntegratedTrajectoryBatch(
-            eta=np.repeat(delivered_eta0[None], saved_count, axis=0),
-            xi=np.repeat(delivered_xi0[None], saved_count, axis=0),
-            gxi=np.zeros((saved_count, batch_size, config.target_nx), dtype=np.float64),
-            gl2=GL2BatchTelemetry(
-                stage_residual=np.zeros(step_shape, dtype=np.float64),
-                converged=np.ones(step_shape, dtype=np.bool_),
-                stage_finite=np.ones(step_shape, dtype=np.bool_),
-                state_finite=np.ones(step_shape, dtype=np.bool_),
+            np.repeat(delivered_eta0[None], saved_count, axis=0),
+            np.repeat(delivered_xi0[None], saved_count, axis=0),
+            np.zeros((saved_count, batch_size, config.target_nx), dtype=np.float64),
+            np.ones(
+                (
+                    (saved_count - 1) * config.substeps_per_saved_frame,
+                    batch_size,
+                ),
+                dtype=np.bool_,
             ),
-            internal_telemetry=internal,
+            internal,
         )
 
     return integrate, calls, initial_eta, time_grids
@@ -162,23 +158,12 @@ def _adjustment_integrator(
             (saved_times.size - 1) * config.substeps_per_saved_frame,
             batch_size,
         )
-        residual = np.zeros(step_shape, dtype=np.float64)
         converged = np.ones(step_shape, dtype=np.bool_)
         markers = eta0[:, 0]
         for marker in failing_markers:
             failed = np.isclose(markers, marker, rtol=0.0, atol=1.0e-14)
-            residual[:, failed] = 1.0
             converged[:, failed] = False
-        return IntegratedAdjustmentBatch(
-            eta=eta,
-            xi=xi,
-            gl2=GL2BatchTelemetry(
-                stage_residual=residual,
-                converged=converged,
-                stage_finite=np.ones(step_shape, dtype=np.bool_),
-                state_finite=np.ones(step_shape, dtype=np.bool_),
-            ),
-        )
+        return IntegratedAdjustmentBatch(eta, xi, converged)
 
     return integrate, calls
 

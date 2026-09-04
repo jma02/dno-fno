@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TypeAlias
 
 import numpy as np
@@ -38,19 +37,12 @@ def subsample_trajectories(
     for simulation, depth in zip(simulations, depths, strict=True):
         rows = None
         trajectory = simulation.trajectory
-        if simulation.decision.accepted != (trajectory is not None):
-            raise RuntimeError(
-                "trajectory data must exist exactly when a simulation is accepted"
-            )
         if trajectory is not None:
             if family == "tanaka":
                 indices = select_tanaka_times(
                     trajectory.eta,
                     length=length,
-                    keep_samples=200,
-                    alpha=0.5,
-                    sigma_steps=50.0,
-                ).indices
+                )
             else:
                 indices = select_uniform_times(
                     trajectory.times.size,
@@ -64,25 +56,11 @@ def subsample_trajectories(
                 time=trajectory.times[indices],
             )
 
-        residual = float(simulation.maximum_gl2_stage_residual)
-        diagnostics: dict[str, float | None] = {
-            "maximum_stage_residual": residual if math.isfinite(residual) else None,
-        }
-        if simulation.health_metrics is not None:
-            diagnostics.update(
-                minimum_internal_water_column=(
-                    simulation.health_metrics.minimum_water_column
-                ),
-                initial_internal_hamiltonian=simulation.health_metrics.initial_hamiltonian,
-                maximum_internal_hamiltonian_drift=(
-                    simulation.health_metrics.maximum_relative_hamiltonian_drift
-                ),
-            )
         outcomes.append(
             SimulationOutcome(
                 decision=simulation.decision,
                 rows=rows,
-                metrics=diagnostics,
+                metrics={},
             )
         )
     return tuple(outcomes)

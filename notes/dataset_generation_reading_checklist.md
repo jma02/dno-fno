@@ -18,12 +18,12 @@ skimmed.
 - [x] `solver/gen_data/trajectory_batch_generator.py` — functional Tanaka/BF/JONSWAP batch flow
 - [x] `solver/gen_data/trajectory_family_adapters.py` — sampled parameters to solver-ready initial states
 - [x] `solver/gen_data/jonswap_horizon_generator.py` — JONSWAP adjustment and memory-bounded grouping by rollout length
-- [ ] `solver/gen_data/pipeline/trajectory_integration.py` — batched GL2 integration
-- [ ] `solver/gen_data/pipeline/dno_target.py` — supervised DNO target construction
-- [ ] `solver/gen_data/pipeline/trajectory_rollout.py` — rollout assembly and per-simulation results
-- [ ] `solver/gen_data/pipeline/trajectory_checks.py` — numerical acceptance checks
-- [ ] `solver/gen_data/pipeline/time_selection.py` — dense-time index selection
-- [ ] `solver/gen_data/pipeline/trajectory_subsampling.py` — retained training rows per accepted simulation
+- [x] `solver/gen_data/pipeline/trajectory_integration.py` — batched GL2 integration
+- [x] `solver/gen_data/pipeline/dno_target.py` — supervised DNO target construction
+- [x] `solver/gen_data/pipeline/trajectory_rollout.py` — rollout assembly and numerical acceptance checks
+- [x] ~~`solver/gen_data/pipeline/trajectory_checks.py`~~ — checks were inlined into `trajectory_rollout.py`
+- [x] `solver/gen_data/pipeline/time_selection.py` — dense-time index selection
+- [x] `solver/gen_data/pipeline/trajectory_subsampling.py` — retained training rows per accepted simulation
 - [ ] `solver/gen_data/pipeline/writer.py` — conversion of results into a completed batch
 - [ ] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
 - [ ] `scripts/build_paper_dataset_view.py` — combination of all family/split runs

@@ -17,6 +17,7 @@ from solver.gen_data.jonswap_tma import (
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import sample_jonswap_tma_simulation
+from solver.gen_data.jonswap_horizon_generator import integrate_and_subsample_jonswap
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.trajectory_config import (
     RolloutNumerics,
@@ -24,6 +25,7 @@ from solver.gen_data.pipeline.trajectory_config import (
 )
 from solver.gen_data.pipeline.trajectory_rollout import execute_trajectory_batch
 from solver.gen_data.pipeline.trajectory_subsampling import subsample_trajectories
+from solver.gen_data.pipeline.time_selection import floor_saved_time_grid
 from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 from solver.gen_data.pipeline.writer import (
     SimulationOutcome,
@@ -44,30 +46,6 @@ from solver.gen_data.trajectory_family_adapters import (
 FloatArray: TypeAlias = NDArray[np.float64]
 
 
-def floor_saved_time_grid(
-    terminal_time: float,
-    *,
-    saved_dt: float,
-    horizon_name: str,
-) -> FloatArray:
-    """Return the saved-time prefix ending immediately before a horizon."""
-
-    step_count = math.floor(terminal_time / saved_dt)
-    while step_count * saved_dt > terminal_time:
-        step_count -= 1
-    while (step_count + 1) * saved_dt <= terminal_time:
-        step_count += 1
-    if step_count < 1:
-        raise ValueError(f"{horizon_name} horizon is shorter than one saved step")
-    saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
-    realized = float(saved_times[-1])
-    if not (realized <= terminal_time and terminal_time - realized < saved_dt):
-        raise RuntimeError(
-            f"{horizon_name} saved-grid horizon was not strictly floored"
-        )
-    return saved_times
-
-
 def _construction_rejection(
     *,
     nonfinite_state: bool = False,
@@ -82,30 +60,6 @@ def _construction_rejection(
         ),
         rows=None,
         metrics={},
-    )
-
-
-def integrate_and_subsample_trajectories(
-    initial: TrajectoryInitialBatch,
-    time_grids: tuple[FloatArray, ...],
-    *,
-    family: TrajectoryFamily,
-    numerical: RolloutNumerics,
-) -> tuple[SimulationOutcome, ...]:
-    """Integrate constructed initial states and subsample the saved frames."""
-
-    simulations = execute_trajectory_batch(
-        initial.eta0,
-        initial.xi0,
-        initial.depths,
-        time_grids,
-        config=numerical,
-    )
-    return subsample_trajectories(
-        simulations,
-        initial.depths,
-        family=family,
-        length=numerical.length,
     )
 
 
@@ -154,8 +108,8 @@ def generate_trajectory_batch(
         )
         time_grids = (saved_times,) * len(tanaka_samples)
         try:
-            initial: TrajectoryInitialBatch | None = (
-                construct_tanaka_trajectory_batch(tanaka_samples, numerical)
+            initial: TrajectoryInitialBatch | None = construct_tanaka_trajectory_batch(
+                tanaka_samples, numerical
             )
         except TanakaPotentialRadicandError as error:
             if not error.is_recoverable:
@@ -200,9 +154,7 @@ def generate_trajectory_batch(
         )
         time_grids_list: list[FloatArray] = []
         for sample in benjamin_feir_samples:
-            carrier_wavenumber = (
-                2.0 * math.pi * sample.carrier_mode / numerical.length
-            )
+            carrier_wavenumber = 2.0 * math.pi * sample.carrier_mode / numerical.length
             time_grids_list.append(
                 floor_saved_time_grid(
                     100.0
@@ -323,10 +275,6 @@ def generate_trajectory_batch(
         valid_time_grids = tuple(time_grids[index] for index in valid_indices)
         if family == "jonswap_tma":
             assert solver_batch_size is not None and peak_periods is not None
-            from solver.gen_data.jonswap_horizon_generator import (
-                integrate_and_subsample_jonswap,
-            )
-
             produced = integrate_and_subsample_jonswap(
                 initial,
                 valid_time_grids,
@@ -335,11 +283,17 @@ def generate_trajectory_batch(
                 solver_batch_size=solver_batch_size,
             )
         else:
-            produced = integrate_and_subsample_trajectories(
-                initial,
-                valid_time_grids,
+            produced = subsample_trajectories(
+                execute_trajectory_batch(
+                    initial.eta0,
+                    initial.xi0,
+                    initial.depths,
+                    valid_time_grids,
+                    config=numerical,
+                ),
+                initial.depths,
                 family=family,
-                numerical=numerical,
+                length=numerical.length,
             )
     outcomes_by_index = {
         **rejected,

@@ -42,8 +42,13 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     TrajectoryFamily,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
-    GL2BatchTelemetry,
     IntegratedTrajectoryBatch,
+)
+from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
+    execute_trajectory_batch,
+)
+from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
+    subsample_trajectories,
 )
 from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
@@ -53,7 +58,6 @@ from solver.gen_data.pipeline.writer import SimulationOutcome  # noqa: E402
 from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS  # noqa: E402
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
     generate_trajectory_batch,
-    integrate_and_subsample_trajectories,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     JonswapInitialStateDomainError,
@@ -163,15 +167,11 @@ def _fast_integrator(
         markers = np.rint(eta0[:, 0]).astype(int)
         converged[:, np.isin(markers, tuple(failed_markers))] = False
         return IntegratedTrajectoryBatch(
-            eta=eta,
-            xi=xi,
-            gxi=np.zeros((saved_times.size, batch_size, nx), dtype=np.float64),
-            gl2=GL2BatchTelemetry(
-                stage_residual=np.zeros(step_shape, dtype=np.float64),
-                converged=converged,
-                stage_finite=np.ones(step_shape, dtype=np.bool_),
-                state_finite=np.ones(step_shape, dtype=np.bool_),
-            ),
+            eta,
+            xi,
+            np.zeros((saved_times.size, batch_size, nx), dtype=np.float64),
+            converged,
+            None,
         )
 
     return integrate, calls
@@ -186,11 +186,17 @@ def _integrate_jonswap_without_adjustment(
     solver_batch_size: int,
 ) -> tuple[SimulationOutcome, ...]:
     del peak_periods, solver_batch_size
-    return integrate_and_subsample_trajectories(
-        initial,
-        time_grids,
+    return subsample_trajectories(
+        execute_trajectory_batch(
+            initial.eta0,
+            initial.xi0,
+            initial.depths,
+            time_grids,
+            config=numerical,
+        ),
+        initial.depths,
         family="jonswap_tma",
-        numerical=numerical,
+        length=numerical.length,
     )
 
 

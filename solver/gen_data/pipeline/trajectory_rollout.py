@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TypeAlias
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -11,53 +10,43 @@ from numpy.typing import NDArray
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.gen_data.pipeline.trajectory_integration import (
-    GL2BatchTelemetry,
-    IntegratedAdjustmentBatch,
-    IntegratedTrajectoryBatch,
     integrate_adjustment_batch,
     integrate_batch,
-    validate_adjustment_rollout,
-    validate_integrated_batch,
-)
-from solver.gen_data.pipeline.trajectory_checks import (
-    TrajectoryHealthMetrics,
-    evaluate_adjustment_trajectory,
-    evaluate_trajectory,
-    evaluate_trajectory_health,
 )
 
 FloatArray: TypeAlias = NDArray[np.float64]
+BoolArray: TypeAlias = NDArray[np.bool_]
 
 
-@dataclass(frozen=True)
-class TrajectorySamples:
-    """Saved times, states, and DNO targets for one trajectory."""
+# Saved times, states, and DNO targets for one trajectory.
+TrajectorySamples = NamedTuple(
+    "TrajectorySamples",
+    [
+        ("times", FloatArray),
+        ("eta", FloatArray),
+        ("xi", FloatArray),
+        ("gxi", FloatArray),
+    ],
+)
 
-    times: FloatArray
-    eta: FloatArray
-    xi: FloatArray
-    gxi: FloatArray
+# Acceptance decision and retained data for one trajectory.
+TrajectorySimulationResult = NamedTuple(
+    "TrajectorySimulationResult",
+    [
+        ("decision", SimulationCheckResult),
+        ("trajectory", TrajectorySamples | None),
+    ],
+)
 
-
-@dataclass(frozen=True)
-class TrajectorySimulationResult:
-    """Acceptance decision and retained data for one trajectory."""
-
-    maximum_gl2_stage_residual: float
-    decision: SimulationCheckResult
-    trajectory: TrajectorySamples | None
-    health_metrics: TrajectoryHealthMetrics | None = None
-
-
-@dataclass(frozen=True)
-class AdjustmentSimulationResult:
-    """Acceptance decision and final state for one JONSWAP warm-up."""
-
-    maximum_gl2_stage_residual: float
-    decision: SimulationCheckResult
-    terminal_eta: FloatArray | None
-    terminal_xi: FloatArray | None
-    minimum_water_column: float | None
+# Acceptance decision and final state for one JONSWAP warm-up.
+AdjustmentSimulationResult = NamedTuple(
+    "AdjustmentSimulationResult",
+    [
+        ("decision", SimulationCheckResult),
+        ("terminal_eta", FloatArray | None),
+        ("terminal_xi", FloatArray | None),
+    ],
+)
 
 
 def _validate_initial_conditions(
@@ -67,8 +56,6 @@ def _validate_initial_conditions(
     *,
     nx: int,
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
-    """Validate and normalize one batch of initial wave states."""
-
     eta = np.asarray(eta0, dtype=np.float64)
     xi = np.asarray(xi0, dtype=np.float64)
     depth_values = np.asarray(depths, dtype=np.float64)
@@ -81,138 +68,6 @@ def _validate_initial_conditions(
     if not np.isfinite(depth_values).all() or np.any(depth_values <= 0.0):
         raise ValueError("depths must be finite and positive")
     return eta, xi, depth_values
-
-
-def _evaluate_gl2_steps(
-    telemetry: GL2BatchTelemetry,
-    simulation_index: int,
-    config: RolloutNumerics,
-    *,
-    saved_time_count: int,
-) -> tuple[bool, float]:
-    step_count = (saved_time_count - 1) * config.substeps_per_saved_frame
-    residual = np.asarray(
-        telemetry.stage_residual[:step_count, simulation_index],
-        dtype=np.float64,
-    )
-    successful_steps = (
-        np.asarray(telemetry.converged[:step_count, simulation_index], dtype=np.bool_)
-        & np.asarray(
-            telemetry.stage_finite[:step_count, simulation_index], dtype=np.bool_
-        )
-        & np.asarray(
-            telemetry.state_finite[:step_count, simulation_index], dtype=np.bool_
-        )
-        & np.isfinite(residual)
-        & (residual <= config.gl2_residual_tolerance)
-    )
-    maximum_stage_residual = float(np.max(residual)) if residual.size else 0.0
-    return bool(np.all(successful_steps)), maximum_stage_residual
-
-
-def _evaluate_trajectory_simulation(
-    rollout: IntegratedTrajectoryBatch,
-    simulation_index: int,
-    depth: float,
-    saved_times: FloatArray,
-    config: RolloutNumerics,
-) -> TrajectorySimulationResult:
-    gl2_succeeded, maximum_stage_residual = _evaluate_gl2_steps(
-        rollout.gl2,
-        simulation_index,
-        config,
-        saved_time_count=saved_times.size,
-    )
-    count = saved_times.size
-    trajectory = TrajectorySamples(
-        times=np.asarray(saved_times, dtype=np.float64),
-        eta=np.asarray(rollout.eta[:count, simulation_index], dtype=np.float64),
-        xi=np.asarray(rollout.xi[:count, simulation_index], dtype=np.float64),
-        gxi=np.asarray(rollout.gxi[:count, simulation_index], dtype=np.float64),
-    )
-    decision = evaluate_trajectory(
-        trajectory.eta,
-        trajectory.xi,
-        trajectory.gxi,
-        depth=depth,
-        gl2_succeeded=gl2_succeeded,
-    )
-
-    health_metrics = None
-    drift_threshold = config.internal_hamiltonian_drift_threshold
-    if drift_threshold is not None:
-        solver_grid = rollout.internal_telemetry
-        if solver_grid is None:
-            raise RuntimeError("the rollout config requires internal telemetry")
-        health_metrics, health_decision = evaluate_trajectory_health(
-            solver_grid.hamiltonian[:count, simulation_index],
-            solver_grid.state_finite[:count, simulation_index],
-            solver_grid.dno_output_finite[:count, simulation_index],
-            solver_grid.minimum_water_column[:count, simulation_index],
-            hamiltonian_drift_threshold=drift_threshold,
-        )
-        decision = SimulationCheckResult(
-            accepted=decision.accepted and health_decision.accepted,
-            nonfinite_state=(
-                decision.nonfinite_state or health_decision.nonfinite_state
-            ),
-            nonfinite_target=(
-                decision.nonfinite_target or health_decision.nonfinite_target
-            ),
-            nonpositive_water_height=(
-                decision.nonpositive_water_height
-                or health_decision.nonpositive_water_height
-            ),
-            hamiltonian_drift=(
-                decision.hamiltonian_drift or health_decision.hamiltonian_drift
-            ),
-            integration_failure=(
-                decision.integration_failure or health_decision.integration_failure
-            ),
-            outside_support=(
-                decision.outside_support or health_decision.outside_support
-            ),
-            incomplete_trajectory=(
-                decision.incomplete_trajectory or not health_decision.accepted
-            ),
-        )
-
-    return TrajectorySimulationResult(
-        maximum_gl2_stage_residual=maximum_stage_residual,
-        decision=decision,
-        trajectory=trajectory if decision.accepted else None,
-        health_metrics=health_metrics,
-    )
-
-
-def _evaluate_adjustment_simulation(
-    rollout: IntegratedAdjustmentBatch,
-    simulation_index: int,
-    depth: float,
-    saved_time_count: int,
-    config: RolloutNumerics,
-) -> AdjustmentSimulationResult:
-    gl2_succeeded, maximum_stage_residual = _evaluate_gl2_steps(
-        rollout.gl2,
-        simulation_index,
-        config,
-        saved_time_count=saved_time_count,
-    )
-    eta = np.asarray(rollout.eta[:saved_time_count, simulation_index], dtype=np.float64)
-    xi = np.asarray(rollout.xi[:saved_time_count, simulation_index], dtype=np.float64)
-    decision, minimum_water_column = evaluate_adjustment_trajectory(
-        eta,
-        xi,
-        depth=depth,
-        gl2_succeeded=gl2_succeeded,
-    )
-    return AdjustmentSimulationResult(
-        maximum_gl2_stage_residual=maximum_stage_residual,
-        decision=decision,
-        terminal_eta=eta[-1] if decision.accepted else None,
-        terminal_xi=xi[-1] if decision.accepted else None,
-        minimum_water_column=minimum_water_column,
-    )
 
 
 def _prepare_time_grids(
@@ -231,6 +86,16 @@ def _prepare_time_grids(
     return grids, integration_times
 
 
+def _all_gl2_steps_converged(
+    convergence: BoolArray,
+    simulation_index: int,
+    saved_time_count: int,
+    substeps_per_saved_frame: int,
+) -> bool:
+    step_count = (saved_time_count - 1) * substeps_per_saved_frame
+    return bool(np.all(convergence[:step_count, simulation_index]))
+
+
 def execute_trajectory_batch(
     eta0: FloatArray,
     xi0: FloatArray,
@@ -239,7 +104,7 @@ def execute_trajectory_batch(
     *,
     config: RolloutNumerics,
 ) -> tuple[TrajectorySimulationResult, ...]:
-    """Integrate a batch, then evaluate each simulation on its requested time grid."""
+    """Integrate a batch, then evaluate each requested trajectory prefix."""
 
     eta, xi, depth_values = _validate_initial_conditions(
         eta0,
@@ -258,22 +123,104 @@ def execute_trajectory_batch(
         saved_times=integration_times,
         config=config,
     )
-    validate_integrated_batch(
-        rollout,
-        batch_size=eta.shape[0],
-        saved_time_count=integration_times.size,
-        config=config,
+    field_shape = (integration_times.size, eta.shape[0], config.target_nx)
+    if any(
+        np.shape(field) != field_shape
+        for field in (rollout.eta, rollout.xi, rollout.gxi)
+    ):
+        raise ValueError(f"trajectory fields must have shape {field_shape}")
+    step_shape = (
+        (integration_times.size - 1) * config.substeps_per_saved_frame,
+        eta.shape[0],
     )
-    return tuple(
-        _evaluate_trajectory_simulation(
-            rollout,
-            index,
-            float(depth_values[index]),
-            time_grid,
-            config,
+    if np.shape(rollout.gl2_converged) != step_shape:
+        raise ValueError(f"GL2 convergence must have shape {step_shape}")
+    health = rollout.solver_grid_health
+    health_shape = (integration_times.size, eta.shape[0])
+    if config.internal_hamiltonian_drift_threshold is not None and (
+        health is None or any(np.shape(field) != health_shape for field in health)
+    ):
+        raise ValueError(f"solver-grid health fields must have shape {health_shape}")
+
+    results: list[TrajectorySimulationResult] = []
+    for index, saved_times in enumerate(grids):
+        saved_count = saved_times.size
+        trajectory = TrajectorySamples(
+            np.asarray(saved_times, dtype=np.float64),
+            np.asarray(rollout.eta[:saved_count, index], dtype=np.float64),
+            np.asarray(rollout.xi[:saved_count, index], dtype=np.float64),
+            np.asarray(rollout.gxi[:saved_count, index], dtype=np.float64),
         )
-        for index, time_grid in enumerate(grids)
-    )
+        state_finite = bool(
+            np.isfinite(trajectory.eta).all() and np.isfinite(trajectory.xi).all()
+        )
+        target_finite = bool(np.isfinite(trajectory.gxi).all())
+        nonpositive_water_height = (
+            state_finite and float(np.min(depth_values[index] + trajectory.eta)) <= 0.0
+        )
+        integration_failure = not _all_gl2_steps_converged(
+            rollout.gl2_converged,
+            index,
+            saved_count,
+            config.substeps_per_saved_frame,
+        )
+        hamiltonian_drift = False
+
+        if (
+            config.internal_hamiltonian_drift_threshold is not None
+            and health is not None
+        ):
+            internal_state_finite = bool(
+                np.all(health.state_finite[:saved_count, index])
+            )
+            internal_target_finite = bool(
+                np.all(health.dno_output_finite[:saved_count, index])
+            )
+            water_column = health.minimum_water_column[:saved_count, index]
+            internal_nonpositive_water_height = (
+                not np.isfinite(water_column).all()
+                or float(np.min(water_column)) <= 0.0
+            )
+            hamiltonian = health.hamiltonian[:saved_count, index]
+            hamiltonian_drift = not np.isfinite(hamiltonian).all()
+            if not hamiltonian_drift:
+                initial_hamiltonian = float(hamiltonian[0])
+                hamiltonian_drift = bool(
+                    np.max(
+                        np.abs(hamiltonian - initial_hamiltonian)
+                        / max(abs(initial_hamiltonian), np.finfo(np.float64).tiny)
+                    )
+                    > config.internal_hamiltonian_drift_threshold
+                )
+            state_finite = state_finite and internal_state_finite
+            target_finite = target_finite and internal_target_finite
+            nonpositive_water_height = (
+                nonpositive_water_height or internal_nonpositive_water_height
+            )
+
+        accepted = (
+            state_finite
+            and target_finite
+            and not nonpositive_water_height
+            and not hamiltonian_drift
+            and not integration_failure
+        )
+        decision = SimulationCheckResult(
+            accepted=accepted,
+            nonfinite_state=not state_finite,
+            nonfinite_target=not target_finite,
+            nonpositive_water_height=nonpositive_water_height,
+            hamiltonian_drift=hamiltonian_drift,
+            integration_failure=integration_failure,
+            incomplete_trajectory=not accepted,
+        )
+        results.append(
+            TrajectorySimulationResult(
+                decision,
+                trajectory if decision.accepted else None,
+            )
+        )
+    return tuple(results)
 
 
 def execute_adjustment_batch(
@@ -286,7 +233,7 @@ def execute_adjustment_batch(
     nonlinear_ramp_order: int,
     config: RolloutNumerics,
 ) -> tuple[AdjustmentSimulationResult, ...]:
-    """Warm up JONSWAP simulations and return each valid nonlinear endpoint."""
+    """Warm up JONSWAP simulations and return valid nonlinear endpoints."""
 
     eta, xi, depth_values = _validate_initial_conditions(
         eta0,
@@ -315,19 +262,48 @@ def execute_adjustment_batch(
         nonlinear_ramp_times=ramp_times,
         nonlinear_ramp_order=nonlinear_ramp_order,
     )
-    validate_adjustment_rollout(
-        rollout,
-        batch_size=eta.shape[0],
-        saved_time_count=integration_times.size,
-        config=config,
+    field_shape = (integration_times.size, eta.shape[0], config.nx)
+    if any(np.shape(field) != field_shape for field in (rollout.eta, rollout.xi)):
+        raise ValueError(f"adjustment fields must have shape {field_shape}")
+    step_shape = (
+        (integration_times.size - 1) * config.substeps_per_saved_frame,
+        eta.shape[0],
     )
-    return tuple(
-        _evaluate_adjustment_simulation(
-            rollout,
-            index,
-            float(depth_values[index]),
-            time_grid.size,
-            config,
+    if np.shape(rollout.gl2_converged) != step_shape:
+        raise ValueError(f"GL2 convergence must have shape {step_shape}")
+
+    results: list[AdjustmentSimulationResult] = []
+    for index, saved_times in enumerate(grids):
+        saved_count = saved_times.size
+        trajectory_eta = np.asarray(rollout.eta[:saved_count, index], dtype=np.float64)
+        trajectory_xi = np.asarray(rollout.xi[:saved_count, index], dtype=np.float64)
+        state_finite = bool(
+            np.isfinite(trajectory_eta).all() and np.isfinite(trajectory_xi).all()
         )
-        for index, time_grid in enumerate(grids)
-    )
+        nonpositive_water_height = (
+            state_finite and float(np.min(depth_values[index] + trajectory_eta)) <= 0.0
+        )
+        integration_failure = not _all_gl2_steps_converged(
+            rollout.gl2_converged,
+            index,
+            saved_count,
+            config.substeps_per_saved_frame,
+        )
+        accepted = (
+            state_finite and not nonpositive_water_height and not integration_failure
+        )
+        decision = SimulationCheckResult(
+            accepted=accepted,
+            nonfinite_state=not state_finite,
+            nonpositive_water_height=nonpositive_water_height,
+            integration_failure=integration_failure,
+            incomplete_trajectory=not accepted,
+        )
+        results.append(
+            AdjustmentSimulationResult(
+                decision,
+                trajectory_eta[-1] if decision.accepted else None,
+                trajectory_xi[-1] if decision.accepted else None,
+            )
+        )
+    return tuple(results)

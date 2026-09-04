@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import jax
 import jax.numpy as jnp
 
@@ -42,19 +40,6 @@ def compute_dno_target(
 
     if not jax.config.read("jax_enable_x64"):
         raise RuntimeError("the paper DNO target requires JAX float64 mode")
-    if nx <= 0 or nx % 2:
-        raise ValueError("nx must be a positive even integer")
-    if not math.isfinite(length) or length <= 0.0:
-        raise ValueError("length must be finite and positive")
-    if dno_order < 0:
-        raise ValueError("dno_order must be nonnegative")
-    if pad_factor < 1:
-        raise ValueError("pad_factor must be positive")
-    nyquist = math.pi * nx / length
-    if not 0.0 < maximum_wavenumber < nyquist:
-        raise ValueError(
-            "maximum_wavenumber must lie strictly below the Nyquist wavenumber"
-        )
     eta_array = jnp.asarray(eta, dtype=jnp.float64)
     xi_array = jnp.asarray(xi, dtype=jnp.float64)
     depth_array = jnp.asarray(depth, dtype=jnp.float64)

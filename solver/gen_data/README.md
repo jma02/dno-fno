@@ -56,8 +56,12 @@ Shared pipeline:
 
 - `pipeline/types.py` defines shared dataset identifiers and saved-array types.
 - `pipeline/simulation_checks.py` defines the acceptance checks and failure reasons.
-- `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
-- `pipeline/trajectory_rollout.py` runs and samples trajectories.
+- `pipeline/trajectory_integration.py` runs batched GL2 integrations and constructs
+  saved targets.
+- `pipeline/trajectory_rollout.py` evaluates complete trajectories and their
+  numerical acceptance checks.
+- `pipeline/time_selection.py` selects retained time indices.
+- `pipeline/trajectory_subsampling.py` converts accepted trajectories into rows.
 - `pipeline/dno_target.py` computes the stored DNO target.
 - `pipeline/batch_artifacts.py` validates sampled specifications, stored rows, and
   results.
