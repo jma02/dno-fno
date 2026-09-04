@@ -6,7 +6,7 @@ three peak-enhancement values, and three right-moving energy fractions.
 
 from __future__ import annotations
 
-from typing import NamedTuple, TypeAlias
+from typing import Literal, NamedTuple, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,10 +18,9 @@ from solver.gen_data.jonswap_tma import (
     PAPER_RIGHT_MOVING_FRACTIONS,
     PAPER_SHALLOW_PEAK_MODES,
     JonswapTmaParameters,
-    RandomSeaStratum,
     ResolvedBand,
-    relative_frequency_interval_fits,
-    sample_jonswap_tma_phases,
+    finite_depth_angular_frequency,
+    positive_mode_wavenumbers,
 )
 from solver.gen_data.pipeline.types import (
     ROOT_SEED_BY_DATASET_SPLIT,
@@ -31,6 +30,7 @@ from solver.gen_data.pipeline.types import (
 
 
 FloatArray: TypeAlias = NDArray[np.float64]
+RandomSeaStratum: TypeAlias = Literal["shallow", "finite", "deep"]
 
 PEAK_WAVENUMBER_BOUNDS = (2.0, 12.0)
 FINITE_DEPTH_BOUNDS = (0.1, 1.5)
@@ -83,10 +83,14 @@ def sample_jonswap_tma_simulation(
             )
         )
     )
-    if stratum == "shallow":
-        peak_mode = int(rng.choice(PAPER_SHALLOW_PEAK_MODES))
-        peak_wavenumber = 2.0 * np.pi * peak_mode / band.length
-        while True:
+    peak_wavenumber = (
+        2.0 * np.pi * int(rng.choice(PAPER_SHALLOW_PEAK_MODES)) / band.length
+        if stratum == "shallow"
+        else 0.0
+    )
+    depth_bounds = FINITE_DEPTH_BOUNDS if stratum == "finite" else DEEP_DEPTH_BOUNDS
+    while True:
+        if stratum == "shallow":
             depth_wavenumber = float(rng.uniform(*SHALLOW_DEPTH_WAVENUMBER_BOUNDS))
             relative_height = float(rng.uniform(*SHALLOW_RELATIVE_HEIGHT_BOUNDS))
             depth = depth_wavenumber / peak_wavenumber
@@ -97,18 +101,8 @@ def sample_jonswap_tma_simulation(
                 peak_enhancement=peak_enhancement,
                 right_moving_fraction=right_moving_fraction,
             )
-            if (
-                depth_wavenumber * relative_height <= PAPER_PEAK_STEEPNESS_MAXIMUM
-                and relative_frequency_interval_fits(
-                    parameters,
-                    band=band,
-                    relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-                )
-            ):
-                break
-    else:
-        depth_bounds = FINITE_DEPTH_BOUNDS if stratum == "finite" else DEEP_DEPTH_BOUNDS
-        while True:
+            peak_steepness = depth_wavenumber * relative_height
+        else:
             parameters = JonswapTmaParameters(
                 depth=float(rng.uniform(*depth_bounds)),
                 significant_height=float(rng.uniform(*SIGNIFICANT_HEIGHT_BOUNDS)),
@@ -116,15 +110,22 @@ def sample_jonswap_tma_simulation(
                 peak_enhancement=peak_enhancement,
                 right_moving_fraction=right_moving_fraction,
             )
-            if (
+            peak_steepness = (
                 parameters.peak_wavenumber * parameters.significant_height / 2.0
-                <= PAPER_PEAK_STEEPNESS_MAXIMUM
-                and relative_frequency_interval_fits(
-                    parameters,
-                    band=band,
-                    relative_maximum=PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-                )
-            ):
-                break
-    phase_right, phase_left = sample_jonswap_tma_phases(rng, band=band)
-    return JonswapTmaSample(parameters, phase_right, phase_left)
+            )
+        frequencies = finite_depth_angular_frequency(
+            np.asarray([parameters.peak_wavenumber, band.maximum_wavenumber]),
+            depth=parameters.depth,
+            gravity=1.0,
+        )
+        if (
+            peak_steepness <= PAPER_PEAK_STEEPNESS_MAXIMUM
+            and frequencies[1] >= PAPER_RELATIVE_FREQUENCY_MAXIMUM * frequencies[0]
+        ):
+            break
+    number_of_modes = positive_mode_wavenumbers(band=band).size
+    return JonswapTmaSample(
+        parameters,
+        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes).astype(np.float64),
+        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes).astype(np.float64),
+    )

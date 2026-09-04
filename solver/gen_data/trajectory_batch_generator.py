@@ -11,8 +11,6 @@ from numpy.typing import NDArray
 
 from solver.gen_data.benjamin_feir_sampling import sample_benjamin_feir_simulation
 from solver.gen_data.jonswap_tma import (
-    PAPER_RESOLVED_BAND_QUADRATURE_ORDER,
-    PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
     ResolvedBand,
     finite_depth_angular_frequency,
 )
@@ -112,8 +110,6 @@ def generate_trajectory_batch(
                 tanaka_samples, numerical
             )
         except TanakaPotentialRadicandError as error:
-            if not error.is_recoverable:
-                raise
             failed = set(error.invalid_simulation_indices)
             rejected.update(
                 (
@@ -175,12 +171,8 @@ def generate_trajectory_batch(
             raise ValueError("JONSWAP generation requires solver_batch_size")
         maximum_wavenumber = numerical.target_maximum_wavenumber
         band = ResolvedBand(
-            length=numerical.length,
-            maximum_wavenumber=maximum_wavenumber,
-            transition_wavenumber=(
-                PAPER_RESOLVED_BAND_TRANSITION_FRACTION * maximum_wavenumber
-            ),
-            quadrature_order=PAPER_RESOLVED_BAND_QUADRATURE_ORDER,
+            numerical.length,
+            maximum_wavenumber,
         )
         jonswap_samples = tuple(
             sample_jonswap_tma_simulation(

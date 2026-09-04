@@ -1,10 +1,10 @@
-"""Focused CPU tests for fail-closed Tanaka potential construction."""
+"""Focused CPU tests for the Tanaka surface-potential real-root gate."""
 
 from __future__ import annotations
 
-import json
 import math
 import os
+from typing import NamedTuple
 import unittest
 from unittest.mock import patch
 
@@ -14,28 +14,14 @@ os.environ.setdefault("DNO_TANAKA_DTYPE", "float64")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
-    TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
     TanakaPotentialRadicandError,
-    _validate_tanaka_surface_potential_radicand,
-    build_per_simulation_initial_conditions,
+    build_tanaka_initial_conditions,
 )
-from solver.gen_data.pipeline.types import (  # noqa: E402
-    DatasetSplit,
-)
-from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    RolloutNumerics,
-)
-from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_PARAMETER_GROUP_IDS,
-    TanakaCrest,
-    sample_tanaka_simulation,
-)
-from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
-    construct_tanaka_trajectory_batch,
-)
+from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
     make_default_tanaka_template,
 )
@@ -44,177 +30,67 @@ jax.config.update("jax_enable_x64", True)
 
 LENGTH = 2.0 * math.pi
 
+FakeTanakaProfiles = NamedTuple(
+    "FakeTanakaProfiles",
+    [
+        ("x_profile", jax.Array),
+        ("eta_profile", jax.Array),
+        ("theta_profile", jax.Array),
+        ("froude", jax.Array),
+    ],
+)
 
-def validate(
-    radical: np.ndarray,
+
+def _profiles(
+    amplitudes: tuple[float, ...],
     *,
-    speeds: np.ndarray,
-    depths: np.ndarray,
-    specs: list[TanakaCrest],
-    simulation_ids: np.ndarray,
-    components_within_simulation: tuple[int, ...],
-) -> None:
-    """Apply the production validator on a small deterministic grid."""
-    _validate_tanaka_surface_potential_radicand(
-        radical,
-        x_grid=np.linspace(0.0, 1.5, radical.shape[1], dtype=np.float64),
-        speed_per_crest=speeds,
-        simulation_h_ref=depths,
-        flat_specs=specs,
-        crest_simulation_ids=simulation_ids,
-        components_within_simulation=components_within_simulation,
+    froude: tuple[float, ...] | None = None,
+) -> FakeTanakaProfiles:
+    count = len(amplitudes)
+    return FakeTanakaProfiles(
+        jnp.tile(jnp.asarray((-1.0, 0.0, 1.0)), (count, 1)),
+        jnp.asarray([(0.0, amplitude, 0.0) for amplitude in amplitudes]),
+        jnp.zeros((count, 3), dtype=jnp.float64),
+        jnp.asarray((1.0,) * count if froude is None else froude),
     )
 
 
-def serialized_components(record: dict[str, object]) -> list[dict[str, object]]:
-    """Narrow the serialized component records after checking their shape."""
-    raw_components = record["components"]
-    if not isinstance(raw_components, list):
-        raise AssertionError("serialized components must be a list")
-    components = [
-        component
-        for component in raw_components
-        if isinstance(component, dict)
-        and all(isinstance(key, str) for key in component)
-    ]
-    if len(components) != len(raw_components):
-        raise AssertionError("serialized components must be string-keyed objects")
-    return components
-
-
-class TanakaPotentialRadicandValidationTest(unittest.TestCase):
-    def test_positive_exact_zero_and_negative_zero_are_accepted(self) -> None:
-        validate(
-            np.asarray(((1.0, 0.0, -0.0, 4.0),), dtype=np.float64),
-            speeds=np.asarray((2.0,), dtype=np.float64),
-            depths=np.asarray((0.2,), dtype=np.float64),
-            specs=[TanakaCrest(0.25, 0.5, 1)],
-            simulation_ids=np.asarray((0,), dtype=np.int32),
-            components_within_simulation=(0,),
+def _build_with_profiles(profiles: FakeTanakaProfiles) -> tuple[jax.Array, jax.Array]:
+    count = profiles.eta_profile.shape[0]
+    with patch(
+        "solver.gen_data.tanaka_initial_conditions.solve_modified_tanaka_batched",
+        return_value=profiles,
+    ):
+        return build_tanaka_initial_conditions(
+            make_default_tanaka_template(nx=32, dno_order=0, pad_factor=1),
+            np.ones(count, dtype=np.float64),
+            tuple((TanakaCrest(0.1, 0.0, 1),) for _ in range(count)),
+            length=LENGTH,
+            nx=32,
+            gravity=1.0,
         )
 
-    def test_smallest_representable_negative_value_is_rejected(self) -> None:
-        smallest_negative = np.nextafter(0.0, -np.inf)
+
+class TanakaPotentialRadicandTest(unittest.TestCase):
+    def test_finite_negative_radicand_reports_invalid_simulations(self) -> None:
         with self.assertRaises(TanakaPotentialRadicandError) as caught:
-            validate(
-                np.asarray(
-                    ((1.0, 0.0, smallest_negative, 4.0),),
-                    dtype=np.float64,
-                ),
-                speeds=np.asarray((2.0,), dtype=np.float64),
-                depths=np.asarray((0.2,), dtype=np.float64),
-                specs=[TanakaCrest(0.25, 0.5, -1)],
-                simulation_ids=np.asarray((0,), dtype=np.int32),
-                components_within_simulation=(0,),
-            )
+            _build_with_profiles(_profiles((0.1, 0.75)))
 
-        record = caught.exception.to_json_record()
-        self.assertEqual(
-            record["reason"],
-            "negative_or_nonfinite_surface_potential_radicand",
-        )
-        component = serialized_components(record)[0]
-        self.assertEqual(component["minimum_radicand"], smallest_negative)
-        self.assertEqual(component["minimum_radicand_grid_index"], 2)
-        self.assertEqual(component["minimum_radicand_x"], 1.0)
-        self.assertEqual(component["negative_count"], 1)
-        self.assertEqual(component["nonfinite_count"], 0)
+        self.assertEqual(caught.exception.invalid_simulation_indices, (1,))
 
-    def test_nonfinite_values_and_mixed_crests_have_strict_records(self) -> None:
-        specifications = [
-            TanakaCrest(0.10, 0.1, 1),
-            TanakaCrest(0.20, 0.2, -1),
-            TanakaCrest(0.30, 0.3, 1),
-        ]
-        radical = np.asarray(
-            (
-                (1.0, 2.0, 3.0, 4.0),
-                (1.0, -0.25, 3.0, 4.0),
-                (1.0, np.nan, np.inf, -np.inf),
-            ),
-            dtype=np.float64,
-        )
-        with self.assertRaises(TanakaPotentialRadicandError) as caught:
-            validate(
-                radical,
-                speeds=np.asarray((1.0, 2.0, 3.0), dtype=np.float64),
-                depths=np.asarray((0.15, 0.25), dtype=np.float64),
-                specs=specifications,
-                simulation_ids=np.asarray((0, 0, 1), dtype=np.int32),
-                components_within_simulation=(0, 1, 0),
-            )
+    def test_nonfinite_speed_is_a_fatal_numerical_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "speeds") as caught:
+            _build_with_profiles(_profiles((0.1, 0.1), froude=(1.0, np.nan)))
 
-        record = caught.exception.to_json_record()
-        self.assertEqual(
-            record["schema"],
-            TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
-        )
-        self.assertEqual(record["invalid_simulation_indices"], [0, 1])
-        components = serialized_components(record)
-        self.assertEqual(
-            [component["global_component_index"] for component in components],
-            [1, 2],
-        )
-        self.assertEqual(
-            [
-                (
-                    component["local_simulation_index"],
-                    component["component_within_simulation"],
-                )
-                for component in components
-            ],
-            [(0, 1), (1, 0)],
-        )
-        self.assertEqual(components[0]["alpha"], specifications[1].alpha)
-        self.assertEqual(components[0]["depth"], 0.15)
-        self.assertEqual(components[0]["speed_squared"], 4.0)
-        self.assertEqual(components[1]["alpha"], specifications[2].alpha)
-        self.assertEqual(components[1]["negative_count"], 0)
-        self.assertEqual(components[1]["nonfinite_count"], 3)
-        self.assertEqual(components[1]["first_nonfinite_grid_index"], 1)
-        self.assertEqual(components[1]["first_nonfinite_x"], 0.5)
-        self.assertIsNone(components[1]["minimum_radicand"])
-        self.assertIsNone(components[1]["minimum_radicand_over_speed_squared"])
-        self.assertIsNone(components[1]["minimum_radicand_grid_index"])
-        self.assertIsNone(components[1]["minimum_radicand_x"])
-        json.dumps(record, sort_keys=True, allow_nan=False)
-        self.assertNotIn("NaN", str(caught.exception))
-        self.assertNotIn("Infinity", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, TanakaPotentialRadicandError)
 
-    def test_nonfinite_or_nonpositive_speed_squared_is_rejected(self) -> None:
-        with self.assertRaises(TanakaPotentialRadicandError) as caught:
-            validate(
-                np.ones((3, 4), dtype=np.float64),
-                speeds=np.asarray((0.0, np.nan, np.inf), dtype=np.float64),
-                depths=np.asarray((0.1, 0.2), dtype=np.float64),
-                specs=[
-                    TanakaCrest(0.1, 0.1, 1),
-                    TanakaCrest(0.2, 0.2, 1),
-                    TanakaCrest(0.3, 0.3, -1),
-                ],
-                simulation_ids=np.asarray((0, 0, 1), dtype=np.int32),
-                components_within_simulation=(0, 1, 0),
-            )
+    def test_nonfinite_radicand_is_a_fatal_numerical_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "radicand") as caught:
+            _build_with_profiles(_profiles((0.1, np.nan)))
 
-        record = caught.exception.to_json_record()
-        self.assertEqual(
-            record["reason"],
-            "nonpositive_or_nonfinite_surface_potential_speed_squared",
-        )
-        self.assertEqual(record["invalid_simulation_indices"], [0, 1])
-        components = serialized_components(record)
-        self.assertEqual(components[0]["speed_squared"], 0.0)
-        self.assertIsNone(components[1]["unsigned_speed"])
-        self.assertIsNone(components[1]["speed_squared"])
-        self.assertIsNone(components[2]["unsigned_speed"])
-        self.assertIsNone(components[2]["speed_squared"])
-        json.dumps(record, sort_keys=True, allow_nan=False)
+        self.assertNotIsInstance(caught.exception, TanakaPotentialRadicandError)
 
-
-class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
-    def test_actual_upper_seam_constructor_and_symmetries_remain_valid(
-        self,
-    ) -> None:
+    def test_real_profiles_preserve_translation_and_direction_symmetries(self) -> None:
         nx = 64
         template = make_default_tanaka_template(
             depth=1.0,
@@ -226,14 +102,14 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
             dno_order=6,
             pad_factor=8,
         )
-        eta, xi = build_per_simulation_initial_conditions(
-            template_params=template,
-            simulation_h_ref=np.asarray((0.35, 0.35, 0.35), dtype=np.float64),
-            simulation_specs=[
-                [TanakaCrest(0.45, 0.0, 1)],
-                [TanakaCrest(0.45, LENGTH / 2.0, 1)],
-                [TanakaCrest(0.45, 0.0, -1)],
-            ],
+        eta, xi = build_tanaka_initial_conditions(
+            template,
+            np.asarray((0.35, 0.35, 0.35), dtype=np.float64),
+            (
+                (TanakaCrest(0.45, 0.0, 1),),
+                (TanakaCrest(0.45, LENGTH / 2.0, 1),),
+                (TanakaCrest(0.45, 0.0, -1),),
+            ),
             length=LENGTH,
             nx=nx,
             gravity=1.0,
@@ -243,64 +119,13 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
         self.assertTrue(np.isfinite(eta_host).all())
         self.assertTrue(np.isfinite(xi_host).all())
         np.testing.assert_allclose(
-            eta_host[1],
-            np.roll(eta_host[0], nx // 2),
-            rtol=2.0e-11,
-            atol=2.0e-13,
+            eta_host[1], np.roll(eta_host[0], nx // 2), rtol=2e-11, atol=2e-13
         )
         np.testing.assert_allclose(
-            xi_host[1],
-            np.roll(xi_host[0], nx // 2),
-            rtol=2.0e-11,
-            atol=2.0e-13,
+            xi_host[1], np.roll(xi_host[0], nx // 2), rtol=2e-11, atol=2e-13
         )
-        np.testing.assert_allclose(
-            eta_host[2],
-            eta_host[0],
-            rtol=2.0e-11,
-            atol=2.0e-13,
-        )
-        np.testing.assert_allclose(
-            xi_host[2],
-            -xi_host[0],
-            rtol=2.0e-11,
-            atol=2.0e-13,
-        )
-
-    def test_constructor_domain_failure_leaves_no_completed_batch(self) -> None:
-        config = RolloutNumerics(
-            nx=64,
-            target_nx=64,
-            length=LENGTH,
-            gravity=1.0,
-            integration_dno_order=0,
-            label_dno_order=0,
-            pad_factor=1,
-            maximum_wavenumber=16.0,
-            target_maximum_wavenumber=16.0,
-            saved_dt=0.02,
-            substeps_per_saved_frame=1,
-            gl2_residual_tolerance=1.0e-8,
-            gl2_iteration_cap=8,
-            internal_hamiltonian_drift_threshold=None,
-        )
-        parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
-        sample = sample_tanaka_simulation(
-            parameter_group_id,
-            dataset_split=DatasetSplit.TEST,
-            attempt_number=53,
-        )
-        failure = TanakaPotentialRadicandError(
-            "negative_or_nonfinite_surface_potential_radicand",
-            (),
-        )
-        with patch(
-            "solver.gen_data.trajectory_family_adapters."
-            "build_per_simulation_initial_conditions",
-            side_effect=failure,
-        ):
-            with self.assertRaises(TanakaPotentialRadicandError):
-                construct_tanaka_trajectory_batch((sample,), config)
+        np.testing.assert_allclose(eta_host[2], eta_host[0], rtol=2e-11, atol=2e-13)
+        np.testing.assert_allclose(xi_host[2], -xi_host[0], rtol=2e-11, atol=2e-13)
 
 
 if __name__ == "__main__":

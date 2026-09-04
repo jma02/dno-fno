@@ -106,9 +106,7 @@ class StokesSamplingTest(unittest.TestCase):
                 self.assertIn(sample.carrier_mode, carrier_modes)
                 self.assertTrue(0.0 <= sample.phase < 2.0 * math.pi)
 
-                wavenumber = (
-                    2.0 * math.pi * sample.carrier_mode / PAPER_DOMAIN_LENGTH
-                )
+                wavenumber = 2.0 * math.pi * sample.carrier_mode / PAPER_DOMAIN_LENGTH
                 amplitude_lower = max(
                     PAPER_AMPLITUDE_BOUNDS[0], steepness_bounds[0] / wavenumber
                 )
@@ -207,6 +205,7 @@ class StokesSamplingTest(unittest.TestCase):
             )
         self.assertIsNone(exhausted)
         self.assertEqual(ursell.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

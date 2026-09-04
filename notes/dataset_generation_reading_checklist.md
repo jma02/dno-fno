@@ -30,9 +30,9 @@ skimmed.
 
 ## Physical constructors worth reading separately
 
-- [ ] `solver/gen_data/tanaka_initial_conditions.py`
-- [ ] `solver/gen_data/benjamin_feir_jcp09.py`
-- [ ] `solver/gen_data/jonswap_tma.py`
+- [x] `solver/gen_data/tanaka_initial_conditions.py`
+- [x] `solver/gen_data/benjamin_feir_jcp09.py`
+- [x] `solver/gen_data/jonswap_tma.py`
 
 ## Optional implementation details
 

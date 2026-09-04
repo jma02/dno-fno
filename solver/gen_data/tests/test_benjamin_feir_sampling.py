@@ -7,18 +7,14 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.benjamin_feir_jcp09 import (
+from solver.gen_data.benjamin_feir_sampling import (
+    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    BENJAMIN_FEIR_PARAMETER_GROUPS,
     CARRIER_MODE_MAX,
     CARRIER_MODE_MIN,
     CARRIER_STEEPNESS_MAX,
     CARRIER_STEEPNESS_MIN,
     PERTURBATION_RATIO_MIN,
-    focused_steepness_proxy,
-    instability_band_fraction,
-)
-from solver.gen_data.benjamin_feir_sampling import (
-    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-    BENJAMIN_FEIR_PARAMETER_GROUPS,
     PAPER_DOMAIN_LENGTH,
     PAPER_FOCUSED_STEEPNESS_LIMIT,
     PAPER_PERTURBATION_RATIO_MAX,
@@ -90,19 +86,11 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
                 )
                 self.assertTrue(0.0 <= sample.translation < PAPER_DOMAIN_LENGTH)
 
-                band_fraction = float(
-                    instability_band_fraction(
-                        carrier_mode,
-                        sideband_offset,
-                        sample.carrier_steepness,
-                    )
+                band_fraction = sideband_offset / (
+                    2.0 * math.sqrt(2.0) * sample.carrier_steepness * carrier_mode
                 )
-                focused_steepness = float(
-                    focused_steepness_proxy(
-                        carrier_mode,
-                        sideband_offset,
-                        sample.carrier_steepness,
-                    )
+                focused_steepness = sample.carrier_steepness * (
+                    1.0 + 2.0 * math.sqrt(1.0 - band_fraction**2)
                 )
                 self.assertTrue(0.0 < band_fraction < 1.0)
                 self.assertLessEqual(

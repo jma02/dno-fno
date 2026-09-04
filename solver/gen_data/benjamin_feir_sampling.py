@@ -14,13 +14,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-from solver.gen_data.benjamin_feir_jcp09 import (
-    BENJAMIN_FEIR_MODE_PAIRS,
-    CARRIER_STEEPNESS_MAX,
-    CARRIER_STEEPNESS_MIN,
-    PERTURBATION_RATIO_MIN,
-    focused_steepness_carrier_upper_bound,
-)
 from solver.gen_data.pipeline.types import (
     ROOT_SEED_BY_DATASET_SPLIT,
     DatasetSplit,
@@ -29,6 +22,11 @@ from solver.gen_data.pipeline.types import (
 
 
 PAPER_DOMAIN_LENGTH = 2.0 * np.pi
+CARRIER_MODE_MIN = 4
+CARRIER_MODE_MAX = 20
+CARRIER_STEEPNESS_MIN = 0.05
+CARRIER_STEEPNESS_MAX = 0.13
+PERTURBATION_RATIO_MIN = 0.05
 PAPER_FOCUSED_STEEPNESS_LIMIT = (1.0 + math.sqrt(2.0)) / 10.0
 PAPER_PERTURBATION_RATIO_MAX = 0.10
 
@@ -37,7 +35,9 @@ BENJAMIN_FEIR_PARAMETER_GROUPS: dict[str, tuple[int, int]] = {
         carrier_mode,
         sideband_offset,
     )
-    for carrier_mode, sideband_offset in BENJAMIN_FEIR_MODE_PAIRS
+    for carrier_mode in range(CARRIER_MODE_MIN, CARRIER_MODE_MAX + 1)
+    for sideband_offset in range(1, carrier_mode)
+    if sideband_offset / carrier_mode < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
 }
 BENJAMIN_FEIR_PARAMETER_GROUP_IDS = tuple(BENJAMIN_FEIR_PARAMETER_GROUPS)
 
@@ -75,14 +75,18 @@ def sample_benjamin_feir_simulation(
         CARRIER_STEEPNESS_MIN,
         sideband_offset / (2.0 * math.sqrt(2.0) * carrier_mode),
     )
+    instability_threshold = sideband_offset / (2.0 * np.sqrt(2.0) * carrier_mode)
     steepness_upper = min(
         CARRIER_STEEPNESS_MAX,
         float(
-            focused_steepness_carrier_upper_bound(
-                carrier_mode,
-                sideband_offset,
-                focused_steepness_limit=PAPER_FOCUSED_STEEPNESS_LIMIT,
+            (
+                -PAPER_FOCUSED_STEEPNESS_LIMIT
+                + 2.0
+                * np.sqrt(
+                    PAPER_FOCUSED_STEEPNESS_LIMIT**2 + 3.0 * instability_threshold**2
+                )
             )
+            / 3.0
         ),
     )
     carrier_steepness = steepness_upper - (steepness_upper - steepness_lower) * float(

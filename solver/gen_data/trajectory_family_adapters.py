@@ -10,14 +10,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.benjamin_feir_jcp09 import (
-    ParameterArrays,
     build_initial_conditions as build_benjamin_feir_initial_conditions,
     deep_water_proxy_depth,
 )
 from solver.gen_data.benjamin_feir_sampling import BenjaminFeirSample
 from solver.gen_data.jonswap_tma import (
-    PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-    PAPER_RELATIVE_FREQUENCY_MINIMUM,
     JonswapTmaState,
     ResolvedBand,
     build_jonswap_tma_initial_condition,
@@ -26,7 +23,7 @@ from solver.gen_data.jonswap_tma_sampling import JonswapTmaSample
 from solver.gen_data.pipeline.dno_target import project_fixed_band
 from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.gen_data.tanaka_initial_conditions import (
-    build_per_simulation_initial_conditions,
+    build_tanaka_initial_conditions,
 )
 from solver.gen_data.tanaka_sampling import TanakaSample
 from solver.solvers.dno_series_jax import build_grid
@@ -102,10 +99,10 @@ def construct_tanaka_trajectory_batch(
         dno_order=numerical.integration_dno_order,
         pad_factor=numerical.pad_factor,
     )
-    eta0, xi0 = build_per_simulation_initial_conditions(
-        template_params=template,
-        simulation_h_ref=depths,
-        simulation_specs=[list(sample.crests) for sample in samples],
+    eta0, xi0 = build_tanaka_initial_conditions(
+        template,
+        depths,
+        tuple(sample.crests for sample in samples),
         length=numerical.length,
         nx=numerical.nx,
         gravity=numerical.gravity,
@@ -120,30 +117,26 @@ def construct_benjamin_feir_trajectory_batch(
 ) -> TrajectoryInitialBatch:
     """Construct Benjamin--Feir initial states."""
 
-    parameters: ParameterArrays = {
-        "n_carr": np.fromiter(
-            (sample.carrier_mode for sample in samples), dtype=np.int32
-        ),
-        "side_offset": np.fromiter(
-            (sample.sideband_offset for sample in samples), dtype=np.int32
-        ),
-        "eps_carrier": np.fromiter(
-            (sample.carrier_steepness for sample in samples), dtype=np.float64
-        ),
-        "eps_pert": np.fromiter(
-            (sample.perturbation_ratio for sample in samples), dtype=np.float64
-        ),
-        "translation": np.fromiter(
-            (sample.translation for sample in samples), dtype=np.float64
-        ),
-    }
     x, _ = build_grid(numerical.nx, numerical.length)
     eta0, xi0 = build_benjamin_feir_initial_conditions(
         x=jnp.asarray(x, dtype=jnp.float64),
-        parameters=parameters,
+        carrier_modes=np.fromiter(
+            (sample.carrier_mode for sample in samples), dtype=np.int32
+        ),
+        sideband_offsets=np.fromiter(
+            (sample.sideband_offset for sample in samples), dtype=np.int32
+        ),
+        carrier_steepnesses=np.fromiter(
+            (sample.carrier_steepness for sample in samples), dtype=np.float64
+        ),
+        perturbation_ratios=np.fromiter(
+            (sample.perturbation_ratio for sample in samples), dtype=np.float64
+        ),
+        translations=np.fromiter(
+            (sample.translation for sample in samples), dtype=np.float64
+        ),
         length=numerical.length,
         gravity=numerical.gravity,
-        dtype=jnp.float64,
     )
     eta, xi = _project_initial_conditions(eta0, xi0, numerical)
     depths = np.full(
@@ -169,10 +162,6 @@ def construct_jonswap_tma_trajectory_batch(
             phase_left=sample.phase_left,
             band=band,
             gravity=numerical.gravity,
-            relative_frequency_interval=(
-                PAPER_RELATIVE_FREQUENCY_MINIMUM,
-                PAPER_RELATIVE_FREQUENCY_MAXIMUM,
-            ),
         )
         for sample in samples
     )

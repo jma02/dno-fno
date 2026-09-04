@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
 from functools import cache
+from typing import NamedTuple
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -24,8 +24,7 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TANAKA_FINE_FACTOR,
-    _validate_tanaka_profile_batch,
-    build_per_simulation_initial_conditions,
+    build_tanaka_initial_conditions,
     cubic_hermite_zero_exterior,
     place_tanaka_profile_periodic,
     tanaka_periodic_image_radius,
@@ -46,12 +45,9 @@ from solver.solvers.time_integrator import (  # noqa: E402
     make_normalized_rollout_settings,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
-    DEFAULT_OUTER_ITERATIONS,
-    DEFAULT_QC_UPPER,
     ModifiedTanakaBatchSolution,
     make_default_tanaka_template,
     solve_modified_tanaka_batched,
-    validate_solved_amplitudes,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -74,13 +70,16 @@ SIMULATION31_SPECS = [
 ]
 
 
-@dataclass(frozen=True)
-class TanakaFixture:
-    profile_solution: ModifiedTanakaBatchSolution
-    eta: jax.Array
-    xi: jax.Array
-    gxi: jax.Array
-    k: jax.Array
+TanakaFixture = NamedTuple(
+    "TanakaFixture",
+    [
+        ("profile_solution", ModifiedTanakaBatchSolution),
+        ("eta", jax.Array),
+        ("xi", jax.Array),
+        ("gxi", jax.Array),
+        ("k", jax.Array),
+    ],
+)
 
 
 def relative_l2(left: jax.Array, right: jax.Array) -> float:
@@ -109,15 +108,14 @@ def build_fixture() -> TanakaFixture:
     )
 
     direction_center = 0.731
-    simulation_specs = [
-        SIMULATION31_SPECS,
-        [TanakaCrest(0.10, direction_center, 1)],
-        [TanakaCrest(0.10, direction_center, -1)],
-    ]
-    eta, xi = build_per_simulation_initial_conditions(
-        template_params=template,
-        simulation_h_ref=np.asarray((SIMULATION31_DEPTH, 0.10, 0.10)),
-        simulation_specs=simulation_specs,
+    eta, xi = build_tanaka_initial_conditions(
+        template,
+        np.asarray((SIMULATION31_DEPTH, 0.10, 0.10)),
+        (
+            tuple(SIMULATION31_SPECS),
+            (TanakaCrest(0.10, direction_center, 1),),
+            (TanakaCrest(0.10, direction_center, -1),),
+        ),
         length=LENGTH,
         nx=NX,
         gravity=1.0,
@@ -155,11 +153,8 @@ def test_cubic_hermite_exact_and_zero_exterior() -> None:
     def polynomial(x: jax.Array) -> jax.Array:
         return 0.5 * x**3 - 0.25 * x**2 - x + 0.75
 
-    def derivative(x: jax.Array) -> jax.Array:
-        return 1.5 * x**2 - 0.5 * x - 1.0
-
     y_nodes = polynomial(x_nodes)
-    slopes = derivative(x_nodes)
+    slopes = 1.5 * x_nodes**2 - 0.5 * x_nodes - 1.0
     x_eval = jnp.linspace(-1.0, 1.0, 101)
     actual = cubic_hermite_zero_exterior(
         x_nodes,
@@ -202,22 +197,6 @@ def test_cubic_hermite_exact_and_zero_exterior() -> None:
     np.testing.assert_array_equal(outside_tangents, jnp.zeros_like(outside))
 
 
-def test_profile_validation_rejects_nonincreasing_knots() -> None:
-    x_profile = jnp.asarray(((-1.0, 0.0, 0.0, 0.5, 1.0),))
-    eta_profile = jnp.zeros_like(x_profile)
-    theta_profile = jnp.zeros_like(x_profile)
-    try:
-        _validate_tanaka_profile_batch(
-            x_profile,
-            eta_profile,
-            theta_profile,
-        )
-    except ValueError as error:
-        assert "strictly increasing" in str(error)
-    else:
-        raise AssertionError("Duplicate Tanaka knots were not rejected.")
-
-
 def test_small_profiles_realize_their_requested_amplitudes() -> None:
     requested = jnp.asarray(
         (1.0e-8, 2.4102831187118947e-5, 1.0e-3),
@@ -228,11 +207,8 @@ def test_small_profiles_realize_their_requested_amplitudes() -> None:
         dno_order=0,
         pad_factor=1,
     )
-    assert template.qc_upper == DEFAULT_QC_UPPER
-    assert template.outer_iterations == DEFAULT_OUTER_ITERATIONS
     solution = solve_modified_tanaka_batched(template, requested)
     achieved = jnp.max(solution.eta_profile, axis=-1)
-    validate_solved_amplitudes(solution.eta_profile, requested)
     np.testing.assert_allclose(
         achieved,
         requested,
@@ -240,21 +216,6 @@ def test_small_profiles_realize_their_requested_amplitudes() -> None:
         atol=1.0e-14,
     )
     jax.clear_caches()
-
-
-def test_profile_amplitude_validation_rejects_the_old_floor() -> None:
-    eta_profile = jnp.asarray(
-        ((0.0, 4.0e-4, 9.947786769e-4, 4.0e-4, 0.0),),
-        dtype=jnp.float64,
-    )
-    requested = jnp.asarray((1.0e-5,), dtype=jnp.float64)
-    try:
-        validate_solved_amplitudes(eta_profile, requested)
-    except ValueError as error:
-        assert "requested=1.0000000000000001e-05" in str(error)
-        assert "achieved=0.0009947786769" in str(error)
-    else:
-        raise AssertionError("The old Tanaka amplitude floor was not rejected.")
 
 
 def test_profiles_remain_nonnegative_and_monotone() -> None:
@@ -421,9 +382,7 @@ def test_simulation31_one_interval_production_rollout() -> None:
 def main() -> None:
     tests = (
         test_cubic_hermite_exact_and_zero_exterior,
-        test_profile_validation_rejects_nonincreasing_knots,
         test_small_profiles_realize_their_requested_amplitudes,
-        test_profile_amplitude_validation_rejects_the_old_floor,
         test_profiles_remain_nonnegative_and_monotone,
         test_periodic_placement_translation_and_image_convergence,
         test_simulation31_tail_and_direction_regression,

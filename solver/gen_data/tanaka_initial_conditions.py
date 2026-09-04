@@ -1,16 +1,15 @@
-"""Construct tangent-Hermite Tanaka initial conditions for trajectory datasets."""
+"""Construct tangent-Hermite Tanaka initial conditions."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.artifact_io import json_text
 from solver.gen_data.tanaka_sampling import TanakaCrest
 from solver.solvers.dno_series_jax import build_grid, myfft, myifft
 from solver.solvers.time_integrator import spectral_dx
@@ -19,133 +18,19 @@ from solver.tanaka_ICs.modified_tanaka import (
     solve_modified_tanaka_batched,
 )
 
-
 TANAKA_FINE_FACTOR = 8
-TANAKA_PROFILE_RECONSTRUCTION = "periodic_tangent_hermite_tan_theta_v1"
-TANAKA_PROFILE_TOLERANCE = 1e-12
-TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA = "tanaka_potential_radicand_failure_v1"
-TanakaPotentialFailureReason: TypeAlias = Literal[
-    "negative_or_nonfinite_surface_potential_radicand",
-    "nonpositive_or_nonfinite_surface_potential_speed_squared",
-]
-
-
-@dataclass(frozen=True)
-class TanakaRadicandFailure:
-    """Diagnostics for one crest whose potential construction failed."""
-
-    local_simulation_index: int
-    component_within_simulation: int
-    global_component_index: int
-    alpha: float | None
-    center: float | None
-    direction: int
-    depth: float | None
-    unsigned_speed: float | None
-    speed_squared: float | None
-    minimum_radicand: float | None
-    minimum_radicand_over_speed_squared: float | None
-    minimum_radicand_grid_index: int | None
-    minimum_radicand_x: float | None
-    negative_count: int
-    nonfinite_count: int
-    first_nonfinite_grid_index: int | None
-    first_nonfinite_x: float | None
-
-    @property
-    def is_finite_negative_radicand(self) -> bool:
-        """Whether this is a recoverable finite square-root domain failure."""
-
-        return (
-            self.speed_squared is not None
-            and self.speed_squared > 0.0
-            and self.negative_count > 0
-            and self.nonfinite_count == 0
-        )
-
-    def to_json_record(self) -> dict[str, object]:
-        return {
-            "local_simulation_index": self.local_simulation_index,
-            "component_within_simulation": self.component_within_simulation,
-            "global_component_index": self.global_component_index,
-            "alpha": self.alpha,
-            "center": self.center,
-            "direction": self.direction,
-            "depth": self.depth,
-            "unsigned_speed": self.unsigned_speed,
-            "speed_squared": self.speed_squared,
-            "minimum_radicand": self.minimum_radicand,
-            "minimum_radicand_over_speed_squared": (
-                self.minimum_radicand_over_speed_squared
-            ),
-            "minimum_radicand_grid_index": self.minimum_radicand_grid_index,
-            "minimum_radicand_x": self.minimum_radicand_x,
-            "negative_count": self.negative_count,
-            "nonfinite_count": self.nonfinite_count,
-            "first_nonfinite_grid_index": self.first_nonfinite_grid_index,
-            "first_nonfinite_x": self.first_nonfinite_x,
-        }
+FloatArray: TypeAlias = NDArray[np.float64]
 
 
 class TanakaPotentialRadicandError(ValueError):
-    """A rejected real-valued Tanaka surface-potential construction."""
+    """Tanaka simulations whose real surface potential cannot be constructed."""
 
-    def __init__(
-        self,
-        reason: TanakaPotentialFailureReason,
-        components: tuple[TanakaRadicandFailure, ...],
-    ) -> None:
-        self.reason = reason
-        self.components = components
-        super().__init__(json_text(self.to_json_record()))
-
-    @property
-    def invalid_simulation_indices(self) -> tuple[int, ...]:
-        return tuple(
-            sorted({component.local_simulation_index for component in self.components})
+    def __init__(self, invalid_simulation_indices: tuple[int, ...]) -> None:
+        self.invalid_simulation_indices = tuple(sorted(set(invalid_simulation_indices)))
+        super().__init__(
+            "negative Tanaka surface-potential radicand in simulations "
+            f"{self.invalid_simulation_indices}"
         )
-
-    @property
-    def is_recoverable(self) -> bool:
-        """Whether failed simulations may be rejected while siblings continue."""
-
-        return (
-            self.reason == "negative_or_nonfinite_surface_potential_radicand"
-            and all(
-                component.is_finite_negative_radicand for component in self.components
-            )
-        )
-
-    def to_json_record(self) -> dict[str, object]:
-        return {
-            "schema": TANAKA_POTENTIAL_RADICAND_FAILURE_SCHEMA,
-            "reason": self.reason,
-            "invalid_simulation_indices": list(self.invalid_simulation_indices),
-            "components": [component.to_json_record() for component in self.components],
-        }
-
-
-def _flatten_simulation_crests(
-    simulation_crests: list[list[TanakaCrest]],
-) -> tuple[list[TanakaCrest], np.ndarray]:
-    flat_crests: list[TanakaCrest] = []
-    crest_simulation_ids: list[int] = []
-    for simulation_index, crests in enumerate(simulation_crests):
-        flat_crests.extend(crests)
-        crest_simulation_ids.extend([simulation_index] * len(crests))
-    return flat_crests, np.asarray(crest_simulation_ids, dtype=np.int32)
-
-
-def _crests_to_jax_arrays(
-    crests: list[TanakaCrest],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    alphas = jnp.asarray([crest.alpha for crest in crests], dtype=jnp.float64)
-    centers = jnp.asarray([crest.center for crest in crests], dtype=jnp.float64)
-    directions = jnp.asarray(
-        [crest.direction for crest in crests],
-        dtype=jnp.float64,
-    )
-    return alphas, centers, directions
 
 
 def cubic_hermite_zero_exterior(
@@ -155,17 +40,10 @@ def cubic_hermite_zero_exterior(
     x_eval: jax.Array,
 ) -> jax.Array:
     """Evaluate a nonuniform cubic Hermite profile, returning zero off support."""
+
     inside = (x_eval >= x_nodes[0]) & (x_eval <= x_nodes[-1])
     safe_x = jnp.where(inside, x_eval, x_nodes[0])
-    interval = (
-        jnp.searchsorted(
-            x_nodes,
-            safe_x,
-            side="right",
-            method="scan",
-        )
-        - 1
-    )
+    interval = jnp.searchsorted(x_nodes, safe_x, side="right", method="scan") - 1
     interval = jnp.clip(interval, 0, x_nodes.shape[0] - 2)
 
     x_left = x_nodes[interval]
@@ -173,12 +51,10 @@ def cubic_hermite_zero_exterior(
     fraction = (safe_x - x_left) / width
     fraction_squared = fraction * fraction
     fraction_cubed = fraction_squared * fraction
-
     h00 = 2.0 * fraction_cubed - 3.0 * fraction_squared + 1.0
     h10 = fraction_cubed - 2.0 * fraction_squared + fraction
     h01 = -2.0 * fraction_cubed + 3.0 * fraction_squared
     h11 = fraction_cubed - fraction_squared
-
     value = (
         h00 * y_nodes[interval]
         + h10 * width * slopes[interval]
@@ -199,34 +75,29 @@ def place_tanaka_profile_periodic(
     length: float,
     nx: int,
     image_radius: int,
-    fine_factor: int = TANAKA_FINE_FACTOR,
 ) -> jax.Array:
     """Place one dimensionless Tanaka profile using its exact surface tangent."""
+
     midpoint = x_profile.shape[0] // 2
     eta_nodes = eta_profile.at[0].set(0.0).at[-1].set(0.0)
     slopes = jnp.tan(theta_profile).at[0].set(0.0).at[midpoint].set(0.0).at[-1].set(0.0)
-
-    periodic_center = jnp.mod(center, length)
     shifts = length * jnp.arange(
         -image_radius,
         image_radius + 1,
         dtype=x_fine.dtype,
     )
-    dimensionless_queries = (
-        x_fine[None, :] + shifts[:, None] - periodic_center
-    ) / depth
+    queries = (x_fine[None, :] + shifts[:, None] - jnp.mod(center, length)) / depth
     eta_fine = depth * jnp.sum(
         cubic_hermite_zero_exterior(
             x_profile,
             eta_nodes,
             slopes,
-            dimensionless_queries,
+            queries,
         ),
         axis=0,
     )
-
     eta_hat_fine = jnp.fft.rfft(eta_fine)
-    eta_hat_native = eta_hat_fine[: nx // 2 + 1] / fine_factor
+    eta_hat_native = eta_hat_fine[: nx // 2 + 1] / TANAKA_FINE_FACTOR
     return jnp.fft.irfft(eta_hat_native, n=nx).astype(eta_profile.dtype)
 
 
@@ -236,246 +107,61 @@ def tanaka_periodic_image_radius(
     length: float,
 ) -> int:
     """Return the images needed to periodize every supplied compact profile."""
-    if length <= 0.0:
-        raise ValueError("Periodic length must be positive.")
-    if not bool(jnp.all(jnp.asarray(depth) > 0.0)):
-        raise ValueError("Tanaka depths must be positive.")
 
     half_support = jnp.maximum(
         jnp.abs(x_profile[..., 0]),
         jnp.abs(x_profile[..., -1]),
     )
-    maximum_physical_half_support = float(jnp.max(half_support * jnp.asarray(depth)))
-    return math.floor(maximum_physical_half_support / length) + 1
+    maximum_half_support = float(jnp.max(half_support * jnp.asarray(depth)))
+    return math.floor(maximum_half_support / length) + 1
 
 
-def _validate_tanaka_profile_batch(
-    x_profile: jax.Array,
-    eta_profile: jax.Array,
-    theta_profile: jax.Array,
-) -> None:
-    """Check assumptions needed for a compactly supported Hermite placement."""
-    if (
-        x_profile.ndim != 2
-        or eta_profile.shape != x_profile.shape
-        or theta_profile.shape != x_profile.shape
-        or x_profile.shape[-1] < 3
-        or x_profile.shape[-1] % 2 != 1
-    ):
-        raise ValueError(
-            "Tanaka x, eta, and theta profiles must have the same two-dimensional "
-            "shape with an odd number of at least three knots."
-        )
-    if not bool(
-        jnp.all(jnp.isfinite(x_profile))
-        & jnp.all(jnp.isfinite(eta_profile))
-        & jnp.all(jnp.isfinite(theta_profile))
-    ):
-        raise ValueError("Tanaka profile contains nonfinite values.")
-    if not bool(jnp.all(jnp.diff(x_profile, axis=-1) > 0.0)):
-        raise ValueError("Tanaka x-profile knots must be strictly increasing.")
-    if not bool(jnp.all(jnp.cos(theta_profile) > 0.0)):
-        raise ValueError("Tanaka profile is not a graph over x.")
-
-    slopes = jnp.tan(theta_profile)
-    midpoint = x_profile.shape[-1] // 2
-    maximum_join_defect = jnp.max(
-        jnp.abs(
-            jnp.concatenate(
-                (
-                    eta_profile[:, (0, -1)],
-                    slopes[:, (0, midpoint, -1)],
-                ),
-                axis=-1,
-            )
-        )
-    )
-    if float(maximum_join_defect) > TANAKA_PROFILE_TOLERANCE:
-        raise ValueError(
-            "Tanaka profile does not join the zero exterior smoothly: "
-            f"maximum endpoint/crest defect is {float(maximum_join_defect):.3e}."
-        )
-
-
-def _tanaka_radicand_failure(
+def build_tanaka_initial_conditions(
+    template: ModifiedTanakaParams,
+    depths: FloatArray,
+    crests_by_simulation: tuple[tuple[TanakaCrest, ...], ...],
     *,
-    global_component_index: int,
-    component_within_simulation: int,
-    simulation_index: int,
-    spec: TanakaCrest,
-    depth: float,
-    unsigned_speed: float,
-    speed_squared: float,
-    radicand: np.ndarray,
-    x_grid: np.ndarray,
-) -> TanakaRadicandFailure:
-    """Describe one invalid crest without retaining nonfinite floats."""
-    finite = np.isfinite(radicand)
-    negative = finite & (radicand < 0.0)
-    nonfinite_indices = np.flatnonzero(~finite)
-
-    minimum_index: int | None = None
-    minimum_radicand: float | None = None
-    minimum_radicand_x: float | None = None
-    minimum_scaled_radicand: float | None = None
-    if bool(np.all(finite)):
-        minimum_index = int(np.argmin(radicand))
-        minimum_radicand = float(radicand[minimum_index])
-        minimum_x = float(x_grid[minimum_index])
-        minimum_radicand_x = minimum_x if math.isfinite(minimum_x) else None
-        if math.isfinite(speed_squared) and speed_squared > 0.0:
-            scaled_radicand = minimum_radicand / speed_squared
-            minimum_scaled_radicand = (
-                scaled_radicand if math.isfinite(scaled_radicand) else None
-            )
-
-    first_nonfinite_index = (
-        int(nonfinite_indices[0]) if nonfinite_indices.size else None
-    )
-    first_nonfinite_x = None
-    if first_nonfinite_index is not None:
-        nonfinite_x = float(x_grid[first_nonfinite_index])
-        first_nonfinite_x = nonfinite_x if math.isfinite(nonfinite_x) else None
-    alpha = float(spec.alpha)
-    center = float(spec.center)
-    return TanakaRadicandFailure(
-        local_simulation_index=simulation_index,
-        component_within_simulation=component_within_simulation,
-        global_component_index=global_component_index,
-        alpha=alpha if math.isfinite(alpha) else None,
-        center=center if math.isfinite(center) else None,
-        direction=int(spec.direction),
-        depth=depth if math.isfinite(depth) else None,
-        unsigned_speed=(unsigned_speed if math.isfinite(unsigned_speed) else None),
-        speed_squared=speed_squared if math.isfinite(speed_squared) else None,
-        minimum_radicand=minimum_radicand,
-        minimum_radicand_over_speed_squared=minimum_scaled_radicand,
-        minimum_radicand_grid_index=minimum_index,
-        minimum_radicand_x=minimum_radicand_x,
-        negative_count=int(np.count_nonzero(negative)),
-        nonfinite_count=int(nonfinite_indices.size),
-        first_nonfinite_grid_index=first_nonfinite_index,
-        first_nonfinite_x=first_nonfinite_x,
-    )
-
-
-def _validate_tanaka_surface_potential_radicand(
-    radical: jax.Array | np.ndarray,
-    *,
-    x_grid: jax.Array | np.ndarray,
-    speed_per_crest: jax.Array | np.ndarray,
-    simulation_h_ref: np.ndarray,
-    flat_specs: list[TanakaCrest],
-    crest_simulation_ids: np.ndarray,
-    components_within_simulation: tuple[int, ...],
-) -> None:
-    """Reject every crest for which the surface-potential root is not real."""
-    radical_host = np.asarray(jax.device_get(radical))
-    x_host = np.asarray(jax.device_get(x_grid))
-    speed_host, speed_squared_host = (
-        np.asarray(value)
-        for value in jax.device_get((speed_per_crest, jnp.square(speed_per_crest)))
-    )
-    depths_host = np.asarray(simulation_h_ref)
-    simulation_ids_host = np.asarray(crest_simulation_ids)
-
-    component_count = len(flat_specs)
-    if radical_host.ndim != 2 or radical_host.shape[0] != component_count:
-        raise ValueError(
-            "Tanaka radicand must have shape (number of crest components, nx)."
-        )
-    if x_host.shape != (radical_host.shape[1],):
-        raise ValueError("Tanaka x grid must contain one point per radicand column.")
-    if speed_host.shape != (component_count,):
-        raise ValueError("Tanaka speed must contain one value per crest component.")
-    if speed_squared_host.shape != speed_host.shape:
-        raise ValueError("Tanaka squared speed shape does not match crest speeds.")
-    if simulation_ids_host.shape != (component_count,):
-        raise ValueError(
-            "Tanaka simulation ids must contain one value per crest component."
-        )
-    if len(components_within_simulation) != component_count:
-        raise ValueError(
-            "Tanaka within-simulation component ids must match the flattened crests."
-        )
-    if np.any(simulation_ids_host < 0) or np.any(
-        simulation_ids_host >= depths_host.size
-    ):
-        raise ValueError("Tanaka crest component refers to an absent local simulation.")
-
-    speed_invalid = (~np.isfinite(speed_squared_host)) | (speed_squared_host <= 0.0)
-    radicand_invalid = np.any(
-        (~np.isfinite(radical_host))
-        | (np.isfinite(radical_host) & (radical_host < 0.0)),
-        axis=1,
-    )
-    if not bool(np.any(speed_invalid) or np.any(radicand_invalid)):
-        return
-
-    if bool(np.any(speed_invalid)):
-        reason = "nonpositive_or_nonfinite_surface_potential_speed_squared"
-        invalid_components = np.flatnonzero(speed_invalid | radicand_invalid)
-    else:
-        reason = "negative_or_nonfinite_surface_potential_radicand"
-        invalid_components = np.flatnonzero(radicand_invalid)
-
-    components = tuple(
-        _tanaka_radicand_failure(
-            global_component_index=int(component_index),
-            component_within_simulation=components_within_simulation[component_index],
-            simulation_index=int(simulation_ids_host[component_index]),
-            spec=flat_specs[component_index],
-            depth=float(depths_host[simulation_ids_host[component_index]]),
-            unsigned_speed=float(speed_host[component_index]),
-            speed_squared=float(speed_squared_host[component_index]),
-            radicand=radical_host[component_index],
-            x_grid=x_host,
-        )
-        for component_index in invalid_components
-    )
-    raise TanakaPotentialRadicandError(
-        reason,
-        components,
-    )
-
-
-def build_per_simulation_initial_conditions(
-    *,
-    template_params: ModifiedTanakaParams,
-    simulation_h_ref: np.ndarray,
-    simulation_specs: list[list[TanakaCrest]],
     length: float,
     nx: int,
     gravity: float,
 ) -> tuple[jax.Array, jax.Array]:
-    """Generate per-simulation tangent-Hermite multicrest initial conditions."""
-    flat_specs, crest_simulation_ids = _flatten_simulation_crests(simulation_specs)
-    flat_steepness, flat_centers, flat_directions = _crests_to_jax_arrays(flat_specs)
-    crest_simulation_ids_array = jnp.asarray(crest_simulation_ids)
+    """Build one periodic multicrest initial state per simulation."""
 
-    tanaka_batch = solve_modified_tanaka_batched(
-        template_params,
-        flat_steepness,
-        centers=jnp.zeros_like(flat_steepness),
-        directions=flat_directions,
+    flat_crests = tuple(
+        crest
+        for simulation_crests in crests_by_simulation
+        for crest in simulation_crests
     )
-    x_profile = tanaka_batch.x_profile / template_params.depth
-    eta_profile = tanaka_batch.eta_profile / template_params.depth
-    theta_profile = tanaka_batch.theta_profile
-    froude = tanaka_batch.froude
-    _validate_tanaka_profile_batch(x_profile, eta_profile, theta_profile)
+    crest_simulation_ids = np.asarray(
+        [
+            simulation_index
+            for simulation_index, simulation_crests in enumerate(crests_by_simulation)
+            for _ in simulation_crests
+        ],
+        dtype=np.int32,
+    )
+    crest_simulation_ids_device = jnp.asarray(crest_simulation_ids)
+    steepness = jnp.asarray([crest.alpha for crest in flat_crests], dtype=jnp.float64)
+    centers = jnp.asarray([crest.center for crest in flat_crests], dtype=jnp.float64)
+    directions = jnp.asarray(
+        [crest.direction for crest in flat_crests], dtype=jnp.float64
+    )
 
-    crest_depths = jnp.asarray(
-        simulation_h_ref,
-        dtype=x_profile.dtype,
-    )[crest_simulation_ids_array]
-    crest_centers = jnp.asarray(flat_centers, dtype=x_profile.dtype)
+    tanaka = solve_modified_tanaka_batched(
+        template,
+        steepness,
+        centers=jnp.zeros_like(steepness),
+        directions=directions,
+    )
+    x_profile = tanaka.x_profile / template.depth
+    eta_profile = tanaka.eta_profile / template.depth
+    theta_profile = tanaka.theta_profile
+    crest_depths = jnp.asarray(depths, dtype=x_profile.dtype)[
+        crest_simulation_ids_device
+    ]
 
     nx_fine = nx * TANAKA_FINE_FACTOR
-    x_fine = (length / nx_fine) * jnp.arange(
-        nx_fine,
-        dtype=x_profile.dtype,
-    )
+    x_fine = (length / nx_fine) * jnp.arange(nx_fine, dtype=x_profile.dtype)
     image_radius = tanaka_periodic_image_radius(
         x_profile,
         crest_depths,
@@ -498,42 +184,38 @@ def build_per_simulation_initial_conditions(
         eta_profile,
         theta_profile,
         crest_depths,
-        crest_centers,
+        jnp.asarray(centers, dtype=x_profile.dtype),
     )
 
-    speed_per_crest = froude * jnp.sqrt(gravity * crest_depths)
-    direction_array = jnp.asarray(
-        flat_directions,
-        dtype=eta_per_crest.dtype,
-    )
+    speed_per_crest = tanaka.froude * jnp.sqrt(gravity * crest_depths)
+    direction_array = jnp.asarray(directions, dtype=eta_per_crest.dtype)
     signed_speed = (direction_array * speed_per_crest)[..., None]
     direction_column = direction_array[..., None]
+    _, wavenumbers = build_grid(nx, length)
+    eta_x = spectral_dx(eta_per_crest, wavenumbers)
+    radicand = (1.0 + eta_x**2) * (signed_speed**2 - 2.0 * gravity * eta_per_crest)
+    radicand_host, speed_squared_host = (
+        np.asarray(value)
+        for value in jax.device_get((radicand, jnp.square(speed_per_crest)))
+    )
+    if not np.all(np.isfinite(speed_squared_host) & (speed_squared_host > 0.0)):
+        raise ValueError("Tanaka wave speeds must be finite and positive")
+    if not np.isfinite(radicand_host).all():
+        raise ValueError("Tanaka surface-potential radicand must be finite")
+    invalid_crests = np.flatnonzero(np.any(radicand_host < 0.0, axis=1))
+    if invalid_crests.size:
+        raise TanakaPotentialRadicandError(
+            tuple(np.unique(crest_simulation_ids[invalid_crests]).astype(int).tolist())
+        )
 
-    x_grid, k_grid = build_grid(nx, length)
-    eta_x = spectral_dx(eta_per_crest, k_grid)
-    radical = (1.0 + eta_x**2) * (signed_speed**2 - 2.0 * gravity * eta_per_crest)
-    components_within_simulation = tuple(
-        component_index
-        for specs in simulation_specs
-        for component_index in range(len(specs))
-    )
-    _validate_tanaka_surface_potential_radicand(
-        radical,
-        x_grid=x_grid,
-        speed_per_crest=speed_per_crest,
-        simulation_h_ref=simulation_h_ref,
-        flat_specs=flat_specs,
-        crest_simulation_ids=crest_simulation_ids,
-        components_within_simulation=components_within_simulation,
-    )
-    xi_x = signed_speed - direction_column * jnp.sqrt(radical)
-    inverse_ik = jnp.where(k_grid != 0.0, 1.0 / (1j * k_grid), 0.0)
+    xi_x = signed_speed - direction_column * jnp.sqrt(radicand)
+    inverse_ik = jnp.where(wavenumbers != 0.0, 1.0 / (1j * wavenumbers), 0.0)
     xi_per_crest = myifft(inverse_ik * myfft(xi_x, nx))
     xi_per_crest -= jnp.mean(xi_per_crest, axis=-1, keepdims=True)
 
-    batch_size = simulation_h_ref.shape[0]
-    eta_simulation = jnp.zeros((batch_size, nx), dtype=eta_per_crest.dtype)
-    xi_simulation = jnp.zeros((batch_size, nx), dtype=xi_per_crest.dtype)
-    eta_simulation = eta_simulation.at[crest_simulation_ids_array].add(eta_per_crest)
-    xi_simulation = xi_simulation.at[crest_simulation_ids_array].add(xi_per_crest)
-    return eta_simulation, xi_simulation
+    batch_size = len(crests_by_simulation)
+    eta = jnp.zeros((batch_size, nx), dtype=eta_per_crest.dtype)
+    xi = jnp.zeros((batch_size, nx), dtype=xi_per_crest.dtype)
+    eta = eta.at[crest_simulation_ids_device].add(eta_per_crest)
+    xi = xi.at[crest_simulation_ids_device].add(xi_per_crest)
+    return eta, xi

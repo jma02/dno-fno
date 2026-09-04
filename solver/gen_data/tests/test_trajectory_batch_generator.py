@@ -260,10 +260,8 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
         base_constructor, calls = _marker_constructor()
         first_call = True
 
-        class RecoverableTanakaFailure(ValueError):
-            is_recoverable = True
+        class TanakaFailure(ValueError):
             invalid_simulation_indices = (0,)
-            reason = "negative_surface_potential_radicand"
 
         def reject_first(
             samples: tuple[object, ...], config: RolloutNumerics
@@ -272,7 +270,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
             if first_call:
                 first_call = False
                 calls.append(len(samples))
-                raise RecoverableTanakaFailure
+                raise TanakaFailure
             return base_constructor(samples, config)
 
         integrator, _ = _fast_integrator()
@@ -280,7 +278,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
             mock.patch(
                 "solver.gen_data.trajectory_batch_generator."
                 "TanakaPotentialRadicandError",
-                new=RecoverableTanakaFailure,
+                new=TanakaFailure,
             ),
             mock.patch(
                 "solver.gen_data.trajectory_batch_generator."

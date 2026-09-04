@@ -19,8 +19,6 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
-    PAPER_RESOLVED_BAND_QUADRATURE_ORDER,
-    PAPER_RESOLVED_BAND_TRANSITION_FRACTION,
     ResolvedBand,
     finite_depth_angular_frequency,
 )
@@ -67,14 +65,9 @@ def _wiring_config() -> RolloutNumerics:
 
 
 def _resolved_band(config: RolloutNumerics) -> ResolvedBand:
-    maximum_wavenumber = config.target_maximum_wavenumber
     return ResolvedBand(
-        length=config.length,
-        maximum_wavenumber=maximum_wavenumber,
-        transition_wavenumber=(
-            PAPER_RESOLVED_BAND_TRANSITION_FRACTION * maximum_wavenumber
-        ),
-        quadrature_order=PAPER_RESOLVED_BAND_QUADRATURE_ORDER,
+        config.length,
+        config.target_maximum_wavenumber,
     )
 
 
@@ -169,7 +162,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 np.testing.assert_array_equal(first.xi0, replay.xi0)
                 np.testing.assert_array_equal(first.depths, replay.depths)
 
-    def test_paper_jonswap_uses_the_declared_band_and_frequency_window(self) -> None:
+    def test_paper_jonswap_uses_the_sharp_relative_frequency_band(self) -> None:
         config = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
         band = _resolved_band(config)
         sample = sample_jonswap_tma_simulation(
@@ -181,7 +174,6 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         initial = construct_jonswap_tma_trajectory_batch((sample,), config, band=band)
 
         self.assertEqual(band.maximum_wavenumber, 128.0)
-        self.assertEqual(band.transition_wavenumber, 96.0)
         _assert_initial_batch(self, initial, config)
 
         wavenumbers = np.asarray(

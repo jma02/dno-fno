@@ -29,7 +29,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
     deep_water_proxy_depth,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
-    build_per_simulation_initial_conditions,
+    build_tanaka_initial_conditions,
 )
 from solver.gen_data.tanaka_sampling import TanakaCrest  # noqa: E402
 from solver.solvers.dno_series_jax import (  # noqa: E402
@@ -85,36 +85,32 @@ def _build_cross_family_batch() -> tuple[State, jax.Array, jax.Array]:
         dno_order=6,
         pad_factor=8,
     )
-    tanaka_eta, tanaka_xi = build_per_simulation_initial_conditions(
-        template_params=template,
-        simulation_h_ref=np.asarray([tanaka_depth], dtype=np.float64),
-        simulation_specs=[
-            [
+    tanaka_eta, tanaka_xi = build_tanaka_initial_conditions(
+        template,
+        np.asarray([tanaka_depth], dtype=np.float64),
+        (
+            (
                 TanakaCrest(
                     alpha=0.10,
                     center=np.pi,
                     direction=1,
-                )
-            ]
-        ],
+                ),
+            ),
+        ),
         length=LENGTH,
         nx=NX,
         gravity=GRAVITY,
     )
 
-    bf_params = {
-        "n_carr": np.asarray([5], dtype=np.int32),
-        "side_offset": np.asarray([1], dtype=np.int32),
-        "eps_carrier": np.asarray([0.08], dtype=np.float64),
-        "eps_pert": np.asarray([0.10], dtype=np.float64),
-        "translation": np.asarray([0.0], dtype=np.float64),
-    }
     bf_eta, bf_xi = build_benjamin_feir_initial_conditions(
         x=x,
-        parameters=bf_params,
+        carrier_modes=np.asarray([5], dtype=np.int32),
+        sideband_offsets=np.asarray([1], dtype=np.int32),
+        carrier_steepnesses=np.asarray([0.08], dtype=np.float64),
+        perturbation_ratios=np.asarray([0.10], dtype=np.float64),
+        translations=np.asarray([0.0], dtype=np.float64),
         length=LENGTH,
         gravity=GRAVITY,
-        dtype=jnp.float64,
     )
 
     eta = jnp.concatenate(
