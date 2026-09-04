@@ -29,10 +29,6 @@ ROOT_SEED_BY_DATASET_SPLIT: Final = {
 }
 
 
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
-JsonObject: TypeAlias = dict[str, JsonValue]
-
 FloatArray: TypeAlias = NDArray[np.floating[Any]]
 SimulationRows = NamedTuple(
     "SimulationRows",
@@ -56,20 +52,3 @@ class DatasetShardArrays(TypedDict):
     time: NDArray[np.float64]
     simulation_local_index: NDArray[np.int32]
     frame_index: NDArray[np.int32]
-
-
-class SimulationIndexArrays(TypedDict):
-    """Row ownership and acceptance data written beside the dataset manifest."""
-
-    schema_version: NDArray[np.int16]
-    trajectory_index: NDArray[np.int32]
-    frame_index: NDArray[np.int32]
-    shard_index: NDArray[np.int32]
-    shard_row: NDArray[np.int64]
-    trajectory_family_id: NDArray[np.int16]
-    trajectory_dataset_split: NDArray[np.str_]
-    trajectory_simulation_id: NDArray[np.int64]
-    trajectory_parameter_group_id: NDArray[np.str_]
-    trajectory_accepted: NDArray[np.bool_]
-    trajectory_first_row: NDArray[np.int64]
-    trajectory_row_count: NDArray[np.int32]

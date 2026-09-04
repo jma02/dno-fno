@@ -1,8 +1,8 @@
 # Dataset generation reading checklist
 
-Read these in order. The first section covers the control flow and scientific
-choices; the second section is implementation detail that can usually be
-skimmed.
+Read these in order. Checkmarks track the completed simplification pass.
+The main path covers control flow and scientific choices; optional implementation
+details can usually be skimmed.
 
 ## Main path
 
@@ -25,8 +25,8 @@ skimmed.
 - [x] `solver/gen_data/pipeline/time_selection.py` — dense-time index selection
 - [x] `solver/gen_data/pipeline/trajectory_subsampling.py` — retained training rows per accepted simulation
 - [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
-- [ ] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
-- [ ] `scripts/build_paper_dataset_view.py` — combination of all family/split runs
+- [x] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
+- [x] `scripts/build_paper_dataset_view.py` — combination of all family/split runs
 
 ## Physical constructors worth reading separately
 

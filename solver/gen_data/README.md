@@ -105,6 +105,10 @@ The supported generation entrypoints live in `scripts/`:
 - `build_paper_dataset_view.py` combines completed family/split runs into one training
   view.
 
+The combined-view command builds immediately. Repeat `--run-summary` for each
+completed family/split run and supply `--output-root`; each included split must
+have all four families with equal accepted simulation counts.
+
 ## Development checks
 
 From the repository root:

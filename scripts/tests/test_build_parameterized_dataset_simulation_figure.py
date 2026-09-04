@@ -15,6 +15,7 @@ from scripts.build_parameterized_dataset_simulation_figure import (
     SelectedTrajectory,
     SourceDetails,
     dimensionless_profile,
+    load_source_details,
     publish_outputs,
     select_validation_trajectories,
 )
@@ -59,6 +60,46 @@ def _details(family: str, root: Path) -> SourceDetails:
 
 
 class ParameterizedDatasetFigureTest(unittest.TestCase):
+    def test_loads_scales_from_current_manifest_without_summary_configuration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for family_id, family in enumerate(FAMILY_ORDER, start=1):
+                with self.subTest(family=family):
+                    source = _source(family, root)
+                    source.summary_path.write_text(
+                        json.dumps(
+                            {
+                                "run_spec": {
+                                    "family_name": family,
+                                    "dataset_split": "validation",
+                                },
+                                "dataset_view": {
+                                    "manifest": source.manifest_path.name,
+                                    "trajectory_map": source.map_path.name,
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    source.manifest_path.write_text(
+                        json.dumps({"grid": {"length": 2.0 * np.pi, "nx": 4}}),
+                        encoding="utf-8",
+                    )
+                    np.savez(
+                        source.map_path,
+                        trajectory_accepted=np.asarray([True]),
+                        trajectory_family_id=np.asarray([family_id]),
+                        trajectory_dataset_split=np.asarray(["validation"]),
+                    )
+
+                    details = load_source_details(source)
+
+                    self.assertEqual(details.length, 2.0 * np.pi)
+                    self.assertEqual(details.stored_nx, 4)
+                    self.assertEqual(details.gravity, 1.0)
+
     def test_dimensionless_profile(self) -> None:
         profile = dimensionless_profile(
             np.asarray([0.0, 1.0, 2.0, 3.0]),

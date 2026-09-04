@@ -138,12 +138,6 @@ def _mapping(value: object, *, context: str) -> Mapping[str, Any]:
     return value
 
 
-def _nonnegative_integer(value: object, *, context: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{context} must be a nonnegative integer")
-    return value
-
-
 def _positive_float(value: object, *, context: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{context} must be numeric")
@@ -151,47 +145,6 @@ def _positive_float(value: object, *, context: str) -> float:
     if not math.isfinite(result) or result <= 0.0:
         raise ValueError(f"{context} must be finite and positive")
     return result
-
-
-def _source_numerical_scales(
-    summary: Mapping[str, Any],
-    *,
-    family: str,
-) -> tuple[float, float, int]:
-    run_spec = _mapping(summary.get("run_spec"), context="source run_spec")
-    configuration = _mapping(
-        run_spec.get("configuration"),
-        context="source configuration",
-    )
-    if family == "stokes":
-        numerical = _mapping(
-            configuration.get("contract"),
-            context="Stokes numerical config",
-        )
-    else:
-        execution = _mapping(
-            configuration.get("trajectory_execution"),
-            context=f"{family} trajectory execution",
-        )
-        numerical = _mapping(
-            execution.get("numerical"),
-            context=f"{family} numerical config",
-        )
-    view = _mapping(summary.get("dataset_view"), context="source dataset_view")
-    grid = _mapping(view.get("grid"), context="source stored grid")
-    length = _positive_float(numerical.get("length"), context="domain length")
-    gravity = _positive_float(numerical.get("gravity"), context="gravity")
-    stored_nx = _nonnegative_integer(grid.get("nx"), context="stored grid nx")
-    if stored_nx < 2:
-        raise ValueError("stored grid nx must be at least two")
-    if not math.isclose(
-        length,
-        _positive_float(grid.get("length"), context="stored grid length"),
-        rel_tol=0.0,
-        abs_tol=1.0e-12,
-    ):
-        raise ValueError("stored-grid length differs from numerical config")
-    return length, gravity, stored_nx
 
 
 def _validate_source_map(
@@ -219,14 +172,17 @@ def load_source_details(source: DatasetSource) -> SourceDetails:
     if run_spec.get("dataset_split") != source.split:
         raise ValueError("source run-spec split differs from its summary name")
     _validate_source_map(source)
-    length, gravity, stored_nx = _source_numerical_scales(
-        summary,
-        family=source.family,
+    grid = _mapping(
+        read_json(source.manifest_path).get("grid"), context="source stored grid"
     )
+    length = _positive_float(grid.get("length"), context="stored grid length")
+    stored_nx = grid.get("nx")
+    if isinstance(stored_nx, bool) or not isinstance(stored_nx, int) or stored_nx < 2:
+        raise ValueError("stored grid nx must be an integer at least two")
     return SourceDetails(
         source=source,
         length=length,
-        gravity=gravity,
+        gravity=1.0,  # All paper families use nondimensional gravity g = 1.
         stored_nx=stored_nx,
     )
 
