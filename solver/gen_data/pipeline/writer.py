@@ -12,10 +12,10 @@ from numpy.typing import NDArray
 from solver.gen_data.pipeline.artifact_io import json_text
 from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.types import (
     BatchPlanArrays,
+    DatasetSplit,
     DatasetShardArrays,
     JsonScalar,
 )

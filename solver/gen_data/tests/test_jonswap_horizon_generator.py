@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import math
 import os
-from pathlib import Path
-import tempfile
 from typing import cast
 import unittest
+from unittest import mock
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -17,26 +15,12 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np  # noqa: E402
 
 from solver.gen_data.jonswap_horizon_generator import (  # noqa: E402
-    HorizonBucketedJonswapBatchGenerator,
     horizon_sorted_groups,
-)
-from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_PARAMETER_GROUP_IDS,
-)
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    PhysicalFamilyId,
-    DatasetSplit,
-)
-from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
-    DatasetChunkConfig,
+    integrate_and_subsample_jonswap,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    PAPER_JONSWAP_ADJUSTMENT_CONFIG,
-    PAPER_JONSWAP_ROLLOUT_CONFIG,
-    RolloutConfig,
-    TrajectoryGenerationConfig,
-    TrajectoryFrameSelectionConfig,
-    paper_trajectory_config,
+    PAPER_ROLLOUT_NUMERICS,
+    RolloutNumerics,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     IntegratedAdjustmentBatch,
@@ -52,60 +36,24 @@ from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
 )
 
 
-def _contract() -> RolloutConfig:
-    return RolloutConfig(
+def _rollout_config(
+    *, internal_hamiltonian_drift_threshold: float | None = None
+) -> RolloutNumerics:
+    return RolloutNumerics(
         nx=64,
         target_nx=64,
         length=2.0 * math.pi,
         gravity=1.0,
-        dno_order=0,
-        target_dno_order=0,
+        integration_dno_order=0,
+        label_dno_order=0,
         pad_factor=1,
         maximum_wavenumber=16.0,
         target_maximum_wavenumber=16.0,
-        dt=0.04,
         saved_dt=0.08,
+        substeps_per_saved_frame=2,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=2,
-        target_time_chunk_size=2,
-    )
-
-
-def _trajectory_config(
-    contract: RolloutConfig | None = None,
-) -> TrajectoryGenerationConfig:
-    return TrajectoryGenerationConfig(
-        family="jonswap_tma",
-        numerical=_contract() if contract is None else contract,
-        frame_selection=TrajectoryFrameSelectionConfig(
-            tanaka_count=3,
-            tanaka_alpha=0.5,
-            tanaka_sigma_steps=1.0,
-            benjamin_feir_count=3,
-            jonswap_tma_count=3,
-        ),
-        period_count=16,
-        jonswap_quadrature_order=4,
-        jonswap_adjustment=PAPER_JONSWAP_ADJUSTMENT_CONFIG,
-    )
-
-
-def _run_spec(
-    root: Path,
-    trajectory_config: TrajectoryGenerationConfig,
-    *,
-    outer_size: int,
-    solver_size: int,
-) -> DatasetChunkConfig:
-    parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[0]
-    return DatasetChunkConfig(
-        root=root,
-        family_name="jonswap_tma",
-        family_id=PhysicalFamilyId.JONSWAP_TMA,
-        dataset_split=DatasetSplit.TEST,
-        simulation_targets={parameter_group_id: outer_size},
-        batch_size=outer_size,
-        solver_batch_size=solver_size,
+        internal_hamiltonian_drift_threshold=internal_hamiltonian_drift_threshold,
     )
 
 
@@ -135,7 +83,7 @@ class RecordingRolloutIntegrator:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        config: RolloutConfig,
+        config: RolloutNumerics,
     ) -> IntegratedTrajectoryBatch:
         del depths
         batch_size, internal_nx = eta0.shape
@@ -158,7 +106,7 @@ class RecordingRolloutIntegrator:
                 delivered_nx,
                 axis=1,
             )
-        substeps = int(round(config.saved_dt / config.dt))
+        substeps = config.substeps_per_saved_frame
         telemetry_shape = ((saved_count - 1) * substeps, batch_size)
         internal_telemetry = None
         if self.hamiltonian_drift is not None:
@@ -210,7 +158,7 @@ class RecordingAdjustmentRolloutIntegrator:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        config: RolloutConfig,
+        config: RolloutNumerics,
         nonlinear_ramp_times: np.ndarray,
         nonlinear_ramp_order: int,
     ) -> IntegratedAdjustmentBatch:
@@ -234,7 +182,7 @@ class RecordingAdjustmentRolloutIntegrator:
                 raise ValueError("terminal_addition has the wrong spatial shape")
             eta[1:] += addition[None, None, :]
         xi = np.repeat(xi0[None, :, :], saved_count, axis=0)
-        substeps = int(round(config.saved_dt / config.dt))
+        substeps = config.substeps_per_saved_frame
         telemetry_shape = ((saved_count - 1) * substeps, batch_size)
         residual = np.zeros(telemetry_shape, dtype=np.float64)
         converged = np.ones(telemetry_shape, dtype=np.bool_)
@@ -271,47 +219,48 @@ def _jonswap_record(
 
 class JonswapHorizonGeneratorTests(unittest.TestCase):
     def test_groups_are_stable(self) -> None:
-        grids = tuple(map(_grid, (9, 3, 8, 3, 10)))
+        grids = tuple(map(_grid, (19, 16, 18, 16, 20)))
 
         groups = horizon_sorted_groups(grids, solver_batch_size=2)
 
         self.assertEqual(groups, ((1, 3), (2, 0), (4,)))
 
     def test_generator_preserves_base_decisions_rows_and_time_metrics(self) -> None:
-        trajectory_config = _trajectory_config()
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory),
-                trajectory_config,
-                outer_size=5,
-                solver_size=2,
-            )
-            rollouts = RecordingRolloutIntegrator()
-            adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=rollouts,
-                adjustment_rollout_integrator=adjustment_rollouts,
-            )
-            markers = np.arange(1, 6, dtype=np.float64) / 100.0
-            initial = TrajectoryInitialBatch(
-                eta0=np.repeat(markers[:, None], 64, axis=1),
-                xi0=np.zeros((5, 64), dtype=np.float64),
-                depths=np.ones(5, dtype=np.float64),
-                specification_records=tuple(
-                    _jonswap_record(index) for index in range(5)
-                ),
-            )
-            grids = tuple(map(_grid, (9, 3, 8, 3, 10)))
+        numerical = _rollout_config()
+        rollouts = RecordingRolloutIntegrator()
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
+        markers = np.arange(1, 6, dtype=np.float64) / 100.0
+        initial = TrajectoryInitialBatch(
+            eta0=np.repeat(markers[:, None], 64, axis=1),
+            xi0=np.zeros((5, 64), dtype=np.float64),
+            depths=np.ones(5, dtype=np.float64),
+            specification_records=tuple(_jonswap_record(index) for index in range(5)),
+        )
+        grids = tuple(map(_grid, (19, 16, 18, 16, 20)))
 
-            outcomes = generator._integrate_and_subsample_jonswap(initial, grids)
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            outcomes = integrate_and_subsample_jonswap(
+                initial,
+                grids,
+                numerical=numerical,
+                solver_batch_size=2,
+            )
 
-        self.assertEqual(rollouts.calls, [(2, 3), (2, 9), (1, 10)])
+        self.assertEqual(rollouts.calls, [(2, 16), (2, 19), (1, 20)])
         self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
         self.assertEqual(
             [outcome.metrics["saved_time_count"] for outcome in outcomes],
-            [9, 3, 8, 3, 10],
+            [19, 16, 18, 16, 20],
         )
         self.assertEqual(
             [
@@ -330,42 +279,40 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 for marker, outcome in zip(markers, outcomes)
             ],
         )
-        self.assertTrue(
-            all(
-                call[3] == PAPER_JONSWAP_ADJUSTMENT_CONFIG.ramp_order
-                for call in adjustment_rollouts.calls
-            )
-        )
+        self.assertTrue(all(call[3] == 4 for call in adjustment_rollouts.calls))
 
     def test_mixed_burn_horizons_use_each_simulations_own_endpoint(self) -> None:
-        trajectory_config = _trajectory_config()
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), trajectory_config, outer_size=3, solver_size=3
-            )
-            production_rollouts = RecordingRolloutIntegrator()
-            adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=production_rollouts,
-                adjustment_rollout_integrator=adjustment_rollouts,
-            )
-            markers = np.asarray((0.01, 0.02, 0.03), dtype=np.float64)
-            peak_wavenumbers = (4.0, 9.0, 16.0)
-            initial = TrajectoryInitialBatch(
-                eta0=np.repeat(markers[:, None], 64, axis=1),
-                xi0=np.zeros((3, 64), dtype=np.float64),
-                depths=np.ones(3, dtype=np.float64),
-                specification_records=tuple(
-                    _jonswap_record(index, peak_wavenumber=wavenumber)
-                    for index, wavenumber in enumerate(peak_wavenumbers)
-                ),
-            )
+        numerical = _rollout_config()
+        production_rollouts = RecordingRolloutIntegrator()
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
+        markers = np.asarray((0.01, 0.02, 0.03), dtype=np.float64)
+        peak_wavenumbers = (4.0, 9.0, 16.0)
+        initial = TrajectoryInitialBatch(
+            eta0=np.repeat(markers[:, None], 64, axis=1),
+            xi0=np.zeros((3, 64), dtype=np.float64),
+            depths=np.ones(3, dtype=np.float64),
+            specification_records=tuple(
+                _jonswap_record(index, peak_wavenumber=wavenumber)
+                for index, wavenumber in enumerate(peak_wavenumbers)
+            ),
+        )
 
-            outcomes = generator._integrate_and_subsample_jonswap(
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=production_rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            outcomes = integrate_and_subsample_jonswap(
                 initial,
-                tuple(map(_grid, (5, 5, 5))),
+                tuple(map(_grid, (16, 16, 16))),
+                numerical=numerical,
+                solver_batch_size=3,
             )
 
         handed_off = production_rollouts.initial_eta[0][:, 0]
@@ -378,11 +325,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         )
         np.testing.assert_allclose(handed_off, markers + realized)
         self.assertGreater(len(set(realized.tolist())), 1)
-        expected_ramps = (
-            PAPER_JONSWAP_ADJUSTMENT_CONFIG.ramp_time_peak_periods
-            * realized
-            / PAPER_JONSWAP_ADJUSTMENT_CONFIG.burn_peak_periods
-        )
+        expected_ramps = 10 * realized / 20
         np.testing.assert_allclose(
             adjustment_rollouts.calls[0][2],
             expected_ramps,
@@ -393,31 +336,37 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
     def test_full_band_adjustment_endpoint_is_not_projected_before_production(
         self,
     ) -> None:
-        contract = PAPER_JONSWAP_ROLLOUT_CONFIG
-        trajectory_config = _trajectory_config(contract)
-        x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
+        rollout_config = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
+        x = 2.0 * math.pi * np.arange(rollout_config.nx) / rollout_config.nx
         high_mode = 0.001 * np.cos(600.0 * x)
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), trajectory_config, outer_size=1, solver_size=1
-            )
-            production_rollouts = RecordingRolloutIntegrator(hamiltonian_drift=0.0)
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=production_rollouts,
-                adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(
-                    terminal_addition=high_mode
-                ),
-            )
-            initial = TrajectoryInitialBatch(
-                eta0=np.full((1, contract.nx), 0.01, dtype=np.float64),
-                xi0=np.zeros((1, contract.nx), dtype=np.float64),
-                depths=np.ones(1, dtype=np.float64),
-                specification_records=(_jonswap_record(0),),
-            )
+        production_rollouts = RecordingRolloutIntegrator(hamiltonian_drift=0.0)
+        initial = TrajectoryInitialBatch(
+            eta0=np.full((1, rollout_config.nx), 0.01, dtype=np.float64),
+            xi0=np.zeros((1, rollout_config.nx), dtype=np.float64),
+            depths=np.ones(1, dtype=np.float64),
+            specification_records=(_jonswap_record(0),),
+        )
 
-            outcomes = generator._integrate_and_subsample_jonswap(initial, (_grid(5),))
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator(
+            terminal_addition=high_mode
+        )
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=production_rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            outcomes = integrate_and_subsample_jonswap(
+                initial,
+                (_grid(16),),
+                numerical=rollout_config,
+                solver_batch_size=1,
+            )
 
         handed_off = production_rollouts.initial_eta[0][0]
         coefficient = np.fft.rfft(handed_off - np.mean(handed_off))[600]
@@ -428,37 +377,38 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         self.assertTrue(outcomes[0].decision.accepted)
 
     def test_burn_failure_skips_production_and_restores_proposal_order(self) -> None:
-        trajectory_config = _trajectory_config()
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), trajectory_config, outer_size=5, solver_size=2
-            )
-            production_rollouts = RecordingRolloutIntegrator()
-            adjustment_rollouts = RecordingAdjustmentRolloutIntegrator(
-                failing_markers=(0.02, 0.05)
-            )
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=production_rollouts,
-                adjustment_rollout_integrator=adjustment_rollouts,
-            )
-            markers = np.arange(1, 6, dtype=np.float64) / 100.0
-            initial = TrajectoryInitialBatch(
-                eta0=np.repeat(markers[:, None], 64, axis=1),
-                xi0=np.zeros((5, 64), dtype=np.float64),
-                depths=np.ones(5, dtype=np.float64),
-                specification_records=tuple(
-                    _jonswap_record(index) for index in range(5)
-                ),
-                construction_metrics=tuple(
-                    {"construction_marker": index} for index in range(5)
-                ),
-            )
+        numerical = _rollout_config()
+        production_rollouts = RecordingRolloutIntegrator()
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator(
+            failing_markers=(0.02, 0.05)
+        )
+        markers = np.arange(1, 6, dtype=np.float64) / 100.0
+        initial = TrajectoryInitialBatch(
+            eta0=np.repeat(markers[:, None], 64, axis=1),
+            xi0=np.zeros((5, 64), dtype=np.float64),
+            depths=np.ones(5, dtype=np.float64),
+            specification_records=tuple(_jonswap_record(index) for index in range(5)),
+            construction_metrics=tuple(
+                {"construction_marker": index} for index in range(5)
+            ),
+        )
 
-            outcomes = generator._integrate_and_subsample_jonswap(
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=production_rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            outcomes = integrate_and_subsample_jonswap(
                 initial,
-                tuple(map(_grid, (9, 3, 8, 3, 10))),
+                tuple(map(_grid, (19, 16, 18, 16, 20))),
+                numerical=numerical,
+                solver_batch_size=2,
             )
 
         self.assertEqual(
@@ -481,63 +431,68 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
     def test_burn_hamiltonian_is_not_an_acceptance_check_and_production_is_unramped(
         self,
     ) -> None:
-        trajectory_config = _trajectory_config()
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), trajectory_config, outer_size=1, solver_size=1
-            )
-            production_rollouts = RecordingRolloutIntegrator()
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=production_rollouts,
-                adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(),
-            )
-            initial = TrajectoryInitialBatch(
-                eta0=np.full((1, 64), 0.01, dtype=np.float64),
-                xi0=np.zeros((1, 64), dtype=np.float64),
-                depths=np.ones(1, dtype=np.float64),
-                specification_records=(_jonswap_record(0),),
-            )
+        numerical = _rollout_config()
+        production_rollouts = RecordingRolloutIntegrator()
+        initial = TrajectoryInitialBatch(
+            eta0=np.full((1, 64), 0.01, dtype=np.float64),
+            xi0=np.zeros((1, 64), dtype=np.float64),
+            depths=np.ones(1, dtype=np.float64),
+            specification_records=(_jonswap_record(0),),
+        )
 
-            (outcome,) = generator._integrate_and_subsample_jonswap(
-                initial, (_grid(5),)
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=production_rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            (outcome,) = integrate_and_subsample_jonswap(
+                initial,
+                (_grid(16),),
+                numerical=numerical,
+                solver_batch_size=1,
             )
 
         self.assertTrue(outcome.decision.accepted)
         self.assertNotIn("nonlinear_adjustment_hamiltonian", outcome.metrics)
-        self.assertEqual(
-            outcome.metrics["nonlinear_adjustment_production_ramp"],
-            "disabled",
-        )
         self.assertEqual(len(production_rollouts.calls), 1)
         self.assertEqual(float(production_rollouts.saved_times[0][0]), 0.0)
 
     def test_autonomous_hamiltonian_gate_rejects_after_accepted_burn(self) -> None:
-        contract = replace(
-            _contract(),
+        rollout_config = _rollout_config(
             internal_hamiltonian_drift_threshold=1.0e-3,
         )
-        trajectory_config = _trajectory_config(contract)
-        with tempfile.TemporaryDirectory() as directory:
-            spec = _run_spec(
-                Path(directory), trajectory_config, outer_size=1, solver_size=1
-            )
-            generator = HorizonBucketedJonswapBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                rollout_integrator=RecordingRolloutIntegrator(hamiltonian_drift=1.0e-2),
-                adjustment_rollout_integrator=RecordingAdjustmentRolloutIntegrator(),
-            )
-            initial = TrajectoryInitialBatch(
-                eta0=np.full((1, 64), 0.01, dtype=np.float64),
-                xi0=np.zeros((1, 64), dtype=np.float64),
-                depths=np.ones(1, dtype=np.float64),
-                specification_records=(_jonswap_record(0),),
-            )
+        initial = TrajectoryInitialBatch(
+            eta0=np.full((1, 64), 0.01, dtype=np.float64),
+            xi0=np.zeros((1, 64), dtype=np.float64),
+            depths=np.ones(1, dtype=np.float64),
+            specification_records=(_jonswap_record(0),),
+        )
 
-            (outcome,) = generator._integrate_and_subsample_jonswap(
-                initial, (_grid(5),)
+        production_rollouts = RecordingRolloutIntegrator(hamiltonian_drift=1.0e-2)
+        adjustment_rollouts = RecordingAdjustmentRolloutIntegrator()
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=production_rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout."
+                "integrate_adjustment_batch",
+                new=adjustment_rollouts,
+            ),
+        ):
+            (outcome,) = integrate_and_subsample_jonswap(
+                initial,
+                (_grid(16),),
+                numerical=rollout_config,
+                solver_batch_size=1,
             )
 
         self.assertFalse(outcome.decision.accepted)
@@ -550,36 +505,6 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             cast(float, outcome.metrics["maximum_internal_hamiltonian_drift"]),
             1.0e-2,
         )
-
-    def test_paper_generator_uses_configured_solver_batch_size(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            trajectory_config = paper_trajectory_config("jonswap_tma")
-            config = _run_spec(
-                Path(directory),
-                trajectory_config,
-                outer_size=1024,
-                solver_size=256,
-            )
-
-        self.assertEqual(config.solver_batch_size, 256)
-        numerical = trajectory_config.numerical
-        self.assertEqual(
-            (
-                numerical.nx,
-                numerical.target_nx,
-                numerical.maximum_wavenumber,
-                numerical.target_maximum_wavenumber,
-                numerical.dno_order,
-                numerical.target_dno_order,
-                numerical.gl2_iteration_cap,
-            ),
-            (2048, 1024, 704.0, 128.0, 4, 6, 5),
-        )
-        generator = HorizonBucketedJonswapBatchGenerator(
-            chunk_config=config,
-            trajectory_config=trajectory_config,
-        )
-        self.assertEqual(generator.chunk_config.solver_batch_size, 256)
 
 
 if __name__ == "__main__":

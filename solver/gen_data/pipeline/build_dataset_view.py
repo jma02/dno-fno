@@ -20,8 +20,8 @@ from solver.gen_data.pipeline.artifact_io import (
 from solver.gen_data.pipeline.batch_artifacts import (
     compute_simulation_row_blocks,
 )
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
 from solver.gen_data.pipeline.types import (
+    DatasetSplit,
     JsonObject,
     JsonValue,
     SimulationIndexArrays,

@@ -54,8 +54,7 @@ Execution:
 
 Shared pipeline:
 
-- `pipeline/simulation_allocation.py` assigns attempts across parameter groups and
-  defines deterministic split IDs.
+- `pipeline/types.py` defines shared dataset identifiers and saved-array types.
 - `pipeline/simulation_checks.py` defines the acceptance checks and failure reasons.
 - `pipeline/trajectory_checks.py` evaluates complete-trajectory checks.
 - `pipeline/trajectory_rollout.py` runs and samples trajectories.

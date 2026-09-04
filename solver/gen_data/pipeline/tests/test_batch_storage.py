@@ -15,8 +15,11 @@ from solver.gen_data.pipeline.batch_storage import (
     load_completed_batch,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
-from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
+from solver.gen_data.pipeline.types import (
+    BatchPlanArrays,
+    DatasetShardArrays,
+    DatasetSplit,
+)
 
 
 def _plan() -> BatchPlanArrays:

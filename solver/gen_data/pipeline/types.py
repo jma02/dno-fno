@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias, TypedDict
+from enum import Enum, IntEnum
+from typing import Final, TypeAlias, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+class DatasetSplit(str, Enum):
+    TRAIN = "train"
+    VALIDATION = "validation"
+    TEST = "test"
+
+
+class PhysicalFamilyId(IntEnum):
+    STOKES = 1
+    TANAKA = 2
+    BENJAMIN_FEIR = 3
+    JONSWAP_TMA = 4
+
+
+ROOT_SEED_BY_DATASET_SPLIT: Final = {
+    DatasetSplit.TRAIN: 2026072210,
+    DatasetSplit.VALIDATION: 2026072204,
+    DatasetSplit.TEST: 2026072205,
+}
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None

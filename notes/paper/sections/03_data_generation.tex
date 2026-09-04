@@ -334,33 +334,25 @@ The coefficient implementation follows the fifth-order formula checked
 against Zhao and Liu \cite{zhao2022}.  The deep-water branch instead requires
 $kh\geq5$.
 
-\paragraph{Seeded sampling and complete records.}
-Let $s$ be the root seed fixed by the data split, let $f$ and $v$ identify the
-physical family and generator revision, let $r$ be an integer stream
-identifier, and let $i$ be the attempted-case index.  A case uses NumPy PCG64
-initialized by a seed sequence with integer entropy $(s,f,v,r,i)$.  The four
+\paragraph{Seeded sampling.}
+Let $s$ be the root seed fixed by the data split, let $f$ identify the physical
+family, and let $i$ be the attempted-simulation index.  A simulation uses NumPy
+PCG64 initialized from $(s,f,i)$.  The four
 categories are the finite/deep branches crossed with the two intervals in
 \cref{eq:paper-stokes-cells}.  Requested accepted-case counts are divided
 among these categories by quotient and remainder before any state is constructed.
 This is a seeded stratified pseudorandom construction, not a low-discrepancy
-sequence.  The proposal stores all five seed coordinates and every realized
-mode, amplitude, depth, phase, branch, and category.
+sequence.  A successful proposal stores its realized mode, amplitude, depth,
+phase, branch, and category.
 
 If a finite-depth amplitude draw violates
 $\mathrm{Ur}_+\leq26$, only the amplitude is redrawn, uniformly from the same
 category intersection.  Its mode, depth, phase, and category remain fixed.  The case
-record stores every rejected amplitude and its value of $\mathrm{Ur}_+$ as
-well as the accepted draw.  At most 1000 such redraws are permitted.  If this
-cap is exhausted, the sampler raises an exception containing the fixed
-parameters and every rejected amplitude--$\mathrm{Ur}_+$ pair.  No member of
-the attempt is appended as training data.  This event is a declared
-out-of-support case, not a fatal batch failure: the production driver stores
-the strict record in the proposal, commits a zero-row rejection, and schedules
-a replacement in the same category.  Only an explicitly declared deterministic
-fatal error writes a terminal failure sidecar.  An ordinary exception
-propagates without writing that record, so the attempt can replay from its last
-durable state.  Static transactions verify the proposal, archive entries, and
-stored configuration hash before commit.
+may make at most 1000 additional amplitude draws.  Intermediate rejected
+amplitudes and their values of $\mathrm{Ur}_+$ are not persisted.  If the
+redraw allowance is exhausted, the sampler returns no state and the batch
+commits a zero-row out-of-support rejection; generation then fills the remaining
+accepted-case quota from a later attempt in the same category.
 
 \paragraph{Static archive and replay checks.}
 These checks concern only the implemented Stokes component of the replacement
@@ -378,7 +370,7 @@ a 20,000-case finite-depth sampling stress with root seed 20260725 and stream
 zero, the two category counts were 10,000 and 10,000, the largest accepted value
 was $\mathrm{Ur}_+=25.9724665$, the largest redraw count was 56, and no case
 exhausted the cap.  A separate forced-exhaustion quota test committed the
-complete record as a zero-row out-of-support attempt and scheduled a
+attempt as a zero-row out-of-support rejection and scheduled a
 replacement in the same category.
 
 The common static transaction was also exercised at the exact target

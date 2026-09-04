@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import DatasetSplit
 
 FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]

@@ -21,11 +21,8 @@ from solver.gen_data.pipeline.trajectory_checks import (  # noqa: E402
 )
 from solver.gen_data.pipeline.batch_storage import batch_path  # noqa: E402
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view  # noqa: E402
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit  # noqa: E402
-from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    RolloutConfig,
-    TrajectoryFrameSelectionConfig,
-)
+from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
+from solver.gen_data.pipeline.trajectory_config import RolloutNumerics  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
     TrajectorySimulationResult,
     TrajectorySamples,
@@ -35,7 +32,6 @@ from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
     SimulationCheckResult,
 )
 from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
-    _select_subsample_time_indices,
     subsample_trajectories,
 )
 from solver.gen_data.pipeline.writer import (  # noqa: E402
@@ -47,41 +43,24 @@ jax.config.update("jax_enable_x64", True)
 
 
 class TrajectoryWriterIntegrationTest(unittest.TestCase):
-    def test_benjamin_feir_retains_uniform_saved_time_indices(self) -> None:
-        times = 0.08 * np.arange(10, dtype=np.float64)
-        x = 2.0 * np.pi * np.arange(8, dtype=np.float64) / 8
-        eta = np.arange(1.0, 11.0)[:, None] * np.cos(x)[None, :]
-        trajectory = TrajectorySamples(
-            times=times,
-            eta=eta,
-            xi=np.zeros_like(eta),
-            gxi=np.zeros_like(eta),
-        )
-        indices = _select_subsample_time_indices(
-            trajectory,
-            family="benjamin_feir",
-            length=2.0 * np.pi,
-            frame_selection=TrajectoryFrameSelectionConfig(benjamin_feir_count=4),
-        )
-        np.testing.assert_array_equal(
-            indices,
-            np.asarray([0, 3, 6, 9], dtype=np.int32),
-        )
-
     def test_actual_rollout_time_selection_commit_and_view(self) -> None:
-        contract = RolloutConfig(
+        rollout_config = RolloutNumerics(
             nx=16,
             target_nx=16,
-            dno_order=0,
-            target_dno_order=0,
+            length=2.0 * math.pi,
+            gravity=1.0,
+            integration_dno_order=0,
+            label_dno_order=0,
             pad_factor=1,
             maximum_wavenumber=3.0,
             target_maximum_wavenumber=3.0,
-            dt=0.02,
             saved_dt=0.02,
-            target_time_chunk_size=2,
+            substeps_per_saved_frame=1,
+            gl2_residual_tolerance=1.0e-8,
+            gl2_iteration_cap=8,
+            internal_hamiltonian_drift_threshold=None,
         )
-        x = 2.0 * math.pi * np.arange(contract.nx) / contract.nx
+        x = 2.0 * math.pi * np.arange(rollout_config.nx) / rollout_config.nx
         eta0 = np.stack((0.001 * np.cos(x), 0.0015 * np.cos(2.0 * x)))
         xi0 = np.stack((0.002 * np.sin(2.0 * x), 0.001 * np.sin(x)))
         depths = np.asarray([1.0, 1.5])
@@ -100,24 +79,19 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
                 batch_id=0,
             )
 
-            saved_times = np.asarray([0.0, 0.02, 0.04])
+            saved_times = 0.02 * np.arange(16, dtype=np.float64)
             execution = execute_trajectory_batch(
                 eta0,
                 xi0,
                 depths,
                 (saved_times,) * eta0.shape[0],
-                config=contract,
+                config=rollout_config,
             )
             outcomes = subsample_trajectories(
                 execution,
                 depths,
                 family="jonswap_tma",
-                length=contract.length,
-                frame_selection=TrajectoryFrameSelectionConfig(
-                    tanaka_count=2,
-                    benjamin_feir_count=2,
-                    jonswap_tma_count=3,
-                ),
+                length=rollout_config.length,
             )
             self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
             commit_simulation_outcomes(
@@ -133,7 +107,7 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             with np.load(view.trajectory_map, allow_pickle=False) as mapping:
                 np.testing.assert_array_equal(
                     mapping["trajectory_row_count"],
-                    np.asarray([3, 3]),
+                    np.asarray([16, 16]),
                 )
                 np.testing.assert_array_equal(
                     mapping["trajectory_dataset_split"],
@@ -143,11 +117,11 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
     def test_large_offline_hamiltonian_drift_does_not_gate_time_selection(
         self,
     ) -> None:
-        times = np.asarray([0.0, 0.08, 0.16], dtype=np.float64)
-        eta = np.zeros((3, 4), dtype=np.float64)
+        times = 0.08 * np.arange(200, dtype=np.float64)
+        eta = np.zeros((200, 4), dtype=np.float64)
         xi = np.ones_like(eta)
         gxi = np.ones_like(eta)
-        gxi[1] *= 10.0
+        gxi[100] *= 10.0
         trajectory = TrajectorySamples(
             times=times,
             eta=eta,
@@ -168,13 +142,12 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             np.asarray([1.0]),
             family="tanaka",
             length=2.0 * math.pi,
-            frame_selection=TrajectoryFrameSelectionConfig(tanaka_count=2),
         )[0]
 
         self.assertTrue(outcome.decision.accepted)
         self.assertIsNotNone(outcome.rows)
         assert outcome.rows is not None
-        np.testing.assert_array_equal(outcome.rows.time, np.asarray([0.0, 0.16]))
+        np.testing.assert_array_equal(outcome.rows.time, times)
 
     def test_rejected_simulation_persists_finite_internal_health_metrics(self) -> None:
         decision = SimulationCheckResult(
@@ -202,7 +175,6 @@ class TrajectoryWriterIntegrationTest(unittest.TestCase):
             np.asarray([1.0]),
             family="benjamin_feir",
             length=2.0 * math.pi,
-            frame_selection=TrajectoryFrameSelectionConfig(benjamin_feir_count=2),
         )[0]
 
         self.assertFalse(outcome.decision.accepted)

@@ -10,16 +10,12 @@ from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.trajectory_rollout import (
     TrajectorySimulationResult,
-    TrajectorySamples,
 )
 from solver.gen_data.pipeline.time_selection import (
     select_tanaka_times,
     select_uniform_times,
 )
-from solver.gen_data.pipeline.trajectory_config import (
-    TrajectoryFamily,
-    TrajectoryFrameSelectionConfig,
-)
+from solver.gen_data.pipeline.trajectory_config import TrajectoryFamily
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,
     SimulationOutcome,
@@ -29,39 +25,12 @@ from solver.gen_data.pipeline.writer import (
 FloatArray: TypeAlias = NDArray[np.float64]
 
 
-def _select_subsample_time_indices(
-    trajectory: TrajectorySamples,
-    *,
-    family: TrajectoryFamily,
-    length: float,
-    frame_selection: TrajectoryFrameSelectionConfig,
-) -> NDArray[np.int32]:
-    if family == "tanaka":
-        return select_tanaka_times(
-            trajectory.eta,
-            length=length,
-            keep_samples=frame_selection.tanaka_count,
-            alpha=frame_selection.tanaka_alpha,
-            sigma_steps=frame_selection.tanaka_sigma_steps,
-        ).indices
-    subsample_count = (
-        frame_selection.benjamin_feir_count
-        if family == "benjamin_feir"
-        else frame_selection.jonswap_tma_count
-    )
-    return select_uniform_times(
-        trajectory.times.size,
-        keep_samples=subsample_count,
-    )
-
-
 def subsample_trajectories(
     simulations: tuple[TrajectorySimulationResult, ...],
     depths: FloatArray,
     *,
     family: TrajectoryFamily,
     length: float,
-    frame_selection: TrajectoryFrameSelectionConfig,
 ) -> tuple[SimulationOutcome, ...]:
     """Subsample accepted trajectories into dataset rows."""
 
@@ -74,12 +43,19 @@ def subsample_trajectories(
                 "trajectory data must exist exactly when a simulation is accepted"
             )
         if trajectory is not None:
-            indices = _select_subsample_time_indices(
-                trajectory,
-                family=family,
-                length=length,
-                frame_selection=frame_selection,
-            )
+            if family == "tanaka":
+                indices = select_tanaka_times(
+                    trajectory.eta,
+                    length=length,
+                    keep_samples=200,
+                    alpha=0.5,
+                    sigma_steps=50.0,
+                ).indices
+            else:
+                indices = select_uniform_times(
+                    trajectory.times.size,
+                    keep_samples=200 if family == "benjamin_feir" else 16,
+                )
             rows = AcceptedSimulationRows(
                 eta=trajectory.eta[indices],
                 xi=trajectory.xi[indices],

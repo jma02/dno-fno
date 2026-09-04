@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Protocol, TypeAlias
+from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.dno_target import compute_dno_target
-from solver.gen_data.pipeline.trajectory_config import RolloutConfig
+from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol
 from solver.solvers.time_integrator import (
     SolverParams,
@@ -64,37 +64,7 @@ class IntegratedAdjustmentBatch:
     gl2: GL2BatchTelemetry
 
 
-class BatchIntegrator(Protocol):
-    """Callable that integrates one trajectory batch."""
-
-    def __call__(
-        self,
-        *,
-        eta0: FloatArray,
-        xi0: FloatArray,
-        depths: FloatArray,
-        saved_times: FloatArray,
-        config: RolloutConfig,
-    ) -> IntegratedTrajectoryBatch: ...
-
-
-class AdjustmentBatchIntegrator(Protocol):
-    """Callable that performs one JONSWAP nonlinear warm-up."""
-
-    def __call__(
-        self,
-        *,
-        eta0: FloatArray,
-        xi0: FloatArray,
-        depths: FloatArray,
-        saved_times: FloatArray,
-        config: RolloutConfig,
-        nonlinear_ramp_times: FloatArray,
-        nonlinear_ramp_order: int,
-    ) -> IntegratedAdjustmentBatch: ...
-
-
-def resample_to_target_grid(field: jax.Array, *, config: RolloutConfig) -> jax.Array:
+def resample_to_target_grid(field: jax.Array, *, config: RolloutNumerics) -> jax.Array:
     """Keep the target Fourier band and resample it onto the target grid."""
 
     source = jnp.asarray(field, dtype=jnp.float64)
@@ -126,7 +96,7 @@ def _compute_solver_grid_diagnostics(
     eta: jax.Array,
     xi: jax.Array,
     depths: jax.Array,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     _, _, gxi = compute_dno_target(
         eta,
@@ -134,7 +104,7 @@ def _compute_solver_grid_diagnostics(
         depths[:, None],
         nx=config.nx,
         length=config.length,
-        dno_order=config.dno_order,
+        dno_order=config.integration_dno_order,
         pad_factor=config.pad_factor,
         maximum_wavenumber=config.maximum_wavenumber,
     )
@@ -153,7 +123,7 @@ def compute_saved_targets(
     eta: jax.Array,
     xi: jax.Array,
     depths: jax.Array,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> tuple[FloatArray, FloatArray, FloatArray, InternalHealthTelemetry | None]:
     """Project saved states and compute their DNO targets in time chunks."""
 
@@ -168,7 +138,7 @@ def compute_saved_targets(
     dno_finite_result = np.empty(health_shape, dtype=np.bool_)
     water_column_result = np.empty(health_shape, dtype=np.float64)
 
-    chunk_size = config.target_time_chunk_size
+    chunk_size = 8
     for start in range(0, eta.shape[0], chunk_size):
         stop = min(start + chunk_size, eta.shape[0])
         count = stop - start
@@ -186,7 +156,7 @@ def compute_saved_targets(
             depths[:, None],
             nx=config.target_nx,
             length=config.length,
-            dno_order=config.target_dno_order,
+            dno_order=config.label_dno_order,
             pad_factor=config.pad_factor,
             maximum_wavenumber=config.target_maximum_wavenumber,
         )
@@ -226,7 +196,7 @@ def compute_saved_targets(
 
 
 def _solver_parameters(
-    config: RolloutConfig,
+    config: RolloutNumerics,
     depths: jax.Array,
     *,
     nonlinear_ramp_times: FloatArray | None,
@@ -240,9 +210,11 @@ def _solver_parameters(
         length=config.length,
         depth=depth_column,
         gravity=config.gravity,
-        dno_order=config.dno_order,
+        dno_order=config.integration_dno_order,
         pad_factor=config.pad_factor,
-        filter_fraction=config.filter_fraction,
+        filter_fraction=(
+            config.maximum_wavenumber / (math.pi * config.nx / config.length)
+        ),
         k=k,
         g0=make_linear_dno_symbol(k, depth_column),
         nonlinear_ramp_time=(
@@ -259,7 +231,7 @@ def _integrate_gl2(
     xi: FloatArray,
     depths: FloatArray,
     saved_times: FloatArray,
-    config: RolloutConfig,
+    config: RolloutNumerics,
     *,
     nonlinear_ramp_times: FloatArray | None = None,
     nonlinear_ramp_order: int = 4,
@@ -312,7 +284,7 @@ def integrate_batch(
     xi0: FloatArray,
     depths: FloatArray,
     saved_times: FloatArray,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> IntegratedTrajectoryBatch:
     """Integrate a validated trajectory batch and compute its DNO targets."""
 
@@ -346,7 +318,7 @@ def integrate_adjustment_batch(
     xi0: FloatArray,
     depths: FloatArray,
     saved_times: FloatArray,
-    config: RolloutConfig,
+    config: RolloutNumerics,
     nonlinear_ramp_times: FloatArray,
     nonlinear_ramp_order: int,
 ) -> IntegratedAdjustmentBatch:
@@ -390,7 +362,7 @@ def validate_integrated_batch(
     *,
     batch_size: int,
     saved_time_count: int,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> None:
     """Validate the arrays returned by a trajectory integrator."""
 
@@ -425,7 +397,7 @@ def validate_adjustment_rollout(
     *,
     batch_size: int,
     saved_time_count: int,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> None:
     """Validate the arrays returned by a nonlinear-adjustment generator."""
 

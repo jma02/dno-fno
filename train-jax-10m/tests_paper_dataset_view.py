@@ -15,8 +15,11 @@ from solver.gen_data.pipeline.batch_storage import (
 )
 from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
-from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
+from solver.gen_data.pipeline.types import (
+    BatchPlanArrays,
+    DatasetShardArrays,
+    DatasetSplit,
+)
 
 TRAIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_DIR))

@@ -14,7 +14,7 @@ from solver.gen_data.pipeline.batch_storage import (
     load_completed_batch,
 )
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import DatasetSplit
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,

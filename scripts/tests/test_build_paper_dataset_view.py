@@ -21,7 +21,7 @@ from scripts.build_paper_dataset_view import (
     preflight,
     validate_combined_plan,
 )
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
+from solver.gen_data.pipeline.types import DatasetSplit
 from solver.gen_data.pipeline.build_dataset_view import DatasetViewPaths
 
 

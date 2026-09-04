@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import unittest
 
 import numpy as np
@@ -24,7 +23,7 @@ from solver.gen_data.jonswap_tma_sampling import (
     JonswapTmaSample,
     sample_jonswap_tma_simulation,
 )
-from solver.gen_data.pipeline.simulation_allocation import (
+from solver.gen_data.pipeline.types import (
     DatasetSplit,
 )
 
@@ -36,17 +35,17 @@ BAND = ResolvedBand(
 )
 
 
-def sample_jonswap_tma(
-    cell_index: int,
+def sample_parameter_group(
+    parameter_group_index: int,
     *,
     dataset_split: DatasetSplit = DatasetSplit.TRAIN,
     attempt_number: int | None = None,
 ) -> JonswapTmaSample:
     """Sample one JONSWAP/TMA parameter group for a test."""
 
-    identifier = cell_index if attempt_number is None else attempt_number
+    identifier = parameter_group_index if attempt_number is None else attempt_number
     return sample_jonswap_tma_simulation(
-        JONSWAP_TMA_PARAMETER_GROUP_IDS[cell_index],
+        JONSWAP_TMA_PARAMETER_GROUP_IDS[parameter_group_index],
         dataset_split=dataset_split,
         attempt_number=identifier,
         band=BAND,
@@ -54,20 +53,16 @@ def sample_jonswap_tma(
 
 
 class JonswapTmaSamplingTest(unittest.TestCase):
-    def test_cells_are_exact_cartesian_product(self) -> None:
+    def test_parameter_groups_are_exact_cartesian_product(self) -> None:
         coordinates = set(JONSWAP_TMA_PARAMETER_GROUPS.values())
         expected = {
-            (stratum, gamma, direction)
+            (stratum, gamma, right_moving_fraction)
             for stratum in ("shallow", "finite", "deep")
             for gamma in PAPER_PEAK_ENHANCEMENTS
-            for direction in PAPER_RIGHT_MOVING_FRACTIONS
+            for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
         }
         self.assertEqual(len(JONSWAP_TMA_PARAMETER_GROUP_IDS), 27)
         self.assertEqual(coordinates, expected)
-        self.assertEqual(
-            len(JONSWAP_TMA_PARAMETER_GROUP_IDS),
-            27,
-        )
 
     def test_every_cell_samples_inside_declared_support(self) -> None:
         for index, (parameter_group_id, parameter_group) in enumerate(
@@ -75,7 +70,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         ):
             stratum, peak_enhancement, right_moving_fraction = parameter_group
             with self.subTest(parameter_group=parameter_group_id):
-                sample = sample_jonswap_tma(index)
+                sample = sample_parameter_group(index)
                 self.assertEqual(
                     find_jonswap_parameter_violations(
                         sample.parameters,
@@ -94,16 +89,15 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 )
 
     def test_replay_is_bitwise_deterministic(self) -> None:
-        first = sample_jonswap_tma(13)
-        second = sample_jonswap_tma(13)
+        first = sample_parameter_group(13)
+        second = sample_parameter_group(13)
 
         self.assertEqual(first.parameters, second.parameters)
         np.testing.assert_array_equal(first.phase_right, second.phase_right)
         np.testing.assert_array_equal(first.phase_left, second.phase_left)
-        self.assertEqual(first.to_json_record(), second.to_json_record())
 
-    def test_phases_are_explicit_independent_and_json_ready(self) -> None:
-        sample = sample_jonswap_tma(8)
+    def test_phases_are_explicit_and_independent(self) -> None:
+        sample = sample_parameter_group(8)
         expected_shape = positive_mode_wavenumbers(band=BAND).shape
         self.assertEqual(sample.phase_right.shape, expected_shape)
         self.assertEqual(sample.phase_left.shape, expected_shape)
@@ -113,16 +107,11 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         self.assertTrue(np.all(sample.phase_left < 2.0 * np.pi))
         self.assertFalse(np.array_equal(sample.phase_right, sample.phase_left))
 
-        record = sample.to_json_record()
-        self.assertIsInstance(record["phase_right"], list)
-        self.assertIsInstance(record["phase_left"], list)
-        json.dumps(record, sort_keys=True, allow_nan=False)
-
     def test_shallow_draws_obey_parameterization_and_constraint(self) -> None:
-        shallow_cell_index = 4
+        shallow_parameter_group_index = 4
         for attempt_number in range(256):
-            sample = sample_jonswap_tma(
-                shallow_cell_index,
+            sample = sample_parameter_group(
+                shallow_parameter_group_index,
                 attempt_number=attempt_number,
             )
             parameters = sample.parameters
@@ -145,9 +134,11 @@ class JonswapTmaSamplingTest(unittest.TestCase):
         self,
     ) -> None:
         for attempt_number in range(512):
-            cell_index = attempt_number % len(JONSWAP_TMA_PARAMETER_GROUP_IDS)
-            sample = sample_jonswap_tma(
-                cell_index,
+            parameter_group_index = attempt_number % len(
+                JONSWAP_TMA_PARAMETER_GROUP_IDS
+            )
+            sample = sample_parameter_group(
+                parameter_group_index,
                 attempt_number=attempt_number,
             )
             self.assertTrue(

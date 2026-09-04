@@ -11,17 +11,12 @@ import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import batch_path
 from solver.gen_data.pipeline.dataset_generation import (
-    DatasetChunkConfig,
+    BatchGenerator,
+    GenerationResult,
     generate_simulations,
-    scan_dataset_generation,
-)
-from solver.gen_data.pipeline.simulation_allocation import (
-    DatasetSplit,
-    PhysicalFamilyId,
-    select_next_parameter_groups,
 )
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
-from solver.gen_data.pipeline.types import BatchPlanArrays
+from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 from solver.gen_data.pipeline.writer import (
     AcceptedSimulationRows,
     SimulationOutcome,
@@ -30,116 +25,87 @@ from solver.gen_data.pipeline.writer import (
 )
 
 
+FAMILY_NAME = "tanaka"
+FAMILY_ID = PhysicalFamilyId.TANAKA
+DATASET_SPLIT = DatasetSplit.TRAIN
+
+
 class InjectedInterruption(RuntimeError):
     """Controlled interruption before a completed batch is written."""
 
 
-def _chunk_config(
+def _generate(
     root: Path,
-    *,
-    simulation_targets: Mapping[str, int] | None = None,
-    batch_size: int = 2,
-) -> DatasetChunkConfig:
-    return DatasetChunkConfig(
-        root=root,
-        family_name="tanaka",
-        family_id=PhysicalFamilyId.TANAKA,
-        dataset_split=DatasetSplit.TRAIN,
-        simulation_targets=simulation_targets or {"low": 2, "moderate": 2},
+    accepted_targets: Mapping[str, int],
+    batch_size: int,
+    generate_batch: BatchGenerator,
+) -> GenerationResult:
+    return generate_simulations(
+        root,
+        family_id=FAMILY_ID,
+        dataset_split=DATASET_SPLIT,
+        accepted_targets=accepted_targets,
         batch_size=batch_size,
+        generate_batch=generate_batch,
     )
 
 
-def _batch_plan(
-    parameter_group_ids: tuple[str, ...],
+def _fake_generator(
     *,
-    first_attempt_number: int,
-    chunk_config: DatasetChunkConfig,
-) -> BatchPlanArrays:
-    return build_batch_plan(
-        parameter_group_ids,
-        tuple(
-            {
-                "parameter_group": parameter_group_id,
-                "attempt_number": first_attempt_number + offset,
-            }
-            for offset, parameter_group_id in enumerate(parameter_group_ids)
-        ),
-        family_id=int(chunk_config.family_id),
-        dataset_split=chunk_config.dataset_split,
-    )
+    rejected_attempts: frozenset[int] = frozenset(),
+) -> tuple[BatchGenerator, list[tuple[int, tuple[str, ...]]]]:
+    calls: list[tuple[int, tuple[str, ...]]] = []
 
-
-def _outcome(
-    attempt_number: int,
-    *,
-    accepted: bool,
-) -> SimulationOutcome:
-    rows = None
-    if accepted:
-        value = float(attempt_number + 1)
-        field = np.full((1, 8), value, dtype=np.float64)
-        rows = AcceptedSimulationRows(
-            eta=field,
-            xi=field / 2.0,
-            gxi=-field,
-            depth=1.0,
-            time=np.asarray([0.0], dtype=np.float64),
-        )
-    return SimulationOutcome(
-        decision=SimulationCheckResult(
-            accepted=accepted,
-            outside_support=not accepted,
-        ),
-        rows=rows,
-        metrics={"attempt_number": attempt_number},
-    )
-
-
-class FakeGenerator:
-    """Save deterministic batches while rejecting selected attempts."""
-
-    def __init__(
-        self,
-        chunk_config: DatasetChunkConfig,
-        *,
-        rejected_attempts: frozenset[int] = frozenset(),
-    ) -> None:
-        self.chunk_config = chunk_config
-        self.rejected_attempts = rejected_attempts
-        self.calls: list[tuple[int, int, tuple[str, ...]]] = []
-
-    def __call__(
-        self,
+    def generate_batch(
         parameter_group_ids: tuple[str, ...],
-        *,
         first_attempt_number: int,
-        batch_id: int,
-    ) -> Path:
-        self.calls.append((batch_id, first_attempt_number, parameter_group_ids))
-        path = batch_path(
-            self.chunk_config.root,
-            family=self.chunk_config.family_name,
-            split=self.chunk_config.dataset_split.value,
-            batch_id=batch_id,
-        )
-        outcomes = tuple(
-            _outcome(
-                first_attempt_number + offset,
-                accepted=(first_attempt_number + offset not in self.rejected_attempts),
+        output_path: Path,
+    ) -> None:
+        calls.append((first_attempt_number, parameter_group_ids))
+        outcomes: list[SimulationOutcome] = []
+        for offset in range(len(parameter_group_ids)):
+            attempt_number = first_attempt_number + offset
+            accepted = attempt_number not in rejected_attempts
+            rows = None
+            if accepted:
+                value = float(attempt_number + 1)
+                field = np.full((1, 8), value, dtype=np.float64)
+                rows = AcceptedSimulationRows(
+                    eta=field,
+                    xi=field / 2.0,
+                    gxi=-field,
+                    depth=1.0,
+                    time=np.asarray([0.0], dtype=np.float64),
+                )
+            outcomes.append(
+                SimulationOutcome(
+                    decision=SimulationCheckResult(
+                        accepted=accepted,
+                        outside_support=not accepted,
+                    ),
+                    rows=rows,
+                    metrics={"attempt_number": attempt_number},
+                )
             )
-            for offset in range(len(parameter_group_ids))
-        )
+
         commit_simulation_outcomes(
-            path,
-            _batch_plan(
+            output_path,
+            build_batch_plan(
                 parameter_group_ids,
-                first_attempt_number=first_attempt_number,
-                chunk_config=self.chunk_config,
+                tuple(
+                    {
+                        "parameter_group": parameter_group_id,
+                        "attempt_number": first_attempt_number + offset,
+                    }
+                    for offset, parameter_group_id in enumerate(parameter_group_ids)
+                ),
+                family_id=FAMILY_ID,
+                dataset_split=DATASET_SPLIT,
             ),
             outcomes,
         )
-        return path
+
+    return generate_batch, calls
 
 
 class DatasetGenerationTests(unittest.TestCase):
@@ -151,144 +117,106 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_rejections_schedule_replacements_and_resume_completed_batches(
         self,
     ) -> None:
-        chunk_config = _chunk_config(self.root)
-        generator = FakeGenerator(
-            chunk_config,
-            rejected_attempts=frozenset({1}),
-        )
+        targets = {"low": 2, "moderate": 2}
+        generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
 
-        state = generate_simulations(chunk_config, generator)
+        attempts, paths = _generate(self.root, targets, 2, generator)
 
-        self.assertTrue(state.complete)
+        self.assertEqual(attempts, {"low": 2, "moderate": 3})
         self.assertEqual(
-            dict(state.accepted_simulation_counts),
-            {"low": 2, "moderate": 2},
-        )
-        self.assertEqual(
-            [
-                parameter_group_id
-                for _, _, parameter_group_ids in generator.calls
-                for parameter_group_id in parameter_group_ids
-            ],
+            [group for _, groups in calls for group in groups],
             ["low", "moderate", "moderate", "low", "moderate"],
         )
-        self.assertEqual(
-            [len(parameter_group_ids) for _, _, parameter_group_ids in generator.calls],
-            [2, 2, 1],
-        )
-        self.assertEqual(
-            [first_attempt_number for _, first_attempt_number, _ in generator.calls],
-            [0, 2, 4],
-        )
-        self.assertEqual(state, scan_dataset_generation(chunk_config))
+        self.assertEqual([len(groups) for _, groups in calls], [2, 2, 1])
+        self.assertEqual([first_attempt for first_attempt, _ in calls], [0, 2, 4])
 
-        class MustNotRun:
-            def __call__(
-                self,
-                parameter_group_ids: tuple[str, ...],
-                *,
-                first_attempt_number: int,
-                batch_id: int,
-            ) -> Path:
-                raise AssertionError(
-                    (parameter_group_ids, first_attempt_number, batch_id)
-                )
+        def must_not_run(
+            parameter_group_ids: tuple[str, ...],
+            first_attempt_number: int,
+            output_path: Path,
+        ) -> None:
+            raise AssertionError(
+                (parameter_group_ids, first_attempt_number, output_path)
+            )
 
-        self.assertTrue(generate_simulations(chunk_config, MustNotRun()).complete)
+        self.assertEqual(
+            _generate(self.root, targets, 2, must_not_run),
+            (attempts, paths),
+        )
 
     def test_interrupted_batch_is_absent_and_rerun_from_the_start(self) -> None:
-        chunk_config = _chunk_config(
-            self.root,
-            simulation_targets={"low": 1, "moderate": 1},
-        )
-        interrupted_parameter_groups: tuple[str, ...] | None = None
+        targets = {"low": 1, "moderate": 1}
+        interrupted_groups: tuple[str, ...] | None = None
         interrupted_first_attempt: int | None = None
 
         def interrupt(
             parameter_group_ids: tuple[str, ...],
-            *,
             first_attempt_number: int,
-            batch_id: int,
-        ) -> Path:
-            nonlocal interrupted_first_attempt, interrupted_parameter_groups
-            interrupted_parameter_groups = parameter_group_ids
+            output_path: Path,
+        ) -> None:
+            del output_path
+            nonlocal interrupted_first_attempt, interrupted_groups
+            interrupted_groups = parameter_group_ids
             interrupted_first_attempt = first_attempt_number
-            raise InjectedInterruption(f"batch {batch_id} stopped")
+            raise InjectedInterruption("batch stopped")
 
-        with self.assertRaisesRegex(InjectedInterruption, "batch 0 stopped"):
-            generate_simulations(chunk_config, interrupt)
+        with self.assertRaisesRegex(InjectedInterruption, "batch stopped"):
+            _generate(self.root, targets, 2, interrupt)
 
         path = batch_path(
             self.root,
-            family="tanaka",
-            split="train",
+            family=FAMILY_NAME,
+            split=DATASET_SPLIT.value,
             batch_id=0,
         )
         self.assertFalse(path.exists())
-        interrupted_state = scan_dataset_generation(chunk_config)
-        self.assertEqual(interrupted_state.completed_batches, ())
-        self.assertEqual(sum(interrupted_state.simulation_attempt_counts.values()), 0)
 
-        generator = FakeGenerator(chunk_config)
-        completed = generate_simulations(chunk_config, generator)
-        self.assertTrue(completed.complete)
-        self.assertEqual(generator.calls[0][1], interrupted_first_attempt)
-        self.assertEqual(generator.calls[0][2], interrupted_parameter_groups)
+        generator, calls = _fake_generator()
+        _, paths = _generate(self.root, targets, 2, generator)
+        self.assertEqual(calls[0], (interrupted_first_attempt, interrupted_groups))
+        self.assertEqual(paths, (path,))
 
     def test_generation_stops_after_retry_limit(self) -> None:
-        chunk_config = _chunk_config(
-            self.root,
-            simulation_targets={"low": 32},
-            batch_size=32,
-        )
-        generator = FakeGenerator(
-            chunk_config,
-            rejected_attempts=frozenset(range(64)),
-        )
+        targets = {"low": 32}
+        generator, _ = _fake_generator(rejected_attempts=frozenset(range(96)))
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "attempt limits reached.*low: accepted=0/32, attempts=64/64",
+            "attempt limits reached.*low: accepted=0/32, attempts=96/96",
         ):
-            generate_simulations(chunk_config, generator)
-
-        state = scan_dataset_generation(chunk_config)
-        self.assertFalse(state.complete)
-        self.assertEqual(dict(state.simulation_attempt_counts), {"low": 64})
-        self.assertEqual(len(state.completed_batches), 2)
-
-    def test_scanner_rejects_batch_gaps(self) -> None:
-        chunk_config = _chunk_config(
-            self.root,
-            simulation_targets={"low": 1},
-            batch_size=1,
-        )
-        generator = FakeGenerator(chunk_config)
-        parameter_group_ids = select_next_parameter_groups(
-            chunk_config.simulation_targets,
-            {},
-            {},
-            chunk_config.maximum_attempts_by_parameter_group,
-            batch_size=1,
-        )
-        generator(parameter_group_ids, first_attempt_number=0, batch_id=1)
-
-        with self.assertRaisesRegex(RuntimeError, "contiguous"):
-            scan_dataset_generation(chunk_config)
-
-    def test_scanner_orders_double_digit_batch_ids_numerically(self) -> None:
-        chunk_config = _chunk_config(
-            self.root,
-            simulation_targets={"low": 12},
-            batch_size=1,
-        )
-        completed = generate_simulations(chunk_config, FakeGenerator(chunk_config))
+            _generate(self.root, targets, 32, generator)
 
         self.assertEqual(
-            tuple(path.stem for path in completed.completed_batches),
+            len(tuple((self.root / "batches" / FAMILY_NAME / "train").glob("*.npz"))),
+            3,
+        )
+
+    def test_scanner_rejects_batch_gaps(self) -> None:
+        targets = {"low": 1}
+        generator, _ = _fake_generator()
+        generator(
+            ("low",),
+            0,
+            batch_path(
+                self.root,
+                family=FAMILY_NAME,
+                split=DATASET_SPLIT.value,
+                batch_id=1,
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+            _generate(self.root, targets, 1, generator)
+
+    def test_scanner_orders_double_digit_batch_ids_numerically(self) -> None:
+        targets = {"low": 12}
+        generator, _ = _fake_generator()
+        completed = _generate(self.root, targets, 1, generator)
+
+        self.assertEqual(
+            tuple(path.stem for path in completed[1]),
             tuple(f"batch_{batch_id:06d}" for batch_id in range(12)),
         )
-        self.assertEqual(completed, scan_dataset_generation(chunk_config))
 
 
 if __name__ == "__main__":

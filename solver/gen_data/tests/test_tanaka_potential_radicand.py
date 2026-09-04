@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -24,12 +22,11 @@ from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     _validate_tanaka_surface_potential_radicand,
     build_per_simulation_initial_conditions,
 )
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
-    PhysicalFamilyId,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    RolloutConfig,
+    RolloutNumerics,
 )
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_PARAMETER_GROUP_IDS,
@@ -37,7 +34,6 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     construct_tanaka_trajectory_batch,
-    prepare_trajectory_batch,
     sample_tanaka_simulations,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
@@ -272,51 +268,40 @@ class TanakaPotentialRadicandIntegrationTest(unittest.TestCase):
         )
 
     def test_constructor_domain_failure_leaves_no_completed_batch(self) -> None:
-        contract = RolloutConfig(
+        config = RolloutNumerics(
             nx=64,
             target_nx=64,
             length=LENGTH,
             gravity=1.0,
-            dno_order=0,
-            target_dno_order=0,
+            integration_dno_order=0,
+            label_dno_order=0,
             pad_factor=1,
             maximum_wavenumber=16.0,
             target_maximum_wavenumber=16.0,
-            dt=0.02,
             saved_dt=0.02,
+            substeps_per_saved_frame=1,
             gl2_residual_tolerance=1.0e-8,
             gl2_iteration_cap=8,
-            target_time_chunk_size=2,
+            internal_hamiltonian_drift_threshold=None,
         )
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         sampled = sample_tanaka_simulations(
             (parameter_group_id,),
             dataset_split=DatasetSplit.TEST,
             first_attempt_number=53,
-            contract=contract,
+            config=config,
         )
         failure = TanakaPotentialRadicandError(
             "negative_or_nonfinite_surface_potential_radicand",
             (),
         )
-        with tempfile.TemporaryDirectory() as directory:
-            proposed = prepare_trajectory_batch(
-                sampled,
-                root=Path(directory),
-                family_name="tanaka",
-                family_id=PhysicalFamilyId.TANAKA,
-                dataset_split=DatasetSplit.TEST,
-                batch_id=0,
-            )
-            with patch(
-                "solver.gen_data.trajectory_family_adapters."
-                "build_per_simulation_initial_conditions",
-                side_effect=failure,
-            ):
-                with self.assertRaises(TanakaPotentialRadicandError):
-                    construct_tanaka_trajectory_batch(proposed)
-
-            self.assertFalse(proposed.path.exists())
+        with patch(
+            "solver.gen_data.trajectory_family_adapters."
+            "build_per_simulation_initial_conditions",
+            side_effect=failure,
+        ):
+            with self.assertRaises(TanakaPotentialRadicandError):
+                construct_tanaka_trajectory_batch(sampled)
 
 
 if __name__ == "__main__":

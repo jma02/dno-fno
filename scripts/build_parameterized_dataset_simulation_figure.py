@@ -48,7 +48,7 @@ from scripts.render_paper_dataset_worst_simulations import (  # noqa: E402
     validate_final_paper_dataset,
     validate_scanned_population,
 )
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
     PhysicalFamilyId,
 )
@@ -166,7 +166,7 @@ def _source_numerical_scales(
     if family == "stokes":
         numerical = _mapping(
             configuration.get("contract"),
-            context="Stokes numerical contract",
+            context="Stokes numerical config",
         )
     else:
         execution = _mapping(
@@ -175,7 +175,7 @@ def _source_numerical_scales(
         )
         numerical = _mapping(
             execution.get("numerical"),
-            context=f"{family} numerical contract",
+            context=f"{family} numerical config",
         )
     view = _mapping(summary.get("dataset_view"), context="source dataset_view")
     grid = _mapping(view.get("grid"), context="source stored grid")
@@ -190,7 +190,7 @@ def _source_numerical_scales(
         rel_tol=0.0,
         abs_tol=1.0e-12,
     ):
-        raise ValueError("stored-grid length differs from numerical contract")
+        raise ValueError("stored-grid length differs from numerical config")
     return length, gravity, stored_nx
 
 

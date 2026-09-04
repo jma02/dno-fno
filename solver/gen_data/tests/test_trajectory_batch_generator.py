@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 import json
 import math
 import os
 from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 from typing import cast
 import unittest
@@ -22,7 +22,9 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-    sample_benjamin_feir_simulation,
+)
+from solver.gen_data.benjamin_feir_jcp09 import (  # noqa: E402
+    deep_water_proxy_depth,
 )
 from solver.gen_data.tanaka_initial_conditions import (  # noqa: E402
     TanakaPotentialRadicandError,
@@ -39,29 +41,24 @@ from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     batch_path,
     load_completed_batch,
 )
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
+from solver.gen_data.pipeline.types import (  # noqa: E402
     PhysicalFamilyId,
     DatasetSplit,
 )
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
-    DatasetChunkConfig,
-    DatasetChunkState,
+    GenerationResult,
     generate_simulations,
-    scan_dataset_generation,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
-    PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG,
-    PAPER_JONSWAP_ROLLOUT_CONFIG,
-    PAPER_TANAKA_ROLLOUT_CONFIG,
-    RolloutConfig,
-    TrajectoryGenerationConfig,
-    TrajectoryFrameSelectionConfig,
-    paper_trajectory_config,
+    PAPER_ROLLOUT_NUMERICS,
+    RolloutNumerics,
+    TrajectoryFamily,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
     IntegratedTrajectoryBatch,
     GL2BatchTelemetry,
 )
+from solver.gen_data.pipeline.writer import SimulationOutcome  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     TANAKA_PARAMETER_GROUP_IDS,
     TanakaCrest,
@@ -69,16 +66,15 @@ from solver.gen_data.tanaka_sampling import (  # noqa: E402
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
     JonswapInitialStateDomainError,
     JonswapInitialStateFailure,
-    PreparedTrajectoryBatch,
+    SampledSimulations,
     TrajectoryInitialBatch,
     construct_tanaka_trajectory_batch,
-    prepare_trajectory_batch,
     sample_tanaka_simulations,
 )
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
-    TrajectoryBatchGenerator,
-    _benjamin_feir_time_grid,
-    _jonswap_time_grid,
+    SimulationTimeGrid,
+    generate_trajectory_batch,
+    integrate_and_subsample_trajectories,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -88,73 +84,64 @@ class InjectedInterruption(OSError):
     """Controlled nonterminal interruption."""
 
 
-def _contract() -> RolloutConfig:
-    return RolloutConfig(
+def _config() -> RolloutNumerics:
+    return RolloutNumerics(
         nx=64,
         target_nx=64,
         length=2.0 * math.pi,
         gravity=1.0,
-        dno_order=0,
-        target_dno_order=0,
+        integration_dno_order=0,
+        label_dno_order=0,
         pad_factor=1,
         maximum_wavenumber=16.0,
         target_maximum_wavenumber=16.0,
-        dt=0.04,
         saved_dt=0.08,
+        substeps_per_saved_frame=2,
         gl2_residual_tolerance=1.0e-8,
         gl2_iteration_cap=2,
-        target_time_chunk_size=2,
+        internal_hamiltonian_drift_threshold=None,
     )
 
 
-def _trajectory_config(family: str) -> TrajectoryGenerationConfig:
-    return TrajectoryGenerationConfig(
-        family=family,  # type: ignore[arg-type]
-        numerical=_contract(),
-        frame_selection=TrajectoryFrameSelectionConfig(
-            tanaka_count=3,
-            tanaka_alpha=0.5,
-            tanaka_sigma_steps=1.0,
-            benjamin_feir_count=3,
-            jonswap_tma_count=3,
-        ),
-        fixed_terminal_time=0.16 if family == "tanaka" else None,
-        period_count=(
-            16 if family == "jonswap_tma" else 1 if family == "benjamin_feir" else None
-        ),
-        jonswap_quadrature_order=4 if family == "jonswap_tma" else None,
-    )
-
-
-def _run_spec(
+def _generate(
     root: Path,
-    trajectory_config: TrajectoryGenerationConfig,
+    family: TrajectoryFamily,
+    numerical: RolloutNumerics,
     *,
     parameter_group_ids: tuple[str, ...],
     targets: tuple[int, ...],
     batch_size: int = 2,
-) -> DatasetChunkConfig:
-    family_id = {
-        "tanaka": PhysicalFamilyId.TANAKA,
-        "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
-        "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
-    }[trajectory_config.family]
-    return DatasetChunkConfig(
-        root=root,
-        family_name=trajectory_config.family,
-        family_id=family_id,
+) -> GenerationResult:
+    return generate_simulations(
+        root,
+        family_id=PhysicalFamilyId[family.upper()],
         dataset_split=DatasetSplit.TEST,
-        simulation_targets=dict(zip(parameter_group_ids, targets, strict=True)),
+        accepted_targets=dict(zip(parameter_group_ids, targets, strict=True)),
         batch_size=batch_size,
+        generate_batch=partial(
+            generate_trajectory_batch,
+            dataset_split=DatasetSplit.TEST,
+            family=family,
+            numerical=numerical,
+            solver_batch_size=batch_size if family == "jonswap_tma" else None,
+        ),
     )
 
 
-def _sample_depth(sample: object) -> float:
-    depth = getattr(sample, "depth", None)
-    if depth is not None:
-        return float(depth)
-    parameters = getattr(sample, "parameters")
-    return float(parameters.depth)
+def _integrate_jonswap_without_adjustment(
+    initial: TrajectoryInitialBatch,
+    time_grids: tuple[SimulationTimeGrid, ...],
+    *,
+    numerical: RolloutNumerics,
+    solver_batch_size: int,
+) -> tuple[SimulationOutcome, ...]:
+    del solver_batch_size
+    return integrate_and_subsample_trajectories(
+        initial,
+        time_grids,
+        family="jonswap_tma",
+        numerical=numerical,
+    )
 
 
 def _tanaka_failure_component(
@@ -193,17 +180,14 @@ class MarkerConstructor:
 
     def __call__(
         self,
-        proposed: PreparedTrajectoryBatch[object],
+        sampled: SampledSimulations[object],
         *,
-        selected_local_indices: tuple[int, ...] | None,
+        selected_local_indices: tuple[int, ...] | None = None,
     ) -> TrajectoryInitialBatch:
-        all_indices = tuple(range(len(proposed.sampled.parameter_group_ids)))
+        all_indices = tuple(range(len(sampled.parameter_group_ids)))
         selected = selected_local_indices or all_indices
         self.calls.append(selected)
-        samples = tuple(proposed.sampled.samples[index] for index in selected)
-        records = tuple(
-            proposed.sampled.specification_records[index] for index in selected
-        )
+        records = tuple(sampled.specification_records[index] for index in selected)
         marker_values = []
         for record in records:
             key = json.dumps(record, sort_keys=True)
@@ -213,14 +197,21 @@ class MarkerConstructor:
         markers = np.asarray(marker_values, dtype=np.float64)
         eta0 = np.repeat(
             markers[:, None],
-            proposed.sampled.contract.nx,
+            sampled.config.nx,
             axis=1,
         )
         return TrajectoryInitialBatch(
             eta0=eta0,
             xi0=np.zeros_like(eta0),
             depths=np.asarray(
-                [_sample_depth(sample) for sample in samples],
+                [
+                    (
+                        float(cast(float, record["depth"]))
+                        if "depth" in record
+                        else deep_water_proxy_depth(sampled.config.length)
+                    )
+                    for record in records
+                ],
                 dtype=np.float64,
             ),
             specification_records=records,
@@ -237,24 +228,22 @@ class JonswapRejectingConstructor:
 
     def __call__(
         self,
-        proposed: PreparedTrajectoryBatch[object],
+        sampled: SampledSimulations[object],
         *,
         selected_local_indices: tuple[int, ...] | None,
     ) -> TrajectoryInitialBatch:
         selected = selected_local_indices or tuple(
-            range(len(proposed.sampled.parameter_group_ids))
+            range(len(sampled.parameter_group_ids))
         )
         self.calls.append(selected)
         if self.rejected_record is None:
             self.rejected_record = json.dumps(
-                proposed.sampled.specification_records[0], sort_keys=True
+                sampled.specification_records[0], sort_keys=True
             )
         invalid_positions = tuple(
             position
             for position, original_index in enumerate(selected)
-            if json.dumps(
-                proposed.sampled.specification_records[original_index], sort_keys=True
-            )
+            if json.dumps(sampled.specification_records[original_index], sort_keys=True)
             == self.rejected_record
         )
         if invalid_positions:
@@ -268,7 +257,7 @@ class JonswapRejectingConstructor:
             )
             raise JonswapInitialStateDomainError(failures)
         return self.base(
-            proposed,
+            sampled,
             selected_local_indices=selected,
         )
 
@@ -282,7 +271,7 @@ class FastRolloutIntegrator:
         failed_production_markers: frozenset[int] = frozenset(),
     ) -> None:
         self.failed_production_markers = failed_production_markers
-        self.calls: list[tuple[float, int, float]] = []
+        self.calls: list[tuple[int, int, float]] = []
 
     def __call__(
         self,
@@ -291,14 +280,16 @@ class FastRolloutIntegrator:
         xi0: np.ndarray,
         depths: np.ndarray,
         saved_times: np.ndarray,
-        config: RolloutConfig,
+        config: RolloutNumerics,
     ) -> IntegratedTrajectoryBatch:
         del depths
         batch_size, nx = eta0.shape
-        self.calls.append((config.dt, batch_size, float(saved_times[-1])))
+        self.calls.append(
+            (config.substeps_per_saved_frame, batch_size, float(saved_times[-1]))
+        )
         eta = np.repeat(eta0[None, :, :], saved_times.size, axis=0)
         xi = np.repeat(xi0[None, :, :], saved_times.size, axis=0)
-        substeps = int(round(config.saved_dt / config.dt))
+        substeps = config.substeps_per_saved_frame
         telemetry_shape = ((saved_times.size - 1) * substeps, batch_size)
         converged = np.ones(telemetry_shape, dtype=np.bool_)
         markers = np.rint(eta0[:, 0]).astype(int)
@@ -316,7 +307,7 @@ class FastRolloutIntegrator:
         )
 
 
-class TrajectoryBatchGeneratorTests(unittest.TestCase):
+class TrajectoryBatchGenerationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -325,64 +316,59 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_failed_trajectory_retains_sibling_and_replaces_same_parameter_group(
         self,
     ) -> None:
-        trajectory_config = _trajectory_config("benjamin_feir")
+        numerical = _config()
         parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(2,),
-        )
         constructor = MarkerConstructor()
         rollouts = FastRolloutIntegrator(failed_production_markers=frozenset({1}))
-        generator = TrajectoryBatchGenerator(
-            chunk_config=spec,
-            trajectory_config=trajectory_config,
-            constructor=constructor,
-            rollout_integrator=rollouts,
-        )
+        with (
+            mock.patch(
+                "solver.gen_data.trajectory_batch_generator."
+                "construct_benjamin_feir_trajectory_batch",
+                new=constructor,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+        ):
+            attempts, completed = _generate(
+                self.root,
+                "benjamin_feir",
+                numerical,
+                parameter_group_ids=(parameter_group_id,),
+                targets=(2,),
+            )
 
-        state = generate_simulations(spec, generator)
-
-        self.assertTrue(state.complete)
-        self.assertEqual(
-            dict(state.accepted_simulation_counts), {parameter_group_id: 2}
-        )
+        self.assertEqual(attempts, {parameter_group_id: 3})
         self.assertEqual(constructor.calls, [(0, 1), (0,)])
-        first = load_completed_batch(state.completed_batches[0])
+        first = load_completed_batch(completed[0])
         self.assertEqual(
             [simulation.accepted for simulation in first.simulations],
             [False, True],
         )
         assert first.shard is not None
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
-        self.assertEqual(first.shard["eta"].shape[0], 3)
-        second = load_completed_batch(state.completed_batches[1])
+        self.assertEqual(first.shard["eta"].shape[0], 200)
+        second = load_completed_batch(completed[1])
         self.assertEqual(
             str(second.plan["parameter_group_id"][0]),
             parameter_group_id,
         )
 
     def test_declared_tanaka_failure_rejects_only_named_simulation(self) -> None:
-        trajectory_config = _trajectory_config("tanaka")
+        numerical = _config()
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
-        spec = _run_spec(
-            self.root / "declared",
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(2,),
-        )
         base_constructor = MarkerConstructor()
         rejected_first_simulation = False
 
         def declared_constructor(
-            proposed: PreparedTrajectoryBatch[object],
+            sampled: SampledSimulations[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
             nonlocal rejected_first_simulation
             selected = selected_local_indices or tuple(
-                range(len(proposed.sampled.parameter_group_ids))
+                range(len(sampled.parameter_group_ids))
             )
             invalid_positions = (0,) if not rejected_first_simulation else ()
             rejected_first_simulation = True
@@ -395,20 +381,31 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                     ),
                 )
             return base_constructor(
-                proposed,
+                sampled,
                 selected_local_indices=selected,
             )
 
-        generator = TrajectoryBatchGenerator(
-            chunk_config=spec,
-            trajectory_config=trajectory_config,
-            constructor=declared_constructor,
-            rollout_integrator=FastRolloutIntegrator(),
-        )
-        state = generate_simulations(spec, generator)
+        rollouts = FastRolloutIntegrator()
+        with (
+            mock.patch(
+                "solver.gen_data.trajectory_batch_generator."
+                "construct_tanaka_trajectory_batch",
+                new=declared_constructor,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+        ):
+            _, completed = _generate(
+                self.root / "declared",
+                "tanaka",
+                numerical,
+                parameter_group_ids=(parameter_group_id,),
+                targets=(2,),
+            )
 
-        self.assertTrue(state.complete)
-        first = load_completed_batch(state.completed_batches[0])
+        first = load_completed_batch(completed[0])
         self.assertEqual(
             [simulation.accepted for simulation in first.simulations],
             [False, True],
@@ -424,64 +421,81 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         assert first.shard is not None
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
-        unexpected_spec = _run_spec(
-            self.root / "unexpected",
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(1,),
-            batch_size=1,
-        )
-
         def unexpected_constructor(
-            proposed: PreparedTrajectoryBatch[object],
+            sampled: SampledSimulations[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
-            del proposed, selected_local_indices
+            del sampled, selected_local_indices
             raise ValueError("unclassified constructor bug")
 
-        unexpected = TrajectoryBatchGenerator(
-            chunk_config=unexpected_spec,
-            trajectory_config=trajectory_config,
-            constructor=unexpected_constructor,
-            rollout_integrator=FastRolloutIntegrator(),
-        )
-        with self.assertRaisesRegex(ValueError, "unclassified"):
-            generate_simulations(unexpected_spec, unexpected)
-        self.assertEqual(
-            scan_dataset_generation(unexpected_spec).completed_batches,
-            (),
+        unexpected_root = self.root / "unexpected"
+        with mock.patch(
+            "solver.gen_data.trajectory_batch_generator."
+            "construct_tanaka_trajectory_batch",
+            new=unexpected_constructor,
+        ):
+            with self.assertRaisesRegex(ValueError, "unclassified"):
+                _generate(
+                    unexpected_root,
+                    "tanaka",
+                    numerical,
+                    parameter_group_ids=(parameter_group_id,),
+                    targets=(1,),
+                    batch_size=1,
+                )
+        self.assertFalse(
+            batch_path(
+                unexpected_root,
+                family="tanaka",
+                split="test",
+                batch_id=0,
+            ).exists()
         )
 
     def test_declared_jonswap_graph_failure_retains_sibling_and_replays(
         self,
     ) -> None:
-        trajectory_config = _trajectory_config("jonswap_tma")
+        numerical = _config()
         parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
 
-        def run(root: Path) -> tuple[DatasetChunkState, JonswapRejectingConstructor]:
-            spec = _run_spec(
-                root,
-                trajectory_config,
-                parameter_group_ids=(parameter_group_id,),
-                targets=(2,),
-            )
+        def run(
+            root: Path,
+        ) -> tuple[
+            tuple[dict[str, int], tuple[Path, ...]],
+            JonswapRejectingConstructor,
+        ]:
             constructor = JonswapRejectingConstructor()
-            state = generate_simulations(
-                spec,
-                TrajectoryBatchGenerator(
-                    chunk_config=spec,
-                    trajectory_config=trajectory_config,
-                    constructor=constructor,
-                    rollout_integrator=FastRolloutIntegrator(),
+            rollouts = FastRolloutIntegrator()
+            with (
+                mock.patch(
+                    "solver.gen_data.trajectory_batch_generator."
+                    "construct_jonswap_tma_trajectory_batch",
+                    new=constructor,
                 ),
-            )
+                mock.patch(
+                    "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                    new=rollouts,
+                ),
+                mock.patch(
+                    "solver.gen_data.jonswap_horizon_generator."
+                    "integrate_and_subsample_jonswap",
+                    new=_integrate_jonswap_without_adjustment,
+                ),
+            ):
+                state = _generate(
+                    root,
+                    "jonswap_tma",
+                    numerical,
+                    parameter_group_ids=(parameter_group_id,),
+                    targets=(2,),
+                )
             return state, constructor
 
         state, constructor = run(self.root / "first")
-        self.assertTrue(state.complete)
+        _, completed = state
         self.assertEqual(constructor.calls, [(0, 1), (1,), (0,)])
-        first = load_completed_batch(state.completed_batches[0])
+        first = load_completed_batch(completed[0])
         self.assertEqual(
             [simulation.accepted for simulation in first.simulations],
             [False, True],
@@ -502,17 +516,11 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
         replay, replay_constructor = run(self.root / "replay")
-        self.assertTrue(replay.complete)
+        _, replay_completed = replay
         self.assertEqual(replay_constructor.calls, constructor.calls)
         self.assertEqual(
-            [
-                load_completed_batch(path).simulations
-                for path in replay.completed_batches
-            ],
-            [
-                load_completed_batch(path).simulations
-                for path in state.completed_batches
-            ],
+            [load_completed_batch(path).simulations for path in replay_completed],
+            [load_completed_batch(path).simulations for path in completed],
         )
 
     def test_constructor_generated_finite_radicand_failure_is_recoverable(
@@ -566,26 +574,19 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         self.assertFalse(caught.exception.is_recoverable)
 
     def test_two_round_tanaka_rejections_archive_original_indices(self) -> None:
-        trajectory_config = _trajectory_config("tanaka")
+        numerical = _config()
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(3,),
-            batch_size=3,
-        )
         base_constructor = MarkerConstructor()
         rejection_round = 0
 
         def rejecting_constructor(
-            proposed: PreparedTrajectoryBatch[object],
+            sampled: SampledSimulations[object],
             *,
             selected_local_indices: tuple[int, ...] | None,
         ) -> TrajectoryInitialBatch:
             nonlocal rejection_round
             selected = selected_local_indices or tuple(
-                range(len(proposed.sampled.parameter_group_ids))
+                range(len(sampled.parameter_group_ids))
             )
             if rejection_round < 2:
                 position = rejection_round
@@ -595,22 +596,32 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                     (_tanaka_failure_component(position, position),),
                 )
             return base_constructor(
-                proposed,
+                sampled,
                 selected_local_indices=selected,
             )
 
-        state = generate_simulations(
-            spec,
-            TrajectoryBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                constructor=rejecting_constructor,
-                rollout_integrator=FastRolloutIntegrator(),
+        rollouts = FastRolloutIntegrator()
+        with (
+            mock.patch(
+                "solver.gen_data.trajectory_batch_generator."
+                "construct_tanaka_trajectory_batch",
+                new=rejecting_constructor,
             ),
-        )
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+        ):
+            _, completed = _generate(
+                self.root,
+                "tanaka",
+                numerical,
+                parameter_group_ids=(parameter_group_id,),
+                targets=(3,),
+                batch_size=3,
+            )
 
-        self.assertTrue(state.complete)
-        first = load_completed_batch(state.completed_batches[0])
+        first = load_completed_batch(completed[0])
         self.assertEqual(
             [simulation.accepted for simulation in first.simulations],
             [False, True, False],
@@ -635,21 +646,13 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
     def test_selected_tanaka_adapter_verifies_full_proposal_then_subsets(
         self,
     ) -> None:
-        trajectory_config = _trajectory_config("tanaka")
+        numerical = _config()
         parameter_group_id = TANAKA_PARAMETER_GROUP_IDS[0]
         sampled = sample_tanaka_simulations(
             (parameter_group_id, parameter_group_id),
             dataset_split=DatasetSplit.TEST,
             first_attempt_number=19,
-            contract=trajectory_config.numerical,
-        )
-        proposed = prepare_trajectory_batch(
-            sampled,
-            root=self.root,
-            family_name="tanaka",
-            family_id=PhysicalFamilyId.TANAKA,
-            dataset_split=DatasetSplit.TEST,
-            batch_id=0,
+            config=numerical,
         )
         observed_depths: list[np.ndarray] = []
 
@@ -659,7 +662,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             self.assertEqual(len(simulation_specs), 1)
             observed_depths.append(depths.copy())
             zeros = np.zeros(
-                (depths.size, trajectory_config.numerical.nx),
+                (depths.size, numerical.nx),
                 dtype=np.float64,
             )
             return zeros, zeros
@@ -670,10 +673,10 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             side_effect=fake_builder,
         ):
             selected = construct_tanaka_trajectory_batch(
-                proposed,
+                sampled,
                 selected_local_indices=(1,),
             )
-        self.assertEqual(selected.eta0.shape, (1, trajectory_config.numerical.nx))
+        self.assertEqual(selected.eta0.shape, (1, numerical.nx))
         self.assertEqual(
             selected.specification_records,
             (sampled.specification_records[1],),
@@ -684,34 +687,39 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unique and increasing"):
             construct_tanaka_trajectory_batch(
-                proposed,
+                sampled,
                 selected_local_indices=(1, 0),
             )
 
     def test_jonswap_simulations_use_distinct_per_simulation_peak_period_grids(
         self,
     ) -> None:
-        trajectory_config = _trajectory_config("jonswap_tma")
+        numerical = _config()
         parameter_group_ids = (
             JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
             JONSWAP_TMA_PARAMETER_GROUP_IDS[18],
         )
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=parameter_group_ids,
-            targets=(1, 1),
-        )
         rollouts = FastRolloutIntegrator()
-        generator = TrajectoryBatchGenerator(
-            chunk_config=spec,
-            trajectory_config=trajectory_config,
-            rollout_integrator=rollouts,
-        )
-        state = generate_simulations(spec, generator)
-        self.assertTrue(state.complete)
+        with (
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+            mock.patch(
+                "solver.gen_data.jonswap_horizon_generator."
+                "integrate_and_subsample_jonswap",
+                new=_integrate_jonswap_without_adjustment,
+            ),
+        ):
+            _, completed = _generate(
+                self.root,
+                "jonswap_tma",
+                numerical,
+                parameter_group_ids=parameter_group_ids,
+                targets=(1, 1),
+            )
 
-        batch = load_completed_batch(state.completed_batches[0])
+        batch = load_completed_batch(completed[0])
         records = [
             json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
         ]
@@ -721,16 +729,15 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
                 finite_depth_angular_frequency(
                     np.asarray([record["peak_wavenumber"]], dtype=np.float64),
                     depth=float(record["depth"]),
-                    gravity=trajectory_config.numerical.gravity,
+                    gravity=numerical.gravity,
                 )[0]
             )
             intended = 16.0 * 2.0 * math.pi / frequency
             expected_terminal_times.append(
                 math.floor(
-                    (intended + 1.0e-12 * trajectory_config.numerical.saved_dt)
-                    / trajectory_config.numerical.saved_dt
+                    (intended + 1.0e-12 * numerical.saved_dt) / numerical.saved_dt
                 )
-                * trajectory_config.numerical.saved_dt
+                * numerical.saved_dt
             )
         np.testing.assert_allclose(
             [
@@ -750,7 +757,7 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         assert batch.shard is not None
         self.assertEqual(
             np.bincount(batch.shard["simulation_local_index"]).tolist(),
-            [3, 3],
+            [16, 16],
         )
         for simulation in batch.simulations:
             self.assertIn("initial_discrete_peak_wavenumber", simulation.metrics)
@@ -760,42 +767,45 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             )
 
     def test_benjamin_feir_simulations_use_distinct_carrier_period_grids(self) -> None:
-        trajectory_config = _trajectory_config("benjamin_feir")
+        numerical = _config()
         parameter_group_ids = (
             BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
             BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
         )
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=parameter_group_ids,
-            targets=(1, 1),
-        )
         rollouts = FastRolloutIntegrator()
-        generator = TrajectoryBatchGenerator(
-            chunk_config=spec,
-            trajectory_config=trajectory_config,
-            constructor=MarkerConstructor(),
-            rollout_integrator=rollouts,
-        )
-        state = generate_simulations(spec, generator)
-        self.assertTrue(state.complete)
+        constructor = MarkerConstructor()
+        with (
+            mock.patch(
+                "solver.gen_data.trajectory_batch_generator."
+                "construct_benjamin_feir_trajectory_batch",
+                new=constructor,
+            ),
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+        ):
+            _, completed = _generate(
+                self.root,
+                "benjamin_feir",
+                numerical,
+                parameter_group_ids=parameter_group_ids,
+                targets=(1, 1),
+            )
 
-        batch = load_completed_batch(state.completed_batches[0])
+        batch = load_completed_batch(completed[0])
         records = [
             json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
         ]
         expected_terminal_times = []
         for record in records:
-            carrier_wavenumber = float(record["carrier_wavenumber"])
-            intended = (
-                2.0
-                * math.pi
-                / math.sqrt(trajectory_config.numerical.gravity * carrier_wavenumber)
+            carrier_wavenumber = (
+                2.0 * math.pi * float(record["carrier_mode"]) / numerical.length
             )
+            intended = 2.0 * math.pi / math.sqrt(numerical.gravity * carrier_wavenumber)
+            intended *= 100.0
             expected_terminal_times.append(
-                math.floor(intended / trajectory_config.numerical.saved_dt)
-                * trajectory_config.numerical.saved_dt
+                math.floor(intended / numerical.saved_dt) * numerical.saved_dt
             )
         np.testing.assert_allclose(
             [
@@ -813,111 +823,22 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
         assert batch.shard is not None
         self.assertEqual(
             np.bincount(batch.shard["simulation_local_index"]).tolist(),
-            [3, 3],
-        )
-
-    def test_jonswap_horizon_is_strictly_floored_at_rounding_boundary(
-        self,
-    ) -> None:
-        trajectory_config = _trajectory_config("jonswap_tma")
-        intended = 7.99999999999996
-        angular_frequency = 16.0 * 2.0 * math.pi / intended
-        sample = SimpleNamespace(
-            parameters=SimpleNamespace(
-                peak_wavenumber=1.0,
-                depth=1.0,
-            )
-        )
-        with mock.patch(
-            "solver.gen_data.trajectory_batch_generator.finite_depth_angular_frequency",
-            return_value=np.asarray([angular_frequency], dtype=np.float64),
-        ):
-            grid = _jonswap_time_grid(sample, trajectory_config)  # type: ignore[arg-type]
-        self.assertLessEqual(grid.realized_terminal_time, intended)
-        self.assertLess(
-            intended - grid.realized_terminal_time,
-            trajectory_config.numerical.saved_dt,
-        )
-        self.assertEqual(grid.realized_terminal_time, 7.92)
-
-    def test_benjamin_feir_horizon_is_one_hundred_carrier_periods(
-        self,
-    ) -> None:
-        trajectory_config = paper_trajectory_config("benjamin_feir")
-        samples = tuple(
-            sample_benjamin_feir_simulation(
-                parameter_group_id,
-                dataset_split=DatasetSplit.TEST,
-                attempt_number=index,
-            )
-            for index, parameter_group_id in enumerate(
-                (
-                    BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
-                    BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
-                )
-            )
-        )
-        for sample in samples:
-            grid = _benjamin_feir_time_grid(sample, trajectory_config)
-            carrier_period = (
-                2.0
-                * math.pi
-                / math.sqrt(
-                    trajectory_config.numerical.gravity * sample.carrier_wavenumber
-                )
-            )
-            intended = 100.0 * carrier_period
-            self.assertEqual(grid.intended_terminal_time, intended)
-            self.assertLessEqual(grid.realized_terminal_time, intended)
-            self.assertLess(
-                intended - grid.realized_terminal_time,
-                trajectory_config.numerical.saved_dt,
-            )
-
-        self.assertEqual(trajectory_config.period_count, 100)
-        self.assertNotEqual(
-            samples[0].carrier_wavenumber,
-            samples[1].carrier_wavenumber,
-        )
-        self.assertNotEqual(
-            _benjamin_feir_time_grid(
-                samples[0], trajectory_config
-            ).realized_terminal_time,
-            _benjamin_feir_time_grid(
-                samples[1], trajectory_config
-            ).realized_terminal_time,
+            [200, 200],
         )
 
     def test_interrupted_batch_restarts_without_partial_artifacts(self) -> None:
-        trajectory_config = _trajectory_config("benjamin_feir")
+        numerical = _config()
         parameter_group_id = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[1]
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(1,),
-            batch_size=1,
-        )
         interrupted_specs: list[tuple[Mapping[str, object], ...]] = []
 
         def interrupt_constructor(
-            proposed: PreparedTrajectoryBatch[object],
+            sampled: SampledSimulations[object],
             *,
-            selected_local_indices: tuple[int, ...] | None,
+            selected_local_indices: tuple[int, ...] | None = None,
         ) -> TrajectoryInitialBatch:
             del selected_local_indices
-            interrupted_specs.append(proposed.sampled.specification_records)
-            self.assertFalse(proposed.path.exists())
+            interrupted_specs.append(sampled.specification_records)
             raise InjectedInterruption("during batch construction")
-
-        interrupted = TrajectoryBatchGenerator(
-            chunk_config=spec,
-            trajectory_config=trajectory_config,
-            constructor=interrupt_constructor,
-            rollout_integrator=FastRolloutIntegrator(),
-        )
-        with self.assertRaisesRegex(InjectedInterruption, "during batch construction"):
-            generate_simulations(spec, interrupted)
 
         expected_path = batch_path(
             self.root,
@@ -925,19 +846,45 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             split="test",
             batch_id=0,
         )
+        with mock.patch(
+            "solver.gen_data.trajectory_batch_generator."
+            "construct_benjamin_feir_trajectory_batch",
+            new=interrupt_constructor,
+        ):
+            with self.assertRaisesRegex(
+                InjectedInterruption, "during batch construction"
+            ):
+                _generate(
+                    self.root,
+                    "benjamin_feir",
+                    numerical,
+                    parameter_group_ids=(parameter_group_id,),
+                    targets=(1,),
+                    batch_size=1,
+                )
         self.assertFalse(expected_path.exists())
-        self.assertEqual(scan_dataset_generation(spec).completed_batches, ())
 
-        state = generate_simulations(
-            spec,
-            TrajectoryBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
-                constructor=MarkerConstructor(),
-                rollout_integrator=FastRolloutIntegrator(),
+        constructor = MarkerConstructor()
+        rollouts = FastRolloutIntegrator()
+        with (
+            mock.patch(
+                "solver.gen_data.trajectory_batch_generator."
+                "construct_benjamin_feir_trajectory_batch",
+                new=constructor,
             ),
-        )
-        self.assertTrue(state.complete)
+            mock.patch(
+                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                new=rollouts,
+            ),
+        ):
+            _generate(
+                self.root,
+                "benjamin_feir",
+                numerical,
+                parameter_group_ids=(parameter_group_id,),
+                targets=(1,),
+                batch_size=1,
+            )
         completed = load_completed_batch(expected_path)
         self.assertEqual(
             tuple(
@@ -947,63 +894,18 @@ class TrajectoryBatchGeneratorTests(unittest.TestCase):
             interrupted_specs[0],
         )
 
-    def test_paper_numerical_contract_is_family_specific(self) -> None:
-        tanaka_trajectory_config = paper_trajectory_config("tanaka")
-        tanaka = tanaka_trajectory_config.numerical
-        self.assertEqual(tanaka, PAPER_TANAKA_ROLLOUT_CONFIG)
-        self.assertEqual(tanaka.maximum_wavenumber, 256.0)
-        self.assertEqual(tanaka.target_maximum_wavenumber, 128.0)
-        self.assertIsNone(tanaka.internal_hamiltonian_drift_threshold)
-        self.assertEqual(tanaka_trajectory_config.fixed_terminal_time, 200.0)
-
-        benjamin_feir_trajectory_config = paper_trajectory_config("benjamin_feir")
-        benjamin_feir = benjamin_feir_trajectory_config.numerical
-        self.assertEqual(benjamin_feir, PAPER_BENJAMIN_FEIR_ROLLOUT_CONFIG)
-        self.assertEqual(benjamin_feir.nx, 1024)
-        self.assertEqual(benjamin_feir.maximum_wavenumber, 256.0)
-        self.assertEqual(benjamin_feir.target_nx, 1024)
-        self.assertEqual(benjamin_feir_trajectory_config.period_count, 100)
-
-        jonswap = paper_trajectory_config("jonswap_tma")
-        jonswap_numerical = jonswap.numerical
-        self.assertEqual(jonswap_numerical, PAPER_JONSWAP_ROLLOUT_CONFIG)
-        self.assertEqual(jonswap_numerical.nx, 2048)
-        self.assertEqual(jonswap_numerical.target_nx, 1024)
-        self.assertEqual(jonswap.period_count, 16)
-        self.assertEqual(jonswap_numerical.maximum_wavenumber, 704.0)
-        self.assertEqual(jonswap_numerical.gl2_iteration_cap, 5)
-        self.assertEqual(jonswap_numerical.target_nx, 1024)
-
-        for numerical in (benjamin_feir, jonswap_numerical):
-            self.assertEqual(numerical.dno_order, 4)
-            self.assertEqual(numerical.target_dno_order, 6)
-            self.assertEqual(
-                numerical.target_maximum_wavenumber,
-                128.0,
-            )
-            self.assertEqual(
-                numerical.internal_hamiltonian_drift_threshold,
-                1.0e-3,
-            )
-
-        self.assertIsNotNone(jonswap.jonswap_adjustment)
-        self.assertIsNone(paper_trajectory_config("benjamin_feir").jonswap_adjustment)
-
-    def test_paper_jonswap_requires_adjustment_generator(self) -> None:
-        trajectory_config = paper_trajectory_config("jonswap_tma")
+    def test_paper_jonswap_requires_solver_batch_size(self) -> None:
+        numerical = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
         parameter_group_id = JONSWAP_TMA_PARAMETER_GROUP_IDS[0]
-        spec = _run_spec(
-            self.root,
-            trajectory_config,
-            parameter_group_ids=(parameter_group_id,),
-            targets=(1,),
-            batch_size=1,
-        )
 
-        with self.assertRaisesRegex(ValueError, "dedicated generator"):
-            TrajectoryBatchGenerator(
-                chunk_config=spec,
-                trajectory_config=trajectory_config,
+        with self.assertRaisesRegex(ValueError, "solver_batch_size"):
+            generate_trajectory_batch(
+                (parameter_group_id,),
+                0,
+                self.root / "batch.npz",
+                dataset_split=DatasetSplit.TEST,
+                family="jonswap_tma",
+                numerical=numerical,
             )
 
 

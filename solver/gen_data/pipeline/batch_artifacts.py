@@ -10,8 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.artifact_io import parse_json
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit
-from solver.gen_data.pipeline.types import JsonObject, JsonScalar
+from solver.gen_data.pipeline.types import DatasetSplit, JsonObject, JsonScalar
 
 
 _BATCH_PLAN_STRING_FIELDS = {

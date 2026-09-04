@@ -2,283 +2,172 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Protocol
+from typing import TypeAlias
 
-from solver.gen_data.pipeline.batch_storage import (
-    batch_path,
-    load_completed_batch,
-)
-from solver.gen_data.pipeline.simulation_allocation import (
-    DatasetSplit,
-    PhysicalFamilyId,
-    select_next_parameter_groups,
-)
-
-MAX_RETRIES_PER_PARAMETER_GROUP = 32
+from solver.gen_data.pipeline.batch_storage import batch_path, load_completed_batch
+from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 
 
-@dataclass(frozen=True)
-class DatasetChunkConfig:
-    """Configuration for generating one dataset chunk across multiple batches."""
-
-    root: Path
-    family_name: str
-    family_id: PhysicalFamilyId
-    dataset_split: DatasetSplit
-    simulation_targets: Mapping[str, int]
-    batch_size: int
-    solver_batch_size: int | None = None
-
-    def __post_init__(self) -> None:
-        if not self.simulation_targets:
-            raise ValueError("simulation_targets must not be empty")
-        if any(
-            not isinstance(parameter_group_id, str) or not parameter_group_id
-            for parameter_group_id in self.simulation_targets
-        ):
-            raise ValueError("simulation target keys must be nonempty strings")
-        if any(
-            not isinstance(simulation_count, int)
-            or isinstance(simulation_count, bool)
-            or simulation_count < 0
-            for simulation_count in self.simulation_targets.values()
-        ):
-            raise ValueError("simulation target values must be nonnegative integers")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        if self.solver_batch_size is not None and not (
-            0 < self.solver_batch_size <= self.batch_size
-        ):
-            raise ValueError("solver_batch_size must be between 1 and batch_size")
-
-    def to_json_record(self) -> dict[str, object]:
-        """Return the complete chunk configuration."""
-
-        accepted_count = sum(self.simulation_targets.values())
-        record: dict[str, object] = {
-            "family_name": self.family_name,
-            "family_id": int(self.family_id),
-            "dataset_split": self.dataset_split.value,
-            "batch_size": self.batch_size,
-            "accepted_simulation_count": accepted_count,
-            "quotas": [
-                {"parameter_group_id": parameter_group_id, "target_accepted": count}
-                for parameter_group_id, count in self.simulation_targets.items()
-            ],
-        }
-        if self.solver_batch_size is not None:
-            record["solver_batch_size"] = self.solver_batch_size
-        return record
-
-    @property
-    def maximum_attempts_by_parameter_group(self) -> Mapping[str, int]:
-        """Return the simulation-attempt limit for each parameter group."""
-
-        return {
-            parameter_group_id: (
-                simulation_count + MAX_RETRIES_PER_PARAMETER_GROUP
-                if simulation_count > 0
-                else 0
-            )
-            for parameter_group_id, simulation_count in self.simulation_targets.items()
-        }
+BatchGenerator: TypeAlias = Callable[[tuple[str, ...], int, Path], None]
+GenerationResult: TypeAlias = tuple[dict[str, int], tuple[Path, ...]]
+MAX_RETRIES_PER_PARAMETER_GROUP = 64
 
 
-@dataclass(frozen=True)
-class DatasetChunkState:
-    """Counts reconstructed from completed batch artifacts."""
-
-    accepted_simulation_counts: Mapping[str, int]
-    simulation_attempt_counts: Mapping[str, int]
-    completed_batches: tuple[Path, ...]
-    complete: bool
-
-
-class BatchGenerator(Protocol):
-    """Generate and save one complete batch."""
-
-    def __call__(
-        self,
-        parameter_group_ids: tuple[str, ...],
-        *,
-        first_attempt_number: int,
-        batch_id: int,
-    ) -> Path: ...
-
-
-def _find_completed_batches(chunk_config: DatasetChunkConfig) -> tuple[Path, ...]:
-    directory = batch_path(
-        chunk_config.root,
-        family=chunk_config.family_name,
-        split=chunk_config.dataset_split.value,
-        batch_id=0,
-    ).parent
-    if not directory.exists():
-        return ()
-    if not directory.is_dir():
-        raise RuntimeError(f"completed batch path is not a directory: {directory}")
-
-    completed_batches = tuple(
-        sorted(
-            directory.glob("batch_*.npz"),
-            key=lambda path: int(path.stem.removeprefix("batch_")),
-        )
-    )
-    for batch_id, path in enumerate(completed_batches):
-        if path != batch_path(
-            chunk_config.root,
-            family=chunk_config.family_name,
-            split=chunk_config.dataset_split.value,
-            batch_id=batch_id,
-        ):
-            raise RuntimeError("completed batch IDs must be contiguous from zero")
-    return completed_batches
-
-
-def _add_completed_batch(
-    chunk_config: DatasetChunkConfig,
+def _update_counts_from_batch(
     path: Path,
+    *,
+    family_id: PhysicalFamilyId,
+    dataset_split: DatasetSplit,
+    accepted_targets: Mapping[str, int],
     accepted_counts: dict[str, int],
     attempt_counts: dict[str, int],
 ) -> None:
-    """Validate one saved batch and add its counts to the generation state."""
-
     batch = load_completed_batch(path)
     plan = batch.plan
-    if int(plan["family_id"].item()) != int(chunk_config.family_id):
+    if int(plan["family_id"].item()) != int(family_id):
         raise RuntimeError("completed batch belongs to a different family")
-    if str(plan["dataset_split"].item()) != chunk_config.dataset_split.value:
+    if str(plan["dataset_split"].item()) != dataset_split.value:
         raise RuntimeError("completed batch belongs to a different dataset split")
+
     parameter_groups = tuple(str(value) for value in plan["parameter_group_id"])
-    unknown_parameter_groups = set(parameter_groups) - set(accepted_counts)
-    if unknown_parameter_groups:
-        raise RuntimeError(
-            "completed batch contains unknown parameter groups: "
-            f"{sorted(unknown_parameter_groups)}"
-        )
     for parameter_group_id, simulation in zip(
         parameter_groups, batch.simulations, strict=True
     ):
+        target = accepted_targets[parameter_group_id]
         attempt_counts[parameter_group_id] += 1
         if simulation.accepted:
             accepted_counts[parameter_group_id] += 1
-
-    for (
-        parameter_group_id,
-        simulation_target,
-    ) in chunk_config.simulation_targets.items():
-        if accepted_counts[parameter_group_id] > simulation_target:
+        if accepted_counts[parameter_group_id] > target:
             raise RuntimeError(
                 f"completed batches exceed the accepted target for {parameter_group_id}"
             )
-        if (
-            attempt_counts[parameter_group_id]
-            > chunk_config.maximum_attempts_by_parameter_group[parameter_group_id]
-        ):
+        maximum_attempts = target + MAX_RETRIES_PER_PARAMETER_GROUP if target else 0
+        if attempt_counts[parameter_group_id] > maximum_attempts:
             raise RuntimeError(
                 f"completed batches exceed the attempt limit for {parameter_group_id}"
             )
 
 
-def _targets_met(
-    chunk_config: DatasetChunkConfig,
-    accepted_counts: Mapping[str, int],
-) -> bool:
-    return all(
-        accepted_counts[parameter_group_id] == simulation_target
-        for parameter_group_id, simulation_target in (
-            chunk_config.simulation_targets.items()
-        )
-    )
-
-
-def scan_dataset_generation(chunk_config: DatasetChunkConfig) -> DatasetChunkState:
-    """Count accepted and attempted simulations in completed batches."""
-
-    accepted_counts = dict.fromkeys(chunk_config.simulation_targets, 0)
-    attempt_counts = dict(accepted_counts)
-    completed_batches = _find_completed_batches(chunk_config)
-    for path in completed_batches:
-        _add_completed_batch(chunk_config, path, accepted_counts, attempt_counts)
-
-    return DatasetChunkState(
-        accepted_simulation_counts=accepted_counts,
-        simulation_attempt_counts=attempt_counts,
-        completed_batches=completed_batches,
-        complete=_targets_met(chunk_config, accepted_counts),
-    )
-
-
-def _attempt_limit_error(
-    chunk_config: DatasetChunkConfig,
-    state: DatasetChunkState,
-) -> RuntimeError:
-    limits = chunk_config.maximum_attempts_by_parameter_group
-    unfinished = "; ".join(
-        f"{parameter_group_id}: accepted="
-        f"{state.accepted_simulation_counts[parameter_group_id]}/"
-        f"{simulation_target}, attempts="
-        f"{state.simulation_attempt_counts[parameter_group_id]}/"
-        f"{limits[parameter_group_id]}"
-        for parameter_group_id, simulation_target in (
-            chunk_config.simulation_targets.items()
-        )
-        if state.accepted_simulation_counts[parameter_group_id] < simulation_target
-    )
-    return RuntimeError(
-        "attempt limits reached before all requested simulations were accepted; "
-        f"{unfinished}"
-    )
-
-
 def generate_simulations(
-    chunk_config: DatasetChunkConfig,
-    generator: BatchGenerator,
-) -> DatasetChunkState:
-    """Generate batches until every sampling-group target is met."""
+    root: Path,
+    *,
+    family_id: PhysicalFamilyId,
+    dataset_split: DatasetSplit,
+    accepted_targets: Mapping[str, int],
+    batch_size: int,
+    generate_batch: BatchGenerator,
+) -> GenerationResult:
+    """Generate until every parameter group has its requested accepted count."""
 
-    state = scan_dataset_generation(chunk_config)
-    while not state.complete:
-        parameter_group_ids = select_next_parameter_groups(
-            chunk_config.simulation_targets,
-            state.accepted_simulation_counts,
-            state.simulation_attempt_counts,
-            chunk_config.maximum_attempts_by_parameter_group,
-            batch_size=chunk_config.batch_size,
+    if (
+        batch_size <= 0
+        or not accepted_targets
+        or any(
+            not isinstance(parameter_group_id, str) or not parameter_group_id
+            for parameter_group_id in accepted_targets
         )
+        or any(
+            not isinstance(target, int) or isinstance(target, bool) or target < 0
+            for target in accepted_targets.values()
+        )
+    ):
+        raise ValueError(
+            "batch size must be positive and accepted targets must map nonempty "
+            "strings to nonnegative integers"
+        )
+
+    family_name = family_id.name.lower()
+    directory = batch_path(
+        root,
+        family=family_name,
+        split=dataset_split.value,
+        batch_id=0,
+    ).parent
+    if directory.exists() and not directory.is_dir():
+        raise RuntimeError(f"completed batch path is not a directory: {directory}")
+    completed_batches = sorted(
+        directory.glob("batch_*.npz"),
+        key=lambda path: int(path.stem.removeprefix("batch_")),
+    )
+    if any(
+        path.name != f"batch_{batch_id:06d}.npz"
+        for batch_id, path in enumerate(completed_batches)
+    ):
+        raise RuntimeError("completed batch IDs must be contiguous from zero")
+
+    accepted_counts = dict.fromkeys(accepted_targets, 0)
+    attempt_counts = dict(accepted_counts)
+    for path in completed_batches:
+        _update_counts_from_batch(
+            path,
+            family_id=family_id,
+            dataset_split=dataset_split,
+            accepted_targets=accepted_targets,
+            accepted_counts=accepted_counts,
+            attempt_counts=attempt_counts,
+        )
+
+    while accepted_counts != accepted_targets:
+        available_slots = sorted(
+            [
+                (
+                    accepted_counts[parameter_group_id] + offset,
+                    parameter_group_id,
+                )
+                for parameter_group_id, target in accepted_targets.items()
+                for offset in range(
+                    min(
+                        batch_size,
+                        target - accepted_counts[parameter_group_id],
+                        target
+                        + MAX_RETRIES_PER_PARAMETER_GROUP
+                        - attempt_counts[parameter_group_id],
+                    )
+                )
+            ],
+            key=lambda slot: slot[0],
+        )
+        parameter_group_ids = tuple(
+            parameter_group_id for _, parameter_group_id in available_slots[:batch_size]
+        )
+
         if not parameter_group_ids:
-            raise _attempt_limit_error(chunk_config, state)
+            unfinished = "; ".join(
+                f"{parameter_group_id}: accepted={accepted_counts[parameter_group_id]}/"
+                f"{target}, attempts={attempt_counts[parameter_group_id]}/"
+                f"{target + MAX_RETRIES_PER_PARAMETER_GROUP}"
+                for parameter_group_id, target in accepted_targets.items()
+                if accepted_counts[parameter_group_id] < target
+            )
+            raise RuntimeError(
+                "attempt limits reached before all requested simulations were accepted; "
+                f"{unfinished}"
+            )
 
-        batch_id = len(state.completed_batches)
-        first_attempt_number = sum(state.simulation_attempt_counts.values())
-        expected_path = batch_path(
-            chunk_config.root,
-            family=chunk_config.family_name,
-            split=chunk_config.dataset_split.value,
-            batch_id=batch_id,
+        output_path = batch_path(
+            root,
+            family=family_name,
+            split=dataset_split.value,
+            batch_id=len(completed_batches),
         )
-        returned_path = generator(
+        generate_batch(
             parameter_group_ids,
-            first_attempt_number=first_attempt_number,
-            batch_id=batch_id,
+            sum(attempt_counts.values()),
+            output_path,
         )
-        if returned_path != expected_path:
-            raise RuntimeError("batch generator returned a nonstandard path")
-        if not expected_path.exists():
+        if not output_path.exists():
             raise RuntimeError("batch generator returned without saving the batch")
 
-        accepted_counts = dict(state.accepted_simulation_counts)
-        attempt_counts = dict(state.simulation_attempt_counts)
-        _add_completed_batch(
-            chunk_config, expected_path, accepted_counts, attempt_counts
+        _update_counts_from_batch(
+            output_path,
+            family_id=family_id,
+            dataset_split=dataset_split,
+            accepted_targets=accepted_targets,
+            accepted_counts=accepted_counts,
+            attempt_counts=attempt_counts,
         )
-        state = DatasetChunkState(
-            accepted_simulation_counts=accepted_counts,
-            simulation_attempt_counts=attempt_counts,
-            completed_batches=(*state.completed_batches, expected_path),
-            complete=_targets_met(chunk_config, accepted_counts),
-        )
-    return state
+        completed_batches.append(output_path)
+
+    return attempt_counts, tuple(completed_batches)

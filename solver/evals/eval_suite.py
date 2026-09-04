@@ -38,7 +38,7 @@ from solver.evals.model_rollout import (  # noqa: E402
     load_run,
     rollout_surrogate,
 )
-from solver.gen_data.pipeline.simulation_allocation import DatasetSplit  # noqa: E402
+from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # noqa: E402
 

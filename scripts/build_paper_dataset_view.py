@@ -18,7 +18,7 @@ from solver.gen_data.pipeline.build_dataset_view import (
     DatasetViewPaths,
     build_dataset_view,
 )
-from solver.gen_data.pipeline.simulation_allocation import (
+from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
 )

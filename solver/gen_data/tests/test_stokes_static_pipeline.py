@@ -1,10 +1,10 @@
-"""CPU end-to-end tests for the common static Stokes writer."""
+"""CPU tests for constructing and labeling static Stokes states."""
 
 from __future__ import annotations
 
-import math
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -14,136 +14,89 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.simulation_allocation import (  # noqa: E402
-    DatasetSplit,
-)
-from solver.gen_data.stokes_sampling import (  # noqa: E402
-    STOKES_PARAMETER_GROUP_IDS,
-    StokesSample,
-    sample_stokes_simulation,
-)
+from solver.gen_data.stokes_sampling import StokesSample  # noqa: E402
 from solver.gen_data.stokes_static_pipeline import (  # noqa: E402
-    PAPER_STATIC_STOKES_CONTRACT,
-    StaticStokesContract,
+    PAPER_STATIC_STOKES_DNO_ORDER,
+    PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
+    PAPER_STATIC_STOKES_NX,
+    PAPER_STATIC_STOKES_PAD_FACTOR,
     evaluate_static_stokes_sample,
 )
 
 jax.config.update("jax_enable_x64", True)
 
 
-def reduced_contract() -> StaticStokesContract:
-    """Return the explicitly labeled CPU wiring contract."""
-
-    return StaticStokesContract(
-        nx=64,
-        length=2.0 * math.pi,
-        dno_order=2,
-        pad_factor=2,
-        maximum_wavenumber=24.0,
-        role="reduced_wiring_evidence_only",
-    )
-
-
 class StokesStaticPipelineTest(unittest.TestCase):
-    def test_contract_requires_an_explicit_reduced_evidence_label(self) -> None:
-        self.assertEqual(
-            (
-                PAPER_STATIC_STOKES_CONTRACT.nx,
-                PAPER_STATIC_STOKES_CONTRACT.dno_order,
-                PAPER_STATIC_STOKES_CONTRACT.pad_factor,
-                PAPER_STATIC_STOKES_CONTRACT.maximum_wavenumber,
-                PAPER_STATIC_STOKES_CONTRACT.role,
-            ),
-            (1024, 6, 8, 128.0, "paper_dataset"),
-        )
-        with self.assertRaisesRegex(ValueError, "must be labeled"):
-            StaticStokesContract(
-                nx=64,
-                dno_order=2,
-                pad_factor=2,
-                maximum_wavenumber=24.0,
+    def test_invalid_constructed_states_are_rejected_before_dno_evaluation(
+        self,
+    ) -> None:
+        sample = StokesSample("finite", 14, 0.2, 0.0, 0.001)
+        zeros = jnp.zeros(PAPER_STATIC_STOKES_NX, dtype=jnp.float64)
+        for eta, failed_check in (
+            (jnp.full_like(zeros, jnp.nan), "nonfinite_state"),
+            (jnp.full_like(zeros, -sample.depth), "nonpositive_water_height"),
+        ):
+            with (
+                self.subTest(failed_check=failed_check),
+                patch(
+                    "solver.gen_data.stokes_static_pipeline.stokes_eta_xi_at_phase",
+                    return_value=(eta, zeros),
+                ),
+                patch(
+                    "solver.gen_data.stokes_static_pipeline.compute_dno_target"
+                ) as target,
+            ):
+                outcome = evaluate_static_stokes_sample(sample)
+
+            self.assertFalse(outcome.decision.accepted)
+            self.assertIsNone(outcome.rows)
+            self.assertTrue(getattr(outcome.decision, failed_check))
+            self.assertEqual(outcome.metrics, {})
+            target.assert_not_called()
+
+    def test_target_finiteness_controls_whether_the_row_is_retained(self) -> None:
+        sample = StokesSample("deep", 3, 4.0, 0.0, 0.005)
+        zeros = jnp.zeros(PAPER_STATIC_STOKES_NX, dtype=jnp.float64)
+
+        for target_q, accepted in (
+            (zeros, True),
+            (jnp.full_like(zeros, jnp.nan), False),
+        ):
+            with (
+                self.subTest(accepted=accepted),
+                patch(
+                    "solver.gen_data.stokes_static_pipeline.stokes_eta_xi_at_phase",
+                    return_value=(zeros, jnp.ones_like(zeros)),
+                ) as constructor,
+                patch(
+                    "solver.gen_data.stokes_static_pipeline.compute_dno_target",
+                    return_value=(zeros, zeros, target_q),
+                ) as target,
+            ):
+                outcome = evaluate_static_stokes_sample(sample)
+
+            self.assertEqual(outcome.decision.accepted, accepted)
+            self.assertEqual(outcome.decision.nonfinite_target, not accepted)
+            self.assertEqual(outcome.metrics, {})
+            self.assertEqual(outcome.rows is not None, accepted)
+            constructor.assert_called_once()
+            target.assert_called_once()
+            target_eta, target_xi, _ = target.call_args.args
+            self.assertTrue(np.isfinite(np.asarray(target_eta)).all())
+            self.assertEqual(float(jnp.mean(target_xi)), 0.0)
+            self.assertEqual(
+                target.call_args.kwargs,
+                {
+                    "nx": PAPER_STATIC_STOKES_NX,
+                    "length": 2.0 * np.pi,
+                    "dno_order": PAPER_STATIC_STOKES_DNO_ORDER,
+                    "pad_factor": PAPER_STATIC_STOKES_PAD_FACTOR,
+                    "maximum_wavenumber": PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
+                },
             )
-        self.assertEqual(
-            reduced_contract().role,
-            "reduced_wiring_evidence_only",
-        )
-
-    def test_nonfinite_target_is_a_zero_row_rejection(self) -> None:
-        sample = sample_stokes_simulation(
-            STOKES_PARAMETER_GROUP_IDS[2],
-            dataset_split=DatasetSplit.VALIDATION,
-            attempt_number=30,
-        )
-        contract = reduced_contract()
-
-        def nonfinite_target(
-            eta: jax.Array | np.ndarray,
-            xi: jax.Array | np.ndarray,
-            depth: float | jax.Array | np.ndarray,
-            *,
-            nx: int,
-            length: float,
-            dno_order: int,
-            pad_factor: int,
-            maximum_wavenumber: float,
-        ) -> tuple[jax.Array, jax.Array, jax.Array]:
-            del depth, nx, length, dno_order, pad_factor, maximum_wavenumber
-            eta_array = jnp.asarray(eta)
-            xi_array = jnp.asarray(xi)
-            return eta_array, xi_array, jnp.full_like(eta_array, jnp.nan)
-
-        outcome = evaluate_static_stokes_sample(
-            sample,
-            contract=contract,
-            target_evaluator=nonfinite_target,
-        )
-        self.assertFalse(outcome.decision.accepted)
-        self.assertIsNone(outcome.rows)
-        self.assertTrue(outcome.decision.nonfinite_target)
-        self.assertEqual(outcome.metrics["target_finite"], False)
-
-    def test_constructor_and_target_exceptions_propagate(self) -> None:
-        sample = sample_stokes_simulation(
-            STOKES_PARAMETER_GROUP_IDS[2],
-            dataset_split=DatasetSplit.VALIDATION,
-            attempt_number=31,
-        )
-        contract = reduced_contract()
-
-        def failing_constructor(
-            sample: StokesSample,
-            contract: StaticStokesContract,
-        ) -> tuple[jax.Array, jax.Array]:
-            del sample, contract
-            raise ValueError("injected constructor bug")
-
-        with self.assertRaisesRegex(ValueError, "injected constructor bug"):
-            evaluate_static_stokes_sample(
-                sample,
-                contract=contract,
-                state_constructor=failing_constructor,
-            )
-
-        def failing_target(
-            eta: jax.Array | np.ndarray,
-            xi: jax.Array | np.ndarray,
-            depth: float | jax.Array | np.ndarray,
-            *,
-            nx: int,
-            length: float,
-            dno_order: int,
-            pad_factor: int,
-            maximum_wavenumber: float,
-        ) -> tuple[jax.Array, jax.Array, jax.Array]:
-            del eta, xi, depth, nx, length, dno_order, pad_factor, maximum_wavenumber
-            raise RuntimeError("injected target bug")
-
-        with self.assertRaisesRegex(RuntimeError, "injected target bug"):
-            evaluate_static_stokes_sample(
-                sample,
-                contract=contract,
-                target_evaluator=failing_target,
-            )
+            if outcome.rows is not None:
+                self.assertEqual(outcome.rows.eta.shape, (1, PAPER_STATIC_STOKES_NX))
+                np.testing.assert_array_equal(outcome.rows.time, np.asarray([0.0]))
 
 
 if __name__ == "__main__":

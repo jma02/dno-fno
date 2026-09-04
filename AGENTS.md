@@ -10,6 +10,7 @@
 - Prefer functional code (map, filter) over imperative code for simple stateless transformations. As a general rule it should mostly improve readability over the imperative, not drastically alter functioanlity.
 - When parsing may fail and the fallback is a fixed default, initialize the default first, then overwrite it inside a narrow `with suppress(...)` block. Avoid combining presence checks, parsing, and fallback assignment in one `try/except`.
 - Assign types to all function arguments and return types. If the return types become unwiedly it is ok to construct type aliases that are still semantically meaningful. If you are certain the full type is inferrable it is also ok to shorten the type signature.
+- If a helper function is written, and is only called once, inline it.
 
 ### Environment + Tooling
 - DO NOT globally install Python packages.

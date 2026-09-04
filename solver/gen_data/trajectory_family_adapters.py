@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Generic, TypeAlias, TypeVar
 
 import jax
@@ -17,6 +16,7 @@ from solver.gen_data.benjamin_feir_jcp09 import (
     BENJAMIN_FEIR_CONSTRUCTOR,
     ParameterArrays,
     build_initial_conditions as build_benjamin_feir_initial_conditions,
+    deep_water_proxy_depth,
 )
 from solver.gen_data.benjamin_feir_sampling import (
     BenjaminFeirSample,
@@ -39,18 +39,10 @@ from solver.gen_data.jonswap_tma_sampling import (
     JonswapTmaSample,
     sample_jonswap_tma_simulation,
 )
-from solver.gen_data.pipeline.batch_storage import batch_path
-from solver.gen_data.pipeline.simulation_allocation import (
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import DatasetSplit
 from solver.gen_data.pipeline.dno_target import project_fixed_band
-from solver.gen_data.pipeline.trajectory_config import RolloutConfig
-from solver.gen_data.pipeline.types import BatchPlanArrays
-from solver.gen_data.pipeline.writer import (
-    JsonScalar,
-    build_batch_plan,
-)
+from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
+from solver.gen_data.pipeline.writer import JsonScalar
 from solver.gen_data.tanaka_sampling import (
     TanakaSample,
     sample_tanaka_simulation,
@@ -72,7 +64,7 @@ class SampledSimulations(Generic[SampleT]):
     parameter_group_ids: tuple[str, ...]
     samples: tuple[SampleT, ...]
     specification_records: tuple[SpecificationRecord, ...]
-    contract: RolloutConfig
+    config: RolloutNumerics
     construction_settings: SpecificationRecord
 
     def __post_init__(self) -> None:
@@ -85,15 +77,6 @@ class SampledSimulations(Generic[SampleT]):
             )
         for record in self.specification_records:
             json_text(record)
-
-
-@dataclass(frozen=True)
-class PreparedTrajectoryBatch(Generic[SampleT]):
-    """Sampled simulations and their eventual completed-batch path."""
-
-    sampled: SampledSimulations[SampleT]
-    path: Path
-    batch_plan: BatchPlanArrays
 
 
 @dataclass(frozen=True)
@@ -233,16 +216,16 @@ def _jonswap_initial_metrics(
     }
 
 
-def resolved_band_for_contract(
-    contract: RolloutConfig,
+def resolved_band_for_config(
+    config: RolloutNumerics,
     *,
     quadrature_order: int = 16,
 ) -> ResolvedBand:
     """Return the delivered random-sea band with transition at ``3 K / 4``."""
 
-    maximum_wavenumber = contract.target_maximum_wavenumber
+    maximum_wavenumber = config.target_maximum_wavenumber
     return ResolvedBand(
-        length=contract.length,
+        length=config.length,
         maximum_wavenumber=maximum_wavenumber,
         transition_wavenumber=(
             PAPER_RESOLVED_BAND_TRANSITION_FRACTION * maximum_wavenumber
@@ -266,10 +249,10 @@ def _strict_record(
     sample_record: Mapping[str, object],
     *,
     constructor: str,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
     constructor_settings: Mapping[str, object] | None = None,
 ) -> SpecificationRecord:
-    initial_maximum_wavenumber = contract.target_maximum_wavenumber
+    initial_maximum_wavenumber = config.target_maximum_wavenumber
     record = {
         **sample_record,
         "initial_condition_constructor": constructor,
@@ -289,45 +272,15 @@ def _sampled_simulations(
     samples: tuple[SampleT, ...],
     records: tuple[SpecificationRecord, ...],
     *,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
     construction_settings: SpecificationRecord,
 ) -> SampledSimulations[SampleT]:
     return SampledSimulations(
         parameter_group_ids=parameter_group_ids,
         samples=samples,
         specification_records=records,
-        contract=contract,
+        config=config,
         construction_settings=construction_settings,
-    )
-
-
-def prepare_trajectory_batch(
-    sampled: SampledSimulations[SampleT],
-    *,
-    root: Path,
-    family_name: str,
-    family_id: PhysicalFamilyId,
-    dataset_split: DatasetSplit,
-    batch_id: int,
-) -> PreparedTrajectoryBatch[SampleT]:
-    """Build the in-memory description for one sampled trajectory batch."""
-
-    batch_plan = build_batch_plan(
-        sampled.parameter_group_ids,
-        sampled.specification_records,
-        family_id=family_id,
-        dataset_split=dataset_split,
-    )
-    path = batch_path(
-        root,
-        family=family_name,
-        split=dataset_split.value,
-        batch_id=batch_id,
-    )
-    return PreparedTrajectoryBatch(
-        sampled=sampled,
-        path=path,
-        batch_plan=batch_plan,
     )
 
 
@@ -335,17 +288,17 @@ def _project_once(
     eta0: FloatArray | jax.Array,
     xi0: FloatArray | jax.Array,
     *,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
 ) -> tuple[FloatArray, FloatArray]:
     """Apply the common fixed-band map, removing only the ``xi`` zero mode."""
 
     eta = jnp.asarray(eta0, dtype=jnp.float64)
     xi = jnp.asarray(xi0, dtype=jnp.float64)
-    if eta.ndim != 2 or eta.shape != xi.shape or eta.shape[1] != contract.nx:
-        raise ValueError(f"raw fields must have common shape (batch, {contract.nx})")
-    _, wavenumbers = build_grid(contract.nx, contract.length)
+    if eta.ndim != 2 or eta.shape != xi.shape or eta.shape[1] != config.nx:
+        raise ValueError(f"raw fields must have common shape (batch, {config.nx})")
+    _, wavenumbers = build_grid(config.nx, config.length)
     k = jnp.asarray(wavenumbers, dtype=jnp.float64)
-    maximum_wavenumber = contract.target_maximum_wavenumber
+    maximum_wavenumber = config.target_maximum_wavenumber
     projected_eta = project_fixed_band(
         eta,
         k,
@@ -391,9 +344,9 @@ def _batch(
     depths: FloatArray,
     specification_records: tuple[SpecificationRecord, ...],
     *,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
 ) -> TrajectoryInitialBatch:
-    eta, xi = _project_once(eta0, xi0, contract=contract)
+    eta, xi = _project_once(eta0, xi0, config=config)
     return TrajectoryInitialBatch(
         eta0=eta,
         xi0=xi,
@@ -407,7 +360,7 @@ def sample_tanaka_simulations(
     *,
     dataset_split: DatasetSplit,
     first_attempt_number: int,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
 ) -> SampledSimulations[TanakaSample]:
     """Sample complete Tanaka simulations without running the Tanaka solver."""
 
@@ -417,7 +370,6 @@ def sample_tanaka_simulations(
             parameter_group_id,
             dataset_split=dataset_split,
             attempt_number=first_attempt_number + offset,
-            domain_length=contract.length,
         )
         for offset, parameter_group_id in enumerate(attempted_groups)
     )
@@ -427,9 +379,19 @@ def sample_tanaka_simulations(
     }
     records = tuple(
         _strict_record(
-            sample.to_json_record(),
+            {
+                "depth": sample.depth,
+                "crests": [
+                    {
+                        "alpha": crest.alpha,
+                        "center": crest.center,
+                        "direction": crest.direction,
+                    }
+                    for crest in sample.crests
+                ],
+            },
             constructor=TANAKA_PROFILE_RECONSTRUCTION,
-            contract=contract,
+            config=config,
             constructor_settings=settings,
         )
         for sample in samples
@@ -438,13 +400,13 @@ def sample_tanaka_simulations(
         attempted_groups,
         samples,
         records,
-        contract=contract,
+        config=config,
         construction_settings=settings,
     )
 
 
 def construct_tanaka_trajectory_batch(
-    proposed: PreparedTrajectoryBatch[TanakaSample],
+    sampled: SampledSimulations[TanakaSample],
     *,
     selected_local_indices: Sequence[int] | None = None,
 ) -> TrajectoryInitialBatch:
@@ -454,7 +416,6 @@ def construct_tanaka_trajectory_batch(
     per-simulation construction failure.
     """
 
-    sampled = proposed.sampled
     samples = sampled.samples
     if not all(isinstance(sample, TanakaSample) for sample in samples):
         raise TypeError("Tanaka construction requires Tanaka samples")
@@ -466,7 +427,7 @@ def construct_tanaka_trajectory_batch(
 
     selected_samples = tuple(samples[index] for index in selected)
     selected_records = tuple(expected_records[index] for index in selected)
-    contract = sampled.contract
+    config = sampled.config
     depths = np.asarray(
         [sample.depth for sample in selected_samples],
         dtype=np.float64,
@@ -474,28 +435,28 @@ def construct_tanaka_trajectory_batch(
     simulation_specs = [list(sample.crests) for sample in selected_samples]
     template = make_default_tanaka_template(
         depth=1.0,
-        gravity=contract.gravity,
+        gravity=config.gravity,
         direction=1,
-        nx=contract.nx,
-        length=contract.length,
+        nx=config.nx,
+        length=config.length,
         center=0.0,
-        dno_order=contract.dno_order,
-        pad_factor=contract.pad_factor,
+        dno_order=config.integration_dno_order,
+        pad_factor=config.pad_factor,
     )
     eta0, xi0 = build_per_simulation_initial_conditions(
         template_params=template,
         simulation_h_ref=depths,
         simulation_specs=simulation_specs,
-        length=contract.length,
-        nx=contract.nx,
-        gravity=contract.gravity,
+        length=config.length,
+        nx=config.nx,
+        gravity=config.gravity,
     )
     return _batch(
         eta0,
         xi0,
         depths,
         selected_records,
-        contract=contract,
+        config=config,
     )
 
 
@@ -504,7 +465,7 @@ def sample_benjamin_feir_simulations(
     *,
     dataset_split: DatasetSplit,
     first_attempt_number: int,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
 ) -> SampledSimulations[BenjaminFeirSample]:
     """Sample complete Benjamin--Feir simulations without numerical construction."""
 
@@ -514,15 +475,20 @@ def sample_benjamin_feir_simulations(
             parameter_group_id,
             dataset_split=dataset_split,
             attempt_number=first_attempt_number + offset,
-            domain_length=contract.length,
         )
         for offset, parameter_group_id in enumerate(attempted_groups)
     )
     records = tuple(
         _strict_record(
-            sample.to_json_record(),
+            {
+                "carrier_mode": sample.carrier_mode,
+                "sideband_offset": sample.sideband_offset,
+                "carrier_steepness": sample.carrier_steepness,
+                "perturbation_ratio": sample.perturbation_ratio,
+                "translation": sample.translation,
+            },
             constructor=BENJAMIN_FEIR_CONSTRUCTOR,
-            contract=contract,
+            config=config,
         )
         for sample in samples
     )
@@ -530,50 +496,49 @@ def sample_benjamin_feir_simulations(
         attempted_groups,
         samples,
         records,
-        contract=contract,
+        config=config,
         construction_settings={},
     )
 
 
 def construct_benjamin_feir_trajectory_batch(
-    proposed: PreparedTrajectoryBatch[BenjaminFeirSample],
+    sampled: SampledSimulations[BenjaminFeirSample],
 ) -> TrajectoryInitialBatch:
     """Construct Benjamin--Feir initial states."""
 
-    sampled = proposed.sampled
     samples = sampled.samples
     if not all(isinstance(sample, BenjaminFeirSample) for sample in samples):
         raise TypeError("Benjamin--Feir construction requires Benjamin--Feir samples")
-    expected_records = sampled.specification_records
-    contract = sampled.contract
-    per_simulation_parameters = tuple(
-        sample.to_parameter_arrays() for sample in samples
-    )
-    parameter_names = tuple(per_simulation_parameters[0])
+    config = sampled.config
     parameters: ParameterArrays = {
-        name: np.concatenate(
-            tuple(
-                simulation_parameters[name]
-                for simulation_parameters in per_simulation_parameters
-            )
-        )
-        for name in parameter_names
+        "n_carr": np.fromiter((s.carrier_mode for s in samples), dtype=np.int32),
+        "side_offset": np.fromiter(
+            (s.sideband_offset for s in samples), dtype=np.int32
+        ),
+        "eps_carrier": np.fromiter(
+            (s.carrier_steepness for s in samples), dtype=np.float64
+        ),
+        "eps_pert": np.fromiter(
+            (s.perturbation_ratio for s in samples), dtype=np.float64
+        ),
+        "translation": np.fromiter((s.translation for s in samples), dtype=np.float64),
     }
-    x, _ = build_grid(contract.nx, contract.length)
+    x, _ = build_grid(config.nx, config.length)
     eta0, xi0 = build_benjamin_feir_initial_conditions(
         x=jnp.asarray(x, dtype=jnp.float64),
         parameters=parameters,
-        length=contract.length,
-        gravity=contract.gravity,
+        length=config.length,
+        gravity=config.gravity,
         dtype=jnp.float64,
     )
-    depths = np.asarray([sample.depth for sample in samples], dtype=np.float64)
+    proxy_depth = deep_water_proxy_depth(config.length)
+    depths = np.full(len(samples), proxy_depth, dtype=np.float64)
     return _batch(
         eta0,
         xi0,
         depths,
-        expected_records,
-        contract=contract,
+        sampled.specification_records,
+        config=config,
     )
 
 
@@ -582,14 +547,14 @@ def sample_jonswap_tma_simulations(
     *,
     dataset_split: DatasetSplit,
     first_attempt_number: int,
-    contract: RolloutConfig,
+    config: RolloutNumerics,
     quadrature_order: int = 16,
 ) -> SampledSimulations[JonswapTmaSample]:
     """Sample complete JONSWAP/TMA simulations and both phase arrays."""
 
     attempted_groups = _require_parameter_group_ids(parameter_group_ids)
-    band = resolved_band_for_contract(
-        contract,
+    band = resolved_band_for_config(
+        config,
         quadrature_order=quadrature_order,
     )
     samples = tuple(
@@ -610,9 +575,17 @@ def sample_jonswap_tma_simulations(
     }
     records = tuple(
         _strict_record(
-            sample.to_json_record(),
+            {
+                "depth": sample.parameters.depth,
+                "significant_height": sample.parameters.significant_height,
+                "peak_wavenumber": sample.parameters.peak_wavenumber,
+                "peak_enhancement": sample.parameters.peak_enhancement,
+                "right_moving_fraction": sample.parameters.right_moving_fraction,
+                "phase_right": sample.phase_right.tolist(),
+                "phase_left": sample.phase_left.tolist(),
+            },
             constructor=constructor,
-            contract=contract,
+            config=config,
             constructor_settings=settings,
         )
         for sample in samples
@@ -621,25 +594,24 @@ def sample_jonswap_tma_simulations(
         attempted_groups,
         samples,
         records,
-        contract=contract,
+        config=config,
         construction_settings=settings,
     )
 
 
 def construct_jonswap_tma_trajectory_batch(
-    proposed: PreparedTrajectoryBatch[JonswapTmaSample],
+    sampled: SampledSimulations[JonswapTmaSample],
     *,
     selected_local_indices: Sequence[int] | None = None,
 ) -> TrajectoryInitialBatch:
     """Construct resolved-band states for the selected simulations."""
 
-    sampled = proposed.sampled
     samples = sampled.samples
     if not all(isinstance(sample, JonswapTmaSample) for sample in samples):
         raise TypeError("JONSWAP/TMA construction requires JONSWAP/TMA samples")
     density_window = sampled.construction_settings.get("density_window")
     if density_window != PAPER_RELATIVE_FREQUENCY_WINDOW:
-        raise ValueError("JONSWAP/TMA density window does not match the contract")
+        raise ValueError("JONSWAP/TMA density window does not match the config")
     relative_minimum = sampled.construction_settings.get("relative_frequency_minimum")
     relative_maximum = sampled.construction_settings.get("relative_frequency_maximum")
     if (
@@ -647,7 +619,7 @@ def construct_jonswap_tma_trajectory_batch(
         or relative_maximum != PAPER_RELATIVE_FREQUENCY_MAXIMUM
     ):
         raise ValueError(
-            "JONSWAP/TMA relative frequency interval does not match the contract"
+            "JONSWAP/TMA relative frequency interval does not match the config"
         )
     relative_frequency_interval = (
         PAPER_RELATIVE_FREQUENCY_MINIMUM,
@@ -656,9 +628,9 @@ def construct_jonswap_tma_trajectory_batch(
     quadrature_order = sampled.construction_settings.get("quadrature_order")
     if not isinstance(quadrature_order, int) or isinstance(quadrature_order, bool):
         raise TypeError("JONSWAP/TMA quadrature_order must be an integer")
-    contract = sampled.contract
-    band = resolved_band_for_contract(
-        contract,
+    config = sampled.config
+    band = resolved_band_for_config(
+        config,
         quadrature_order=quadrature_order,
     )
     expected_records = sampled.specification_records
@@ -669,7 +641,7 @@ def construct_jonswap_tma_trajectory_batch(
 
     selected_samples = tuple(samples[index] for index in selected)
     selected_records = tuple(expected_records[index] for index in selected)
-    x = contract.length * np.arange(contract.nx, dtype=np.float64) / contract.nx
+    x = config.length * np.arange(config.nx, dtype=np.float64) / config.nx
     states = tuple(
         build_jonswap_tma_initial_condition(
             x,
@@ -677,14 +649,14 @@ def construct_jonswap_tma_trajectory_batch(
             phase_right=sample.phase_right,
             phase_left=sample.phase_left,
             band=band,
-            gravity=contract.gravity,
+            gravity=config.gravity,
             relative_frequency_interval=relative_frequency_interval,
         )
         for sample in selected_samples
     )
     raw_eta0 = np.stack(tuple(state.eta for state in states))
     raw_xi0 = np.stack(tuple(state.xi for state in states))
-    eta0, xi0 = _project_once(raw_eta0, raw_xi0, contract=contract)
+    eta0, xi0 = _project_once(raw_eta0, raw_xi0, config=config)
     depths = np.asarray(
         [sample.parameters.depth for sample in selected_samples],
         dtype=np.float64,
@@ -729,8 +701,8 @@ def construct_jonswap_tma_trajectory_batch(
                 xi0[index],
                 depth=sample.parameters.depth,
                 significant_height=sample.parameters.significant_height,
-                length=contract.length,
-                gravity=contract.gravity,
+                length=config.length,
+                gravity=config.gravity,
             )
             for index, (sample, state) in enumerate(zip(selected_samples, states))
         ),

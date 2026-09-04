@@ -9,10 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
-from solver.gen_data.pipeline.trajectory_config import RolloutConfig
+from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.gen_data.pipeline.trajectory_integration import (
-    AdjustmentBatchIntegrator,
-    BatchIntegrator,
     GL2BatchTelemetry,
     IntegratedAdjustmentBatch,
     IntegratedTrajectoryBatch,
@@ -88,7 +86,7 @@ def _validate_initial_conditions(
 def _evaluate_gl2_steps(
     telemetry: GL2BatchTelemetry,
     simulation_index: int,
-    config: RolloutConfig,
+    config: RolloutNumerics,
     *,
     saved_time_count: int,
 ) -> tuple[bool, float]:
@@ -117,7 +115,7 @@ def _evaluate_trajectory_simulation(
     simulation_index: int,
     depth: float,
     saved_times: FloatArray,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> TrajectorySimulationResult:
     gl2_succeeded, maximum_stage_residual = _evaluate_gl2_steps(
         rollout.gl2,
@@ -192,7 +190,7 @@ def _evaluate_adjustment_simulation(
     simulation_index: int,
     depth: float,
     saved_time_count: int,
-    config: RolloutConfig,
+    config: RolloutNumerics,
 ) -> AdjustmentSimulationResult:
     gl2_succeeded, maximum_stage_residual = _evaluate_gl2_steps(
         rollout.gl2,
@@ -239,8 +237,7 @@ def execute_trajectory_batch(
     depths: FloatArray,
     time_grids: tuple[FloatArray, ...],
     *,
-    config: RolloutConfig,
-    integrator: BatchIntegrator = integrate_batch,
+    config: RolloutNumerics,
 ) -> tuple[TrajectorySimulationResult, ...]:
     """Integrate a batch, then evaluate each simulation on its requested time grid."""
 
@@ -254,7 +251,7 @@ def execute_trajectory_batch(
         time_grids,
         batch_size=eta.shape[0],
     )
-    rollout = integrator(
+    rollout = integrate_batch(
         eta0=eta,
         xi0=xi,
         depths=depth_values,
@@ -287,8 +284,7 @@ def execute_adjustment_batch(
     *,
     nonlinear_ramp_times: FloatArray,
     nonlinear_ramp_order: int,
-    config: RolloutConfig,
-    integrator: AdjustmentBatchIntegrator = integrate_adjustment_batch,
+    config: RolloutNumerics,
 ) -> tuple[AdjustmentSimulationResult, ...]:
     """Warm up JONSWAP simulations and return each valid nonlinear endpoint."""
 
@@ -310,7 +306,7 @@ def execute_adjustment_batch(
     if nonlinear_ramp_order < 1:
         raise ValueError("nonlinear_ramp_order must be positive")
 
-    rollout = integrator(
+    rollout = integrate_adjustment_batch(
         eta0=eta,
         xi0=xi,
         depths=depth_values,
