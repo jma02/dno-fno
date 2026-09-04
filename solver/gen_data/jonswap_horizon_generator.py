@@ -15,7 +15,7 @@ from solver.gen_data.pipeline.trajectory_rollout import (
 )
 from solver.gen_data.pipeline.trajectory_subsampling import subsample_trajectories
 from solver.gen_data.pipeline.time_selection import floor_saved_time_grid
-from solver.gen_data.pipeline.writer import SimulationOutcome
+from solver.gen_data.pipeline.types import SimulationRows
 from solver.gen_data.trajectory_family_adapters import TrajectoryInitialBatch
 
 
@@ -66,11 +66,11 @@ def integrate_and_subsample_jonswap(
     *,
     numerical: RolloutNumerics,
     solver_batch_size: int,
-) -> tuple[SimulationOutcome, ...]:
+) -> tuple[SimulationRows | None, ...]:
     """Run JONSWAP adjustment and production in similar-length groups."""
 
     groups = horizon_sorted_groups(time_grids, solver_batch_size=solver_batch_size)
-    ordered_outcomes: list[SimulationOutcome | None] = [None] * len(time_grids)
+    ordered_rows: list[SimulationRows | None] = [None] * len(time_grids)
     for indices in groups:
         group_initial = _select_initial_batch(initial, indices)
         group_time_grids = tuple(time_grids[index] for index in indices)
@@ -94,26 +94,18 @@ def integrate_and_subsample_jonswap(
         )
         accepted_indices = tuple(
             index
-            for index, simulation in enumerate(adjustment_simulations)
-            if simulation.decision.accepted
+            for index, endpoint in enumerate(adjustment_simulations)
+            if endpoint is not None
         )
-        production_by_index: dict[int, SimulationOutcome] = {}
+        endpoints = tuple(
+            endpoint for endpoint in adjustment_simulations if endpoint is not None
+        )
+        production_by_index: dict[int, SimulationRows | None] = {}
         if accepted_indices:
-            endpoints = tuple(
-                (
-                    adjustment_simulations[index].terminal_eta,
-                    adjustment_simulations[index].terminal_xi,
-                )
-                for index in accepted_indices
-            )
-            if any(eta is None or xi is None for eta, xi in endpoints):
-                raise RuntimeError(
-                    "accepted nonlinear adjustment omitted a full-band endpoint"
-                )
             selected = _select_initial_batch(group_initial, accepted_indices)
             endpoint_batch = TrajectoryInitialBatch(
-                np.stack(tuple(eta for eta, _ in endpoints if eta is not None)),
-                np.stack(tuple(xi for _, xi in endpoints if xi is not None)),
+                np.stack(tuple(endpoint[0] for endpoint in endpoints)),
+                np.stack(tuple(endpoint[1] for endpoint in endpoints)),
                 selected.depths,
             )
             production = subsample_trajectories(
@@ -129,18 +121,10 @@ def integrate_and_subsample_jonswap(
                 length=numerical.length,
             )
             production_by_index = dict(zip(accepted_indices, production, strict=True))
-        outcomes = tuple(
-            production_by_index[index]
-            if simulation.decision.accepted
-            else SimulationOutcome(
-                decision=simulation.decision,
-                rows=None,
-                metrics={},
-            )
-            for index, simulation in enumerate(adjustment_simulations)
+        group_rows = tuple(
+            production_by_index.get(index)
+            for index in range(len(adjustment_simulations))
         )
-        for index, outcome in zip(indices, outcomes, strict=True):
-            ordered_outcomes[index] = outcome
-    if any(outcome is None for outcome in ordered_outcomes):
-        raise RuntimeError("every JONSWAP simulation must produce an outcome")
-    return tuple(outcome for outcome in ordered_outcomes if outcome is not None)
+        for index, rows in zip(indices, group_rows, strict=True):
+            ordered_rows[index] = rows
+    return tuple(ordered_rows)

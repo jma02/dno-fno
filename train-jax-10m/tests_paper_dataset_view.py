@@ -13,12 +13,11 @@ from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.batch_artifacts import SimulationResult
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.types import (
-    BatchPlanArrays,
-    DatasetShardArrays,
     DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
 )
 
 TRAIN_DIR = Path(__file__).resolve().parent
@@ -35,10 +34,10 @@ def _write_batch(
     root: Path,
     *,
     family: str,
-    family_id: int,
+    family_id: PhysicalFamilyId,
     split: str,
     dataset_split: DatasetSplit,
-    attempt_numbers: tuple[int, ...],
+    simulation_count: int,
     accepted_local_indices: tuple[int, ...],
 ) -> Path:
     path = batch_path(
@@ -47,77 +46,27 @@ def _write_batch(
         split=split,
         batch_id=0,
     )
-    proposal = BatchPlanArrays(
-        family_id=np.asarray(family_id, dtype=np.int16),
-        dataset_split=np.asarray(dataset_split.value),
-        parameter_group_id=np.asarray(
-            [f"group_{index}" for index in range(len(attempt_numbers))]
-        ),
-        simulation_spec_json=np.asarray(
-            [
-                json.dumps({"attempt_number": attempt_number})
-                for attempt_number in attempt_numbers
-            ]
-        ),
-    )
     frames_per_simulation = 2
-    simulation_local_index = np.repeat(
-        np.asarray(accepted_local_indices, dtype=np.int32),
-        frames_per_simulation,
-    )
-    frame_index = np.tile(
-        np.arange(frames_per_simulation, dtype=np.int32),
-        len(accepted_local_indices),
-    )
-    rows = simulation_local_index.size
-    field = np.arange(rows * 4, dtype=np.float32).reshape(rows, 4) / 10.0
-    shard = DatasetShardArrays(
-        eta=field,
-        xi=field + np.float32(0.1),
-        gxi=field - np.float32(0.1),
-        depth=np.repeat(
-            np.arange(1, len(accepted_local_indices) + 1, dtype=np.float64),
-            frames_per_simulation,
-        ),
-        time=frame_index.astype(np.float64),
-        simulation_local_index=simulation_local_index,
-        frame_index=frame_index,
-    )
-    blocks = {
-        local_index: (position * frames_per_simulation, frames_per_simulation)
-        for position, local_index in enumerate(accepted_local_indices)
-    }
-    records = tuple(
-        SimulationResult(
-            accepted=local_index in blocks,
-            failed_checks=() if local_index in blocks else ("integration_failure",),
-            metrics={},
-        )
-        for local_index in range(len(attempt_numbers))
-    )
+    accepted = set(accepted_local_indices)
     save_completed_batch(
         path,
-        plan=proposal,
-        shard=shard,
-        simulations=records,
+        tuple(f"group_{index}" for index in range(simulation_count)),
+        tuple(
+            SimulationRows(
+                eta=np.full((frames_per_simulation, 4), local_index + 1.0),
+                xi=np.full((frames_per_simulation, 4), local_index + 1.1),
+                gxi=np.full((frames_per_simulation, 4), local_index + 0.9),
+                depth=float(local_index + 1),
+                time=np.arange(frames_per_simulation, dtype=np.float64),
+            )
+            if local_index in accepted
+            else None
+            for local_index in range(simulation_count)
+        ),
+        family_id=family_id,
+        dataset_split=dataset_split,
     )
     return path
-
-
-def _build_single_family_view(root: Path) -> Path:
-    batch = _write_batch(
-        root,
-        family="stokes",
-        family_id=0,
-        split="train",
-        dataset_split=DatasetSplit.TRAIN,
-        attempt_numbers=(10,),
-        accepted_local_indices=(0,),
-    )
-    return build_dataset_view(
-        root,
-        (batch,),
-    ).manifest
 
 
 def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
@@ -126,19 +75,19 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
         train = _write_batch(
             root,
             family="stokes",
-            family_id=0,
+            family_id=PhysicalFamilyId.STOKES,
             split="train",
             dataset_split=DatasetSplit.TRAIN,
-            attempt_numbers=(10, 11),
+            simulation_count=2,
             accepted_local_indices=(0,),
         )
         validation = _write_batch(
             root,
             family="tanaka",
-            family_id=1,
+            family_id=PhysicalFamilyId.TANAKA,
             split="validation",
             dataset_split=DatasetSplit.VALIDATION,
-            attempt_numbers=(20,),
+            simulation_count=1,
             accepted_local_indices=(0,),
         )
         paths = build_dataset_view(
@@ -186,7 +135,16 @@ def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
 def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
         root = Path(raw_directory)
-        manifest_path = _build_single_family_view(root)
+        batch = _write_batch(
+            root,
+            family="stokes",
+            family_id=PhysicalFamilyId.STOKES,
+            split="train",
+            dataset_split=DatasetSplit.TRAIN,
+            simulation_count=1,
+            accepted_local_indices=(0,),
+        )
+        manifest_path = build_dataset_view(root, (batch,)).manifest
         dataset = load_dataset_arrays(manifest_path)
         indices = np.arange(dataset["eta"].shape[0], dtype=np.int64)
         first = load_or_compute_stats(

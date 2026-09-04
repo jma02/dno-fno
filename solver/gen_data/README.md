@@ -25,10 +25,10 @@ family, split, and number determine its random draws. A run then:
 5. computes the common Craig--Sulem DNO target;
 6. applies the required numerical checks;
 7. selects the retained times from accepted trajectories;
-8. atomically writes the completed batch, including zero-row rejection decisions.
+8. atomically writes the completed batch; rejected attempts own no rows.
 
-Errors in the constructor or solver stop the run. They are not silently turned
-into rejected data. A rejected simulation is tied to an explicit failed check.
+Unexpected errors in the constructor or solver stop the run. Declared numerical
+rejections own no rows and are replaced from the same parameter group.
 
 All accepted trajectory rows stay together in one split. The generator never
 makes row-level train/validation/test splits.
@@ -55,7 +55,6 @@ Execution:
 Shared pipeline:
 
 - `pipeline/types.py` defines shared dataset identifiers and saved-array types.
-- `pipeline/simulation_checks.py` defines the acceptance checks and failure reasons.
 - `pipeline/trajectory_integration.py` runs batched GL2 integrations and constructs
   saved targets.
 - `pipeline/trajectory_rollout.py` evaluates complete trajectories and their
@@ -63,9 +62,8 @@ Shared pipeline:
 - `pipeline/time_selection.py` selects retained time indices.
 - `pipeline/trajectory_subsampling.py` converts accepted trajectories into rows.
 - `pipeline/dno_target.py` computes the stored DNO target.
-- `pipeline/batch_artifacts.py` validates sampled specifications, stored rows, and
-  results.
-- `pipeline/batch_storage.py` reads and writes one completed NPZ per batch.
+- `pipeline/batch_storage.py` validates, reads, and writes one completed NPZ per
+  batch.
 - `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
 - `pipeline/build_dataset_view.py` creates the manifest and trajectory map used
   by training.
@@ -74,25 +72,22 @@ Shared pipeline:
 
 ## Acceptance
 
-`SimulationCheckResult` records the acceptance decision and names each failure
-condition with a Boolean field. The checks cover finite values, positive water
-height, complete time grids, integration convergence, DNO residuals, and
-internal energy drift where applicable.
+The rollout returns rows only when the simulation passes its numerical checks.
+Those checks cover finite values, positive water height, complete time grids,
+integration convergence, DNO values, and internal energy drift where applicable.
 
-JONSWAP uses two separate decisions: the nonlinear adjustment must first
-produce a valid handoff, then the autonomous production rollout must pass its
-own checks. This separation is why the JONSWAP generator has explicit
-adjustment handling.
+For JONSWAP, the nonlinear adjustment must first produce a valid handoff; the
+autonomous production rollout is checked separately.
 
 ## Stored files
 
-Each finished batch is one NPZ containing its simulation assignments, sampled
-parameters, acceptance decisions, and any accepted rows. A batch with no
-accepted simulations simply omits the row arrays.
+Each finished batch is one NPZ containing its family, split, parameter-group
+assignments, and any accepted rows. Row ownership identifies accepted attempts;
+a batch with no accepted simulations simply omits the row arrays.
 
-The NPZ is written to a temporary sibling and renamed only after it is complete.
-If generation stops before that rename, there is no batch artifact; the next run
-restarts the same deterministic batch from the beginning.
+The NPZ is written to a temporary sibling and published only after it is
+complete. If generation stops before publication, the next run restarts the
+same deterministic batch from the beginning.
 
 The dataset view contains:
 

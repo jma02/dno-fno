@@ -12,13 +12,13 @@ from typing import Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.batch_storage import load_completed_batch
+from solver.gen_data.pipeline.batch_storage import (
+    load_completed_batch,
+    simulation_row_blocks,
+)
 from solver.gen_data.pipeline.artifact_io import (
     write_json_atomic,
     write_npz_atomic,
-)
-from solver.gen_data.pipeline.batch_artifacts import (
-    compute_simulation_row_blocks,
 )
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
@@ -42,29 +42,6 @@ class DatasetViewPaths:
     trajectory_map: Path
 
 
-def _relative_path(path: Path, start: Path) -> str:
-    return os.path.relpath(path.resolve(), start=start.resolve())
-
-
-def _validate_view_request(
-    name: str,
-    length: float,
-    batches: Sequence[Path],
-) -> None:
-    if not name or any(
-        not (character.isascii() and (character.isalnum() or character in "_-"))
-        for character in name
-    ):
-        raise ValueError("name must contain only letters, digits, '_' or '-'")
-    if not np.isfinite(length) or length <= 0.0:
-        raise ValueError("length must be finite and positive")
-    if not batches:
-        raise ValueError("at least one completed batch is required")
-    resolved_batches = tuple(batch.resolve() for batch in batches)
-    if len(set(resolved_batches)) != len(resolved_batches):
-        raise ValueError("completed batch paths must be unique")
-
-
 def build_dataset_view(
     root: Path,
     batches: Sequence[Path],
@@ -78,7 +55,18 @@ def build_dataset_view(
     simulations legitimately contains no row arrays.
     """
 
-    _validate_view_request(name, length, batches)
+    if not name or any(
+        not (character.isascii() and (character.isalnum() or character in "_-"))
+        for character in name
+    ):
+        raise ValueError("name must contain only letters, digits, '_' or '-'")
+    if not np.isfinite(length) or length <= 0.0:
+        raise ValueError("length must be finite and positive")
+    if not batches:
+        raise ValueError("at least one completed batch is required")
+    resolved_batches = tuple(batch.resolve() for batch in batches)
+    if len(set(resolved_batches)) != len(resolved_batches):
+        raise ValueError("completed batch paths must be unique")
     output_paths = DatasetViewPaths(
         manifest=root / f"{name}.dataset.json",
         trajectory_map=root / f"{name}.trajectory_map.npz",
@@ -102,12 +90,9 @@ def build_dataset_view(
 
     for batch_path in batches:
         batch = load_completed_batch(batch_path)
-        batch_plan = batch.plan
-        family_id = int(batch_plan["family_id"])
-        dataset_split = DatasetSplit(str(batch_plan["dataset_split"].item()))
-
-        simulations = batch.simulations
-        number_of_simulations = len(simulations)
+        family_id = int(batch.family_id)
+        dataset_split = batch.dataset_split
+        number_of_simulations = len(batch.parameter_group_ids)
 
         shard_index: int | None = None
         shard_row_count = 0
@@ -123,12 +108,15 @@ def build_dataset_view(
             shard_row_count = int(shard["eta"].shape[0])
             shard_records.append(
                 {
-                    "path": _relative_path(batch_path, output_paths.manifest.parent),
+                    "path": os.path.relpath(
+                        batch_path.resolve(),
+                        start=output_paths.manifest.parent.resolve(),
+                    ),
                     "n_rows": shard_row_count,
                 }
             )
             local_index = shard["simulation_local_index"]
-            row_blocks = compute_simulation_row_blocks(
+            row_blocks = simulation_row_blocks(
                 local_index,
                 number_of_simulations=number_of_simulations,
             )
@@ -150,8 +138,8 @@ def build_dataset_view(
         next_simulation_id[simulation_group] = (
             first_simulation_id + number_of_simulations
         )
-        parameter_group_ids.extend(map(str, batch_plan["parameter_group_id"]))
-        accepted_simulations.extend(simulation.accepted for simulation in simulations)
+        parameter_group_ids.extend(batch.parameter_group_ids)
+        accepted_simulations.extend(map(bool, batch.accepted_simulations))
         for local_index in range(number_of_simulations):
             first_row, row_count = row_blocks.get(local_index, (-1, 0))
             first_rows.append(global_row_count + first_row if first_row >= 0 else -1)

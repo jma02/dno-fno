@@ -16,7 +16,7 @@ from solver.gen_data.jonswap_tma import (
 )
 from solver.gen_data.jonswap_tma_sampling import sample_jonswap_tma_simulation
 from solver.gen_data.jonswap_horizon_generator import integrate_and_subsample_jonswap
-from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.trajectory_config import (
     RolloutNumerics,
     TrajectoryFamily,
@@ -24,11 +24,10 @@ from solver.gen_data.pipeline.trajectory_config import (
 from solver.gen_data.pipeline.trajectory_rollout import execute_trajectory_batch
 from solver.gen_data.pipeline.trajectory_subsampling import subsample_trajectories
 from solver.gen_data.pipeline.time_selection import floor_saved_time_grid
-from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
-from solver.gen_data.pipeline.writer import (
-    SimulationOutcome,
-    build_batch_plan,
-    commit_simulation_outcomes,
+from solver.gen_data.pipeline.types import (
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
 )
 from solver.gen_data.tanaka_initial_conditions import TanakaPotentialRadicandError
 from solver.gen_data.tanaka_sampling import sample_tanaka_simulation
@@ -44,23 +43,6 @@ from solver.gen_data.trajectory_family_adapters import (
 FloatArray: TypeAlias = NDArray[np.float64]
 
 
-def _construction_rejection(
-    *,
-    nonfinite_state: bool = False,
-    nonpositive_water_height: bool = False,
-) -> SimulationOutcome:
-    return SimulationOutcome(
-        decision=SimulationCheckResult(
-            accepted=False,
-            nonfinite_state=nonfinite_state,
-            nonpositive_water_height=nonpositive_water_height,
-            outside_support=True,
-        ),
-        rows=None,
-        metrics={},
-    )
-
-
 def generate_trajectory_batch(
     parameter_group_ids: tuple[str, ...],
     first_attempt_number: int,
@@ -74,7 +56,6 @@ def generate_trajectory_batch(
     """Sample, simulate, and save one trajectory batch."""
 
     valid_indices = tuple(range(len(parameter_group_ids)))
-    rejected: dict[int, SimulationOutcome] = {}
     peak_periods: FloatArray | None = None
 
     if family == "tanaka":
@@ -85,20 +66,6 @@ def generate_trajectory_batch(
                 attempt_number=first_attempt_number + offset,
             )
             for offset, parameter_group_id in enumerate(parameter_group_ids)
-        )
-        specifications = tuple(
-            {
-                "depth": sample.depth,
-                "crests": [
-                    {
-                        "alpha": crest.alpha,
-                        "center": crest.center,
-                        "direction": crest.direction,
-                    }
-                    for crest in sample.crests
-                ],
-            }
-            for sample in tanaka_samples
         )
         saved_times = numerical.saved_dt * np.arange(
             int(round(200.0 / numerical.saved_dt)) + 1,
@@ -111,13 +78,6 @@ def generate_trajectory_batch(
             )
         except TanakaPotentialRadicandError as error:
             failed = set(error.invalid_simulation_indices)
-            rejected.update(
-                (
-                    index,
-                    _construction_rejection(),
-                )
-                for index in error.invalid_simulation_indices
-            )
             valid_indices = tuple(
                 index for index in valid_indices if index not in failed
             )
@@ -137,16 +97,6 @@ def generate_trajectory_batch(
                 attempt_number=first_attempt_number + offset,
             )
             for offset, parameter_group_id in enumerate(parameter_group_ids)
-        )
-        specifications = tuple(
-            {
-                "carrier_mode": sample.carrier_mode,
-                "sideband_offset": sample.sideband_offset,
-                "carrier_steepness": sample.carrier_steepness,
-                "perturbation_ratio": sample.perturbation_ratio,
-                "translation": sample.translation,
-            }
-            for sample in benjamin_feir_samples
         )
         time_grids_list: list[FloatArray] = []
         for sample in benjamin_feir_samples:
@@ -183,18 +133,6 @@ def generate_trajectory_batch(
             )
             for offset, parameter_group_id in enumerate(parameter_group_ids)
         )
-        specifications = tuple(
-            {
-                "depth": sample.parameters.depth,
-                "significant_height": sample.parameters.significant_height,
-                "peak_wavenumber": sample.parameters.peak_wavenumber,
-                "peak_enhancement": sample.parameters.peak_enhancement,
-                "right_moving_fraction": sample.parameters.right_moving_fraction,
-                "phase_right": sample.phase_right.tolist(),
-                "phase_left": sample.phase_left.tolist(),
-            }
-            for sample in jonswap_samples
-        )
         peak_periods = np.asarray(
             [
                 2.0
@@ -228,21 +166,6 @@ def generate_trajectory_batch(
             )
         except JonswapInitialStateDomainError as error:
             failed = set(error.invalid_simulation_indices)
-            rejected.update(
-                (
-                    index,
-                    _construction_rejection(
-                        nonfinite_state=nonfinite_state,
-                        nonpositive_water_height=nonpositive_water_height,
-                    ),
-                )
-                for index, nonfinite_state, nonpositive_water_height in zip(
-                    error.invalid_simulation_indices,
-                    error.nonfinite_state_flags,
-                    error.nonpositive_water_height_flags,
-                    strict=True,
-                )
-            )
             valid_indices = tuple(
                 index for index in valid_indices if index not in failed
             )
@@ -256,13 +179,7 @@ def generate_trajectory_batch(
                 else None
             )
 
-    batch_plan = build_batch_plan(
-        parameter_group_ids,
-        specifications,
-        family_id=PhysicalFamilyId[family.upper()],
-        dataset_split=dataset_split,
-    )
-    produced: tuple[SimulationOutcome, ...] = ()
+    produced: tuple[SimulationRows | None, ...] = ()
     if initial is not None:
         valid_time_grids = tuple(time_grids[index] for index in valid_indices)
         if family == "jonswap_tma":
@@ -287,12 +204,11 @@ def generate_trajectory_batch(
                 family=family,
                 length=numerical.length,
             )
-    outcomes_by_index = {
-        **rejected,
-        **dict(zip(valid_indices, produced, strict=True)),
-    }
-    commit_simulation_outcomes(
+    rows_by_index = dict(zip(valid_indices, produced, strict=True))
+    save_completed_batch(
         output_path,
-        batch_plan,
-        tuple(outcomes_by_index[index] for index in range(len(parameter_group_ids))),
+        parameter_group_ids,
+        tuple(rows_by_index.get(index) for index in range(len(parameter_group_ids))),
+        family_id=PhysicalFamilyId[family.upper()],
+        dataset_split=dataset_split,
     )

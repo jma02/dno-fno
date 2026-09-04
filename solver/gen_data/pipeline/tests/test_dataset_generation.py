@@ -9,19 +9,16 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_storage import batch_path
+from solver.gen_data.pipeline.batch_storage import batch_path, save_completed_batch
 from solver.gen_data.pipeline.dataset_generation import (
     BatchGenerator,
     GenerationResult,
     generate_simulations,
 )
-from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
-from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
-from solver.gen_data.pipeline.writer import (
-    AcceptedSimulationRows,
-    SimulationOutcome,
-    build_batch_plan,
-    commit_simulation_outcomes,
+from solver.gen_data.pipeline.types import (
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
 )
 
 
@@ -62,47 +59,28 @@ def _fake_generator(
         output_path: Path,
     ) -> None:
         calls.append((first_attempt_number, parameter_group_ids))
-        outcomes: list[SimulationOutcome] = []
+        rows_by_simulation: list[SimulationRows | None] = []
         for offset in range(len(parameter_group_ids)):
             attempt_number = first_attempt_number + offset
-            accepted = attempt_number not in rejected_attempts
-            rows = None
-            if accepted:
+            rows: SimulationRows | None = None
+            if attempt_number not in rejected_attempts:
                 value = float(attempt_number + 1)
                 field = np.full((1, 8), value, dtype=np.float64)
-                rows = AcceptedSimulationRows(
+                rows = SimulationRows(
                     eta=field,
                     xi=field / 2.0,
                     gxi=-field,
                     depth=1.0,
                     time=np.asarray([0.0], dtype=np.float64),
                 )
-            outcomes.append(
-                SimulationOutcome(
-                    decision=SimulationCheckResult(
-                        accepted=accepted,
-                        outside_support=not accepted,
-                    ),
-                    rows=rows,
-                    metrics={"attempt_number": attempt_number},
-                )
-            )
+            rows_by_simulation.append(rows)
 
-        commit_simulation_outcomes(
+        save_completed_batch(
             output_path,
-            build_batch_plan(
-                parameter_group_ids,
-                tuple(
-                    {
-                        "parameter_group": parameter_group_id,
-                        "attempt_number": first_attempt_number + offset,
-                    }
-                    for offset, parameter_group_id in enumerate(parameter_group_ids)
-                ),
-                family_id=FAMILY_ID,
-                dataset_split=DATASET_SPLIT,
-            ),
-            outcomes,
+            parameter_group_ids,
+            rows_by_simulation,
+            family_id=FAMILY_ID,
+            dataset_split=DATASET_SPLIT,
         )
 
     return generate_batch, calls

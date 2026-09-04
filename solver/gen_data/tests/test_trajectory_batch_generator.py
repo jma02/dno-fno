@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-import json
 import math
 import os
 from pathlib import Path
@@ -22,12 +21,15 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    sample_benjamin_feir_simulation,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
+    ResolvedBand,
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     JONSWAP_TMA_PARAMETER_GROUP_IDS,
+    sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
     batch_path,
@@ -53,8 +55,8 @@ from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
     PhysicalFamilyId,
+    SimulationRows,
 )
-from solver.gen_data.pipeline.writer import SimulationOutcome  # noqa: E402
 from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS  # noqa: E402
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
     generate_trajectory_batch,
@@ -184,7 +186,7 @@ def _integrate_jonswap_without_adjustment(
     *,
     numerical: RolloutNumerics,
     solver_batch_size: int,
-) -> tuple[SimulationOutcome, ...]:
+) -> tuple[SimulationRows | None, ...]:
     del peak_periods, solver_batch_size
     return subsample_trajectories(
         execute_trajectory_batch(
@@ -206,7 +208,7 @@ def _last_saved_times(path: Path) -> list[float]:
     simulation_indices = batch.shard["simulation_local_index"]
     return [
         float(np.max(batch.shard["time"][simulation_indices == index]))
-        for index in range(len(batch.simulations))
+        for index in range(len(batch.parameter_group_ids))
     ]
 
 
@@ -244,10 +246,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
         self.assertEqual(constructor_calls, [2, 1])
         self.assertEqual([call[0] for call in integration_calls], [2, 1])
         first = load_completed_batch(completed[0])
-        self.assertEqual(
-            [simulation.accepted for simulation in first.simulations],
-            [False, True],
-        )
+        np.testing.assert_array_equal(first.accepted_simulations, (False, True))
         assert first.shard is not None
         np.testing.assert_array_equal(
             np.unique(first.shard["simulation_local_index"]),
@@ -300,11 +299,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
         self.assertEqual(calls[:2], [2, 1])
         first = load_completed_batch(completed[0])
-        self.assertEqual(
-            [simulation.accepted for simulation in first.simulations],
-            [False, True],
-        )
-        self.assertEqual(first.simulations[0].failed_checks, ("outside_support",))
+        np.testing.assert_array_equal(first.accepted_simulations, (False, True))
         assert first.shard is not None
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
@@ -355,14 +350,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
         self.assertEqual(calls[:2], [2, 1])
         first = load_completed_batch(completed[0])
-        self.assertEqual(
-            [simulation.accepted for simulation in first.simulations],
-            [False, True],
-        )
-        self.assertEqual(
-            first.simulations[0].failed_checks,
-            ("nonpositive_water_height", "outside_support"),
-        )
+        np.testing.assert_array_equal(first.accepted_simulations, (False, True))
         assert first.shard is not None
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
@@ -438,15 +426,18 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 (1, 1),
             )
 
-        batch = load_completed_batch(completed[0])
-        specifications = [
-            json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
-        ]
+        band = ResolvedBand(numerical.length, numerical.target_maximum_wavenumber)
         expected = []
-        for specification in specifications:
+        for offset, group in enumerate(groups):
+            sample = sample_jonswap_tma_simulation(
+                group,
+                dataset_split=DatasetSplit.TEST,
+                attempt_number=offset,
+                band=band,
+            )
             frequency = finite_depth_angular_frequency(
-                np.asarray([specification["peak_wavenumber"]], dtype=np.float64),
-                depth=float(specification["depth"]),
+                np.asarray([sample.parameters.peak_wavenumber], dtype=np.float64),
+                depth=sample.parameters.depth,
                 gravity=numerical.gravity,
             )[0]
             intended = 16.0 * 2.0 * math.pi / float(frequency)
@@ -458,8 +449,9 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
             _last_saved_times(completed[0]), expected, rtol=0.0, atol=1.0e-13
         )
         self.assertEqual(calls, [(2, max(expected))])
-        self.assertEqual(
-            [simulation.accepted for simulation in batch.simulations], [True, True]
+        np.testing.assert_array_equal(
+            load_completed_batch(completed[0]).accepted_simulations,
+            (True, True),
         )
 
     def test_benjamin_feir_simulations_use_their_own_carrier_horizons(self) -> None:
@@ -489,15 +481,14 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 (1, 1),
             )
 
-        batch = load_completed_batch(completed[0])
-        specifications = [
-            json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
-        ]
         expected = []
-        for specification in specifications:
-            carrier_wavenumber = (
-                2.0 * math.pi * float(specification["carrier_mode"]) / numerical.length
+        for offset, group in enumerate(groups):
+            sample = sample_benjamin_feir_simulation(
+                group,
+                dataset_split=DatasetSplit.TEST,
+                attempt_number=offset,
             )
+            carrier_wavenumber = 2.0 * math.pi * sample.carrier_mode / numerical.length
             intended = (
                 100.0
                 * 2.0

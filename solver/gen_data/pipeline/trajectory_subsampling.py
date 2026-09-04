@@ -7,36 +7,30 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.trajectory_rollout import (
-    TrajectorySimulationResult,
-)
+from solver.gen_data.pipeline.trajectory_rollout import TrajectorySamples
 from solver.gen_data.pipeline.time_selection import (
     select_tanaka_times,
     select_uniform_times,
 )
 from solver.gen_data.pipeline.trajectory_config import TrajectoryFamily
-from solver.gen_data.pipeline.writer import (
-    AcceptedSimulationRows,
-    SimulationOutcome,
-)
+from solver.gen_data.pipeline.types import SimulationRows
 
 
 FloatArray: TypeAlias = NDArray[np.float64]
 
 
 def subsample_trajectories(
-    simulations: tuple[TrajectorySimulationResult, ...],
+    simulations: tuple[TrajectorySamples | None, ...],
     depths: FloatArray,
     *,
     family: TrajectoryFamily,
     length: float,
-) -> tuple[SimulationOutcome, ...]:
+) -> tuple[SimulationRows | None, ...]:
     """Subsample accepted trajectories into dataset rows."""
 
-    outcomes: list[SimulationOutcome] = []
-    for simulation, depth in zip(simulations, depths, strict=True):
+    rows_by_simulation: list[SimulationRows | None] = []
+    for trajectory, depth in zip(simulations, depths, strict=True):
         rows = None
-        trajectory = simulation.trajectory
         if trajectory is not None:
             if family == "tanaka":
                 indices = select_tanaka_times(
@@ -48,7 +42,7 @@ def subsample_trajectories(
                     trajectory.times.size,
                     keep_samples=200 if family == "benjamin_feir" else 16,
                 )
-            rows = AcceptedSimulationRows(
+            rows = SimulationRows(
                 eta=trajectory.eta[indices],
                 xi=trajectory.xi[indices],
                 gxi=trajectory.gxi[indices],
@@ -56,11 +50,5 @@ def subsample_trajectories(
                 time=trajectory.times[indices],
             )
 
-        outcomes.append(
-            SimulationOutcome(
-                decision=simulation.decision,
-                rows=rows,
-                metrics={},
-            )
-        )
-    return tuple(outcomes)
+        rows_by_simulation.append(rows)
+    return tuple(rows_by_simulation)

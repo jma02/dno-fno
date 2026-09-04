@@ -24,7 +24,7 @@ skimmed.
 - [x] ~~`solver/gen_data/pipeline/trajectory_checks.py`~~ — checks were inlined into `trajectory_rollout.py`
 - [x] `solver/gen_data/pipeline/time_selection.py` — dense-time index selection
 - [x] `solver/gen_data/pipeline/trajectory_subsampling.py` — retained training rows per accepted simulation
-- [ ] `solver/gen_data/pipeline/writer.py` — conversion of results into a completed batch
+- [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
 - [ ] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
 - [ ] `scripts/build_paper_dataset_view.py` — combination of all family/split runs
 
@@ -36,11 +36,11 @@ skimmed.
 
 ## Optional implementation details
 
-- [ ] `solver/gen_data/pipeline/simulation_checks.py` — small named result record
-- [ ] `solver/gen_data/pipeline/batch_artifacts.py` — in-memory saved-batch layout
-- [ ] `solver/gen_data/pipeline/batch_storage.py` — NPZ save/load boundary
-- [ ] `solver/gen_data/pipeline/artifact_io.py` — atomic JSON/NPZ helpers
-- [ ] `solver/gen_data/pipeline/types.py` — shared type aliases
+- [x] ~~`solver/gen_data/pipeline/simulation_checks.py`~~ — acceptance is represented directly by rows or `None`
+- [x] ~~`solver/gen_data/pipeline/batch_artifacts.py`~~ — folded into `batch_storage.py`
+- [x] `solver/gen_data/pipeline/batch_storage.py` — NPZ save/load boundary
+- [x] `solver/gen_data/pipeline/artifact_io.py` — atomic JSON/NPZ helpers
+- [x] `solver/gen_data/pipeline/types.py` — shared type aliases
 
 Tests are best read beside the corresponding implementation file, not as a
 separate sequence.

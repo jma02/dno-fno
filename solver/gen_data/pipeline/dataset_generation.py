@@ -25,19 +25,19 @@ def _update_counts_from_batch(
     attempt_counts: dict[str, int],
 ) -> None:
     batch = load_completed_batch(path)
-    plan = batch.plan
-    if int(plan["family_id"].item()) != int(family_id):
+    if batch.family_id != family_id:
         raise RuntimeError("completed batch belongs to a different family")
-    if str(plan["dataset_split"].item()) != dataset_split.value:
+    if batch.dataset_split != dataset_split:
         raise RuntimeError("completed batch belongs to a different dataset split")
 
-    parameter_groups = tuple(str(value) for value in plan["parameter_group_id"])
-    for parameter_group_id, simulation in zip(
-        parameter_groups, batch.simulations, strict=True
+    for parameter_group_id, accepted in zip(
+        batch.parameter_group_ids,
+        batch.accepted_simulations,
+        strict=True,
     ):
         target = accepted_targets[parameter_group_id]
         attempt_counts[parameter_group_id] += 1
-        if simulation.accepted:
+        if accepted:
             accepted_counts[parameter_group_id] += 1
         if accepted_counts[parameter_group_id] > target:
             raise RuntimeError(

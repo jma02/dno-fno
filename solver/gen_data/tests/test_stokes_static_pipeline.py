@@ -32,12 +32,12 @@ class StokesStaticPipelineTest(unittest.TestCase):
     ) -> None:
         sample = StokesSample("finite", 14, 0.2, 0.0, 0.001)
         zeros = jnp.zeros(PAPER_STATIC_STOKES_NX, dtype=jnp.float64)
-        for eta, failed_check in (
-            (jnp.full_like(zeros, jnp.nan), "nonfinite_state"),
-            (jnp.full_like(zeros, -sample.depth), "nonpositive_water_height"),
+        for eta, failure in (
+            (jnp.full_like(zeros, jnp.nan), "nonfinite state"),
+            (jnp.full_like(zeros, -sample.depth), "nonpositive water height"),
         ):
             with (
-                self.subTest(failed_check=failed_check),
+                self.subTest(failure=failure),
                 patch(
                     "solver.gen_data.stokes_static_pipeline.stokes_eta_xi_at_phase",
                     return_value=(eta, zeros),
@@ -46,12 +46,9 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     "solver.gen_data.stokes_static_pipeline.compute_dno_target"
                 ) as target,
             ):
-                outcome = evaluate_static_stokes_sample(sample)
+                rows = evaluate_static_stokes_sample(sample)
 
-            self.assertFalse(outcome.decision.accepted)
-            self.assertIsNone(outcome.rows)
-            self.assertTrue(getattr(outcome.decision, failed_check))
-            self.assertEqual(outcome.metrics, {})
+            self.assertIsNone(rows)
             target.assert_not_called()
 
     def test_target_finiteness_controls_whether_the_row_is_retained(self) -> None:
@@ -73,12 +70,9 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     return_value=(zeros, zeros, target_q),
                 ) as target,
             ):
-                outcome = evaluate_static_stokes_sample(sample)
+                rows = evaluate_static_stokes_sample(sample)
 
-            self.assertEqual(outcome.decision.accepted, accepted)
-            self.assertEqual(outcome.decision.nonfinite_target, not accepted)
-            self.assertEqual(outcome.metrics, {})
-            self.assertEqual(outcome.rows is not None, accepted)
+            self.assertEqual(rows is not None, accepted)
             constructor.assert_called_once()
             target.assert_called_once()
             target_eta, target_xi, _ = target.call_args.args
@@ -94,9 +88,9 @@ class StokesStaticPipelineTest(unittest.TestCase):
                     "maximum_wavenumber": PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
                 },
             )
-            if outcome.rows is not None:
-                self.assertEqual(outcome.rows.eta.shape, (1, PAPER_STATIC_STOKES_NX))
-                np.testing.assert_array_equal(outcome.rows.time, np.asarray([0.0]))
+            if rows is not None:
+                self.assertEqual(rows.eta.shape, (1, PAPER_STATIC_STOKES_NX))
+                np.testing.assert_array_equal(rows.time, np.asarray([0.0]))
 
 
 if __name__ == "__main__":

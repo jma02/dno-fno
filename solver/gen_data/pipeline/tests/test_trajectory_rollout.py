@@ -257,21 +257,10 @@ class TrajectoryRolloutTest(unittest.TestCase):
             )
 
         self.assertEqual(
-            tuple(simulation.decision.accepted for simulation in simulations),
+            tuple(simulation is not None for simulation in simulations),
             (True, False, False, False, False),
         )
-        for simulation, flag in zip(
-            simulations[1:],
-            (
-                "hamiltonian_drift",
-                "nonfinite_state",
-                "nonfinite_target",
-                "nonpositive_water_height",
-            ),
-            strict=True,
-        ):
-            self.assertTrue(getattr(simulation.decision, flag))
-            self.assertIsNone(simulation.trajectory)
+        self.assertTrue(all(simulation is None for simulation in simulations[1:]))
 
     def test_variable_horizons_ignore_failures_after_each_prefix(self) -> None:
         config = _config(
@@ -336,13 +325,9 @@ class TrajectoryRolloutTest(unittest.TestCase):
                 config=config,
             )
 
-        self.assertTrue(all(result.decision.accepted for result in simulations))
+        self.assertTrue(all(result is not None for result in simulations))
         self.assertEqual(
-            tuple(
-                result.trajectory.times.size
-                for result in simulations
-                if result.trajectory
-            ),
+            tuple(result.times.size for result in simulations if result is not None),
             (3, 4, 5),
         )
 
@@ -403,18 +388,16 @@ class TrajectoryRolloutTest(unittest.TestCase):
         np.testing.assert_array_equal(calls[0][0], ramp_times)
         self.assertEqual(calls[0][1], 4)
         self.assertEqual(
-            tuple(result.decision.accepted for result in simulations),
+            tuple(result is not None for result in simulations),
             (True, True, False),
         )
         for index, expected in enumerate((1.04, 2.06)):
-            terminal_eta = simulations[index].terminal_eta
-            terminal_xi = simulations[index].terminal_xi
-            assert terminal_eta is not None and terminal_xi is not None
+            endpoint = simulations[index]
+            assert endpoint is not None
+            terminal_eta, terminal_xi = endpoint
             np.testing.assert_allclose(terminal_eta, expected)
             np.testing.assert_allclose(terminal_xi, -grids[index][-1])
-        self.assertIsNone(simulations[2].terminal_eta)
-        self.assertIsNone(simulations[2].terminal_xi)
-        self.assertTrue(simulations[2].decision.integration_failure)
+        self.assertIsNone(simulations[2])
 
     def test_truncated_integrator_outputs_fail_closed(self) -> None:
         config = _config(nx=8, maximum_wavenumber=2.0)

@@ -7,7 +7,6 @@ from typing import NamedTuple, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.gen_data.pipeline.trajectory_integration import (
     integrate_adjustment_batch,
@@ -26,25 +25,6 @@ TrajectorySamples = NamedTuple(
         ("eta", FloatArray),
         ("xi", FloatArray),
         ("gxi", FloatArray),
-    ],
-)
-
-# Acceptance decision and retained data for one trajectory.
-TrajectorySimulationResult = NamedTuple(
-    "TrajectorySimulationResult",
-    [
-        ("decision", SimulationCheckResult),
-        ("trajectory", TrajectorySamples | None),
-    ],
-)
-
-# Acceptance decision and final state for one JONSWAP warm-up.
-AdjustmentSimulationResult = NamedTuple(
-    "AdjustmentSimulationResult",
-    [
-        ("decision", SimulationCheckResult),
-        ("terminal_eta", FloatArray | None),
-        ("terminal_xi", FloatArray | None),
     ],
 )
 
@@ -103,7 +83,7 @@ def execute_trajectory_batch(
     time_grids: tuple[FloatArray, ...],
     *,
     config: RolloutNumerics,
-) -> tuple[TrajectorySimulationResult, ...]:
+) -> tuple[TrajectorySamples | None, ...]:
     """Integrate a batch, then evaluate each requested trajectory prefix."""
 
     eta, xi, depth_values = _validate_initial_conditions(
@@ -142,7 +122,7 @@ def execute_trajectory_batch(
     ):
         raise ValueError(f"solver-grid health fields must have shape {health_shape}")
 
-    results: list[TrajectorySimulationResult] = []
+    results: list[TrajectorySamples | None] = []
     for index, saved_times in enumerate(grids):
         saved_count = saved_times.size
         trajectory = TrajectorySamples(
@@ -198,27 +178,14 @@ def execute_trajectory_batch(
                 nonpositive_water_height or internal_nonpositive_water_height
             )
 
-        accepted = (
-            state_finite
+        results.append(
+            trajectory
+            if state_finite
             and target_finite
             and not nonpositive_water_height
             and not hamiltonian_drift
             and not integration_failure
-        )
-        decision = SimulationCheckResult(
-            accepted=accepted,
-            nonfinite_state=not state_finite,
-            nonfinite_target=not target_finite,
-            nonpositive_water_height=nonpositive_water_height,
-            hamiltonian_drift=hamiltonian_drift,
-            integration_failure=integration_failure,
-            incomplete_trajectory=not accepted,
-        )
-        results.append(
-            TrajectorySimulationResult(
-                decision,
-                trajectory if decision.accepted else None,
-            )
+            else None
         )
     return tuple(results)
 
@@ -232,7 +199,7 @@ def execute_adjustment_batch(
     nonlinear_ramp_times: FloatArray,
     nonlinear_ramp_order: int,
     config: RolloutNumerics,
-) -> tuple[AdjustmentSimulationResult, ...]:
+) -> tuple[tuple[FloatArray, FloatArray] | None, ...]:
     """Warm up JONSWAP simulations and return valid nonlinear endpoints."""
 
     eta, xi, depth_values = _validate_initial_conditions(
@@ -272,7 +239,7 @@ def execute_adjustment_batch(
     if np.shape(rollout.gl2_converged) != step_shape:
         raise ValueError(f"GL2 convergence must have shape {step_shape}")
 
-    results: list[AdjustmentSimulationResult] = []
+    results: list[tuple[FloatArray, FloatArray] | None] = []
     for index, saved_times in enumerate(grids):
         saved_count = saved_times.size
         trajectory_eta = np.asarray(rollout.eta[:saved_count, index], dtype=np.float64)
@@ -289,21 +256,9 @@ def execute_adjustment_batch(
             saved_count,
             config.substeps_per_saved_frame,
         )
-        accepted = (
-            state_finite and not nonpositive_water_height and not integration_failure
-        )
-        decision = SimulationCheckResult(
-            accepted=accepted,
-            nonfinite_state=not state_finite,
-            nonpositive_water_height=nonpositive_water_height,
-            integration_failure=integration_failure,
-            incomplete_trajectory=not accepted,
-        )
         results.append(
-            AdjustmentSimulationResult(
-                decision,
-                trajectory_eta[-1] if decision.accepted else None,
-                trajectory_xi[-1] if decision.accepted else None,
-            )
+            (trajectory_eta[-1], trajectory_xi[-1])
+            if state_finite and not nonpositive_water_height and not integration_failure
+            else None
         )
     return tuple(results)

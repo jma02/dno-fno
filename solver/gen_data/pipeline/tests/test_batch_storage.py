@@ -2,69 +2,40 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
 import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_artifacts import SimulationResult
+from solver.gen_data.pipeline.artifact_io import load_npz, write_npz_atomic
 from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     load_completed_batch,
     save_completed_batch,
+    simulation_row_blocks,
 )
 from solver.gen_data.pipeline.types import (
-    BatchPlanArrays,
-    DatasetShardArrays,
     DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
 )
 
 
-def _plan() -> BatchPlanArrays:
-    return {
-        "family_id": np.asarray(2, dtype=np.int16),
-        "dataset_split": np.asarray(DatasetSplit.TRAIN.value),
-        "parameter_group_id": np.asarray(["low", "high", "low"]),
-        "simulation_spec_json": np.asarray(
-            [json.dumps({"amplitude": value}) for value in (0.1, 0.2, 0.3)]
-        ),
-    }
-
-
-def _shard() -> DatasetShardArrays:
-    simulation_local_index = np.asarray([0, 0, 2, 2, 2], dtype=np.int32)
-    frame_index = np.asarray([0, 1, 0, 1, 2], dtype=np.int32)
-    field = np.arange(20, dtype=np.float32).reshape(5, 4) / 100.0
-    return {
-        "eta": field,
-        "xi": field + np.float32(0.1),
-        "gxi": field - np.float32(0.1),
-        "depth": np.asarray([1.0, 1.0, 2.0, 2.0, 2.0], dtype=np.float64),
-        "time": np.asarray([0.0, 1.0, 0.0, 0.5, 1.0], dtype=np.float64),
-        "simulation_local_index": simulation_local_index,
-        "frame_index": frame_index,
-    }
-
-
-def _records() -> tuple[SimulationResult, ...]:
-    return (
-        SimulationResult(
-            accepted=True,
-            failed_checks=(),
-            metrics={"maximum_error": 1e-5},
-        ),
-        SimulationResult(
-            accepted=False,
-            failed_checks=("integration_failure",),
-            metrics={"maximum_error": None},
-        ),
-        SimulationResult(
-            accepted=True,
-            failed_checks=(),
-            metrics={"maximum_error": 2e-5},
-        ),
+def _simulation_rows(
+    *,
+    frame_count: int = 2,
+    depth: float = 1.0,
+    offset: float = 0.0,
+) -> SimulationRows:
+    eta = np.arange(frame_count * 4, dtype=np.float64).reshape(frame_count, 4)
+    eta = eta / 100.0 + offset
+    return SimulationRows(
+        eta,
+        eta + 0.1,
+        eta - 0.1,
+        depth,
+        np.linspace(0.0, 1.0, frame_count, dtype=np.float64),
     )
 
 
@@ -79,77 +50,153 @@ class BatchStorageTests(unittest.TestCase):
             batch_id=7,
         )
 
-    def test_completed_batch_round_trip(self) -> None:
+    def test_sparse_completed_batch_round_trip_and_no_overwrite(self) -> None:
+        rows = (
+            _simulation_rows(),
+            None,
+            _simulation_rows(frame_count=3, depth=2.0, offset=1.0),
+        )
         save_completed_batch(
             self.path,
-            plan=_plan(),
-            shard=_shard(),
-            simulations=_records(),
+            ("low", "high", "low"),
+            rows,
+            family_id=PhysicalFamilyId.TANAKA,
+            dataset_split=DatasetSplit.TRAIN,
         )
 
         batch = load_completed_batch(self.path)
-        self.assertEqual(batch.simulations, _records())
-        self.assertIsNotNone(batch.shard)
+        self.assertEqual(batch.family_id, PhysicalFamilyId.TANAKA)
+        self.assertEqual(batch.dataset_split, DatasetSplit.TRAIN)
+        self.assertEqual(batch.parameter_group_ids, ("low", "high", "low"))
+        np.testing.assert_array_equal(
+            batch.accepted_simulations,
+            np.asarray([True, False, True]),
+        )
         assert batch.shard is not None
-        np.testing.assert_array_equal(batch.shard["eta"], _shard()["eta"])
+        np.testing.assert_array_equal(
+            batch.shard["simulation_local_index"],
+            np.asarray([0, 0, 2, 2, 2], dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            batch.shard["frame_index"],
+            np.asarray([0, 1, 0, 1, 2], dtype=np.int32),
+        )
+        self.assertEqual(batch.shard["eta"].dtype, np.dtype(np.float32))
+
         with self.assertRaises(FileExistsError):
             save_completed_batch(
                 self.path,
-                plan=_plan(),
-                shard=_shard(),
-                simulations=_records(),
+                ("low",),
+                (_simulation_rows(offset=9.0),),
+                family_id=PhysicalFamilyId.TANAKA,
+                dataset_split=DatasetSplit.TRAIN,
             )
-
-    def test_all_rejected_batch_needs_no_row_arrays(self) -> None:
-        simulations = tuple(
-            SimulationResult(
-                accepted=False,
-                failed_checks=("integration_failure",),
-                metrics={},
-            )
-            for _ in range(3)
+        np.testing.assert_array_equal(
+            load_completed_batch(self.path).accepted_simulations,
+            np.asarray([True, False, True]),
         )
+
+    def test_all_rejected_batch_has_no_shard(self) -> None:
         save_completed_batch(
             self.path,
-            plan=_plan(),
-            shard=None,
-            simulations=simulations,
-        )
-        self.assertIsNone(load_completed_batch(self.path).shard)
-
-    def test_failed_check_names_are_validated_and_ordered(self) -> None:
-        result = SimulationResult(
-            accepted=False,
-            failed_checks=("outside_support", "nonfinite_state"),
-            metrics={},
+            ("a", "b", "c"),
+            (None, None, None),
+            family_id=PhysicalFamilyId.JONSWAP_TMA,
+            dataset_split=DatasetSplit.TEST,
         )
 
-        self.assertEqual(
-            result.failed_checks,
-            ("nonfinite_state", "outside_support"),
+        batch = load_completed_batch(self.path)
+        self.assertIsNone(batch.shard)
+        np.testing.assert_array_equal(
+            batch.accepted_simulations,
+            np.zeros(3, dtype=np.bool_),
         )
-        with self.assertRaisesRegex(ValueError, "unknown failed checks"):
-            SimulationResult(
-                accepted=False,
-                failed_checks=("made_up_failure",),
-                metrics={},
-            )
 
-    def test_inconsistent_rows_are_rejected_before_writing(self) -> None:
-        wrong = list(_records())
-        wrong[1] = SimulationResult(
-            accepted=True,
-            failed_checks=(),
-            metrics={},
+    def test_save_rejects_invalid_stored_rows(self) -> None:
+        valid = _simulation_rows()
+        invalid_rows = (
+            valid._replace(xi=np.zeros((2, 3), dtype=np.float64)),
+            valid._replace(time=np.asarray([1.0, 0.0])),
+            valid._replace(depth=0.0),
+            valid._replace(
+                eta=np.full((2, 4), np.finfo(np.float64).max, dtype=np.float64)
+            ),
         )
-        with self.assertRaisesRegex(ValueError, "rows do not match"):
+        for index, rows in enumerate(invalid_rows):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                save_completed_batch(
+                    self.path,
+                    ("group",),
+                    (rows,),
+                    family_id=PhysicalFamilyId.STOKES,
+                    dataset_split=DatasetSplit.VALIDATION,
+                )
+            self.assertFalse(self.path.exists())
+
+        with self.assertRaisesRegex(ValueError, "equal nonzero lengths"):
             save_completed_batch(
                 self.path,
-                plan=_plan(),
-                shard=_shard(),
-                simulations=wrong,
+                ("a", "b"),
+                (valid,),
+                family_id=PhysicalFamilyId.STOKES,
+                dataset_split=DatasetSplit.VALIDATION,
             )
-        self.assertFalse(self.path.exists())
+
+    def test_load_validates_frame_time_depth_and_complete_shard(self) -> None:
+        save_completed_batch(
+            self.path,
+            ("group",),
+            (_simulation_rows(frame_count=3),),
+            family_id=PhysicalFamilyId.BENJAMIN_FEIR,
+            dataset_split=DatasetSplit.TRAIN,
+        )
+        valid = load_npz(self.path)
+        corruptions = (
+            ("frame", "frame_index", np.asarray([0, 2, 1], dtype=np.int32)),
+            ("time", "time", np.asarray([0.0, 1.0, 0.5], dtype=np.float64)),
+            ("depth", "depth", np.asarray([1.0, 2.0, 1.0], dtype=np.float64)),
+        )
+        for label, field, replacement in corruptions:
+            with self.subTest(field=field):
+                arrays = dict(valid)
+                arrays[field] = replacement
+                corrupt_path = self.path.with_name(f"{label}.npz")
+                write_npz_atomic(corrupt_path, arrays)
+                with self.assertRaises(ValueError):
+                    load_completed_batch(corrupt_path)
+
+        arrays = dict(valid)
+        del arrays["gxi"]
+        incomplete_path = self.path.with_name("incomplete.npz")
+        write_npz_atomic(incomplete_path, arrays)
+        with self.assertRaisesRegex(ValueError, "missing shard arrays"):
+            load_completed_batch(incomplete_path)
+
+        arrays = dict(valid)
+        arrays["simulation_results_json"] = np.asarray("legacy bookkeeping")
+        unexpected_path = self.path.with_name("unexpected.npz")
+        write_npz_atomic(unexpected_path, arrays)
+        with self.assertRaisesRegex(ValueError, "unexpected arrays"):
+            load_completed_batch(unexpected_path)
+
+    def test_simulation_row_blocks_requires_sparse_ordered_blocks(self) -> None:
+        self.assertEqual(
+            simulation_row_blocks(
+                np.asarray([0, 0, 2, 2, 2], dtype=np.int32),
+                number_of_simulations=3,
+            ),
+            {0: (0, 2), 2: (2, 3)},
+        )
+        with self.assertRaisesRegex(ValueError, "ordered block"):
+            simulation_row_blocks(
+                np.asarray([0, 2, 1], dtype=np.int32),
+                number_of_simulations=3,
+            )
+        with self.assertRaisesRegex(ValueError, "absent from the batch"):
+            simulation_row_blocks(
+                np.asarray([3], dtype=np.int32),
+                number_of_simulations=3,
+            )
 
 
 if __name__ == "__main__":

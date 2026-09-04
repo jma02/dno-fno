@@ -110,7 +110,7 @@ upper endpoint.  An endpoint convention written explicitly in an individual
 sampling formula---including the half-open phase and center intervals and the
 mixed open--closed Benjamin--Feir steepness draw---overrides that default.
 These endpoint choices do not change a continuous uniform law, but they are
-recorded for exact numerical replay.
+specified for deterministic regeneration.
 For each trajectory family, one common executor runs a
 residual-controlled GL2 trajectory with time step \(0.01\), saving a
 candidate state every \(0.08\).  JONSWAP/TMA first uses the explicitly
@@ -120,15 +120,17 @@ path returns a complete admissible trajectory on the requested interval.  The
 \(0.005\) and \(0.0025\) steps are used only by a separate method-validation
 utility; they are not additional production rollouts or retry steps.
 
-Common modules assign a split and parameter category before numerical work, write
-atomic proposal, array-shard, result, and failure records, and build a checked
-multi-shard manifest and case-to-row map.  A resumable driver continues until
-the accepted-case quota in every parameter category is met.  A rejected attempt is
-replaced only in its original category.  The training loader uses the preassigned
-splits and draws one stored time from every accepted case, with equal accepted
-case counts across the four physical families.  Unexpected construction or
-target-evaluation errors propagate and leave the durable proposal available
-for replay; they are not silently converted into ordinary rejected samples.
+Common modules assign a split and parameter category before numerical work and
+write one atomic completed-batch artifact containing the family and split, the
+ordered parameter-group identifiers, and the accepted row arrays.  A batch slot
+with no owned row block denotes a rejected attempt; sampled specifications and
+phases, failure reasons, and diagnostic metrics are not persisted.  A resumable
+driver continues until the accepted-case quota in every parameter category is
+met, replacing a rejected attempt only in its original category.  The fixed
+split, family, and attempted-simulation index seed deterministic regeneration.
+The training loader uses the preassigned splits and globally shuffles all
+accepted training rows.  Unexpected construction or target-evaluation errors
+propagate rather than being silently converted into ordinary rejected samples.
 The family laws below therefore describe attempted specifications, not the
 unconditional law of loader-visible cases.  If \(X\) is a complete attempted
 specification in preassigned category \(i\), \(A_f\) is the declared complete
@@ -148,14 +150,12 @@ graph validity followed by nonlinear adjustment and complete autonomous-
 trajectory acceptance.  Thus the quotas preserve the declared category
 marginals, not the unconditioned proposal law within a category.  This is a
 statement about how the release is constructed; it does not by itself assert a
-measured within-category shift for every family.  Every rejected proposal
-remains recorded, and no retrospective parameter cutoff is applied.
-The manifest compares the numerical contract and the hashes of its defining
-source files only among shards having the same physical family and revision.
-A loader-facing view must contain exactly one revision of each included
-family.  The final view may therefore combine Stokes revision 2, Tanaka
-revision 3, Benjamin--Feir revision 4, and JONSWAP/TMA revision 4, but it
-cannot mix two revisions of any one family.
+measured within-category shift for every family.  No retrospective parameter
+cutoff is applied.  The loader-facing manifest and row map record the selected
+shards, split totals, and case-to-row ownership; they do not persist numerical-
+configuration or source hashes.  The release described here selects Stokes
+revision 2, Tanaka revision 3, Benjamin--Feir revision 4, and JONSWAP/TMA
+revision 4.
 
 An earlier generator-revision-1 complete transaction smoke test used a reduced
 wiring contract:
@@ -218,13 +218,14 @@ potential $\xi$, and depth $h>0$.  The target is fixed to
 Thus both inputs are restricted before evaluation, and the output is
 restricted and made mean zero afterward.  The target is evaluated in float64;
 the three fields $\eta$, $\xi$, and $q_{\mathrm{ref}}$ are stored in float32,
-while the parameters from which they were constructed are stored in float64.
+while depth and retained time are stored in float64.  The sampled parameters
+from which a row was constructed are not stored.
 Thus the mean-zero statement is exact for the float64 target and is preserved
 in the stored array only to float32 rounding error.
 Static Stokes states use exactly \cref{eq:forward-dataset-target}, rather than
-the unfiltered labels in some historical v9 sources.  The generator rejects
-changes to $L,N,K,M,p$, or the evaluation precision, and each archive records
-a hash of this target configuration and the source files that implement it.
+the unfiltered labels in some historical v9 sources.  The paper generator fixes
+$L,N,K,M,p$ and the evaluation precision in its numerical settings; the completed
+batches do not record target-configuration or source hashes.
 The three trajectory families have internal evolution contracts specified
 below, but all deliver the same target in
 \cref{eq:forward-dataset-target}.
@@ -342,16 +343,17 @@ categories are the finite/deep branches crossed with the two intervals in
 \cref{eq:paper-stokes-cells}.  Requested accepted-case counts are divided
 among these categories by quotient and remainder before any state is constructed.
 This is a seeded stratified pseudorandom construction, not a low-discrepancy
-sequence.  A successful proposal stores its realized mode, amplitude, depth,
-phase, branch, and category.
+sequence.  A successful proposal holds its realized mode, amplitude, depth,
+phase, branch, and category only long enough to construct its rows; these
+values can instead be regenerated from the split, family, and attempt seed.
 
 If a finite-depth amplitude draw violates
 $\mathrm{Ur}_+\leq26$, only the amplitude is redrawn, uniformly from the same
 category intersection.  Its mode, depth, phase, and category remain fixed.  The case
 may make at most 1000 additional amplitude draws.  Intermediate rejected
 amplitudes and their values of $\mathrm{Ur}_+$ are not persisted.  If the
-redraw allowance is exhausted, the sampler returns no state and the batch
-commits a zero-row out-of-support rejection; generation then fills the remaining
+redraw allowance is exhausted, the sampler returns no state and the batch slot
+owns no rows; generation then fills the remaining
 accepted-case quota from a later attempt in the same category.
 
 \paragraph{Static archive and replay checks.}
@@ -457,7 +459,7 @@ Define the expression under the square root by
   \label{eq:paper-tanaka-radicand}
 \end{equation}
 The constructor requires the nodewise condition
-$\min_\ell\mathcal R_{\alpha,h,x_0}(x_\ell)\geq0$ and records an attempted component
+$\min_\ell\mathcal R_{\alpha,h,x_0}(x_\ell)\geq0$ and treats an attempted component
 that violates this condition as inadmissible; it does not replace a negative
 value by zero.  For the fixed upper-steepness, seam-centered test case, the
 initial value is
@@ -653,15 +655,15 @@ direction is fixed by $q\in\{0,1\}$.  The separation is always feasible on
 the declared support because $3mh\leq2.7<2\pi=L$.  Thus separation and
 translation symmetry are enforced before integration.
 
-The population sampler and the ordered common archive adapter are
-implemented.  In particular, the complete sampled parameters are persisted
-before the tangent-Hermite constructor is called.  The potential routine
+The population sampler and ordered batch adapter are implemented.  The
+sampled parameters are held only during construction and can be regenerated
+from the split, family, and attempt seed.  The potential routine
 transfers the computed radicand to the host once before taking the square root
 and introduces no clipping tolerance.  An everywhere-finite, positive-speed
 component with a negative radicand is a declared support rejection: it
 contributes no rows and is replaced in the same category.  A nonfinite radicand,
-a nonpositive or nonfinite computed speed, a malformed diagnostic record, or
-an unexpected exception remains an implementation error and stops the run.
+a nonpositive or nonfinite computed speed, or an unexpected exception remains
+an implementation error and stops the run.
 In the historical reduced paired calculation described above, the Tanaka
 attempt was accepted, committed three finite rows, and was finite when read by
 the training loader.  This is transaction evidence at the reduced contract,
@@ -936,8 +938,9 @@ arrays and transactions.
 These counts measure the implemented population and numerical path; they do
 not turn the proxy bound into a physical wave-breaking criterion.
 
-The common adapter persists the pair, continuous parameters, translation,
-and fixed relative phase before constructing the equation-(33) state.  In the
+The former common adapter persisted the pair, continuous parameters,
+translation, and fixed relative phase before constructing the equation-(33)
+state.  In the
 reduced accepted-quota
 calculation, the Benjamin--Feir attempt was accepted, committed three rows,
 and was finite when read by the training loader.  This historical transaction
@@ -1185,8 +1188,9 @@ nonlinear focusing can still make a proposed trajectory fail.
 
 The spectrum, phase sampler, support predicate, state
 \cref{eq:paper-random-state}, and 27-category proposal law are implemented.
-Every case proposal record stores both realized phase arrays.  The ordered
-adapter persists that record before construction.  It then checks the
+Both realized phase arrays are held during construction but are not persisted;
+they can be regenerated from the split, family, and attempt seed.  The adapter
+then checks the
 realized graph condition
 \begin{equation}
   \min_\ell\{h+\eta_0(x_\ell)\}>0.
@@ -1207,15 +1211,10 @@ The JONSWAP/TMA completion audit reports its effect separately; the analogous
 common-law statement does not claim measured bias in another family.  No
 retrospective parameter cutoff or bulk rejection-rate gate is applied.
 
-For every valid construction, the result record includes the discrete peak
-wavenumber, the number of spectral cells whose energy is at least half the
-largest cell energy, the RMS values of $\eta_0$ and $\xi_0$, the ratio
-$4\operatorname{RMS}(\eta_0)/H_s$, the minimum water column, and the relative
-error in the exact linear-energy identity below \cref{eq:paper-random-state}.
-These are diagnostics of what was constructed, not additional acceptance
-rules.  The adapter then connects the result to
-the dedicated adjusted trajectory executor, 16-time selection, whole-case
-writer, and split-aware view.  An earlier reduced accepted-quota calculation
+The current adapter does not persist proposal values or construction metrics.
+It connects a valid construction to the dedicated adjusted trajectory
+executor, 16-time selection, accepted-row storage, and split-aware view.  An
+earlier reduced accepted-quota calculation
 used the former paired validation path: its random-sea attempt was accepted,
 committed three finite rows, and was finite when read by the training loader.  Its
 intended horizon was \(H=30.0341\), and its realized terminal time was
@@ -1311,16 +1310,18 @@ Benjamin--Feir and \(K_F=704\) for JONSWAP/TMA, and define
 where \(G^{K_F}_4\) is the order-four DNO evaluated from the full sharp
 internal state and \(\varepsilon_{64}\) is the smallest positive normal
 float64 number.  The executor requires \(d_{H,F}\leq10^{-3}\).  Before
-projection to \(P_{128}\), it also records at every saved autonomous frame
+projection to \(P_{128}\), it also evaluates at every saved autonomous frame
 whether the internal state and \(G^{K_F}_4(\eta;h)\xi\) are finite and the
 minimum value of \(h+\eta\).  These dense saved-frame quantities, including
-the initial Hamiltonian and maximum drift, are persisted with the case.
+the initial Hamiltonian and maximum drift, are used for the acceptance
+decision but are not persisted.
 The Hamiltonian reference is the adjusted endpoint for JONSWAP/TMA; no
 Hamiltonian gate is applied during its nonautonomous adjustment.
 
 These statements define one requirement: the fixed method must return a
-complete admissible trajectory.  The individual diagnostics record why this
-requirement failed; they are not separately fitted data filters.  An
+complete admissible trajectory.  The individual checks determine that
+decision, but a rejected attempt's failure reason is not persisted.  They are
+not separately fitted data filters.  An
 incomplete case contributes no rows, including no finite prefix, and its
 replacement is drawn from the same predeclared parameter category.  Sign
 changes, slope, spectral roughness, target magnitude, visual appearance, and
@@ -1748,11 +1749,10 @@ initial condition is constructed.  The three split roots are 2026072210,
 2026072204, and 2026072205, respectively.  A rejection remains attached to
 its assigned split and parameter category, and no saved times from one case may
 belong to different splits.  In each epoch, the training loader uses every
-accepted training case once and chooses one of its stored times uniformly.
-Because the four families have equal accepted-case counts, every family and
-every case have equal epoch weight; the number of stored times does not
-determine either weight.  Validation uses one fixed, deterministic stored time
-from every accepted validation case.
+accepted training row and globally reshuffles the row indices.  Equal accepted-
+case counts across the four families therefore do not imply equal row weight
+when the families retain different numbers of times per case.  Validation uses
+every accepted validation row in one fixed deterministic order.
 
 A training case from each of the four families contributes
 \[
@@ -1776,20 +1776,23 @@ the two longer-running JONSWAP/TMA worker lanes, its final 8192-case increment
 uses the three disjoint intervals \([8192,12288)\), \([12288,14336)\), and
 \([14336,16384)\).
 
-The split-tagged attempt allocator, atomic proposal/shard/result/failure
-transaction, multi-shard manifest, and loader are implemented and tested as
-family-independent modules.  The loader uses the stored split and chooses one
-stored time from every accepted case in each epoch; it requires equal accepted
-case counts across families and stops if that condition is absent.  The static
-Stokes adapter exercises this transaction at the exact paper target.  Under
+The split-tagged attempt allocator, atomic completed-batch storage, multi-shard
+manifest, row map, and loader are implemented and tested as family-independent
+modules.  Each completed batch stores its family and split, its ordered
+parameter-group identifiers, and any accepted row arrays.  A rejected slot is
+identified by the absence of owned rows.  The loader uses the stored split and
+globally shuffles every accepted training row each epoch.  The historical
+exact-target Stokes calculation described above exercised the former
+transaction.  Under
 Stokes revision 2, one case from each of its four parameter categories passed
 this exact calculation, with all four quality-decision masks equal to zero.
 Its completed production splits contain 16384 training cases and 1024 cases
 in each of validation and test; these artifacts are retained.
-The Tanaka, Benjamin--Feir, and random-sea adapters enforce sampling, durable
-proposal, then construction.  One reduced accepted-quota case from each of
-these three families continued through the former paired GL2 validation path
-and loader-facing view, and each produced three finite loaded rows.  Those
+In the former reduced accepted-quota workflow, the Tanaka, Benjamin--Feir, and
+random-sea adapters enforced sampling, durable proposal, then construction.
+One case from each of these three families continued through the former paired
+GL2 validation path and loader-facing view, and each produced three finite
+loaded rows.  Those
 family-revision-1 calculations are historical transaction tests, not tests of
 the current family-revision executors, numerical validation of the paper
 target, or evidence about any family population.

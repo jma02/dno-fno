@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -16,13 +15,9 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np  # noqa: E402
 
 from solver.gen_data.pipeline.batch_storage import load_completed_batch  # noqa: E402
-from solver.gen_data.pipeline.simulation_checks import (  # noqa: E402
-    SimulationCheckResult,
-)
-from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
-from solver.gen_data.pipeline.writer import (  # noqa: E402
-    AcceptedSimulationRows,
-    SimulationOutcome,
+from solver.gen_data.pipeline.types import (  # noqa: E402
+    DatasetSplit,
+    SimulationRows,
 )
 from solver.gen_data.stokes_batch_generator import (  # noqa: E402
     generate_static_stokes_batch,
@@ -40,16 +35,12 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         path = Path(temporary.name) / "batch.npz"
         sample = StokesSample("deep", 3, 4.0, 0.5, 0.005)
         field = np.zeros((1, 1024), dtype=np.float64)
-        accepted = SimulationOutcome(
-            decision=SimulationCheckResult(accepted=True),
-            rows=AcceptedSimulationRows(
-                eta=field,
-                xi=field,
-                gxi=field,
-                depth=sample.depth,
-                time=np.asarray([0.0], dtype=np.float64),
-            ),
-            metrics={},
+        accepted = SimulationRows(
+            eta=field,
+            xi=field,
+            gxi=field,
+            depth=sample.depth,
+            time=np.asarray([0.0], dtype=np.float64),
         )
         parameter_groups = (
             STOKES_PARAMETER_GROUP_IDS[0],
@@ -91,14 +82,8 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
         evaluate.assert_called_once_with(sample)
 
         batch = load_completed_batch(path)
-        specifications = tuple(
-            json.loads(str(value)) for value in batch.plan["simulation_spec_json"]
-        )
-        self.assertEqual(specifications, ({}, sample._asdict()))
-        self.assertEqual(
-            tuple(simulation.failed_checks for simulation in batch.simulations),
-            (("outside_support",), ()),
-        )
+        self.assertEqual(batch.parameter_group_ids, parameter_groups)
+        np.testing.assert_array_equal(batch.accepted_simulations, (False, True))
         assert batch.shard is not None
         np.testing.assert_array_equal(
             batch.shard["simulation_local_index"],

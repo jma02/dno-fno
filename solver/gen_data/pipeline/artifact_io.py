@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 import uuid
 
 import numpy as np
 from numpy.typing import NDArray
-
-from solver.gen_data.pipeline.types import JsonObject
 
 
 def load_npz(path: Path) -> dict[str, NDArray[Any]]:
@@ -21,47 +21,22 @@ def load_npz(path: Path) -> dict[str, NDArray[Any]]:
         return {name: np.asarray(archive[name]) for name in archive.files}
 
 
-def json_text(value: object, *, indent: int | None = None) -> str:
-    """Serialize a JSON-like value deterministically and reject nonfinite numbers."""
-
-    return json.dumps(
-        value,
-        indent=indent,
-        sort_keys=True,
-        separators=(",", ":") if indent is None else None,
-        allow_nan=False,
-    )
-
-
-def parse_json(text: str) -> object:
-    """Parse JSON, rejecting the nonstandard NaN and Infinity values."""
-
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"nonfinite JSON constant {value!r}")
-
-    return json.loads(text, parse_constant=reject_constant)
-
-
-def read_json_object(path: Path) -> JsonObject:
-    """Read a JSON file and require an object at its root."""
-
-    value = parse_json(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return cast(JsonObject, value)
-
-
-def _write_file_atomically(
+@contextmanager
+def _atomic_output_path(
     path: Path,
-    write_temporary_file: Callable[[Path], None],
-) -> None:
-    """Write a temporary file completely, then rename it to the destination."""
+    *,
+    replace_existing: bool,
+) -> Iterator[Path]:
+    """Expose a temporary path and publish it only after a successful write."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        write_temporary_file(temporary)
-        temporary.replace(path)
+        yield temporary
+        if replace_existing:
+            temporary.replace(path)
+        else:
+            os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -69,6 +44,8 @@ def _write_file_atomically(
 def write_npz_atomic(
     path: Path,
     arrays: Mapping[str, NDArray[Any]],
+    *,
+    replace_existing: bool = True,
 ) -> None:
     """Atomically write a pickle-free NPZ with deterministic member order."""
 
@@ -76,21 +53,19 @@ def write_npz_atomic(
     if any(array.dtype.kind == "O" for array in ordered.values()):
         raise TypeError("atomic NPZ arrays cannot use object dtype")
 
-    def write_temporary_file(temporary: Path) -> None:
+    with _atomic_output_path(path, replace_existing=replace_existing) as temporary:
         with temporary.open("wb") as handle:
             # NumPy's stub treats arbitrary NPZ member names as potential
             # ``allow_pickle`` arguments even though object arrays are rejected above.
             np.savez(handle, **ordered)  # pyright: ignore[reportArgumentType]
 
-    _write_file_atomically(path, write_temporary_file)
-
 
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     """Atomically write deterministic, finite JSON."""
 
-    encoded = (json_text(payload, indent=2) + "\n").encode("utf-8")
+    encoded = (
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
 
-    def write_temporary_file(temporary: Path) -> None:
+    with _atomic_output_path(path, replace_existing=True) as temporary:
         temporary.write_bytes(encoded)
-
-    _write_file_atomically(path, write_temporary_file)

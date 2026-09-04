@@ -198,7 +198,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 new=adjustment,
             ),
         ):
-            outcomes = integrate_and_subsample_jonswap(
+            rows_by_simulation = integrate_and_subsample_jonswap(
                 initial,
                 (_grid(16),) * 3,
                 peak_periods,
@@ -213,7 +213,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         np.testing.assert_allclose(adjustment_calls[0][2], 10.0 * peak_periods)
         self.assertEqual(adjustment_calls[0][3], 4)
         self.assertEqual(float(production_times[0][0]), 0.0)
-        self.assertTrue(all(outcome.decision.accepted for outcome in outcomes))
+        self.assertTrue(all(rows is not None for rows in rows_by_simulation))
 
     def test_full_band_adjustment_endpoint_reaches_production_unprojected(self) -> None:
         numerical = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
@@ -237,7 +237,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 new=adjustment,
             ),
         ):
-            (outcome,) = integrate_and_subsample_jonswap(
+            (rows,) = integrate_and_subsample_jonswap(
                 initial,
                 (_grid(16),),
                 np.asarray([0.4]),
@@ -248,9 +248,8 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         coefficient = np.fft.rfft(handed_off[0][0] - np.mean(handed_off[0][0]))[600]
         self.assertGreater(abs(coefficient), 0.4)
         self.assertEqual(handed_off[0].shape, (1, 2048))
-        self.assertTrue(outcome.decision.accepted)
-        assert outcome.rows is not None
-        self.assertEqual(outcome.rows.eta.shape[-1], 1024)
+        assert rows is not None
+        self.assertEqual(rows.eta.shape[-1], 1024)
 
     def test_burn_failures_skip_production_and_restore_input_order(self) -> None:
         numerical = _config()
@@ -273,7 +272,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 new=adjustment,
             ),
         ):
-            outcomes = integrate_and_subsample_jonswap(
+            rows_by_simulation = integrate_and_subsample_jonswap(
                 initial,
                 tuple(map(_grid, (19, 16, 18, 16, 20))),
                 np.full(5, 0.4, dtype=np.float64),
@@ -282,12 +281,9 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [outcome.decision.accepted for outcome in outcomes],
+            [rows is not None for rows in rows_by_simulation],
             [True, False, True, True, False],
         )
-        self.assertIsNone(outcomes[1].rows)
-        self.assertIsNone(outcomes[4].rows)
-        self.assertTrue(outcomes[1].decision.integration_failure)
         self.assertEqual(sum(values.shape[0] for values in handed_off), 3)
 
     def test_production_health_gate_runs_after_an_accepted_burn(self) -> None:
@@ -310,7 +306,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 new=adjustment,
             ),
         ):
-            (outcome,) = integrate_and_subsample_jonswap(
+            (rows,) = integrate_and_subsample_jonswap(
                 initial,
                 (_grid(16),),
                 np.asarray([0.4]),
@@ -318,10 +314,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 solver_batch_size=1,
             )
 
-        self.assertFalse(outcome.decision.accepted)
-        self.assertIsNone(outcome.rows)
-        self.assertTrue(outcome.decision.hamiltonian_drift)
-        self.assertTrue(outcome.decision.incomplete_trajectory)
+        self.assertIsNone(rows)
 
 
 if __name__ == "__main__":

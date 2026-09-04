@@ -9,12 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
-from solver.gen_data.pipeline.simulation_checks import SimulationCheckResult
 from solver.gen_data.pipeline.dno_target import compute_dno_target, project_fixed_band
-from solver.gen_data.pipeline.writer import (
-    AcceptedSimulationRows,
-    SimulationOutcome,
-)
+from solver.gen_data.pipeline.types import SimulationRows
 from solver.gen_data.stokes_sampling import (
     PAPER_DOMAIN_LENGTH,
     PAPER_GRAVITY,
@@ -29,7 +25,7 @@ PAPER_STATIC_STOKES_PAD_FACTOR = 8
 PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER = 128.0
 
 
-def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationOutcome:
+def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None:
     """Construct, validate, and label one static Stokes simulation."""
 
     with jax.enable_x64():
@@ -62,21 +58,11 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationOutcome:
     xi_host = np.asarray(jax.device_get(xi_input), dtype=np.float64)
 
     if not np.isfinite(eta_host).all() or not np.isfinite(xi_host).all():
-        return SimulationOutcome(
-            decision=SimulationCheckResult(accepted=False, nonfinite_state=True),
-            rows=None,
-            metrics={},
-        )
+        return None
 
     minimum_water_column = float(np.min(sample.depth + eta_host))
     if not math.isfinite(minimum_water_column) or minimum_water_column <= 0.0:
-        return SimulationOutcome(
-            decision=SimulationCheckResult(
-                accepted=False, nonpositive_water_height=True
-            ),
-            rows=None,
-            metrics={},
-        )
+        return None
 
     with jax.enable_x64():
         target_eta, target_xi, q_ref = compute_dno_target(
@@ -92,24 +78,16 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationOutcome:
     target_eta_host = np.asarray(jax.device_get(target_eta), dtype=np.float64)
     target_xi_host = np.asarray(jax.device_get(target_xi), dtype=np.float64)
     q_ref_host = np.asarray(jax.device_get(q_ref), dtype=np.float64)
-    delivered_state_finite = bool(
-        np.isfinite(target_eta_host).all() and np.isfinite(target_xi_host).all()
-    )
-    target_finite = bool(np.isfinite(q_ref_host).all())
-    decision = SimulationCheckResult(
-        accepted=delivered_state_finite and target_finite,
-        nonfinite_state=not delivered_state_finite,
-        nonfinite_target=not target_finite,
-    )
-    rows = (
-        AcceptedSimulationRows(
+    return (
+        SimulationRows(
             eta=target_eta_host[None, :],
             xi=target_xi_host[None, :],
             gxi=q_ref_host[None, :],
             depth=sample.depth,
             time=np.asarray([0.0], dtype=np.float64),
         )
-        if decision.accepted
+        if np.isfinite(target_eta_host).all()
+        and np.isfinite(target_xi_host).all()
+        and np.isfinite(q_ref_host).all()
         else None
     )
-    return SimulationOutcome(decision=decision, rows=rows, metrics={})

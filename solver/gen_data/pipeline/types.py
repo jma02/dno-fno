@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum, IntEnum
-from typing import Final, TypeAlias, TypedDict
+from typing import Any, Final, NamedTuple, TypeAlias, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,14 +33,17 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 
-
-class BatchPlanArrays(TypedDict):
-    """Arrays describing the simulations assigned to one batch."""
-
-    family_id: NDArray[np.int16]
-    dataset_split: NDArray[np.str_]
-    parameter_group_id: NDArray[np.str_]
-    simulation_spec_json: NDArray[np.str_]
+FloatArray: TypeAlias = NDArray[np.floating[Any]]
+SimulationRows = NamedTuple(
+    "SimulationRows",
+    [
+        ("eta", FloatArray),
+        ("xi", FloatArray),
+        ("gxi", FloatArray),
+        ("depth", float),
+        ("time", FloatArray),
+    ],
+)
 
 
 class DatasetShardArrays(TypedDict):

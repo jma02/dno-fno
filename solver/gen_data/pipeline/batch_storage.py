@@ -3,42 +3,43 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.artifact_io import (
-    json_text,
-    load_npz,
-    parse_json,
-    write_npz_atomic,
+from solver.gen_data.pipeline.artifact_io import load_npz, write_npz_atomic
+from solver.gen_data.pipeline.types import (
+    DatasetShardArrays,
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
 )
-from solver.gen_data.pipeline.batch_artifacts import (
-    BATCH_PLAN_FIELDS,
-    SHARD_FIELDS,
-    SimulationResult,
-    compute_simulation_row_blocks,
-    parse_simulation_result,
-    validate_batch_plan,
-    validate_shard,
-)
-from solver.gen_data.pipeline.types import BatchPlanArrays, DatasetShardArrays
 
 _PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
-_RESULTS_JSON = "simulation_results_json"
+_SHARD_DTYPES = {
+    "eta": np.dtype(np.float32),
+    "xi": np.dtype(np.float32),
+    "gxi": np.dtype(np.float32),
+    "depth": np.dtype(np.float64),
+    "time": np.dtype(np.float64),
+    "simulation_local_index": np.dtype(np.int32),
+    "frame_index": np.dtype(np.int32),
+}
+_SHARD_FIELDS = frozenset(_SHARD_DTYPES)
 
-
-@dataclass(frozen=True)
-class CompletedBatch:
-    """Validated contents of one finished simulation batch."""
-
-    plan: BatchPlanArrays
-    shard: DatasetShardArrays | None
-    simulations: tuple[SimulationResult, ...]
+CompletedBatch = NamedTuple(
+    "CompletedBatch",
+    [
+        ("family_id", PhysicalFamilyId),
+        ("dataset_split", DatasetSplit),
+        ("parameter_group_ids", tuple[str, ...]),
+        ("accepted_simulations", NDArray[np.bool_]),
+        ("shard", DatasetShardArrays | None),
+    ],
+)
 
 
 def batch_path(
@@ -60,89 +61,194 @@ def batch_path(
     return root / "batches" / family / split / f"batch_{batch_id:06d}.npz"
 
 
-def _validate_simulation_results(
-    plan: BatchPlanArrays,
-    shard: DatasetShardArrays | None,
-    simulations: Sequence[SimulationResult],
-) -> None:
-    simulation_count = int(plan["simulation_spec_json"].size)
-    if len(simulations) != simulation_count:
-        raise ValueError("results must contain every planned simulation")
+def simulation_row_blocks(
+    simulation_local_index: NDArray[Any],
+    *,
+    number_of_simulations: int,
+) -> dict[int, tuple[int, int]]:
+    """Return each simulation's contiguous ``(first_row, row_count)`` block."""
 
-    row_blocks = (
-        compute_simulation_row_blocks(
-            shard["simulation_local_index"],
-            number_of_simulations=simulation_count,
+    indices = np.asarray(simulation_local_index)
+    if indices.ndim != 1 or indices.dtype.kind not in {"i", "u"}:
+        raise ValueError(
+            "simulation_local_index must be a one-dimensional integer array"
         )
-        if shard is not None
-        else {}
+    if number_of_simulations <= 0:
+        raise ValueError("number_of_simulations must be positive")
+    if indices.size == 0:
+        return {}
+    if np.any(indices < 0) or int(np.max(indices)) >= number_of_simulations:
+        raise ValueError(
+            "simulation_local_index references a simulation absent from the batch"
+        )
+    if np.any(indices[1:] < indices[:-1]):
+        raise ValueError("rows from each simulation must form one ordered block")
+
+    starts = np.concatenate(
+        (np.asarray([0]), np.flatnonzero(indices[1:] != indices[:-1]) + 1)
     )
-    for local_index, simulation in enumerate(simulations):
-        if simulation.accepted != (local_index in row_blocks):
-            raise ValueError(
-                f"simulation at local index {local_index}: rows do not match its result"
-            )
+    ends = np.concatenate((starts[1:], np.asarray([indices.size])))
+    return {
+        int(indices[first_row]): (int(first_row), int(end - first_row))
+        for first_row, end in zip(starts, ends, strict=True)
+    }
+
+
+def _validate_shard(
+    shard: DatasetShardArrays, number_of_simulations: int
+) -> dict[int, tuple[int, int]]:
+    eta = shard["eta"]
+    if eta.ndim != 2 or min(eta.shape) == 0:
+        raise ValueError("eta must have nonempty shape (row, space)")
+    row_count = eta.shape[0]
+    for name, dtype in _SHARD_DTYPES.items():
+        field = shard[name]
+        if field.dtype != dtype:
+            raise TypeError(f"array {name!r} has dtype {field.dtype}; expected {dtype}")
+        shape = eta.shape if name in {"eta", "xi", "gxi"} else (row_count,)
+        if field.shape != shape:
+            raise ValueError(f"array {name!r} must have shape {shape}")
+        if not np.isfinite(field).all():
+            raise ValueError(f"shard array {name!r} contains nonfinite values")
+    if np.any(shard["depth"] <= 0.0):
+        raise ValueError("every stored depth must be positive")
+
+    row_blocks = simulation_row_blocks(
+        shard["simulation_local_index"], number_of_simulations=number_of_simulations
+    )
+    for first_row, frame_count in row_blocks.values():
+        rows = slice(first_row, first_row + frame_count)
+        if not np.array_equal(
+            shard["frame_index"][rows], np.arange(frame_count, dtype=np.int32)
+        ):
+            raise ValueError("frame_index must be 0, 1, ... within every simulation")
+        if np.any(np.diff(shard["time"][rows]) <= 0.0):
+            raise ValueError("stored times must increase within every simulation")
+        depths = shard["depth"][rows]
+        if not np.all(depths == depths[0]):
+            raise ValueError("depth must remain constant within each simulation")
+    return row_blocks
 
 
 def save_completed_batch(
     path: Path,
+    parameter_group_ids: Sequence[str],
+    rows_by_simulation: Sequence[SimulationRows | None],
     *,
-    plan: BatchPlanArrays,
-    shard: DatasetShardArrays | None,
-    simulations: Sequence[SimulationResult],
+    family_id: PhysicalFamilyId,
+    dataset_split: DatasetSplit,
 ) -> None:
-    """Atomically save a finished batch; interrupted batches leave no artifact."""
+    """Atomically save one finished batch without replacing an existing batch."""
 
-    if path.exists():
-        raise FileExistsError(f"completed batch already exists: {path}")
-    validate_batch_plan(plan)
-    if shard is not None:
-        validate_shard(shard, batch_plan=plan)
-    _validate_simulation_results(plan, shard, simulations)
+    simulation_count = len(parameter_group_ids)
+    if simulation_count == 0 or len(rows_by_simulation) != simulation_count:
+        raise ValueError(
+            "parameter_group_ids and rows_by_simulation must have equal nonzero lengths"
+        )
+    if any(
+        not isinstance(group_id, str) or not group_id
+        for group_id in parameter_group_ids
+    ):
+        raise ValueError("parameter_group_ids must contain nonempty strings")
+    if not isinstance(family_id, PhysicalFamilyId):
+        raise TypeError("family_id must be a PhysicalFamilyId")
+    if not isinstance(dataset_split, DatasetSplit):
+        raise TypeError("dataset_split must be a DatasetSplit")
+    if simulation_count > np.iinfo(np.int32).max:
+        raise ValueError("simulation count exceeds the int32 shard capacity")
+
+    parts: dict[str, list[NDArray[Any]]] = {name: [] for name in _SHARD_DTYPES}
+    for local_index, rows in enumerate(rows_by_simulation):
+        if rows is None:
+            continue
+        with np.errstate(over="ignore", invalid="ignore"):
+            eta = np.asarray(rows.eta, dtype=np.float32)
+            xi = np.asarray(rows.xi, dtype=np.float32)
+            gxi = np.asarray(rows.gxi, dtype=np.float32)
+        if eta.ndim != 2:
+            raise ValueError("eta must have shape (row, space)")
+        row_count = eta.shape[0]
+        if row_count > np.iinfo(np.int32).max:
+            raise ValueError("frame count exceeds the int32 shard capacity")
+        shard = DatasetShardArrays(
+            eta=eta,
+            xi=xi,
+            gxi=gxi,
+            depth=np.full(row_count, float(rows.depth), dtype=np.float64),
+            time=np.asarray(rows.time, dtype=np.float64),
+            simulation_local_index=np.full(row_count, local_index, dtype=np.int32),
+            frame_index=np.arange(row_count, dtype=np.int32),
+        )
+        _validate_shard(shard, simulation_count)
+        for name in parts:
+            parts[name].append(shard[name])
 
     arrays: dict[str, NDArray[Any]] = {
-        name: np.asarray(value) for name, value in plan.items()
+        "family_id": np.asarray(int(family_id), dtype=np.int16),
+        "dataset_split": np.asarray(dataset_split.value),
+        "parameter_group_id": np.asarray(parameter_group_ids),
     }
-    if shard is not None:
-        arrays.update({name: np.asarray(value) for name, value in shard.items()})
-    arrays[_RESULTS_JSON] = np.asarray(
-        json_text([simulation.to_json_record() for simulation in simulations])
-    )
-    write_npz_atomic(path, arrays)
+    if parts["eta"]:
+        arrays.update({name: np.concatenate(values) for name, values in parts.items()})
+    write_npz_atomic(path, arrays, replace_existing=False)
 
 
 def load_completed_batch(path: Path) -> CompletedBatch:
     """Load and validate one completed batch artifact."""
 
     arrays = load_npz(path)
-    plan = cast(
-        BatchPlanArrays,
-        {name: arrays[name] for name in BATCH_PLAN_FIELDS if name in arrays},
+    unexpected = arrays.keys() - {
+        "family_id",
+        "dataset_split",
+        "parameter_group_id",
+        *_SHARD_FIELDS,
+    }
+    if unexpected:
+        raise ValueError(
+            f"completed batch contains unexpected arrays {sorted(unexpected)}"
+        )
+    missing_metadata = {"family_id", "dataset_split", "parameter_group_id"}.difference(
+        arrays
     )
-    validate_batch_plan(plan)
+    if missing_metadata:
+        raise ValueError(
+            f"completed batch is missing metadata arrays {sorted(missing_metadata)}"
+        )
+    family = arrays["family_id"]
+    if family.dtype != np.dtype(np.int16) or family.ndim != 0:
+        raise TypeError("family_id must be a scalar int16 array")
+    family_id = PhysicalFamilyId(int(family.item()))
 
-    present_shard_fields = arrays.keys() & SHARD_FIELDS
-    if present_shard_fields and present_shard_fields != SHARD_FIELDS:
-        missing = SHARD_FIELDS - present_shard_fields
+    split = arrays["dataset_split"]
+    if split.dtype.kind != "U" or split.ndim != 0:
+        raise TypeError("dataset_split must be a scalar string array")
+    dataset_split = DatasetSplit(str(split.item()))
+
+    groups = arrays["parameter_group_id"]
+    if groups.dtype.kind != "U" or groups.ndim != 1 or groups.size == 0:
+        raise TypeError("parameter_group_id must be a nonempty string array")
+    parameter_group_ids = tuple(map(str, groups))
+    if any(not group_id for group_id in parameter_group_ids):
+        raise ValueError("parameter_group_id entries must not be empty")
+
+    present_shard_fields = arrays.keys() & _SHARD_FIELDS
+    if present_shard_fields and present_shard_fields != _SHARD_FIELDS:
+        missing = _SHARD_FIELDS - present_shard_fields
         raise ValueError(f"completed batch is missing shard arrays {sorted(missing)}")
     shard = (
-        cast(DatasetShardArrays, {name: arrays[name] for name in SHARD_FIELDS})
+        cast(DatasetShardArrays, {name: arrays[name] for name in _SHARD_FIELDS})
         if present_shard_fields
         else None
     )
+    accepted_simulations = np.zeros(len(parameter_group_ids), dtype=np.bool_)
     if shard is not None:
-        validate_shard(shard, batch_plan=plan)
-
-    if _RESULTS_JSON not in arrays or arrays[_RESULTS_JSON].ndim != 0:
-        raise ValueError(f"completed batch requires scalar {_RESULTS_JSON}")
-    raw_results = parse_json(str(arrays[_RESULTS_JSON].item()))
-    if not isinstance(raw_results, list):
-        raise ValueError("simulation_results_json must encode a list")
-    simulations = tuple(parse_simulation_result(value) for value in raw_results)
-    _validate_simulation_results(plan, shard, simulations)
+        row_blocks = _validate_shard(shard, len(parameter_group_ids))
+        accepted_simulations[list(row_blocks)] = True
 
     return CompletedBatch(
-        plan=plan,
-        shard=shard,
-        simulations=simulations,
+        family_id,
+        dataset_split,
+        parameter_group_ids,
+        accepted_simulations,
+        shard,
     )
