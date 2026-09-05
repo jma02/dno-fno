@@ -83,20 +83,20 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 @app.function(volumes={VOLUME_MOUNT: volume}, timeout=600)
-def status() -> dict:
+def status() -> dict[str, list[str]]:
     """List dataset and run files currently on the volume."""
     import json
     import os
 
-    summary: dict[str, list[str]] = {"datasets": [], "runs": []}
-    for name in sorted(os.listdir(VOLUME_MOUNT)):
-        if name.endswith(".npz") or name.endswith(".meta.json"):
-            sz = os.path.getsize(f"{VOLUME_MOUNT}/{name}") / 1e9
-            summary["datasets"].append(f"{name}  ({sz:.2f} GB)")
     out_dir = f"{VOLUME_MOUNT}/outputs"
-    if os.path.isdir(out_dir):
-        for name in sorted(os.listdir(out_dir)):
-            summary["runs"].append(name)
+    summary = {
+        "datasets": [
+            f"{name}  ({os.path.getsize(f'{VOLUME_MOUNT}/{name}') / 1e9:.2f} GB)"
+            for name in sorted(os.listdir(VOLUME_MOUNT))
+            if name.endswith((".npz", ".meta.json"))
+        ],
+        "runs": sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else [],
+    }
     print(json.dumps(summary, indent=2))
     return summary
 
@@ -111,11 +111,11 @@ def upload_data(
     npz = src / train_dataset
     if not npz.exists():
         raise FileNotFoundError(f"missing local file: {npz}")
-    targets = [(npz, f"/{train_dataset}")]
-    for suffix in (".meta.json", ".stats.json"):
-        sidecar = npz.with_suffix(suffix)
-        if sidecar.exists():
-            targets.append((sidecar, f"/{sidecar.name}"))
+    targets = [(npz, f"/{train_dataset}")] + [
+        (sidecar, f"/{sidecar.name}")
+        for sidecar in (npz.with_suffix(".meta.json"), npz.with_suffix(".stats.json"))
+        if sidecar.exists()
+    ]
 
     total = sum(p.stat().st_size for p, _ in targets) / 1e9
     print(f"Uploading {len(targets)} files ({total:.2f} GB) -> volume {VOLUME_NAME!r}")
@@ -159,15 +159,9 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
         raise ValueError("dataset view contains duplicate upload targets")
 
     repo_root = REPO_ROOT.resolve()
-    relative_targets: list[tuple[Path, str]] = []
-    for path in targets:
-        try:
-            relative = path.relative_to(repo_root)
-        except ValueError as exc:
-            raise ValueError(
-                f"dataset-view file is outside repository: {path}"
-            ) from exc
-        relative_targets.append((path, f"/{relative.as_posix()}"))
+    relative_targets = [
+        (path, f"/{path.relative_to(repo_root).as_posix()}") for path in targets
+    ]
 
     total_bytes = sum(path.stat().st_size for path, _ in relative_targets)
     print(
@@ -215,7 +209,7 @@ def run_training(
     cs_mult_hidden: int,
     total_epochs: int,
     trainer_args: str,
-) -> dict:
+) -> dict[str, object]:
     import json
     import os
     import shlex
@@ -247,35 +241,25 @@ def run_training(
         if repo_path not in sys.path:
             sys.path.insert(0, repo_path)
 
+    options = {
+        "dataset": dataset,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "width": width,
+        "n_blocks": n_blocks,
+        "norm": norm,
+        "model": model_kind,
+        "seed": seed,
+        "run_name": run_name,
+        "latent": latent,
+        "cs_mult_hidden": cs_mult_hidden,
+    }
     cmd = [
         sys.executable,
         "/repo/train-jax-10m/1d_dno_fno_jax.py",
-        "--dataset",
-        dataset,
-        "--epochs",
-        str(epochs),
-        "--batch_size",
-        str(batch_size),
-        "--lr",
-        str(lr),
-        "--weight_decay",
-        str(weight_decay),
-        "--width",
-        str(width),
-        "--n_blocks",
-        str(n_blocks),
-        "--norm",
-        norm,
-        "--model",
-        model_kind,
-        "--seed",
-        str(seed),
-        "--run_name",
-        run_name,
-        "--latent",
-        str(latent),
-        "--cs_mult_hidden",
-        str(cs_mult_hidden),
+        *(part for key, value in options.items() for part in (f"--{key}", str(value))),
     ]
     if model_kind == "fno":
         cmd.extend(["--modes", str(modes)])
