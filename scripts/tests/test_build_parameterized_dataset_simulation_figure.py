@@ -1,182 +1,133 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
-from scripts.build_parameterized_dataset_simulation_figure import (
-    CENTRAL_VALIDATION_CATEGORIES,
-    FAMILY_ORDER,
-    DimensionlessProfile,
-    Illustration,
-    SelectedTrajectory,
-    SourceDetails,
-    dimensionless_profile,
-    load_source_details,
-    publish_outputs,
-    select_validation_trajectories,
-)
-from scripts.render_paper_dataset_worst_simulations import (
-    CombinedSummaryBinding,
-    DatasetSource,
-    TrajectoryIndex,
+from scripts import build_parameterized_dataset_simulation_figure as illustration
+from scripts import render_paper_dataset_worst_simulations as renderer
+from scripts.tests.test_render_paper_dataset_worst_simulations import (
+    _write_json,
+    _write_source,
 )
 
 
-def _source(family: str, root: Path) -> DatasetSource:
-    return DatasetSource(
-        root=root,
-        family=family,
-        split="validation",
-        summary_path=root / f"paper_dataset_{family}_validation.summary.json",
-        manifest_path=root / "dataset.json",
-        map_path=root / "map.npz",
-        shard_paths={0: root / "shard.npz"},
-        trajectories=tuple(
-            TrajectoryIndex(
-                accepted_index=index,
-                trajectory_index=index,
-                simulation_id=simulation_id,
-                category=CENTRAL_VALIDATION_CATEGORIES[family],
-                shard_index=0,
-                first_shard_row=index,
-                row_count=1,
-            )
-            for index, simulation_id in enumerate((30, 10, 20, 40))
-        ),
+def _combined_sources(root: Path) -> Path:
+    summaries = [
+        _write_source(
+            root / family,
+            family,
+            1,
+            simulation_ids=(30, 10, 20, 40),
+            category=illustration.CENTRAL_VALIDATION_CATEGORIES[family],
+        )
+        for family in illustration.FAMILY_ORDER
+    ]
+    combined = root / "combined.summary.json"
+    _write_json(
+        combined,
+        {
+            "status": "complete",
+            "run_summaries": list(map(str, summaries)),
+            "accepted_simulations": 16,
+            "rows": 16,
+        },
     )
-
-
-def _details(family: str, root: Path) -> SourceDetails:
-    return SourceDetails(
-        source=_source(family, root),
-        length=2.0 * np.pi,
-        gravity=9.81,
-        stored_nx=4,
-    )
+    return combined
 
 
 class ParameterizedDatasetFigureTest(unittest.TestCase):
-    def test_loads_scales_from_current_manifest_without_summary_configuration(
-        self,
-    ) -> None:
+    def test_cli_selects_lower_medians_and_plots_dimensionless_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for family_id, family in enumerate(FAMILY_ORDER, start=1):
-                with self.subTest(family=family):
-                    source = _source(family, root)
-                    source.summary_path.write_text(
-                        json.dumps(
-                            {
-                                "run_spec": {
-                                    "family_name": family,
-                                    "dataset_split": "validation",
-                                },
-                                "dataset_view": {
-                                    "manifest": source.manifest_path.name,
-                                    "trajectory_map": source.map_path.name,
-                                },
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
-                    source.manifest_path.write_text(
-                        json.dumps({"grid": {"length": 2.0 * np.pi, "nx": 4}}),
-                        encoding="utf-8",
-                    )
-                    np.savez(
-                        source.map_path,
-                        trajectory_accepted=np.asarray([True]),
-                        trajectory_family_id=np.asarray([family_id]),
-                        trajectory_dataset_split=np.asarray(["validation"]),
-                    )
-
-                    details = load_source_details(source)
-
-                    self.assertEqual(details.length, 2.0 * np.pi)
-                    self.assertEqual(details.stored_nx, 4)
-                    self.assertEqual(details.gravity, 1.0)
-
-    def test_dimensionless_profile(self) -> None:
-        profile = dimensionless_profile(
-            np.asarray([0.0, 1.0, 2.0, 3.0]),
-            np.asarray([2.0, 4.0, 6.0, 8.0]),
-            depth=2.0,
-            gravity=4.0,
-        )
-        np.testing.assert_allclose(profile.x_over_length, [0.0, 0.25, 0.5, 0.75])
-        np.testing.assert_allclose(profile.eta_over_depth, [0.0, 0.5, 1.0, 1.5])
-        np.testing.assert_allclose(
-            profile.xi_over_depth_speed,
-            np.asarray([2.0, 4.0, 6.0, 8.0]) / (2.0 * np.sqrt(8.0)),
-        )
-
-    def test_selects_lower_median_simulation_id_per_family(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            selected = select_validation_trajectories(
-                tuple(_details(family, root / family) for family in FAMILY_ORDER)
-            )
-        self.assertEqual(
-            tuple(item.trajectory.simulation_id for item in selected), (20,) * 4
-        )
-        self.assertEqual(tuple(item.lower_median_index for item in selected), (1,) * 4)
-        self.assertEqual(tuple(item.candidate_count for item in selected), (4,) * 4)
-
-    def test_published_sidecar_records_simulations_without_file_digests(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            illustrations: list[Illustration] = []
-            for family in FAMILY_ORDER:
-                details = _details(family, root / family)
-                selected = SelectedTrajectory(
-                    details=details,
-                    trajectory=details.source.trajectories[0],
-                    candidate_count=4,
-                    lower_median_index=1,
-                )
-                values = np.linspace(-1.0, 1.0, 4)
-                illustrations.append(
-                    Illustration(
-                        selected=selected,
-                        eta=values,
-                        xi=-values,
-                        depth=1.0,
-                        time=0.0,
-                        frame_index=0,
-                        profile=DimensionlessProfile(
-                            x_over_length=np.arange(4) / 4,
-                            eta_over_depth=values,
-                            xi_over_depth_speed=-values,
-                        ),
-                    )
-                )
-            summary_path = root / "combined.summary.json"
-            summary_path.write_text("{}\n", encoding="utf-8")
-            binding = CombinedSummaryBinding(
-                path=summary_path,
-                source_summary_paths=(),
-                expected_source_count=0,
-                expected_accepted_simulations=0,
-                expected_retained_rows=0,
-            )
-            pdf, png, sidecar = publish_outputs(
-                illustrations,
-                output_stem=root / "figure",
-                binding=binding,
-            )
-            record = json.loads(sidecar.read_text(encoding="utf-8"))
-
-            self.assertTrue(pdf.is_file())
-            self.assertTrue(png.is_file())
+            combined = _combined_sources(root)
+            with (
+                mock.patch(
+                    "sys.argv",
+                    [
+                        illustration.__file__,
+                        "--combined-summary",
+                        str(combined),
+                        "--output-stem",
+                        str(root / "figure"),
+                    ],
+                ),
+                # Population validation has separate tests; this fixture has four small sources.
+                mock.patch.object(renderer, "validate_final_paper_dataset"),
+                redirect_stdout(io.StringIO()),
+            ):
+                state = runpy.run_path(illustration.__file__, run_name="__main__")
+            record = json.loads((root / "figure.json").read_text())
+            self.assertTrue((root / "figure.pdf").is_file())
+            self.assertTrue((root / "figure.png").is_file())
             self.assertEqual(
                 [simulation["family"] for simulation in record["simulations"]],
-                list(FAMILY_ORDER),
+                list(illustration.FAMILY_ORDER),
             )
-            self.assertEqual(set(record["artifacts"]), {"pdf", "png"})
+            for row, simulation in enumerate(record["simulations"]):
+                self.assertEqual(simulation["simulation_id"], 20)
+                self.assertEqual(simulation["selection"]["candidate_count"], 4)
+                self.assertEqual(
+                    simulation["selection"]["lower_median_index_zero_based"], 1
+                )
+                self.assertEqual(simulation["gravity"], 1.0)
+                self.assertEqual(simulation["domain_length"], 2.0 * np.pi)
+                self.assertEqual(simulation["stored_nx"], 256)
+                self.assertEqual(simulation["owned_row"]["shard_row"], 2)
+                with np.load(root / simulation["family"] / "shard.npz") as archive:
+                    eta = np.asarray(archive["eta"][2], dtype=np.float64)
+                    xi = np.asarray(archive["xi"][2], dtype=np.float64)
+                elevation = state["axes"][row, 0].lines[0]
+                potential = state["axes"][row, 1].lines[0]
+                np.testing.assert_array_equal(
+                    elevation.get_xdata(), np.arange(256) / 256
+                )
+                np.testing.assert_array_equal(elevation.get_ydata(), eta / 8.0)
+                np.testing.assert_array_equal(
+                    potential.get_ydata(), xi / (8.0 * np.sqrt(8.0))
+                )
+            for artifact in record["artifacts"].values():
+                self.assertEqual(
+                    Path(artifact["path"]).stat().st_size, artifact["bytes"]
+                )
+            self.assertFalse(tuple(root.glob(".figure.staging-*")))
+
+    def test_invalid_first_frame_does_not_publish_or_replace_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            combined = _combined_sources(root)
+            mapping = root / "tanaka" / "map.npz"
+            with np.load(mapping) as archive:
+                arrays = {name: archive[name] for name in archive.files}
+            np.savez(mapping, **{**arrays, "frame_index": np.ones(4, dtype=np.int32)})
+            for suffix in (".pdf", ".png", ".json"):
+                (root / f"figure{suffix}").write_bytes(b"existing")
+            with (
+                mock.patch(
+                    "sys.argv",
+                    [
+                        illustration.__file__,
+                        "--combined-summary",
+                        str(combined),
+                        "--output-stem",
+                        str(root / "figure"),
+                    ],
+                ),
+                mock.patch.object(renderer, "validate_final_paper_dataset"),
+                self.assertRaisesRegex(ValueError, "not frame zero"),
+            ):
+                runpy.run_path(illustration.__file__, run_name="__main__")
+            for suffix in (".pdf", ".png", ".json"):
+                self.assertEqual((root / f"figure{suffix}").read_bytes(), b"existing")
+            self.assertFalse(tuple(root.glob(".figure.staging-*")))
+            self.assertEqual(illustration.plt.get_fignums(), [])
 
 
 if __name__ == "__main__":

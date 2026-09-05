@@ -9,15 +9,13 @@ amplitude-thresholded count of spatial oscillations in ``G(eta)xi``.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import matplotlib
 import numpy as np
@@ -106,83 +104,88 @@ DEFINITIONS: Final = {
 }
 
 
-@dataclass(frozen=True)
-class TrajectoryIndex:
-    """Location of one accepted trajectory in a dataset shard."""
-
-    accepted_index: int
-    trajectory_index: int
-    simulation_id: int
-    category: str
-    shard_index: int
-    first_shard_row: int
-    row_count: int
-
-
-@dataclass(frozen=True)
-class DatasetSource:
-    """One completed family/split generation run."""
-
-    root: Path
-    family: str
-    split: str
-    summary_path: Path
-    manifest_path: Path
-    map_path: Path
-    shard_paths: dict[int, Path]
-    trajectories: tuple[TrajectoryIndex, ...]
+TrajectoryIndex = NamedTuple(
+    "TrajectoryIndex",
+    [
+        ("accepted_index", int),
+        ("trajectory_index", int),
+        ("simulation_id", int),
+        ("category", str),
+        ("shard_index", int),
+        ("first_shard_row", int),
+        ("row_count", int),
+    ],
+)
 
 
-@dataclass(frozen=True)
-class CombinedSummaryBinding:
-    """Generation runs recorded by one completed combined view."""
-
-    path: Path
-    source_summary_paths: tuple[Path, ...]
-    expected_source_count: int
-    expected_accepted_simulations: int
-    expected_retained_rows: int
-
-
-@dataclass(frozen=True)
-class SimulationMetrics:
-    """Whole-trajectory diagnostic maxima for one accepted simulation."""
-
-    source_index: int
-    accepted_index: int
-    trajectory_index: int
-    family: str
-    split: str
-    simulation_id: int
-    category: str
-    shard_index: int
-    first_shard_row: int
-    row_count: int
-    depth: float
-    all_frames_finite: bool
-    constant_depth: bool
-    ordered_time: bool
-    minimum_water_column: float
-    minimum_water_fraction: float
-    maximum_eta_slope: float
-    maximum_eta_slope_frame: int
-    maximum_gxi_high_band_fraction: float
-    maximum_gxi_high_band_fraction_frame: int
-    maximum_thresholded_gxi_sign_changes: int
-    maximum_thresholded_gxi_sign_changes_frame: int
-    maximum_relative_stored_band_quadratic_energy_drift: float
-    maximum_relative_stored_band_quadratic_energy_drift_frame: int
+DatasetSource = NamedTuple(
+    "DatasetSource",
+    [
+        ("root", Path),
+        ("family", str),
+        ("split", str),
+        ("summary_path", Path),
+        ("manifest_path", Path),
+        ("map_path", Path),
+        ("shard_paths", dict[int, Path]),
+        ("trajectories", tuple[TrajectoryIndex, ...]),
+    ],
+)
 
 
-@dataclass(frozen=True)
-class LoadedTrajectory:
-    """Stored fields for a selected accepted trajectory."""
+CombinedSummaryBinding = NamedTuple(
+    "CombinedSummaryBinding",
+    [
+        ("path", Path),
+        ("source_summary_paths", tuple[Path, ...]),
+        ("expected_source_count", int),
+        ("expected_accepted_simulations", int),
+        ("expected_retained_rows", int),
+    ],
+)
 
-    eta: np.ndarray
-    xi: np.ndarray
-    gxi: np.ndarray
-    depth: np.ndarray
-    time: np.ndarray
+
+SimulationMetrics = NamedTuple(
+    "SimulationMetrics",
+    [
+        ("source_index", int),
+        ("accepted_index", int),
+        ("trajectory_index", int),
+        ("family", str),
+        ("split", str),
+        ("simulation_id", int),
+        ("category", str),
+        ("shard_index", int),
+        ("first_shard_row", int),
+        ("row_count", int),
+        ("depth", float),
+        ("all_frames_finite", bool),
+        ("constant_depth", bool),
+        ("ordered_time", bool),
+        ("minimum_water_column", float),
+        ("minimum_water_fraction", float),
+        ("maximum_eta_slope", float),
+        ("maximum_eta_slope_frame", int),
+        ("maximum_gxi_high_band_fraction", float),
+        ("maximum_gxi_high_band_fraction_frame", int),
+        ("maximum_thresholded_gxi_sign_changes", int),
+        ("maximum_thresholded_gxi_sign_changes_frame", int),
+        ("maximum_relative_stored_band_quadratic_energy_drift", float),
+        ("maximum_relative_stored_band_quadratic_energy_drift_frame", int),
+    ],
+)
+
+
+LoadedTrajectory = NamedTuple(
+    "LoadedTrajectory",
+    [
+        ("eta", np.ndarray),
+        ("xi", np.ndarray),
+        ("gxi", np.ndarray),
+        ("depth", np.ndarray),
+        ("time", np.ndarray),
+    ],
+)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -294,21 +297,26 @@ def validate_scanned_population(
         )
 
 
-def validate_final_paper_dataset_counts(
+def validate_final_paper_dataset(
+    sources: Sequence[DatasetSource],
     *,
-    source_count: int,
-    family_split_accepted_simulations: Mapping[tuple[str, str], int],
-    accepted_simulations: int,
     retained_rows: int,
 ) -> None:
-    """Require the exact, independently recovered paper release population."""
+    """Require the paper release counts recovered from source trajectory maps."""
 
+    source_count = len(sources)
+    observed_family_split_counts: dict[tuple[str, str], int] = {}
+    for source in sources:
+        key = (source.family, source.split)
+        observed_family_split_counts[key] = observed_family_split_counts.get(
+            key, 0
+        ) + len(source.trajectories)
+    accepted_simulations = sum(observed_family_split_counts.values())
     expected_family_split_counts = {
         (family, split): split_count
         for family in FAMILY_LABELS
         for split, split_count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS.items()
     }
-    observed_family_split_counts = dict(family_split_accepted_simulations)
     mismatches: list[str] = []
     if source_count != FINAL_PAPER_DATASET_SOURCE_COUNT:
         mismatches.append(
@@ -336,81 +344,6 @@ def validate_final_paper_dataset_counts(
         )
 
 
-def validate_final_paper_dataset(
-    sources: Sequence[DatasetSource],
-    *,
-    retained_rows: int,
-) -> None:
-    """Recover final contract counts from source trajectory maps."""
-
-    family_split_counts: dict[tuple[str, str], int] = {}
-    for source in sources:
-        key = (source.family, source.split)
-        family_split_counts[key] = family_split_counts.get(key, 0) + len(
-            source.trajectories
-        )
-    validate_final_paper_dataset_counts(
-        source_count=len(sources),
-        family_split_accepted_simulations=family_split_counts,
-        accepted_simulations=sum(family_split_counts.values()),
-        retained_rows=retained_rows,
-    )
-
-
-@contextmanager
-def atomic_output_directory(requested: Path) -> Iterator[tuple[Path, Path]]:
-    """Yield an owned sibling staging directory, then atomically publish it."""
-
-    final_path = requested.expanduser().resolve()
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    if final_path.exists() or final_path.is_symlink():
-        raise FileExistsError(f"output path already exists: {final_path}")
-    staging_path = Path(
-        tempfile.mkdtemp(
-            prefix=f".{final_path.name}.staging-",
-            dir=final_path.parent,
-        )
-    )
-    committed = False
-    try:
-        yield staging_path, final_path
-        if final_path.exists() or final_path.is_symlink():
-            raise FileExistsError(
-                f"output path appeared during rendering: {final_path}"
-            )
-        staging_path.rename(final_path)
-        committed = True
-    finally:
-        if not committed:
-            shutil.rmtree(staging_path, ignore_errors=True)
-
-
-def _write_diagnostic_summary(path: Path, record: Mapping[str, Any]) -> None:
-    """Write only a complete top-level diagnostic summary."""
-
-    if record.get("status") != "complete":
-        raise ValueError("diagnostic summary status must be complete")
-    path.write_text(
-        json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _artifact_record(
-    path: Path,
-    *,
-    staging_output_dir: Path,
-    published_output_dir: Path,
-) -> dict[str, object]:
-    """Describe staged bytes at the path they will have after publication."""
-
-    relative_path = path.resolve().relative_to(staging_output_dir.resolve())
-    return {
-        "path": str((published_output_dir / relative_path).resolve()),
-        "bytes": path.stat().st_size,
-    }
-
-
 def _artifact_path(root: Path, value: object, *, context: str) -> Path:
     """Resolve one named source artifact without allowing root escape."""
 
@@ -420,55 +353,6 @@ def _artifact_path(root: Path, value: object, *, context: str) -> Path:
     if not path.is_relative_to(root):
         raise ValueError(f"{context} path escapes its source root")
     return path
-
-
-def _trajectory_indices(
-    map_path: Path,
-) -> tuple[TrajectoryIndex, ...]:
-    with np.load(map_path, allow_pickle=False) as archive:
-        accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
-        simulation_ids = np.asarray(
-            archive["trajectory_simulation_id"],
-            dtype=np.int64,
-        )
-        parameter_group_ids = np.asarray(archive["trajectory_parameter_group_id"])
-        first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
-        row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
-        row_trajectories = np.asarray(archive["trajectory_index"], dtype=np.int32)
-        row_shards = np.asarray(archive["shard_index"], dtype=np.int32)
-        shard_rows = np.asarray(archive["shard_row"], dtype=np.int64)
-
-    records: list[TrajectoryIndex] = []
-    for accepted_index, trajectory_index_value in enumerate(np.flatnonzero(accepted)):
-        trajectory_index = int(trajectory_index_value)
-        first = int(first_rows[trajectory_index])
-        count = int(row_counts[trajectory_index])
-        if count < 1:
-            raise RuntimeError(f"accepted trajectory {trajectory_index} has no rows")
-        positions = slice(first, first + count)
-        if not np.all(row_trajectories[positions] == trajectory_index):
-            raise RuntimeError("trajectory-map rows are not contiguous")
-        shards = np.unique(row_shards[positions])
-        if shards.size != 1:
-            raise RuntimeError("one accepted trajectory crosses shard boundaries")
-        local_rows = shard_rows[positions]
-        if not np.array_equal(
-            local_rows,
-            np.arange(local_rows[0], local_rows[0] + count),
-        ):
-            raise RuntimeError("trajectory rows are not contiguous in its shard")
-        records.append(
-            TrajectoryIndex(
-                accepted_index=accepted_index,
-                trajectory_index=trajectory_index,
-                simulation_id=int(simulation_ids[trajectory_index]),
-                category=str(parameter_group_ids[trajectory_index]),
-                shard_index=int(shards[0]),
-                first_shard_row=int(local_rows[0]),
-                row_count=count,
-            )
-        )
-    return tuple(records)
 
 
 def load_source_summary(summary_path: Path) -> DatasetSource:
@@ -530,7 +414,45 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
         )
         shard_paths[shard_index] = shard_path
 
-    trajectories = _trajectory_indices(map_path)
+    with np.load(map_path, allow_pickle=False) as archive:
+        accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
+        simulation_ids = np.asarray(archive["trajectory_simulation_id"], dtype=np.int64)
+        parameter_group_ids = np.asarray(archive["trajectory_parameter_group_id"])
+        first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
+        row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
+        row_trajectories = np.asarray(archive["trajectory_index"], dtype=np.int32)
+        row_shards = np.asarray(archive["shard_index"], dtype=np.int32)
+        shard_rows = np.asarray(archive["shard_row"], dtype=np.int64)
+    records: list[TrajectoryIndex] = []
+    for accepted_index, trajectory_index_value in enumerate(np.flatnonzero(accepted)):
+        trajectory_index = int(trajectory_index_value)
+        first = int(first_rows[trajectory_index])
+        count = int(row_counts[trajectory_index])
+        if count < 1:
+            raise RuntimeError(f"accepted trajectory {trajectory_index} has no rows")
+        positions = slice(first, first + count)
+        if not np.all(row_trajectories[positions] == trajectory_index):
+            raise RuntimeError("trajectory-map rows are not contiguous")
+        shards = np.unique(row_shards[positions])
+        if shards.size != 1:
+            raise RuntimeError("one accepted trajectory crosses shard boundaries")
+        local_rows = shard_rows[positions]
+        if not np.array_equal(
+            local_rows, np.arange(local_rows[0], local_rows[0] + count)
+        ):
+            raise RuntimeError("trajectory rows are not contiguous in its shard")
+        records.append(
+            TrajectoryIndex(
+                accepted_index=accepted_index,
+                trajectory_index=trajectory_index,
+                simulation_id=int(simulation_ids[trajectory_index]),
+                category=str(parameter_group_ids[trajectory_index]),
+                shard_index=int(shards[0]),
+                first_shard_row=int(local_rows[0]),
+                row_count=count,
+            )
+        )
+    trajectories = tuple(records)
     if len(trajectories) != int(manifest["n_accepted_trajectories"]):
         raise RuntimeError(f"accepted trajectory count mismatch in {resolved}")
     if sum(value.row_count for value in trajectories) != int(
@@ -555,14 +477,11 @@ def _argmax(values: np.ndarray) -> tuple[float, int]:
 
 
 def _audit_shard(
-    source_index: int,
-    family: str,
-    split: str,
-    shard_index: int,
-    shard_path: Path,
-    trajectories: tuple[TrajectoryIndex, ...],
-    block_rows: int,
+    task: tuple[int, str, str, int, Path, tuple[TrajectoryIndex, ...], int],
 ) -> tuple[SimulationMetrics, ...]:
+    source_index, family, split, shard_index, shard_path, trajectories, block_rows = (
+        task
+    )
     with np.load(shard_path, allow_pickle=False) as archive:
         eta = np.asarray(archive["eta"])
         xi = np.asarray(archive["xi"])
@@ -716,20 +635,6 @@ def _audit_shard(
     return tuple(records)
 
 
-def _audit_task(
-    values: tuple[
-        int,
-        str,
-        str,
-        int,
-        Path,
-        tuple[TrajectoryIndex, ...],
-        int,
-    ],
-) -> tuple[SimulationMetrics, ...]:
-    return _audit_shard(*values)
-
-
 def _descending_indices(values: np.ndarray, count: int) -> tuple[int, ...]:
     return tuple(
         map(
@@ -853,192 +758,6 @@ def _plot_simulations(
     return png_path, pdf_path
 
 
-def animation_frame_indices(
-    stored_frames: int,
-    maximum_frames: int = GIF_MAXIMUM_FRAMES,
-) -> np.ndarray:
-    """Return inclusive, monotonically increasing stored-frame indices."""
-
-    if stored_frames < 1 or maximum_frames < 1:
-        raise ValueError("stored_frames and maximum_frames must be positive")
-    count = min(stored_frames, maximum_frames)
-    if count == 1:
-        return np.asarray([0], dtype=np.int32)
-    indices = np.rint(np.linspace(0, stored_frames - 1, count)).astype(np.int32)
-    if np.unique(indices).size != count:
-        raise RuntimeError("animation frame selection contains duplicates")
-    return indices
-
-
-def padded_animation_limits(values: np.ndarray) -> tuple[float, float]:
-    """Return finite nondegenerate limits over every stored frame."""
-
-    if values.size == 0 or not np.all(np.isfinite(values)):
-        raise ValueError("animation limits require finite nonempty values")
-    lower = float(np.min(values))
-    upper = float(np.max(values))
-    span = upper - lower
-    padding = (
-        GIF_Y_LIMIT_PADDING_FRACTION * span
-        if span > 0.0
-        else GIF_Y_LIMIT_PADDING_FRACTION * max(abs(lower), 1.0)
-    )
-    return lower - padding, upper + padding
-
-
-def animation_record(trajectory: LoadedTrajectory) -> dict[str, object]:
-    """Describe the deterministic rank-one animation for one trajectory."""
-
-    frame_indices = animation_frame_indices(int(trajectory.time.size))
-    fps = (
-        GIF_SHORT_FPS
-        if frame_indices.size <= GIF_SHORT_FRAME_THRESHOLD
-        else GIF_LONG_FPS
-    )
-    return {
-        "stored_frames": int(trajectory.time.size),
-        "frame_indices": frame_indices.tolist(),
-        "first_time": float(trajectory.time[0]),
-        "last_time": float(trajectory.time[-1]),
-        "fps": fps,
-        "dimensions_pixels": list(GIF_DIMENSIONS),
-        "field_y_limits": {
-            name: list(padded_animation_limits(field))
-            for name, field in zip(
-                FIELD_NAMES,
-                (trajectory.eta, trajectory.xi, trajectory.gxi),
-            )
-        },
-    }
-
-
-def _draw_animation_frame(
-    *,
-    lines: Sequence[Any],
-    fields: Sequence[np.ndarray],
-    time_text: Any,
-    time: np.ndarray,
-    frame_index: int,
-) -> tuple[Any, ...]:
-    for line, field in zip(lines, fields):
-        line.set_ydata(field[frame_index])
-    time_text.set_text(rf"$t={time[frame_index]:.2f}$")
-    return (*lines, time_text)
-
-
-def _render_rank_one_gif(
-    simulation: SimulationMetrics,
-    trajectory: LoadedTrajectory,
-    title: str,
-    output_path: Path,
-) -> tuple[Path, dict[str, object]]:
-    """Render and decode-check one fixed-axis accepted-trajectory GIF."""
-
-    record = animation_record(trajectory)
-    frame_indices = np.asarray(record["frame_indices"], dtype=np.int32)
-    fps = (
-        GIF_SHORT_FPS
-        if frame_indices.size <= GIF_SHORT_FRAME_THRESHOLD
-        else GIF_LONG_FPS
-    )
-    fields = (trajectory.eta, trajectory.xi, trajectory.gxi)
-    x = np.linspace(0.0, 2.0 * np.pi, trajectory.eta.shape[1], endpoint=False)
-    figure, axes = plt.subplots(
-        1,
-        len(fields),
-        figsize=(12.5, 3.6),
-        constrained_layout=True,
-    )
-    lines = []
-    try:
-        limits = record["field_y_limits"]
-        if not isinstance(limits, Mapping):
-            raise TypeError("animation field limits are not a mapping")
-        for axis, name, field, field_title in zip(
-            axes,
-            FIELD_NAMES,
-            fields,
-            FIELD_TITLES,
-        ):
-            (line,) = axis.plot(
-                x,
-                field[frame_indices[0]],
-                color="#2563eb",
-                linewidth=1.4,
-            )
-            axis.set_xlim(0.0, 2.0 * np.pi)
-            axis.set_ylim(*limits[name])
-            axis.set_xticks((0.0, np.pi, 2.0 * np.pi))
-            axis.set_xticklabels(("0", r"$\pi$", r"$2\pi$"))
-            axis.set_xlabel(r"$x$")
-            axis.set_title(field_title)
-            axis.grid(alpha=0.2, linewidth=0.5)
-            lines.append(line)
-        figure.suptitle(
-            f"{title}   "
-            rf"($h={simulation.depth:.3g}$, simulation {simulation.simulation_id})",
-            fontsize=12,
-        )
-        time_text = figure.text(
-            0.5,
-            0.92,
-            "",
-            ha="center",
-            va="center",
-            fontsize=11,
-        )
-
-        def update(animation_index: int) -> tuple[Any, ...]:
-            return _draw_animation_frame(
-                lines=lines,
-                fields=fields,
-                time_text=time_text,
-                time=trajectory.time,
-                frame_index=int(frame_indices[animation_index]),
-            )
-
-        if frame_indices.size == 1:
-            update(0)
-            writer = PillowWriter(fps=fps)
-            writer.setup(figure, output_path, dpi=100)
-            writer.grab_frame()
-            writer.finish()
-        else:
-            animation = FuncAnimation(
-                figure,
-                update,
-                frames=frame_indices.size,
-                interval=1_000.0 / fps,
-                blit=False,
-                repeat=True,
-            )
-            animation.save(
-                output_path,
-                writer=PillowWriter(fps=fps),
-                dpi=100,
-            )
-    finally:
-        plt.close(figure)
-
-    with Image.open(output_path) as image:
-        expected_duration = 250 if record["fps"] == GIF_SHORT_FPS else 80
-        if (
-            image.format != "GIF"
-            or tuple(map(int, image.size)) != GIF_DIMENSIONS
-            or int(getattr(image, "n_frames", 1)) != frame_indices.size
-            or image.info.get("loop") != 0
-        ):
-            raise RuntimeError(f"rendered GIF contract differs: {output_path}")
-        for index in range(frame_indices.size):
-            image.seek(index)
-            image.load()
-            if image.info.get("duration") != expected_duration:
-                raise RuntimeError(
-                    f"rendered GIF frame duration differs: {output_path}"
-                )
-    return output_path, record
-
-
 def _quantiles(values: np.ndarray) -> dict[str, float]:
     return {
         f"q{int(round(100.0 * quantile)):03d}": float(np.quantile(values, quantile))
@@ -1122,12 +841,16 @@ if __name__ == "__main__":
             retained_rows=retained_rows_from_maps,
         )
 
-    with atomic_output_directory(args.output_dir) as (
-        staging_output_dir,
-        final_output_dir,
-    ):
-        output_dir = staging_output_dir
-        published_output_dir = final_output_dir
+    final_output_dir = args.output_dir.expanduser().resolve()
+    final_output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if final_output_dir.exists() or final_output_dir.is_symlink():
+        raise FileExistsError(f"output path already exists: {final_output_dir}")
+    output_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{final_output_dir.name}.staging-", dir=final_output_dir.parent
+        )
+    )
+    try:
         tasks = []
         for source_index, source in enumerate(sources):
             by_shard: dict[int, list[TrajectoryIndex]] = {}
@@ -1147,7 +870,7 @@ if __name__ == "__main__":
             )
 
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            simulation_groups = tuple(pool.map(_audit_task, tasks))
+            simulation_groups = tuple(pool.map(_audit_shard, tasks))
         simulations = tuple(
             simulation for group in simulation_groups for simulation in group
         )
@@ -1277,7 +1000,7 @@ if __name__ == "__main__":
                 "rankings": {
                     name: [
                         {
-                            **asdict(family_simulations[index]),
+                            **family_simulations[index]._asdict(),
                             "source_root": str(
                                 sources[family_simulations[index].source_index].root
                             ),
@@ -1379,14 +1102,143 @@ if __name__ == "__main__":
                     )
                 )
                 top_simulation = selected[0]
-                gif_path, animation = _render_rank_one_gif(
-                    top_simulation,
-                    loaded[_simulation_key(top_simulation)],
-                    (
-                        f"{family_label}: rank-one accepted simulation by the {metric_label}"
-                    ),
-                    output_dir / f"{family}_worst_{ranking_name}.gif",
+                loaded_trajectory = loaded[_simulation_key(top_simulation)]
+                title = f"{family_label}: rank-one accepted simulation by the {metric_label}"
+                gif_path = output_dir / f"{family}_worst_{ranking_name}.gif"
+                stored_frames = int(loaded_trajectory.time.size)
+                if stored_frames < 1:
+                    raise ValueError("animation requires at least one stored frame")
+                frame_indices = np.rint(
+                    np.linspace(
+                        0, stored_frames - 1, min(stored_frames, GIF_MAXIMUM_FRAMES)
+                    )
+                ).astype(np.int32)
+                fps = (
+                    GIF_SHORT_FPS
+                    if frame_indices.size <= GIF_SHORT_FRAME_THRESHOLD
+                    else GIF_LONG_FPS
                 )
+                fields = (
+                    loaded_trajectory.eta,
+                    loaded_trajectory.xi,
+                    loaded_trajectory.gxi,
+                )
+                limits: dict[str, tuple[float, float]] = {}
+                for name, field in zip(FIELD_NAMES, fields):
+                    if field.size == 0 or not np.all(np.isfinite(field)):
+                        raise ValueError(
+                            "animation limits require finite nonempty values"
+                        )
+                    lower, upper = float(np.min(field)), float(np.max(field))
+                    span = upper - lower
+                    padding = GIF_Y_LIMIT_PADDING_FRACTION * (
+                        span if span > 0.0 else max(abs(lower), 1.0)
+                    )
+                    limits[name] = (lower - padding, upper + padding)
+                animation_record = {
+                    "stored_frames": stored_frames,
+                    "frame_indices": frame_indices.tolist(),
+                    "first_time": float(loaded_trajectory.time[0]),
+                    "last_time": float(loaded_trajectory.time[-1]),
+                    "fps": fps,
+                    "dimensions_pixels": list(GIF_DIMENSIONS),
+                    "field_y_limits": {
+                        name: list(bounds) for name, bounds in limits.items()
+                    },
+                }
+                x = np.linspace(
+                    0.0, 2.0 * np.pi, loaded_trajectory.eta.shape[1], endpoint=False
+                )
+                figure, axes = plt.subplots(
+                    1,
+                    len(fields),
+                    figsize=(12.5, 3.6),
+                    constrained_layout=True,
+                )
+                lines = []
+                try:
+                    for axis, name, field, field_title in zip(
+                        axes,
+                        FIELD_NAMES,
+                        fields,
+                        FIELD_TITLES,
+                    ):
+                        (line,) = axis.plot(
+                            x,
+                            field[frame_indices[0]],
+                            color="#2563eb",
+                            linewidth=1.4,
+                        )
+                        axis.set_xlim(0.0, 2.0 * np.pi)
+                        axis.set_ylim(*limits[name])
+                        axis.set_xticks((0.0, np.pi, 2.0 * np.pi))
+                        axis.set_xticklabels(("0", r"$\pi$", r"$2\pi$"))
+                        axis.set_xlabel(r"$x$")
+                        axis.set_title(field_title)
+                        axis.grid(alpha=0.2, linewidth=0.5)
+                        lines.append(line)
+                    figure.suptitle(
+                        f"{title}   "
+                        rf"($h={top_simulation.depth:.3g}$, simulation {top_simulation.simulation_id})",
+                        fontsize=12,
+                    )
+                    time_text = figure.text(
+                        0.5,
+                        0.92,
+                        "",
+                        ha="center",
+                        va="center",
+                        fontsize=11,
+                    )
+
+                    def update(animation_index: int) -> tuple[Any, ...]:
+                        frame_index = int(frame_indices[animation_index])
+                        for line, field in zip(lines, fields):
+                            line.set_ydata(field[frame_index])
+                        time_text.set_text(
+                            rf"$t={loaded_trajectory.time[frame_index]:.2f}$"
+                        )
+                        return (*lines, time_text)
+
+                    if frame_indices.size == 1:
+                        update(0)
+                        writer = PillowWriter(fps=fps)
+                        writer.setup(figure, gif_path, dpi=100)
+                        writer.grab_frame()
+                        writer.finish()
+                    else:
+                        animation = FuncAnimation(
+                            figure,
+                            update,
+                            frames=frame_indices.size,
+                            interval=1_000.0 / fps,
+                            blit=False,
+                            repeat=True,
+                        )
+                        animation.save(
+                            gif_path,
+                            writer=PillowWriter(fps=fps),
+                            dpi=100,
+                        )
+                finally:
+                    plt.close(figure)
+
+                with Image.open(gif_path) as image:
+                    expected_duration = 250 if fps == GIF_SHORT_FPS else 80
+                    if (
+                        image.format != "GIF"
+                        or tuple(map(int, image.size)) != GIF_DIMENSIONS
+                        or int(getattr(image, "n_frames", 1)) != frame_indices.size
+                        or image.info.get("loop") != 0
+                    ):
+                        raise RuntimeError(f"rendered GIF contract differs: {gif_path}")
+                    for index in range(frame_indices.size):
+                        image.seek(index)
+                        image.load()
+                        if image.info.get("duration") != expected_duration:
+                            raise RuntimeError(
+                                f"rendered GIF frame duration differs: {gif_path}"
+                            )
                 figures.append(gif_path)
                 animations[gif_path.name] = {
                     "family": family,
@@ -1398,7 +1250,7 @@ if __name__ == "__main__":
                     "simulation_id": top_simulation.simulation_id,
                     "category": top_simulation.category,
                     "split": top_simulation.split,
-                    **animation,
+                    **animation_record,
                 }
 
             top_index = rankings["combined"][0]
@@ -1475,21 +1327,30 @@ if __name__ == "__main__":
             "families": family_results,
             "animations": animations,
             "artifacts": {
-                path.name: _artifact_record(
-                    path,
-                    staging_output_dir=output_dir,
-                    published_output_dir=published_output_dir,
-                )
+                path.name: {
+                    "path": str(
+                        final_output_dir / path.resolve().relative_to(output_dir)
+                    ),
+                    "bytes": path.stat().st_size,
+                }
                 for path in figures
             },
         }
         summary_path = output_dir / "summary.json"
-        _write_diagnostic_summary(summary_path, record)
-        accepted_simulations = len(simulations)
-        figure_relative_paths = tuple(
-            path.relative_to(staging_output_dir) for path in figures
+        summary_path.write_text(
+            json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
         )
-        summary_relative_path = summary_path.relative_to(staging_output_dir)
+        accepted_simulations = len(simulations)
+        figure_relative_paths = tuple(path.relative_to(output_dir) for path in figures)
+        summary_relative_path = summary_path.relative_to(output_dir)
+        if final_output_dir.exists() or final_output_dir.is_symlink():
+            raise FileExistsError(
+                f"output path appeared during rendering: {final_output_dir}"
+            )
+        output_dir.rename(final_output_dir)
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
 
     print(
         json.dumps(

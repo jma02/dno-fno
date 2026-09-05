@@ -1,322 +1,239 @@
-"""Focused tests for dataset-tail diagnostics and rendering."""
+"""Whole-pipeline tests for accepted dataset diagnostics and publication."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
-from unittest import mock
 
 import numpy as np
 from PIL import Image
 
 from scripts import render_paper_dataset_worst_simulations as renderer
-from scripts.render_paper_dataset_worst_simulations import (
-    FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
-    FINAL_PAPER_DATASET_RETAINED_ROWS,
-    FINAL_PAPER_DATASET_SOURCE_COUNT,
-    FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS,
-    SIGN_DIFFERENCE_RELATIVE_THRESHOLD,
-    LoadedTrajectory,
-    TrajectoryIndex,
-    _artifact_record,
-    _audit_shard,
-    _descending_indices,
-    _render_rank_one_gif,
-    _write_diagnostic_summary,
-    animation_frame_indices,
-    animation_record,
-    atomic_output_directory,
-    load_combined_summary_binding,
-    load_source_summary,
-    padded_animation_limits,
-    validate_final_paper_dataset_counts,
-    validate_scanned_population,
-)
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+
+def _write_source(
+    root: Path,
+    family: str,
+    frames: int,
+    *,
+    simulation_ids: tuple[int, ...] = (17,),
+    category: str = "known",
+) -> Path:
+    root.mkdir()
+    count = len(simulation_ids)
+    rows = count * frames
+    x = 2.0 * np.pi * np.arange(256) / 256
+    scale = np.tile(np.arange(1, frames + 1), count)[:, None]
+    np.savez(
+        root / "shard.npz",
+        eta=(scale * np.sin(x)).astype(np.float32),
+        xi=(2.0 * scale * np.cos(x)).astype(np.float32),
+        gxi=np.tile(np.sin(100.0 * x), (rows, 1)).astype(np.float32),
+        depth=np.full(rows, 8.0),
+        time=np.tile(np.arange(frames, dtype=np.float64), count),
     )
+    family_id = tuple(renderer.FAMILY_LABELS).index(family) + 1
+    np.savez(
+        root / "map.npz",
+        trajectory_accepted=np.ones(count, dtype=np.bool_),
+        trajectory_simulation_id=np.asarray(simulation_ids),
+        trajectory_parameter_group_id=np.full(count, category),
+        trajectory_first_row=np.arange(count) * frames,
+        trajectory_row_count=np.full(count, frames),
+        trajectory_family_id=np.full(count, family_id),
+        trajectory_dataset_split=np.full(count, "validation"),
+        trajectory_index=np.repeat(np.arange(count), frames),
+        shard_index=np.zeros(rows, dtype=np.int32),
+        shard_row=np.arange(rows),
+        frame_index=np.tile(np.arange(frames), count),
+    )
+    _write_json(
+        root / "dataset.json",
+        {
+            "trajectory_map_npz": "map.npz",
+            "dataset_shards": [{"path": "shard.npz"}],
+            "n_accepted_trajectories": count,
+            "n_accepted_rows": rows,
+            "grid": {"length": 2.0 * np.pi, "nx": 256},
+        },
+    )
+    summary = root / f"paper_dataset_{family}_validation.summary.json"
+    _write_json(
+        summary,
+        {
+            "status": "complete",
+            "output_root": str(root),
+            "run_spec": {"family_name": family, "dataset_split": "validation"},
+            "dataset_view": {"manifest": "dataset.json", "trajectory_map": "map.npz"},
+        },
+    )
+    return summary
 
 
-class CombinedSummaryTests(unittest.TestCase):
-    def test_loads_source_paths_and_counts(self) -> None:
+class DatasetRenderingTests(unittest.TestCase):
+    def test_combined_summary_binds_source_paths_and_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            summaries = []
-            for index in range(2):
-                path = root / f"source_{index}.summary.json"
-                _write_json(path, {"status": "complete"})
-                summaries.append(path.resolve())
+            source_path = _write_source(root / "stokes", "stokes", 1)
+            source = renderer.load_source_summary(source_path)
             combined = root / "combined.summary.json"
-            _write_json(
-                combined,
-                {
-                    "status": "complete",
-                    "run_summaries": [str(path) for path in summaries],
-                    "accepted_simulations": 3,
-                    "rows": 7,
-                },
+            record = {
+                "status": "complete",
+                "run_summaries": [str(source_path)],
+                "accepted_simulations": 1,
+                "rows": 1,
+            }
+            _write_json(combined, record)
+            binding = renderer.load_combined_summary_binding(combined)
+            renderer.validate_bound_sources(binding, (source,))
+            renderer.validate_scanned_population(
+                binding, source_count=1, accepted_simulations=1, retained_rows=1
             )
-
-            binding = load_combined_summary_binding(combined)
-
-        self.assertEqual(binding.source_summary_paths, tuple(summaries))
-        validate_scanned_population(
-            binding,
-            source_count=2,
-            accepted_simulations=3,
-            retained_rows=7,
-        )
-
-    def test_rejects_relative_or_repeated_source_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source.summary.json"
-            _write_json(source, {})
-            for run_summaries, message in (
-                ([source.name], "not absolute"),
-                (
-                    [str(source.resolve()), str(source.resolve())],
-                    "repeats",
-                ),
-            ):
-                combined = root / "combined.summary.json"
-                _write_json(
-                    combined,
-                    {
-                        "status": "complete",
-                        "run_summaries": run_summaries,
-                        "accepted_simulations": 0,
-                        "rows": 0,
-                    },
+            with self.assertRaisesRegex(ValueError, "counts differ"):
+                renderer.validate_scanned_population(
+                    binding, source_count=1, accepted_simulations=1, retained_rows=2
                 )
+            for paths, message in (
+                ([source_path.name], "not absolute"),
+                ([str(source_path)] * 2, "repeats"),
+            ):
+                _write_json(combined, {**record, "run_summaries": paths})
                 with (
-                    self.subTest(message=message),
-                    self.assertRaisesRegex(
-                        ValueError,
-                        message,
-                    ),
+                    self.subTest(paths=paths),
+                    self.assertRaisesRegex(ValueError, message),
                 ):
-                    load_combined_summary_binding(combined)
+                    renderer.load_combined_summary_binding(combined)
 
-    def test_loads_new_generation_summary_paths(self) -> None:
+    def test_final_population_is_recovered_from_source_maps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            manifest = root / "paper_dataset_tanaka_train.dataset.json"
-            trajectory_map = root / "paper_dataset_tanaka_train.trajectory_map.npz"
-            trajectory_map.touch()
-            _write_json(
-                manifest,
-                {
-                    "trajectory_map_npz": trajectory_map.name,
-                    "dataset_shards": [],
-                    "n_accepted_trajectories": 0,
-                    "n_accepted_rows": 0,
-                },
+            source = renderer.load_source_summary(
+                _write_source(Path(temporary) / "stokes", "stokes", 1)
             )
-            summary = root / "paper_dataset_tanaka_train.summary.json"
-            _write_json(
-                summary,
-                {
-                    "status": "complete",
-                    "output_root": str(root),
-                    "run_spec": {
-                        "family_name": "tanaka",
-                        "dataset_split": "train",
-                    },
-                    "dataset_view": {
-                        "manifest": str(manifest),
-                        "trajectory_map": str(trajectory_map),
-                    },
-                },
+            sources = tuple(
+                source._replace(
+                    family=family, split=split, trajectories=source.trajectories * count
+                )
+                for family in renderer.FAMILY_LABELS
+                for split, count in renderer.FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS.items()
             )
-            with mock.patch.object(
-                renderer,
-                "_trajectory_indices",
-                return_value=(),
+            renderer.validate_final_paper_dataset(
+                sources, retained_rows=renderer.FINAL_PAPER_DATASET_RETAINED_ROWS
+            )
+            for population, rows in (
+                (sources[:-1], renderer.FINAL_PAPER_DATASET_RETAINED_ROWS),
+                (sources, renderer.FINAL_PAPER_DATASET_RETAINED_ROWS - 1),
             ):
-                source = load_source_summary(summary)
+                with self.assertRaisesRegex(ValueError, "contract failed"):
+                    renderer.validate_final_paper_dataset(
+                        population, retained_rows=rows
+                    )
 
-        self.assertEqual(source.family, "tanaka")
-        self.assertEqual(source.split, "train")
-        self.assertEqual(source.manifest_path, manifest)
-        self.assertEqual(source.map_path, trajectory_map)
-
-
-class DatasetContractAndPublicationTests(unittest.TestCase):
-    @staticmethod
-    def _family_split_counts() -> dict[tuple[str, str], int]:
-        return {
-            (family, split): count
-            for family in ("stokes", "tanaka", "benjamin_feir", "jonswap_tma")
-            for split, count in FINAL_PAPER_DATASET_SPLIT_ACCEPTED_SIMULATIONS.items()
-        }
-
-    def test_final_contract_accepts_only_exact_counts(self) -> None:
-        expected = self._family_split_counts()
-        validate_final_paper_dataset_counts(
-            source_count=FINAL_PAPER_DATASET_SOURCE_COUNT,
-            family_split_accepted_simulations=expected,
-            accepted_simulations=FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
-            retained_rows=FINAL_PAPER_DATASET_RETAINED_ROWS,
-        )
-        with self.assertRaisesRegex(ValueError, "contract failed"):
-            validate_final_paper_dataset_counts(
-                source_count=FINAL_PAPER_DATASET_SOURCE_COUNT,
-                family_split_accepted_simulations=expected,
-                accepted_simulations=FINAL_PAPER_DATASET_ACCEPTED_SIMULATIONS,
-                retained_rows=FINAL_PAPER_DATASET_RETAINED_ROWS - 1,
-            )
-
-    def test_atomic_output_publishes_only_after_success(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            requested = root / "diagnostics"
-            with atomic_output_directory(requested) as (staging, final_path):
-                self.assertEqual(final_path, requested.resolve())
-                self.assertFalse(requested.exists())
-                _write_diagnostic_summary(
-                    staging / "summary.json",
-                    {"status": "complete"},
-                )
-            self.assertTrue((requested / "summary.json").is_file())
-
-            failed = root / "failed"
-            with self.assertRaisesRegex(RuntimeError, "render failed"):
-                with atomic_output_directory(failed) as (staging, _):
-                    (staging / "partial.png").write_bytes(b"partial")
-                    raise RuntimeError("render failed")
-            self.assertFalse(failed.exists())
-
-    def test_artifact_record_has_path_and_size(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            staging = root / ".staging"
-            staging.mkdir()
-            figure = staging / "figure.png"
-            figure.write_bytes(b"rendered figure")
-            record = _artifact_record(
-                figure,
-                staging_output_dir=staging,
-                published_output_dir=root / "published",
-            )
-        self.assertEqual(record["bytes"], len(b"rendered figure"))
-        self.assertTrue(str(record["path"]).endswith("published/figure.png"))
-
-
-class MorphologyDiagnosticTests(unittest.TestCase):
     def test_descending_ranking_preserves_scan_order_for_ties(self) -> None:
-        values = np.asarray((3.0, 3.0, 2.0, 3.0), dtype=np.float64)
-        self.assertEqual(_descending_indices(values, 4), (0, 1, 3, 2))
-
-    def test_known_oscillatory_trajectory_has_nonzero_diagnostics(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            nx = 256
-            x = 2.0 * np.pi * np.arange(nx, dtype=np.float64) / nx
-            shard_path = Path(temporary) / "shard.npz"
-            np.savez(
-                shard_path,
-                eta=np.stack((np.sin(x), 2.0 * np.sin(x))).astype(np.float32),
-                xi=np.zeros((2, nx), dtype=np.float32),
-                gxi=np.stack((np.sin(100.0 * x), np.sin(100.0 * x))).astype(np.float32),
-                depth=np.asarray((3.0, 3.0), dtype=np.float64),
-                time=np.asarray((0.0, 1.0), dtype=np.float64),
-            )
-            trajectory = TrajectoryIndex(
-                accepted_index=0,
-                trajectory_index=0,
-                simulation_id=17,
-                category="known",
-                shard_index=0,
-                first_shard_row=0,
-                row_count=2,
-            )
-            (metrics,) = _audit_shard(
-                0,
-                "tanaka",
-                "train",
-                0,
-                shard_path,
-                (trajectory,),
-                2,
-            )
-
-        self.assertEqual(SIGN_DIFFERENCE_RELATIVE_THRESHOLD, 0.03)
-        self.assertAlmostEqual(metrics.maximum_eta_slope, 2.0, places=5)
-        self.assertAlmostEqual(metrics.maximum_gxi_high_band_fraction, 1.0)
-        self.assertGreater(metrics.maximum_thresholded_gxi_sign_changes, 0)
-
-
-class RankOneAnimationTests(unittest.TestCase):
-    @staticmethod
-    def _trajectory(frames: int) -> LoadedTrajectory:
-        x = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
-        scale = np.arange(1, frames + 1, dtype=np.float64)[:, None]
-        return LoadedTrajectory(
-            eta=scale * np.sin(x)[None, :],
-            xi=scale * np.cos(x)[None, :],
-            gxi=scale * np.sin(2.0 * x)[None, :],
-            depth=np.full(frames, 4.0),
-            time=np.arange(frames, dtype=np.float64),
+        self.assertEqual(
+            renderer._descending_indices(np.asarray((3.0, 3.0, 2.0, 3.0)), 4),
+            (0, 1, 3, 2),
         )
 
-    @staticmethod
-    def _simulation(frames: int) -> renderer.SimulationMetrics:
-        return renderer.SimulationMetrics(
-            source_index=0,
-            accepted_index=0,
-            trajectory_index=0,
-            family="stokes" if frames == 1 else "jonswap_tma",
-            split="train",
-            simulation_id=17,
-            category="finite",
-            shard_index=0,
-            first_shard_row=0,
-            row_count=frames,
-            depth=4.0,
-            all_frames_finite=True,
-            constant_depth=True,
-            ordered_time=True,
-            minimum_water_column=3.0,
-            minimum_water_fraction=0.75,
-            maximum_eta_slope=1.0,
-            maximum_eta_slope_frame=0,
-            maximum_gxi_high_band_fraction=0.0,
-            maximum_gxi_high_band_fraction_frame=0,
-            maximum_thresholded_gxi_sign_changes=0,
-            maximum_thresholded_gxi_sign_changes_frame=0,
-            maximum_relative_stored_band_quadratic_energy_drift=0.0,
-            maximum_relative_stored_band_quadratic_energy_drift_frame=0,
-        )
-
-    def test_frame_selection_and_limits(self) -> None:
-        self.assertEqual(animation_frame_indices(1).tolist(), [0])
-        indices = animation_frame_indices(200)
-        self.assertEqual(indices.size, 100)
-        self.assertEqual((int(indices[0]), int(indices[-1])), (0, 199))
-        self.assertTrue(np.all(np.diff(indices) > 0))
-        self.assertEqual(padded_animation_limits(np.zeros((1, 3))), (-0.06, 0.06))
-
-    def test_static_and_multiframe_gifs_decode(self) -> None:
+    def test_cli_ranks_known_waves_and_decodes_static_and_multiframe_gifs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for frames in (1, 4):
-                trajectory = self._trajectory(frames)
-                path, record = _render_rank_one_gif(
-                    self._simulation(frames),
-                    trajectory,
-                    "Accepted trajectory",
-                    root / f"simulation_{frames}.gif",
+            for family, frames in (("stokes", 1), ("tanaka", 4)):
+                _write_source(root / family, family, frames)
+            output = root / "diagnostics"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(renderer.__file__)),
+                    "--source",
+                    str(root / "stokes"),
+                    "--source",
+                    str(root / "tanaka"),
+                    "--output-dir",
+                    str(output),
+                    "--workers",
+                    "1",
+                    "--top-count",
+                    "1",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "MPLCONFIGDIR": str(root / "matplotlib")},
+                timeout=120,
+            )
+            result = json.loads(completed.stdout)
+            record = json.loads((output / "summary.json").read_text())
+            self.assertEqual(result["accepted_simulations"], 2)
+            self.assertEqual(record["population"]["retained_rows"], 5)
+            for family, frames in (("stokes", 1), ("tanaka", 4)):
+                metrics = record["families"][family]["rankings"]["eta_slope"][0]
+                self.assertAlmostEqual(metrics["maximum_eta_slope"], frames, places=5)
+                self.assertAlmostEqual(metrics["maximum_gxi_high_band_fraction"], 1.0)
+                self.assertGreater(metrics["maximum_thresholded_gxi_sign_changes"], 0)
+                gif = output / f"{family}_worst_eta_slope.gif"
+                animation = record["animations"][gif.name]
+                self.assertEqual(animation["frame_indices"], list(range(frames)))
+                self.assertAlmostEqual(
+                    animation["field_y_limits"]["eta"][0], -1.12 * frames
                 )
-                self.assertEqual(record, animation_record(trajectory))
-                with Image.open(path) as image:
+                self.assertAlmostEqual(
+                    animation["field_y_limits"]["eta"][1], 1.12 * frames
+                )
+                with Image.open(gif) as image:
                     self.assertEqual(image.size, renderer.GIF_DIMENSIONS)
                     self.assertEqual(int(getattr(image, "n_frames", 1)), frames)
+                    self.assertEqual(image.info["loop"], 0)
+                    for index in range(frames):
+                        image.seek(index)
+                        image.load()
+                        self.assertEqual(image.info["duration"], 250)
+            for artifact in record["artifacts"].values():
+                path = Path(artifact["path"])
+                self.assertTrue(path.is_relative_to(output))
+                self.assertEqual(path.stat().st_size, artifact["bytes"])
+            self.assertFalse(tuple(root.glob(".diagnostics.staging-*")))
+
+    def test_failed_audit_removes_staging_and_existing_outputs_are_preserved(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_source(root / "tanaka", "tanaka", 2)
+            shard = root / "tanaka" / "shard.npz"
+            with np.load(shard) as archive:
+                arrays = {name: archive[name] for name in archive.files}
+            np.savez(shard, **{**arrays, "time": np.zeros(2)})
+            output = root / "diagnostics"
+            command = [
+                sys.executable,
+                str(Path(renderer.__file__)),
+                "--source",
+                str(root / "tanaka"),
+                "--output-dir",
+                str(output),
+                "--workers",
+                "1",
+            ]
+            failed = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("failed a hard audit", failed.stderr)
+            self.assertFalse(output.exists())
+            self.assertFalse(tuple(root.glob(".diagnostics.staging-*")))
+            output.mkdir()
+            sentinel = output / "existing.txt"
+            sentinel.write_text("keep")
+            failed = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertIn("output path already exists", failed.stderr)
+            self.assertEqual(sentinel.read_text(), "keep")
 
 
 if __name__ == "__main__":
