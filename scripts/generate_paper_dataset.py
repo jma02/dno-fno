@@ -66,8 +66,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="JONSWAP simulations solved together after sorting by rollout length.",
     )
     args = parser.parse_args(argv)
-    if min(args.num_simulations, args.batch_size) <= 0:
-        raise ValueError("num_simulations and batch_size must be positive")
     if args.family == "jonswap_tma":
         if args.solver_batch_size is None or args.solver_batch_size <= 0:
             raise ValueError("JONSWAP/TMA requires a positive solver_batch_size")
