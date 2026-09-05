@@ -26,11 +26,6 @@ def generate_simulations(
 ) -> GenerationResult:
     """Generate until every parameter group has its requested accepted count."""
 
-    if batch_size <= 0:
-        raise ValueError("batch size must be positive")
-    if any(target < 0 for target in accepted_targets.values()):
-        raise ValueError("accepted targets must be nonnegative")
-
     family_name = family_id.name.lower()
     directory = batch_path(
         root,

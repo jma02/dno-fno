@@ -33,8 +33,6 @@ def horizon_sorted_groups(
 ) -> tuple[tuple[int, ...], ...]:
     """Group simulation indices by saved-time count without changing ties."""
 
-    if solver_batch_size <= 0:
-        raise ValueError("solver_batch_size must be positive")
     ordered = tuple(
         sorted(
             range(len(time_grids)),

@@ -56,8 +56,6 @@ def batch_path(
             raise ValueError(
                 f"{field_name} must contain only letters, digits, '_' or '-'"
             )
-    if batch_id < 0:
-        raise ValueError("batch_id must be nonnegative")
     return root / "batches" / family / split / f"batch_{batch_id:06d}.npz"
 
 
@@ -73,8 +71,6 @@ def simulation_row_blocks(
         raise ValueError(
             "simulation_local_index must be a one-dimensional integer array"
         )
-    if number_of_simulations <= 0:
-        raise ValueError("number_of_simulations must be positive")
     if indices.size == 0:
         return {}
     if np.any(indices < 0) or int(np.max(indices)) >= number_of_simulations:
