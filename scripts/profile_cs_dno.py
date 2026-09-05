@@ -29,8 +29,9 @@ os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 import statistics
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -73,22 +74,22 @@ DOMAIN_LENGTH = 2.0 * float(np.pi)
 
 
 def median_ms(
-    fn, *args, warmup: int = 5, iters: int = 20
+    fn: Callable[..., Any], *args: Any, warmup: int = 5, iters: int = 20
 ) -> tuple[float, float, float]:
     """Median / p90 / min of ``fn(*args)`` in milliseconds."""
     for _ in range(warmup):
-        out = fn(*args)
-        jax.block_until_ready(out)
+        jax.block_until_ready(fn(*args))
     samples: list[float] = []
     for _ in range(iters):
         t0 = time.perf_counter()
-        out = fn(*args)
-        jax.block_until_ready(out)
+        jax.block_until_ready(fn(*args))
         samples.append((time.perf_counter() - t0) * 1000.0)
     samples.sort()
-    med = statistics.median(samples)
-    p90 = samples[int(0.9 * (len(samples) - 1))]
-    return med, p90, samples[0]
+    return (
+        statistics.median(samples),
+        samples[int(0.9 * (len(samples) - 1))],
+        samples[0],
+    )
 
 
 if __name__ == "__main__":
@@ -156,8 +157,10 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Case 1: full training step (forward + backward + AdamW + all_gather)
     # ------------------------------------------------------------------
-    def _step_body(state, x, d_, y):
-        def _loss(p):
+    def _step_body(
+        state: train_state.TrainState, x: jax.Array, d_: jax.Array, y: jax.Array
+    ) -> tuple[train_state.TrainState, jax.Array]:
+        def _loss(p: Any) -> jax.Array:
             pred = state.apply_fn({"params": p}, x, d_)
             return loss_fn(pred, y)
 
@@ -187,8 +190,10 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Case 2: forward + backward only (no optimizer, no all_gather)
     # ------------------------------------------------------------------
-    def _fwdbwd_body(params_, x, d_, y):
-        def _loss(p):
+    def _fwdbwd_body(
+        params_: Any, x: jax.Array, d_: jax.Array, y: jax.Array
+    ) -> tuple[jax.Array, Any]:
+        def _loss(p: Any) -> jax.Array:
             pred = cast(jax.Array, model.apply({"params": p}, x, d_))
             return loss_fn(pred, y)
 
@@ -210,7 +215,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Case 3: forward only (no loss, no backward)
     # ------------------------------------------------------------------
-    def _fwd_body(params_, x, d_):
+    def _fwd_body(params_: Any, x: jax.Array, d_: jax.Array) -> Any:
         return model.apply({"params": params_}, x, d_)
 
     fwd_step = jax.jit(
@@ -255,12 +260,11 @@ if __name__ == "__main__":
         ]
 
     @jax.jit
-    def block_fwd(bp, ef, xp, dp):
+    def block_fwd(bp: Any, ef: jax.Array, xp: jax.Array, dp: jax.Array) -> Any:
         return block.apply({"params": bp}, ef, xp, dp)
 
     # Warm block on device 0
-    _ = block_fwd(block_params, eta_feats0, xi_phys0, depth0)
-    jax.block_until_ready(_)
+    jax.block_until_ready(block_fwd(block_params, eta_feats0, xi_phys0, depth0))
 
     # ------------------------------------------------------------------
     # Case 5: raw rfft round-trip at several shapes.
@@ -284,12 +288,12 @@ if __name__ == "__main__":
         )
 
     @jax.jit
-    def rfft_roundtrip(x):
+    def rfft_roundtrip(x: jax.Array) -> jax.Array:
         xh = jnp.fft.rfft(x, axis=-1, norm="forward")
         return jnp.fft.irfft(xh, n=NX, axis=-1, norm="forward")
 
     @jax.jit
-    def rfft_roundtrip_branched(x):
+    def rfft_roundtrip_branched(x: jax.Array) -> jax.Array:
         # x shape (B, N, L) — FFT along the spatial axis, matching CraigSulemBlock's
         # rfft(prods, axis=1) → irfft(..., axis=-1) usage on (B, N, L)-shaped fields.
         xh = jnp.fft.rfft(x, axis=1, norm="forward")
@@ -318,27 +322,17 @@ if __name__ == "__main__":
     results: dict[str, tuple[float, float, float]] = {}
 
     results["full_step (fwd+bwd+adamw+all_gather)"] = median_ms(
-        lambda state: train_step(state, inputs, depth, targets),
-        ts,
-        iters=iters,
+        train_step, ts, inputs, depth, targets, iters=iters
     )
 
     results["fwd+bwd (loss+grad, no opt)"] = median_ms(
-        lambda params_: fwdbwd_step(params_, inputs, depth, targets),
-        ts.params,
-        iters=iters,
+        fwdbwd_step, ts.params, inputs, depth, targets, iters=iters
     )
 
-    results["fwd only"] = median_ms(
-        lambda params_: fwd_step(params_, inputs, depth),
-        ts.params,
-        iters=iters,
-    )
+    results["fwd only"] = median_ms(fwd_step, ts.params, inputs, depth, iters=iters)
 
     results["single CraigSulemBlock fwd (128x1024, dev0)"] = median_ms(
-        lambda bp: block_fwd(bp, eta_feats0, xi_phys0, depth0),
-        block_params,
-        iters=iters,
+        block_fwd, block_params, eta_feats0, xi_phys0, depth0, iters=iters
     )
 
     results["rfft roundtrip (128, 1024) dev0"] = median_ms(

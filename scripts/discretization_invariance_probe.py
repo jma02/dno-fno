@@ -89,11 +89,10 @@ def add_high_mode_noise(
     high_std = relative_std * low_rms
     n_high = n_test_freq - n_native_freq
 
-    f_hat_new = f_hat.copy()
     real_part = rng.normal(0.0, high_std, size=n_high).astype(np.float32)
     imag_part = rng.normal(0.0, high_std, size=n_high).astype(np.float32)
-    f_hat_new[n_native_freq:] = real_part + 1j * imag_part
-    return np.fft.irfft(f_hat_new, n=n, norm="forward")
+    f_hat[n_native_freq:] = real_part + 1j * imag_part
+    return np.fft.irfft(f_hat, n=n, norm="forward")
 
 
 def rel_l2(a: np.ndarray, b: np.ndarray) -> float:
@@ -106,9 +105,7 @@ def rel_l2(a: np.ndarray, b: np.ndarray) -> float:
 
 def rel_l2_mean_centered(a: np.ndarray, b: np.ndarray) -> float:
     """Relative L2 error after subtracting the mean from both signals."""
-    a0 = a - a.mean()
-    b0 = b - b.mean()
-    return rel_l2(a0, b0)
+    return rel_l2(a - a.mean(), b - b.mean())
 
 
 if __name__ == "__main__":
@@ -249,18 +246,17 @@ if __name__ == "__main__":
         print(f"  test   {args.n_test}: time={t_test:.3f}s")
 
         # Compare shared low-mode content.
-        if args.n_test > n_native:
-            compare_n = n_native
-            gxi_test_compare = change_resolution_rfft(gxi_test, compare_n)
-            gxi_native_compare = gxi_native
-        elif args.n_test < n_native:
-            compare_n = args.n_test
-            gxi_test_compare = gxi_test
-            gxi_native_compare = change_resolution_rfft(gxi_native, compare_n)
-        else:
-            compare_n = n_native
-            gxi_test_compare = gxi_test
-            gxi_native_compare = gxi_native
+        compare_n = min(n_native, args.n_test)
+        gxi_test_compare = (
+            change_resolution_rfft(gxi_test, compare_n)
+            if args.n_test > compare_n
+            else gxi_test
+        )
+        gxi_native_compare = (
+            change_resolution_rfft(gxi_native, compare_n)
+            if n_native > compare_n
+            else gxi_native
+        )
 
         rel_l2_cross = rel_l2(gxi_native_compare, gxi_test_compare)
         rel_l2_mean_cross = rel_l2_mean_centered(gxi_native_compare, gxi_test_compare)

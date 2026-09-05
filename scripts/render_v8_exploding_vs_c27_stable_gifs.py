@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import matplotlib
 
@@ -29,17 +28,20 @@ DEFAULT_OUTPUT = ROOT / "outputs/v8_exploding_vs_c27_stable_gifs_20260820"
 DEFAULT_SIMULATIONS = ("tanaka_g0:5", "tanaka_g0:11", "tanaka_g1:1000006")
 
 
-@dataclass(frozen=True)
-class RolloutArchive:
-    path: Path
-    simulation_ids: np.ndarray
-    times: np.ndarray
-    depths: np.ndarray
-    truth_eta: np.ndarray
-    truth_xi: np.ndarray
-    pred_eta: np.ndarray
-    pred_xi: np.ndarray
-    pred_gxi: np.ndarray
+RolloutArchive = NamedTuple(
+    "RolloutArchive",
+    [
+        ("path", Path),
+        ("simulation_ids", np.ndarray),
+        ("times", np.ndarray),
+        ("depths", np.ndarray),
+        ("truth_eta", np.ndarray),
+        ("truth_xi", np.ndarray),
+        ("pred_eta", np.ndarray),
+        ("pred_xi", np.ndarray),
+        ("pred_gxi", np.ndarray),
+    ],
+)
 
 
 def _simulation_index(archive: RolloutArchive, simulation_id: int) -> int:
@@ -103,13 +105,18 @@ if __name__ == "__main__":
     simulations = args.simulations or tuple(map(_parse_simulation, DEFAULT_SIMULATIONS))
     archives: dict[tuple[str, str], RolloutArchive] = {}
 
-    def archive(version: str, family: str) -> RolloutArchive:
-        key = (version, family)
-        if key not in archives:
-            base = args.v8_dir if version == "v8" else args.c27_dir / family
+    output_dir = args.output_dir
+    frame_count = args.frames
+    fps = args.fps
+    dpi = args.dpi
+    records: list[dict[str, Any]] = []
+    for family, simulation_id in simulations:
+        for version, base in (("v8", args.v8_dir), ("c27", args.c27_dir / family)):
+            if (version, family) in archives:
+                continue
             path = base / f"{family}_trajs.npz"
             with np.load(path, allow_pickle=False) as loaded_archive:
-                archives[key] = RolloutArchive(
+                archives[version, family] = RolloutArchive(
                     path=path.resolve(),
                     simulation_ids=np.array(
                         loaded_archive["simulation_ids"], copy=True
@@ -122,16 +129,8 @@ if __name__ == "__main__":
                     pred_xi=np.array(loaded_archive["pred_xi"], copy=True),
                     pred_gxi=np.array(loaded_archive["pred_gxi"], copy=True),
                 )
-        return archives[key]
-
-    records: list[dict[str, Any]] = []
-    for family, simulation_id in simulations:
-        old = archive("v8", family)
-        new = archive("c27", family)
-        output_dir = args.output_dir
-        frame_count = args.frames
-        fps = args.fps
-        dpi = args.dpi
+        old = archives["v8", family]
+        new = archives["c27", family]
         old_index = _simulation_index(old, simulation_id)
         new_index = _simulation_index(new, simulation_id)
         if not np.array_equal(old.times, new.times):

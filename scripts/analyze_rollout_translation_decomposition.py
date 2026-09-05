@@ -572,21 +572,6 @@ def _correlation(x: Array, y: Array, mask: Array) -> dict[str, float | int | Non
     }
 
 
-def summarize_terminal(values: Array, valid: Array) -> dict[str, float | int | None]:
-    """Return finite terminal quantiles on the truth-valid population."""
-    selected = values[-1, valid]
-    selected = selected[np.isfinite(selected)]
-    if not selected.size:
-        return {"n": 0, "median": None, "p90": None, "p95": None, "maximum": None}
-    return {
-        "n": int(selected.size),
-        "median": float(np.median(selected)),
-        "p90": float(np.percentile(selected, 90)),
-        "p95": float(np.percentile(selected, 95)),
-        "maximum": float(np.max(selected)),
-    }
-
-
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     """Write heterogeneous dictionaries as a rectangular CSV table."""
     if not rows:
@@ -599,21 +584,67 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def analyze_archive(
-    archive_path: Path,
-    output_path: Path,
-    *,
-    length: float | None,
-    fields: tuple[str, ...],
-    thresholds: tuple[float, ...],
-    dominance_fraction: float,
-    correlation_times_requested: tuple[float, ...] | None,
-    center_xi: bool,
-    progress: bool,
-    focus_simulation_indices: tuple[int, ...] = (),
-    focus_label: str | None = None,
-) -> dict[str, Any]:
-    """Analyze one trajectory archive and write JSON, NPZ, and CSV outputs."""
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("archive", type=Path, help="Saved rollout trajectory NPZ.")
+    parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
+    parser.add_argument(
+        "--length",
+        type=float,
+        default=None,
+        help="Periodic length; default reads the archive, then falls back to 2*pi.",
+    )
+    parser.add_argument(
+        "--fields",
+        type=parse_field_list,
+        default=("eta", "xi", "q"),
+        help="Comma-separated fields; eta is required and unavailable optional fields are skipped.",
+    )
+    parser.add_argument(
+        "--thresholds",
+        type=parse_float_list,
+        default=(0.25, 0.5, 0.75, 1.0),
+        help="Comma-separated relative-error onset thresholds.",
+    )
+    parser.add_argument(
+        "--translation-dominance-fraction",
+        type=float,
+        default=0.9,
+        help="Squared raw-error fraction that must be removed at raw onset.",
+    )
+    parser.add_argument(
+        "--correlation-times",
+        type=parse_float_list,
+        default=None,
+        help="Optional saved-time targets; default uses 0,10,20,40,60,80,100%% of the horizon.",
+    )
+    parser.add_argument(
+        "--raw-xi-gauge",
+        action="store_true",
+        help="Do not remove the spatial mean independently from truth/predicted xi.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress framewise alignment progress.",
+    )
+    parser.add_argument(
+        "--focus-simulation-indices",
+        type=parse_int_list,
+        default=(),
+        help="Optional comma-separated archive-local indices copied to a focused table.",
+    )
+    parser.add_argument(
+        "--focus-label",
+        default=None,
+        help="Description of the preselected focused simulations.",
+    )
+    args = parser.parse_args()
+    archive_path, output_path = args.archive, args.output
+    length, fields, thresholds = args.length, args.fields, args.thresholds
+    dominance_fraction = args.translation_dominance_fraction
+    center_xi = not args.raw_xi_gauge
+    focus_simulation_indices = args.focus_simulation_indices
     if not 0.0 <= dominance_fraction <= 1.0:
         raise ValueError(
             f"dominance_fraction must lie in [0, 1], got {dominance_fraction}"
@@ -664,8 +695,6 @@ def analyze_archive(
         n_times, n_simulations, nx = truth_eta.shape
         if "simulation_ids" in archive.files:
             simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
-        elif "simulation_ids" in archive.files:
-            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
         else:
             simulation_ids = np.arange(n_simulations, dtype=np.int64)
         depths = (
@@ -689,7 +718,7 @@ def analyze_archive(
             truth_eta,
             pred_eta,
             periodic_length,
-            progress=progress,
+            progress=not args.quiet,
         )
         drift = np.asarray(unwrapped, dtype=np.float64).copy()
         for simulation in range(drift.shape[1]):
@@ -918,7 +947,7 @@ def analyze_archive(
                 ),
             }
         )
-    correlation_times = correlation_times_requested
+    correlation_times = args.correlation_times
     if correlation_times is None:
         start, stop = float(times[0]), float(times[-1])
         correlation_times = tuple(
@@ -1034,6 +1063,29 @@ def analyze_archive(
             ),
         }
 
+    terminal_summary: dict[str, dict[str, dict[str, float | int | None]]] = {}
+    for field, metrics in field_metrics.items():
+        terminal_summary[field] = {}
+        for metric in (
+            "raw_relative_error",
+            "aligned_relative_error",
+            "translation_relative_error",
+            "signed_squared_error_removed",
+        ):
+            selected = metrics[metric][-1, truth_valid]
+            selected = selected[np.isfinite(selected)]
+            terminal_summary[field][metric] = (
+                {
+                    "n": int(selected.size),
+                    "median": float(np.median(selected)),
+                    "p90": float(np.percentile(selected, 90)),
+                    "p95": float(np.percentile(selected, 95)),
+                    "maximum": float(np.max(selected)),
+                }
+                if selected.size
+                else {"n": 0, "median": None, "p90": None, "p95": None, "maximum": None}
+            )
+
     result: dict[str, Any] = {
         "definition": {
             "translation_operator": "T_d f(x) = f(x-d)",
@@ -1064,26 +1116,13 @@ def analyze_archive(
         "fields": requested_and_available,
         "missing_requested_optional_fields": missing_fields,
         "n_truth_valid": int(np.count_nonzero(truth_valid)),
-        "terminal_summary": {
-            field: {
-                metric: summarize_terminal(values, truth_valid)
-                for metric, values in metrics.items()
-                if metric
-                in {
-                    "raw_relative_error",
-                    "aligned_relative_error",
-                    "translation_relative_error",
-                    "signed_squared_error_removed",
-                }
-            }
-            for field, metrics in field_metrics.items()
-        },
+        "terminal_summary": terminal_summary,
         "alignment_velocity_validation": alignment_velocity_validation,
         "onset_table": onset_table,
         "correlation_table": correlation_table,
         "simulation_records": simulation_records,
         "focus": {
-            "label": focus_label,
+            "label": args.focus_label,
             "simulation_indices": list(focus_simulation_indices),
             "simulation_records": focus_records,
         },
@@ -1098,79 +1137,6 @@ def analyze_archive(
     output_path.write_text(
         json.dumps(result, indent=2, allow_nan=False),
         encoding="utf-8",
-    )
-    return result
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archive", type=Path, help="Saved rollout trajectory NPZ.")
-    parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
-    parser.add_argument(
-        "--length",
-        type=float,
-        default=None,
-        help="Periodic length; default reads the archive, then falls back to 2*pi.",
-    )
-    parser.add_argument(
-        "--fields",
-        type=parse_field_list,
-        default=("eta", "xi", "q"),
-        help="Comma-separated fields; eta is required and unavailable optional fields are skipped.",
-    )
-    parser.add_argument(
-        "--thresholds",
-        type=parse_float_list,
-        default=(0.25, 0.5, 0.75, 1.0),
-        help="Comma-separated relative-error onset thresholds.",
-    )
-    parser.add_argument(
-        "--translation-dominance-fraction",
-        type=float,
-        default=0.9,
-        help="Squared raw-error fraction that must be removed at raw onset.",
-    )
-    parser.add_argument(
-        "--correlation-times",
-        type=parse_float_list,
-        default=None,
-        help="Optional saved-time targets; default uses 0,10,20,40,60,80,100%% of the horizon.",
-    )
-    parser.add_argument(
-        "--raw-xi-gauge",
-        action="store_true",
-        help="Do not remove the spatial mean independently from truth/predicted xi.",
-    )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress framewise alignment progress.",
-    )
-    parser.add_argument(
-        "--focus-simulation-indices",
-        type=parse_int_list,
-        default=(),
-        help="Optional comma-separated archive-local indices copied to a focused table.",
-    )
-    parser.add_argument(
-        "--focus-label",
-        default=None,
-        help="Description of the preselected focused simulations.",
-    )
-    args = parser.parse_args()
-
-    result = analyze_archive(
-        args.archive,
-        args.output,
-        length=args.length,
-        fields=args.fields,
-        thresholds=args.thresholds,
-        dominance_fraction=args.translation_dominance_fraction,
-        correlation_times_requested=args.correlation_times,
-        center_xi=not args.raw_xi_gauge,
-        progress=not args.quiet,
-        focus_simulation_indices=args.focus_simulation_indices,
-        focus_label=args.focus_label,
     )
     print(
         json.dumps(

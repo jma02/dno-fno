@@ -18,7 +18,6 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -85,44 +84,6 @@ COLORS: Mapping[str, str] = {
 ArrayMap: TypeAlias = dict[str, np.ndarray]
 
 
-@dataclass(frozen=True)
-class RegisteredStates:
-    """Deterministically selected registered evaluation states."""
-
-    eta: np.ndarray
-    xi: np.ndarray
-    depths: np.ndarray
-    simulation_ids: np.ndarray
-    archive_indices: np.ndarray
-    family_indices: np.ndarray
-    family_names: np.ndarray
-    source_paths: tuple[str, ...]
-
-
-def depth_stratified_indices(
-    depths: np.ndarray,
-    simulation_ids: np.ndarray,
-    count: int,
-) -> np.ndarray:
-    """Choose one deterministic midpoint from each equal-count depth stratum."""
-    if count <= 0 or count > depths.size:
-        raise ValueError(
-            f"invalid state count {count} for archive of size {depths.size}"
-        )
-    order = np.lexsort((simulation_ids, depths))
-    edges = np.linspace(0, depths.size, count + 1, dtype=np.int64)
-    positions = np.asarray(
-        [
-            (int(left) + int(right) - 1) // 2
-            for left, right in zip(edges[:-1], edges[1:])
-        ],
-        dtype=np.int64,
-    )
-    if np.unique(positions).size != count:
-        raise RuntimeError("depth-stratified positions are not unique")
-    return order[positions]
-
-
 def make_reference_evaluator(
     k: jnp.ndarray,
     order: int,
@@ -147,41 +108,20 @@ def make_reference_evaluator(
     return evaluate
 
 
-def evaluate_reference(
+def evaluate_batched(
     evaluator: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
     eta: np.ndarray,
     xi: np.ndarray,
-    depths: np.ndarray,
+    depth_inputs: np.ndarray,
     slices: Sequence[slice],
 ) -> np.ndarray:
-    """Evaluate a reference operator in fixed batches."""
+    """Batch an operator using its physical-depth or log-depth inputs."""
     outputs = [
         np.asarray(
             evaluator(
                 jnp.asarray(eta[chunk], dtype=jnp.float64),
                 jnp.asarray(xi[chunk], dtype=jnp.float64),
-                jnp.asarray(depths[chunk], dtype=jnp.float64),
-            )
-        )
-        for chunk in slices
-    ]
-    return np.concatenate(outputs)
-
-
-def evaluate_model(
-    predict: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
-    eta: np.ndarray,
-    xi: np.ndarray,
-    log_depths: np.ndarray,
-    slices: Sequence[slice],
-) -> np.ndarray:
-    """Evaluate the trained model in fixed batches."""
-    outputs = [
-        np.asarray(
-            predict(
-                jnp.asarray(eta[chunk], dtype=jnp.float64),
-                jnp.asarray(xi[chunk], dtype=jnp.float64),
-                jnp.asarray(log_depths[chunk], dtype=jnp.float64),
+                jnp.asarray(depth_inputs[chunk], dtype=jnp.float64),
             )
         )
         for chunk in slices
@@ -215,30 +155,6 @@ def curve_slope(curve: np.ndarray, epsilons: np.ndarray, fit_mask: np.ndarray) -
     return float(fitted_slopes(curve[:, None], epsilons, fit_mask)[0])
 
 
-def stratified_bootstrap_median_slope_ci(
-    state_slopes: np.ndarray,
-    family_indices: np.ndarray,
-    samples: int,
-    seed: int,
-) -> tuple[float, float, np.ndarray]:
-    """Bootstrap the pooled median of per-state slopes within family strata."""
-    rng = np.random.default_rng(seed)
-    family_members = tuple(
-        np.flatnonzero(family_indices == index) for index in range(len(FAMILY_NAMES))
-    )
-    bootstrap_slopes = np.empty(samples, dtype=np.float64)
-    for sample_index in range(samples):
-        selected = np.concatenate(
-            [
-                rng.choice(members, size=members.size, replace=True)
-                for members in family_members
-            ]
-        )
-        bootstrap_slopes[sample_index] = np.median(state_slopes[selected])
-    low, high = np.quantile(bootstrap_slopes, [0.025, 0.975])
-    return float(low), float(high), bootstrap_slopes
-
-
 def distribution_summary(values: np.ndarray) -> dict[str, float]:
     """Return a compact finite distribution summary."""
     if not np.isfinite(values).all():
@@ -251,53 +167,6 @@ def distribution_summary(values: np.ndarray) -> dict[str, float]:
         "p95": float(np.quantile(values, 0.95)),
         "max": float(np.max(values)),
     }
-
-
-def metric_summary(
-    values: np.ndarray,
-    slopes: np.ndarray,
-    epsilons: np.ndarray,
-    fit_mask: np.ndarray,
-    family_indices: np.ndarray,
-    bootstrap_samples: int,
-    bootstrap_seed: int,
-) -> tuple[dict[str, Any], np.ndarray]:
-    """Summarize one scaling metric and its stratified bootstrap."""
-    median_curve = np.median(values, axis=1)
-    q25_curve = np.quantile(values, 0.25, axis=1)
-    q75_curve = np.quantile(values, 0.75, axis=1)
-    ci_low, ci_high, bootstrap_slopes = stratified_bootstrap_median_slope_ci(
-        slopes,
-        family_indices,
-        bootstrap_samples,
-        bootstrap_seed,
-    )
-    family_median_state_slopes = {
-        family: float(np.median(slopes[family_indices == family_index]))
-        for family_index, family in enumerate(FAMILY_NAMES)
-    }
-    family_median_curve_slopes = {
-        family: curve_slope(
-            np.median(values[:, family_indices == family_index], axis=1),
-            epsilons,
-            fit_mask,
-        )
-        for family_index, family in enumerate(FAMILY_NAMES)
-    }
-    return (
-        {
-            "pooled_median_curve": median_curve.tolist(),
-            "pooled_q25_curve": q25_curve.tolist(),
-            "pooled_q75_curve": q75_curve.tolist(),
-            "pooled_median_curve_slope": curve_slope(median_curve, epsilons, fit_mask),
-            "pooled_state_slope_median": float(np.median(slopes)),
-            "stratified_bootstrap_state_slope_median_ci95": [ci_low, ci_high],
-            "per_state_slope": distribution_summary(slopes),
-            "family_median_state_slopes": family_median_state_slopes,
-            "family_median_curve_slopes": family_median_curve_slopes,
-        },
-        bootstrap_slopes,
-    )
 
 
 if __name__ == "__main__":
@@ -345,11 +214,23 @@ if __name__ == "__main__":
                 raise KeyError(f"{path} is missing {sorted(missing_keys)}")
             depths = np.asarray(archive["depths"], dtype=np.float64)
             simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
-            selected = depth_stratified_indices(
-                depths,
-                simulation_ids,
-                args.states_per_family,
+            count = args.states_per_family
+            if count <= 0 or count > depths.size:
+                raise ValueError(
+                    f"invalid state count {count} for archive of size {depths.size}"
+                )
+            order = np.lexsort((simulation_ids, depths))
+            edges = np.linspace(0, depths.size, count + 1, dtype=np.int64)
+            positions = np.asarray(
+                [
+                    (int(left) + int(right) - 1) // 2
+                    for left, right in zip(edges[:-1], edges[1:])
+                ],
+                dtype=np.int64,
             )
+            if np.unique(positions).size != count:
+                raise RuntimeError("depth-stratified positions are not unique")
+            selected = order[positions]
             eta = np.asarray(archive["truth_eta"][0, selected], dtype=np.float64)
             xi = np.asarray(archive["truth_xi"][0, selected], dtype=np.float64)
 
@@ -366,19 +247,16 @@ if __name__ == "__main__":
         )
 
     family_indices = np.concatenate(family_index_parts)
-    states = RegisteredStates(
-        eta=np.concatenate(eta_parts),
-        xi=np.concatenate(xi_parts),
-        depths=np.concatenate(depth_parts),
-        simulation_ids=np.concatenate(simulation_parts),
-        archive_indices=np.concatenate(archive_index_parts),
-        family_indices=family_indices,
-        family_names=np.asarray([FAMILY_NAMES[index] for index in family_indices]),
-        source_paths=tuple(
-            str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES
-        ),
+    eta = np.concatenate(eta_parts)
+    xi = np.concatenate(xi_parts)
+    depths = np.concatenate(depth_parts)
+    simulation_ids = np.concatenate(simulation_parts)
+    archive_indices = np.concatenate(archive_index_parts)
+    family_names = np.asarray([FAMILY_NAMES[index] for index in family_indices])
+    source_paths = tuple(
+        str(paths[family].relative_to(REPO_ROOT)) for family in FAMILY_NAMES
     )
-    state_count, nx = states.eta.shape
+    state_count, nx = eta.shape
     expected_count = len(FAMILY_NAMES) * args.states_per_family
     if state_count != expected_count:
         raise RuntimeError(f"expected {expected_count} states, loaded {state_count}")
@@ -419,10 +297,10 @@ if __name__ == "__main__":
     reference1 = make_reference_evaluator(k.astype(jnp.float64), order=1)
     reference6 = make_reference_evaluator(k.astype(jnp.float64), order=6)
 
-    q0 = evaluate_reference(reference0, states.eta, states.xi, states.depths, slices)
-    q01 = evaluate_reference(reference1, states.eta, states.xi, states.depths, slices)
+    q0 = evaluate_batched(reference0, eta, xi, depths, slices)
+    q01 = evaluate_batched(reference1, eta, xi, depths, slices)
     q1 = q01 - q0
-    log_depths = np.log(states.depths)
+    log_depths = np.log(depths)
 
     @jax.jit
     def evaluate_model_jvp_batch(
@@ -439,8 +317,8 @@ if __name__ == "__main__":
 
     model_jvp_pairs = [
         evaluate_model_jvp_batch(
-            jnp.asarray(states.eta[chunk], dtype=jnp.float64),
-            jnp.asarray(states.xi[chunk], dtype=jnp.float64),
+            jnp.asarray(eta[chunk], dtype=jnp.float64),
+            jnp.asarray(xi[chunk], dtype=jnp.float64),
             jnp.asarray(log_depths[chunk], dtype=jnp.float64),
         )
         for chunk in slices
@@ -452,11 +330,11 @@ if __name__ == "__main__":
 
     reference_order6 = np.stack(
         [
-            evaluate_reference(
+            evaluate_batched(
                 reference6,
-                epsilon * states.eta,
-                states.xi,
-                states.depths,
+                epsilon * eta,
+                xi,
+                depths,
                 slices,
             )
             for epsilon in EPSILONS
@@ -464,10 +342,10 @@ if __name__ == "__main__":
     )
     model_outputs = np.stack(
         [
-            evaluate_model(
+            evaluate_batched(
                 predict,
-                epsilon * states.eta,
-                states.xi,
+                epsilon * eta,
+                xi,
                 log_depths,
                 slices,
             )
@@ -524,18 +402,50 @@ if __name__ == "__main__":
 
     summaries: dict[str, dict[str, Any]] = {}
     bootstrap_slopes: ArrayMap = {}
+    family_members = tuple(
+        np.flatnonzero(family_indices == index) for index in range(len(FAMILY_NAMES))
+    )
     for metric_offset, (name, values) in enumerate(metrics.items()):
-        summary, bootstrapped = metric_summary(
-            values,
-            slopes[name],
-            EPSILONS,
-            fit_mask,
-            states.family_indices,
-            args.bootstrap_samples,
-            args.bootstrap_seed + metric_offset,
-        )
-        summary["expected_asymptotic_order"] = EXPECTED_ORDERS[name]
-        summaries[name] = summary
+        state_slopes = slopes[name]
+        median_curve = np.median(values, axis=1)
+        q25_curve = np.quantile(values, 0.25, axis=1)
+        q75_curve = np.quantile(values, 0.75, axis=1)
+        rng = np.random.default_rng(args.bootstrap_seed + metric_offset)
+        bootstrapped = np.empty(args.bootstrap_samples, dtype=np.float64)
+        for sample_index in range(args.bootstrap_samples):
+            selected = np.concatenate(
+                [
+                    rng.choice(members, size=members.size, replace=True)
+                    for members in family_members
+                ]
+            )
+            bootstrapped[sample_index] = np.median(state_slopes[selected])
+        ci_low, ci_high = np.quantile(bootstrapped, [0.025, 0.975])
+        summaries[name] = {
+            "pooled_median_curve": median_curve.tolist(),
+            "pooled_q25_curve": q25_curve.tolist(),
+            "pooled_q75_curve": q75_curve.tolist(),
+            "pooled_median_curve_slope": curve_slope(median_curve, EPSILONS, fit_mask),
+            "pooled_state_slope_median": float(np.median(state_slopes)),
+            "stratified_bootstrap_state_slope_median_ci95": [
+                float(ci_low),
+                float(ci_high),
+            ],
+            "per_state_slope": distribution_summary(state_slopes),
+            "family_median_state_slopes": {
+                family: float(np.median(state_slopes[family_indices == index]))
+                for index, family in enumerate(FAMILY_NAMES)
+            },
+            "family_median_curve_slopes": {
+                family: curve_slope(
+                    np.median(values[:, family_indices == index], axis=1),
+                    EPSILONS,
+                    fit_mask,
+                )
+                for index, family in enumerate(FAMILY_NAMES)
+            },
+            "expected_asymptotic_order": EXPECTED_ORDERS[name],
+        }
         bootstrap_slopes[name] = bootstrapped
 
     flat_surface_relative_error = (
@@ -554,10 +464,10 @@ if __name__ == "__main__":
 
     selection = [
         {
-            "family": str(states.family_names[index]),
-            "archive_index": int(states.archive_indices[index]),
-            "simulation_id": int(states.simulation_ids[index]),
-            "depth": float(states.depths[index]),
+            "family": str(family_names[index]),
+            "archive_index": int(archive_indices[index]),
+            "simulation_id": int(simulation_ids[index]),
+            "depth": float(depths[index]),
         }
         for index in range(state_count)
     ]
@@ -670,13 +580,13 @@ if __name__ == "__main__":
         "epsilons": EPSILONS,
         "fit_epsilons": FIT_EPSILONS,
         "family_names": np.asarray(FAMILY_NAMES),
-        "state_family_names": states.family_names,
-        "family_indices": states.family_indices,
-        "simulation_ids": states.simulation_ids,
-        "archive_indices": states.archive_indices,
-        "depths": states.depths,
-        "eta_frame0": states.eta,
-        "xi_frame0": states.xi,
+        "state_family_names": family_names,
+        "family_indices": family_indices,
+        "simulation_ids": simulation_ids,
+        "archive_indices": archive_indices,
+        "depths": depths,
+        "eta_frame0": eta,
+        "xi_frame0": xi,
         "q0_projected_rms": q0_norm,
         "q1_projected_rms": q1_norm,
         "flat_surface_relative_error": flat_surface_relative_error,
@@ -726,7 +636,7 @@ if __name__ == "__main__":
             "state_count": state_count,
             "frame_index": 0,
             "rule": "sort by (depth, simulation_id), split each family into equal-count strata, choose each stratum midpoint",
-            "source_paths": list(states.source_paths),
+            "source_paths": list(source_paths),
             "selection": selection,
         },
         "protocol": {

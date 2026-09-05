@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import runpy
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 
 from scripts.analyze_rollout_translation_decomposition import (
-    analyze_archive,
     compute_alignment_velocity_identity,
     compute_eta_alignment,
     compute_field_metrics,
@@ -223,22 +225,30 @@ def test_archive_outputs_are_json_safe_and_include_onsets() -> None:
             pred_gxi=pred_q,
             length=length,
         )
-        result = analyze_archive(
-            archive_path,
-            output_path,
-            length=None,
-            fields=("eta", "xi", "q"),
-            thresholds=(0.05, 0.25),
-            dominance_fraction=0.9,
-            correlation_times_requested=None,
-            center_xi=True,
-            progress=False,
-            focus_simulation_indices=(0, 1),
-            focus_label="synthetic focus",
+        script = (
+            Path(__file__).parents[1] / "analyze_rollout_translation_decomposition.py"
         )
+        with patch.object(
+            sys,
+            "argv",
+            [
+                str(script),
+                str(archive_path),
+                "--output",
+                str(output_path),
+                "--thresholds",
+                "0.05,0.25",
+                "--quiet",
+                "--focus-simulation-indices",
+                "0,1",
+                "--focus-label",
+                "synthetic focus",
+            ],
+        ):
+            runpy.run_path(str(script), run_name="__main__")
         loaded = json.loads(output_path.read_text(encoding="utf-8"))
 
-        assert result["n_simulations"] == 3
+        assert loaded["n_simulations"] == 3
         assert loaded["focus"]["label"] == "synthetic focus"
         assert len(loaded["onset_table"]) == 2
         assert loaded["simulation_records"][2]["first_nonfinite_time"] == 2.0
