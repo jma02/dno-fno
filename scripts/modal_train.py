@@ -134,9 +134,6 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
     shard_records = manifest.get("dataset_shards")
     if not isinstance(shard_records, list) or not shard_records:
         raise ValueError(f"dataset manifest has no dataset_shards: {dataset_path}")
-    if files_per_commit <= 0:
-        raise ValueError("files_per_commit must be positive")
-
     trajectory_map = manifest.get("trajectory_map_npz")
     if not isinstance(trajectory_map, str) or not trajectory_map:
         raise ValueError(f"dataset manifest has no trajectory_map_npz: {dataset_path}")

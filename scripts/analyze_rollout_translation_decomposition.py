@@ -649,13 +649,6 @@ if __name__ == "__main__":
         raise ValueError(
             f"dominance_fraction must lie in [0, 1], got {dominance_fraction}"
         )
-    if any(threshold < 0.0 for threshold in thresholds):
-        raise ValueError(f"thresholds must be nonnegative, got {thresholds}")
-    if any(index < 0 for index in focus_simulation_indices):
-        raise ValueError(
-            "focus simulation indices must be nonnegative, got "
-            f"{focus_simulation_indices}"
-        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with np.load(archive_path, allow_pickle=False) as archive:

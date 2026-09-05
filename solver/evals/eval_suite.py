@@ -476,8 +476,6 @@ def _rollout_ic_chunks(
 ) -> RolloutPayload:
     if not ics:
         raise ValueError("cannot roll out an empty IC list")
-    if batch_size is not None and batch_size <= 0:
-        raise ValueError(f"rollout batch size must be positive; got {batch_size}")
     effective_batch_size = min(batch_size or len(ics), len(ics))
     if effective_batch_size == len(ics):
         return rollout(ics)
@@ -962,10 +960,6 @@ def main() -> None:
     parser.add_argument("--rollout_batch_size", type=int, default=None)
     parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
-    if args.n_ics <= 0:
-        parser.error("--n_ics must be positive")
-    if args.rollout_batch_size is not None and args.rollout_batch_size <= 0:
-        parser.error("--rollout_batch_size must be positive")
     if not args.gpu:
         os.environ.setdefault("JAX_PLATFORMS", "cpu")
     jax.config.update("jax_enable_x64", True)

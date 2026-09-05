@@ -437,10 +437,6 @@ def main() -> None:
             f"hadamard_microbatch {args.hadamard_microbatch} must be divisible by "
             f"device count {n_devices}"
         )
-    if args.hadamard_weight > 0.0 and args.hadamard_interval < 1:
-        raise ValueError(
-            f"hadamard_interval must be positive, got {args.hadamard_interval}"
-        )
     mesh = Mesh(np.array(devices), axis_names=("batch",))
     data_sharding = NamedSharding(mesh, P("batch"))
     replicated = NamedSharding(mesh, P())

@@ -917,8 +917,6 @@ def rollout(
         )
     if telemetry_enabled:
         assert implicit_residual_tolerance is not None
-        if implicit_iterations < 0:
-            raise ValueError("implicit_iterations must be nonnegative")
         if not 0.0 < implicit_residual_tolerance < float("inf"):
             raise ValueError("implicit_residual_tolerance must be finite and positive")
 

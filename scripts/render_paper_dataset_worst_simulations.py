@@ -797,8 +797,6 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
-    if min(args.workers, args.block_rows, args.top_count) < 1:
-        parser.error("--workers, --block-rows, and --top-count must be positive")
     if args.require_final_paper_dataset and args.combined_summary is None:
         parser.error("--require-final-paper-dataset requires --combined-summary")
 
