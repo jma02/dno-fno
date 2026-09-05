@@ -35,12 +35,12 @@ from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
 from solver.gen_data.trajectory_batch_generator import generate_trajectory_batch
 
 
-FAMILIES = (
-    "stokes",
-    "tanaka",
-    "benjamin_feir",
-    "jonswap_tma",
-)
+FAMILIES = {
+    "stokes": STOKES_PARAMETER_GROUP_IDS,
+    "tanaka": TANAKA_PARAMETER_GROUP_IDS,
+    "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
+    "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
+}
 SPLITS = ("train", "validation", "test")
 
 
@@ -97,12 +97,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    parameter_group_ids = {
-        "stokes": STOKES_PARAMETER_GROUP_IDS,
-        "tanaka": TANAKA_PARAMETER_GROUP_IDS,
-        "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-        "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
-    }[args.family]
+    parameter_group_ids = FAMILIES[args.family]
     output_root = args.output_root.expanduser().resolve()
     dataset_split = DatasetSplit(args.split)
     simulations_per_group, remainder = divmod(
