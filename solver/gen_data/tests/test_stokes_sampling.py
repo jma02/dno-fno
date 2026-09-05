@@ -24,7 +24,6 @@ from solver.gen_data.stokes_sampling import (  # noqa: E402
     PAPER_AMPLITUDE_BOUNDS,
     PAPER_DOMAIN_LENGTH,
     PAPER_GRAVITY,
-    STOKES_PARAMETER_GROUP_IDS,
     STOKES_PARAMETER_GROUPS,
     StokesSample,
     sample_stokes_simulation,
@@ -68,7 +67,7 @@ class StokesSamplingTest(unittest.TestCase):
 
     def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
-            STOKES_PARAMETER_GROUP_IDS, start=90
+            STOKES_PARAMETER_GROUPS, start=90
         ):
             with self.subTest(parameter_group=parameter_group_id):
                 first = sample_stokes(

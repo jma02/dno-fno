@@ -8,7 +8,6 @@ import unittest
 import numpy as np
 
 from solver.gen_data.benjamin_feir_sampling import (
-    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
     BENJAMIN_FEIR_PARAMETER_GROUPS,
     CARRIER_MODE_MAX,
     CARRIER_MODE_MIN,
@@ -33,11 +32,11 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
         )
         self.assertEqual(tuple(BENJAMIN_FEIR_PARAMETER_GROUPS.values()), expected)
-        self.assertEqual(len(BENJAMIN_FEIR_PARAMETER_GROUP_IDS), 66)
+        self.assertEqual(len(BENJAMIN_FEIR_PARAMETER_GROUPS), 66)
 
     def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
-            BENJAMIN_FEIR_PARAMETER_GROUP_IDS, start=90
+            BENJAMIN_FEIR_PARAMETER_GROUPS, start=90
         ):
             with self.subTest(parameter_group=parameter_group_id):
                 first = sample_benjamin_feir_simulation(

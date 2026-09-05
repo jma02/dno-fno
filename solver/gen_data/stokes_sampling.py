@@ -47,7 +47,6 @@ STOKES_PARAMETER_GROUPS: dict[
     "deep_low": ("deep", (0.005, 0.03), _DEEP_LOW_CARRIER_MODES),
     "deep_moderate": ("deep", (0.03, 0.15), _DEEP_MODERATE_CARRIER_MODES),
 }
-STOKES_PARAMETER_GROUP_IDS = tuple(STOKES_PARAMETER_GROUPS)
 
 _compiled_finite_depth_ursell = jax.jit(finite_depth_stokes_ursell_upper_bound)
 

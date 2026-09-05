@@ -19,8 +19,8 @@ os.environ["DNO_TANAKA_DTYPE"] = "float64"
 
 import jax
 
-from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUP_IDS
-from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUP_IDS
+from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUPS
+from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUPS
 from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
 from solver.gen_data.pipeline.dataset_generation import generate_simulations
@@ -29,17 +29,17 @@ from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 from solver.gen_data.stokes_batch_generator import generate_static_stokes_batch
 from solver.gen_data.stokes_sampling import (
     PAPER_DOMAIN_LENGTH,
-    STOKES_PARAMETER_GROUP_IDS,
+    STOKES_PARAMETER_GROUPS,
 )
-from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
+from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUPS
 from solver.gen_data.trajectory_batch_generator import generate_trajectory_batch
 
 
 FAMILIES = {
-    "stokes": STOKES_PARAMETER_GROUP_IDS,
-    "tanaka": TANAKA_PARAMETER_GROUP_IDS,
-    "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-    "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUP_IDS,
+    "stokes": STOKES_PARAMETER_GROUPS,
+    "tanaka": TANAKA_PARAMETER_GROUPS,
+    "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUPS,
+    "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUPS,
 }
 SPLITS = ("train", "validation", "test")
 
@@ -97,15 +97,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    parameter_group_ids = FAMILIES[args.family]
     output_root = args.output_root.expanduser().resolve()
     dataset_split = DatasetSplit(args.split)
-    simulations_per_group, remainder = divmod(
-        args.num_simulations, len(parameter_group_ids)
-    )
+    family_parameter_groups = FAMILIES[args.family]
+    count, remainder = divmod(args.num_simulations, len(family_parameter_groups))
     accepted_targets = {
-        parameter_group_id: simulations_per_group + int(index < remainder)
-        for index, parameter_group_id in enumerate(parameter_group_ids)
+        group: count + (index < remainder)
+        for index, group in enumerate(family_parameter_groups)
     }
     family_id = PhysicalFamilyId[args.family.upper()]
 

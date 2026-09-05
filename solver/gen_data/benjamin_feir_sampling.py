@@ -39,7 +39,6 @@ BENJAMIN_FEIR_PARAMETER_GROUPS: dict[str, tuple[int, int]] = {
     for sideband_offset in range(1, carrier_mode)
     if sideband_offset / carrier_mode < 2.0 * math.sqrt(2.0) * CARRIER_STEEPNESS_MAX
 }
-BENJAMIN_FEIR_PARAMETER_GROUP_IDS = tuple(BENJAMIN_FEIR_PARAMETER_GROUPS)
 
 BenjaminFeirSample = NamedTuple(
     "BenjaminFeirSample",

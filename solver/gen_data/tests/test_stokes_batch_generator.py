@@ -22,10 +22,7 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 from solver.gen_data.stokes_batch_generator import (  # noqa: E402
     generate_static_stokes_batch,
 )
-from solver.gen_data.stokes_sampling import (  # noqa: E402
-    STOKES_PARAMETER_GROUP_IDS,
-    StokesSample,
-)
+from solver.gen_data.stokes_sampling import StokesSample  # noqa: E402
 
 
 class StaticStokesBatchExecutionTests(unittest.TestCase):
@@ -42,10 +39,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             depth=sample.depth,
             time=np.asarray([0.0], dtype=np.float64),
         )
-        parameter_groups = (
-            STOKES_PARAMETER_GROUP_IDS[0],
-            STOKES_PARAMETER_GROUP_IDS[2],
-        )
+        parameter_groups = ("finite_low", "deep_low")
 
         with (
             patch(

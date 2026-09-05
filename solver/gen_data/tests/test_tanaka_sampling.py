@@ -13,7 +13,6 @@ from solver.gen_data.tanaka_sampling import (
     STEEP_DEPTH_BOUNDS,
     TANAKA_DELIVERED_MAXIMUM_WAVENUMBER,
     TANAKA_MINIMUM_RESOLUTION_RATIO,
-    TANAKA_PARAMETER_GROUP_IDS,
     TANAKA_PARAMETER_GROUPS,
     sample_tanaka_simulation,
 )
@@ -43,7 +42,7 @@ class TanakaSamplingTest(unittest.TestCase):
 
     def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
-            TANAKA_PARAMETER_GROUP_IDS, start=90
+            TANAKA_PARAMETER_GROUPS, start=90
         ):
             with self.subTest(parameter_group=parameter_group_id):
                 first = sample_tanaka_simulation(

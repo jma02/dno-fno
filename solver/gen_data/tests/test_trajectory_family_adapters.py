@@ -15,7 +15,6 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
@@ -23,7 +22,6 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_PARAMETER_GROUP_IDS,
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
@@ -32,7 +30,6 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
 )
 from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
-    TANAKA_PARAMETER_GROUP_IDS,
     sample_tanaka_simulation,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
@@ -110,7 +107,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
 
         tanaka_samples = tuple(
             sample_tanaka_simulation(
-                TANAKA_PARAMETER_GROUP_IDS[0],
+                "main_m1_q0",
                 dataset_split=DatasetSplit.TEST,
                 attempt_number=19,
             )
@@ -118,7 +115,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         )
         bf_samples = tuple(
             sample_benjamin_feir_simulation(
-                BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
+                "n_c_04__delta_n_01",
                 dataset_split=DatasetSplit.TEST,
                 attempt_number=23,
             )
@@ -126,7 +123,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         )
         jonswap_samples = tuple(
             sample_jonswap_tma_simulation(
-                JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
+                "finite__gamma_1__right_0",
                 dataset_split=DatasetSplit.TEST,
                 attempt_number=29,
                 band=band,
@@ -166,7 +163,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         config = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
         band = _resolved_band(config)
         sample = sample_jonswap_tma_simulation(
-            JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
+            "finite__gamma_1__right_0",
             dataset_split=DatasetSplit.TEST,
             attempt_number=31,
             band=band,

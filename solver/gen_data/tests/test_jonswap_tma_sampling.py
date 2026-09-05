@@ -19,7 +19,6 @@ from solver.gen_data.jonswap_tma import (
 from solver.gen_data.jonswap_tma_sampling import (
     DEEP_DEPTH_BOUNDS,
     FINITE_DEPTH_BOUNDS,
-    JONSWAP_TMA_PARAMETER_GROUP_IDS,
     JONSWAP_TMA_PARAMETER_GROUPS,
     PEAK_WAVENUMBER_BOUNDS,
     SHALLOW_DEPTH_WAVENUMBER_BOUNDS,
@@ -41,7 +40,7 @@ def sample_parameter_group(
     attempt_number: int | None = None,
 ) -> JonswapTmaSample:
     return sample_jonswap_tma_simulation(
-        JONSWAP_TMA_PARAMETER_GROUP_IDS[parameter_group_index],
+        tuple(JONSWAP_TMA_PARAMETER_GROUPS)[parameter_group_index],
         dataset_split=dataset_split,
         attempt_number=(
             parameter_group_index if attempt_number is None else attempt_number
@@ -58,7 +57,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
             for gamma in PAPER_PEAK_ENHANCEMENTS
             for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
         }
-        self.assertEqual(len(JONSWAP_TMA_PARAMETER_GROUP_IDS), 27)
+        self.assertEqual(len(JONSWAP_TMA_PARAMETER_GROUPS), 27)
         self.assertEqual(set(JONSWAP_TMA_PARAMETER_GROUPS.values()), expected)
 
     def test_every_parameter_group_samples_inside_its_declared_range(self) -> None:
@@ -134,7 +133,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
     def test_sampled_spectra_fit_the_paper_relative_frequency_band(self) -> None:
         for attempt_number in range(512):
             sample = sample_parameter_group(
-                attempt_number % len(JONSWAP_TMA_PARAMETER_GROUP_IDS),
+                attempt_number % len(JONSWAP_TMA_PARAMETER_GROUPS),
                 attempt_number=attempt_number,
             )
             frequencies = finite_depth_angular_frequency(

@@ -49,7 +49,6 @@ JONSWAP_TMA_PARAMETER_GROUPS: dict[str, tuple[RandomSeaStratum, float, float]] =
     for peak_enhancement in PAPER_PEAK_ENHANCEMENTS
     for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
 }
-JONSWAP_TMA_PARAMETER_GROUP_IDS = tuple(JONSWAP_TMA_PARAMETER_GROUPS)
 
 
 JonswapTmaSample = NamedTuple(

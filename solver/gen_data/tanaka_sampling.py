@@ -42,7 +42,6 @@ TANAKA_PARAMETER_GROUPS: dict[str, tuple[Literal["main", "steep"], int, int]] = 
     "steep_m1_q0": ("steep", 1, 0),
     "steep_m1_q1": ("steep", 1, 1),
 }
-TANAKA_PARAMETER_GROUP_IDS = tuple(TANAKA_PARAMETER_GROUPS)
 
 TanakaCrest = NamedTuple(
     "TanakaCrest",

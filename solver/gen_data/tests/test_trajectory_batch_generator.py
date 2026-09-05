@@ -20,7 +20,6 @@ import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
 from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
-    BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
@@ -28,7 +27,6 @@ from solver.gen_data.jonswap_tma import (  # noqa: E402
     finite_depth_angular_frequency,
 )
 from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
-    JONSWAP_TMA_PARAMETER_GROUP_IDS,
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
@@ -57,7 +55,6 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
     PhysicalFamilyId,
     SimulationRows,
 )
-from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS  # noqa: E402
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
     generate_trajectory_batch,
 )
@@ -220,7 +217,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
     def test_failed_rollout_retains_its_sibling_and_is_replaced(self) -> None:
         numerical = _config()
-        group = BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0]
+        group = "n_c_04__delta_n_01"
         constructor, constructor_calls = _marker_constructor()
         integrator, integration_calls = _fast_integrator(frozenset({1}))
         with (
@@ -255,7 +252,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
     def test_tanaka_construction_rejects_only_the_named_simulation(self) -> None:
         numerical = _config()
-        group = TANAKA_PARAMETER_GROUP_IDS[0]
+        group = "main_m1_q0"
         base_constructor, calls = _marker_constructor()
         first_call = True
 
@@ -305,7 +302,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
     def test_jonswap_construction_rejects_only_the_named_simulation(self) -> None:
         numerical = _config()
-        group = JONSWAP_TMA_PARAMETER_GROUP_IDS[9]
+        group = "finite__gamma_1__right_0"
         base_constructor, calls = _marker_constructor()
         first_call = True
 
@@ -378,7 +375,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                     self.root,
                     "tanaka",
                     numerical,
-                    (TANAKA_PARAMETER_GROUP_IDS[0],),
+                    ("main_m1_q0",),
                     (1,),
                     batch_size=1,
                 )
@@ -387,8 +384,8 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
     def test_jonswap_simulations_use_their_own_peak_period_horizons(self) -> None:
         numerical = _config()
         groups = (
-            JONSWAP_TMA_PARAMETER_GROUP_IDS[9],
-            JONSWAP_TMA_PARAMETER_GROUP_IDS[18],
+            "finite__gamma_1__right_0",
+            "deep__gamma_1__right_0",
         )
         constructor, _ = _marker_constructor()
         integrator, calls = _fast_integrator()
@@ -457,8 +454,8 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
     def test_benjamin_feir_simulations_use_their_own_carrier_horizons(self) -> None:
         numerical = _config()
         groups = (
-            BENJAMIN_FEIR_PARAMETER_GROUP_IDS[0],
-            BENJAMIN_FEIR_PARAMETER_GROUP_IDS[-1],
+            "n_c_04__delta_n_01",
+            "n_c_20__delta_n_07",
         )
         constructor, _ = _marker_constructor()
         integrator, calls = _fast_integrator()
@@ -508,7 +505,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
     def test_jonswap_requires_solver_batch_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "solver_batch_size"):
             generate_trajectory_batch(
-                (JONSWAP_TMA_PARAMETER_GROUP_IDS[0],),
+                ("shallow__gamma_1__right_0",),
                 0,
                 self.root / "batch.npz",
                 dataset_split=DatasetSplit.TEST,
