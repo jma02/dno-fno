@@ -14,6 +14,26 @@ from pathlib import Path
 from time import perf_counter
 from typing import Sequence
 
+# Tanaka chooses its precision at import time.
+os.environ["DNO_TANAKA_DTYPE"] = "float64"
+
+import jax
+
+from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUP_IDS
+from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUP_IDS
+from solver.gen_data.pipeline.artifact_io import write_json_atomic
+from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.dataset_generation import generate_simulations
+from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
+from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
+from solver.gen_data.stokes_batch_generator import generate_static_stokes_batch
+from solver.gen_data.stokes_sampling import (
+    PAPER_DOMAIN_LENGTH,
+    STOKES_PARAMETER_GROUP_IDS,
+)
+from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
+from solver.gen_data.trajectory_batch_generator import generate_trajectory_batch
+
 
 FAMILIES = (
     "stokes",
@@ -72,33 +92,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.solver_batch_size > args.batch_size:
             raise ValueError("solver_batch_size must not exceed batch_size")
 
-    os.environ["JAX_ENABLE_X64"] = "true"
-    os.environ["DNO_TANAKA_DTYPE"] = "float64"
-    os.environ["JAX_PLATFORMS"] = "cuda" if args.gpu else "cpu"
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_platforms", "cuda" if args.gpu else "cpu")
     if not args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-    import jax
-
-    from solver.gen_data.benjamin_feir_sampling import (
-        BENJAMIN_FEIR_PARAMETER_GROUP_IDS,
-    )
-    from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUP_IDS
-    from solver.gen_data.pipeline.artifact_io import write_json_atomic
-    from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-    from solver.gen_data.pipeline.dataset_generation import (
-        generate_simulations,
-    )
-    from solver.gen_data.pipeline.types import (
-        DatasetSplit,
-        PhysicalFamilyId,
-    )
-    from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
-    from solver.gen_data.stokes_sampling import (
-        PAPER_DOMAIN_LENGTH,
-        STOKES_PARAMETER_GROUP_IDS,
-    )
-    from solver.gen_data.tanaka_sampling import TANAKA_PARAMETER_GROUP_IDS
 
     parameter_group_ids = {
         "stokes": STOKES_PARAMETER_GROUP_IDS,
@@ -116,11 +113,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         for index, parameter_group_id in enumerate(parameter_group_ids)
     }
     family_id = PhysicalFamilyId[args.family.upper()]
-
-    from solver.gen_data.stokes_batch_generator import (
-        generate_static_stokes_batch,
-    )
-    from solver.gen_data.trajectory_batch_generator import generate_trajectory_batch
 
     backend = jax.default_backend()
     requested = "gpu" if args.gpu else "cpu"
