@@ -38,7 +38,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                             "stokes",
                             "--split",
                             "validation",
-                            "--accepted-simulations",
+                            "--num-simulations",
                             "4",
                             "--output-root",
                             directory,

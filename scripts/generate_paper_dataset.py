@@ -39,10 +39,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Simulation-level dataset split.",
     )
     parser.add_argument(
-        "--accepted-simulations",
+        "--num-simulations",
         type=int,
         required=True,
-        help="Number of valid simulations to generate across parameter groups.",
+        help=(
+            "Number of valid simulations to generate for this family and split. "
+            "Rejected attempts do not count."
+        ),
     )
     parser.add_argument(
         "--output-root",
@@ -68,8 +71,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="JONSWAP simulations solved together after sorting by rollout length.",
     )
     args = parser.parse_args(argv)
-    if min(args.accepted_simulations, args.batch_size) <= 0:
-        raise ValueError("accepted_simulations and batch_size must be positive")
+    if min(args.num_simulations, args.batch_size) <= 0:
+        raise ValueError("num_simulations and batch_size must be positive")
     if args.family == "jonswap_tma":
         if args.solver_batch_size is None or args.solver_batch_size <= 0:
             raise ValueError("JONSWAP/TMA requires a positive solver_batch_size")
@@ -115,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_root = args.output_root.expanduser().resolve()
     dataset_split = DatasetSplit(args.split)
     simulations_per_group, remainder = divmod(
-        args.accepted_simulations, len(parameter_group_ids)
+        args.num_simulations, len(parameter_group_ids)
     )
     accepted_targets = {
         parameter_group_id: simulations_per_group + int(index < remainder)
