@@ -193,12 +193,6 @@ def compute_eta_alignment(
     Unwrapping changes only the representative modulo ``length`` and is done
     separately on every contiguous finite segment of each simulation.
     """
-    validate_field_pair(
-        truth_eta,
-        pred_eta,
-        name="eta",
-        expected_time_simulations=truth_eta.shape[:2],
-    )
     n_times, n_simulations, _ = truth_eta.shape
     wrapped = np.full((n_times, n_simulations), np.nan, dtype=np.float64)
     finite = np.all(
@@ -282,16 +276,6 @@ def compute_alignment_velocity_identity(
     denominator smaller than ``denominator_tolerance * <a_x,a_x>`` are marked
     undefined because the fitted group-orbit coordinate is ill-conditioned.
     """
-    for name, truth, prediction in (
-        ("eta", truth_eta, pred_eta),
-        ("q", truth_q, pred_q),
-    ):
-        validate_field_pair(
-            truth,
-            prediction,
-            name=name,
-            expected_time_simulations=displacement.shape,
-        )
     n_times, n_simulations, _ = truth_eta.shape
     shape = (n_times, n_simulations)
     result: dict[str, Array] = {
@@ -439,12 +423,6 @@ def compute_field_metrics(
     common elevation shift worsened that field rather than silently fitting a
     second displacement.
     """
-    validate_field_pair(
-        truth,
-        prediction,
-        name="field",
-        expected_time_simulations=displacement.shape,
-    )
     n_times, n_simulations, nx = truth.shape
     shape = (n_times, n_simulations)
     metrics = {
@@ -652,8 +630,6 @@ if __name__ == "__main__":
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with np.load(archive_path, allow_pickle=False) as archive:
-        if "times" not in archive.files:
-            raise KeyError(f"{archive_path} does not contain times")
         times = np.asarray(archive["times"], dtype=np.float64)
         if times.ndim != 1 or not times.size or not np.all(np.isfinite(times)):
             raise ValueError(
@@ -728,10 +704,6 @@ if __name__ == "__main__":
         for field in ordered_fields:
             truth_key, prediction_key = FIELD_KEYS[field]
             if truth_key not in archive.files or prediction_key not in archive.files:
-                if field == "eta":
-                    raise KeyError(
-                        f"archive lacks required {truth_key}/{prediction_key}"
-                    )
                 missing_fields.append(field)
                 continue
             truth_field = (

@@ -86,12 +86,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="JONSWAP simulations solved together after sorting by rollout length.",
     )
     args = parser.parse_args(argv)
-    if args.solver_batch_size is not None:
-        if args.family != "jonswap_tma":
-            raise ValueError("solver_batch_size is only used for JONSWAP/TMA")
-        if args.solver_batch_size > args.batch_size:
-            raise ValueError("solver_batch_size must not exceed batch_size")
-
     jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_platforms", "cuda" if args.gpu else "cpu")
     if not args.gpu:
@@ -107,10 +101,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     family_id = PhysicalFamilyId[args.family.upper()]
 
-    backend = jax.default_backend()
-    requested = "gpu" if args.gpu else "cpu"
-    if backend != requested:
-        raise RuntimeError(f"requested {requested}, but JAX initialized {backend}")
+    jax.default_backend()
     total_started = perf_counter()
     if args.family == "stokes":
         generate_batch = partial(

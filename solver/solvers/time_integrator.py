@@ -715,9 +715,6 @@ def gauss_legendre_2_if_step(
 ) -> State:
     """Take the legacy fixed-count GL2 integrating-factor step."""
 
-    if iterations < 0:
-        raise ValueError("iterations must be nonnegative")
-
     sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
     c1 = 0.5 - sqrt3 / 6.0
     c2 = 0.5 + sqrt3 / 6.0
@@ -809,10 +806,6 @@ def gauss_legendre_2_if_step_with_telemetry(
     samples continue.
     """
 
-    if max_iterations < 0:
-        raise ValueError("max_iterations must be nonnegative")
-    if not 0.0 < residual_tolerance < float("inf"):
-        raise ValueError("residual_tolerance must be finite and positive")
     return _gauss_legendre_2_if_step_result(
         state,
         t,
@@ -862,17 +855,12 @@ def take_step_with_telemetry(
     dt: float | jax.Array,
     params: SolverParams,
     *,
-    method: str = "gl2_if",
     implicit_max_iterations: int = 8,
     implicit_residual_tolerance: float = 1e-8,
     implicit_relaxation: float = 1.0,
 ) -> ImplicitStepResult:
     """Take one convergence-controlled implicit step with diagnostics."""
 
-    if method != "gl2_if":
-        raise ValueError(
-            "implicit-stage telemetry is currently available only for 'gl2_if'"
-        )
     return gauss_legendre_2_if_step_with_telemetry(
         state,
         t,
@@ -908,18 +896,6 @@ def rollout(
     """
 
     times = jnp.asarray(times)
-    if substeps_per_interval < 1:
-        raise ValueError("substeps_per_interval must be positive")
-    telemetry_enabled = implicit_residual_tolerance is not None
-    if telemetry_enabled and method != "gl2_if":
-        raise ValueError(
-            "implicit_residual_tolerance is currently available only for 'gl2_if'"
-        )
-    if telemetry_enabled:
-        assert implicit_residual_tolerance is not None
-        if not 0.0 < implicit_residual_tolerance < float("inf"):
-            raise ValueError("implicit_residual_tolerance must be finite and positive")
-
     initial_state = State(
         eta=jnp.asarray(initial_state.eta), xi=jnp.asarray(initial_state.xi)
     )
@@ -930,7 +906,7 @@ def rollout(
     if times.shape[0] == 1:
         eta = initial_state.eta[jnp.newaxis, :]
         xi = initial_state.xi[jnp.newaxis, :]
-        if telemetry_enabled:
+        if implicit_residual_tolerance is not None:
             empty_shape = (0, *initial_state.eta.shape[:-1])
             step_telemetry = ImplicitStepTelemetry(
                 residual=jnp.empty(empty_shape, dtype=initial_state.eta.dtype),
@@ -943,8 +919,7 @@ def rollout(
     else:
         dts = times[1:] - times[:-1]
 
-        if telemetry_enabled:
-            assert implicit_residual_tolerance is not None
+        if implicit_residual_tolerance is not None:
 
             def step_fn_with_telemetry(
                 carry: State,
@@ -960,7 +935,6 @@ def rollout(
                         current_t,
                         dt,
                         params,
-                        method=method,
                         implicit_max_iterations=implicit_iterations,
                         implicit_residual_tolerance=implicit_residual_tolerance,
                         implicit_relaxation=implicit_relaxation,
@@ -982,7 +956,6 @@ def rollout(
                             sub_t,
                             dt_sub,
                             params,
-                            method=method,
                             implicit_max_iterations=implicit_iterations,
                             implicit_residual_tolerance=implicit_residual_tolerance,
                             implicit_relaxation=implicit_relaxation,
@@ -1074,8 +1047,7 @@ def rollout(
         )
 
     payload: dict[str, jnp.ndarray] = {"times": times, "eta": eta, "xi": xi}
-    if telemetry_enabled:
-        assert step_telemetry is not None
+    if step_telemetry is not None:
         n_steps = step_telemetry.residual.shape[0]
         if n_steps == 0:
             sample_shape = initial_state.eta.shape[:-1]

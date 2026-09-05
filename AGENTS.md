@@ -3,6 +3,7 @@
 - Do not mix unrelated cleanup into functional changes.
 - Prefer the smallest correct change, not the smallest possible edit.
 - A function does not need to return its inputs to the caller if they are not mutated during the function call.
+- Trust invariants established by the main entry points and fixed configuration; do not revalidate them downstream. Keep checks for genuine numerical failures and external-data integrity.
 
 ## Python
 

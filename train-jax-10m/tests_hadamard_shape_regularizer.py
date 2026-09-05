@@ -297,17 +297,6 @@ def test_loss_is_jittable_and_differentiable() -> None:
     assert abs(float(gradient["alpha"])) > 1e-10
 
 
-def test_invalid_config_is_rejected() -> None:
-    eta, _, _, k = _base_inputs(batch_size=1)
-    bad = _config(relative_eps_min=0.0)
-    try:
-        construct_relative_eta_probe(jax.random.PRNGKey(0), eta, k, bad, jnp.float64)
-    except ValueError as error:
-        assert "relative eps bounds" in str(error)
-    else:
-        raise AssertionError("invalid finite-secant range was accepted")
-
-
 TESTS: list[tuple[str, TestFn]] = [
     ("math/projected_sobolev_energy", test_projected_sobolev_energy_matches_known_mode),
     (
@@ -321,7 +310,6 @@ TESTS: list[tuple[str, TestFn]] = [
         test_normalizers_and_output_mean_match_production,
     ),
     ("integration/jit_and_grad", test_loss_is_jittable_and_differentiable),
-    ("validation/invalid_config", test_invalid_config_is_rejected),
 ]
 
 

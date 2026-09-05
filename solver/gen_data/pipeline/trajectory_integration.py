@@ -91,8 +91,6 @@ def _integrate_gl2(
     nonlinear_ramp_times: FloatArray | None = None,
     nonlinear_ramp_order: int = 4,
 ) -> tuple[dict[str, jax.Array], jax.Array]:
-    if not jax.config.read("jax_enable_x64"):
-        raise RuntimeError("paper-dataset integration requires JAX float64")
     depth_device = jnp.asarray(depths, dtype=jnp.float64)
     _, wavenumbers = build_grid(config.nx, config.length)
     k = jnp.asarray(wavenumbers, dtype=jnp.float64)

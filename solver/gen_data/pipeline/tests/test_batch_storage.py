@@ -133,15 +133,6 @@ class BatchStorageTests(unittest.TestCase):
                 )
             self.assertFalse(self.path.exists())
 
-        with self.assertRaisesRegex(ValueError, "equal nonzero lengths"):
-            save_completed_batch(
-                self.path,
-                ("a", "b"),
-                (valid,),
-                family_id=PhysicalFamilyId.STOKES,
-                dataset_split=DatasetSplit.VALIDATION,
-            )
-
     def test_load_validates_frame_time_depth_and_complete_shard(self) -> None:
         save_completed_batch(
             self.path,

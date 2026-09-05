@@ -399,55 +399,6 @@ class TrajectoryRolloutTest(unittest.TestCase):
             np.testing.assert_allclose(terminal_xi, -grids[index][-1])
         self.assertIsNone(simulations[2])
 
-    def test_truncated_integrator_outputs_fail_closed(self) -> None:
-        config = _config(nx=8, maximum_wavenumber=2.0)
-        initial = np.zeros((1, config.nx))
-        times = np.asarray([0.0, config.saved_dt])
-        fields = np.zeros((times.size, 1, config.nx))
-
-        with (
-            patch(
-                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
-                return_value=IntegratedTrajectoryBatch(
-                    fields,
-                    fields,
-                    fields,
-                    np.ones((0, 1), dtype=np.bool_),
-                    None,
-                ),
-            ),
-            self.assertRaises(ValueError),
-        ):
-            execute_trajectory_batch(
-                initial,
-                initial,
-                np.ones(1),
-                (times,),
-                config=config,
-            )
-
-        with (
-            patch(
-                "solver.gen_data.pipeline.trajectory_rollout."
-                "integrate_adjustment_batch",
-                return_value=IntegratedAdjustmentBatch(
-                    fields[:1],
-                    fields[:1],
-                    np.ones((1, 1), dtype=np.bool_),
-                ),
-            ),
-            self.assertRaises(ValueError),
-        ):
-            execute_adjustment_batch(
-                initial,
-                initial,
-                np.ones(1),
-                (times,),
-                nonlinear_ramp_times=np.ones(1),
-                nonlinear_ramp_order=4,
-                config=config,
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -108,7 +108,6 @@ def generate_trajectory_batch(
                     * math.pi
                     / math.sqrt(numerical.gravity * carrier_wavenumber),
                     saved_dt=numerical.saved_dt,
-                    horizon_name="Benjamin--Feir",
                 )
             )
         time_grids = tuple(time_grids_list)
@@ -154,7 +153,6 @@ def generate_trajectory_batch(
             floor_saved_time_grid(
                 16.0 * peak_period,
                 saved_dt=numerical.saved_dt,
-                horizon_name="JONSWAP/TMA",
             )
             for peak_period in peak_periods
         )

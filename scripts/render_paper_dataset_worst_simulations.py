@@ -872,8 +872,6 @@ if __name__ == "__main__":
         simulations = tuple(
             simulation for group in simulation_groups for simulation in group
         )
-        if len(simulations) != sum(len(source.trajectories) for source in sources):
-            raise RuntimeError("whole-dataset audit lost trajectories")
         retained_rows = sum(simulation.row_count for simulation in simulations)
         if binding is not None:
             validate_scanned_population(
@@ -1104,8 +1102,6 @@ if __name__ == "__main__":
                 title = f"{family_label}: rank-one accepted simulation by the {metric_label}"
                 gif_path = output_dir / f"{family}_worst_{ranking_name}.gif"
                 stored_frames = int(loaded_trajectory.time.size)
-                if stored_frames < 1:
-                    raise ValueError("animation requires at least one stored frame")
                 frame_indices = np.rint(
                     np.linspace(
                         0, stored_frames - 1, min(stored_frames, GIF_MAXIMUM_FRAMES)
@@ -1123,10 +1119,6 @@ if __name__ == "__main__":
                 )
                 limits: dict[str, tuple[float, float]] = {}
                 for name, field in zip(FIELD_NAMES, fields):
-                    if field.size == 0 or not np.all(np.isfinite(field)):
-                        raise ValueError(
-                            "animation limits require finite nonempty values"
-                        )
                     lower, upper = float(np.min(field)), float(np.max(field))
                     span = upper - lower
                     padding = GIF_Y_LIMIT_PADDING_FRACTION * (

@@ -16,7 +16,6 @@ def floor_saved_time_grid(
     terminal_time: float,
     *,
     saved_dt: float,
-    horizon_name: str,
 ) -> FloatArray:
     """Return the saved-time prefix ending immediately before a horizon."""
 
@@ -25,29 +24,13 @@ def floor_saved_time_grid(
         step_count -= 1
     while (step_count + 1) * saved_dt <= terminal_time:
         step_count += 1
-    if step_count < 1:
-        raise ValueError(f"{horizon_name} horizon is shorter than one saved step")
-    saved_times = saved_dt * np.arange(step_count + 1, dtype=np.float64)
-    realized = float(saved_times[-1])
-    if not (realized <= terminal_time and terminal_time - realized < saved_dt):
-        raise RuntimeError(
-            f"{horizon_name} saved-grid horizon was not strictly floored"
-        )
-    return saved_times
+    return saved_dt * np.arange(step_count + 1, dtype=np.float64)
 
 
 def select_tanaka_times(eta: FloatArray, *, length: float) -> IntArray:
     """Select 200 frames, concentrating half the density on rapid evolution."""
 
     surface = np.asarray(eta, dtype=np.float64)
-    if surface.ndim != 2 or min(surface.shape) < 2:
-        raise ValueError("eta must have nonempty shape (time, space)")
-    if surface.shape[0] < 200:
-        raise ValueError("Tanaka trajectories must contain at least 200 frames")
-    if not np.isfinite(surface).all():
-        raise ValueError("eta must contain only finite values")
-    if not math.isfinite(length) or length <= 0.0:
-        raise ValueError("length must be finite and positive")
 
     nx = surface.shape[-1]
     wavenumbers = 2.0 * np.pi * np.fft.fftfreq(nx, d=length / nx)
@@ -97,7 +80,5 @@ def select_uniform_times(
 ) -> IntArray:
     """Select the nearest dense-grid indices to an endpoint-uniform grid."""
 
-    if not 2 <= keep_samples <= number_of_times:
-        raise ValueError("keep_samples must lie between two and the time count")
     numerator = np.arange(keep_samples, dtype=np.int64) * (number_of_times - 1)
     return np.floor(numerator / (keep_samples - 1) + 0.5).astype(np.int32)

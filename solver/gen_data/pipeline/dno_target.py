@@ -38,15 +38,9 @@ def compute_dno_target(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Return projected inputs and their discrete DNO target."""
 
-    if not jax.config.read("jax_enable_x64"):
-        raise RuntimeError("the paper DNO target requires JAX float64 mode")
     eta_array = jnp.asarray(eta, dtype=jnp.float64)
     xi_array = jnp.asarray(xi, dtype=jnp.float64)
     depth_array = jnp.asarray(depth, dtype=jnp.float64)
-    if eta_array.shape != xi_array.shape:
-        raise ValueError("eta and xi must have identical shapes")
-    if eta_array.shape[-1] != nx:
-        raise ValueError(f"expected {nx} grid points, got {eta_array.shape[-1]}")
 
     _, wavenumbers = build_grid(nx, length)
     wavenumbers = jnp.asarray(wavenumbers, dtype=eta_array.dtype)

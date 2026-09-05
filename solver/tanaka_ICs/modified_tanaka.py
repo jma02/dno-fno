@@ -65,10 +65,6 @@ def validate_solved_amplitudes(
 
     eta = jnp.asarray(eta_profile)
     requested = jnp.asarray(requested_amplitudes, dtype=eta.dtype)
-    if eta.ndim != 2 or requested.shape != (eta.shape[0],):
-        raise ValueError(
-            "Tanaka profiles and requested amplitudes must have matching batch size."
-        )
     achieved = jnp.max(eta, axis=-1)
     absolute_error = jnp.abs(achieved - requested)
     allowed_error = jnp.maximum(
@@ -830,9 +826,6 @@ def solve_modified_tanaka_batched(
     directions: jnp.ndarray | None = None,
 ) -> ModifiedTanakaBatchSolution:
     amplitudes = jnp.asarray(amplitudes, dtype=REAL_DTYPE)
-    if amplitudes.ndim != 1:
-        raise ValueError("amplitudes must have shape (batch,)")
-
     if centers is None:
         centers = jnp.full_like(amplitudes, template_params.center)
     else:

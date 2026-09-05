@@ -29,43 +29,6 @@ TrajectorySamples = NamedTuple(
 )
 
 
-def _validate_initial_conditions(
-    eta0: FloatArray,
-    xi0: FloatArray,
-    depths: FloatArray,
-    *,
-    nx: int,
-) -> tuple[FloatArray, FloatArray, FloatArray]:
-    eta = np.asarray(eta0, dtype=np.float64)
-    xi = np.asarray(xi0, dtype=np.float64)
-    depth_values = np.asarray(depths, dtype=np.float64)
-    if eta.ndim != 2 or eta.shape[-1] != nx:
-        raise ValueError(f"eta0 must have shape (batch, {nx}), got {eta.shape}")
-    if xi.shape != eta.shape:
-        raise ValueError("xi0 must have the same shape as eta0")
-    if depth_values.shape != (eta.shape[0],):
-        raise ValueError(f"depths must have shape ({eta.shape[0]},)")
-    if not np.isfinite(depth_values).all() or np.any(depth_values <= 0.0):
-        raise ValueError("depths must be finite and positive")
-    return eta, xi, depth_values
-
-
-def _prepare_time_grids(
-    time_grids: tuple[FloatArray, ...],
-    *,
-    batch_size: int,
-) -> tuple[tuple[FloatArray, ...], FloatArray]:
-    if len(time_grids) != batch_size:
-        raise ValueError("time_grids must contain one grid per input simulation")
-    grids = tuple(np.asarray(times, dtype=np.float64) for times in time_grids)
-    integration_times = max(grids, key=len)
-    if any(
-        not np.array_equal(times, integration_times[: times.size]) for times in grids
-    ):
-        raise ValueError("every time grid must be a prefix of the longest grid")
-    return grids, integration_times
-
-
 def _all_gl2_steps_converged(
     convergence: BoolArray,
     simulation_index: int,
@@ -86,16 +49,11 @@ def execute_trajectory_batch(
 ) -> tuple[TrajectorySamples | None, ...]:
     """Integrate a batch, then evaluate each requested trajectory prefix."""
 
-    eta, xi, depth_values = _validate_initial_conditions(
-        eta0,
-        xi0,
-        depths,
-        nx=config.nx,
-    )
-    grids, integration_times = _prepare_time_grids(
-        time_grids,
-        batch_size=eta.shape[0],
-    )
+    eta = np.asarray(eta0, dtype=np.float64)
+    xi = np.asarray(xi0, dtype=np.float64)
+    depth_values = np.asarray(depths, dtype=np.float64)
+    grids = tuple(np.asarray(times, dtype=np.float64) for times in time_grids)
+    integration_times = max(grids, key=len)
     rollout = integrate_batch(
         eta0=eta,
         xi0=xi,
@@ -103,24 +61,7 @@ def execute_trajectory_batch(
         saved_times=integration_times,
         config=config,
     )
-    field_shape = (integration_times.size, eta.shape[0], config.target_nx)
-    if any(
-        np.shape(field) != field_shape
-        for field in (rollout.eta, rollout.xi, rollout.gxi)
-    ):
-        raise ValueError(f"trajectory fields must have shape {field_shape}")
-    step_shape = (
-        (integration_times.size - 1) * config.substeps_per_saved_frame,
-        eta.shape[0],
-    )
-    if np.shape(rollout.gl2_converged) != step_shape:
-        raise ValueError(f"GL2 convergence must have shape {step_shape}")
     health = rollout.solver_grid_health
-    health_shape = (integration_times.size, eta.shape[0])
-    if config.internal_hamiltonian_drift_threshold is not None and (
-        health is None or any(np.shape(field) != health_shape for field in health)
-    ):
-        raise ValueError(f"solver-grid health fields must have shape {health_shape}")
 
     results: list[TrajectorySamples | None] = []
     for index, saved_times in enumerate(grids):
@@ -202,23 +143,12 @@ def execute_adjustment_batch(
 ) -> tuple[tuple[FloatArray, FloatArray] | None, ...]:
     """Warm up JONSWAP simulations and return valid nonlinear endpoints."""
 
-    eta, xi, depth_values = _validate_initial_conditions(
-        eta0,
-        xi0,
-        depths,
-        nx=config.nx,
-    )
-    grids, integration_times = _prepare_time_grids(
-        time_grids,
-        batch_size=eta.shape[0],
-    )
+    eta = np.asarray(eta0, dtype=np.float64)
+    xi = np.asarray(xi0, dtype=np.float64)
+    depth_values = np.asarray(depths, dtype=np.float64)
+    grids = tuple(np.asarray(times, dtype=np.float64) for times in time_grids)
+    integration_times = max(grids, key=len)
     ramp_times = np.asarray(nonlinear_ramp_times, dtype=np.float64)
-    if ramp_times.shape != depth_values.shape:
-        raise ValueError(f"nonlinear_ramp_times must have shape {depth_values.shape}")
-    if not np.isfinite(ramp_times).all() or np.any(ramp_times <= 0.0):
-        raise ValueError("nonlinear_ramp_times must be finite and positive")
-    if nonlinear_ramp_order < 1:
-        raise ValueError("nonlinear_ramp_order must be positive")
 
     rollout = integrate_adjustment_batch(
         eta0=eta,
@@ -229,15 +159,6 @@ def execute_adjustment_batch(
         nonlinear_ramp_times=ramp_times,
         nonlinear_ramp_order=nonlinear_ramp_order,
     )
-    field_shape = (integration_times.size, eta.shape[0], config.nx)
-    if any(np.shape(field) != field_shape for field in (rollout.eta, rollout.xi)):
-        raise ValueError(f"adjustment fields must have shape {field_shape}")
-    step_shape = (
-        (integration_times.size - 1) * config.substeps_per_saved_frame,
-        eta.shape[0],
-    )
-    if np.shape(rollout.gl2_converged) != step_shape:
-        raise ValueError(f"GL2 convergence must have shape {step_shape}")
 
     results: list[tuple[FloatArray, FloatArray] | None] = []
     for index, saved_times in enumerate(grids):

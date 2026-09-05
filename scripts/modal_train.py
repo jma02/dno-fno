@@ -109,8 +109,6 @@ def upload_data(
     """Push one flat training dataset and its sidecars onto the volume."""
     src = Path(local_dir).resolve()
     npz = src / train_dataset
-    if not npz.exists():
-        raise FileNotFoundError(f"missing local file: {npz}")
     targets = [(npz, f"/{train_dataset}")] + [
         (sidecar, f"/{sidecar.name}")
         for sidecar in (npz.with_suffix(".meta.json"), npz.with_suffix(".stats.json"))
@@ -149,9 +147,6 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
             raise ValueError(f"invalid dataset_shards record: {record!r}")
         targets.append((dataset_path.parent / shard).resolve())
 
-    missing = [path for path in targets if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"missing dataset-view files: {missing[:5]}")
     if len(set(targets)) != len(targets):
         raise ValueError("dataset view contains duplicate upload targets")
 

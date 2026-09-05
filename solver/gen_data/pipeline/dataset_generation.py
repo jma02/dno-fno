@@ -33,8 +33,6 @@ def generate_simulations(
         split=dataset_split.value,
         batch_id=0,
     ).parent
-    if directory.exists() and not directory.is_dir():
-        raise RuntimeError(f"completed batch path is not a directory: {directory}")
     completed_batches = sorted(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
@@ -98,8 +96,6 @@ def generate_simulations(
                 sum(attempt_counts.values()),
                 output_path,
             )
-            if not output_path.exists():
-                raise RuntimeError("batch generator returned without saving the batch")
 
         batch = load_completed_batch(output_path)
         if batch.family_id != family_id:

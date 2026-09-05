@@ -1064,7 +1064,6 @@ def main() -> None:
             train_indices,
             args.batch_size,
             epoch_rng,
-            shuffle=True,
             drop_last=True,
         )
         batch_iter = (
@@ -1176,7 +1175,6 @@ def main() -> None:
             val_indices,
             args.batch_size,
             None,
-            shuffle=False,
             drop_last=False,
         )
         val_batches = (

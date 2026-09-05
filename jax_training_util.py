@@ -199,9 +199,6 @@ def plot_labeled_samples(
     labels: Sequence[str],
     depth_values: np.ndarray | None = None,
 ) -> None:
-    if len(labels) == 0:
-        raise ValueError("Cannot plot labeled samples for an empty selection")
-
     figure, axes = plt.subplots(3, len(labels), figsize=(4 * len(labels), 8), sharex="col")
     axes = np.asarray(axes)
     if axes.ndim == 1:

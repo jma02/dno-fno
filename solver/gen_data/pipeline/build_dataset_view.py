@@ -47,10 +47,6 @@ def build_dataset_view(
         for character in name
     ):
         raise ValueError("name must contain only letters, digits, '_' or '-'")
-    if not np.isfinite(length) or length <= 0.0:
-        raise ValueError("length must be finite and positive")
-    if not batches:
-        raise ValueError("at least one completed batch is required")
     resolved_batches = tuple(batch.resolve() for batch in batches)
     if len(set(resolved_batches)) != len(resolved_batches):
         raise ValueError("completed batch paths must be unique")

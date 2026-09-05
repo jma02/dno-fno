@@ -91,8 +91,6 @@ def build_combined_view(
         batch_paths.update(batches)
         runs[identity] = CompletedRun(path, accepted_count, attempted_count, batches)
 
-    if not runs:
-        raise ValueError("at least one completed run is required")
     ordered_runs: dict[tuple[DatasetSplit, str], CompletedRun] = {}
     splits = tuple(
         split for split in DatasetSplit if any(key[0] == split for key in runs)

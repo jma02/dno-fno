@@ -101,8 +101,6 @@ def build_initial_conditions(
 ) -> tuple[jax.Array, jax.Array]:
     """Vectorize the deep-water JCP09 construction over a simulation batch."""
 
-    if not jax.config.read("jax_enable_x64"):
-        raise RuntimeError("Benjamin--Feir construction requires JAX float64")
     x_array = jnp.asarray(x, dtype=jnp.float64)
     return jax.vmap(
         lambda mode, offset, steepness, ratio, translation: _initial_condition(

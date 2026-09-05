@@ -77,7 +77,6 @@ def integrate_and_subsample_jonswap(
             floor_saved_time_grid(
                 _ADJUSTMENT_BURN_PEAK_PERIODS * peak_period,
                 saved_dt=numerical.saved_dt,
-                horizon_name="nonlinear-adjustment",
             )
             for peak_period in group_peak_periods
         )

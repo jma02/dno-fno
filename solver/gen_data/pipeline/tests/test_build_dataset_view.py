@@ -122,7 +122,7 @@ class DatasetViewTests(unittest.TestCase):
                 np.asarray([0, 0, 1, 1], dtype=np.int32),
             )
 
-    def test_duplicate_batch_path_is_rejected(self) -> None:
+    def test_aliased_batch_paths_are_rejected_before_publication(self) -> None:
         path = batch_path(self.root, family="stokes", split="train", batch_id=0)
         _write_batch(
             path,
@@ -132,9 +132,11 @@ class DatasetViewTests(unittest.TestCase):
             accepted_local_indices=(0, 1),
             frames_per_simulation=1,
         )
+        alias = batch_path(self.root, family="stokes", split="train", batch_id=1)
+        alias.symlink_to(path)
 
         with self.assertRaisesRegex(ValueError, "batch paths must be unique"):
-            build_dataset_view(self.root, (path, path))
+            build_dataset_view(self.root, (path, alias))
 
         self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
         self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())

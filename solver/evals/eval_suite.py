@@ -83,10 +83,7 @@ FAMILY_CONFIGS: dict[str, FamilyConfig] = {
 def _resolve_manifest_path(manifest_path: Path, value: object, label: str) -> Path:
     if not isinstance(value, str) or not value:
         raise ValueError(f"dataset manifest must define nonempty {label}")
-    path = (manifest_path.parent / value).resolve()
-    if not path.is_file():
-        raise ValueError(f"dataset {label} does not exist: {path}")
-    return path
+    return (manifest_path.parent / value).resolve()
 
 
 def _load_paper_dataset_ics(
@@ -474,8 +471,6 @@ def _rollout_ic_chunks(
     *,
     label: str,
 ) -> RolloutPayload:
-    if not ics:
-        raise ValueError("cannot roll out an empty IC list")
     effective_batch_size = min(batch_size or len(ics), len(ics))
     if effective_batch_size == len(ics):
         return rollout(ics)
@@ -487,13 +482,7 @@ def _rollout_ic_chunks(
         print(f"    {label} IC chunk {start}:{stop} of {len(ics)}", flush=True)
         result = rollout(ics[start:stop])
         for field_name in chunks:
-            values = np.asarray(result[field_name])
-            if values.ndim != 3 or values.shape[1] != stop - start:
-                raise ValueError(
-                    f"{label} chunk field {field_name} has shape {values.shape}; "
-                    f"expected (n_t, {stop - start}, nx)"
-                )
-            chunks[field_name].append(values)
+            chunks[field_name].append(np.asarray(result[field_name]))
         total_wall += float(result["wall_s"])
     return {
         **{name: np.concatenate(values, axis=1) for name, values in chunks.items()},
@@ -579,11 +568,6 @@ def compute_metrics(
         drift_truth = (h_truth - h_truth[:1]) / (np.abs(h_truth[:1]) + 1e-12)
         drift_pred = (h_pred - h_pred[:1]) / (np.abs(h_pred[:1]) + 1e-12)
         energy_error = (h_pred - h_truth) / (np.abs(h_truth) + 1e-12)
-    if np.asarray(times).shape != (n_t,):
-        raise ValueError(
-            f"times must have shape ({n_t},), got {np.asarray(times).shape}"
-        )
-
     truth_nonfinite_by_field: dict[str, np.ndarray] = {
         field: np.asarray(
             ~np.isfinite(truth[field]).all(axis=(0, 2)),

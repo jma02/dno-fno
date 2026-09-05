@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-import re
 from typing import Any, NamedTuple, cast
 
 import numpy as np
@@ -18,7 +17,6 @@ from solver.gen_data.pipeline.types import (
     SimulationRows,
 )
 
-_PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 _SHARD_DTYPES = {
     "eta": np.dtype(np.float32),
     "xi": np.dtype(np.float32),
@@ -51,11 +49,6 @@ def batch_path(
 ) -> Path:
     """Return the standard path for one completed batch."""
 
-    for value, field_name in ((family, "family"), (split, "split")):
-        if _PATH_COMPONENT_PATTERN.fullmatch(value) is None:
-            raise ValueError(
-                f"{field_name} must contain only letters, digits, '_' or '-'"
-            )
     return root / "batches" / family / split / f"batch_{batch_id:06d}.npz"
 
 
@@ -137,21 +130,6 @@ def save_completed_batch(
     """Atomically save one finished batch without replacing an existing batch."""
 
     simulation_count = len(parameter_group_ids)
-    if simulation_count == 0 or len(rows_by_simulation) != simulation_count:
-        raise ValueError(
-            "parameter_group_ids and rows_by_simulation must have equal nonzero lengths"
-        )
-    if any(
-        not isinstance(group_id, str) or not group_id
-        for group_id in parameter_group_ids
-    ):
-        raise ValueError("parameter_group_ids must contain nonempty strings")
-    if not isinstance(family_id, PhysicalFamilyId):
-        raise TypeError("family_id must be a PhysicalFamilyId")
-    if not isinstance(dataset_split, DatasetSplit):
-        raise TypeError("dataset_split must be a DatasetSplit")
-    if simulation_count > np.iinfo(np.int32).max:
-        raise ValueError("simulation count exceeds the int32 shard capacity")
 
     parts: dict[str, list[NDArray[Any]]] = {name: [] for name in _SHARD_DTYPES}
     for local_index, rows in enumerate(rows_by_simulation):
@@ -161,11 +139,7 @@ def save_completed_batch(
             eta = np.asarray(rows.eta, dtype=np.float32)
             xi = np.asarray(rows.xi, dtype=np.float32)
             gxi = np.asarray(rows.gxi, dtype=np.float32)
-        if eta.ndim != 2:
-            raise ValueError("eta must have shape (row, space)")
         row_count = eta.shape[0]
-        if row_count > np.iinfo(np.int32).max:
-            raise ValueError("frame count exceeds the int32 shard capacity")
         shard = DatasetShardArrays(
             eta=eta,
             xi=xi,

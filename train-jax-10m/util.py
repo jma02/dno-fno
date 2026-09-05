@@ -62,19 +62,11 @@ def assert_pytree_replicated(tree: Any, *, name: str) -> None:
             raise RuntimeError(f"{name} leaf {path} has divergent device replicas")
 
 
-def require_jax_devices(
-    *,
-    allow_cpu: bool = False,
-    min_device_count: int = 1,
-) -> tuple[str, list[Any]]:
+def require_jax_devices() -> tuple[str, list[Any]]:
     backend = jax.default_backend()
-    if backend != "gpu" and not allow_cpu:
+    if backend != "gpu":
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
     devices = list(jax.local_devices())
-    if len(devices) < min_device_count:
-        raise RuntimeError(
-            f"Expected at least {min_device_count} local JAX devices, found {len(devices)}."
-        )
     return backend, devices
 
 
@@ -220,10 +212,10 @@ def _load_paper_dataset_shards(
     location: DatasetLocation,
 ) -> dict[str, np.ndarray]:
     manifest = location.manifest
-    shard_records = manifest.get("dataset_shards")
+    shard_records = cast(list[dict[str, object]], manifest["dataset_shards"])
     grid = manifest.get("grid")
-    if not isinstance(shard_records, list) or not isinstance(grid, dict):
-        raise ValueError("Schema-v2 manifest requires dataset_shards and grid")
+    if not isinstance(grid, dict):
+        raise ValueError("Schema-v2 manifest requires grid")
     nx = grid.get("nx")
     length = grid.get("length")
     if (
@@ -240,8 +232,6 @@ def _load_paper_dataset_shards(
         name: [] for name in ("eta", "xi", "gxi", "depth", "time")
     }
     for path, record in zip(location.dataset_shard_paths, shard_records):
-        if not isinstance(record, dict):
-            raise TypeError("every dataset shard record must be an object")
         with np.load(path, allow_pickle=False) as archive:
             missing = sorted(set(field_parts) - set(archive.files))
             if missing:
@@ -302,23 +292,8 @@ def build_dataset_split_indices(
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return every accepted row from the dataset's preassigned splits."""
-    required = {"dataset_split", "accepted_mask"}
-    missing = sorted(required - set(dataset))
-    if missing:
-        raise ValueError(f"Paper-dataset is missing row arrays: {missing}")
     dataset_split = np.asarray(dataset["dataset_split"])
     eligible = np.asarray(dataset["accepted_mask"])
-    if dataset_split.shape != eligible.shape:
-        raise ValueError("dataset_split and accepted_mask must have matching shapes")
-    if dataset_split.dtype.kind not in {"U", "S"} or eligible.dtype != np.bool_:
-        raise TypeError(
-            "dataset_split must contain strings and accepted_mask must be bool"
-        )
-    unknown_splits = set(map(str, dataset_split)).difference(
-        split.value for split in DatasetSplit
-    )
-    if unknown_splits:
-        raise ValueError(f"unknown dataset splits: {sorted(unknown_splits)}")
     rng = np.random.default_rng(seed)
     return (
         rng.permutation(
@@ -399,8 +374,6 @@ def load_or_compute_stats(
     selection: dict[str, object] | None = None
     if indices is not None:
         indices = np.asarray(indices)
-        if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
-            raise TypeError("indices must be a one-dimensional integer array")
         if indices.size == 0:
             raise ValueError(
                 "Cannot compute normalization statistics from an empty selection"
@@ -437,10 +410,6 @@ def load_or_compute_stats(
     if dataset is None:
         dataset = load_dataset_arrays(dataset_path)
     num_examples = int(dataset["eta"].shape[0])
-    if indices is not None and (
-        int(indices.min()) < 0 or int(indices.max()) >= num_examples
-    ):
-        raise IndexError("Statistics selection contains an out-of-range row index")
 
     eta_min, eta_max, eta_absmax = _compute_selected_extrema(dataset["eta"], indices)
     xi_min, xi_max, xi_absmax = _compute_selected_extrema(dataset["xi"], indices)
@@ -566,15 +535,12 @@ def get_batches(
     batch_size: int,
     rng: np.random.Generator | None,
     *,
-    shuffle: bool,
     drop_last: bool,
 ) -> Iterator[RawBatchTuple]:
     """Yield raw (eta, xi, gxi, depth_log, indices) batches. Normalization happens
     on-device inside the jitted step."""
     ordered_indices = np.array(indices, copy=True)
-    if shuffle:
-        if rng is None:
-            raise ValueError("rng is required when shuffle=True")
+    if rng is not None:
         rng.shuffle(ordered_indices)
 
     limit = ordered_indices.shape[0]
@@ -613,10 +579,6 @@ def device_prefetch(
     def _producer() -> None:
         try:
             for item in iterator:
-                if len(item) != len(destinations):
-                    raise ValueError(
-                        f"prefetch: item arity {len(item)} != destinations {len(destinations)}"
-                    )
                 pushed = tuple(
                     jax.device_put(field, dest) if dest is not None else field
                     for field, dest in zip(item, destinations)

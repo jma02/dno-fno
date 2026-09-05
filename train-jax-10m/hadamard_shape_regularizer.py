@@ -58,36 +58,12 @@ def sample_microbatch(
     return eta[indices], xi[indices], depth_per_sample[indices]
 
 
-def _validate_config(cfg: HadamardRegConfig) -> None:
-    if cfg.k_max <= 0.0:
-        raise ValueError(f"k_max must be positive, got {cfg.k_max}")
-    if cfg.sobolev_order < 0:
-        raise ValueError(
-            f"sobolev_order must be nonnegative, got {cfg.sobolev_order}"
-        )
-    if not 0.0 < cfg.relative_eps_min <= cfg.relative_eps_max:
-        raise ValueError(
-            "relative eps bounds must satisfy 0 < min <= max; got "
-            f"{cfg.relative_eps_min}, {cfg.relative_eps_max}"
-        )
-    if cfg.eta_scale_floor <= 0.0:
-        raise ValueError(
-            f"eta_scale_floor must be positive, got {cfg.eta_scale_floor}"
-        )
-    if cfg.denominator_floor <= 0.0:
-        raise ValueError(
-            f"denominator_floor must be positive, got {cfg.denominator_floor}"
-        )
-
-
 def sobolev_weight_sq(k: Array, order: int) -> Array:
     """Return the squared spectral weight used by the supervised loss.
 
     The trainer's order-``s`` convention is
     ``W(k)^2 = 1 + |k|^2 + ... + |k|^(2s)`` rather than ``(1+k^2)^s``.
     """
-    if order < 0:
-        raise ValueError(f"order must be nonnegative, got {order}")
     k_abs = jnp.abs(k)
     weight_sq = jnp.ones_like(k_abs)
     for derivative_order in range(1, order + 1):
@@ -138,7 +114,6 @@ def construct_relative_eta_probe(
     dominated by the largest wavenumbers.  Finally, its physical RMS is set to
     ``max(rms(eta - mean(eta)), eta_scale_floor)`` independently per sample.
     """
-    _validate_config(cfg)
     eta = eta_phys.astype(dtype)
     k_typed = k.astype(dtype)
     batch_size = eta.shape[0]
@@ -230,7 +205,6 @@ def compute_hadamard_reg(
     magnitude (up to sign).  All reported diagnostics are scalar arrays, so
     they can be stacked and averaged directly by the trainer.
     """
-    _validate_config(cfg)
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)

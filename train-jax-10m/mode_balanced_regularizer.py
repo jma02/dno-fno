@@ -24,63 +24,6 @@ class ModeBalancedConfig:
     dispersion_weighting: bool = False
 
 
-def _validate_config(config: ModeBalancedConfig) -> None:
-    if config.k_max <= 0.0:
-        raise ValueError(f"k_max must be positive, got {config.k_max}")
-    if config.gravity <= 0.0:
-        raise ValueError(f"gravity must be positive, got {config.gravity}")
-    if config.active_scale_relative <= 0.0:
-        raise ValueError(
-            "active_scale_relative must be positive, got "
-            f"{config.active_scale_relative}"
-        )
-    if config.denominator_floor_relative <= 0.0:
-        raise ValueError(
-            "denominator_floor_relative must be positive, got "
-            f"{config.denominator_floor_relative}"
-        )
-    if config.absolute_floor <= 0.0:
-        raise ValueError(
-            f"absolute_floor must be positive, got {config.absolute_floor}"
-        )
-    if config.huber_delta <= 0.0:
-        raise ValueError(
-            f"huber_delta must be positive, got {config.huber_delta}"
-        )
-    if config.ratio_cap <= 0.0:
-        raise ValueError(f"ratio_cap must be positive, got {config.ratio_cap}")
-
-
-def _validate_shapes(
-    eta: jax.Array,
-    gxi_prediction: jax.Array,
-    gxi_target: jax.Array,
-    depth: jax.Array,
-    k_rfft: jax.Array,
-) -> None:
-    if eta.ndim != 2:
-        raise ValueError(f"eta must have shape (batch, grid), got {eta.shape}")
-    if gxi_prediction.shape != eta.shape:
-        raise ValueError(
-            "gxi_prediction must have the same shape as eta, got "
-            f"{gxi_prediction.shape} and {eta.shape}"
-        )
-    if gxi_target.shape != eta.shape:
-        raise ValueError(
-            "gxi_target must have the same shape as eta, got "
-            f"{gxi_target.shape} and {eta.shape}"
-        )
-    if depth.shape != (eta.shape[0],):
-        raise ValueError(
-            f"depth must have shape ({eta.shape[0]},), got {depth.shape}"
-        )
-    expected_modes = eta.shape[-1] // 2 + 1
-    if k_rfft.shape != (expected_modes,):
-        raise ValueError(
-            f"k_rfft must have shape ({expected_modes},), got {k_rfft.shape}"
-        )
-
-
 def _capped_pseudo_huber(
     squared_ratio: jax.Array,
     delta: jax.Array,
@@ -127,9 +70,6 @@ def compute_mode_balanced_loss(
     This changes only the relative weight of samples; the complex per-mode
     loss within each sample is unchanged.
     """
-    _validate_config(config)
-    _validate_shapes(eta, gxi_prediction, gxi_target, depth, k_rfft)
-
     real_dtype = eta.dtype
     eta_hat = jnp.fft.rfft(eta, axis=-1, norm="forward")
     prediction_hat = jnp.fft.rfft(
