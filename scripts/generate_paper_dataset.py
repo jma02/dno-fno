@@ -66,13 +66,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="JONSWAP simulations solved together after sorting by rollout length.",
     )
     args = parser.parse_args(argv)
-    if args.family == "jonswap_tma":
-        if args.solver_batch_size is None or args.solver_batch_size <= 0:
-            raise ValueError("JONSWAP/TMA requires a positive solver_batch_size")
+    if args.solver_batch_size is not None:
+        if args.family != "jonswap_tma":
+            raise ValueError("solver_batch_size is only used for JONSWAP/TMA")
         if args.solver_batch_size > args.batch_size:
             raise ValueError("solver_batch_size must not exceed batch_size")
-    elif args.solver_batch_size is not None:
-        raise ValueError("solver_batch_size is only used for JONSWAP/TMA")
 
     os.environ["JAX_ENABLE_X64"] = "true"
     os.environ["DNO_TANAKA_DTYPE"] = "float64"
