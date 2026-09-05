@@ -59,12 +59,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         required=True,
         help="Maximum attempted simulations in one batch.",
     )
-    parser.add_argument(
-        "--platform",
-        choices=("cpu", "gpu"),
-        default="cpu",
-        help="JAX execution platform; defaults to the fail-safe CPU path.",
-    )
+    parser.add_argument("--gpu", action="store_true", help="Use GPU instead of CPU.")
     parser.add_argument(
         "--solver-batch-size",
         type=int,
@@ -83,8 +78,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     os.environ["JAX_ENABLE_X64"] = "true"
     os.environ["DNO_TANAKA_DTYPE"] = "float64"
-    os.environ["JAX_PLATFORMS"] = "cpu" if args.platform == "cpu" else "cuda"
-    if args.platform == "cpu":
+    os.environ["JAX_PLATFORMS"] = "cuda" if args.gpu else "cpu"
+    if not args.gpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     import jax
@@ -132,8 +127,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     from solver.gen_data.trajectory_batch_generator import generate_trajectory_batch
 
     backend = jax.default_backend()
-    if backend != args.platform:
-        raise RuntimeError(f"requested {args.platform}, but JAX initialized {backend}")
+    requested = "gpu" if args.gpu else "cpu"
+    if backend != requested:
+        raise RuntimeError(f"requested {requested}, but JAX initialized {backend}")
     total_started = perf_counter()
     if args.family == "stokes":
         generate_batch = partial(

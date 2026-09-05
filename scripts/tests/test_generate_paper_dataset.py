@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -26,14 +27,21 @@ class PaperDatasetGenerationTests(unittest.TestCase):
         )
 
     def test_generation_starts_without_execute_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            with patch(
-                "solver.gen_data.pipeline.dataset_generation.generate_simulations",
-                side_effect=RuntimeError("generation started"),
-            ) as generate:
+        for flags, backend in (((), "cpu"), (("--gpu",), "gpu")):
+            with (
+                self.subTest(backend=backend),
+                tempfile.TemporaryDirectory() as directory,
+                patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "7"}),
+                patch("jax.default_backend", return_value=backend),
+                patch(
+                    "solver.gen_data.pipeline.dataset_generation.generate_simulations",
+                    side_effect=RuntimeError("generation started"),
+                ) as generate,
+            ):
                 with self.assertRaisesRegex(RuntimeError, "generation started"):
                     main(
                         (
+                            *flags,
                             "--family",
                             "stokes",
                             "--split",
@@ -47,10 +55,16 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                         )
                     )
 
-        self.assertEqual(
-            tuple(generate.call_args.kwargs["accepted_targets"].values()),
-            (1, 1, 1, 1),
-        )
+                self.assertEqual(
+                    os.environ["JAX_PLATFORMS"], "cuda" if flags else "cpu"
+                )
+                self.assertEqual(
+                    os.environ["CUDA_VISIBLE_DEVICES"], "7" if flags else ""
+                )
+                self.assertEqual(
+                    tuple(generate.call_args.kwargs["accepted_targets"].values()),
+                    (1, 1, 1, 1),
+                )
 
 
 if __name__ == "__main__":
