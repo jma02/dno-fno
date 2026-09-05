@@ -15,41 +15,6 @@ GenerationResult: TypeAlias = tuple[dict[str, int], tuple[Path, ...]]
 MAX_RETRIES_PER_PARAMETER_GROUP = 64
 
 
-def _update_counts_from_batch(
-    path: Path,
-    *,
-    family_id: PhysicalFamilyId,
-    dataset_split: DatasetSplit,
-    accepted_targets: Mapping[str, int],
-    accepted_counts: dict[str, int],
-    attempt_counts: dict[str, int],
-) -> None:
-    batch = load_completed_batch(path)
-    if batch.family_id != family_id:
-        raise RuntimeError("completed batch belongs to a different family")
-    if batch.dataset_split != dataset_split:
-        raise RuntimeError("completed batch belongs to a different dataset split")
-
-    for parameter_group_id, accepted in zip(
-        batch.parameter_group_ids,
-        batch.accepted_simulations,
-        strict=True,
-    ):
-        target = accepted_targets[parameter_group_id]
-        attempt_counts[parameter_group_id] += 1
-        if accepted:
-            accepted_counts[parameter_group_id] += 1
-        if accepted_counts[parameter_group_id] > target:
-            raise RuntimeError(
-                f"completed batches exceed the accepted target for {parameter_group_id}"
-            )
-        maximum_attempts = target + MAX_RETRIES_PER_PARAMETER_GROUP if target else 0
-        if attempt_counts[parameter_group_id] > maximum_attempts:
-            raise RuntimeError(
-                f"completed batches exceed the attempt limit for {parameter_group_id}"
-            )
-
-
 def generate_simulations(
     root: Path,
     *,
@@ -99,75 +64,88 @@ def generate_simulations(
 
     accepted_counts = dict.fromkeys(accepted_targets, 0)
     attempt_counts = dict(accepted_counts)
-    for path in completed_batches:
-        _update_counts_from_batch(
-            path,
-            family_id=family_id,
-            dataset_split=dataset_split,
-            accepted_targets=accepted_targets,
-            accepted_counts=accepted_counts,
-            attempt_counts=attempt_counts,
-        )
-
-    while accepted_counts != accepted_targets:
-        available_slots = sorted(
-            [
-                (
-                    accepted_counts[parameter_group_id] + offset,
-                    parameter_group_id,
-                )
-                for parameter_group_id, target in accepted_targets.items()
-                for offset in range(
-                    min(
-                        batch_size,
-                        target - accepted_counts[parameter_group_id],
-                        target
-                        + MAX_RETRIES_PER_PARAMETER_GROUP
-                        - attempt_counts[parameter_group_id],
-                    )
-                )
-            ],
-            key=lambda slot: slot[0],
-        )
-        parameter_group_ids = tuple(
-            parameter_group_id for _, parameter_group_id in available_slots[:batch_size]
-        )
-
-        if not parameter_group_ids:
-            unfinished = "; ".join(
-                f"{parameter_group_id}: accepted={accepted_counts[parameter_group_id]}/"
-                f"{target}, attempts={attempt_counts[parameter_group_id]}/"
-                f"{target + MAX_RETRIES_PER_PARAMETER_GROUP}"
-                for parameter_group_id, target in accepted_targets.items()
-                if accepted_counts[parameter_group_id] < target
-            )
-            raise RuntimeError(
-                "attempt limits reached before all requested simulations were accepted; "
-                f"{unfinished}"
-            )
-
+    batch_id = 0
+    while batch_id < len(completed_batches) or accepted_counts != accepted_targets:
         output_path = batch_path(
             root,
             family=family_name,
             split=dataset_split.value,
-            batch_id=len(completed_batches),
+            batch_id=batch_id,
         )
-        generate_batch(
-            parameter_group_ids,
-            sum(attempt_counts.values()),
-            output_path,
-        )
-        if not output_path.exists():
-            raise RuntimeError("batch generator returned without saving the batch")
+        if batch_id == len(completed_batches):
+            available_slots = sorted(
+                [
+                    (
+                        accepted_counts[parameter_group_id] + offset,
+                        parameter_group_id,
+                    )
+                    for parameter_group_id, target in accepted_targets.items()
+                    for offset in range(
+                        min(
+                            batch_size,
+                            target - accepted_counts[parameter_group_id],
+                            target
+                            + MAX_RETRIES_PER_PARAMETER_GROUP
+                            - attempt_counts[parameter_group_id],
+                        )
+                    )
+                ],
+                key=lambda slot: slot[0],
+            )
+            parameter_group_ids = tuple(
+                parameter_group_id
+                for _, parameter_group_id in available_slots[:batch_size]
+            )
 
-        _update_counts_from_batch(
-            output_path,
-            family_id=family_id,
-            dataset_split=dataset_split,
-            accepted_targets=accepted_targets,
-            accepted_counts=accepted_counts,
-            attempt_counts=attempt_counts,
-        )
-        completed_batches.append(output_path)
+            if not parameter_group_ids:
+                unfinished = "; ".join(
+                    f"{parameter_group_id}: accepted={accepted_counts[parameter_group_id]}/"
+                    f"{target}, attempts={attempt_counts[parameter_group_id]}/"
+                    f"{target + MAX_RETRIES_PER_PARAMETER_GROUP}"
+                    for parameter_group_id, target in accepted_targets.items()
+                    if accepted_counts[parameter_group_id] < target
+                )
+                raise RuntimeError(
+                    "attempt limits reached before all requested simulations were accepted; "
+                    f"{unfinished}"
+                )
+
+            generate_batch(
+                parameter_group_ids,
+                sum(attempt_counts.values()),
+                output_path,
+            )
+            if not output_path.exists():
+                raise RuntimeError("batch generator returned without saving the batch")
+
+        batch = load_completed_batch(output_path)
+        if batch.family_id != family_id:
+            raise RuntimeError("completed batch belongs to a different family")
+        if batch.dataset_split != dataset_split:
+            raise RuntimeError("completed batch belongs to a different dataset split")
+
+        for parameter_group_id, accepted in zip(
+            batch.parameter_group_ids,
+            batch.accepted_simulations,
+            strict=True,
+        ):
+            target = accepted_targets[parameter_group_id]
+            attempt_counts[parameter_group_id] += 1
+            if accepted:
+                accepted_counts[parameter_group_id] += 1
+            if accepted_counts[parameter_group_id] > target:
+                raise RuntimeError(
+                    f"completed batches exceed the accepted target for {parameter_group_id}"
+                )
+            maximum_attempts = target + MAX_RETRIES_PER_PARAMETER_GROUP if target else 0
+            if attempt_counts[parameter_group_id] > maximum_attempts:
+                raise RuntimeError(
+                    f"completed batches exceed the attempt limit for {parameter_group_id}"
+                )
+        del batch  # Release loaded rows before generating the next batch.
+
+        if batch_id == len(completed_batches):
+            completed_batches.append(output_path)
+        batch_id += 1
 
     return attempt_counts, tuple(completed_batches)
