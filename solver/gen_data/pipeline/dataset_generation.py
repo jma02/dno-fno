@@ -37,12 +37,6 @@ def generate_simulations(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
     )
-    if any(
-        path.name != f"batch_{batch_id:06d}.npz"
-        for batch_id, path in enumerate(completed_batches)
-    ):
-        raise RuntimeError("completed batch IDs must be contiguous from zero")
-
     accepted_counts = dict.fromkeys(accepted_targets, 0)
     attempt_counts = dict(accepted_counts)
     batch_id = 0

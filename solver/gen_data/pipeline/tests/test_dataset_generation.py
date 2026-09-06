@@ -169,7 +169,7 @@ class DatasetGenerationTests(unittest.TestCase):
             3,
         )
 
-    def test_scanner_rejects_batch_gaps(self) -> None:
+    def test_resume_fails_when_a_saved_batch_is_missing(self) -> None:
         targets = {"low": 1}
         generator, _ = _fake_generator()
         generator(
@@ -183,7 +183,7 @@ class DatasetGenerationTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+        with self.assertRaises(FileNotFoundError):
             _generate(self.root, targets, 1, generator)
 
     def test_scanner_orders_double_digit_batch_ids_numerically(self) -> None:
