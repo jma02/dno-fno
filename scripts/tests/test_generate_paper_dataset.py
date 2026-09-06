@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from typing import get_args, get_type_hints
+from typing import get_args
 import unittest
 from unittest.mock import patch
 
@@ -21,9 +21,9 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             FAMILIES.items(), get_args(RequestedSimulationsPerGroup), strict=True
         ):
             with self.subTest(family=family):
-                fields = get_type_hints(schema)
-                self.assertEqual(tuple(fields), tuple(groups))
-                self.assertEqual(set(fields.values()), {int})
+                group_names, count_type = get_args(schema)
+                self.assertEqual(get_args(group_names), tuple(groups))
+                self.assertIs(count_type, int)
 
     def test_import_sets_float64_without_initializing_backends(self) -> None:
         subprocess.run(
