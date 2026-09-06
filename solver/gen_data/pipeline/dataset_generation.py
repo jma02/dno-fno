@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
-from solver.gen_data.pipeline.batch_storage import batch_path, load_completed_batch
+from solver.gen_data.pipeline.batch_storage import load_completed_batch
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
@@ -35,19 +35,14 @@ def generate_simulations(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
     )
+    # counting number of successful simulations we get for our quotas
     successful_per_group = dict.fromkeys(requested_simulations_per_group, 0)
+    # counting number of total attempts we get for our attempt quotas
     attempts_per_group = dict.fromkeys(requested_simulations_per_group, 0)
 
     # Recover progress from saved batches before generating anything new.
     for batch_id in range(len(completed_batches)):
-        batch = load_completed_batch(
-            batch_path(
-                root,
-                family=family_name,
-                split=dataset_split.value,
-                batch_id=batch_id,
-            )
-        )
+        batch = load_completed_batch(directory / f"batch_{batch_id:06d}.npz")
         if batch.family_id != family_id:
             raise RuntimeError("completed batch belongs to a different family")
         if batch.dataset_split != dataset_split:
@@ -58,19 +53,21 @@ def generate_simulations(
             batch.accepted_simulations,
             strict=True,
         ):
-            requested = requested_simulations_per_group[group]
             attempts_per_group[group] += 1
             if succeeded:
                 successful_per_group[group] += 1
-            if successful_per_group[group] > requested:
-                raise RuntimeError(
-                    f"completed batches exceed the accepted target for {group}"
-                )
-            if attempts_per_group[group] > 2 * requested:
-                raise RuntimeError(
-                    f"completed batches exceed the attempt limit for {group}"
-                )
         del batch
+
+    # Check all saved totals before writing any new batches.
+    for group, requested in requested_simulations_per_group.items():
+        if successful_per_group[group] > requested:
+            raise RuntimeError(
+                f"completed batches exceed the accepted target for {group}"
+            )
+        if attempts_per_group[group] > 2 * requested:
+            raise RuntimeError(
+                f"completed batches exceed the attempt limit for {group}"
+            )
 
     # Finish each group in order; only the final dataset needs the requested mix.
     for group, requested in requested_simulations_per_group.items():
@@ -87,12 +84,7 @@ def generate_simulations(
                     f"successful={successful_per_group[group]}/{requested}, "
                     f"attempts={attempts_per_group[group]}/{attempt_limit}"
                 )
-            output_path = batch_path(
-                root,
-                family=family_name,
-                split=dataset_split.value,
-                batch_id=len(completed_batches),
-            )
+            output_path = directory / f"batch_{len(completed_batches):06d}.npz"
             generate_batch(
                 (group,) * number_of_simulations,
                 sum(attempts_per_group.values()),

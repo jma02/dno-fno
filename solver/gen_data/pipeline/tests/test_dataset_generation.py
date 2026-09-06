@@ -207,14 +207,20 @@ class DatasetGenerationTests(unittest.TestCase):
                 root = self.root / str(saved_count)
                 generator, _ = _fake_generator(rejected_attempts=rejected)
                 generator(
-                    ("main_m1_q0",) * saved_count,
+                    ("main_m1_q1",) * saved_count,
                     0,
                     batch_path(
                         root, family=FAMILY_NAME, split=DATASET_SPLIT.value, batch_id=0
                     ),
                 )
+                must_not_run, _ = _fake_generator(interrupt_after_batches=0)
                 with self.assertRaisesRegex(RuntimeError, error):
-                    _generate(root, {"main_m1_q0": requested}, 2, generator)
+                    _generate(
+                        root,
+                        {"main_m1_q0": 1, "main_m1_q1": requested},
+                        2,
+                        must_not_run,
+                    )
 
     def test_resume_fails_when_a_saved_batch_is_missing(self) -> None:
         targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 1}
