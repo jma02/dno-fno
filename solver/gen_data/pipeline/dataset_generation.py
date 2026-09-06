@@ -16,7 +16,6 @@ from solver.gen_data.pipeline.types import (
 
 BatchGenerator: TypeAlias = Callable[[tuple[str, ...], int, Path], None]
 GenerationResult: TypeAlias = tuple[dict[str, int], tuple[Path, ...]]
-MAX_RETRIES_PER_PARAMETER_GROUP = 64
 
 
 def generate_simulations(
@@ -67,10 +66,7 @@ def generate_simulations(
                 raise RuntimeError(
                     f"completed batches exceed the accepted target for {group}"
                 )
-            attempt_limit = (
-                requested + MAX_RETRIES_PER_PARAMETER_GROUP if requested else 0
-            )
-            if attempts_per_group[group] > attempt_limit:
+            if attempts_per_group[group] > 2 * requested:
                 raise RuntimeError(
                     f"completed batches exceed the attempt limit for {group}"
                 )
@@ -78,7 +74,7 @@ def generate_simulations(
 
     # Finish each group in order; only the final dataset needs the requested mix.
     for group, requested in requested_simulations_per_group.items():
-        attempt_limit = requested + MAX_RETRIES_PER_PARAMETER_GROUP
+        attempt_limit = 2 * requested
         while successful_per_group[group] < requested:
             number_of_simulations = min(
                 batch_size,

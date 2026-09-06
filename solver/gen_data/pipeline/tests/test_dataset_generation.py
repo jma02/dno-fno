@@ -164,11 +164,11 @@ class DatasetGenerationTests(unittest.TestCase):
         self.assertEqual(attempts, {"main_m1_q0": 2, "main_m1_q1": 3})
         self.assertEqual(calls[1:], [(3, ("main_m1_q0",)), (4, ("main_m1_q1",))])
 
-    def test_generation_stops_after_retry_limit(self) -> None:
-        for requested, batch_size in ((32, 32), (3, 2)):
+    def test_generation_respects_attempt_limit(self) -> None:
+        for requested, batch_size in ((32, 32), (5, 3)):
             with self.subTest(requested=requested, batch_size=batch_size):
                 targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": requested}
-                limit = requested + 64
+                limit = 2 * requested
                 generator, calls = _fake_generator(
                     rejected_attempts=frozenset(range(limit))
                 )
@@ -180,11 +180,27 @@ class DatasetGenerationTests(unittest.TestCase):
                         self.root / str(requested), targets, batch_size, generator
                     )
                 self.assertEqual(sum(len(groups) for _, groups in calls), limit)
+                must_not_run, _ = _fake_generator(interrupt_after_batches=0)
+                with self.assertRaisesRegex(RuntimeError, "attempt limit reached"):
+                    _generate(
+                        self.root / str(requested), targets, batch_size, must_not_run
+                    )
+
+                generator, _ = _fake_generator(
+                    rejected_attempts=frozenset(range(requested))
+                )
+                root = self.root / f"last_attempt_{requested}"
+                attempts, paths = _generate(root, targets, batch_size, generator)
+                self.assertEqual(attempts, {"main_m1_q0": limit})
+                self.assertEqual(
+                    _generate(root, targets, batch_size, must_not_run),
+                    (attempts, paths),
+                )
 
     def test_resume_rejects_saved_quota_and_retry_overflows(self) -> None:
         for requested, saved_count, rejected, error in (
             (1, 2, frozenset(), "accepted target"),
-            (1, 66, frozenset(range(66)), "attempt limit"),
+            (1, 3, frozenset(range(3)), "attempt limit"),
             (0, 1, frozenset({0}), "attempt limit"),
         ):
             with self.subTest(requested=requested, saved_count=saved_count):

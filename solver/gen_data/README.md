@@ -33,7 +33,7 @@ rejections own no rows and are replaced from the same parameter group.
 Generation first reads saved batches to recover progress, then finishes each
 parameter group in dictionary order. New batches contain one group, up to the
 batch-size limit or that group's remaining quota. A group stops the run if it
-still needs successes after its requested count plus 64 attempts. This ordering
+still needs successes after twice its requested count in attempts. This ordering
 controls generation only; it does not balance training epochs.
 
 All accepted trajectory rows stay together in one split. The generator never
