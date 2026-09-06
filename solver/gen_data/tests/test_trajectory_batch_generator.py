@@ -103,7 +103,7 @@ def _generate(
         root,
         family_id=PhysicalFamilyId[family.upper()],
         dataset_split=DatasetSplit.TEST,
-        accepted_targets=dict(zip(parameter_group_ids, targets, strict=True)),
+        requested_per_group=dict(zip(parameter_group_ids, targets, strict=True)),
         batch_size=batch_size,
         generate_batch=partial(
             generate_trajectory_batch,

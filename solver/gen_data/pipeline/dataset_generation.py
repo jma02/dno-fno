@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
@@ -20,11 +20,11 @@ def generate_simulations(
     *,
     family_id: PhysicalFamilyId,
     dataset_split: DatasetSplit,
-    accepted_targets: Mapping[str, int],
+    requested_per_group: dict[str, int],
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
-    """Generate until every parameter group has its requested accepted count."""
+    """Generate the requested successful simulations for each parameter group."""
 
     family_name = family_id.name.lower()
     directory = batch_path(
@@ -37,10 +37,12 @@ def generate_simulations(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
     )
-    accepted_counts = dict.fromkeys(accepted_targets, 0)
-    attempt_counts = dict(accepted_counts)
+    successful_per_group = dict.fromkeys(requested_per_group, 0)
+    attempts_per_group = dict(successful_per_group)
     batch_id = 0
-    while batch_id < len(completed_batches) or accepted_counts != accepted_targets:
+    while (
+        batch_id < len(completed_batches) or successful_per_group != requested_per_group
+    ):
         output_path = batch_path(
             root,
             family=family_name,
@@ -50,35 +52,31 @@ def generate_simulations(
         if batch_id == len(completed_batches):
             available_slots = sorted(
                 [
-                    (
-                        accepted_counts[parameter_group_id] + offset,
-                        parameter_group_id,
-                    )
-                    for parameter_group_id, target in accepted_targets.items()
+                    (successful_per_group[group] + offset, group)
+                    for group, requested in requested_per_group.items()
                     for offset in range(
                         min(
                             batch_size,
-                            target - accepted_counts[parameter_group_id],
-                            target
+                            requested - successful_per_group[group],
+                            requested
                             + MAX_RETRIES_PER_PARAMETER_GROUP
-                            - attempt_counts[parameter_group_id],
+                            - attempts_per_group[group],
                         )
                     )
                 ],
                 key=lambda slot: slot[0],
             )
             parameter_group_ids = tuple(
-                parameter_group_id
-                for _, parameter_group_id in available_slots[:batch_size]
+                group for _, group in available_slots[:batch_size]
             )
 
             if not parameter_group_ids:
                 unfinished = "; ".join(
-                    f"{parameter_group_id}: accepted={accepted_counts[parameter_group_id]}/"
-                    f"{target}, attempts={attempt_counts[parameter_group_id]}/"
-                    f"{target + MAX_RETRIES_PER_PARAMETER_GROUP}"
-                    for parameter_group_id, target in accepted_targets.items()
-                    if accepted_counts[parameter_group_id] < target
+                    f"{group}: accepted={successful_per_group[group]}/"
+                    f"{requested}, attempts={attempts_per_group[group]}/"
+                    f"{requested + MAX_RETRIES_PER_PARAMETER_GROUP}"
+                    for group, requested in requested_per_group.items()
+                    if successful_per_group[group] < requested
                 )
                 raise RuntimeError(
                     "attempt limits reached before all requested simulations were accepted; "
@@ -87,7 +85,7 @@ def generate_simulations(
 
             generate_batch(
                 parameter_group_ids,
-                sum(attempt_counts.values()),
+                sum(attempts_per_group.values()),
                 output_path,
             )
 
@@ -97,23 +95,25 @@ def generate_simulations(
         if batch.dataset_split != dataset_split:
             raise RuntimeError("completed batch belongs to a different dataset split")
 
-        for parameter_group_id, accepted in zip(
+        for group, succeeded in zip(
             batch.parameter_group_ids,
             batch.accepted_simulations,
             strict=True,
         ):
-            target = accepted_targets[parameter_group_id]
-            attempt_counts[parameter_group_id] += 1
-            if accepted:
-                accepted_counts[parameter_group_id] += 1
-            if accepted_counts[parameter_group_id] > target:
+            requested = requested_per_group[group]
+            attempts_per_group[group] += 1
+            if succeeded:
+                successful_per_group[group] += 1
+            if successful_per_group[group] > requested:
                 raise RuntimeError(
-                    f"completed batches exceed the accepted target for {parameter_group_id}"
+                    f"completed batches exceed the accepted target for {group}"
                 )
-            maximum_attempts = target + MAX_RETRIES_PER_PARAMETER_GROUP if target else 0
-            if attempt_counts[parameter_group_id] > maximum_attempts:
+            attempt_limit = (
+                requested + MAX_RETRIES_PER_PARAMETER_GROUP if requested else 0
+            )
+            if attempts_per_group[group] > attempt_limit:
                 raise RuntimeError(
-                    f"completed batches exceed the attempt limit for {parameter_group_id}"
+                    f"completed batches exceed the attempt limit for {group}"
                 )
         del batch  # Release loaded rows before generating the next batch.
 
@@ -121,4 +121,4 @@ def generate_simulations(
             completed_batches.append(output_path)
         batch_id += 1
 
-    return attempt_counts, tuple(completed_batches)
+    return attempts_per_group, tuple(completed_batches)

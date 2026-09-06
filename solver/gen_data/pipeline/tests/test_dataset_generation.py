@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,7 +32,7 @@ class InjectedInterruption(RuntimeError):
 
 def _generate(
     root: Path,
-    accepted_targets: Mapping[str, int],
+    requested_per_group: dict[str, int],
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
@@ -41,7 +40,7 @@ def _generate(
         root,
         family_id=FAMILY_ID,
         dataset_split=DATASET_SPLIT,
-        accepted_targets=accepted_targets,
+        requested_per_group=requested_per_group,
         batch_size=batch_size,
         generate_batch=generate_batch,
     )

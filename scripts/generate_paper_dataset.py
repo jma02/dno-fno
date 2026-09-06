@@ -94,9 +94,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_root = args.output_root.expanduser().resolve()
     dataset_split = DatasetSplit(args.split)
     family_parameter_groups = FAMILIES[args.family]
-    count, remainder = divmod(args.num_simulations, len(family_parameter_groups))
-    accepted_targets = {
-        group: count + (index < remainder)
+    per_group, remainder = divmod(args.num_simulations, len(family_parameter_groups))
+    requested_per_group = {
+        group: per_group + (index < remainder)
         for index, group in enumerate(family_parameter_groups)
     }
     family_id = PhysicalFamilyId[args.family.upper()]
@@ -121,11 +121,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         length = numerical.length
 
     generation_started = perf_counter()
-    attempted, completed_batches = generate_simulations(
+    attempts_per_group, completed_batches = generate_simulations(
         output_root,
         family_id=family_id,
         dataset_split=dataset_split,
-        accepted_targets=accepted_targets,
+        requested_per_group=requested_per_group,
         batch_size=args.batch_size,
         generate_batch=generate_batch,
     )
@@ -139,20 +139,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         length=length,
     )
     view_seconds = perf_counter() - view_started
-    attempted_total = sum(attempted.values())
-    accepted_total = sum(accepted_targets.values())
-    counts = {
-        "attempted": attempted_total,
-        "accepted": accepted_total,
-        "rejected": attempted_total - accepted_total,
+    total_attempts = sum(attempts_per_group.values())
+    total_successful = sum(requested_per_group.values())
+    simulation_summary = {
+        "attempted": total_attempts,
+        "accepted": total_successful,
+        "rejected": total_attempts - total_successful,
         "by_parameter_group": {
             parameter_group_id: {
                 "target_accepted": target_count,
-                "attempted": attempted[parameter_group_id],
+                "attempted": attempts_per_group[parameter_group_id],
                 "accepted": target_count,
-                "rejected": attempted[parameter_group_id] - target_count,
+                "rejected": attempts_per_group[parameter_group_id] - target_count,
             }
-            for parameter_group_id, target_count in accepted_targets.items()
+            for parameter_group_id, target_count in requested_per_group.items()
         },
     }
     view_record = {
@@ -164,13 +164,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         "family_id": int(family_id),
         "dataset_split": dataset_split.value,
         "batch_size": args.batch_size,
-        "accepted_simulation_count": sum(accepted_targets.values()),
+        "accepted_simulation_count": sum(requested_per_group.values()),
         "quotas": [
             {
                 "parameter_group_id": parameter_group_id,
                 "target_accepted": target,
             }
-            for parameter_group_id, target in accepted_targets.items()
+            for parameter_group_id, target in requested_per_group.items()
         ],
     }
     if args.solver_batch_size is not None:
@@ -182,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "batch_paths": [
             str(path.resolve().relative_to(output_root)) for path in completed_batches
         ],
-        "counts": counts,
+        "counts": simulation_summary,
         "dataset_view": view_record,
         "timing_seconds": {
             "generation": generation_seconds,
