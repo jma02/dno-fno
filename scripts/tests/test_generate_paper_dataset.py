@@ -7,24 +7,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from typing import get_args
 import unittest
 from unittest.mock import patch
 
-from scripts.generate_paper_dataset import FAMILIES, main
-from solver.gen_data.pipeline.types import RequestedSimulationsPerGroup
+from scripts.generate_paper_dataset import main
 
 
 class PaperDatasetGenerationTests(unittest.TestCase):
-    def test_request_schemas_match_family_parameter_groups(self) -> None:
-        for (family, groups), schema in zip(
-            FAMILIES.items(), get_args(RequestedSimulationsPerGroup), strict=True
-        ):
-            with self.subTest(family=family):
-                group_names, count_type = get_args(schema)
-                self.assertEqual(get_args(group_names), tuple(groups))
-                self.assertIs(count_type, int)
-
     def test_import_sets_float64_without_initializing_backends(self) -> None:
         subprocess.run(
             (

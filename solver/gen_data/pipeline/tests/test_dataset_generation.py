@@ -18,7 +18,7 @@ from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
-    TanakaRequestedSimulationsPerGroup,
+    RequestedSimulationsPerGroup,
 )
 
 
@@ -33,7 +33,7 @@ class InjectedInterruption(RuntimeError):
 
 def _generate(
     root: Path,
-    requested_simulations_per_group: TanakaRequestedSimulationsPerGroup,
+    requested_simulations_per_group: RequestedSimulationsPerGroup,
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
@@ -98,7 +98,7 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_rejections_schedule_replacements_and_resume_completed_batches(
         self,
     ) -> None:
-        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 2, "main_m1_q1": 2}
+        targets = {"main_m1_q0": 2, "main_m1_q1": 2}
         generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
 
         attempts, paths = _generate(self.root, targets, 2, generator)
@@ -119,7 +119,7 @@ class DatasetGenerationTests(unittest.TestCase):
         )
 
     def test_every_interrupted_batch_resumes_identically(self) -> None:
-        targets: TanakaRequestedSimulationsPerGroup = {
+        targets = {
             "main_m1_q0": 3,
             "main_m1_q1": 2,
             "main_m2_q0": 0,
@@ -151,7 +151,7 @@ class DatasetGenerationTests(unittest.TestCase):
                             np.testing.assert_array_equal(a[name], b[name])
 
     def test_resume_recovers_old_mixed_group_batches(self) -> None:
-        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 2, "main_m1_q1": 2}
+        targets = {"main_m1_q0": 2, "main_m1_q1": 2}
         generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
         generator(
             ("main_m1_q0", "main_m1_q1", "main_m1_q1"),
@@ -167,7 +167,7 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_generation_respects_attempt_limit(self) -> None:
         for requested, batch_size in ((32, 32), (5, 3)):
             with self.subTest(requested=requested, batch_size=batch_size):
-                targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": requested}
+                targets = {"main_m1_q0": requested}
                 limit = 2 * requested
                 generator, calls = _fake_generator(
                     rejected_attempts=frozenset(range(limit))
@@ -223,7 +223,7 @@ class DatasetGenerationTests(unittest.TestCase):
                     )
 
     def test_resume_fails_when_a_saved_batch_is_missing(self) -> None:
-        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 1}
+        targets = {"main_m1_q0": 1}
         generator, _ = _fake_generator()
         generator(
             ("main_m1_q0",),
@@ -240,7 +240,7 @@ class DatasetGenerationTests(unittest.TestCase):
             _generate(self.root, targets, 1, generator)
 
     def test_scanner_orders_double_digit_batch_ids_numerically(self) -> None:
-        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 12}
+        targets = {"main_m1_q0": 12}
         generator, _ = _fake_generator()
         completed = _generate(self.root, targets, 1, generator)
 

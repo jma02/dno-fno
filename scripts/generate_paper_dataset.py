@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 from time import perf_counter
-from typing import Sequence, cast
+from typing import Sequence
 
 # Tanaka chooses its precision at import time.
 os.environ["DNO_TANAKA_DTYPE"] = "float64"
@@ -99,13 +99,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_split = DatasetSplit(args.split)
     family_parameter_groups = FAMILIES[args.family]
     per_group, remainder = divmod(args.num_simulations, len(family_parameter_groups))
-    requested_simulations_per_group = cast(
-        RequestedSimulationsPerGroup,
-        {
-            group: per_group + (index < remainder)
-            for index, group in enumerate(family_parameter_groups)
-        },
-    )
+    requested_simulations_per_group: RequestedSimulationsPerGroup = {
+        group: per_group + (index < remainder)
+        for index, group in enumerate(family_parameter_groups)
+    }
     family_id = PhysicalFamilyId[args.family.upper()]
 
     jax.default_backend()

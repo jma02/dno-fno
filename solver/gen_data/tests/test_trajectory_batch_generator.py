@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import TypeAlias, cast
+from typing import TypeAlias
 import unittest
 from unittest import mock
 
@@ -53,7 +53,6 @@ from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
     PhysicalFamilyId,
-    RequestedSimulationsPerGroup,
     SimulationRows,
 )
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
@@ -104,9 +103,8 @@ def _generate(
         root,
         family_id=PhysicalFamilyId[family.upper()],
         dataset_split=DatasetSplit.TEST,
-        requested_simulations_per_group=cast(
-            RequestedSimulationsPerGroup,
-            dict(zip(parameter_group_ids, targets, strict=True)),
+        requested_simulations_per_group=dict(
+            zip(parameter_group_ids, targets, strict=True)
         ),
         batch_size=batch_size,
         generate_batch=partial(
