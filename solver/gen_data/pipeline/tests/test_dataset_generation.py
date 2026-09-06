@@ -12,6 +12,7 @@ from solver.gen_data.pipeline.batch_storage import batch_path, save_completed_ba
 from solver.gen_data.pipeline.dataset_generation import (
     BatchGenerator,
     GenerationResult,
+    RequestedSimulationsPerGroup,
     generate_simulations,
 )
 from solver.gen_data.pipeline.types import (
@@ -32,7 +33,7 @@ class InjectedInterruption(RuntimeError):
 
 def _generate(
     root: Path,
-    requested_per_group: dict[str, int],
+    requested_simulations_per_group: RequestedSimulationsPerGroup,
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
@@ -40,7 +41,7 @@ def _generate(
         root,
         family_id=FAMILY_ID,
         dataset_split=DATASET_SPLIT,
-        requested_per_group=requested_per_group,
+        requested_simulations_per_group=requested_simulations_per_group,
         batch_size=batch_size,
         generate_batch=generate_batch,
     )

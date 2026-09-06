@@ -70,7 +70,11 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     os.environ["CUDA_VISIBLE_DEVICES"], "7" if flags else ""
                 )
                 self.assertEqual(
-                    tuple(generate.call_args.kwargs["requested_per_group"].values()),
+                    tuple(
+                        generate.call_args.kwargs[
+                            "requested_simulations_per_group"
+                        ].values()
+                    ),
                     (1, 1, 1, 1),
                 )
 

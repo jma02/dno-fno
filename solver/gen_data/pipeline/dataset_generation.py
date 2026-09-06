@@ -10,6 +10,8 @@ from solver.gen_data.pipeline.batch_storage import batch_path, load_completed_ba
 from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 
 
+# Parameter-group name -> number of successful simulations requested.
+RequestedSimulationsPerGroup: TypeAlias = dict[str, int]
 BatchGenerator: TypeAlias = Callable[[tuple[str, ...], int, Path], None]
 GenerationResult: TypeAlias = tuple[dict[str, int], tuple[Path, ...]]
 MAX_RETRIES_PER_PARAMETER_GROUP = 64
@@ -20,7 +22,7 @@ def generate_simulations(
     *,
     family_id: PhysicalFamilyId,
     dataset_split: DatasetSplit,
-    requested_per_group: dict[str, int],
+    requested_simulations_per_group: RequestedSimulationsPerGroup,
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
@@ -37,11 +39,12 @@ def generate_simulations(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
     )
-    successful_per_group = dict.fromkeys(requested_per_group, 0)
+    successful_per_group = dict.fromkeys(requested_simulations_per_group, 0)
     attempts_per_group = dict(successful_per_group)
     batch_id = 0
     while (
-        batch_id < len(completed_batches) or successful_per_group != requested_per_group
+        batch_id < len(completed_batches)
+        or successful_per_group != requested_simulations_per_group
     ):
         output_path = batch_path(
             root,
@@ -53,7 +56,7 @@ def generate_simulations(
             available_slots = sorted(
                 [
                     (successful_per_group[group] + offset, group)
-                    for group, requested in requested_per_group.items()
+                    for group, requested in requested_simulations_per_group.items()
                     for offset in range(
                         min(
                             batch_size,
@@ -75,7 +78,7 @@ def generate_simulations(
                     f"{group}: accepted={successful_per_group[group]}/"
                     f"{requested}, attempts={attempts_per_group[group]}/"
                     f"{requested + MAX_RETRIES_PER_PARAMETER_GROUP}"
-                    for group, requested in requested_per_group.items()
+                    for group, requested in requested_simulations_per_group.items()
                     if successful_per_group[group] < requested
                 )
                 raise RuntimeError(
@@ -100,7 +103,7 @@ def generate_simulations(
             batch.accepted_simulations,
             strict=True,
         ):
-            requested = requested_per_group[group]
+            requested = requested_simulations_per_group[group]
             attempts_per_group[group] += 1
             if succeeded:
                 successful_per_group[group] += 1

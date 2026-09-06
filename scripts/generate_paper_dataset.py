@@ -23,7 +23,10 @@ from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUP
 from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUPS
 from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.dataset_generation import generate_simulations
+from solver.gen_data.pipeline.dataset_generation import (
+    RequestedSimulationsPerGroup,
+    generate_simulations,
+)
 from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
 from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 from solver.gen_data.stokes_batch_generator import generate_static_stokes_batch
@@ -95,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_split = DatasetSplit(args.split)
     family_parameter_groups = FAMILIES[args.family]
     per_group, remainder = divmod(args.num_simulations, len(family_parameter_groups))
-    requested_per_group = {
+    requested_simulations_per_group: RequestedSimulationsPerGroup = {
         group: per_group + (index < remainder)
         for index, group in enumerate(family_parameter_groups)
     }
@@ -125,7 +128,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_root,
         family_id=family_id,
         dataset_split=dataset_split,
-        requested_per_group=requested_per_group,
+        requested_simulations_per_group=requested_simulations_per_group,
         batch_size=args.batch_size,
         generate_batch=generate_batch,
     )
@@ -140,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     view_seconds = perf_counter() - view_started
     total_attempts = sum(attempts_per_group.values())
-    total_successful = sum(requested_per_group.values())
+    total_successful = sum(requested_simulations_per_group.values())
     simulation_summary = {
         "attempted": total_attempts,
         "accepted": total_successful,
@@ -152,7 +155,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "accepted": target_count,
                 "rejected": attempts_per_group[parameter_group_id] - target_count,
             }
-            for parameter_group_id, target_count in requested_per_group.items()
+            for parameter_group_id, target_count in requested_simulations_per_group.items()
         },
     }
     view_record = {
@@ -164,13 +167,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         "family_id": int(family_id),
         "dataset_split": dataset_split.value,
         "batch_size": args.batch_size,
-        "accepted_simulation_count": sum(requested_per_group.values()),
+        "accepted_simulation_count": sum(requested_simulations_per_group.values()),
         "quotas": [
             {
                 "parameter_group_id": parameter_group_id,
                 "target_accepted": target,
             }
-            for parameter_group_id, target in requested_per_group.items()
+            for parameter_group_id, target in requested_simulations_per_group.items()
         ],
     }
     if args.solver_batch_size is not None:
