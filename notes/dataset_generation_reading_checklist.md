@@ -7,7 +7,7 @@ details can usually be skimmed.
 ## Main path
 
 - [x] `scripts/generate_paper_dataset.py` — command-line entry point and family dispatch
-- [x] `solver/gen_data/pipeline/dataset_generation.py` — functional generation loop: balance accepted simulations, retry failures, and resume completed batches
+- [x] `solver/gen_data/pipeline/dataset_generation.py` — read saved progress, then finish each parameter group in batches with replacement attempts for failures
 - [x] `solver/gen_data/pipeline/trajectory_config.py` — the three fixed numerical rollout profiles
 - [x] `solver/gen_data/stokes_sampling.py` — Stokes parameter distribution
 - [x] `solver/gen_data/tanaka_sampling.py` — Tanaka parameter distribution

@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 from time import perf_counter
-from typing import Sequence
+from typing import Sequence, cast
 
 # Tanaka chooses its precision at import time.
 os.environ["DNO_TANAKA_DTYPE"] = "float64"
@@ -23,12 +23,13 @@ from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUP
 from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUPS
 from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
-from solver.gen_data.pipeline.dataset_generation import (
-    RequestedSimulationsPerGroup,
-    generate_simulations,
-)
+from solver.gen_data.pipeline.dataset_generation import generate_simulations
 from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
-from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
+from solver.gen_data.pipeline.types import (
+    DatasetSplit,
+    PhysicalFamilyId,
+    RequestedSimulationsPerGroup,
+)
 from solver.gen_data.stokes_batch_generator import generate_static_stokes_batch
 from solver.gen_data.stokes_sampling import (
     PAPER_DOMAIN_LENGTH,
@@ -98,10 +99,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_split = DatasetSplit(args.split)
     family_parameter_groups = FAMILIES[args.family]
     per_group, remainder = divmod(args.num_simulations, len(family_parameter_groups))
-    requested_simulations_per_group: RequestedSimulationsPerGroup = {
-        group: per_group + (index < remainder)
-        for index, group in enumerate(family_parameter_groups)
-    }
+    requested_simulations_per_group = cast(
+        RequestedSimulationsPerGroup,
+        {
+            group: per_group + (index < remainder)
+            for index, group in enumerate(family_parameter_groups)
+        },
+    )
     family_id = PhysicalFamilyId[args.family.upper()]
 
     jax.default_backend()

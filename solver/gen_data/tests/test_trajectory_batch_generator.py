@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import TypeAlias
+from typing import TypeAlias, cast
 import unittest
 from unittest import mock
 
@@ -53,6 +53,7 @@ from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
     DatasetSplit,
     PhysicalFamilyId,
+    RequestedSimulationsPerGroup,
     SimulationRows,
 )
 from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
@@ -103,8 +104,9 @@ def _generate(
         root,
         family_id=PhysicalFamilyId[family.upper()],
         dataset_split=DatasetSplit.TEST,
-        requested_simulations_per_group=dict(
-            zip(parameter_group_ids, targets, strict=True)
+        requested_simulations_per_group=cast(
+            RequestedSimulationsPerGroup,
+            dict(zip(parameter_group_ids, targets, strict=True)),
         ),
         batch_size=batch_size,
         generate_batch=partial(
@@ -385,6 +387,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
     def test_jonswap_simulations_use_their_own_peak_period_horizons(self) -> None:
         numerical = _config()
+        output_path = self.root / "batch.npz"
         groups = (
             "finite__gamma_1__right_0",
             "deep__gamma_1__right_0",
@@ -417,12 +420,14 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 new=_integrate_jonswap_without_adjustment,
             ),
         ):
-            _, completed = _generate(
-                self.root,
-                "jonswap_tma",
-                numerical,
+            generate_trajectory_batch(
                 groups,
-                (1, 1),
+                0,
+                output_path,
+                dataset_split=DatasetSplit.TEST,
+                family="jonswap_tma",
+                numerical=numerical,
+                solver_batch_size=2,
             )
 
         band = ResolvedBand(numerical.length, numerical.target_maximum_wavenumber)
@@ -445,16 +450,17 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
             )
 
         np.testing.assert_allclose(
-            _last_saved_times(completed[0]), expected, rtol=0.0, atol=1.0e-13
+            _last_saved_times(output_path), expected, rtol=0.0, atol=1.0e-13
         )
         self.assertEqual(calls, [(2, max(expected))])
         np.testing.assert_array_equal(
-            load_completed_batch(completed[0]).accepted_simulations,
+            load_completed_batch(output_path).accepted_simulations,
             (True, True),
         )
 
     def test_benjamin_feir_simulations_use_their_own_carrier_horizons(self) -> None:
         numerical = _config()
+        output_path = self.root / "batch.npz"
         groups = (
             "n_c_04__delta_n_01",
             "n_c_20__delta_n_07",
@@ -472,12 +478,13 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 new=integrator,
             ),
         ):
-            _, completed = _generate(
-                self.root,
-                "benjamin_feir",
-                numerical,
+            generate_trajectory_batch(
                 groups,
-                (1, 1),
+                0,
+                output_path,
+                dataset_split=DatasetSplit.TEST,
+                family="benjamin_feir",
+                numerical=numerical,
             )
 
         expected = []
@@ -500,7 +507,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
 
         self.assertNotEqual(*expected)
         np.testing.assert_allclose(
-            _last_saved_times(completed[0]), expected, rtol=0.0, atol=1.0e-13
+            _last_saved_times(output_path), expected, rtol=0.0, atol=1.0e-13
         )
         self.assertEqual(calls, [(2, max(expected))])
 

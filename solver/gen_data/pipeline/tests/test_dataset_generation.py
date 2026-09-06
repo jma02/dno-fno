@@ -12,13 +12,13 @@ from solver.gen_data.pipeline.batch_storage import batch_path, save_completed_ba
 from solver.gen_data.pipeline.dataset_generation import (
     BatchGenerator,
     GenerationResult,
-    RequestedSimulationsPerGroup,
     generate_simulations,
 )
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
+    TanakaRequestedSimulationsPerGroup,
 )
 
 
@@ -33,7 +33,7 @@ class InjectedInterruption(RuntimeError):
 
 def _generate(
     root: Path,
-    requested_simulations_per_group: RequestedSimulationsPerGroup,
+    requested_simulations_per_group: TanakaRequestedSimulationsPerGroup,
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
@@ -50,6 +50,7 @@ def _generate(
 def _fake_generator(
     *,
     rejected_attempts: frozenset[int] = frozenset(),
+    interrupt_after_batches: int | None = None,
 ) -> tuple[BatchGenerator, list[tuple[int, tuple[str, ...]]]]:
     calls: list[tuple[int, tuple[str, ...]]] = []
 
@@ -58,6 +59,8 @@ def _fake_generator(
         first_attempt_number: int,
         output_path: Path,
     ) -> None:
+        if len(calls) == interrupt_after_batches:
+            raise InjectedInterruption("batch stopped")
         calls.append((first_attempt_number, parameter_group_ids))
         rows_by_simulation: list[SimulationRows | None] = []
         for offset in range(len(parameter_group_ids)):
@@ -95,85 +98,113 @@ class DatasetGenerationTests(unittest.TestCase):
     def test_rejections_schedule_replacements_and_resume_completed_batches(
         self,
     ) -> None:
-        targets = {"low": 2, "moderate": 2}
+        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 2, "main_m1_q1": 2}
         generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
 
         attempts, paths = _generate(self.root, targets, 2, generator)
 
-        self.assertEqual(attempts, {"low": 2, "moderate": 3})
+        self.assertEqual(attempts, {"main_m1_q0": 3, "main_m1_q1": 2})
         self.assertEqual(
-            [group for _, groups in calls for group in groups],
-            ["low", "moderate", "moderate", "low", "moderate"],
+            calls,
+            [
+                (0, ("main_m1_q0", "main_m1_q0")),
+                (2, ("main_m1_q0",)),
+                (3, ("main_m1_q1", "main_m1_q1")),
+            ],
         )
-        self.assertEqual([len(groups) for _, groups in calls], [2, 2, 1])
-        self.assertEqual([first_attempt for first_attempt, _ in calls], [0, 2, 4])
-
-        def must_not_run(
-            parameter_group_ids: tuple[str, ...],
-            first_attempt_number: int,
-            output_path: Path,
-        ) -> None:
-            raise AssertionError(
-                (parameter_group_ids, first_attempt_number, output_path)
-            )
-
+        must_not_run, _ = _fake_generator(interrupt_after_batches=0)
         self.assertEqual(
             _generate(self.root, targets, 2, must_not_run),
             (attempts, paths),
         )
 
-    def test_interrupted_batch_is_absent_and_rerun_from_the_start(self) -> None:
-        targets = {"low": 1, "moderate": 1}
-        interrupted_groups: tuple[str, ...] | None = None
-        interrupted_first_attempt: int | None = None
-
-        def interrupt(
-            parameter_group_ids: tuple[str, ...],
-            first_attempt_number: int,
-            output_path: Path,
-        ) -> None:
-            del output_path
-            nonlocal interrupted_first_attempt, interrupted_groups
-            interrupted_groups = parameter_group_ids
-            interrupted_first_attempt = first_attempt_number
-            raise InjectedInterruption("batch stopped")
-
-        with self.assertRaisesRegex(InjectedInterruption, "batch stopped"):
-            _generate(self.root, targets, 2, interrupt)
-
-        path = batch_path(
-            self.root,
-            family=FAMILY_NAME,
-            split=DATASET_SPLIT.value,
-            batch_id=0,
+    def test_every_interrupted_batch_resumes_identically(self) -> None:
+        targets: TanakaRequestedSimulationsPerGroup = {
+            "main_m1_q0": 3,
+            "main_m1_q1": 2,
+            "main_m2_q0": 0,
+        }
+        rejected = frozenset({1, 4})
+        generator, reference_calls = _fake_generator(rejected_attempts=rejected)
+        reference_attempts, reference_paths = _generate(
+            self.root / "reference", targets, 2, generator
         )
-        self.assertFalse(path.exists())
+        for completed_count in range(len(reference_calls)):
+            with self.subTest(completed_count=completed_count):
+                root = self.root / str(completed_count)
+                interrupt, completed_calls = _fake_generator(
+                    rejected_attempts=rejected,
+                    interrupt_after_batches=completed_count,
+                )
+                with self.assertRaises(InjectedInterruption):
+                    _generate(root, targets, 2, interrupt)
+                directory = root / "batches" / FAMILY_NAME / DATASET_SPLIT.value
+                self.assertEqual(len(tuple(directory.glob("*.npz"))), completed_count)
+                generator, resumed_calls = _fake_generator(rejected_attempts=rejected)
+                attempts, paths = _generate(root, targets, 2, generator)
+                self.assertEqual(attempts, reference_attempts)
+                self.assertEqual(completed_calls + resumed_calls, reference_calls)
+                for actual, expected in zip(paths, reference_paths, strict=True):
+                    with np.load(actual) as a, np.load(expected) as b:
+                        self.assertEqual(a.files, b.files)
+                        for name in a.files:
+                            np.testing.assert_array_equal(a[name], b[name])
 
-        generator, calls = _fake_generator()
-        _, paths = _generate(self.root, targets, 2, generator)
-        self.assertEqual(calls[0], (interrupted_first_attempt, interrupted_groups))
-        self.assertEqual(paths, (path,))
+    def test_resume_recovers_old_mixed_group_batches(self) -> None:
+        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 2, "main_m1_q1": 2}
+        generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
+        generator(
+            ("main_m1_q0", "main_m1_q1", "main_m1_q1"),
+            0,
+            batch_path(
+                self.root, family=FAMILY_NAME, split=DATASET_SPLIT.value, batch_id=0
+            ),
+        )
+        attempts, _ = _generate(self.root, targets, 2, generator)
+        self.assertEqual(attempts, {"main_m1_q0": 2, "main_m1_q1": 3})
+        self.assertEqual(calls[1:], [(3, ("main_m1_q0",)), (4, ("main_m1_q1",))])
 
     def test_generation_stops_after_retry_limit(self) -> None:
-        targets = {"low": 32}
-        generator, _ = _fake_generator(rejected_attempts=frozenset(range(96)))
+        for requested, batch_size in ((32, 32), (3, 2)):
+            with self.subTest(requested=requested, batch_size=batch_size):
+                targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": requested}
+                limit = requested + 64
+                generator, calls = _fake_generator(
+                    rejected_attempts=frozenset(range(limit))
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"attempt limit reached.*main_m1_q0: successful=0/{requested}, attempts={limit}/{limit}",
+                ):
+                    _generate(
+                        self.root / str(requested), targets, batch_size, generator
+                    )
+                self.assertEqual(sum(len(groups) for _, groups in calls), limit)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "attempt limits reached.*low: accepted=0/32, attempts=96/96",
+    def test_resume_rejects_saved_quota_and_retry_overflows(self) -> None:
+        for requested, saved_count, rejected, error in (
+            (1, 2, frozenset(), "accepted target"),
+            (1, 66, frozenset(range(66)), "attempt limit"),
+            (0, 1, frozenset({0}), "attempt limit"),
         ):
-            _generate(self.root, targets, 32, generator)
-
-        self.assertEqual(
-            len(tuple((self.root / "batches" / FAMILY_NAME / "train").glob("*.npz"))),
-            3,
-        )
+            with self.subTest(requested=requested, saved_count=saved_count):
+                root = self.root / str(saved_count)
+                generator, _ = _fake_generator(rejected_attempts=rejected)
+                generator(
+                    ("main_m1_q0",) * saved_count,
+                    0,
+                    batch_path(
+                        root, family=FAMILY_NAME, split=DATASET_SPLIT.value, batch_id=0
+                    ),
+                )
+                with self.assertRaisesRegex(RuntimeError, error):
+                    _generate(root, {"main_m1_q0": requested}, 2, generator)
 
     def test_resume_fails_when_a_saved_batch_is_missing(self) -> None:
-        targets = {"low": 1}
+        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 1}
         generator, _ = _fake_generator()
         generator(
-            ("low",),
+            ("main_m1_q0",),
             0,
             batch_path(
                 self.root,
@@ -187,7 +218,7 @@ class DatasetGenerationTests(unittest.TestCase):
             _generate(self.root, targets, 1, generator)
 
     def test_scanner_orders_double_digit_batch_ids_numerically(self) -> None:
-        targets = {"low": 12}
+        targets: TanakaRequestedSimulationsPerGroup = {"main_m1_q0": 12}
         generator, _ = _fake_generator()
         completed = _generate(self.root, targets, 1, generator)
 
@@ -195,6 +226,8 @@ class DatasetGenerationTests(unittest.TestCase):
             tuple(path.stem for path in completed[1]),
             tuple(f"batch_{batch_id:06d}" for batch_id in range(12)),
         )
+        must_not_run, _ = _fake_generator(interrupt_after_batches=0)
+        self.assertEqual(_generate(self.root, targets, 1, must_not_run), completed)
 
 
 if __name__ == "__main__":
