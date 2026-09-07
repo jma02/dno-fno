@@ -46,7 +46,7 @@ from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
 from solver.gen_data.pipeline.trajectory_rollout import (  # noqa: E402
     execute_trajectory_batch,
 )
-from solver.gen_data.pipeline.trajectory_subsampling import (  # noqa: E402
+from solver.gen_data.pipeline.time_selection import (  # noqa: E402
     subsample_trajectories,
 )
 from solver.gen_data.pipeline.types import (  # noqa: E402

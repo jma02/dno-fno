@@ -8,7 +8,7 @@ import numpy as np
 
 from solver.gen_data.pipeline.trajectory_config import TrajectoryFamily
 from solver.gen_data.pipeline.trajectory_rollout import TrajectorySamples
-from solver.gen_data.pipeline.trajectory_subsampling import subsample_trajectories
+from solver.gen_data.pipeline.time_selection import subsample_trajectories
 
 
 class TrajectorySubsamplingTest(unittest.TestCase):

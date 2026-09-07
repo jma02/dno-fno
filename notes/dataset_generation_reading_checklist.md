@@ -22,8 +22,8 @@ details can usually be skimmed.
 - [x] `solver/gen_data/pipeline/dno_target.py` — supervised DNO target construction
 - [x] `solver/gen_data/pipeline/trajectory_rollout.py` — rollout assembly and numerical acceptance checks
 - [x] ~~`solver/gen_data/pipeline/trajectory_checks.py`~~ — checks were inlined into `trajectory_rollout.py`
-- [x] `solver/gen_data/pipeline/time_selection.py` — dense-time index selection
-- [x] `solver/gen_data/pipeline/trajectory_subsampling.py` — retained training rows per accepted simulation
+- [x] `solver/gen_data/pipeline/time_selection.py` — saved-time grids, frame selection, and dataset rows
+- [x] ~~`solver/gen_data/pipeline/trajectory_subsampling.py`~~ — folded into `time_selection.py`
 - [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
 - [x] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
 - [x] `scripts/build_paper_dataset_view.py` — combination of all family/split runs

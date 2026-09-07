@@ -65,8 +65,7 @@ Shared pipeline:
   saved targets.
 - `pipeline/trajectory_rollout.py` evaluates complete trajectories and their
   numerical acceptance checks.
-- `pipeline/time_selection.py` selects retained time indices.
-- `pipeline/trajectory_subsampling.py` converts accepted trajectories into rows.
+- `pipeline/time_selection.py` selects frames and builds dataset rows.
 - `pipeline/dno_target.py` computes the stored DNO target.
 - `pipeline/batch_storage.py` validates, reads, and writes one completed NPZ per
   batch.
