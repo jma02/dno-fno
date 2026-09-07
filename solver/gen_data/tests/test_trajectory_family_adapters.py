@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -18,6 +19,7 @@ from solver.gen_data.benjamin_feir_sampling import (  # noqa: E402
     sample_benjamin_feir_simulation,
 )
 from solver.gen_data.jonswap_tma import (  # noqa: E402
+    JonswapTmaState,
     ResolvedBand,
     finite_depth_angular_frequency,
 )
@@ -146,20 +148,23 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
                 "jonswap_tma",
                 construct_jonswap_tma_trajectory_batch(
                     (jonswap_samples[0],), config, band=band
-                ),
+                )[0],
                 construct_jonswap_tma_trajectory_batch(
                     (jonswap_samples[1],), config, band=band
-                ),
+                )[0],
             ),
         )
         for family, first, replay in pairs:
             with self.subTest(family=family):
+                assert first is not None and replay is not None
                 _assert_initial_batch(self, first, config)
                 np.testing.assert_array_equal(first.eta0, replay.eta0)
                 np.testing.assert_array_equal(first.xi0, replay.xi0)
                 np.testing.assert_array_equal(first.depths, replay.depths)
 
-    def test_paper_jonswap_uses_the_sharp_relative_frequency_band(self) -> None:
+    def test_paper_jonswap_preserves_spectral_band_and_filters_invalid_states(
+        self,
+    ) -> None:
         config = PAPER_ROLLOUT_NUMERICS["jonswap_tma"]
         band = _resolved_band(config)
         sample = sample_jonswap_tma_simulation(
@@ -168,7 +173,11 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             attempt_number=31,
             band=band,
         )
-        initial = construct_jonswap_tma_trajectory_batch((sample,), config, band=band)
+        initial, indices = construct_jonswap_tma_trajectory_batch(
+            (sample,), config, band=band
+        )
+        assert initial is not None
+        self.assertEqual(indices, (0,))
 
         self.assertEqual(band.maximum_wavenumber, 128.0)
         _assert_initial_batch(self, initial, config)
@@ -194,6 +203,38 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
             float(np.max(np.abs(np.fft.rfft(initial.eta0[0])[outside_window]))),
             1.0e-10,
         )
+
+        samples = tuple(
+            sample._replace(parameters=sample.parameters._replace(depth=float(i + 1)))
+            for i in range(4)
+        )
+        eta = np.repeat(
+            np.asarray([np.nan, 0.1, -3.0, 0.2])[:, None], config.nx, axis=1
+        )
+        xi = np.arange(4)[:, None] * np.sin(
+            2.0 * np.pi * np.arange(config.nx) / config.nx
+        )
+        for expected_indices in ((1, 3), ()):
+            eta_fields = eta if expected_indices else np.full_like(eta, np.nan)
+            with (
+                self.subTest(expected_indices=expected_indices),
+                patch(
+                    "solver.gen_data.trajectory_family_adapters.build_jonswap_tma_initial_condition",
+                    side_effect=map(JonswapTmaState, eta_fields, xi),
+                ) as build,
+            ):
+                initial, indices = construct_jonswap_tma_trajectory_batch(
+                    samples, config, band=band
+                )
+            self.assertEqual(build.call_count, len(samples))
+            self.assertEqual(indices, expected_indices)
+            if not indices:
+                self.assertIsNone(initial)
+                continue
+            assert initial is not None
+            np.testing.assert_allclose(initial.eta0, eta[list(indices)], atol=1e-15)
+            np.testing.assert_allclose(initial.xi0, xi[list(indices)], atol=1e-15)
+            np.testing.assert_array_equal(initial.depths, [2.0, 4.0])
 
 
 if __name__ == "__main__":

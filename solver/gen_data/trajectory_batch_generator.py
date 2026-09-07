@@ -32,7 +32,6 @@ from solver.gen_data.pipeline.types import (
 from solver.gen_data.tanaka_initial_conditions import TanakaPotentialRadicandError
 from solver.gen_data.tanaka_sampling import sample_tanaka_simulation
 from solver.gen_data.trajectory_family_adapters import (
-    JonswapInitialStateDomainError,
     TrajectoryInitialBatch,
     construct_benjamin_feir_trajectory_batch,
     construct_jonswap_tma_trajectory_batch,
@@ -156,26 +155,11 @@ def generate_trajectory_batch(
             )
             for peak_period in peak_periods
         )
-        try:
-            initial = construct_jonswap_tma_trajectory_batch(
-                jonswap_samples,
-                numerical,
-                band=band,
-            )
-        except JonswapInitialStateDomainError as error:
-            failed = set(error.invalid_simulation_indices)
-            valid_indices = tuple(
-                index for index in valid_indices if index not in failed
-            )
-            initial = (
-                construct_jonswap_tma_trajectory_batch(
-                    tuple(jonswap_samples[index] for index in valid_indices),
-                    numerical,
-                    band=band,
-                )
-                if valid_indices
-                else None
-            )
+        initial, valid_indices = construct_jonswap_tma_trajectory_batch(
+            jonswap_samples,
+            numerical,
+            band=band,
+        )
 
     produced: tuple[SimulationRows | None, ...] = ()
     if initial is not None:

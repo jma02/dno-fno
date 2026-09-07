@@ -30,7 +30,6 @@ from solver.gen_data.jonswap_tma_sampling import (  # noqa: E402
     sample_jonswap_tma_simulation,
 )
 from solver.gen_data.pipeline.batch_storage import (  # noqa: E402
-    batch_path,
     load_completed_batch,
 )
 from solver.gen_data.pipeline.dataset_generation import (  # noqa: E402
@@ -59,7 +58,6 @@ from solver.gen_data.trajectory_batch_generator import (  # noqa: E402
     generate_trajectory_batch,
 )
 from solver.gen_data.trajectory_family_adapters import (  # noqa: E402
-    JonswapInitialStateDomainError,
     TrajectoryInitialBatch,
 )
 
@@ -302,86 +300,88 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
         assert first.shard is not None
         self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
 
-    def test_jonswap_construction_rejects_only_the_named_simulation(self) -> None:
+    def test_jonswap_keeps_valid_states_without_reconstruction(self) -> None:
         numerical = _config()
-        group = "finite__gamma_1__right_0"
-        base_constructor, calls = _marker_constructor()
-        first_call = True
-
-        def reject_first(
-            samples: tuple[object, ...],
-            config: RolloutNumerics,
-            *,
-            band: object,
-        ) -> TrajectoryInitialBatch:
-            nonlocal first_call
-            del band
-            if first_call:
-                first_call = False
-                calls.append(len(samples))
-                raise JonswapInitialStateDomainError((0,), (False,), (True,))
-            return base_constructor(samples, config)
-
-        integrator, _ = _fast_integrator()
-        with (
-            mock.patch(
-                "solver.gen_data.trajectory_batch_generator."
-                "construct_jonswap_tma_trajectory_batch",
-                new=reject_first,
-            ),
-            mock.patch(
-                "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
-                new=integrator,
-            ),
-            mock.patch(
-                "solver.gen_data.jonswap_horizon_generator."
-                "integrate_and_subsample_jonswap",
-                new=_integrate_jonswap_without_adjustment,
-            ),
-        ):
-            _, completed = _generate(
-                self.root,
-                "jonswap_tma",
-                numerical,
-                (group,),
-                (2,),
-            )
-
-        self.assertEqual(calls[:2], [2, 1])
-        first = load_completed_batch(completed[0])
-        np.testing.assert_array_equal(first.accepted_simulations, (False, True))
-        assert first.shard is not None
-        self.assertTrue(np.all(first.shard["simulation_local_index"] == 1))
+        groups = ("finite__gamma_1__right_0",) * 4
+        for indices in ((1, 3), ()):
+            with self.subTest(indices=indices):
+                output = self.root / f"valid_{len(indices)}.npz"
+                marker_constructor, _ = _marker_constructor()
+                markers = marker_constructor(groups, numerical)
+                initial = (
+                    TrajectoryInitialBatch(*(field[list(indices)] for field in markers))
+                    if indices
+                    else None
+                )
+                integrator, calls = _fast_integrator()
+                with (
+                    mock.patch(
+                        "solver.gen_data.trajectory_batch_generator.construct_jonswap_tma_trajectory_batch",
+                        return_value=(initial, indices),
+                    ) as construct,
+                    mock.patch(
+                        "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
+                        new=integrator,
+                    ),
+                    mock.patch(
+                        "solver.gen_data.trajectory_batch_generator.integrate_and_subsample_jonswap",
+                        wraps=_integrate_jonswap_without_adjustment,
+                    ) as integrate,
+                ):
+                    generate_trajectory_batch(
+                        groups,
+                        0,
+                        output,
+                        dataset_split=DatasetSplit.TEST,
+                        family="jonswap_tma",
+                        numerical=numerical,
+                        solver_batch_size=2,
+                    )
+                construct.assert_called_once()
+                self.assertEqual(integrate.call_count, bool(indices))
+                self.assertEqual([count for count, _ in calls], [2] if indices else [])
+                batch = load_completed_batch(output)
+                np.testing.assert_array_equal(
+                    batch.accepted_simulations, np.isin(np.arange(4), indices)
+                )
+                if indices:
+                    assert batch.shard is not None
+                    np.testing.assert_array_equal(
+                        np.unique(batch.shard["simulation_local_index"]), indices
+                    )
+                    np.testing.assert_array_equal(
+                        batch.shard["eta"][:, 0],
+                        batch.shard["simulation_local_index"] + 1,
+                    )
+                else:
+                    self.assertIsNone(batch.shard)
 
     def test_unexpected_constructor_error_is_not_recorded_as_rejection(self) -> None:
         numerical = _config()
-        output = batch_path(
-            self.root,
-            family="tanaka",
-            split="test",
-            batch_id=0,
+        cases: tuple[tuple[TrajectoryFamily, str], ...] = (
+            ("tanaka", "main_m1_q0"),
+            ("jonswap_tma", "finite__gamma_1__right_0"),
         )
-
-        def fail(
-            samples: tuple[object, ...], config: RolloutNumerics
-        ) -> TrajectoryInitialBatch:
-            del samples, config
-            raise ValueError("constructor bug")
-
-        with mock.patch(
-            "solver.gen_data.trajectory_batch_generator.construct_tanaka_trajectory_batch",
-            new=fail,
-        ):
-            with self.assertRaisesRegex(ValueError, "constructor bug"):
-                _generate(
-                    self.root,
-                    "tanaka",
-                    numerical,
-                    ("main_m1_q0",),
-                    (1,),
-                    batch_size=1,
+        for family, group in cases:
+            output = self.root / f"{family}.npz"
+            with (
+                self.subTest(family=family),
+                mock.patch(
+                    f"solver.gen_data.trajectory_batch_generator.construct_{family}_trajectory_batch",
+                    side_effect=ValueError("constructor bug"),
+                ),
+                self.assertRaisesRegex(ValueError, "constructor bug"),
+            ):
+                generate_trajectory_batch(
+                    (group,),
+                    0,
+                    output,
+                    dataset_split=DatasetSplit.TEST,
+                    family=family,
+                    numerical=numerical,
+                    solver_batch_size=1,
                 )
-        self.assertFalse(output.exists())
+            self.assertFalse(output.exists())
 
     def test_jonswap_simulations_use_their_own_peak_period_horizons(self) -> None:
         numerical = _config()
@@ -391,29 +391,21 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
             "deep__gamma_1__right_0",
         )
         constructor, _ = _marker_constructor()
+        initial = constructor(groups, numerical)
         integrator, calls = _fast_integrator()
-
-        def construct(
-            samples: tuple[object, ...],
-            config: RolloutNumerics,
-            *,
-            band: object,
-        ) -> TrajectoryInitialBatch:
-            del band
-            return constructor(samples, config)
 
         with (
             mock.patch(
                 "solver.gen_data.trajectory_batch_generator."
                 "construct_jonswap_tma_trajectory_batch",
-                new=construct,
+                return_value=(initial, (0, 1)),
             ),
             mock.patch(
                 "solver.gen_data.pipeline.trajectory_rollout.integrate_batch",
                 new=integrator,
             ),
             mock.patch(
-                "solver.gen_data.jonswap_horizon_generator."
+                "solver.gen_data.trajectory_batch_generator."
                 "integrate_and_subsample_jonswap",
                 new=_integrate_jonswap_without_adjustment,
             ),

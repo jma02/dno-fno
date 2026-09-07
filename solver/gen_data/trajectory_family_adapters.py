@@ -38,24 +38,6 @@ TrajectoryInitialBatch = NamedTuple(
 )
 
 
-class JonswapInitialStateDomainError(ValueError):
-    """JONSWAP initial states outside the finite positive-water graph domain."""
-
-    def __init__(
-        self,
-        invalid_simulation_indices: tuple[int, ...],
-        nonfinite_state_flags: tuple[bool, ...],
-        nonpositive_water_height_flags: tuple[bool, ...],
-    ) -> None:
-        self.invalid_simulation_indices = invalid_simulation_indices
-        self.nonfinite_state_flags = nonfinite_state_flags
-        self.nonpositive_water_height_flags = nonpositive_water_height_flags
-        super().__init__(
-            "JONSWAP/TMA initial states violate the graph domain at local indices "
-            f"{invalid_simulation_indices}"
-        )
-
-
 def _project_initial_conditions(
     eta0: FloatArray | jax.Array,
     xi0: FloatArray | jax.Array,
@@ -150,8 +132,8 @@ def construct_jonswap_tma_trajectory_batch(
     numerical: RolloutNumerics,
     *,
     band: ResolvedBand,
-) -> TrajectoryInitialBatch:
-    """Construct resolved-band JONSWAP/TMA initial states."""
+) -> tuple[TrajectoryInitialBatch | None, tuple[int, ...]]:
+    """Return valid JONSWAP/TMA initial states and their original sample indices."""
 
     x = numerical.length * np.arange(numerical.nx, dtype=np.float64) / numerical.nx
     states: tuple[JonswapTmaState, ...] = tuple(
@@ -184,16 +166,14 @@ def construct_jonswap_tma_trajectory_batch(
     minimum_water_columns[finite_indices] = np.min(
         depths[finite_indices, None] + eta0[finite_indices], axis=1
     )
-    invalid = np.flatnonzero(
-        ~state_finite
-        | ~np.isfinite(minimum_water_columns)
-        | (minimum_water_columns <= 0.0)
+    valid = np.flatnonzero(
+        state_finite
+        & np.isfinite(minimum_water_columns)
+        & (minimum_water_columns > 0.0)
     )
-    if invalid.size:
-        indices = tuple(int(index) for index in invalid)
-        raise JonswapInitialStateDomainError(
-            indices,
-            tuple(not bool(state_finite[index]) for index in invalid),
-            tuple(bool(state_finite[index]) for index in invalid),
-        )
-    return TrajectoryInitialBatch(eta0, xi0, depths)
+    if not valid.size:
+        return None, ()
+    return (
+        TrajectoryInitialBatch(eta0[valid], xi0[valid], depths[valid]),
+        tuple(int(index) for index in valid),
+    )
