@@ -1,4 +1,4 @@
-"""Build a loader-facing view from completed paper-dataset batches."""
+"""Use completed batches as one dataset without merging their data."""
 
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ def build_dataset_view(
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
 ) -> DatasetViewPaths:
-    """Write a training manifest and row-to-simulation map.
+    """Write the dataset's JSON file list and NPZ row-to-simulation map.
 
-    Process batches in caller order. Keep metadata for every attempted
-    simulation, including rejected attempts with no stored rows.
+    Batches keep the supplied order. Rejected simulations are recorded
+    but contribute no data rows.
     """
 
     if not name or any(
@@ -84,7 +84,7 @@ def build_dataset_view(
             )
             first_rows[accepted_indices] = total_rows + first_local_rows
             row_counts[accepted_indices] = rows_per_simulation
-            # One entry per stored row: its attempted simulation and source location.
+            # Each saved row points to its simulation in the list of all attempts.
             map_parts["trajectory_index"].append(local_index + total_simulations)
             map_parts["frame_index"].append(shard["frame_index"])
             map_parts["shard_index"].append(
@@ -93,7 +93,7 @@ def build_dataset_view(
             map_parts["shard_row"].append(np.arange(shard_row_count, dtype=np.int64))
             total_rows += shard_row_count
 
-        # One entry per attempted simulation; IDs count separately per family/split.
+        # Continue simulation IDs across batches of the same family and split.
         family_split = (family_id, dataset_split)
         first_simulation_id = next_simulation_id[family_split]
         next_simulation_id[family_split] += number_of_simulations
