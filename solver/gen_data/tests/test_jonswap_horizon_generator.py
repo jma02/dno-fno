@@ -15,7 +15,6 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np  # noqa: E402
 
 from solver.gen_data.jonswap_horizon_generator import (  # noqa: E402
-    horizon_sorted_groups,
     integrate_and_subsample_jonswap,
 )
 from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
@@ -169,13 +168,6 @@ def _adjustment_integrator(
 
 
 class JonswapHorizonGeneratorTests(unittest.TestCase):
-    def test_groups_are_stable(self) -> None:
-        groups = horizon_sorted_groups(
-            tuple(map(_grid, (19, 16, 18, 16, 20))),
-            solver_batch_size=2,
-        )
-        self.assertEqual(groups, ((1, 3), (2, 0), (4,)))
-
     def test_each_adjustment_uses_its_peak_period_and_own_endpoint(self) -> None:
         numerical = _config()
         production, _, handed_off, production_times = _production_integrator()
@@ -205,7 +197,16 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
                 numerical=numerical,
                 solver_batch_size=3,
             )
+            empty_rows = integrate_and_subsample_jonswap(
+                TrajectoryInitialBatch(*(field[:0] for field in initial)),
+                (),
+                peak_periods[:0],
+                numerical=numerical,
+                solver_batch_size=3,
+            )
 
+        self.assertEqual(empty_rows, ())
+        self.assertEqual(len(adjustment_calls), 1)
         realized = (
             np.floor(20.0 * peak_periods / numerical.saved_dt) * numerical.saved_dt
         )
@@ -251,11 +252,14 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         assert rows is not None
         self.assertEqual(rows.eta.shape[-1], 1024)
 
-    def test_burn_failures_skip_production_and_restore_input_order(self) -> None:
+    def test_stable_groups_skip_burn_failures_and_restore_input_order(self) -> None:
         numerical = _config()
-        production, _, handed_off, _ = _production_integrator()
-        adjustment, _ = _adjustment_integrator(failing_markers=(0.02, 0.05))
+        production, production_calls, _, _ = _production_integrator()
+        adjustment, adjustment_calls = _adjustment_integrator(
+            failing_markers=(0.02, 0.05)
+        )
         markers = np.arange(1, 6, dtype=np.float64) / 100.0
+        peak_periods = np.asarray((0.31, 0.43, 0.57, 0.61, 0.73), dtype=np.float64)
         initial = TrajectoryInitialBatch(
             np.repeat(markers[:, None], numerical.nx, axis=1),
             np.zeros((5, numerical.nx), dtype=np.float64),
@@ -275,7 +279,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             rows_by_simulation = integrate_and_subsample_jonswap(
                 initial,
                 tuple(map(_grid, (19, 16, 18, 16, 20))),
-                np.full(5, 0.4, dtype=np.float64),
+                peak_periods,
                 numerical=numerical,
                 solver_batch_size=2,
             )
@@ -284,7 +288,19 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             [rows is not None for rows in rows_by_simulation],
             [True, False, True, True, False],
         )
-        self.assertEqual(sum(values.shape[0] for values in handed_off), 3)
+        self.assertEqual([call[0] for call in adjustment_calls], [2, 2, 1])
+        np.testing.assert_allclose(
+            np.concatenate([call[2] for call in adjustment_calls]),
+            10.0 * peak_periods[[1, 3, 2, 0, 4]],
+        )
+        self.assertEqual(production_calls, [(1, 16), (2, 19)])
+        realized = (
+            np.floor(20.0 * peak_periods / numerical.saved_dt) * numerical.saved_dt
+        )
+        np.testing.assert_allclose(
+            [rows.eta[0, 0] for rows in rows_by_simulation if rows is not None],
+            (markers + realized)[[0, 2, 3]],
+        )
 
     def test_production_health_gate_runs_after_an_accepted_burn(self) -> None:
         numerical = _config(internal_hamiltonian_drift_threshold=1.0e-3)
