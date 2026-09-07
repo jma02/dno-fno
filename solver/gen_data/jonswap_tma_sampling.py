@@ -93,28 +93,16 @@ def sample_jonswap_tma_simulation(
             depth_wavenumber = float(rng.uniform(*SHALLOW_DEPTH_WAVENUMBER_BOUNDS))
             relative_height = float(rng.uniform(*SHALLOW_RELATIVE_HEIGHT_BOUNDS))
             depth = depth_wavenumber / peak_wavenumber
-            parameters = JonswapTmaParameters(
-                depth=depth,
-                significant_height=2.0 * depth * relative_height,
-                peak_wavenumber=peak_wavenumber,
-                peak_enhancement=peak_enhancement,
-                right_moving_fraction=right_moving_fraction,
-            )
+            significant_height = 2.0 * depth * relative_height
             peak_steepness = depth_wavenumber * relative_height
         else:
-            parameters = JonswapTmaParameters(
-                depth=float(rng.uniform(*depth_bounds)),
-                significant_height=float(rng.uniform(*SIGNIFICANT_HEIGHT_BOUNDS)),
-                peak_wavenumber=float(rng.uniform(*PEAK_WAVENUMBER_BOUNDS)),
-                peak_enhancement=peak_enhancement,
-                right_moving_fraction=right_moving_fraction,
-            )
-            peak_steepness = (
-                parameters.peak_wavenumber * parameters.significant_height / 2.0
-            )
+            depth = float(rng.uniform(*depth_bounds))
+            significant_height = float(rng.uniform(*SIGNIFICANT_HEIGHT_BOUNDS))
+            peak_wavenumber = float(rng.uniform(*PEAK_WAVENUMBER_BOUNDS))
+            peak_steepness = peak_wavenumber * significant_height / 2.0
         frequencies = finite_depth_angular_frequency(
-            np.asarray([parameters.peak_wavenumber, band.maximum_wavenumber]),
-            depth=parameters.depth,
+            np.asarray([peak_wavenumber, band.maximum_wavenumber]),
+            depth=depth,
             gravity=1.0,
         )
         if (
@@ -124,7 +112,13 @@ def sample_jonswap_tma_simulation(
             break
     number_of_modes = positive_mode_wavenumbers(band=band).size
     return JonswapTmaSample(
-        parameters,
-        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes).astype(np.float64),
-        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes).astype(np.float64),
+        JonswapTmaParameters(
+            depth=depth,
+            significant_height=significant_height,
+            peak_wavenumber=peak_wavenumber,
+            peak_enhancement=peak_enhancement,
+            right_moving_fraction=right_moving_fraction,
+        ),
+        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes),
+        rng.uniform(0.0, 2.0 * np.pi, size=number_of_modes),
     )
