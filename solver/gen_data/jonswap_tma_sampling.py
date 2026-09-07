@@ -1,6 +1,6 @@
 """Parameter sampling for the paper-dataset JONSWAP/TMA family.
 
-The 27 parameter groups are the Cartesian product of three depth strata,
+The 27 parameter groups are the Cartesian product of three depth regimes,
 three peak-enhancement values, and three right-moving energy fractions.
 """
 
@@ -30,7 +30,7 @@ from solver.gen_data.pipeline.types import (
 
 
 FloatArray: TypeAlias = NDArray[np.float64]
-RandomSeaStratum: TypeAlias = Literal["shallow", "finite", "deep"]
+DepthRegime: TypeAlias = Literal["shallow", "finite", "deep"]
 
 PEAK_WAVENUMBER_BOUNDS = (2.0, 12.0)
 FINITE_DEPTH_BOUNDS = (0.1, 1.5)
@@ -40,12 +40,12 @@ SHALLOW_DEPTH_WAVENUMBER_BOUNDS = (0.2, 1.5)
 SHALLOW_RELATIVE_HEIGHT_BOUNDS = (0.03, 0.16)
 
 
-JONSWAP_TMA_PARAMETER_GROUPS: dict[str, tuple[RandomSeaStratum, float, float]] = {
+JONSWAP_TMA_PARAMETER_GROUPS: dict[str, tuple[DepthRegime, float, float]] = {
     (
-        f"{stratum}__gamma_{format(peak_enhancement, 'g').replace('.', 'p')}"
+        f"{depth_regime}__gamma_{format(peak_enhancement, 'g').replace('.', 'p')}"
         f"__right_{format(right_moving_fraction, 'g').replace('.', 'p')}"
-    ): (stratum, peak_enhancement, right_moving_fraction)
-    for stratum in ("shallow", "finite", "deep")
+    ): (depth_regime, peak_enhancement, right_moving_fraction)
+    for depth_regime in ("shallow", "finite", "deep")
     for peak_enhancement in PAPER_PEAK_ENHANCEMENTS
     for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
 }
@@ -70,7 +70,7 @@ def sample_jonswap_tma_simulation(
 ) -> JonswapTmaSample:
     """Sample parameters and both phase arrays from one JONSWAP/TMA group."""
 
-    stratum, peak_enhancement, right_moving_fraction = JONSWAP_TMA_PARAMETER_GROUPS[
+    depth_regime, peak_enhancement, right_moving_fraction = JONSWAP_TMA_PARAMETER_GROUPS[
         parameter_group_id
     ]
     rng = np.random.Generator(
@@ -84,12 +84,12 @@ def sample_jonswap_tma_simulation(
     )
     peak_wavenumber = (
         2.0 * np.pi * int(rng.choice(PAPER_SHALLOW_PEAK_MODES)) / band.length
-        if stratum == "shallow"
+        if depth_regime == "shallow"
         else 0.0
     )
-    depth_bounds = FINITE_DEPTH_BOUNDS if stratum == "finite" else DEEP_DEPTH_BOUNDS
+    depth_bounds = FINITE_DEPTH_BOUNDS if depth_regime == "finite" else DEEP_DEPTH_BOUNDS
     while True:
-        if stratum == "shallow":
+        if depth_regime == "shallow":
             depth_wavenumber = float(rng.uniform(*SHALLOW_DEPTH_WAVENUMBER_BOUNDS))
             relative_height = float(rng.uniform(*SHALLOW_RELATIVE_HEIGHT_BOUNDS))
             depth = depth_wavenumber / peak_wavenumber

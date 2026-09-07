@@ -52,8 +52,8 @@ def sample_parameter_group(
 class JonswapTmaSamplingTest(unittest.TestCase):
     def test_parameter_groups_are_the_exact_cartesian_product(self) -> None:
         expected = {
-            (stratum, gamma, right_moving_fraction)
-            for stratum in ("shallow", "finite", "deep")
+            (depth_regime, gamma, right_moving_fraction)
+            for depth_regime in ("shallow", "finite", "deep")
             for gamma in PAPER_PEAK_ENHANCEMENTS
             for right_moving_fraction in PAPER_RIGHT_MOVING_FRACTIONS
         }
@@ -62,7 +62,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
 
     def test_every_parameter_group_samples_inside_its_declared_range(self) -> None:
         for index, (group_id, group) in enumerate(JONSWAP_TMA_PARAMETER_GROUPS.items()):
-            stratum, peak_enhancement, right_moving_fraction = group
+            depth_regime, peak_enhancement, right_moving_fraction = group
             parameters = sample_parameter_group(index).parameters
             with self.subTest(parameter_group=group_id):
                 self.assertTrue(np.isfinite(parameters).all())
@@ -77,7 +77,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 self.assertLessEqual(
                     PEAK_WAVENUMBER_BOUNDS[0], parameters.peak_wavenumber
                 )
-                if stratum == "shallow":
+                if depth_regime == "shallow":
                     peak_mode = parameters.peak_wavenumber * BAND.length / (2.0 * np.pi)
                     self.assertIn(round(peak_mode), PAPER_SHALLOW_PEAK_MODES)
                     self.assertAlmostEqual(peak_mode, round(peak_mode), places=12)
@@ -94,7 +94,7 @@ class JonswapTmaSamplingTest(unittest.TestCase):
                 else:
                     depth_bounds = (
                         FINITE_DEPTH_BOUNDS
-                        if stratum == "finite"
+                        if depth_regime == "finite"
                         else DEEP_DEPTH_BOUNDS
                     )
                     self.assertLessEqual(
