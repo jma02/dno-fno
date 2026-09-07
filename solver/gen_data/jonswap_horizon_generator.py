@@ -67,7 +67,7 @@ def integrate_and_subsample_jonswap(
             continue
         accepted_indices = [index for index, _ in accepted]
         depths = initial.depths[accepted_indices]
-        production = subsample_trajectories(
+        subsampled_rows = subsample_trajectories(
             execute_trajectory_batch(
                 np.stack(tuple(endpoint[0] for _, endpoint in accepted)),
                 np.stack(tuple(endpoint[1] for _, endpoint in accepted)),
@@ -79,6 +79,6 @@ def integrate_and_subsample_jonswap(
             family="jonswap_tma",
             length=numerical.length,
         )
-        for index, rows in zip(accepted_indices, production, strict=True):
+        for index, rows in zip(accepted_indices, subsampled_rows, strict=True):
             rows_by_simulation[index] = rows
     return tuple(rows_by_simulation)
