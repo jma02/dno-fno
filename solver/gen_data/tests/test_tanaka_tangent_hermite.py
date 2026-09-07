@@ -39,10 +39,10 @@ from solver.solvers.time_integrator import (  # noqa: E402
     SolverParams,
     State,
     apply_lowpass,
-    batched_rollout,
     cast_solver_params_dtype,
     cast_state_dtype,
     make_normalized_rollout_settings,
+    rollout,
 )
 from solver.tanaka_ICs.modified_tanaka import (  # noqa: E402
     ModifiedTanakaBatchSolution,
@@ -339,7 +339,7 @@ def test_simulation31_one_interval_production_rollout() -> None:
         g0=make_linear_dno_symbol(fixture.k, depth),
     )
     params = cast_solver_params_dtype(params, jnp.float64)
-    rollout = batched_rollout(
+    trajectory = rollout(
         cast_state_dtype(
             State(
                 eta=fixture.eta[:1],
@@ -356,10 +356,10 @@ def test_simulation31_one_interval_production_rollout() -> None:
         implicit_relaxation=defaults.implicit_relaxation,
         zero_mean_xi=defaults.zero_mean_xi,
     )
-    jax.block_until_ready(rollout["gxi"])
-    eta = np.asarray(rollout["eta"])
-    xi = np.asarray(rollout["xi"])
-    gxi = np.asarray(rollout["gxi"])
+    jax.block_until_ready(trajectory["gxi"])
+    eta = np.asarray(trajectory["eta"])
+    xi = np.asarray(trajectory["xi"])
+    gxi = np.asarray(trajectory["gxi"])
     assert np.all(np.isfinite(eta))
     assert np.all(np.isfinite(xi))
     assert np.all(np.isfinite(gxi))

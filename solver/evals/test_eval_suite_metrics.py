@@ -32,7 +32,7 @@ class ComputeMetricsTest(unittest.TestCase):
             "gxi": 3.0 * values,
             "wall_s": 1.0,
         }
-        protocol = '{"schema_version":2}'
+        protocol = '{"family":"tanaka"}'
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)

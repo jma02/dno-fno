@@ -713,7 +713,7 @@ def gauss_legendre_2_if_step(
     iterations: int = 4,
     relaxation: float = 1.0,
 ) -> State:
-    """Take the legacy fixed-count GL2 integrating-factor step."""
+    """Take a GL2 integrating-factor step with a fixed number of iterations."""
 
     sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
     c1 = 0.5 - sqrt3 / 6.0
@@ -886,8 +886,8 @@ def rollout(
 ) -> dict[str, jnp.ndarray]:
     """Integrate saved states, optionally recording convergence-controlled GL2.
 
-    Existing calls with ``implicit_residual_tolerance=None`` retain the fixed
-    ``implicit_iterations`` behavior and payload.  Supplying a tolerance
+    With ``implicit_residual_tolerance=None``, implicit methods use a fixed
+    ``implicit_iterations`` count.  Supplying a tolerance
     interprets ``implicit_iterations`` as a per-step iteration cap and adds
     per-substep and trajectory-level ``gl2_*`` diagnostics to the payload.
     Per-step arrays have shape ``(number_of_actual_substeps, *batch_shape)``;
@@ -1134,30 +1134,3 @@ def rollout(
             gxi = apply_lowpass(gxi, params.k, params.filter_fraction)
         payload["gxi"] = gxi
     return payload
-
-
-def batched_rollout(
-    initial_state: State,
-    times: jnp.ndarray,
-    params: SolverParams,
-    save_gxi: bool = True,
-    substeps_per_interval: int = 1,
-    method: str = "gl2_if",
-    implicit_iterations: int = 8,
-    implicit_relaxation: float = 1.0,
-    zero_mean_xi: bool = False,
-    implicit_residual_tolerance: float | None = None,
-) -> dict[str, jnp.ndarray]:
-    """Batch rollout entry point for initial states of shape (batch, nx) and shared times."""
-    return rollout(
-        initial_state,
-        times,
-        params,
-        save_gxi=save_gxi,
-        substeps_per_interval=substeps_per_interval,
-        method=method,
-        implicit_iterations=implicit_iterations,
-        implicit_relaxation=implicit_relaxation,
-        zero_mean_xi=zero_mean_xi,
-        implicit_residual_tolerance=implicit_residual_tolerance,
-    )

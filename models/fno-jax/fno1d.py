@@ -101,21 +101,6 @@ class FNO1d(nn.Module):
     xi_scale: float = 1.0       # feature_absmax for xi channel
     target_scale: float = 1.0   # target_absmax for gxi
     h_clip_max: float = 5.0     # saturate log(h) at log(h_clip_max); kh_sat = 5 at k_min=1, tanh(5)≈1
-    eta_features: bool = False  # concat cs_dno-style spectral η features (η², η³, ∂η, ∂²η, ½∂η, ℋη) to input
-
-    def _eta_spectral_features(self, eta: jnp.ndarray, grid_size: int) -> jnp.ndarray:
-        n_freq = grid_size // 2 + 1
-        k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(n_freq)
-        eta_hat = jnp.fft.rfft(eta, axis=-1)
-        feats = [
-            eta ** 2,
-            eta ** 3,
-            jnp.fft.irfft(1j * k_arr[None, :] * eta_hat, n=grid_size, axis=-1),
-            jnp.fft.irfft(-(k_arr ** 2)[None, :] * eta_hat, n=grid_size, axis=-1),
-            jnp.fft.irfft(jnp.sqrt(k_arr)[None, :] * eta_hat, n=grid_size, axis=-1),
-            jnp.fft.irfft(-1j * jnp.sign(k_arr).astype(eta_hat.dtype)[None, :] * eta_hat, n=grid_size, axis=-1),
-        ]
-        return jnp.stack(feats, axis=-1)  # (B, N, 6)
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
@@ -139,9 +124,6 @@ class FNO1d(nn.Module):
         d1 = (jnp.roll(x, -1, axis=1) - jnp.roll(x, 1, axis=1)) / 2.0
         d2 = jnp.roll(x, -1, axis=1) - 2.0 * x + jnp.roll(x, 1, axis=1)
         x_in = jnp.concatenate([x, d1, d2], axis=-1)  # (B, N, 6)
-        if self.eta_features:
-            eta_feats = self._eta_spectral_features(x[:, :, 0], grid_size)
-            x_in = jnp.concatenate([x_in, eta_feats], axis=-1)  # (B, N, 12)
         x = nn.Dense(self.width, name="input_proj")(x_in)  # (B, N, W)
 
         film = FiLMConditioner(self.width, self.n_blocks, name="film")

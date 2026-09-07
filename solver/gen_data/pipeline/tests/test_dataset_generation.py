@@ -150,20 +150,6 @@ class DatasetGenerationTests(unittest.TestCase):
                         for name in a.files:
                             np.testing.assert_array_equal(a[name], b[name])
 
-    def test_resume_recovers_old_mixed_group_batches(self) -> None:
-        targets = {"main_m1_q0": 2, "main_m1_q1": 2}
-        generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
-        generator(
-            ("main_m1_q0", "main_m1_q1", "main_m1_q1"),
-            0,
-            batch_path(
-                self.root, family=FAMILY_NAME, split=DATASET_SPLIT.value, batch_id=0
-            ),
-        )
-        attempts, _ = _generate(self.root, targets, 2, generator)
-        self.assertEqual(attempts, {"main_m1_q0": 2, "main_m1_q1": 3})
-        self.assertEqual(calls[1:], [(3, ("main_m1_q0",)), (4, ("main_m1_q1",))])
-
     def test_generation_respects_attempt_limit(self) -> None:
         for requested, batch_size in ((32, 32), (5, 3)):
             with self.subTest(requested=requested, batch_size=batch_size):

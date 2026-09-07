@@ -22,8 +22,6 @@ from pathlib import Path
 
 dataset_path = Path(sys.argv[1])
 manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
-if manifest.get("schema_version") != 2:
-    raise SystemExit("C27 requires a schema-v2 paper-dataset manifest")
 if sum(record["n_rows"] for record in manifest["dataset_shards"]) != 7_686_144:
     raise SystemExit("paper-dataset manifest does not contain the expected rows")
 print("paper-dataset structure preflight passed")

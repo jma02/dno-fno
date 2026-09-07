@@ -1,4 +1,4 @@
-"""CPU integration test for schema-v2 paper-dataset views."""
+"""CPU integration test for paper-dataset views."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def _write_batch(
     return path
 
 
-def test_schema_v2_loads_shards_and_uses_preassigned_splits() -> None:
+def test_loads_shards_and_uses_preassigned_splits() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
         root = Path(raw_directory)
         train = _write_batch(
@@ -176,16 +176,16 @@ def test_direct_npz_dataset_is_rejected() -> None:
         try:
             load_dataset_arrays(flat_dataset_path)
         except ValueError as error:
-            assert "schema-v2" in str(error)
+            assert "*.dataset.json manifest" in str(error)
         else:
             raise AssertionError("direct NPZ dataset did not fail closed")
 
 
 def main() -> int:
-    test_schema_v2_loads_shards_and_uses_preassigned_splits()
+    test_loads_shards_and_uses_preassigned_splits()
     test_stats_cache_is_refreshed_when_dataset_inputs_change()
     test_direct_npz_dataset_is_rejected()
-    print("[PASS] schema-v2 paper-dataset view and preassigned splits")
+    print("[PASS] paper-dataset view and preassigned splits")
     return 0
 
 

@@ -280,7 +280,7 @@ def main() -> None:
     model = FNO1d(
         modes=int(config["modes"]),
         width=int(config["width"]),
-        n_blocks=int(config.get("n_blocks", 4)),
+        n_blocks=int(config["n_blocks"]),
     )
 
     @jax.jit

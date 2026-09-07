@@ -87,11 +87,7 @@ def load_training_arrays(
             xi_parts.append(npz[xi_key])
             gxi_parts.append(npz[gxi_key])
 
-        x = (
-            npz["x"]
-            if "x" in npz.files
-            else np.arange(eta_parts[0].shape[1], dtype=np.float64)
-        )
+        x = npz["x"]
 
     return {
         "eta": np.concatenate(eta_parts, axis=0),

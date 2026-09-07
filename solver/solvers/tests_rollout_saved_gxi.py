@@ -22,8 +22,8 @@ from solver.solvers.dno_series_jax import dno_series_eval  # noqa: E402
 from solver.solvers.time_integrator import (  # noqa: E402
     State,
     apply_lowpass,
-    batched_rollout,
     make_solver_params,
+    rollout,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -60,7 +60,7 @@ def test_saved_gxi_respects_rollout_lowpass() -> None:
         pad_factor=params.pad_factor,
     )
     expected = apply_lowpass(raw_gxi, params.k, params.filter_fraction)
-    result = batched_rollout(
+    result = rollout(
         initial_state,
         jnp.asarray([0.0]),
         params,

@@ -570,13 +570,13 @@ if __name__ == "__main__":
         "--length",
         type=float,
         default=None,
-        help="Periodic length; default reads the archive, then falls back to 2*pi.",
+        help="Periodic length; defaults to the archive's truth protocol.",
     )
     parser.add_argument(
         "--fields",
         type=parse_field_list,
         default=("eta", "xi", "q"),
-        help="Comma-separated fields; eta is required and unavailable optional fields are skipped.",
+        help="Comma-separated fields; eta is required.",
     )
     parser.add_argument(
         "--thresholds",
@@ -637,13 +637,11 @@ if __name__ == "__main__":
             )
         if times.size > 1 and np.any(np.diff(times) <= 0.0):
             raise ValueError("times must be strictly increasing")
-        periodic_length = 2.0 * np.pi
-        if length is not None:
-            periodic_length = float(length)
-        elif "domain_length" in archive.files:
-            periodic_length = float(np.asarray(archive["domain_length"]).reshape(()))
-        elif "length" in archive.files:
-            periodic_length = float(np.asarray(archive["length"]).reshape(()))
+        periodic_length = (
+            float(length)
+            if length is not None
+            else float(json.loads(str(archive["truth_protocol_json"].item()))["length"])
+        )
         if not np.isfinite(periodic_length) or periodic_length <= 0.0:
             raise ValueError(
                 f"periodic length must be positive and finite, got {periodic_length}"
@@ -662,20 +660,9 @@ if __name__ == "__main__":
             expected_time_simulations=(times.size, truth_eta.shape[1]),
         )
         n_times, n_simulations, nx = truth_eta.shape
-        if "simulation_ids" in archive.files:
-            simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
-        else:
-            simulation_ids = np.arange(n_simulations, dtype=np.int64)
-        depths = (
-            np.asarray(archive["depths"], dtype=np.float64)
-            if "depths" in archive.files
-            else np.full(n_simulations, np.nan, dtype=np.float64)
-        )
-        truth_valid = (
-            np.asarray(archive["truth_valid"], dtype=bool)
-            if "truth_valid" in archive.files
-            else np.ones(n_simulations, dtype=bool)
-        )
+        simulation_ids = np.asarray(archive["simulation_ids"], dtype=np.int64)
+        depths = np.asarray(archive["depths"], dtype=np.float64)
+        truth_valid = np.asarray(archive["truth_valid"], dtype=bool)
         if simulation_ids.shape != (n_simulations,) or depths.shape != (n_simulations,):
             raise ValueError(
                 "simulation_ids and depths must each have shape (simulation,)"
@@ -694,8 +681,6 @@ if __name__ == "__main__":
             finite_indices = np.flatnonzero(np.isfinite(drift[:, simulation]))
             if finite_indices.size:
                 drift[:, simulation] -= drift[finite_indices[0], simulation]
-        requested_and_available: list[str] = []
-        missing_fields: list[str] = []
         field_metrics: dict[str, dict[str, Array]] = {}
         velocity_metrics: dict[str, Array] | None = None
         truth_field: Array | None = None
@@ -703,9 +688,6 @@ if __name__ == "__main__":
         ordered_fields = tuple(field for field in ("eta", "q", "xi") if field in fields)
         for field in ordered_fields:
             truth_key, prediction_key = FIELD_KEYS[field]
-            if truth_key not in archive.files or prediction_key not in archive.files:
-                missing_fields.append(field)
-                continue
             truth_field = (
                 truth_eta if field == "eta" else np.asarray(archive[truth_key])
             )
@@ -729,7 +711,6 @@ if __name__ == "__main__":
                 periodic_length,
                 center=field == "xi" and center_xi,
             )
-            requested_and_available.append(field)
             if field == "q":
                 velocity_metrics = compute_alignment_velocity_identity(
                     truth_eta,
@@ -1078,8 +1059,7 @@ if __name__ == "__main__":
         "grid_spacing": dx,
         "n_times": n_times,
         "n_simulations": n_simulations,
-        "fields": requested_and_available,
-        "missing_requested_optional_fields": missing_fields,
+        "fields": ordered_fields,
         "n_truth_valid": int(np.count_nonzero(truth_valid)),
         "terminal_summary": terminal_summary,
         "alignment_velocity_validation": alignment_velocity_validation,

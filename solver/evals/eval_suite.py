@@ -96,11 +96,6 @@ def _load_paper_dataset_ics(
     manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError(f"dataset manifest must contain a JSON object: {dataset_path}")
-    if manifest.get("schema_version") != 2:
-        raise ValueError("eval_suite requires paper-dataset schema version 2")
-    if manifest.get("requires_trajectory_map") is not True:
-        raise ValueError("paper-dataset manifest must require its trajectory map")
-
     grid = manifest.get("grid")
     if not isinstance(grid, dict):
         raise ValueError("dataset manifest is missing grid metadata")
@@ -250,7 +245,7 @@ def _load_paper_dataset_ics(
         "kind": "paper_dataset_test_split",
         "family": family,
         "family_id": family_id,
-        "dataset_split": 2,
+        "dataset_split": DatasetSplit.TEST.value,
         "dataset_manifest": str(dataset_path),
         "trajectory_map": str(trajectory_map_path),
         "loaded_shards": loaded_shards,
@@ -267,7 +262,6 @@ def _truth_protocol(
     ics: list[IC],
 ) -> str:
     protocol = {
-        "schema_version": 2,
         "family": family,
         "dt": cfg.dt,
         "tmax": cfg.tmax,
@@ -388,7 +382,7 @@ def truth_rollout_batched(
         xi=jnp.asarray(np.stack([ic.xi for ic in ics]), dtype=dtype),
     )
     started = time.perf_counter()
-    result = ti.batched_rollout(
+    result = ti.rollout(
         state,
         times,
         params,

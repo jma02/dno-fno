@@ -17,7 +17,6 @@ from solver.gen_data.pipeline.types import DatasetSplit
 FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]
 
-DATASET_VIEW_SCHEMA_VERSION = 2
 _TRAINING_MAP_DTYPES = {
     "trajectory_index": np.dtype(np.int32),
     "trajectory_accepted": np.dtype(np.bool_),
@@ -71,30 +70,20 @@ def require_jax_devices() -> tuple[str, list[Any]]:
 
 
 def _resolve_dataset_location(dataset_path: Path) -> DatasetLocation:
-    """Resolve a schema-v2 paper-dataset view."""
+    """Resolve a paper-dataset view."""
     if not dataset_path.name.endswith(".dataset.json"):
         raise ValueError(
-            f"Training requires a schema-v2 *.dataset.json manifest, got {dataset_path}"
+            f"Training requires a *.dataset.json manifest, got {dataset_path}"
         )
 
     manifest_raw = json.loads(dataset_path.read_text(encoding="utf-8"))
     if not isinstance(manifest_raw, dict):
         raise ValueError(f"Dataset manifest must contain a JSON object: {dataset_path}")
     manifest: dict[str, object] = manifest_raw
-    manifest_version = manifest.get("schema_version")
-    if (
-        not isinstance(manifest_version, int)
-        or isinstance(manifest_version, bool)
-        or manifest_version != DATASET_VIEW_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            f"Unsupported dataset manifest schema_version in {dataset_path}; "
-            f"expected {DATASET_VIEW_SCHEMA_VERSION}"
-        )
     shard_records = manifest.get("dataset_shards")
     if not isinstance(shard_records, list) or not shard_records:
         raise ValueError(
-            f"Schema-v2 manifest requires a nonempty dataset_shards list: {dataset_path}"
+            f"Dataset manifest requires a nonempty dataset_shards list: {dataset_path}"
         )
     resolved_shards: list[Path] = []
     for record in shard_records:
@@ -108,16 +97,10 @@ def _resolve_dataset_location(dataset_path: Path) -> DatasetLocation:
             raise FileNotFoundError(f"Dataset shard is missing: {shard_path}")
         resolved_shards.append(shard_path)
 
-    requires_trajectory_map = manifest.get("requires_trajectory_map", False)
-    if requires_trajectory_map is not True:
-        raise ValueError(
-            f"Schema-v2 manifest must require a trajectory map: {dataset_path}"
-        )
-
     trajectory_map_name = manifest.get("trajectory_map_npz")
     if not isinstance(trajectory_map_name, str) or not trajectory_map_name:
         raise ValueError(
-            f"Schema-v2 manifest requires a nonempty trajectory_map_npz: {dataset_path}"
+            f"Dataset manifest requires a nonempty trajectory_map_npz: {dataset_path}"
         )
     trajectory_map_path = (dataset_path.parent / trajectory_map_name).resolve()
     if not trajectory_map_path.exists():
@@ -145,16 +128,6 @@ def _load_trajectory_map_arrays(
             raise ValueError(
                 f"Trajectory map {trajectory_map_path} is missing required arrays: {missing}"
             )
-        if "schema_version" in archive.files:
-            schema_version = np.asarray(archive["schema_version"])
-            if (
-                schema_version.ndim != 0
-                or int(schema_version) != DATASET_VIEW_SCHEMA_VERSION
-            ):
-                raise ValueError(
-                    f"Unsupported trajectory-map schema_version in {trajectory_map_path}; "
-                    f"expected scalar {DATASET_VIEW_SCHEMA_VERSION}"
-                )
         arrays = {name: np.asarray(archive[name]) for name in _TRAINING_MAP_FIELDS}
 
     for name, expected_dtype in _TRAINING_MAP_DTYPES.items():
@@ -215,7 +188,7 @@ def _load_paper_dataset_shards(
     shard_records = cast(list[dict[str, object]], manifest["dataset_shards"])
     grid = manifest.get("grid")
     if not isinstance(grid, dict):
-        raise ValueError("Schema-v2 manifest requires grid")
+        raise ValueError("Dataset manifest requires grid")
     nx = grid.get("nx")
     length = grid.get("length")
     if (
@@ -227,7 +200,7 @@ def _load_paper_dataset_shards(
         or not np.isfinite(length)
         or length <= 0.0
     ):
-        raise ValueError("Schema-v2 manifest has an invalid spatial grid")
+        raise ValueError("Dataset manifest has an invalid spatial grid")
     field_parts: dict[str, list[np.ndarray]] = {
         name: [] for name in ("eta", "xi", "gxi", "depth", "time")
     }
@@ -282,7 +255,7 @@ def _load_paper_dataset_shards(
 
 
 def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
-    """Load one schema-v2 paper-dataset view."""
+    """Load one paper-dataset view."""
     location = _resolve_dataset_location(dataset_path)
     return _load_paper_dataset_shards(location)
 
@@ -434,7 +407,7 @@ def load_or_compute_stats(
         "depth_max": depth_max,
         "log_depth_min": log_depth_min,
         "log_depth_max": log_depth_max,
-        "domain_length": float(dataset.get("domain_length", 2.0 * np.pi)),
+        "domain_length": float(dataset["domain_length"]),
         "index_selection": selection,
         "input_file_state": input_file_state,
     }
@@ -455,10 +428,10 @@ class NormStats:
     @staticmethod
     def from_dict(stats: StatsDict, mode: str = "minmax") -> NormStats:
         feature_absmax = np.asarray(
-            cast(Sequence[float], stats.get("feature_absmax", [1.0, 1.0])),
+            cast(Sequence[float], stats["feature_absmax"]),
             dtype=np.float32,
         ).reshape((1, 1, 2))
-        target_absmax = float(cast(float | int, stats.get("target_absmax", 1.0)))
+        target_absmax = float(cast(float | int, stats["target_absmax"]))
         return NormStats(
             feature_min=np.asarray(
                 cast(Sequence[float], stats["feature_min"]),

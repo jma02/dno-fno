@@ -253,7 +253,7 @@ class GaussLegendreTelemetryTest(unittest.TestCase):
         )
         self.assertTrue(bool(jnp.all(result["gl2_hit_iteration_cap"][:, 1])))
 
-    def test_legacy_fixed_iteration_output_is_unchanged(self) -> None:
+    def test_fixed_iteration_output_is_unchanged(self) -> None:
         params = make_solver_params(
             self.nx,
             2.0 * math.pi,

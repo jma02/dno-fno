@@ -1,10 +1,10 @@
-"""Render truth-vs-surrogate animations from an eval_suite ``<regime>_trajs.npz``.
+"""Render truth-vs-surrogate animations from an eval_suite ``<family>_trajs.npz``.
 
 Usage:
     uv run python -m solver.evals.animate_trajs \\
-        --trajs outputs/.../eval_suite/random_sea_deep_trajs.npz \\
+        --trajs outputs/.../eval_suite/jonswap_tma_trajs.npz \\
         --select best,median,worst \\
-        --out outputs/.../eval_suite/random_sea_deep_movies/
+        --out outputs/.../eval_suite/jonswap_tma_movies/
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def render_movie(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trajs", required=True, help="Path to <regime>_trajs.npz")
+    parser.add_argument("--trajs", required=True, help="Path to <family>_trajs.npz")
     parser.add_argument(
         "--out",
         default=None,
@@ -180,12 +180,7 @@ def main() -> None:
     with np.load(trajs_path) as d:
         times = np.asarray(d["times"])
         depths = np.asarray(d["depths"])
-        if "simulation_ids" in d.files:
-            simulation_ids = np.asarray(d["simulation_ids"])
-        elif "simulation_ids" in d.files:
-            simulation_ids = np.asarray(d["simulation_ids"])
-        else:
-            simulation_ids = np.arange(d["depths"].shape[0])
+        simulation_ids = np.asarray(d["simulation_ids"])
         truth_eta = np.asarray(d["truth_eta"])  # (n_t, NB, nx)
         truth_xi = np.asarray(d["truth_xi"])
         truth_gxi = np.asarray(d["truth_gxi"])

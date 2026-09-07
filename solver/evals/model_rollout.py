@@ -105,7 +105,6 @@ def load_run(
             domain_length=float(config["domain_length"]),
             xi_scale=float(config["xi_scale"]),
             target_scale=float(config["target_scale"]),
-            eta_features=bool(config.get("fno_eta_features", False)),
         )
     else:
         raise ValueError(f"unsupported checkpoint model: {model_name!r}")

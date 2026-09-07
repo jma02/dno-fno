@@ -17,10 +17,6 @@ from solver.gen_data.pipeline.artifact_io import write_json_atomic, write_npz_at
 from solver.gen_data.pipeline.types import DatasetSplit
 
 
-DATASET_VIEW_SCHEMA_VERSION = 2
-TRAJECTORY_MAP_SCHEMA_VERSION = 2
-
-
 DatasetViewPaths = NamedTuple(
     "DatasetViewPaths", [("manifest", Path), ("trajectory_map", Path)]
 )
@@ -125,17 +121,14 @@ def build_dataset_view(
     if spatial_size is None:
         raise ValueError("a dataset view must contain at least one accepted row")
     trajectory_map = {
-        "schema_version": np.asarray(TRAJECTORY_MAP_SCHEMA_VERSION, dtype=np.int16),
-        **{field: np.concatenate(parts) for field, parts in map_parts.items()},
+        field: np.concatenate(parts) for field, parts in map_parts.items()
     }
     write_npz_atomic(output_paths.trajectory_map, trajectory_map)
     dataset_split_array = trajectory_map["trajectory_dataset_split"]
     accepted_array = trajectory_map["trajectory_accepted"]
     manifest = {
-        "schema_version": DATASET_VIEW_SCHEMA_VERSION,
         "dataset_shards": shard_records,
         "trajectory_map_npz": output_paths.trajectory_map.name,
-        "requires_trajectory_map": True,
         "n_rows": total_rows,
         "n_trajectories": total_simulations,
         "n_accepted_trajectories": int(np.count_nonzero(accepted_array)),

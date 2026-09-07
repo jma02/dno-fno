@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -217,13 +218,14 @@ def test_archive_outputs_are_json_safe_and_include_onsets() -> None:
             simulation_ids=np.asarray([4, 21, 27]),
             depths=np.asarray([0.1, 0.2, 0.3]),
             truth_valid=np.ones(3, dtype=bool),
+            model_nonfinite_any=np.asarray([False, False, True]),
             truth_eta=truth_eta,
             pred_eta=pred_eta,
             truth_xi=truth_xi,
             pred_xi=pred_xi,
             truth_gxi=truth_q,
             pred_gxi=pred_q,
-            length=length,
+            truth_protocol_json=np.asarray(json.dumps({"length": length})),
         )
         script = (
             Path(__file__).parents[1] / "analyze_rollout_translation_decomposition.py"
@@ -260,6 +262,26 @@ def test_archive_outputs_are_json_safe_and_include_onsets() -> None:
             ".focus.csv",
         ):
             assert output_path.with_suffix(suffix).is_file()
+        paired_output = root / "paired.json"
+        subprocess.run(
+            [
+                sys.executable,
+                str(script.with_name("compare_paired_translation_errors.py")),
+                "--baseline",
+                str(archive_path),
+                "--candidate",
+                str(archive_path),
+                "--output",
+                str(paired_output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        paired = json.loads(paired_output.read_text())
+        assert paired["all_valid"]["n"] == 2
+        assert paired["truth_max_abs_difference"] == 0.0
+        assert "shallow" not in paired
 
 
 if __name__ == "__main__":

@@ -29,13 +29,13 @@ def make_linear_dno_symbol(
 
 
 def myfft(y: jnp.ndarray, nx: int) -> jnp.ndarray:
-    """FFT with the MATLAB convention used in the legacy DNO scripts."""
+    """FFT along the final axis with coefficient ``nx // 2`` set to zero."""
     fy = jnp.fft.fft(y, axis=-1)
     return fy.at[..., nx // 2].set(0)
 
 
 def myifft(fy: jnp.ndarray) -> jnp.ndarray:
-    """Real inverse FFT matching the MATLAB helper."""
+    """Real inverse FFT along the final axis."""
     return jnp.real(jnp.fft.ifft(fy, axis=-1))
 
 
@@ -158,15 +158,3 @@ def dno_series_eval(
     for gm_term in gm_terms[1:]:
         g = g + gm_term
     return g
-
-
-def batched_dno_series_eval(
-    eta: jnp.ndarray,
-    xi: jnp.ndarray,
-    k: jnp.ndarray,
-    depth: float | jax.Array,
-    order: int,
-    pad_factor: int = DEFAULT_PAD_FACTOR,
-) -> jnp.ndarray:
-    """Explicit batched entry point for arrays of shape (batch, nx)."""
-    return dno_series_eval(eta, xi, k, depth, order, pad_factor=pad_factor)

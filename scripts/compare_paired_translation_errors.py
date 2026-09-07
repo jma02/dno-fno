@@ -16,9 +16,6 @@ from analyze_rollout_translation_decomposition import (
 )
 
 
-REGIMES = ("tanaka_g0", "tanaka_g1")
-
-
 def archive_metrics(path: Path, length: float) -> dict[str, np.ndarray]:
     """Return final raw, aligned, and translation-component errors."""
     with np.load(path) as archive:
@@ -27,10 +24,8 @@ def archive_metrics(path: Path, length: float) -> dict[str, np.ndarray]:
         truth = np.asarray(archive["truth_eta"][-1], dtype=np.float64)
         prediction = np.asarray(archive["pred_eta"][-1], dtype=np.float64)
         valid = np.all(np.isfinite(truth) & np.isfinite(prediction), axis=-1)
-        if "truth_valid" in archive.files:
-            valid &= np.asarray(archive["truth_valid"], dtype=bool)
-        if "model_nonfinite_any" in archive.files:
-            valid &= ~np.asarray(archive["model_nonfinite_any"], dtype=bool)
+        valid &= np.asarray(archive["truth_valid"], dtype=bool)
+        valid &= ~np.asarray(archive["model_nonfinite_any"], dtype=bool)
 
     displacement = np.asarray(
         [
@@ -102,72 +97,63 @@ def paired_summary(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline-eval-dir", type=Path, required=True)
-    parser.add_argument("--candidate-eval-dir", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--length", type=float, default=2.0 * np.pi)
     parser.add_argument("--shallow-depth", type=float, default=0.03)
     args = parser.parse_args()
 
-    results: list[dict[str, Any]] = []
-    for regime in REGIMES:
-        baseline = archive_metrics(
-            args.baseline_eval_dir / regime / f"{regime}_trajs.npz",
-            args.length,
-        )
-        candidate = archive_metrics(
-            args.candidate_eval_dir / regime / f"{regime}_trajs.npz",
-            args.length,
-        )
-        if not np.array_equal(baseline["simulation_ids"], candidate["simulation_ids"]):
-            raise ValueError(f"{regime}: simulation IDs do not match")
-        if not np.array_equal(baseline["depths"], candidate["depths"]):
-            raise ValueError(f"{regime}: depths do not match")
-        truth_max_abs_difference = float(
-            np.max(np.abs(baseline["truth"] - candidate["truth"]))
-        )
-        if truth_max_abs_difference > 1e-8:
-            raise ValueError(
-                f"{regime}: final truth states differ by {truth_max_abs_difference:.3e}"
-            )
-        valid = baseline["valid"] & candidate["valid"]
-        shallow = valid & (baseline["depths"] < args.shallow_depth)
-        result = {
-            "regime": regime,
-            "truth_max_abs_difference": truth_max_abs_difference,
-            "all_valid": paired_summary(baseline, candidate, valid),
-            "shallow": {
-                "depth_upper_bound": args.shallow_depth,
-                **paired_summary(baseline, candidate, shallow),
-            },
+    baseline = archive_metrics(args.baseline, args.length)
+    candidate = archive_metrics(args.candidate, args.length)
+    if not np.array_equal(baseline["simulation_ids"], candidate["simulation_ids"]):
+        raise ValueError("simulation IDs do not match")
+    if not np.array_equal(baseline["depths"], candidate["depths"]):
+        raise ValueError("depths do not match")
+    truth_max_abs_difference = float(
+        np.max(np.abs(baseline["truth"] - candidate["truth"]))
+    )
+    if truth_max_abs_difference > 1e-8:
+        raise ValueError(f"final truth states differ by {truth_max_abs_difference:.3e}")
+    valid = baseline["valid"] & candidate["valid"]
+    result = {
+        "baseline": str(args.baseline),
+        "candidate": str(args.candidate),
+        "truth_max_abs_difference": truth_max_abs_difference,
+        "all_valid": paired_summary(baseline, candidate, valid),
+    }
+    shallow = valid & (baseline["depths"] < args.shallow_depth)
+    if np.any(shallow):
+        result["shallow"] = {
+            "depth_upper_bound": args.shallow_depth,
+            **paired_summary(baseline, candidate, shallow),
         }
-        translation_change = candidate["translation"] - baseline["translation"]
-        ordered = np.flatnonzero(valid)[np.argsort(translation_change[valid])]
-        result["largest_translation_improvements"] = [
-            {
-                "simulation_index": int(index),
-                "simulation_id": int(baseline["simulation_ids"][index]),
-                "depth": float(baseline["depths"][index]),
-                "baseline": float(baseline["translation"][index]),
-                "candidate": float(candidate["translation"][index]),
-            }
-            for index in ordered[:5]
-        ]
-        result["largest_translation_regressions"] = [
-            {
-                "simulation_index": int(index),
-                "simulation_id": int(baseline["simulation_ids"][index]),
-                "depth": float(baseline["depths"][index]),
-                "baseline": float(baseline["translation"][index]),
-                "candidate": float(candidate["translation"][index]),
-            }
-            for index in ordered[-5:][::-1]
-        ]
-        results.append(result)
+    translation_change = candidate["translation"] - baseline["translation"]
+    ordered = np.flatnonzero(valid)[np.argsort(translation_change[valid])]
+    result["largest_translation_improvements"] = [
+        {
+            "simulation_index": int(index),
+            "simulation_id": int(baseline["simulation_ids"][index]),
+            "depth": float(baseline["depths"][index]),
+            "baseline": float(baseline["translation"][index]),
+            "candidate": float(candidate["translation"][index]),
+        }
+        for index in ordered[:5]
+    ]
+    result["largest_translation_regressions"] = [
+        {
+            "simulation_index": int(index),
+            "simulation_id": int(baseline["simulation_ids"][index]),
+            "depth": float(baseline["depths"][index]),
+            "baseline": float(baseline["translation"][index]),
+            "candidate": float(candidate["translation"][index]),
+        }
+        for index in ordered[-5:][::-1]
+    ]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        json.dumps(results, indent=2, allow_nan=False),
+        json.dumps(result, indent=2, allow_nan=False),
         encoding="utf-8",
     )
-    print(json.dumps(results, indent=2, allow_nan=False))
+    print(json.dumps(result, indent=2, allow_nan=False))

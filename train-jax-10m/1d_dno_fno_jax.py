@@ -274,7 +274,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         required=True,
-        help="Schema-v2 paper-dataset *.dataset.json manifest.",
+        help="Paper-dataset *.dataset.json manifest.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--modes", type=int, default=32)
@@ -473,11 +473,7 @@ def main() -> None:
         )
     train_steps_per_epoch = train_indices.shape[0] // args.batch_size
 
-    domain_length = float(
-        np.asarray(
-            stats.get("domain_length", dataset.get("domain_length", 2.0 * np.pi))
-        ).item()
-    )
+    domain_length = float(dataset["domain_length"])
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
     # input channel. That's only exact under norm=scale, where the channel is divided
     # by feature_absmax. norm=minmax shifts as well, so the baseline is approximate.

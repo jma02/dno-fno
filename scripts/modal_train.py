@@ -4,17 +4,17 @@ Workflow:
     # 0. Log in once:
     modal token new
 
-    # 1. Upload a flat NPZ training dataset:
-    modal run scripts/modal_train.py::upload_data
+    # 1. Upload a training dataset manifest and its referenced files:
+    modal run scripts/modal_train.py::upload_dataset_view --dataset outputs/.../paper.dataset.json
 
-    # For a manifest-backed dataset, use upload_dataset_view instead.
-
-    # 2. Train (single-GPU H100 by default; pass --gpu-spec to override):
+    # 2. Train (single-GPU H100 by default):
     modal run scripts/modal_train.py::train \\
+        --dataset /data/outputs/.../paper.dataset.json \\
         --epochs 30 --batch-size 1024 --modes 64 --width 64 --n-blocks 4
 
     # multi-GPU example:
-    modal run scripts/modal_train.py::train --gpu-spec "H100:4" --batch-size 4096
+    MODAL_GPU=H100:4 modal run scripts/modal_train.py::train \\
+        --dataset /data/outputs/.../paper.dataset.json --batch-size 4096
 
     # 3. Download a finished run dir to local outputs/:
     modal run scripts/modal_train.py::download_run --run-name fno_jax_10m_20260507_103000
@@ -73,9 +73,6 @@ image = (
     .add_local_dir(REPO_ROOT / "models" / "fno-jax", remote_path="/repo/models/fno-jax")
     .add_local_dir(REPO_ROOT / "models" / "dno-net", remote_path="/repo/models/dno-net")
     .add_local_dir(REPO_ROOT / "solver", remote_path="/repo/solver")
-    .add_local_file(
-        REPO_ROOT / "jax_training_util.py", remote_path="/repo/jax_training_util.py"
-    )
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -91,37 +88,13 @@ def status() -> dict[str, list[str]]:
     out_dir = f"{VOLUME_MOUNT}/outputs"
     summary = {
         "datasets": [
-            f"{name}  ({os.path.getsize(f'{VOLUME_MOUNT}/{name}') / 1e9:.2f} GB)"
-            for name in sorted(os.listdir(VOLUME_MOUNT))
-            if name.endswith((".npz", ".meta.json"))
+            str(path.relative_to(VOLUME_MOUNT))
+            for path in sorted(Path(VOLUME_MOUNT).rglob("*.dataset.json"))
         ],
         "runs": sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else [],
     }
     print(json.dumps(summary, indent=2))
     return summary
-
-
-@app.local_entrypoint()
-def upload_data(
-    train_dataset: str = "combined_dataset.npz",
-    local_dir: str = "data",
-) -> None:
-    """Push one flat training dataset and its sidecars onto the volume."""
-    src = Path(local_dir).resolve()
-    npz = src / train_dataset
-    targets = [(npz, f"/{train_dataset}")] + [
-        (sidecar, f"/{sidecar.name}")
-        for sidecar in (npz.with_suffix(".meta.json"), npz.with_suffix(".stats.json"))
-        if sidecar.exists()
-    ]
-
-    total = sum(p.stat().st_size for p, _ in targets) / 1e9
-    print(f"Uploading {len(targets)} files ({total:.2f} GB) -> volume {VOLUME_NAME!r}")
-    with volume.batch_upload(force=True) as batch:
-        for path, remote in targets:
-            print(f"  {path.name}  ({path.stat().st_size / 1e9:.2f} GB) -> {remote}")
-            batch.put_file(str(path), remote)
-    print("upload complete.")
 
 
 @app.local_entrypoint()
@@ -318,7 +291,7 @@ def run_training(
 
 @app.local_entrypoint()
 def train(
-    dataset: str = "combined_dataset.npz",
+    dataset: str,
     run_name: str = "",
     epochs: int = 30,
     batch_size: int = 1024,
