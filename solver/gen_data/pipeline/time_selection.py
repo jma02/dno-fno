@@ -1,4 +1,4 @@
-"""Choose the saved frames retained from accepted trajectories."""
+"""Build regular output times and choose which trajectory frames to keep."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ def floor_saved_time_grid(
     *,
     saved_dt: float,
 ) -> FloatArray:
-    """Return the saved-time prefix ending immediately before a horizon."""
+    """Return 0, saved_dt, 2*saved_dt, ... without exceeding terminal_time."""
 
     step_count = math.floor(terminal_time / saved_dt)
+    # Correct division rounding so the last time fits and the next one does not.
     while step_count * saved_dt > terminal_time:
         step_count -= 1
     while (step_count + 1) * saved_dt <= terminal_time:
@@ -28,7 +29,11 @@ def floor_saved_time_grid(
 
 
 def select_tanaka_times(eta: FloatArray, *, length: float) -> IntArray:
-    """Select 200 frames, concentrating half the density on rapid evolution."""
+    """Return 200 distinct frame indices, including the first and last.
+
+    Half the selection weight is spread equally across frames; half follows
+    smoothed relative changes in the sum of squared surface slopes.
+    """
 
     surface = np.asarray(eta, dtype=np.float64)
 
@@ -38,9 +43,11 @@ def select_tanaka_times(eta: FloatArray, *, length: float) -> IntArray:
         1j * wavenumbers * np.fft.fft(surface, axis=-1),
         axis=-1,
     ).real
+    # This is total squared surface slope, not physical wave energy.
     energy = np.sum(derivative**2, axis=-1)
     activity = np.abs(np.gradient(energy)) / (energy + 1.0e-12)
 
+    # Smooth across saved frames: Gaussian standard deviation 50, cutoff 150.
     sigma_steps = 50.0
     radius = math.ceil(3.0 * sigma_steps)
     offsets = np.arange(-radius, radius + 1, dtype=np.float64)
@@ -61,10 +68,12 @@ def select_tanaka_times(eta: FloatArray, *, length: float) -> IntArray:
     density /= np.sum(density)
 
     keep_samples = 200
+    # Space picks by accumulated weight, giving high-weight intervals more picks.
     quantiles = (np.arange(keep_samples, dtype=np.float64) + 0.5) / keep_samples
     raw = np.searchsorted(np.cumsum(density), quantiles, side="left")
     raw[0] = 0
     raw[-1] = surface.shape[0] - 1
+    # Reserve room for all 200 indices, then move repeated selections forward.
     lower = np.arange(keep_samples, dtype=np.int64)
     upper = surface.shape[0] - keep_samples + lower
     indices = np.clip(raw, lower, upper)
@@ -78,7 +87,7 @@ def select_uniform_times(
     *,
     keep_samples: int,
 ) -> IntArray:
-    """Select the nearest dense-grid indices to an endpoint-uniform grid."""
+    """Round evenly spaced positions from first to last frame; round ties upward."""
 
     numerator = np.arange(keep_samples, dtype=np.int64) * (number_of_times - 1)
     return np.floor(numerator / (keep_samples - 1) + 0.5).astype(np.int32)
