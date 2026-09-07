@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
@@ -30,8 +29,8 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None
 
     with jax.enable_x64():
         x, wavenumbers = build_grid(PAPER_STATIC_STOKES_NX, PAPER_DOMAIN_LENGTH)
-        eta_raw, xi_raw = stokes_eta_xi_at_phase(
-            x=jnp.asarray(x, dtype=jnp.float64),
+        eta, xi = stokes_eta_xi_at_phase(
+            x=x,
             phase=sample.phase,
             n0=sample.carrier_mode,
             a0=sample.amplitude,
@@ -40,34 +39,29 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None
             gravity=PAPER_GRAVITY,
             ichoi=1 if sample.branch == "finite" else 0,
         )
-        eta_array = jnp.asarray(eta_raw, dtype=jnp.float64)
-        xi_array = jnp.asarray(xi_raw, dtype=jnp.float64)
-        wavenumber_array = jnp.asarray(wavenumbers, dtype=jnp.float64)
-        eta_input = project_fixed_band(
-            eta_array,
-            wavenumber_array,
+        eta = project_fixed_band(
+            eta,
+            wavenumbers,
             maximum_wavenumber=PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
         )
-        xi_input = project_fixed_band(
-            xi_array - jnp.mean(xi_array),
-            wavenumber_array,
+        xi = project_fixed_band(
+            xi,
+            wavenumbers,
             maximum_wavenumber=PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
             remove_mean=True,
         )
-    eta_host = np.asarray(jax.device_get(eta_input), dtype=np.float64)
-    xi_host = np.asarray(jax.device_get(xi_input), dtype=np.float64)
+        eta_host, xi_host = map(np.asarray, jax.device_get((eta, xi)))
 
-    if not np.isfinite(eta_host).all() or not np.isfinite(xi_host).all():
-        return None
+        if not all(np.isfinite(field).all() for field in (eta_host, xi_host)):
+            return None
 
-    minimum_water_column = float(np.min(sample.depth + eta_host))
-    if not math.isfinite(minimum_water_column) or minimum_water_column <= 0.0:
-        return None
+        minimum_water_column = float(np.min(sample.depth + eta_host))
+        if not math.isfinite(minimum_water_column) or minimum_water_column <= 0.0:
+            return None
 
-    with jax.enable_x64():
-        target_eta, target_xi, q_ref = compute_dno_target(
-            eta_input,
-            xi_input,
+        eta, xi, gxi = compute_dno_target(
+            eta,
+            xi,
             sample.depth,
             nx=PAPER_STATIC_STOKES_NX,
             length=PAPER_DOMAIN_LENGTH,
@@ -75,19 +69,13 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None
             pad_factor=PAPER_STATIC_STOKES_PAD_FACTOR,
             maximum_wavenumber=PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
         )
-    target_eta_host = np.asarray(jax.device_get(target_eta), dtype=np.float64)
-    target_xi_host = np.asarray(jax.device_get(target_xi), dtype=np.float64)
-    q_ref_host = np.asarray(jax.device_get(q_ref), dtype=np.float64)
-    return (
-        SimulationRows(
-            eta=target_eta_host[None, :],
-            xi=target_xi_host[None, :],
-            gxi=q_ref_host[None, :],
-            depth=sample.depth,
-            time=np.asarray([0.0], dtype=np.float64),
-        )
-        if np.isfinite(target_eta_host).all()
-        and np.isfinite(target_xi_host).all()
-        and np.isfinite(q_ref_host).all()
-        else None
+    eta_host, xi_host, gxi_host = map(np.asarray, jax.device_get((eta, xi, gxi)))
+    if not all(np.isfinite(field).all() for field in (eta_host, xi_host, gxi_host)):
+        return None
+    return SimulationRows(
+        eta=eta_host[None, :],
+        xi=xi_host[None, :],
+        gxi=gxi_host[None, :],
+        depth=sample.depth,
+        time=np.asarray([0.0], dtype=np.float64),
     )
