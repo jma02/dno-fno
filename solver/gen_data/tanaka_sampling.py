@@ -94,17 +94,14 @@ def sample_tanaka_simulation(
     depth = float(np.exp(rng.uniform(np.log(depth_lower), np.log(depth_upper))))
 
     minimum_separation = SEPARATION_TO_DEPTH_RATIO * depth
-    if crest_count == 1:
-        centers = (float(rng.uniform(0.0, PAPER_DOMAIN_LENGTH)),)
-    else:
-        slack = PAPER_DOMAIN_LENGTH - crest_count * minimum_separation
-        weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
-        gaps = minimum_separation + slack * weights
-        origin = float(rng.uniform(0.0, PAPER_DOMAIN_LENGTH))
-        offsets = np.concatenate((np.zeros(1, dtype=np.float64), np.cumsum(gaps[:-1])))
-        centers = tuple(
-            float(center) for center in np.mod(origin + offsets, PAPER_DOMAIN_LENGTH)
-        )
+    slack = PAPER_DOMAIN_LENGTH - crest_count * minimum_separation
+    weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
+    gaps = minimum_separation + slack * weights
+    origin = float(rng.uniform(0.0, PAPER_DOMAIN_LENGTH))
+    offsets = np.concatenate((np.zeros(1, dtype=np.float64), np.cumsum(gaps[:-1])))
+    centers = tuple(
+        float(center) for center in np.mod(origin + offsets, PAPER_DOMAIN_LENGTH)
+    )
 
     directions = tuple(
         int(direction)
