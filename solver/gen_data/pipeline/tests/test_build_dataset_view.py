@@ -68,58 +68,64 @@ class DatasetViewTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def test_view_preserves_sparse_simulation_ids_and_row_ownership(self) -> None:
-        first = batch_path(self.root, family="stokes", split="train", batch_id=0)
-        second = batch_path(self.root, family="stokes", split="train", batch_id=1)
-        _write_batch(
-            first,
-            family_id=PhysicalFamilyId.STOKES,
-            dataset_split=DatasetSplit.TRAIN,
-            simulation_count=3,
-            accepted_local_indices=(0, 2),
-            frames_per_simulation=1,
-        )
-        _write_batch(
-            second,
-            family_id=PhysicalFamilyId.STOKES,
-            dataset_split=DatasetSplit.TRAIN,
-            simulation_count=2,
-            accepted_local_indices=(1,),
-            frames_per_simulation=2,
-        )
+        batches: list[Path] = []
+        for batch_id, (family, split, count, accepted, frames) in enumerate(
+            (
+                (PhysicalFamilyId.STOKES, DatasetSplit.TRAIN, 2, (), 1),
+                (PhysicalFamilyId.TANAKA, DatasetSplit.TRAIN, 3, (0, 2), 1),
+                (PhysicalFamilyId.STOKES, DatasetSplit.TEST, 1, (0,), 1),
+                (PhysicalFamilyId.STOKES, DatasetSplit.TRAIN, 2, (1,), 2),
+            )
+        ):
+            path = self.root / f"batch_{batch_id:06d}.npz"
+            _write_batch(
+                path,
+                family_id=family,
+                dataset_split=split,
+                simulation_count=count,
+                accepted_local_indices=accepted,
+                frames_per_simulation=frames,
+            )
+            batches.append(path)
 
-        view = build_dataset_view(self.root, (first, second))
+        with self.assertRaisesRegex(ValueError, "at least one accepted row"):
+            build_dataset_view(self.root, batches[:1])
+        self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
+        self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())
+
+        view = build_dataset_view(self.root, batches)
         manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["n_rows"], 4)
-        self.assertEqual(manifest["n_trajectories"], 5)
+        self.assertEqual(manifest["n_rows"], 5)
+        self.assertEqual(manifest["n_trajectories"], 8)
         self.assertEqual(
             [record["n_rows"] for record in manifest["dataset_shards"]],
-            [2, 2],
+            [2, 1, 2],
         )
         self.assertEqual(manifest["grid"]["nx"], 4)
         with np.load(view.trajectory_map, allow_pickle=False) as trajectory_map:
             np.testing.assert_array_equal(
                 trajectory_map["trajectory_accepted"],
-                np.asarray([True, False, True, False, True]),
+                np.asarray([False, False, True, False, True, True, False, True]),
             )
             np.testing.assert_array_equal(
                 trajectory_map["trajectory_first_row"],
-                np.asarray([0, -1, 1, -1, 2], dtype=np.int64),
+                np.asarray([-1, -1, 0, -1, 1, 2, -1, 3], dtype=np.int64),
             )
             np.testing.assert_array_equal(
                 trajectory_map["trajectory_index"],
-                np.asarray([0, 2, 4, 4], dtype=np.int32),
+                np.asarray([2, 4, 5, 7, 7], dtype=np.int32),
             )
             np.testing.assert_array_equal(
                 trajectory_map["trajectory_simulation_id"],
-                np.arange(5, dtype=np.int64),
+                np.asarray([0, 1, 0, 1, 2, 0, 2, 3], dtype=np.int64),
             )
             np.testing.assert_array_equal(
                 trajectory_map["trajectory_row_count"],
-                np.asarray([1, 0, 1, 0, 2], dtype=np.int32),
+                np.asarray([0, 0, 1, 0, 1, 1, 0, 2], dtype=np.int32),
             )
             np.testing.assert_array_equal(
                 trajectory_map["shard_index"],
-                np.asarray([0, 0, 1, 1], dtype=np.int32),
+                np.asarray([0, 0, 1, 2, 2], dtype=np.int32),
             )
 
     def test_aliased_batch_paths_are_rejected_before_publication(self) -> None:
