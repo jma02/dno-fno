@@ -8,14 +8,14 @@ import jax.numpy as jnp
 from solver.solvers.dno_series_jax import build_grid, dno_series_eval
 
 
-def project_fixed_band(
+def bandlimit_field(
     field: jax.Array,
     wavenumbers: jax.Array,
     *,
     maximum_wavenumber: float,
     remove_mean: bool = False,
 ) -> jax.Array:
-    """Apply the sharp physical-wavenumber projection used by the target."""
+    """Remove Fourier modes above the wavenumber cutoff, optionally zeroing the mean."""
 
     coefficients = jnp.fft.fft(field, axis=-1)
     mask = jnp.abs(wavenumbers) <= maximum_wavenumber
@@ -44,12 +44,12 @@ def compute_dno_target(
 
     _, wavenumbers = build_grid(nx, length)
     wavenumbers = jnp.asarray(wavenumbers, dtype=eta_array.dtype)
-    eta_input = project_fixed_band(
+    eta_input = bandlimit_field(
         eta_array,
         wavenumbers,
         maximum_wavenumber=maximum_wavenumber,
     )
-    xi_input = project_fixed_band(
+    xi_input = bandlimit_field(
         xi_array,
         wavenumbers,
         maximum_wavenumber=maximum_wavenumber,
@@ -62,7 +62,7 @@ def compute_dno_target(
         dno_order,
         pad_factor=pad_factor,
     )
-    target = project_fixed_band(
+    target = bandlimit_field(
         target,
         wavenumbers,
         maximum_wavenumber=maximum_wavenumber,
