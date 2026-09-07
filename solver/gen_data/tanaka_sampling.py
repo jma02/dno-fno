@@ -76,13 +76,10 @@ def sample_tanaka_simulation(
 
     if regime == "main":
         total_alpha = float(rng.uniform(*MAIN_TOTAL_ALPHA_BOUNDS))
-        if crest_count == 1:
-            alphas = (total_alpha,)
-        else:
-            weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
-            split_alphas = [float(total_alpha * weight) for weight in weights]
-            split_alphas[-1] = total_alpha - sum(split_alphas[:-1])
-            alphas = tuple(split_alphas)
+        weights = rng.dirichlet(np.ones(crest_count, dtype=np.float64))
+        split_alphas = [float(total_alpha * weight) for weight in weights]
+        split_alphas[-1] = total_alpha - sum(split_alphas[:-1])
+        alphas = tuple(split_alphas)
         base_depth_lower, depth_upper = MAIN_DEPTH_BOUNDS
     else:
         alphas = (float(rng.uniform(*STEEP_ALPHA_BOUNDS)),)
