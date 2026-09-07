@@ -38,12 +38,12 @@ TrajectoryInitialBatch = NamedTuple(
 )
 
 
-def _project_initial_conditions(
+def _preprocess_initial_conditions(
     eta0: FloatArray | jax.Array,
     xi0: FloatArray | jax.Array,
     numerical: RolloutNumerics,
 ) -> tuple[FloatArray, FloatArray]:
-    """Apply the common target-band projection and remove the xi zero mode."""
+    """Band-limit eta/xi, remove xi's mean, and return float64 NumPy arrays."""
 
     _, wavenumbers = build_grid(numerical.nx, numerical.length)
     projected_eta = project_fixed_band(
@@ -89,7 +89,7 @@ def construct_tanaka_trajectory_batch(
         nx=numerical.nx,
         gravity=numerical.gravity,
     )
-    eta, xi = _project_initial_conditions(eta0, xi0, numerical)
+    eta, xi = _preprocess_initial_conditions(eta0, xi0, numerical)
     return TrajectoryInitialBatch(eta, xi, depths)
 
 
@@ -120,7 +120,7 @@ def construct_benjamin_feir_trajectory_batch(
         length=numerical.length,
         gravity=numerical.gravity,
     )
-    eta, xi = _project_initial_conditions(eta0, xi0, numerical)
+    eta, xi = _preprocess_initial_conditions(eta0, xi0, numerical)
     depths = np.full(
         len(samples), deep_water_proxy_depth(numerical.length), dtype=np.float64
     )
@@ -147,7 +147,7 @@ def construct_jonswap_tma_trajectory_batch(
         )
         for sample in samples
     )
-    eta0, xi0 = _project_initial_conditions(
+    eta0, xi0 = _preprocess_initial_conditions(
         np.stack(tuple(state.eta for state in states)),
         np.stack(tuple(state.xi for state in states)),
         numerical,
