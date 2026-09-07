@@ -20,7 +20,7 @@ from solver.gen_data.jonswap_tma import (
     build_jonswap_tma_initial_condition,
 )
 from solver.gen_data.jonswap_tma_sampling import JonswapTmaSample
-from solver.gen_data.pipeline.dno_target import bandlimit_field
+from solver.gen_data.pipeline.dno_target import project_fixed_band
 from solver.gen_data.pipeline.trajectory_config import RolloutNumerics
 from solver.gen_data.tanaka_initial_conditions import (
     build_tanaka_initial_conditions,
@@ -46,17 +46,17 @@ def _preprocess_initial_conditions(
     """Band-limit eta/xi, remove xi's mean, and return float64 NumPy arrays."""
 
     _, wavenumbers = build_grid(numerical.nx, numerical.length)
-    projected_eta = bandlimit_field(
+    projected_eta = project_fixed_band(
         jnp.asarray(eta0, dtype=jnp.float64),
         jnp.asarray(wavenumbers, dtype=jnp.float64),
         maximum_wavenumber=numerical.target_maximum_wavenumber,
     )
-    projected_xi = bandlimit_field(
+    projected_xi = project_fixed_band(
         jnp.asarray(xi0, dtype=jnp.float64),
         jnp.asarray(wavenumbers, dtype=jnp.float64),
         maximum_wavenumber=numerical.target_maximum_wavenumber,
-        remove_mean=True,
     )
+    projected_xi = projected_xi - projected_xi.mean(axis=-1, keepdims=True)
     jax.block_until_ready(projected_xi)
     return (
         np.asarray(jax.device_get(projected_eta), dtype=np.float64),

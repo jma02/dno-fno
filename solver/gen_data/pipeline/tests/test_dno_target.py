@@ -39,8 +39,8 @@ class DnoTargetTest(unittest.TestCase):
 
     def test_unresolved_input_modes_do_not_change_the_target(self) -> None:
         x = 2.0 * np.pi * jnp.arange(64, dtype=jnp.float64) / 64.0
-        eta = 0.02 * jnp.cos(3.0 * x)
-        xi = 0.03 * jnp.sin(4.0 * x)
+        eta = 0.02 * jnp.cos(3.0 * x) + 0.01
+        xi = 0.03 * jnp.sin(4.0 * x) + 0.02
         high_mode = 0.1 * jnp.cos(12.0 * x)
 
         base = compute_dno_target(
@@ -64,6 +64,7 @@ class DnoTargetTest(unittest.TestCase):
             maximum_wavenumber=8.0,
         )
 
+        np.testing.assert_allclose(np.mean(base[:2], axis=-1), (0.01, 0.02))
         for base_field, perturbed_field in zip(base, perturbed):
             np.testing.assert_allclose(
                 np.asarray(base_field),
@@ -76,6 +77,8 @@ class DnoTargetTest(unittest.TestCase):
         x = 2.0 * np.pi * jnp.arange(64, dtype=jnp.float64) / 64.0
         eta = 0.02 * jnp.cos(3.0 * x) + 0.01 * jnp.sin(5.0 * x)
         xi = 0.03 * jnp.sin(4.0 * x) + 2.0
+        eta = jnp.stack((eta, 0.7 * eta))
+        xi = jnp.stack((xi, -0.5 * xi - 3.0))
         shift = 7
 
         _, _, target = compute_dno_target(
@@ -89,8 +92,8 @@ class DnoTargetTest(unittest.TestCase):
             maximum_wavenumber=8.0,
         )
         _, _, shifted_target = compute_dno_target(
-            jnp.roll(eta, shift),
-            jnp.roll(xi, shift),
+            jnp.roll(eta, shift, axis=-1),
+            jnp.roll(xi, shift, axis=-1),
             0.8,
             nx=64,
             length=2.0 * math.pi,
@@ -99,10 +102,10 @@ class DnoTargetTest(unittest.TestCase):
             maximum_wavenumber=8.0,
         )
 
-        self.assertLess(abs(float(jnp.mean(target))), 1e-14)
+        np.testing.assert_allclose(jnp.mean(target, axis=-1), 0.0, atol=1e-14)
         np.testing.assert_allclose(
             np.asarray(shifted_target),
-            np.asarray(jnp.roll(target, shift)),
+            np.asarray(jnp.roll(target, shift, axis=-1)),
             rtol=1e-11,
             atol=1e-12,
         )

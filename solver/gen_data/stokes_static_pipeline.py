@@ -8,7 +8,7 @@ import jax
 import numpy as np
 
 from solver.reference_solutions.stokes_wave import stokes_eta_xi_at_phase
-from solver.gen_data.pipeline.dno_target import bandlimit_field, compute_dno_target
+from solver.gen_data.pipeline.dno_target import compute_dno_target, project_fixed_band
 from solver.gen_data.pipeline.types import SimulationRows
 from solver.gen_data.stokes_sampling import (
     PAPER_DOMAIN_LENGTH,
@@ -39,17 +39,17 @@ def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None
             gravity=PAPER_GRAVITY,
             ichoi=1 if sample.branch == "finite" else 0,
         )
-        eta = bandlimit_field(
+        eta = project_fixed_band(
             eta,
             wavenumbers,
             maximum_wavenumber=PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
         )
-        xi = bandlimit_field(
+        xi = project_fixed_band(
             xi,
             wavenumbers,
             maximum_wavenumber=PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER,
-            remove_mean=True,
         )
+        xi = xi - xi.mean(axis=-1, keepdims=True)
         eta_host, xi_host = map(np.asarray, jax.device_get((eta, xi)))
 
         if not all(np.isfinite(field).all() for field in (eta_host, xi_host)):
