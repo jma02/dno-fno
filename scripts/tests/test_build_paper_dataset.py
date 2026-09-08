@@ -1,8 +1,7 @@
-"""Pool generation runs and split whole simulations without family quotas."""
+"""Build a dataset directly from saved NPZ files, without run summaries."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -11,8 +10,7 @@ import unittest
 
 import numpy as np
 
-from scripts.build_paper_dataset import build_paper_dataset
-from solver.gen_data.pipeline.artifact_io import write_json_atomic
+from scripts.build_paper_dataset import build_dataset
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
@@ -41,22 +39,7 @@ def _write_run(
         family_id=PhysicalFamilyId[family.upper()],
         seed=seed,
     )
-    summary_path = run_root / f"paper_dataset_{family}.summary.json"
-    write_json_atomic(
-        summary_path,
-        {
-            "status": "complete",
-            "output_root": str(run_root),
-            "run_spec": {
-                "family_name": family,
-                "seed": seed,
-                "accepted_simulation_count": accepted_count,
-            },
-            "counts": {"accepted": accepted_count, "attempted": accepted_count + 1},
-            "batch_paths": [str(batch.relative_to(run_root))],
-        },
-    )
-    return summary_path
+    return batch
 
 
 class PaperDatasetTests(unittest.TestCase):
@@ -70,9 +53,7 @@ class PaperDatasetTests(unittest.TestCase):
             _write_run(self.root, "stokes", accepted_count=3),
             _write_run(self.root, "tanaka", accepted_count=7),
         )
-        dataset = build_paper_dataset(
-            tuple(reversed(paths)), output_root=self.root / "dataset"
-        )
+        dataset = build_dataset(self.root / "dataset", tuple(reversed(paths)))
         arrays = {path.stem: np.load(path) for path in dataset.glob("*.npy")}
         np.testing.assert_array_equal(arrays["family_id"], [1] * 3 + [2] * 14)
         np.testing.assert_array_equal(
@@ -95,32 +76,32 @@ class PaperDatasetTests(unittest.TestCase):
                 sys.executable,
                 "-m",
                 "scripts.build_paper_dataset",
-                *(f"--run-summary={path}" for path in paths),
+                *(f"--input-root={path.parent.parent}" for path in paths),
                 f"--output-root={self.root / 'cli_dataset'}",
             ],
             capture_output=True,
             text=True,
             check=True,
         )
-        cli_dataset = Path(json.loads(result.stdout)["dataset"])
+        cli_dataset = Path(result.stdout.strip())
         for name, array in arrays.items():
             np.testing.assert_array_equal(np.load(cli_dataset / f"{name}.npy"), array)
 
     def test_accepts_one_family_and_rejects_invalid_split_fractions(self) -> None:
         path = _write_run(self.root, "stokes", accepted_count=10)
-        dataset = build_paper_dataset((path,), output_root=self.root / "dataset")
+        dataset = build_dataset(self.root / "dataset", (path,))
         np.testing.assert_array_equal(np.load(dataset / "family_id.npy"), np.ones(10))
         for validation, test in (
             (-0.1, 0.1),
             (0.1, -0.1),
-            (0.6, 0.4),
+            (0.6, 0.5),
             (float("nan"), 0.1),
         ):
             with self.subTest(validation=validation, test=test):
                 with self.assertRaisesRegex(ValueError, "fractions"):
-                    build_paper_dataset(
+                    build_dataset(
+                        self.root / "invalid",
                         (path,),
-                        output_root=self.root / "invalid",
                         validation_fraction=validation,
                         test_fraction=test,
                     )
@@ -130,14 +111,11 @@ class PaperDatasetTests(unittest.TestCase):
         paths = (_write_run(self.root, "stokes"),)
         duplicate = _write_run(self.root / "duplicate", "stokes")
         with self.assertRaisesRegex(ValueError, "distinct family/seed pairs"):
-            build_paper_dataset((*paths, duplicate), output_root=self.root / "dataset")
-        summary = json.loads(paths[0].read_text())
-        alias = paths[0].parent / "alias.npz"
-        alias.symlink_to(paths[0].parent / summary["batch_paths"][0])
-        summary["batch_paths"].append(alias.name)
-        write_json_atomic(paths[0], summary)
+            build_dataset(self.root / "dataset", (*paths, duplicate))
+        alias = paths[0].with_name("batch_alias.npz")
+        alias.symlink_to(paths[0])
         with self.assertRaisesRegex(ValueError, "must not appear twice"):
-            build_paper_dataset(paths, output_root=self.root / "dataset")
+            build_dataset(self.root / "dataset", (*paths, alias))
         self.assertFalse((self.root / "dataset").exists())
 
 

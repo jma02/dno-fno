@@ -23,7 +23,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     compute_metrics,
 )
 from solver.gen_data.pipeline.batch_storage import save_completed_batch  # noqa: E402
-from solver.gen_data.pipeline.build_dataset import build_dataset  # noqa: E402
+from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
     PhysicalFamilyId,
     SimulationRows,

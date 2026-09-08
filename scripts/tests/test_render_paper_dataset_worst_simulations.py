@@ -15,7 +15,7 @@ from PIL import Image
 
 from scripts import render_paper_dataset_worst_simulations as renderer
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
-from solver.gen_data.pipeline.build_dataset import build_dataset
+from scripts.build_paper_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
     SimulationRows,

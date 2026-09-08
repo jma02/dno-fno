@@ -9,11 +9,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_storage import (
-    batch_path,
-    save_completed_batch,
-)
-from solver.gen_data.pipeline.build_dataset import build_dataset
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
+from scripts.build_paper_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
     SimulationRows,
@@ -127,8 +124,8 @@ class DatasetTests(unittest.TestCase):
             build_dataset(dataset, batches)
 
     def test_mixed_spatial_grids_are_rejected_before_publication(self) -> None:
-        first = batch_path(self.root, family="stokes", batch_id=0)
-        second = batch_path(self.root, family="stokes", batch_id=1)
+        first = self.root / "batches/stokes/batch_000000.npz"
+        second = self.root / "batches/stokes/batch_000001.npz"
         _write_batch(
             first,
             family_id=PhysicalFamilyId.STOKES,

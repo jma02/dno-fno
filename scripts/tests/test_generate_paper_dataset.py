@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -17,20 +16,19 @@ from solver.gen_data.stokes_sampling import STOKES_PARAMETER_GROUPS
 
 
 class PaperDatasetGenerationTests(unittest.TestCase):
-    def test_completed_generation_only_saves_batches_and_summary(self) -> None:
+    def test_completed_generation_reports_counts_without_a_summary_file(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch("jax.config.update"),
             patch("jax.default_backend", return_value="cpu"),
-            patch("builtins.print"),
+            patch("builtins.print") as output,
             patch("scripts.generate_paper_dataset.generate_simulations") as generate,
         ):
             root = Path(directory)
             batches = [root / "batches" / "batch_000000.npz"]
-            generate.return_value = (
-                {group: 1 for group in STOKES_PARAMETER_GROUPS},
-                batches,
-            )
+            attempts = dict.fromkeys(STOKES_PARAMETER_GROUPS, 1)
+            attempts[next(iter(attempts))] = 2
+            generate.return_value = (attempts, batches)
             main(
                 (
                     "--family",
@@ -50,15 +48,8 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 generate.call_args.kwargs["family_id"], PhysicalFamilyId.STOKES
             )
             self.assertEqual(generate.call_args.kwargs["seed"], 42)
-            files = list(root.iterdir())
-            self.assertEqual(len(files), 1)
-            summary = json.loads(files[0].read_text())
-            self.assertEqual(files[0].name, "paper_dataset_stokes.summary.json")
-            self.assertEqual(summary["run_spec"]["seed"], 42)
-            self.assertNotIn("dataset_split", summary["run_spec"])
-            self.assertEqual(summary["status"], "complete")
-            self.assertEqual(summary["batch_paths"], ["batches/batch_000000.npz"])
-            self.assertEqual(summary["counts"]["accepted"], 4)
+            self.assertEqual(list(root.iterdir()), [])
+            output.assert_called_once_with("stokes: accepted=4, attempted=5, batches=1")
 
     def test_import_sets_float64_without_initializing_backends(self) -> None:
         subprocess.run(

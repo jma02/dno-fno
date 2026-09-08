@@ -5,12 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
-from solver.gen_data.pipeline.artifact_io import load_npz, write_npz_atomic
 from solver.gen_data.pipeline.batch_storage import (
-    batch_path,
     load_completed_batch,
     save_completed_batch,
     simulation_row_blocks,
@@ -42,11 +41,7 @@ class BatchStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.path = batch_path(
-            Path(self.temporary.name),
-            family="tanaka",
-            batch_id=7,
-        )
+        self.path = Path(self.temporary.name) / "batches/tanaka/batch_000007.npz"
 
     def test_sparse_completed_batch_round_trip_and_no_overwrite(self) -> None:
         rows = (
@@ -65,7 +60,8 @@ class BatchStorageTests(unittest.TestCase):
         batch = load_completed_batch(self.path)
         self.assertEqual(batch.family_id, PhysicalFamilyId.TANAKA)
         self.assertEqual(batch.seed, 2026072210)
-        self.assertEqual(load_npz(self.path)["seed"].dtype, np.dtype(np.int64))
+        with np.load(self.path, allow_pickle=False) as archive:
+            self.assertEqual(archive["seed"].dtype, np.dtype(np.int64))
         self.assertEqual(batch.parameter_group_ids, ("low", "high", "low"))
         np.testing.assert_array_equal(
             batch.accepted_simulations,
@@ -111,6 +107,25 @@ class BatchStorageTests(unittest.TestCase):
             np.zeros(3, dtype=np.bool_),
         )
 
+    def test_write_failures_leave_no_published_batch_or_temporary_file(self) -> None:
+        for operation in ("np.savez", "os.link"):
+            with (
+                self.subTest(operation=operation),
+                patch(
+                    f"solver.gen_data.pipeline.batch_storage.{operation}",
+                    side_effect=OSError("interrupted write"),
+                ),
+                self.assertRaisesRegex(OSError, "interrupted write"),
+            ):
+                save_completed_batch(
+                    self.path,
+                    ("group",),
+                    (_simulation_rows(),),
+                    family_id=PhysicalFamilyId.STOKES,
+                    seed=42,
+                )
+            self.assertEqual(list(self.path.parent.iterdir()), [])
+
     def test_save_rejects_invalid_stored_rows(self) -> None:
         valid = _simulation_rows()
         invalid_rows = (
@@ -140,7 +155,8 @@ class BatchStorageTests(unittest.TestCase):
             family_id=PhysicalFamilyId.BENJAMIN_FEIR,
             seed=2026072210,
         )
-        valid = load_npz(self.path)
+        with np.load(self.path, allow_pickle=False) as archive:
+            valid = {name: archive[name] for name in archive.files}
         corruptions = (
             ("frame", "frame_index", np.asarray([0, 2, 1], dtype=np.int32)),
             ("time", "time", np.asarray([0.0, 1.0, 0.5], dtype=np.float64)),
@@ -151,21 +167,21 @@ class BatchStorageTests(unittest.TestCase):
                 arrays = dict(valid)
                 arrays[field] = replacement
                 corrupt_path = self.path.with_name(f"{label}.npz")
-                write_npz_atomic(corrupt_path, arrays)
+                np.savez(corrupt_path, **arrays)
                 with self.assertRaises(ValueError):
                     load_completed_batch(corrupt_path)
 
         arrays = dict(valid)
         del arrays["gxi"]
         incomplete_path = self.path.with_name("incomplete.npz")
-        write_npz_atomic(incomplete_path, arrays)
+        np.savez(incomplete_path, **arrays)
         with self.assertRaisesRegex(ValueError, "missing shard arrays"):
             load_completed_batch(incomplete_path)
 
         arrays = dict(valid)
         arrays["simulation_results_json"] = np.asarray("legacy bookkeeping")
         unexpected_path = self.path.with_name("unexpected.npz")
-        write_npz_atomic(unexpected_path, arrays)
+        np.savez(unexpected_path, **arrays)
         with self.assertRaisesRegex(ValueError, "unexpected arrays"):
             load_completed_batch(unexpected_path)
 

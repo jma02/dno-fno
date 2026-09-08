@@ -5,9 +5,9 @@ The main path covers control flow and scientific choices; optional implementatio
 details can usually be skimmed.
 
 Current workflow: choose simulation counts, generate without dataset splits,
-pool completed runs, split whole accepted simulations once, then train on shuffled
+pool completed NPZ batches, split whole simulations once, then train on shuffled
 rows. The builder imposes no family quotas; its default is a global 80/10/10 split
-with seed `42`. Generation has a separate seed, default `2026072210`.
+with seed `42`. Generation uses seed `2026072210` by default, with no summary files.
 
 ## Main path
 
@@ -30,8 +30,7 @@ with seed `42`. Generation has a separate seed, default `2026072210`.
 - [x] `solver/gen_data/pipeline/time_selection.py` — saved-time grids, frame selection, and dataset rows
 - [x] ~~`solver/gen_data/pipeline/trajectory_subsampling.py`~~ — folded into `time_selection.py`
 - [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
-- [x] `scripts/build_paper_dataset.py` — pool chosen completed runs and choose split fractions/seed
-- [x] `solver/gen_data/pipeline/build_dataset.py` — split whole accepted simulations once, then save their rows and metadata
+- [x] `scripts/build_paper_dataset.py` — read all `batch_*.npz` under repeated `--input-root` directories, split simulations, and write NPY arrays to `--output-root`; no generation-completion requirement
 
 Continue into `train-jax-10m/util.py` for training-only normalization and shuffled
 row batches, then `train-jax-10m/1d_dno_fno_jax.py` for the training loop.
@@ -50,8 +49,7 @@ counts.
 
 - [x] ~~`solver/gen_data/pipeline/simulation_checks.py`~~ — acceptance is represented directly by rows or `None`
 - [x] ~~`solver/gen_data/pipeline/batch_artifacts.py`~~ — folded into `batch_storage.py`
-- [x] `solver/gen_data/pipeline/batch_storage.py` — NPZ save/load boundary
-- [x] `solver/gen_data/pipeline/artifact_io.py` — atomic JSON/NPZ helpers
+- [x] `solver/gen_data/pipeline/batch_storage.py` — atomic, resumable NPZ batch files
 - [x] `solver/gen_data/pipeline/types.py` — shared type aliases
 
 Tests are best read beside the corresponding implementation file, not as a

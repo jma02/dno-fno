@@ -5,9 +5,9 @@ This repo assumes NVIDIA GPU execution for JAX training.
 
 For the current paper dataset and C27 training workflow, see
 [`scripts/README.md`](scripts/README.md) and the
-[dataset-generation guide](solver/gen_data/README.md). Generate simulations first,
-split them once when building the arrays, then train on shuffled rows. The C27
-launchers default to `outputs/paper_dataset/arrays`.
+[dataset-generation guide](solver/gen_data/README.md). Generate NPZ batches, then
+use `scripts/build_paper_dataset.py` to split whole simulations and assemble the
+training arrays. C27 launchers default to `outputs/paper_dataset/arrays`.
 
 ## Baseline workflow
 

@@ -1,15 +1,16 @@
-"""Read and write one complete artifact per simulation batch."""
+"""Read and write completed NPZ simulation batches."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, NamedTuple, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from solver.gen_data.pipeline.artifact_io import load_npz, write_npz_atomic
 from solver.gen_data.pipeline.types import (
     DatasetShardArrays,
     PhysicalFamilyId,
@@ -37,17 +38,6 @@ CompletedBatch = NamedTuple(
         ("shard", DatasetShardArrays | None),
     ],
 )
-
-
-def batch_path(
-    root: Path,
-    *,
-    family: str,
-    batch_id: int,
-) -> Path:
-    """Return the standard path for one completed batch."""
-
-    return root / "batches" / family / f"batch_{batch_id:06d}.npz"
 
 
 def simulation_row_blocks(
@@ -154,17 +144,22 @@ def save_completed_batch(
     arrays: dict[str, NDArray[Any]] = {
         "family_id": np.asarray(int(family_id), dtype=np.int16),
         "seed": np.asarray(seed, dtype=np.int64),
-        "parameter_group_id": np.asarray(parameter_group_ids),
+        "parameter_group_id": np.asarray(parameter_group_ids, dtype=np.str_),
     }
     if parts["eta"]:
         arrays.update({name: np.concatenate(values) for name, values in parts.items()})
-    write_npz_atomic(path, arrays, replace_existing=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.") as temporary:
+        np.savez(temporary, **arrays)  # pyright: ignore[reportArgumentType]
+        temporary.flush()
+        os.link(temporary.name, path)
 
 
 def load_completed_batch(path: Path) -> CompletedBatch:
-    """Load and validate one completed batch artifact."""
+    """Load and validate one completed batch."""
 
-    arrays = load_npz(path)
+    with np.load(path, allow_pickle=False) as archive:
+        arrays = {name: archive[name] for name in archive.files}
     unexpected = arrays.keys() - {
         "family_id",
         "seed",

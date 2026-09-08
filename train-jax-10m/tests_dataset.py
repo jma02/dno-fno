@@ -9,11 +9,7 @@ import tempfile
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_storage import (
-    batch_path,
-    save_completed_batch,
-)
-from solver.gen_data.pipeline.build_dataset import build_dataset
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
     SimulationRows,
@@ -21,7 +17,9 @@ from solver.gen_data.pipeline.types import (
 
 TRAIN_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_DIR))
+sys.path.insert(0, str(TRAIN_DIR.parent))
 
+from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from util import (  # noqa: E402
     build_dataset_split_indices,
     get_batches,
@@ -37,11 +35,7 @@ def _write_batch(
     simulation_count: int,
     accepted_local_indices: tuple[int, ...],
 ) -> Path:
-    path = batch_path(
-        root,
-        family=family_id.name.lower(),
-        batch_id=0,
-    )
+    path = root / "batches" / family_id.name.lower() / "batch_000000.npz"
     frames_per_simulation = 2
     accepted = set(accepted_local_indices)
     save_completed_batch(

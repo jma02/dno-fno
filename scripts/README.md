@@ -32,16 +32,16 @@ uv run python scripts/generate_paper_dataset.py --family stokes \
 ```
 
 The count above is just a small example; choose each family's count explicitly.
-Generation saves batches and `paper_dataset_<family>.summary.json`. Pool any
-completed runs with repeated `--run-summary` arguments; the builder requires
-neither all four families nor equal family counts. It randomly assigns whole
-accepted simulations to a global 80/10/10 train/validation/test split once, using
-its separate `--seed` (default `42`). All snapshots from a simulation stay together.
-Use `--validation-fraction` and `--test-fraction` to change those proportions.
+Generation saves self-contained, resumable NPZ batches, not summary files.
+`build_paper_dataset.py` contains all assembly and split logic: it recursively
+reads `batch_*.npz` under each `--input-root` (repeat to pool directories).
+It uses every completed batch present, even before generation reaches its quota.
+Whole accepted simulations get a global 80/10/10 train/validation/test split with
+seed `42`; change it with `--seed`, `--validation-fraction`, and `--test-fraction`.
 
 ```sh
 uv run python scripts/build_paper_dataset.py \
-  --run-summary outputs/paper_dataset/generated/paper_dataset_stokes.summary.json \
+  --input-root outputs/paper_dataset/generated \
   --output-root outputs/paper_dataset/arrays
 ```
 

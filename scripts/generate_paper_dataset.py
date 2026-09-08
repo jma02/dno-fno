@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import argparse
 from functools import partial
-import json
 import os
 from pathlib import Path
-from time import perf_counter
 from typing import Sequence
 
 # Tanaka chooses its precision at import time.
@@ -21,7 +19,6 @@ import jax
 
 from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUPS
 from solver.gen_data.jonswap_tma_sampling import JONSWAP_TMA_PARAMETER_GROUPS
-from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.dataset_generation import generate_simulations
 from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
 from solver.gen_data.pipeline.types import (
@@ -69,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--output-root",
         type=Path,
         required=True,
-        help="Root containing completed batches and the generation summary.",
+        help="Root containing completed simulation batches.",
     )
     parser.add_argument(
         "--batch-size",
@@ -99,7 +96,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     family_id = PhysicalFamilyId[args.family.upper()]
 
     jax.default_backend()
-    total_started = perf_counter()
     if args.family == "stokes":
         generate_batch = partial(
             generate_static_stokes_batch,
@@ -115,7 +111,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             solver_batch_size=args.solver_batch_size,
         )
 
-    generation_started = perf_counter()
     attempts_per_group, completed_batches = generate_simulations(
         output_root,
         family_id=family_id,
@@ -124,61 +119,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         batch_size=args.batch_size,
         generate_batch=generate_batch,
     )
-    generation_seconds = perf_counter() - generation_started
-    total_attempts = sum(attempts_per_group.values())
-    total_successful = sum(requested_simulations_per_group.values())
-    simulation_summary = {
-        "attempted": total_attempts,
-        "accepted": total_successful,
-        "rejected": total_attempts - total_successful,
-        "by_parameter_group": {
-            parameter_group_id: {
-                "target_accepted": target_count,
-                "attempted": attempts_per_group[parameter_group_id],
-                "accepted": target_count,
-                "rejected": attempts_per_group[parameter_group_id] - target_count,
-            }
-            for parameter_group_id, target_count in requested_simulations_per_group.items()
-        },
-    }
-    run_spec: dict[str, object] = {
-        "family_name": args.family,
-        "family_id": int(family_id),
-        "seed": args.seed,
-        "batch_size": args.batch_size,
-        "accepted_simulation_count": sum(requested_simulations_per_group.values()),
-        "quotas": [
-            {
-                "parameter_group_id": parameter_group_id,
-                "target_accepted": target,
-            }
-            for parameter_group_id, target in requested_simulations_per_group.items()
-        ],
-    }
-    if args.solver_batch_size is not None:
-        run_spec["solver_batch_size"] = args.solver_batch_size
-    summary: dict[str, object] = {
-        "status": "complete",
-        "output_root": str(output_root),
-        "run_spec": run_spec,
-        "batch_paths": [
-            str(path.resolve().relative_to(output_root)) for path in completed_batches
-        ],
-        "counts": simulation_summary,
-        "timing_seconds": {
-            "generation": generation_seconds,
-            "total": perf_counter() - total_started,
-        },
-    }
-    summary_path = output_root / f"paper_dataset_{args.family}.summary.json"
-    write_json_atomic(summary_path, summary)
-    output: dict[str, object] = {
-        "status": summary["status"],
-        "summary_path": str(summary_path),
-        "counts": summary["counts"],
-        "timing_seconds": summary["timing_seconds"],
-    }
-    print(json.dumps(output, indent=2, sort_keys=True, allow_nan=False))
+    print(
+        f"{args.family}: accepted={args.num_simulations}, "
+        f"attempted={sum(attempts_per_group.values())}, batches={len(completed_batches)}"
+    )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from solver.gen_data.pipeline.batch_storage import batch_path, save_completed_batch
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.dataset_generation import (
     BatchGenerator,
     GenerationResult,
@@ -210,7 +210,7 @@ class DatasetGenerationTests(unittest.TestCase):
                 generator(
                     ("main_m1_q1",) * saved_count,
                     0,
-                    batch_path(root, family=FAMILY_NAME, batch_id=0),
+                    root / "batches" / FAMILY_NAME / "batch_000000.npz",
                 )
                 must_not_run, _ = _fake_generator(interrupt_after_batches=0)
                 with self.assertRaisesRegex(RuntimeError, error):
@@ -227,11 +227,7 @@ class DatasetGenerationTests(unittest.TestCase):
         generator(
             ("main_m1_q0",),
             0,
-            batch_path(
-                self.root,
-                family=FAMILY_NAME,
-                batch_id=1,
-            ),
+            self.root / "batches" / FAMILY_NAME / "batch_000001.npz",
         )
 
         with self.assertRaises(FileNotFoundError):

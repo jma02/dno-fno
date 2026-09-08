@@ -38,7 +38,7 @@ batch-size limit or that group's remaining quota. A group stops the run if it
 still needs successes after twice its requested count in attempts. This ordering
 controls generation only; it does not balance training epochs.
 
-Generation does not assign dataset splits. After pooling completed runs, the
+Generation does not assign dataset splits. After pooling completed batches, the
 builder randomly splits whole accepted simulations once, globally: 80% train,
 10% validation, and 10% test by default, with split seed `42`. Fractions are
 applied to simulation counts, not row counts; every simulation's snapshots stay
@@ -74,8 +74,6 @@ Shared pipeline:
 - `pipeline/dno_target.py` computes the stored DNO target.
 - `pipeline/batch_storage.py` validates, reads, and writes one completed NPZ per
   batch.
-- `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
-- `pipeline/build_dataset.py` combines saved batches into the arrays used by training.
 - `pipeline/dataset_generation.py` counts completed batches and generates the
   remaining simulations needed by each parameter group.
 
@@ -94,7 +92,7 @@ Each finished batch is one NPZ containing its family, seed, parameter-group
 assignments, and any accepted rows. Row ownership identifies accepted attempts;
 a batch with no accepted simulations simply omits the row arrays.
 Files live at `batches/<family>/batch_<number>.npz`; resume verifies the seed
-before reusing them.
+before reusing them. Generation writes no summary files.
 
 The NPZ is written to a temporary sibling and published only after it is
 complete. If generation stops before publication, the next run restarts the
@@ -124,15 +122,15 @@ therefore do not mean equal row counts or equal training contributions.
 The supported generation entrypoints live in `scripts/`:
 
 - `generate_paper_dataset.py` takes a family, simulation count, and optional seed,
-  then saves batches and `paper_dataset_<family>.summary.json`;
-- `build_paper_dataset.py` pools completed runs, assigns the simulation split,
-  and writes one training dataset directory.
+  then saves resumable NPZ batches;
+- `build_paper_dataset.py` contains the assembly and split logic and writes the
+  NPY arrays used by training.
 
-Pass the chosen summaries with repeated `--run-summary` arguments and supply
-`--output-root`. Any completed runs can be pooled; all four families and equal
-counts are not required. Repeated runs of the same family must use different seeds
-and separate generation roots. The builder's `--seed`, `--validation-fraction`,
-and `--test-fraction` control splitting independently of generation.
+Pass `--input-root` (repeat to pool directories) and `--output-root`. The builder
+recursively reads all completed `batch_*.npz` present; generation need not have
+reached its quota. No family balance is required. Separate runs of the same family
+must use different seeds. The builder's `--seed`, `--validation-fraction`, and
+`--test-fraction` control splitting independently of generation.
 
 Existing completed batches can be exported without regenerating simulations;
 write to a new output directory. The C27 launchers default to
