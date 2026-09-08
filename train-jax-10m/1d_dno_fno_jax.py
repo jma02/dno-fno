@@ -531,8 +531,7 @@ def main() -> None:
                 {"params": current_params}, batch_inputs, batch_depth
             )
             data_loss = loss_fn(predictions_0, batch_targets)
-            extra = jnp.asarray(0.0, dtype=training_dtype)
-            zero = jnp.asarray(0.0, dtype=training_dtype)
+            physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {}
 
             if mode_balanced_weight > 0.0:
@@ -559,7 +558,7 @@ def main() -> None:
                     * mode_warmup
                 )
                 mode_extra = mode_weight_eff * loss_mode
-                extra = extra + mode_extra
+                physics_loss = physics_loss + mode_extra
                 metrics.update(
                     mode_balanced_loss=loss_mode,
                     mode_balanced_extra=mode_extra,
@@ -601,7 +600,7 @@ def main() -> None:
                 )
                 loss_tangent = loss_tangent * shard_weight
                 tangent_extra = translation_tangent_weight * loss_tangent
-                extra = extra + tangent_extra
+                physics_loss = physics_loss + tangent_extra
                 metrics.update(
                     translation_tangent_loss=loss_tangent,
                     translation_tangent_extra=tangent_extra,
@@ -677,24 +676,24 @@ def main() -> None:
                     step_active,
                     _hadamard_active_branch,
                     lambda _: {
-                        "hadamard_active": zero,
-                        "hadamard_loss": zero,
-                        "hadamard_defect_rms": zero,
-                        "hadamard_residual_hs_rms": zero,
-                        "hadamard_forcing_hs_rms": zero,
-                        "hadamard_secant_hs_rms": zero,
-                        "hadamard_fd_step": zero,
-                        "hadamard_eta_scale": zero,
-                        "hadamard_extra": zero,
-                        "hadamard_warmup": zero,
-                        "hadamard_weight_eff": zero,
+                        "hadamard_active": jnp.float32(0.0),
+                        "hadamard_loss": jnp.float32(0.0),
+                        "hadamard_defect_rms": jnp.float32(0.0),
+                        "hadamard_residual_hs_rms": jnp.float32(0.0),
+                        "hadamard_forcing_hs_rms": jnp.float32(0.0),
+                        "hadamard_secant_hs_rms": jnp.float32(0.0),
+                        "hadamard_fd_step": jnp.float32(0.0),
+                        "hadamard_eta_scale": jnp.float32(0.0),
+                        "hadamard_extra": jnp.float32(0.0),
+                        "hadamard_warmup": jnp.float32(0.0),
+                        "hadamard_weight_eff": jnp.float32(0.0),
                     },
                     operand=None,
                 )
-                extra = extra + hadamard_metrics["hadamard_extra"]
+                physics_loss = physics_loss + hadamard_metrics["hadamard_extra"]
                 metrics.update(hadamard_metrics)
 
-            return data_loss + extra, metrics
+            return data_loss + physics_loss, metrics
 
         (loss_value, metrics), grads = jax.value_and_grad(
             loss_for_params, has_aux=True
