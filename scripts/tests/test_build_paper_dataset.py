@@ -11,14 +11,18 @@ import unittest
 
 import numpy as np
 
-from scripts.build_paper_dataset import FAMILY_IDS, build_paper_dataset
+from scripts.build_paper_dataset import build_paper_dataset
 from solver.gen_data.pipeline.artifact_io import (
     load_npz,
     write_json_atomic,
     write_npz_atomic,
 )
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
-from solver.gen_data.pipeline.types import DatasetSplit, SimulationRows
+from solver.gen_data.pipeline.types import (
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
+)
 
 
 def _write_run(
@@ -30,7 +34,7 @@ def _write_run(
 ) -> Path:
     run_root = root / f"{split.value}_{family}"
     batch = run_root / "batches" / "batch_000000.npz"
-    frame_count = int(FAMILY_IDS[family])
+    frame_count = int(PhysicalFamilyId[family.upper()])
     eta = np.arange(frame_count * 4, dtype=np.float64).reshape(frame_count, 4)
     rows = SimulationRows(
         eta, eta + 1.0, eta - 1.0, 1.0, np.arange(frame_count, dtype=np.float64)
@@ -39,7 +43,7 @@ def _write_run(
         batch,
         ("group",) * (accepted_count + 1),
         (None, *((rows,) * accepted_count)),
-        family_id=FAMILY_IDS[family],
+        family_id=PhysicalFamilyId[family.upper()],
         dataset_split=split,
     )
     summary_path = run_root / f"paper_dataset_{family}_{split.value}.summary.json"
@@ -63,7 +67,9 @@ def _write_run(
 def _write_split(
     root: Path, split: DatasetSplit = DatasetSplit.TRAIN
 ) -> tuple[Path, ...]:
-    return tuple(_write_run(root, family, split) for family in FAMILY_IDS)
+    return tuple(
+        _write_run(root, family.name.lower(), split) for family in PhysicalFamilyId
+    )
 
 
 class PaperDatasetTests(unittest.TestCase):
@@ -146,8 +152,8 @@ class PaperDatasetTests(unittest.TestCase):
                         root, "stokes", DatasetSplit.TRAIN, accepted_count=count
                     ),
                     *(
-                        _write_run(root, family, DatasetSplit.TRAIN)
-                        for family in tuple(FAMILY_IDS)[1:]
+                        _write_run(root, family.name.lower(), DatasetSplit.TRAIN)
+                        for family in tuple(PhysicalFamilyId)[1:]
                     ),
                 )
                 summary = json.loads(paths[0].read_text())
@@ -176,7 +182,7 @@ class PaperDatasetTests(unittest.TestCase):
                         extra,
                         ("extra",),
                         (None,),
-                        family_id=FAMILY_IDS["jonswap_tma"],
+                        family_id=PhysicalFamilyId.JONSWAP_TMA,
                         dataset_split=DatasetSplit.TEST,
                     )
                     summary = json.loads(paths[-1].read_text())
