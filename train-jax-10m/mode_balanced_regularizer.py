@@ -7,9 +7,6 @@ import jax
 import jax.numpy as jnp
 
 
-Diagnostics = dict[str, jax.Array]
-
-
 @dataclass(frozen=True)
 class ModeBalancedConfig:
     """Configuration for balancing errors over reference-active modes."""
@@ -24,17 +21,6 @@ class ModeBalancedConfig:
     dispersion_weighting: bool = False
 
 
-def _capped_pseudo_huber(
-    squared_ratio: jax.Array,
-    delta: jax.Array,
-    cap: jax.Array,
-) -> jax.Array:
-    """Return a stable pseudo-Huber penalty after clipping extreme ratios."""
-    clipped_ratio = jnp.minimum(squared_ratio, cap)
-    scaled_ratio = clipped_ratio / delta**2
-    return 2.0 * clipped_ratio / (jnp.sqrt(1.0 + scaled_ratio) + 1.0)
-
-
 def compute_mode_balanced_loss(
     eta: jax.Array,
     gxi_prediction: jax.Array,
@@ -42,7 +28,7 @@ def compute_mode_balanced_loss(
     depth: jax.Array,
     k_rfft: jax.Array,
     config: ModeBalancedConfig,
-) -> tuple[jax.Array, Diagnostics]:
+) -> jax.Array:
     """Compare complex DNO coefficients with soft balance over active modes.
 
     For each positive Fourier mode, the physical reference scale is
@@ -112,62 +98,35 @@ def compute_mode_balanced_loss(
 
     squared_error = jnp.abs(prediction_hat - target_hat) ** 2
     squared_ratio = squared_error / (physical_scale + denominator_floor)
-    ratio_cap = jnp.asarray(config.ratio_cap, dtype=real_dtype)
-    penalty = _capped_pseudo_huber(
-        squared_ratio,
-        jnp.asarray(config.huber_delta, dtype=real_dtype),
-        ratio_cap,
+    clipped_ratio = jnp.minimum(
+        squared_ratio, jnp.asarray(config.ratio_cap, dtype=real_dtype)
     )
+    scaled_ratio = clipped_ratio / jnp.asarray(config.huber_delta, dtype=real_dtype)**2
+    penalty = 2.0 * clipped_ratio / (jnp.sqrt(1.0 + scaled_ratio) + 1.0)
 
     active_weight = jnp.sum(mode_weight, axis=-1)
-    weight_floor = jnp.asarray(config.absolute_floor, dtype=real_dtype)
     per_sample_loss = jnp.sum(mode_weight * penalty, axis=-1) / jnp.maximum(
-        active_weight, weight_floor
+        active_weight, absolute_floor
     )
-    parseval_weight = jnp.full_like(k_abs, 2.0)
-    parseval_weight = parseval_weight.at[0].set(1.0)
-    if eta.shape[-1] % 2 == 0:
-        parseval_weight = parseval_weight.at[-1].set(1.0)
-    eta_energy = (
-        parseval_weight[None, :]
-        * jnp.abs(eta_hat) ** 2
-        * band[None, :]
-    )
-    total_eta_energy = jnp.sum(eta_energy, axis=-1)
-    safe_eta_energy = jnp.where(
-        total_eta_energy > 0.0,
-        total_eta_energy,
-        jnp.ones_like(total_eta_energy),
-    )
-    effective_frequency_squared = jax.lax.stop_gradient(
-        jnp.sum(omega_squared * eta_energy, axis=-1)
-        / safe_eta_energy
-    )
-    sample_weight = (
-        effective_frequency_squared
-        if config.dispersion_weighting
-        else jnp.ones_like(effective_frequency_squared)
-    )
-    loss = jnp.mean(sample_weight * per_sample_loss)
-
-    total_weight = jnp.sum(mode_weight)
-    total_weight_safe = jnp.maximum(total_weight, weight_floor)
-    weighted_raw_ratio = jnp.sum(mode_weight * squared_ratio) / total_weight_safe
-    clipped_fraction = jnp.sum(
-        mode_weight * (squared_ratio >= ratio_cap).astype(real_dtype)
-    ) / total_weight_safe
-    diagnostics: Diagnostics = {
-        "loss": loss,
-        "unweighted_loss": jnp.mean(per_sample_loss),
-        "effective_frequency_squared_mean": jnp.mean(
-            effective_frequency_squared
-        ),
-        "relative_error_rms": jnp.sqrt(weighted_raw_ratio),
-        "active_modes": jnp.mean(active_weight),
-        "clipped_mode_fraction": clipped_fraction,
-        "mean_denominator_floor": jnp.mean(denominator_floor),
-        "max_raw_squared_ratio": jnp.max(
-            jnp.where(mode_weight > 0.0, squared_ratio, 0.0)
-        ),
-    }
-    return loss, diagnostics
+    if config.dispersion_weighting:
+        parseval_weight = jnp.full_like(k_abs, 2.0)
+        parseval_weight = parseval_weight.at[0].set(1.0)
+        if eta.shape[-1] % 2 == 0:
+            parseval_weight = parseval_weight.at[-1].set(1.0)
+        eta_energy = (
+            parseval_weight[None, :]
+            * jnp.abs(eta_hat) ** 2
+            * band[None, :]
+        )
+        total_eta_energy = jnp.sum(eta_energy, axis=-1)
+        safe_eta_energy = jnp.where(
+            total_eta_energy > 0.0,
+            total_eta_energy,
+            jnp.ones_like(total_eta_energy),
+        )
+        effective_frequency_squared = jax.lax.stop_gradient(
+            jnp.sum(omega_squared * eta_energy, axis=-1)
+            / safe_eta_energy
+        )
+        per_sample_loss = effective_frequency_squared * per_sample_loss
+    return jnp.mean(per_sample_loss)

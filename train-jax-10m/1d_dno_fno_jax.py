@@ -537,7 +537,7 @@ def main() -> None:
             if mode_balanced_weight > 0.0:
                 gxi_pred_phys_mode = denorm_targets_jax(predictions_0)[..., 0]
                 gxi_target_phys_mode = denorm_targets_jax(batch_targets)[..., 0]
-                loss_mode, _ = compute_mode_balanced_loss(
+                loss_mode = compute_mode_balanced_loss(
                     eta=eta,
                     gxi_prediction=gxi_pred_phys_mode,
                     gxi_target=gxi_target_phys_mode,
@@ -555,7 +555,7 @@ def main() -> None:
 
             if translation_tangent_weight > 0.0:
                 gxi_pred_phys_tan = denorm_targets_jax(predictions_0)[..., 0]
-                loss_tangent, tangent_diagnostics = compute_translation_tangent_loss(
+                loss_tangent, local_selected = compute_translation_tangent_loss(
                     eta=eta,
                     gxi_prediction=gxi_pred_phys_tan,
                     gxi_target=gxi,
@@ -563,7 +563,6 @@ def main() -> None:
                     k=k_grid_jax,
                     config=translation_tangent_cfg,
                 )
-                local_selected = tangent_diagnostics["selected_samples"]
                 global_selected = jax.lax.psum(local_selected, axis_name="batch")
                 device_count = jax.lax.psum(
                     jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"
@@ -596,7 +595,7 @@ def main() -> None:
                         hadamard_microbatch_local,
                     )
                     batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
-                    loss_hadamard, _ = compute_hadamard_reg(
+                    loss_hadamard = compute_hadamard_reg(
                         rng=rng_probe,
                         apply_fn=current_state.apply_fn,
                         model_params=current_params,
@@ -688,7 +687,7 @@ def main() -> None:
         h_phys = jnp.exp(log_h)
         mode_loss = jnp.asarray(0.0, dtype=training_dtype)
         if mode_balanced_weight > 0.0:
-            mode_loss, _ = compute_mode_balanced_loss(
+            mode_loss = compute_mode_balanced_loss(
                 eta=eta,
                 gxi_prediction=denorm_targets_jax(predictions)[..., 0],
                 gxi_target=denorm_targets_jax(batch_targets)[..., 0],
@@ -698,7 +697,7 @@ def main() -> None:
             )
         tangent_loss = jnp.asarray(0.0, dtype=training_dtype)
         if translation_tangent_weight > 0.0:
-            tangent_loss, tangent_diagnostics = compute_translation_tangent_loss(
+            tangent_loss, local_selected = compute_translation_tangent_loss(
                 eta=eta,
                 gxi_prediction=denorm_targets_jax(predictions)[..., 0],
                 gxi_target=gxi,
@@ -706,7 +705,6 @@ def main() -> None:
                 k=k_grid_jax,
                 config=translation_tangent_cfg,
             )
-            local_selected = tangent_diagnostics["selected_samples"]
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(
                 jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"

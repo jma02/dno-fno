@@ -26,7 +26,6 @@ Array: TypeAlias = jax.Array
 ApplyFn: TypeAlias = Callable[[dict[str, Any], Array, Array], Array]
 NormalizeInputsFn: TypeAlias = Callable[[Array, Array], Array]
 DenormalizeTargetsFn: TypeAlias = Callable[[Array], Array]
-Diagnostics: TypeAlias = dict[str, Array]
 
 
 @dataclass(frozen=True)
@@ -191,8 +190,8 @@ def compute_hadamard_reg(
     k: Array,
     cfg: HadamardRegConfig,
     dtype: jnp.dtype,
-) -> tuple[Array, Diagnostics]:
-    """Return the normalized finite-secant Hadamard defect and diagnostics.
+) -> Array:
+    """Return the normalized finite-secant Hadamard loss.
 
     Inputs are clean physical training states of shape ``(batch, nx)``;
     ``batch_depth_local`` is the model's usual depth input for those samples.
@@ -202,14 +201,13 @@ def compute_hadamard_reg(
 
     where ``S`` is the Hadamard residual and
     ``R = G(eta)(zeta B) + d_x(zeta V)`` is the identity's right-hand-side
-    magnitude (up to sign).  All reported diagnostics are scalar arrays, so
-    they can be stacked and averaged directly by the trainer.
+    magnitude (up to sign).
     """
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)
     depth = batch_depth_local.astype(dtype)
-    zeta, fd_step, eta_scale = construct_relative_eta_probe(
+    zeta, fd_step, _ = construct_relative_eta_probe(
         rng, eta, k_typed, cfg, dtype
     )
 
@@ -262,22 +260,7 @@ def compute_hadamard_reg(
     forcing_energy = projected_sobolev_energy(
         forcing, k_typed, cfg.k_max, cfg.sobolev_order
     )
-    secant_energy = projected_sobolev_energy(
-        secant, k_typed, cfg.k_max, cfg.sobolev_order
-    )
     denominator = forcing_energy + jnp.asarray(
         cfg.denominator_floor, dtype=dtype
     )
-    per_sample_loss = residual_energy / denominator
-    loss = jnp.mean(per_sample_loss)
-
-    diagnostics: Diagnostics = {
-        "hadamard_loss": loss,
-        "hadamard_defect_rms": jnp.mean(jnp.sqrt(per_sample_loss)),
-        "hadamard_residual_hs_rms": jnp.mean(jnp.sqrt(residual_energy)),
-        "hadamard_forcing_hs_rms": jnp.mean(jnp.sqrt(forcing_energy)),
-        "hadamard_secant_hs_rms": jnp.mean(jnp.sqrt(secant_energy)),
-        "hadamard_fd_step": jnp.mean(fd_step),
-        "hadamard_eta_scale": jnp.mean(eta_scale),
-    }
-    return loss, diagnostics
+    return jnp.mean(residual_energy / denominator)

@@ -161,7 +161,7 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
 
 def test_exact_g01_has_zero_flat_surface_defect() -> None:
     eta, xi, depth, k = _base_inputs()
-    loss, diagnostics = compute_hadamard_reg(
+    loss = compute_hadamard_reg(
         rng=jax.random.PRNGKey(8),
         apply_fn=_g01_apply,
         model_params={},
@@ -174,23 +174,12 @@ def test_exact_g01_has_zero_flat_surface_defect() -> None:
         cfg=_config(),
         dtype=jnp.float64,
     )
-    assert float(loss) < 1e-18, diagnostics
-    assert float(diagnostics["hadamard_defect_rms"]) < 2e-9
-    assert set(diagnostics) == {
-        "hadamard_loss",
-        "hadamard_defect_rms",
-        "hadamard_residual_hs_rms",
-        "hadamard_forcing_hs_rms",
-        "hadamard_secant_hs_rms",
-        "hadamard_fd_step",
-        "hadamard_eta_scale",
-    }
-    assert all(value.shape == () for value in diagnostics.values())
+    assert float(loss) < 1e-18
 
 
 def test_g0_only_detects_missing_shape_derivative() -> None:
     eta, xi, depth, k = _base_inputs()
-    loss, diagnostics = compute_hadamard_reg(
+    loss = compute_hadamard_reg(
         rng=jax.random.PRNGKey(8),
         apply_fn=_g0_apply,
         model_params={},
@@ -204,7 +193,6 @@ def test_g0_only_detects_missing_shape_derivative() -> None:
         dtype=jnp.float64,
     )
     assert float(loss) > 0.99
-    assert float(diagnostics["hadamard_defect_rms"]) > 0.99
 
 
 def test_normalizers_and_output_mean_match_production() -> None:
@@ -242,7 +230,7 @@ def test_normalizers_and_output_mean_match_production() -> None:
         np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14
     )
 
-    loss, _ = compute_hadamard_reg(
+    loss = compute_hadamard_reg(
         jax.random.PRNGKey(3),
         scaled_apply,
         {},
@@ -275,7 +263,7 @@ def test_loss_is_jittable_and_differentiable() -> None:
         return output[..., None]
 
     def loss_of_params(params: dict[str, Array]) -> Array:
-        loss, _ = compute_hadamard_reg(
+        return compute_hadamard_reg(
             jax.random.PRNGKey(15),
             perturbed_apply,
             params,
@@ -288,7 +276,6 @@ def test_loss_is_jittable_and_differentiable() -> None:
             cfg,
             jnp.float64,
         )
-        return loss
 
     params = {"alpha": jnp.asarray(0.4, dtype=jnp.float64)}
     value, gradient = jax.jit(jax.value_and_grad(loss_of_params))(params)
