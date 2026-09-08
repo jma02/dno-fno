@@ -56,8 +56,6 @@ def build_dataset_view(
         dataset_split = batch.dataset_split
         number_of_simulations = len(batch.parameter_group_ids)
 
-        if total_simulations + number_of_simulations > np.iinfo(np.int32).max:
-            raise ValueError("trajectory count exceeds the int32 map capacity")
         first_rows = np.full(number_of_simulations, -1, dtype=np.int64)
         row_counts = np.zeros(number_of_simulations, dtype=np.int32)
         if batch.shard is not None:
