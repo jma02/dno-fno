@@ -29,7 +29,14 @@ def build_dataset_view(
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
 ) -> DatasetViewPaths:
-    """Write the dataset's JSON file list and NPZ row-to-simulation map."""
+    """Write two files for training:
+
+    - A JSON file telling training which batch files to load.
+    - A NumPy file recording which simulation each saved snapshot belongs to,
+      along with its family and train/validation/test split.
+
+    The wave data is already saved. This function does not generate or merge it.
+    """
 
     if not name or any(
         not (character.isascii() and (character.isalnum() or character in "_-"))
