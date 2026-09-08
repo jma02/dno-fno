@@ -241,10 +241,10 @@ def main() -> None:
         "by sqrt(g*h). 0 disables.",
     )
     parser.add_argument(
-        "--translation_tangent_window_depths",
+        "--translation_tangent_smoothing_scale",
         type=float,
         default=1.0,
-        help="Gaussian localization width as a multiple of physical depth h.",
+        help="Gaussian smoothing standard deviation = this value × water depth.",
     )
     parser.add_argument(
         "--translation_tangent_energy_floor_relative",
@@ -482,8 +482,8 @@ def main() -> None:
     config_payload["translation_tangent_weight"] = float(
         args.translation_tangent_weight
     )
-    config_payload["translation_tangent_window_depths"] = float(
-        args.translation_tangent_window_depths
+    config_payload["translation_tangent_smoothing_scale"] = float(
+        args.translation_tangent_smoothing_scale
     )
     config_payload["translation_tangent_energy_floor_relative"] = float(
         args.translation_tangent_energy_floor_relative
@@ -531,7 +531,7 @@ def main() -> None:
     log_h_max = float(np.log(5.0))
     translation_tangent_weight = float(args.translation_tangent_weight)
     translation_tangent_cfg = TranslationTangentConfig(
-        window_depths=float(args.translation_tangent_window_depths),
+        smoothing_scale=float(args.translation_tangent_smoothing_scale),
         energy_floor_relative=float(args.translation_tangent_energy_floor_relative),
         gravity=gravity,
     )

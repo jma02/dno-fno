@@ -10,7 +10,7 @@ import jax.numpy as jnp
 class TranslationTangentConfig:
     """Configuration for the local projection of DNO error onto ``eta_x``."""
 
-    window_depths: float = 1.0
+    smoothing_scale: float = 1.0
     energy_floor_relative: float = 1e-3
     gravity: float = 1.0
 
@@ -19,10 +19,10 @@ def _periodic_gaussian_smooth(
     fields: jax.Array,
     depth: jax.Array,
     k_rfft: jax.Array,
-    window_depths: float,
+    smoothing_scale: float,
 ) -> jax.Array:
     """Smooth ``(B, C, N)`` fields over a periodic window proportional to depth."""
-    sigma = jnp.asarray(window_depths, dtype=fields.dtype) * depth
+    sigma = jnp.asarray(smoothing_scale, dtype=fields.dtype) * depth
     multiplier = jnp.exp(
         -0.5 * (sigma[:, None] * k_rfft[None, :]) ** 2
     )
@@ -78,7 +78,7 @@ def compute_translation_tangent_loss(
         fields,
         depth,
         jnp.abs(k[: eta.shape[-1] // 2 + 1]),
-        config.window_depths,
+        config.smoothing_scale,
     )
     local_cross = smoothed[:, 0]
     local_energy = jnp.maximum(smoothed[:, 1], jnp.asarray(0.0, dtype=dtype))
