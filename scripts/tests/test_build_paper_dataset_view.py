@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -119,10 +121,30 @@ class CombinedViewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only one generation run"):
             build_combined_view((*paths, duplicate), output_root=self.root / "view")
         summary = json.loads(paths[0].read_text())
-        summary["batch_paths"] *= 2
+        alias = paths[0].parent / "alias.npz"
+        alias.symlink_to(paths[0].parent / summary["batch_paths"][0])
+        summary["batch_paths"].append(alias.name)
         write_json_atomic(paths[0], summary)
         with self.assertRaisesRegex(ValueError, "must not repeat"):
             build_combined_view(paths, output_root=self.root / "view")
+        self.assertFalse((self.root / "view").exists())
+
+    def test_cli_rejects_path_traversal_names_before_loading_runs(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.build_paper_dataset_view",
+                f"--run-summary={self.root / 'missing.json'}",
+                f"--output-root={self.root / 'view'}",
+                "--name=../escape",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--name must contain only", result.stderr)
+        self.assertFalse((self.root / "view").exists())
 
     def test_rejects_inaccurate_attempted_or_accepted_counts(self) -> None:
         for count in (1, 2):

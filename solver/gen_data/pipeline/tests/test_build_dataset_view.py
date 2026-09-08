@@ -128,25 +128,6 @@ class DatasetViewTests(unittest.TestCase):
                 np.asarray([0, 0, 1, 2, 2], dtype=np.int32),
             )
 
-    def test_aliased_batch_paths_are_rejected_before_publication(self) -> None:
-        path = batch_path(self.root, family="stokes", split="train", batch_id=0)
-        _write_batch(
-            path,
-            family_id=PhysicalFamilyId.STOKES,
-            dataset_split=DatasetSplit.TRAIN,
-            simulation_count=2,
-            accepted_local_indices=(0, 1),
-            frames_per_simulation=1,
-        )
-        alias = batch_path(self.root, family="stokes", split="train", batch_id=1)
-        alias.symlink_to(path)
-
-        with self.assertRaisesRegex(ValueError, "batch paths must be unique"):
-            build_dataset_view(self.root, (path, alias))
-
-        self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
-        self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())
-
     def test_mixed_spatial_grids_are_rejected_before_publication(self) -> None:
         first = batch_path(self.root, family="stokes", split="test", batch_id=0)
         second = batch_path(self.root, family="stokes", split="test", batch_id=1)

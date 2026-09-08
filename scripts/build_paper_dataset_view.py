@@ -169,6 +169,11 @@ if __name__ == "__main__":
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--name", help="Output basename.")
     args = parser.parse_args()
+    if args.name and any(
+        not (character.isascii() and (character.isalnum() or character in "_-"))
+        for character in args.name
+    ):
+        parser.error("--name must contain only letters, digits, '_' or '-'")
     summary_path = build_combined_view(
         args.run_summary,
         output_root=args.output_root,

@@ -38,14 +38,6 @@ def build_dataset_view(
     The wave data is already saved. This function does not generate or merge it.
     """
 
-    if not name or any(
-        not (character.isascii() and (character.isalnum() or character in "_-"))
-        for character in name
-    ):
-        raise ValueError("name must contain only letters, digits, '_' or '-'")
-    resolved_batches = tuple(batch.resolve() for batch in batches)
-    if len(set(resolved_batches)) != len(resolved_batches):
-        raise ValueError("completed batch paths must be unique")
     output_paths = DatasetViewPaths(
         manifest=root / f"{name}.dataset.json",
         trajectory_map=root / f"{name}.trajectory_map.npz",
@@ -58,7 +50,7 @@ def build_dataset_view(
     spatial_size: int | None = None
     next_simulation_id: defaultdict[tuple[int, DatasetSplit], int] = defaultdict(int)
 
-    for batch_path in resolved_batches:
+    for batch_path in map(Path.resolve, batches):
         batch = load_completed_batch(batch_path)
         family_id = int(batch.family_id)
         dataset_split = batch.dataset_split
