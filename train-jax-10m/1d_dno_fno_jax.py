@@ -745,61 +745,33 @@ def main() -> None:
     latest_ckpt_dir = run_dir / "latest_ckpt"
     metadata_path = latest_ckpt_dir / "metadata.json"
     if metadata_path.exists():
-        decoded = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if not isinstance(decoded, dict) or not all(
-            isinstance(key, str) for key in decoded
-        ):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
             raise ValueError(f"invalid checkpoint metadata object: {metadata_path}")
-        record = cast(dict[str, object], decoded)
 
-        def require_int(key: str) -> int:
-            value = record.get(key)
-            if isinstance(value, bool) or not isinstance(value, int):
+        for key in ("epoch", "best_epoch"):
+            if type(metadata.get(key)) is not int:
                 raise ValueError(f"checkpoint metadata {key!r} must be an integer")
-            return value
-
-        def require_float(key: str) -> float:
-            value = record.get(key)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+        for key in ("train_loss", "val_loss", "best_val_loss"):
+            if type(metadata.get(key)) not in (int, float):
                 raise ValueError(f"checkpoint metadata {key!r} must be numeric")
-            return float(value)
 
-        history_value = record.get("history")
-        if not isinstance(history_value, list):
+        checkpoint_history = metadata.get("history")
+        if not isinstance(checkpoint_history, list):
             raise ValueError("checkpoint metadata 'history' must be a list")
-        checkpoint_history: list[dict[str, float]] = []
-        for index, entry in enumerate(history_value):
-            if not isinstance(entry, dict):
-                raise ValueError(f"checkpoint history entry {index} must be an object")
-            parsed_entry: dict[str, float] = {}
-            for key, value in entry.items():
-                if (
-                    not isinstance(key, str)
-                    or isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                ):
-                    raise ValueError(
-                        f"checkpoint history entry {index} must contain numeric values"
-                    )
-                parsed_entry[key] = value
-            checkpoint_history.append(parsed_entry)
+        for index, entry in enumerate(checkpoint_history):
+            if not isinstance(entry, dict) or any(
+                type(value) not in (int, float) for value in entry.values()
+            ):
+                raise ValueError(
+                    f"checkpoint history entry {index} must be an object with numeric values"
+                )
 
-        stats_value = record.get("stats")
-        if not isinstance(stats_value, dict) or not all(
-            isinstance(key, str) for key in stats_value
-        ):
+        if not isinstance(metadata.get("stats"), dict):
             raise ValueError("checkpoint metadata 'stats' must be an object")
 
-        meta = CheckpointMetadata(
-            epoch=require_int("epoch"),
-            train_loss=require_float("train_loss"),
-            val_loss=require_float("val_loss"),
-            history=checkpoint_history,
-            best_val_loss=require_float("best_val_loss"),
-            best_epoch=require_int("best_epoch"),
-            stats=cast(dict[str, object], stats_value),
-        )
-        resume_epoch = meta["epoch"]
+        metadata = cast(CheckpointMetadata, metadata)
+        resume_epoch = metadata["epoch"]
         payload_path = latest_ckpt_dir / f"ckpt_{resume_epoch}"
         if not payload_path.is_dir():
             raise RuntimeError(
@@ -824,12 +796,12 @@ def main() -> None:
             step=jnp.asarray(int(restored["step"]), dtype=jnp.int32),
         )
         training_state = replicate_pytree_from_host(training_state, replicated)
-        history = list(meta["history"])
-        best_val_loss = meta["best_val_loss"]
-        best_epoch = meta["best_epoch"]
-        start_epoch = int(meta["epoch"]) + 1
+        history = metadata["history"]
+        best_val_loss = metadata["best_val_loss"]
+        best_epoch = metadata["best_epoch"]
+        start_epoch = resume_epoch + 1
         print(
-            f"auto-resume: restored from {latest_ckpt_dir} at epoch {meta['epoch']}, "
+            f"auto-resume: restored from {latest_ckpt_dir} at epoch {resume_epoch}, "
             f"resuming at epoch {start_epoch}"
         )
 
