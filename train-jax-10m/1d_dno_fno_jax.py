@@ -120,18 +120,23 @@ def save_checkpoint(
     metadata_tmp.replace(metadata_path)
 
 
-def read_step_count(counter: jax.Array, *, name: str) -> int:
+def read_parameter_update_count(update_counter: jax.Array, *, counter_name: str) -> int:
     """Read this update counter from every local device, requiring equal counts.
 
     For example, [100, 100] returns 100; [100, 99] stops training with an error.
     This checks the counters; it does not advance or synchronize them.
     """
-    device_counts = [int(np.asarray(shard.data)) for shard in counter.addressable_shards]
-    if not device_counts:
-        raise RuntimeError(f"{name} has no readable device copies")
-    if len(set(device_counts)) != 1:
-        raise RuntimeError(f"{name} differs across devices: {device_counts}")
-    return device_counts[0]
+    update_counts_per_device = [
+        int(np.asarray(device_copy.data))
+        for device_copy in update_counter.addressable_shards
+    ]
+    if not update_counts_per_device:
+        raise RuntimeError(f"{counter_name} has no readable device copies")
+    if len(set(update_counts_per_device)) != 1:
+        raise RuntimeError(
+            f"{counter_name} differs across devices: {update_counts_per_device}"
+        )
+    return update_counts_per_device[0]
 
 
 def training_counter_values(
@@ -141,21 +146,21 @@ def training_counter_values(
     announce: bool = False,
 ) -> tuple[int, int]:
     """Validate replicated TrainState/Adam/schedule counters."""
-    state_step = read_step_count(
+    state_step = read_parameter_update_count(
         cast(jax.Array, state.step),
-        name=f"{context} TrainState.step",
+        counter_name=f"{context} TrainState.step",
     )
     optimizer_state = cast(
         tuple[optax.ScaleByAdamState, object, optax.ScaleByScheduleState],
         state.opt_state,
     )
-    adam_step = read_step_count(
+    adam_step = read_parameter_update_count(
         cast(jax.Array, optimizer_state[0].count),
-        name=f"{context} Adam count",
+        counter_name=f"{context} Adam count",
     )
-    schedule_step = read_step_count(
+    schedule_step = read_parameter_update_count(
         cast(jax.Array, optimizer_state[-1].count),
-        name=f"{context} LR schedule count",
+        counter_name=f"{context} LR schedule count",
     )
     if adam_step != schedule_step:
         raise RuntimeError(
