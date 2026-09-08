@@ -62,7 +62,7 @@ def _write_source(
             "trajectory_map_npz": "map.npz",
             "dataset_shards": [{"path": "shard.npz"}],
             "n_accepted_trajectories": count,
-            "n_accepted_rows": rows,
+            "n_rows": rows,
             "grid": {"length": 2.0 * np.pi, "nx": 256},
         },
     )

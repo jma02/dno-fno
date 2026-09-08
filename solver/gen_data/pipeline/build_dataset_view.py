@@ -38,10 +38,8 @@ def build_dataset_view(
     The wave data is already saved. This function does not generate or merge it.
     """
 
-    output_paths = DatasetViewPaths(
-        manifest=root / f"{name}.dataset.json",
-        trajectory_map=root / f"{name}.trajectory_map.npz",
-    )
+    dataset_index_path = root / f"{name}.dataset.json"
+    trajectory_map_path = root / f"{name}.trajectory_map.npz"
     output_directory = root.resolve()
     map_parts: defaultdict[str, list[NDArray[Any]]] = defaultdict(list)
     shard_records: list[dict[str, object]] = []
@@ -49,12 +47,18 @@ def build_dataset_view(
     total_simulations = 0
     spatial_size: int | None = None
     next_simulation_id: defaultdict[tuple[int, DatasetSplit], int] = defaultdict(int)
+    split_counts = {
+        split.value: {"attempted": 0, "accepted": 0} for split in DatasetSplit
+    }
 
     for batch_path in map(Path.resolve, batches):
         batch = load_completed_batch(batch_path)
         family_id = int(batch.family_id)
         dataset_split = batch.dataset_split
         number_of_simulations = len(batch.parameter_group_ids)
+        split_totals = split_counts[dataset_split.value]
+        split_totals["attempted"] += number_of_simulations
+        split_totals["accepted"] += int(batch.accepted_simulations.sum())
 
         first_rows = np.full(number_of_simulations, -1, dtype=np.int64)
         row_counts = np.zeros(number_of_simulations, dtype=np.int32)
@@ -116,28 +120,17 @@ def build_dataset_view(
     trajectory_map = {
         field: np.concatenate(parts) for field, parts in map_parts.items()
     }
-    write_npz_atomic(output_paths.trajectory_map, trajectory_map)
-    dataset_split_array = trajectory_map["trajectory_dataset_split"]
-    accepted_array = trajectory_map["trajectory_accepted"]
+    write_npz_atomic(trajectory_map_path, trajectory_map)
     manifest = {
         "dataset_shards": shard_records,
-        "trajectory_map_npz": output_paths.trajectory_map.name,
+        "trajectory_map_npz": trajectory_map_path.name,
         "n_rows": total_rows,
         "n_trajectories": total_simulations,
-        "n_accepted_trajectories": int(np.count_nonzero(accepted_array)),
-        "n_accepted_rows": total_rows,
+        "n_accepted_trajectories": sum(
+            totals["accepted"] for totals in split_counts.values()
+        ),
         "grid": {"length": float(length), "nx": spatial_size},
-        "split_counts": {
-            split.value: {
-                "attempted": int(np.count_nonzero(dataset_split_array == split.value)),
-                "accepted": int(
-                    np.count_nonzero(
-                        (dataset_split_array == split.value) & accepted_array
-                    )
-                ),
-            }
-            for split in DatasetSplit
-        },
+        "split_counts": split_counts,
     }
-    write_json_atomic(output_paths.manifest, manifest)
-    return output_paths
+    write_json_atomic(dataset_index_path, manifest)
+    return DatasetViewPaths(dataset_index_path, trajectory_map_path)

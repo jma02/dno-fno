@@ -455,9 +455,7 @@ def load_source_summary(summary_path: Path) -> DatasetSource:
     trajectories = tuple(records)
     if len(trajectories) != int(manifest["n_accepted_trajectories"]):
         raise RuntimeError(f"accepted trajectory count mismatch in {resolved}")
-    if sum(value.row_count for value in trajectories) != int(
-        manifest["n_accepted_rows"]
-    ):
+    if sum(value.row_count for value in trajectories) != int(manifest["n_rows"]):
         raise RuntimeError(f"accepted row count mismatch in {resolved}")
     return DatasetSource(
         root=resolved,

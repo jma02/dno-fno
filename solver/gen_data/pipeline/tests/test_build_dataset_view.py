@@ -97,6 +97,15 @@ class DatasetViewTests(unittest.TestCase):
         manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
         self.assertEqual(manifest["n_rows"], 5)
         self.assertEqual(manifest["n_trajectories"], 8)
+        self.assertEqual(manifest["n_accepted_trajectories"], 4)
+        self.assertEqual(
+            manifest["split_counts"],
+            {
+                "train": {"attempted": 7, "accepted": 3},
+                "validation": {"attempted": 0, "accepted": 0},
+                "test": {"attempted": 1, "accepted": 1},
+            },
+        )
         self.assertEqual(
             [record["n_rows"] for record in manifest["dataset_shards"]],
             [2, 1, 2],
