@@ -120,14 +120,18 @@ def save_checkpoint(
     metadata_tmp.replace(metadata_path)
 
 
-def replicated_scalar_value(value: jax.Array, *, name: str) -> int:
-    """Return a replicated scalar after verifying every local device agrees."""
-    replica_values = [int(np.asarray(shard.data)) for shard in value.addressable_shards]
-    if not replica_values:
-        raise RuntimeError(f"{name} has no addressable replicas")
-    if len(set(replica_values)) != 1:
-        raise RuntimeError(f"{name} replicas disagree: {replica_values}")
-    return replica_values[0]
+def read_step_count(counter: jax.Array, *, name: str) -> int:
+    """Read this update counter from every local device, requiring equal counts.
+
+    For example, [100, 100] returns 100; [100, 99] stops training with an error.
+    This checks the counters; it does not advance or synchronize them.
+    """
+    device_counts = [int(np.asarray(shard.data)) for shard in counter.addressable_shards]
+    if not device_counts:
+        raise RuntimeError(f"{name} has no readable device copies")
+    if len(set(device_counts)) != 1:
+        raise RuntimeError(f"{name} differs across devices: {device_counts}")
+    return device_counts[0]
 
 
 def training_counter_values(
@@ -137,7 +141,7 @@ def training_counter_values(
     announce: bool = False,
 ) -> tuple[int, int]:
     """Validate replicated TrainState/Adam/schedule counters."""
-    state_step = replicated_scalar_value(
+    state_step = read_step_count(
         cast(jax.Array, state.step),
         name=f"{context} TrainState.step",
     )
@@ -145,11 +149,11 @@ def training_counter_values(
         tuple[optax.ScaleByAdamState, object, optax.ScaleByScheduleState],
         state.opt_state,
     )
-    adam_step = replicated_scalar_value(
+    adam_step = read_step_count(
         cast(jax.Array, optimizer_state[0].count),
         name=f"{context} Adam count",
     )
-    schedule_step = replicated_scalar_value(
+    schedule_step = read_step_count(
         cast(jax.Array, optimizer_state[-1].count),
         name=f"{context} LR schedule count",
     )
