@@ -512,39 +512,6 @@ def main() -> None:
     k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
-    hadamard_metric_names = (
-        "hadamard_active",
-        "hadamard_loss",
-        "hadamard_defect_rms",
-        "hadamard_residual_hs_rms",
-        "hadamard_forcing_hs_rms",
-        "hadamard_secant_hs_rms",
-        "hadamard_fd_step",
-        "hadamard_eta_scale",
-        "hadamard_extra",
-        "hadamard_warmup",
-        "hadamard_weight_eff",
-    )
-    translation_tangent_metric_names = (
-        "translation_tangent_active",
-        "translation_tangent_loss",
-        "translation_tangent_extra",
-        "translation_tangent_speed_abs_error",
-        "translation_tangent_speed_rel_error",
-        "translation_tangent_selected_samples",
-    )
-    mode_balanced_metric_names = (
-        "mode_balanced_active",
-        "mode_balanced_loss",
-        "mode_balanced_extra",
-        "mode_balanced_weight_eff",
-        "mode_balanced_unweighted_loss",
-        "mode_balanced_effective_frequency_squared_mean",
-        "mode_balanced_relative_error_rms",
-        "mode_balanced_active_modes",
-        "mode_balanced_clipped_mode_fraction",
-    )
-
     def _train_step_body(
         current_state: train_state.TrainState,
         rng_key: jax.Array,
@@ -552,7 +519,7 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-    ):
+    ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
         eta = eta.astype(training_dtype)
         xi = xi.astype(training_dtype)
         gxi = gxi.astype(training_dtype)
@@ -562,25 +529,16 @@ def main() -> None:
         log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
         h_phys = jnp.exp(log_h)
 
-        def loss_for_params(current_params):
+        def loss_for_params(
+            current_params: FlatParams,
+        ) -> tuple[jax.Array, dict[str, jax.Array]]:
             predictions_0 = current_state.apply_fn(
                 {"params": current_params}, batch_inputs, batch_depth
             )
             data_loss = loss_fn(predictions_0, batch_targets)
             extra = jnp.asarray(0.0, dtype=training_dtype)
             zero = jnp.asarray(0.0, dtype=training_dtype)
-            hadamard_metrics = jnp.zeros(
-                (len(hadamard_metric_names),),
-                dtype=training_dtype,
-            )
-            translation_tangent_metrics = jnp.zeros(
-                (len(translation_tangent_metric_names),),
-                dtype=training_dtype,
-            )
-            mode_balanced_metrics = jnp.zeros(
-                (len(mode_balanced_metric_names),),
-                dtype=training_dtype,
-            )
+            metrics: dict[str, jax.Array] = {}
 
             if mode_balanced_weight > 0.0:
                 gxi_pred_phys_mode = denorm_targets_jax(predictions_0)[..., 0]
@@ -607,18 +565,21 @@ def main() -> None:
                 )
                 mode_extra = mode_weight_eff * loss_mode
                 extra = extra + mode_extra
-                mode_balanced_metrics = jnp.stack(
-                    (
-                        jnp.asarray(1.0, dtype=training_dtype),
-                        loss_mode,
-                        mode_extra,
-                        mode_weight_eff,
-                        mode_diagnostics["unweighted_loss"],
-                        mode_diagnostics["effective_frequency_squared_mean"],
-                        mode_diagnostics["relative_error_rms"],
-                        mode_diagnostics["active_modes"],
-                        mode_diagnostics["clipped_mode_fraction"],
-                    )
+                metrics.update(
+                    mode_balanced_loss=loss_mode,
+                    mode_balanced_extra=mode_extra,
+                    mode_balanced_weight_eff=mode_weight_eff,
+                    mode_balanced_unweighted_loss=mode_diagnostics["unweighted_loss"],
+                    mode_balanced_effective_frequency_squared_mean=mode_diagnostics[
+                        "effective_frequency_squared_mean"
+                    ],
+                    mode_balanced_relative_error_rms=mode_diagnostics[
+                        "relative_error_rms"
+                    ],
+                    mode_balanced_active_modes=mode_diagnostics["active_modes"],
+                    mode_balanced_clipped_mode_fraction=mode_diagnostics[
+                        "clipped_mode_fraction"
+                    ],
                 )
 
             if translation_tangent_weight > 0.0:
@@ -646,15 +607,18 @@ def main() -> None:
                 loss_tangent = loss_tangent * shard_weight
                 tangent_extra = translation_tangent_weight * loss_tangent
                 extra = extra + tangent_extra
-                translation_tangent_metrics = jnp.stack(
-                    (
-                        jnp.asarray(1.0, dtype=training_dtype),
-                        loss_tangent,
-                        tangent_extra,
-                        tangent_diagnostics["speed_abs_error"] * shard_weight,
-                        tangent_diagnostics["speed_relative_error"] * shard_weight,
-                        global_selected / device_count,
-                    )
+                metrics.update(
+                    translation_tangent_loss=loss_tangent,
+                    translation_tangent_extra=tangent_extra,
+                    translation_tangent_speed_abs_error=tangent_diagnostics[
+                        "speed_abs_error"
+                    ]
+                    * shard_weight,
+                    translation_tangent_speed_rel_error=tangent_diagnostics[
+                        "speed_relative_error"
+                    ]
+                    * shard_weight,
+                    translation_tangent_selected_samples=global_selected / device_count,
                 )
             if hadamard_weight > 0.0:
                 current_step = jnp.asarray(current_state.step)
@@ -664,7 +628,7 @@ def main() -> None:
                     jnp.asarray(0, dtype=current_step.dtype),
                 )
 
-                def _hadamard_active_branch(_):
+                def _hadamard_active_branch(_: None) -> dict[str, jax.Array]:
                     rng_base = jax.random.fold_in(
                         rng_key,
                         jax.lax.axis_index("batch") * 53 + 127,
@@ -702,65 +666,47 @@ def main() -> None:
                         jnp.asarray(hadamard_weight, dtype=jnp.float64) * warmup
                     )
                     hadamard_extra = weight_eff * loss_hadamard
-                    metrics = jnp.stack(
-                        [
-                            jnp.asarray(1.0, dtype=jnp.float64),
-                            diagnostics["hadamard_loss"],
-                            diagnostics["hadamard_defect_rms"],
-                            diagnostics["hadamard_residual_hs_rms"],
-                            diagnostics["hadamard_forcing_hs_rms"],
-                            diagnostics["hadamard_secant_hs_rms"],
-                            diagnostics["hadamard_fd_step"],
-                            diagnostics["hadamard_eta_scale"],
-                            hadamard_extra,
-                            warmup,
-                            weight_eff,
-                        ]
-                    ).astype(training_dtype)
-                    return hadamard_extra.astype(training_dtype), metrics
-
-                def _hadamard_skip_branch(_):
-                    return zero, jnp.zeros(
-                        (len(hadamard_metric_names),),
-                        dtype=training_dtype,
+                    return jax.tree.map(
+                        lambda value: value.astype(training_dtype),
+                        {
+                            **diagnostics,
+                            "hadamard_active": jnp.asarray(1.0, dtype=training_dtype),
+                            "hadamard_extra": hadamard_extra,
+                            "hadamard_warmup": warmup,
+                            "hadamard_weight_eff": weight_eff,
+                        },
                     )
 
-                hadamard_extra, hadamard_metrics = jax.lax.cond(
+                # Both branches must return the same metric keys and scalar dtypes.
+                hadamard_metrics = jax.lax.cond(
                     step_active,
                     _hadamard_active_branch,
-                    _hadamard_skip_branch,
+                    lambda _: {
+                        "hadamard_active": zero,
+                        "hadamard_loss": zero,
+                        "hadamard_defect_rms": zero,
+                        "hadamard_residual_hs_rms": zero,
+                        "hadamard_forcing_hs_rms": zero,
+                        "hadamard_secant_hs_rms": zero,
+                        "hadamard_fd_step": zero,
+                        "hadamard_eta_scale": zero,
+                        "hadamard_extra": zero,
+                        "hadamard_warmup": zero,
+                        "hadamard_weight_eff": zero,
+                    },
                     operand=None,
                 )
-                extra = extra + hadamard_extra
+                extra = extra + hadamard_metrics["hadamard_extra"]
+                metrics.update(hadamard_metrics)
 
-            return data_loss + extra, (
-                hadamard_metrics,
-                translation_tangent_metrics,
-                mode_balanced_metrics,
-            )
+            return data_loss + extra, metrics
 
-        (
-            (
-                loss_value,
-                (
-                    hadamard_metrics,
-                    translation_tangent_metrics,
-                    mode_balanced_metrics,
-                ),
-            ),
-            grads,
-        ) = jax.value_and_grad(loss_for_params, has_aux=True)(current_state.params)
+        (loss_value, metrics), grads = jax.value_and_grad(
+            loss_for_params, has_aux=True
+        )(current_state.params)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
-        hadamard_metrics = jax.lax.pmean(hadamard_metrics, axis_name="batch")
-        translation_tangent_metrics = jax.lax.pmean(
-            translation_tangent_metrics,
-            axis_name="batch",
-        )
-        mode_balanced_metrics = jax.lax.pmean(
-            mode_balanced_metrics,
-            axis_name="batch",
-        )
+        metrics = jax.lax.pmean(metrics, axis_name="batch")
         next_state = current_state.apply_gradients(grads=grads)
         next_state = next_state.replace(
             params=jax.tree.map(
@@ -768,13 +714,7 @@ def main() -> None:
                 next_state.params,
             )
         )
-        return (
-            next_state,
-            loss_value,
-            hadamard_metrics,
-            translation_tangent_metrics,
-            mode_balanced_metrics,
-        )
+        return next_state, loss_value, metrics
 
     train_steps = {
         partition: jax.jit(
@@ -782,7 +722,7 @@ def main() -> None:
                 _train_step_body,
                 mesh=mesh,
                 in_specs=(P(), P(), partition, partition, partition, partition),
-                out_specs=(P(), P(), P(), P(), P()),
+                out_specs=(P(), P(), P()),
                 check_rep=False,
             )
         )
@@ -997,18 +937,7 @@ def main() -> None:
         batch_iter = device_prefetch(batch_iter, sharding=data_sharding, depth=2)
         batch_losses: list[float] = []
         train_batch_sizes: list[int] = []
-        hadamard_metric_sums = np.zeros(
-            (len(hadamard_metric_names),),
-            dtype=np.float64,
-        )
-        translation_tangent_metric_sums = np.zeros(
-            (len(translation_tangent_metric_names),),
-            dtype=np.float64,
-        )
-        mode_balanced_metric_sums = np.zeros(
-            (len(mode_balanced_metric_names),),
-            dtype=np.float64,
-        )
+        metric_sums: dict[str, float] = {}
         train_bar = tqdm(
             batch_iter,
             total=train_steps_per_epoch,
@@ -1021,37 +950,13 @@ def main() -> None:
                 P("batch") if eta_b.shape[0] % n_devices == 0 else P()
             ]
             train_rng, step_key = jax.random.split(train_rng)
-            (
-                training_state,
-                batch_loss,
-                batch_hadamard_metrics,
-                batch_translation_tangent_metrics,
-                batch_mode_balanced_metrics,
-            ) = train_step(training_state, step_key, eta_b, xi_b, gxi_b, depth_b)
+            training_state, batch_loss, batch_metrics = train_step(
+                training_state, step_key, eta_b, xi_b, gxi_b, depth_b
+            )
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
-            hadamard_metrics_np = np.asarray(
-                jax.device_get(batch_hadamard_metrics),
-                dtype=np.float64,
-            )
-            tangent_metrics_np = np.asarray(
-                jax.device_get(batch_translation_tangent_metrics),
-                dtype=np.float64,
-            )
-            if eta_b.shape[0] % n_devices:
-                tangent_metrics_np[-1] /= n_devices
-            mode_metrics_np = np.asarray(
-                jax.device_get(batch_mode_balanced_metrics),
-                dtype=np.float64,
-            )
-            if translation_tangent_weight > 0.0:
-                tangent_metrics_np[:-1] *= eta_b.shape[0]
-                translation_tangent_metric_sums += tangent_metrics_np
-            if mode_balanced_weight > 0.0:
-                mode_balanced_metric_sums += mode_metrics_np * eta_b.shape[0]
-            active_hadamard = bool(
-                hadamard_weight > 0.0 and hadamard_metrics_np[0] > 0.5
-            )
+            batch_metrics = jax.device_get(batch_metrics)
+            active_hadamard = float(batch_metrics.get("hadamard_active", 0.0)) > 0.5
             batch_index = len(batch_losses) - 1
             current_step = epoch_start_step + batch_index
             if hadamard_weight > 0.0:
@@ -1062,13 +967,23 @@ def main() -> None:
                         f"epoch={epoch}, batch={batch_index}, step={current_step}: "
                         f"expected={expected_hadamard}, observed={active_hadamard}"
                     )
-            if active_hadamard:
-                hadamard_metric_sums += hadamard_metrics_np
+            for name, metric in batch_metrics.items():
+                value = float(metric)
+                if name == "translation_tangent_selected_samples":
+                    # A replicated tail batch contains the same rows on every device.
+                    if eta_b.shape[0] % n_devices:
+                        value /= n_devices
+                elif name.startswith("hadamard_"):
+                    if not active_hadamard:
+                        continue
+                else:
+                    value *= eta_b.shape[0]
+                metric_sums[name] = metric_sums.get(name, 0.0) + value
             if active_hadamard:
                 train_bar.set_postfix(
                     loss=batch_loss_value,
-                    shape=float(hadamard_metrics_np[1]),
-                    defect=float(hadamard_metrics_np[2]),
+                    shape=float(batch_metrics["hadamard_loss"]),
+                    defect=float(batch_metrics["hadamard_defect_rms"]),
                 )
             else:
                 train_bar.set_postfix(loss=batch_loss_value)
@@ -1155,33 +1070,24 @@ def main() -> None:
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
         }
+        active_hadamard_batches = metric_sums.get("hadamard_active", 0.0)
         if hadamard_weight > 0.0:
-            active_hadamard_batches = (
-                float(hadamard_metric_sums[0]) if batch_losses else 0.0
-            )
             epoch_record["hadamard_active_batches"] = active_hadamard_batches
             epoch_record["hadamard_active_fraction"] = (
                 active_hadamard_batches / float(len(batch_losses))
                 if batch_losses
                 else 0.0
             )
-            if active_hadamard_batches > 0.0:
-                hadamard_means = hadamard_metric_sums / active_hadamard_batches
-                for name, value in zip(hadamard_metric_names[1:], hadamard_means[1:]):
-                    epoch_record[name] = float(value)
-        if translation_tangent_weight > 0.0:
-            tangent_means = translation_tangent_metric_sums / sum(train_batch_sizes)
-            for name, value in zip(
-                translation_tangent_metric_names[1:-1], tangent_means[1:-1]
-            ):
-                epoch_record[name] = float(value)
-            epoch_record["translation_tangent_selected_samples"] = float(
-                translation_tangent_metric_sums[-1] * n_devices
-            )
-        if mode_balanced_weight > 0.0:
-            mode_means = mode_balanced_metric_sums / sum(train_batch_sizes)
-            for name, value in zip(mode_balanced_metric_names[1:], mode_means[1:]):
-                epoch_record[name] = float(value)
+        # Hadamard means use active batches; other means use rows; counts stay totals.
+        for name, total in metric_sums.items():
+            if name == "hadamard_active":
+                continue
+            if name == "translation_tangent_selected_samples":
+                epoch_record[name] = total * n_devices
+            elif name.startswith("hadamard_"):
+                epoch_record[name] = total / active_hadamard_batches
+            else:
+                epoch_record[name] = total / sum(train_batch_sizes)
         history.append(epoch_record)
         epoch_bar.set_postfix(train_loss=train_loss, val_loss=val_loss)
 
