@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import tempfile
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
@@ -25,6 +27,7 @@ from util import (  # noqa: E402
     get_batches,
     load_dataset_arrays,
     load_or_compute_stats,
+    make_normalizers,
 )
 
 
@@ -78,7 +81,7 @@ def test_loads_readonly_arrays_and_keeps_simulation_splits() -> None:
         assert dataset["eta"].shape == (40, 4)
         assert all(
             isinstance(dataset[name], np.memmap) and not dataset[name].flags.writeable
-            for name in ("eta", "xi", "gxi", "depth", "time", "dataset_split", "x")
+            for name in ("eta", "xi", "gxi", "depth", "dataset_split", "x")
         )
         splits = build_dataset_split_indices(dataset)
         train_rows, validation_rows, test_rows = splits
@@ -145,11 +148,7 @@ def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
         )
         dataset = load_dataset_arrays(dataset_path)
         indices = np.arange(2, dtype=np.int64)
-        first = load_or_compute_stats(
-            dataset_path,
-            dataset=dataset,
-            indices=indices,
-        )
+        first = load_or_compute_stats(dataset_path, dataset, indices=indices)
         other = load_or_compute_stats(dataset_path, dataset, indices=indices + 2)
         assert other["index_selection"] != first["index_selection"]
         assert other["target_absmax"] != first["target_absmax"]
@@ -157,6 +156,14 @@ def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
         assert restored == first
 
         cache_path = dataset_path / "stats.json"
+        for invalid in (
+            {key: value for key, value in first.items() if key != "feature_absmax"},
+            {**first, "target_absmax": float("nan")},
+        ):
+            cache_path.write_text(json.dumps(invalid), encoding="utf-8")
+            assert (
+                load_or_compute_stats(dataset_path, dataset, indices=indices) == first
+            )
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         cached["target_absmax"] = 123456.0
         cache_path.write_text(json.dumps(cached), encoding="utf-8")
@@ -165,33 +172,67 @@ def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
         targets = np.load(target_path, mmap_mode="r+")
         targets *= 2
         targets.flush()
-        second = load_or_compute_stats(
-            dataset_path,
-            dataset=dataset,
-            indices=indices,
-        )
+        second = load_or_compute_stats(dataset_path, dataset, indices=indices)
         assert second["target_absmax"] == 2 * np.asarray(first["target_absmax"])
         assert second["target_absmax"] != 123456.0
 
 
-def test_manifest_is_not_a_dataset_directory() -> None:
-    with tempfile.TemporaryDirectory() as raw_directory:
-        manifest_path = Path(raw_directory) / "old.dataset.json"
-        manifest_path.write_text("{}", encoding="utf-8")
-        try:
-            load_dataset_arrays(manifest_path)
-        except NotADirectoryError:
-            pass
-        else:
-            raise AssertionError("manifest was accepted as a dataset directory")
+def test_normalizers_preserve_both_modes_and_constant_fields() -> None:
+    for values in (
+        np.arange(12).reshape(2, 6) - 3,
+        np.zeros((2, 6)),
+        np.full((2, 6), 2),
+    ):
+        eta, xi, gxi = (
+            jnp.asarray(values * factor, dtype=jnp.float32) for factor in (1, -2, 3)
+        )
+        features = np.stack((eta, xi), axis=-1)
+        minimum, maximum = features.min(axis=(0, 1)), features.max(axis=(0, 1))
+        scales = np.abs(features).max(axis=(0, 1))
+        target_min, target_max, target_scale = map(
+            float, (gxi.min(), gxi.max(), jnp.abs(gxi).max())
+        )
+        stats = {
+            "feature_min": minimum.tolist(),
+            "feature_max": maximum.tolist(),
+            "feature_absmax": scales.tolist(),
+            "target_min": target_min,
+            "target_max": target_max,
+            "target_absmax": target_scale,
+        }
+        for mode in ("scale", "minmax"):
+            norm_inputs, norm_targets, denorm_targets = make_normalizers(stats, mode)
+            inputs = jax.jit(norm_inputs)(eta, xi)
+            targets = jax.jit(norm_targets)(gxi)
+            expected_inputs = (
+                features / np.where(scales > 0, scales, 1)
+                if mode == "scale"
+                else (features - minimum) / (maximum - minimum + 1e-8) * 2 - 1
+            )
+            expected_targets = (
+                np.asarray(gxi) / (target_scale or 1)
+                if mode == "scale"
+                else (np.asarray(gxi) - np.float32(target_min))
+                / np.float32(target_max - target_min + 1e-8)
+                * 2
+                - 1
+            )
+            assert inputs.dtype == targets.dtype == jnp.float32
+            np.testing.assert_allclose(inputs, expected_inputs, rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(
+                targets[..., 0], expected_targets, rtol=1e-6, atol=1e-6
+            )
+            np.testing.assert_allclose(
+                jax.jit(denorm_targets)(targets)[..., 0], gxi, rtol=1e-6, atol=1e-6
+            )
 
 
 def main() -> int:
     test_loads_readonly_arrays_and_keeps_simulation_splits()
     test_stats_cache_is_refreshed_when_dataset_inputs_change()
-    test_manifest_is_not_a_dataset_directory()
+    test_normalizers_preserve_both_modes_and_constant_fields()
     print(
-        "[PASS] whole-simulation splits, epoch shuffles, train-only stats, and cache identity"
+        "[PASS] dataset splits, epoch shuffles, train-only/cache stats, both normalizers"
     )
     return 0
 

@@ -33,7 +33,6 @@ for _d in (REPO_ROOT, FNO_DIR, DNO_DIR):
 
 from util import (  # noqa: E402
     FlatParams,
-    NormStats,
     assert_pytree_replicated,
     build_dataset_split_indices,
     device_prefetch,
@@ -42,7 +41,6 @@ from util import (  # noqa: E402
     load_or_compute_stats,
     make_normalizers,
     replicate_pytree_from_host,
-    require_jax_devices,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from hadamard_shape_regularizer import (  # noqa: E402
@@ -426,7 +424,10 @@ def main() -> None:
 
     training_dtype = jnp.float32
 
-    backend, devices = require_jax_devices()
+    backend = jax.default_backend()
+    if backend != "gpu":
+        raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
+    devices = jax.local_devices()
     n_devices = len(devices)
     if args.batch_size % n_devices != 0:
         raise ValueError(
@@ -451,15 +452,8 @@ def main() -> None:
     dataset = load_dataset_arrays(dataset_path)
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
-    stats = dict(
-        load_or_compute_stats(
-            dataset_path,
-            dataset=dataset,
-            indices=train_indices,
-        )
-    )
+    stats = load_or_compute_stats(dataset_path, dataset, indices=train_indices)
     stats["target_kind"] = "gxi"
-    ns = NormStats.from_dict(stats, mode=args.norm)
     full_batches, remainder = divmod(train_indices.size, args.batch_size)
     train_steps_per_epoch = (
         full_batches + bool(remainder // n_devices) + bool(remainder % n_devices)
@@ -469,9 +463,12 @@ def main() -> None:
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
     # input channel. That's only exact under norm=scale, where the channel is divided
     # by feature_absmax. norm=minmax shifts as well, so the baseline is approximate.
-    xi_scale = float(np.asarray(ns.feature_absmax).reshape(-1)[1])
-    eta_scale = float(np.asarray(ns.feature_absmax).reshape(-1)[0])
-    target_scale = float(ns.target_absmax)
+    feature_scale = np.asarray(
+        cast(list[float], stats["feature_absmax"]), dtype=np.float32
+    )
+    eta_scale, xi_scale = map(float, np.where(feature_scale > 0, feature_scale, 1.0))
+    target_absmax = float(cast(float, stats["target_absmax"]))
+    target_scale = target_absmax if target_absmax > 0 else 1.0
     if args.model == "cs_dno":
         model = CraigSulemDNO(
             width=args.width,
@@ -602,7 +599,9 @@ def main() -> None:
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
 
-    norm_inputs_jax, norm_targets_jax, denorm_targets_jax = make_normalizers(ns)
+    norm_inputs_jax, norm_targets_jax, denorm_targets_jax = make_normalizers(
+        stats, args.norm
+    )
 
     gravity = 1.0
     log_h_max = float(np.log(5.0))

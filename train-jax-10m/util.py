@@ -5,7 +5,6 @@ import json
 import queue
 import threading
 from contextlib import suppress
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, cast
 
@@ -18,7 +17,7 @@ from solver.gen_data.pipeline.types import DatasetSplit
 FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]
 
-_TRAINING_ARRAY_NAMES = ("eta", "xi", "gxi", "depth", "time", "dataset_split", "x")
+_TRAINING_ARRAY_NAMES = ("eta", "xi", "gxi", "depth", "dataset_split", "x")
 
 
 def replicate_pytree_from_host(tree: Any, sharding: jax.sharding.Sharding) -> Any:
@@ -51,14 +50,6 @@ def assert_pytree_replicated(tree: Any, *, name: str) -> None:
             raise RuntimeError(f"{name} leaf {path} has divergent device replicas")
 
 
-def require_jax_devices() -> tuple[str, list[Any]]:
-    backend = jax.default_backend()
-    if backend != "gpu":
-        raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
-    devices = list(jax.local_devices())
-    return backend, devices
-
-
 def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
     """Memory-map the saved arrays without copying the dataset into RAM."""
     dataset = {
@@ -72,8 +63,7 @@ def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
     if any(dataset[name].shape != eta.shape for name in ("xi", "gxi")):
         raise ValueError("Dataset fields have inconsistent shapes")
     if any(
-        dataset[name].shape != (eta.shape[0],)
-        for name in ("depth", "time", "dataset_split")
+        dataset[name].shape != (eta.shape[0],) for name in ("depth", "dataset_split")
     ):
         raise ValueError("Dataset row metadata has inconsistent shapes")
     if not np.isin(
@@ -105,78 +95,47 @@ def build_dataset_split_indices(
     )
 
 
-def _stats_valid(s: dict[str, object]) -> bool:
-    feature_min = s.get("feature_min")
-    feature_max = s.get("feature_max")
-    if not (
-        isinstance(feature_min, (list, tuple))
-        and isinstance(feature_max, (list, tuple))
-        and len(feature_min) == 2
-        and len(feature_max) == 2
-    ):
-        return False
-    values = (*feature_min, *feature_max, s.get("target_min"), s.get("target_max"))
-    return all(
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and np.isfinite(value)
-        for value in values
-    )
-
-
 def _compute_selected_extrema(
     array: np.ndarray,
-    indices: np.ndarray | None,
+    indices: np.ndarray,
     *,
     chunk_size: int = 65_536,
     zero_mean: bool = False,
 ) -> tuple[float, float, float]:
     minimum = np.inf
     maximum = -np.inf
-    absmax = 0.0
-    number_of_rows = array.shape[0] if indices is None else indices.shape[0]
-    for start in range(0, number_of_rows, chunk_size):
-        selected = (
-            array[start : start + chunk_size]
-            if indices is None
-            else array[indices[start : start + chunk_size]]
-        )
+    for start in range(0, indices.size, chunk_size):
+        selected = array[indices[start : start + chunk_size]]
         if zero_mean:
             selected = _zero_mean_xi(selected)
         minimum = min(minimum, float(np.min(selected)))
         maximum = max(maximum, float(np.max(selected)))
-        absmax = max(absmax, float(np.max(np.abs(selected))))
-    return minimum, maximum, absmax
+    return minimum, maximum, max(abs(minimum), abs(maximum))
 
 
 def load_or_compute_stats(
     dataset_path: Path,
-    dataset: dict[str, np.ndarray] | None = None,
+    dataset: dict[str, np.ndarray],
     *,
-    indices: np.ndarray | None = None,
+    indices: np.ndarray,
 ) -> StatsDict:
-    input_file_state: list[dict[str, int]] = []
-    for name in _TRAINING_ARRAY_NAMES:
-        state = (dataset_path / f"{name}.npy").stat()
-        input_file_state.append(
-            {
-                "size_bytes": state.st_size,
-                "modified_ns": state.st_mtime_ns,
-            }
+    """Cache normalization statistics for the supplied training rows."""
+    input_file_state = [
+        {"size_bytes": state.st_size, "modified_ns": state.st_mtime_ns}
+        for state in map(
+            Path.stat, (dataset_path / f"{name}.npy" for name in _TRAINING_ARRAY_NAMES)
         )
-    selection: dict[str, object] | None = None
-    if indices is not None:
-        indices = np.asarray(indices)
-        if indices.size == 0:
-            raise ValueError(
-                "Cannot compute normalization statistics from an empty selection"
-            )
-        selection = {
-            "count": int(indices.shape[0]),
-            "sha256": hashlib.sha256(
-                np.sort(indices.astype(np.int64)).tobytes()
-            ).hexdigest(),
-        }
+    ]
+    if indices.size == 0:
+        raise ValueError(
+            "Cannot compute normalization statistics from an empty selection"
+        )
+    selection = {
+        "count": int(indices.size),
+        "sha256": hashlib.sha256(
+            np.sort(indices.astype(np.int64)).tobytes()
+        ).hexdigest(),
+    }
 
     stats_path = dataset_path / "stats.json"
     if stats_path.exists():
@@ -185,15 +144,29 @@ def load_or_compute_stats(
             cached = json.loads(stats_path.read_text(encoding="utf-8"))
         if (
             isinstance(cached, dict)
-            and _stats_valid(cached)
             and cached.get("index_selection") == selection
             and cached.get("input_file_state") == input_file_state
+            and all(
+                isinstance(values, list)
+                and len(values) == 2
+                and all(
+                    type(value) in (int, float) and np.isfinite(cast(float, value))
+                    for value in values
+                )
+                for values in (
+                    cached.get(name)
+                    for name in ("feature_min", "feature_max", "feature_absmax")
+                )
+            )
+            and all(
+                type(value) in (int, float) and np.isfinite(cast(float, value))
+                for value in (
+                    cached.get(name)
+                    for name in ("target_min", "target_max", "target_absmax")
+                )
+            )
         ):
             return cached
-
-    if dataset is None:
-        dataset = load_dataset_arrays(dataset_path)
-    num_examples = int(dataset["eta"].shape[0])
 
     eta_min, eta_max, eta_absmax = _compute_selected_extrema(dataset["eta"], indices)
     xi_min, xi_max, xi_absmax = _compute_selected_extrema(
@@ -202,64 +175,18 @@ def load_or_compute_stats(
     target_min, target_max, target_absmax = _compute_selected_extrema(
         dataset["gxi"], indices
     )
-    depth_arr = np.asarray(dataset["depth"], dtype=np.float64)
-    depth_min, depth_max, _ = _compute_selected_extrema(depth_arr, indices)
-    log_depth = np.log(np.clip(depth_arr, 1e-12, None))
-    log_depth_min, log_depth_max, _ = _compute_selected_extrema(log_depth, indices)
     stats: StatsDict = {
-        "dataset": str(dataset_path),
-        "num_examples": int(indices.shape[0]) if indices is not None else num_examples,
-        "storage_num_examples": num_examples,
         "feature_min": [eta_min, xi_min],
         "feature_max": [eta_max, xi_max],
         "feature_absmax": [eta_absmax, xi_absmax],
         "target_min": target_min,
         "target_max": target_max,
         "target_absmax": target_absmax,
-        "depth_min": depth_min,
-        "depth_max": depth_max,
-        "log_depth_min": log_depth_min,
-        "log_depth_max": log_depth_max,
-        "domain_length": float(dataset["domain_length"]),
         "index_selection": selection,
         "input_file_state": input_file_state,
     }
     stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
     return stats
-
-
-@dataclass(frozen=True)
-class NormStats:
-    feature_min: np.ndarray
-    feature_max: np.ndarray
-    feature_absmax: np.ndarray
-    target_min: float
-    target_max: float
-    target_absmax: float
-    mode: str  # "minmax" or "scale"
-
-    @staticmethod
-    def from_dict(stats: StatsDict, mode: str = "minmax") -> NormStats:
-        feature_absmax = np.asarray(
-            cast(Sequence[float], stats["feature_absmax"]),
-            dtype=np.float32,
-        ).reshape((1, 1, 2))
-        target_absmax = float(cast(float | int, stats["target_absmax"]))
-        return NormStats(
-            feature_min=np.asarray(
-                cast(Sequence[float], stats["feature_min"]),
-                dtype=np.float32,
-            ).reshape((1, 1, 2)),
-            feature_max=np.asarray(
-                cast(Sequence[float], stats["feature_max"]),
-                dtype=np.float32,
-            ).reshape((1, 1, 2)),
-            feature_absmax=np.where(feature_absmax > 0, feature_absmax, 1.0),
-            target_min=float(cast(float | int, stats["target_min"])),
-            target_max=float(cast(float | int, stats["target_max"])),
-            target_absmax=target_absmax if target_absmax > 0 else 1.0,
-            mode=mode,
-        )
 
 
 RawBatchTuple = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
@@ -274,12 +201,16 @@ def compute_log_depth(depth: np.ndarray) -> np.ndarray:
     return np.log(np.clip(arr, 1e-12, None)).astype(np.float32)
 
 
-def make_normalizers(ns: NormStats) -> NormalizerFunctions:
+def make_normalizers(stats: StatsDict, mode: str = "minmax") -> NormalizerFunctions:
     """Return (norm_inputs, norm_targets, denorm_targets) jit-compatible functions
     that bake the stats as constants. Inputs/targets stay in fp32."""
-    if ns.mode == "scale":
-        feat_scale = jnp.asarray(ns.feature_absmax, dtype=jnp.float32)
-        tgt_scale = jnp.float32(ns.target_absmax)
+    if mode == "scale":
+        feature_absmax = np.asarray(
+            cast(Sequence[float], stats["feature_absmax"]), dtype=np.float32
+        ).reshape((1, 1, 2))
+        feat_scale = jnp.asarray(np.where(feature_absmax > 0, feature_absmax, 1.0))
+        target_absmax = float(cast(float, stats["target_absmax"]))
+        tgt_scale = jnp.float32(target_absmax if target_absmax > 0 else 1.0)
 
         def norm_inputs(eta: jax.Array, xi: jax.Array) -> jax.Array:
             stacked = jnp.stack((eta, xi), axis=-1)
@@ -292,12 +223,18 @@ def make_normalizers(ns: NormStats) -> NormalizerFunctions:
             return arr * tgt_scale
 
     else:
-        feat_min = jnp.asarray(ns.feature_min, dtype=jnp.float32)
-        feat_range = jnp.asarray(
-            ns.feature_max - ns.feature_min + 1e-8, dtype=jnp.float32
+        feature_min, feature_max = (
+            np.asarray(cast(Sequence[float], stats[name]), dtype=np.float32).reshape(
+                (1, 1, 2)
+            )
+            for name in ("feature_min", "feature_max")
         )
-        tgt_min = jnp.float32(ns.target_min)
-        tgt_range = jnp.float32(ns.target_max - ns.target_min + 1e-8)
+        feat_min = jnp.asarray(feature_min)
+        feat_range = jnp.asarray(feature_max - feature_min + 1e-8)
+        target_min = float(cast(float, stats["target_min"]))
+        target_max = float(cast(float, stats["target_max"]))
+        tgt_min = jnp.float32(target_min)
+        tgt_range = jnp.float32(target_max - target_min + 1e-8)
 
         def norm_inputs(eta: jax.Array, xi: jax.Array) -> jax.Array:
             stacked = jnp.stack((eta, xi), axis=-1)

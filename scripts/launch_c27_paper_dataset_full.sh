@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path("train-jax-10m").resolve()))
-from util import NormStats, build_dataset_split_indices, get_batches, load_dataset_arrays, load_or_compute_stats, make_normalizers
+from util import build_dataset_split_indices, get_batches, load_dataset_arrays, load_or_compute_stats, make_normalizers
 
 dataset_path = Path(sys.argv[1]).expanduser().resolve()
 dataset = load_dataset_arrays(dataset_path)
@@ -30,7 +30,7 @@ train, validation, test = build_dataset_split_indices(dataset)
 if not train.size or not validation.size:
     raise SystemExit("training requires nonempty train and validation splits")
 stats = load_or_compute_stats(dataset_path, dataset, indices=train)
-norm_inputs, norm_targets, _ = make_normalizers(NormStats.from_dict(stats, mode="scale"))
+norm_inputs, norm_targets, _ = make_normalizers(stats, mode="scale")
 eta, xi, gxi, depth, _ = next(get_batches(
     dataset["eta"], dataset["xi"], dataset["gxi"], dataset["depth"], train,
     batch_size=1024, rng=None,
