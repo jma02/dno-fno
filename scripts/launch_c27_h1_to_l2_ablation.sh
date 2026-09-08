@@ -34,7 +34,7 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --cs_mult_hidden 160 \
   --translation_tangent_weight "$TRANSLATION_TANGENT_WEIGHT" \
   --translation_tangent_smoothing_scale 1 \
-  --translation_tangent_energy_floor_relative 1e-3 \
+  --translation_tangent_denominator_eps 1e-3 \
   --mode_balanced_weight "$MODE_BALANCED_WEIGHT" \
   --mode_balanced_warmup_steps "$MODE_BALANCED_WARMUP_STEPS" \
   --mode_balanced_k_max 128 \
@@ -95,7 +95,7 @@ expected = {
     "translation_tangent_weight": float(tangent_weight),
     "translation_tangent_scope": "all_nonflat_rows",
     "translation_tangent_smoothing_scale": 1.0,
-    "translation_tangent_energy_floor_relative": 1e-3,
+    "translation_tangent_denominator_eps": 1e-3,
     "mode_balanced_weight": float(mode_weight),
     "mode_balanced_warmup_steps": int(mode_warmup_steps),
     "mode_balanced_k_max": 128.0,

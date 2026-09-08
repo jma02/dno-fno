@@ -247,10 +247,10 @@ def main() -> None:
         help="Gaussian smoothing standard deviation = this value × water depth.",
     )
     parser.add_argument(
-        "--translation_tangent_energy_floor_relative",
+        "--translation_tangent_denominator_eps",
         type=float,
         default=1e-3,
-        help="Local eta_x-energy denominator floor relative to its sample maximum.",
+        help="Epsilon relative to each sample's maximum smoothed squared slope.",
     )
     parser.add_argument(
         "--mode_balanced_weight",
@@ -485,8 +485,8 @@ def main() -> None:
     config_payload["translation_tangent_smoothing_scale"] = float(
         args.translation_tangent_smoothing_scale
     )
-    config_payload["translation_tangent_energy_floor_relative"] = float(
-        args.translation_tangent_energy_floor_relative
+    config_payload["translation_tangent_denominator_eps"] = float(
+        args.translation_tangent_denominator_eps
     )
     config_payload["translation_tangent_scope"] = "all_nonflat_rows"
     config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
@@ -532,7 +532,7 @@ def main() -> None:
     translation_tangent_weight = float(args.translation_tangent_weight)
     translation_tangent_cfg = TranslationTangentConfig(
         smoothing_scale=float(args.translation_tangent_smoothing_scale),
-        energy_floor_relative=float(args.translation_tangent_energy_floor_relative),
+        denominator_eps=float(args.translation_tangent_denominator_eps),
         gravity=gravity,
     )
     mode_balanced_weight = float(args.mode_balanced_weight)

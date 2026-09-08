@@ -115,7 +115,7 @@ def test_rigid_phase_growth_matches_relative_elevation_growth() -> None:
     target = -0.4 * eta_x
     prediction = target - speed_error * eta_x
     depth = jnp.asarray([0.16], dtype=eta.dtype)
-    config = TranslationTangentConfig(energy_floor_relative=1e-12)
+    config = TranslationTangentConfig(denominator_eps=1e-12)
 
     loss, diagnostics = compute_translation_tangent_loss(
         eta, prediction, target, depth, k, config
@@ -159,7 +159,7 @@ def test_phase_growth_weights_narrower_profiles_by_wave_number_squared() -> None
     target = -0.4 * eta_x
     prediction = target - 0.01 * eta_x
     depth = jnp.asarray([0.2, 0.2], dtype=eta.dtype)
-    config = TranslationTangentConfig(energy_floor_relative=1e-12)
+    config = TranslationTangentConfig(denominator_eps=1e-12)
 
     def one_sample(index: int) -> tuple[float, float]:
         loss, diagnostics = compute_translation_tangent_loss(

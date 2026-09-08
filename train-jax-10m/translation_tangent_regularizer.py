@@ -11,7 +11,7 @@ class TranslationTangentConfig:
     """Configuration for the local projection of DNO error onto ``eta_x``."""
 
     smoothing_scale: float = 1.0
-    energy_floor_relative: float = 1e-3
+    denominator_eps: float = 1e-3
     gravity: float = 1.0
 
 
@@ -83,7 +83,7 @@ def compute_translation_tangent_loss(
     local_cross = smoothed[:, 0]
     local_energy = jnp.maximum(smoothed[:, 1], jnp.asarray(0.0, dtype=dtype))
     energy_floor = (
-        jnp.asarray(config.energy_floor_relative, dtype=dtype)
+        jnp.asarray(config.denominator_eps, dtype=dtype)
         * jnp.max(local_energy, axis=-1, keepdims=True)
     )
     local_speed_error = -local_cross / (
