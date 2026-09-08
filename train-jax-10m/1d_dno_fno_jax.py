@@ -87,12 +87,9 @@ def save_checkpoint(
     output_dir.mkdir(parents=True, exist_ok=True)
     host_state = jax.device_get(state)
 
-    def to_np(value: object) -> np.ndarray:
-        return np.asarray(value)
-
     payload = {
-        "params": jax.tree_util.tree_map(to_np, host_state.params),
-        "opt_state": jax.tree_util.tree_map(to_np, host_state.opt_state),
+        "params": jax.tree_util.tree_map(np.asarray, host_state.params),
+        "opt_state": jax.tree_util.tree_map(np.asarray, host_state.opt_state),
         "step": int(host_state.step),
     }
 
@@ -123,75 +120,6 @@ def save_checkpoint(
     metadata_tmp = output_dir / "metadata.json.tmp"
     metadata_tmp.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     metadata_tmp.replace(metadata_path)
-
-
-def read_committed_checkpoint_metadata(checkpoint_dir: Path) -> CheckpointMetadata:
-    """Read metadata only when its exact, committed Orbax payload exists."""
-    metadata_path = checkpoint_dir / "metadata.json"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"no metadata.json under {checkpoint_dir}")
-    decoded = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if not isinstance(decoded, dict) or not all(
-        isinstance(key, str) for key in decoded
-    ):
-        raise ValueError(f"invalid checkpoint metadata object: {metadata_path}")
-    record = cast(dict[str, object], decoded)
-
-    def require_int(key: str) -> int:
-        value = record.get(key)
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(f"checkpoint metadata {key!r} must be an integer")
-        return value
-
-    def require_float(key: str) -> float:
-        value = record.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"checkpoint metadata {key!r} must be numeric")
-        return float(value)
-
-    history_value = record.get("history")
-    if not isinstance(history_value, list):
-        raise ValueError("checkpoint metadata 'history' must be a list")
-    history: list[dict[str, float]] = []
-    for index, entry in enumerate(history_value):
-        if not isinstance(entry, dict):
-            raise ValueError(f"checkpoint history entry {index} must be an object")
-        parsed_entry: dict[str, float] = {}
-        for key, value in entry.items():
-            if (
-                not isinstance(key, str)
-                or isinstance(value, bool)
-                or not isinstance(value, (int, float))
-            ):
-                raise ValueError(
-                    f"checkpoint history entry {index} must contain numeric values"
-                )
-            parsed_entry[key] = value
-        history.append(parsed_entry)
-
-    stats_value = record.get("stats")
-    if not isinstance(stats_value, dict) or not all(
-        isinstance(key, str) for key in stats_value
-    ):
-        raise ValueError("checkpoint metadata 'stats' must be an object")
-
-    metadata = CheckpointMetadata(
-        epoch=require_int("epoch"),
-        train_loss=require_float("train_loss"),
-        val_loss=require_float("val_loss"),
-        history=history,
-        best_val_loss=require_float("best_val_loss"),
-        best_epoch=require_int("best_epoch"),
-        stats=cast(dict[str, object], stats_value),
-    )
-    epoch = metadata["epoch"]
-    payload_path = checkpoint_dir / f"ckpt_{epoch}"
-    if not payload_path.is_dir():
-        raise RuntimeError(
-            f"checkpoint metadata advertises epoch {epoch}, but {payload_path} "
-            "does not exist; refusing a potentially torn checkpoint"
-        )
-    return metadata
 
 
 def replicated_scalar_value(value: jax.Array, *, name: str) -> int:
@@ -240,7 +168,7 @@ def training_counter_values(
     return state_step, schedule_step
 
 
-def parse_args() -> argparse.Namespace:
+def main() -> None:
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
     parser.add_argument(
@@ -415,11 +343,7 @@ def parse_args() -> argparse.Namespace:
         default=1e-12,
         help="Floor in the normalized Hadamard response denominator.",
     )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
+    args = parser.parse_args()
     start_time = perf_counter()
 
     training_dtype = jnp.float32
@@ -995,9 +919,69 @@ def main() -> None:
     # Auto-resume from the current run's per-epoch checkpoint so Modal preemption
     # does not lose progress.
     latest_ckpt_dir = run_dir / "latest_ckpt"
-    if (latest_ckpt_dir / "metadata.json").exists():
-        meta = read_committed_checkpoint_metadata(latest_ckpt_dir)
-        resume_epoch = int(meta["epoch"])
+    metadata_path = latest_ckpt_dir / "metadata.json"
+    if metadata_path.exists():
+        decoded = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(decoded, dict) or not all(
+            isinstance(key, str) for key in decoded
+        ):
+            raise ValueError(f"invalid checkpoint metadata object: {metadata_path}")
+        record = cast(dict[str, object], decoded)
+
+        def require_int(key: str) -> int:
+            value = record.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"checkpoint metadata {key!r} must be an integer")
+            return value
+
+        def require_float(key: str) -> float:
+            value = record.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"checkpoint metadata {key!r} must be numeric")
+            return float(value)
+
+        history_value = record.get("history")
+        if not isinstance(history_value, list):
+            raise ValueError("checkpoint metadata 'history' must be a list")
+        checkpoint_history: list[dict[str, float]] = []
+        for index, entry in enumerate(history_value):
+            if not isinstance(entry, dict):
+                raise ValueError(f"checkpoint history entry {index} must be an object")
+            parsed_entry: dict[str, float] = {}
+            for key, value in entry.items():
+                if (
+                    not isinstance(key, str)
+                    or isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                ):
+                    raise ValueError(
+                        f"checkpoint history entry {index} must contain numeric values"
+                    )
+                parsed_entry[key] = value
+            checkpoint_history.append(parsed_entry)
+
+        stats_value = record.get("stats")
+        if not isinstance(stats_value, dict) or not all(
+            isinstance(key, str) for key in stats_value
+        ):
+            raise ValueError("checkpoint metadata 'stats' must be an object")
+
+        meta = CheckpointMetadata(
+            epoch=require_int("epoch"),
+            train_loss=require_float("train_loss"),
+            val_loss=require_float("val_loss"),
+            history=checkpoint_history,
+            best_val_loss=require_float("best_val_loss"),
+            best_epoch=require_int("best_epoch"),
+            stats=cast(dict[str, object], stats_value),
+        )
+        resume_epoch = meta["epoch"]
+        payload_path = latest_ckpt_dir / f"ckpt_{resume_epoch}"
+        if not payload_path.is_dir():
+            raise RuntimeError(
+                f"checkpoint metadata advertises epoch {resume_epoch}, but {payload_path} "
+                "does not exist; refusing a potentially torn checkpoint"
+            )
         template = {
             "params": training_state.params,
             "opt_state": training_state.opt_state,
