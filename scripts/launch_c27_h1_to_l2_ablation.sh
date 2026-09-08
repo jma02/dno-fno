@@ -38,7 +38,7 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --mode_balanced_weight "$MODE_BALANCED_WEIGHT" \
   --mode_balanced_warmup_steps "$MODE_BALANCED_WARMUP_STEPS" \
   --mode_balanced_k_max 128 \
-  --mode_balanced_active_scale_relative 1e-4 \
+  --mode_balanced_activity_threshold 1e-4 \
   --mode_balanced_denominator_floor_relative 1e-6 \
   --hadamard_weight "$HADAMARD_WEIGHT" \
   --hadamard_interval "$HADAMARD_INTERVAL" \
@@ -99,7 +99,7 @@ expected = {
     "mode_balanced_weight": float(mode_weight),
     "mode_balanced_warmup_steps": int(mode_warmup_steps),
     "mode_balanced_k_max": 128.0,
-    "mode_balanced_active_scale_relative": 1e-4,
+    "mode_balanced_activity_threshold": 1e-4,
     "mode_balanced_denominator_floor_relative": 1e-6,
     "hadamard_weight": float(hadamard_weight),
     "hadamard_interval": int(hadamard_interval),

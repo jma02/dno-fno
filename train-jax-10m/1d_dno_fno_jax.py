@@ -271,10 +271,11 @@ def main() -> None:
         help="Largest positive physical wavenumber included in the mode-balanced loss.",
     )
     parser.add_argument(
-        "--mode_balanced_active_scale_relative",
+        "--mode_balanced_activity_threshold",
         type=float,
         default=1e-4,
-        help="Soft activity threshold relative to each sample's strongest modal energy.",
+        help="Modes at this fraction of each sample's peak reference scale receive "
+        "about half activity weight; weaker modes receive less.",
     )
     parser.add_argument(
         "--mode_balanced_denominator_floor_relative",
@@ -492,8 +493,8 @@ def main() -> None:
     config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
     config_payload["mode_balanced_warmup_steps"] = int(args.mode_balanced_warmup_steps)
     config_payload["mode_balanced_k_max"] = float(args.mode_balanced_k_max)
-    config_payload["mode_balanced_active_scale_relative"] = float(
-        args.mode_balanced_active_scale_relative
+    config_payload["mode_balanced_activity_threshold"] = float(
+        args.mode_balanced_activity_threshold
     )
     config_payload["mode_balanced_denominator_floor_relative"] = float(
         args.mode_balanced_denominator_floor_relative
@@ -540,7 +541,7 @@ def main() -> None:
     mode_balanced_cfg = ModeBalancedConfig(
         k_max=float(args.mode_balanced_k_max),
         gravity=gravity,
-        active_scale_relative=float(args.mode_balanced_active_scale_relative),
+        activity_threshold=float(args.mode_balanced_activity_threshold),
         denominator_floor_relative=float(args.mode_balanced_denominator_floor_relative),
     )
     hadamard_weight = float(args.hadamard_weight)

@@ -16,7 +16,7 @@ class ModeBalancedConfig:
 
     k_max: float = 128.0
     gravity: float = 1.0
-    active_scale_relative: float = 1e-4
+    activity_threshold: float = 1e-4
     denominator_floor_relative: float = 1e-6
     absolute_floor: float = 1e-24
     huber_delta: float = 1.0
@@ -101,7 +101,7 @@ def compute_mode_balanced_loss(
         + absolute_floor
     )
     activity_floor = (
-        jnp.asarray(config.active_scale_relative, dtype=real_dtype)
+        jnp.asarray(config.activity_threshold, dtype=real_dtype)
         * sample_scale
         + absolute_floor
     )
