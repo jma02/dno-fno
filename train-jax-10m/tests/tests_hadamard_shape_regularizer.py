@@ -3,7 +3,7 @@
 Run directly; pytest is not required:
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=True \
-      .venv/bin/python train-jax-10m/tests_hadamard_shape_regularizer.py
+      .venv/bin/python train-jax-10m/tests/tests_hadamard_shape_regularizer.py
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
+TRAIN_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TRAIN_DIR))
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402

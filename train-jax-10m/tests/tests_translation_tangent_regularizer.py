@@ -1,11 +1,16 @@
 """CPU invariants for the localized translation-tangent objective."""
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from translation_tangent_regularizer import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from translation_tangent_regularizer import (  # noqa: E402
     TranslationTangentConfig,
     compute_translation_tangent_loss,
 )

@@ -17,7 +17,7 @@ from solver.gen_data.pipeline.types import (
     SimulationRows,
 )
 
-TRAIN_DIR = Path(__file__).resolve().parent
+TRAIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAIN_DIR))
 sys.path.insert(0, str(TRAIN_DIR.parent))
 

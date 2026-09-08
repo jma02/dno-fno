@@ -2,7 +2,7 @@
 
 Run on at least two GPUs to exercise the failure mode directly::
 
-    CUDA_VISIBLE_DEVICES=0,1 uv run python train-jax-10m/tests_replication_safety.py
+    CUDA_VISIBLE_DEVICES=0,1 uv run python train-jax-10m/tests/tests_replication_safety.py
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-TRAIN_DIR = Path(__file__).resolve().parent
+TRAIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAIN_DIR))
 
 from util import (  # noqa: E402

@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+import sys
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mode_balanced_regularizer import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mode_balanced_regularizer import (  # noqa: E402
     ModeBalancedConfig,
     compute_mode_balanced_loss,
 )
