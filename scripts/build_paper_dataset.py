@@ -1,4 +1,4 @@
-"""Combine completed family/split runs into NumPy arrays for training."""
+"""Combine all 12 family/split runs into NumPy arrays for training."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
 
 
 def build_paper_dataset(summary_paths: Sequence[Path], *, output_root: Path) -> Path:
-    """Combine equally sized family populations, preserving their assigned splits."""
+    """Build train, validation, and test with equal family populations in each."""
     batches_by_run: dict[tuple[DatasetSplit, PhysicalFamilyId], tuple[Path, ...]] = {}
     simulations_per_run: dict[tuple[DatasetSplit, PhysicalFamilyId], int] = {}
     for summary_path in summary_paths:
@@ -28,16 +28,14 @@ def build_paper_dataset(summary_paths: Sequence[Path], *, output_root: Path) -> 
         )
         simulations_per_run[split, family] = summary["counts"]["accepted"]
 
+    if len(batches_by_run) != 12:
+        raise ValueError("provide all 12 family/split runs")
     batch_paths: list[Path] = []
     for split in DatasetSplit:
-        families = {
-            family for run_split, family in batches_by_run if run_split == split
-        }
-        if not families:
-            continue
-        if families != set(PhysicalFamilyId):
-            raise ValueError(f"{split.value} requires all four physical families")
-        if len({simulations_per_run[split, family] for family in families}) != 1:
+        if (
+            len({simulations_per_run[split, family] for family in PhysicalFamilyId})
+            != 1
+        ):
             raise ValueError(
                 f"{split.value} requires equal accepted counts in every family"
             )
@@ -55,7 +53,7 @@ if __name__ == "__main__":
         type=Path,
         action="append",
         required=True,
-        help="Completed family/split summary; repeat for every run.",
+        help="Repeat for all 12 runs: four families, each with train/validation/test.",
     )
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args()

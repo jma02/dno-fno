@@ -113,9 +113,9 @@ The supported generation entrypoints live in `scripts/`:
 - `generate_paper_dataset.py` saves batches and a run summary for one family/split;
 - `build_paper_dataset.py` combines completed runs into one training dataset directory.
 
-The build command runs immediately. Repeat `--run-summary` for each
-completed family/split run and supply `--output-root`; each included split must
-have all four families with equal accepted simulation counts.
+The build command requires all 12 generation summaries: four families, each with
+train, validation, and test. Pass each using `--run-summary` and supply
+`--output-root`. Families must have equal successful simulation counts within each split.
 Existing completed batches can be exported without regenerating simulations.
 Use a new output directory (the C27 launchers expect `.../c16384_v01024_t01024/arrays`);
 allow about 100 GB of additional disk for the full dataset.

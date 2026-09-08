@@ -60,11 +60,11 @@ def _write_run(
     return summary_path
 
 
-def _write_split(
-    root: Path, split: DatasetSplit = DatasetSplit.TRAIN
-) -> tuple[Path, ...]:
+def _write_runs(root: Path) -> tuple[Path, ...]:
     return tuple(
-        _write_run(root, family.name.lower(), split) for family in PhysicalFamilyId
+        _write_run(root, family.name.lower(), split)
+        for split in DatasetSplit
+        for family in PhysicalFamilyId
     )
 
 
@@ -75,9 +75,7 @@ class PaperDatasetTests(unittest.TestCase):
         self.root = Path(temporary.name)
 
     def test_combines_sparse_batches_in_split_and_family_order(self) -> None:
-        paths = tuple(
-            path for split in DatasetSplit for path in _write_split(self.root, split)
-        )
+        paths = _write_runs(self.root)
         dataset = build_paper_dataset(
             tuple(reversed(paths)), output_root=self.root / "dataset"
         )
@@ -113,10 +111,13 @@ class PaperDatasetTests(unittest.TestCase):
         for name, array in arrays.items():
             np.testing.assert_array_equal(np.load(cli_dataset / f"{name}.npy"), array)
 
-    def test_requires_all_families_and_equal_accepted_counts(self) -> None:
-        paths = _write_split(self.root)
-        with self.assertRaisesRegex(ValueError, "all four"):
-            build_paper_dataset(paths[:-1], output_root=self.root / "missing")
+    def test_requires_all_runs_and_equal_accepted_counts(self) -> None:
+        paths = _write_runs(self.root)
+        for incomplete in (paths[:-1], paths[:-4], paths[:4]):
+            with self.subTest(run_count=len(incomplete)):
+                with self.assertRaisesRegex(ValueError, "all 12 family/split runs"):
+                    build_paper_dataset(incomplete, output_root=self.root / "missing")
+                self.assertFalse((self.root / "missing").exists())
         unequal = _write_run(
             self.root / "unequal", "stokes", DatasetSplit.TRAIN, accepted_count=2
         )
@@ -126,7 +127,7 @@ class PaperDatasetTests(unittest.TestCase):
             )
 
     def test_rejects_duplicate_runs_and_batches(self) -> None:
-        paths = _write_split(self.root)
+        paths = _write_runs(self.root)
         duplicate = _write_run(self.root / "duplicate", "stokes", DatasetSplit.TRAIN)
         with self.assertRaisesRegex(ValueError, "only one generation run"):
             build_paper_dataset((*paths, duplicate), output_root=self.root / "dataset")

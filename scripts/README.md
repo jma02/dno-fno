@@ -23,8 +23,9 @@ trainer implementation. Superseded exploratory and scheduled launch scripts
 remain available through Git history rather than in the working tree.
 
 Generation saves batches and a run summary. Combine completed runs into a dataset
-directory with `scripts/build_paper_dataset.py`, repeating `--run-summary` for
-each family/split run and choosing `--output-root` for the resulting NPY arrays.
+directory with `scripts/build_paper_dataset.py`, passing all 12 summaries via
+repeated `--run-summary` arguments (four families × train/validation/test).
+Choose `--output-root` for the resulting NPY arrays; partial exports are not supported.
 Existing completed batches can be reused without rerunning simulations. Export
 to a new directory; allow about 100 GB of additional disk for the full dataset:
 
