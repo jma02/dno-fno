@@ -433,11 +433,6 @@ def main() -> None:
     )
     total_steps = schedule_epochs * train_steps_per_epoch
     if args.lr_warmup_steps > 0:
-        if args.lr_warmup_steps >= total_steps:
-            raise ValueError(
-                f"lr_warmup_steps {args.lr_warmup_steps} must be smaller than "
-                f"total optimizer steps {total_steps}"
-            )
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=args.lr,
