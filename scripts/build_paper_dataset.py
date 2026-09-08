@@ -28,7 +28,7 @@ def build_paper_dataset(summary_paths: Sequence[Path], *, output_root: Path) -> 
         )
         simulations_per_run[split, family] = summary["counts"]["accepted"]
 
-    ordered_batches: list[Path] = []
+    batch_paths: list[Path] = []
     for split in DatasetSplit:
         families = {
             family for run_split, family in batches_by_run if run_split == split
@@ -42,10 +42,10 @@ def build_paper_dataset(summary_paths: Sequence[Path], *, output_root: Path) -> 
                 f"{split.value} requires equal accepted counts in every family"
             )
         for family in PhysicalFamilyId:
-            ordered_batches.extend(batches_by_run[split, family])
-    if len(set(ordered_batches)) != len(ordered_batches):
+            batch_paths.extend(batches_by_run[split, family])
+    if len(set(batch_paths)) != len(batch_paths):
         raise ValueError("generation runs must not repeat a completed batch")
-    return build_dataset(output_root, ordered_batches)
+    return build_dataset(output_root, batch_paths)
 
 
 if __name__ == "__main__":
