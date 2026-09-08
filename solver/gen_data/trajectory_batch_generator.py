@@ -27,7 +27,6 @@ from solver.gen_data.pipeline.time_selection import (
     subsample_trajectories,
 )
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -49,7 +48,7 @@ def generate_trajectory_batch(
     first_attempt_number: int,
     output_path: Path,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
     family: TrajectoryFamily,
     numerical: RolloutNumerics,
     solver_batch_size: int | None = None,
@@ -63,7 +62,7 @@ def generate_trajectory_batch(
         tanaka_samples = tuple(
             sample_tanaka_simulation(
                 parameter_group_id,
-                dataset_split=dataset_split,
+                seed=seed,
                 attempt_number=first_attempt_number + offset,
             )
             for offset, parameter_group_id in enumerate(parameter_group_ids)
@@ -94,7 +93,7 @@ def generate_trajectory_batch(
         benjamin_feir_samples = tuple(
             sample_benjamin_feir_simulation(
                 parameter_group_id,
-                dataset_split=dataset_split,
+                seed=seed,
                 attempt_number=first_attempt_number + offset,
             )
             for offset, parameter_group_id in enumerate(parameter_group_ids)
@@ -127,7 +126,7 @@ def generate_trajectory_batch(
         jonswap_samples = tuple(
             sample_jonswap_tma_simulation(
                 parameter_group_id,
-                dataset_split=dataset_split,
+                seed=seed,
                 attempt_number=first_attempt_number + offset,
                 band=band,
             )
@@ -194,5 +193,5 @@ def generate_trajectory_batch(
         parameter_group_ids,
         tuple(rows_by_index.get(index) for index in range(len(parameter_group_ids))),
         family_id=PhysicalFamilyId[family.upper()],
-        dataset_split=dataset_split,
+        seed=seed,
     )

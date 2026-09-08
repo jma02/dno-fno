@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -94,15 +95,13 @@ def _zero_mean_xi(xi: np.ndarray) -> np.ndarray:
 
 def build_dataset_split_indices(
     dataset: dict[str, np.ndarray],
-    seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return all rows from the dataset's simulation-level splits."""
     dataset_split = np.asarray(dataset["dataset_split"])
-    rng = np.random.default_rng(seed)
     return (
-        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.TRAIN.value)),
-        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.VALIDATION.value)),
-        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.TEST.value)),
+        np.flatnonzero(dataset_split == DatasetSplit.TRAIN.value),
+        np.flatnonzero(dataset_split == DatasetSplit.VALIDATION.value),
+        np.flatnonzero(dataset_split == DatasetSplit.TEST.value),
     )
 
 
@@ -172,34 +171,25 @@ def load_or_compute_stats(
             raise ValueError(
                 "Cannot compute normalization statistics from an empty selection"
             )
-        selection = {"count": int(indices.shape[0])}
+        selection = {
+            "count": int(indices.shape[0]),
+            "sha256": hashlib.sha256(
+                np.sort(indices.astype(np.int64)).tobytes()
+            ).hexdigest(),
+        }
 
     stats_path = dataset_path / "stats.json"
     if stats_path.exists():
         cached: object = None
         with suppress(json.JSONDecodeError, OSError):
             cached = json.loads(stats_path.read_text(encoding="utf-8"))
-        cached_selection = (
-            cached.get("index_selection") if isinstance(cached, dict) else None
-        )
-        selection_matches = (
-            cached_selection is None
-            if selection is None
-            else (
-                isinstance(cached_selection, dict)
-                and cached_selection.get("count") == selection["count"]
-            )
-        )
         if (
             isinstance(cached, dict)
             and _stats_valid(cached)
-            and selection_matches
+            and cached.get("index_selection") == selection
             and cached.get("input_file_state") == input_file_state
         ):
-            return {
-                **cached,
-                "index_selection": selection,
-            }
+            return cached
 
     if dataset is None:
         dataset = load_dataset_arrays(dataset_path)
@@ -331,55 +321,56 @@ def get_batches(
     batch_size: int,
     rng: np.random.Generator | None,
     *,
-    drop_last: bool,
+    device_count: int = 1,
 ) -> Iterator[RawBatchTuple]:
     """Yield raw (eta, xi, gxi, depth_log, indices) batches. Normalization happens
-    on-device inside the jitted step."""
+    on-device inside the jitted step. An indivisible tail is split into a sharded
+    prefix and fewer than device_count replicated rows."""
     ordered_indices = np.array(indices, copy=True)
     if rng is not None:
         rng.shuffle(ordered_indices)
 
-    limit = ordered_indices.shape[0]
-    if drop_last:
-        limit = (limit // batch_size) * batch_size
-    ordered_indices = ordered_indices[:limit]
-
-    for start in range(0, limit, batch_size):
-        end = start + batch_size
-        batch_indices = ordered_indices[start:end]
-        yield (
-            eta[batch_indices],
-            _zero_mean_xi(xi[batch_indices]),
-            gxi[batch_indices],
-            compute_log_depth(depth[batch_indices]),
-            batch_indices,
-        )
+    for start in range(0, ordered_indices.size, batch_size):
+        end = min(start + batch_size, ordered_indices.size)
+        divided_end = end - (end - start) % device_count
+        for batch_indices in (
+            ordered_indices[start:divided_end],
+            ordered_indices[divided_end:end],
+        ):
+            if batch_indices.size:
+                yield (
+                    eta[batch_indices],
+                    _zero_mean_xi(xi[batch_indices]),
+                    gxi[batch_indices],
+                    compute_log_depth(depth[batch_indices]),
+                    batch_indices,
+                )
 
 
 def device_prefetch(
     iterator: Iterable[tuple[Any, ...]],
     *,
-    destinations: Sequence[Any | None],
+    sharding: jax.sharding.NamedSharding,
     depth: int = 2,
 ) -> Iterator[tuple[Any, ...]]:
     """Prefetch batches onto the GPU in a background thread.
 
-    For each tuple yielded by ``iterator``, fields whose corresponding entry in
-    ``destinations`` is non-None are pushed via ``jax.device_put``; others pass
-    through unchanged. Producer runs ahead by up to ``depth`` batches so the
-    H2D copy overlaps with model compute.
+    A tail indivisible by the device count is replicated, without dropping or
+    padding rows. Producer runs ahead so copying overlaps with model compute.
     """
     q: queue.Queue = queue.Queue(maxsize=depth)
     sentinel: object = object()
+    replicated = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec())
 
     def _producer() -> None:
         try:
             for item in iterator:
-                pushed = tuple(
-                    jax.device_put(field, dest) if dest is not None else field
-                    for field, dest in zip(item, destinations)
+                destination = (
+                    sharding
+                    if item[0].shape[0] % sharding.mesh.size == 0
+                    else replicated
                 )
-                q.put(pushed)
+                q.put(tuple(jax.device_put(field, destination) for field in item))
         except BaseException as exc:  # surface in main thread
             q.put(("__prefetch_error__", exc))
         finally:

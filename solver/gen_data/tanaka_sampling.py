@@ -13,11 +13,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 
-from solver.gen_data.pipeline.types import (
-    ROOT_SEED_BY_DATASET_SPLIT,
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import PhysicalFamilyId
 
 
 PAPER_DOMAIN_LENGTH = 2.0 * np.pi
@@ -56,7 +52,7 @@ TanakaSample = NamedTuple(
 def sample_tanaka_simulation(
     parameter_group_id: str,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
     attempt_number: int,
 ) -> TanakaSample:
     """Sample one Tanaka initial-condition specification."""
@@ -65,13 +61,7 @@ def sample_tanaka_simulation(
         parameter_group_id
     ]
     rng = np.random.Generator(
-        np.random.PCG64(
-            (
-                ROOT_SEED_BY_DATASET_SPLIT[dataset_split],
-                PhysicalFamilyId.TANAKA,
-                attempt_number,
-            )
-        )
+        np.random.PCG64((seed, PhysicalFamilyId.TANAKA, attempt_number))
     )
 
     if regime == "main":

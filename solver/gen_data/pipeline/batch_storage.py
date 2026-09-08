@@ -12,7 +12,6 @@ from numpy.typing import NDArray
 from solver.gen_data.pipeline.artifact_io import load_npz, write_npz_atomic
 from solver.gen_data.pipeline.types import (
     DatasetShardArrays,
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -32,7 +31,7 @@ CompletedBatch = NamedTuple(
     "CompletedBatch",
     [
         ("family_id", PhysicalFamilyId),
-        ("dataset_split", DatasetSplit),
+        ("seed", int),
         ("parameter_group_ids", tuple[str, ...]),
         ("accepted_simulations", NDArray[np.bool_]),
         ("shard", DatasetShardArrays | None),
@@ -44,12 +43,11 @@ def batch_path(
     root: Path,
     *,
     family: str,
-    split: str,
     batch_id: int,
 ) -> Path:
     """Return the standard path for one completed batch."""
 
-    return root / "batches" / family / split / f"batch_{batch_id:06d}.npz"
+    return root / "batches" / family / f"batch_{batch_id:06d}.npz"
 
 
 def simulation_row_blocks(
@@ -125,7 +123,7 @@ def save_completed_batch(
     rows_by_simulation: Sequence[SimulationRows | None],
     *,
     family_id: PhysicalFamilyId,
-    dataset_split: DatasetSplit,
+    seed: int,
 ) -> None:
     """Atomically save one finished batch without replacing an existing batch."""
 
@@ -155,7 +153,7 @@ def save_completed_batch(
 
     arrays: dict[str, NDArray[Any]] = {
         "family_id": np.asarray(int(family_id), dtype=np.int16),
-        "dataset_split": np.asarray(dataset_split.value),
+        "seed": np.asarray(seed, dtype=np.int64),
         "parameter_group_id": np.asarray(parameter_group_ids),
     }
     if parts["eta"]:
@@ -169,7 +167,7 @@ def load_completed_batch(path: Path) -> CompletedBatch:
     arrays = load_npz(path)
     unexpected = arrays.keys() - {
         "family_id",
-        "dataset_split",
+        "seed",
         "parameter_group_id",
         *_SHARD_FIELDS,
     }
@@ -177,9 +175,7 @@ def load_completed_batch(path: Path) -> CompletedBatch:
         raise ValueError(
             f"completed batch contains unexpected arrays {sorted(unexpected)}"
         )
-    missing_metadata = {"family_id", "dataset_split", "parameter_group_id"}.difference(
-        arrays
-    )
+    missing_metadata = {"family_id", "seed", "parameter_group_id"}.difference(arrays)
     if missing_metadata:
         raise ValueError(
             f"completed batch is missing metadata arrays {sorted(missing_metadata)}"
@@ -189,10 +185,9 @@ def load_completed_batch(path: Path) -> CompletedBatch:
         raise TypeError("family_id must be a scalar int16 array")
     family_id = PhysicalFamilyId(int(family.item()))
 
-    split = arrays["dataset_split"]
-    if split.dtype.kind != "U" or split.ndim != 0:
-        raise TypeError("dataset_split must be a scalar string array")
-    dataset_split = DatasetSplit(str(split.item()))
+    seed = arrays["seed"]
+    if seed.dtype != np.dtype(np.int64) or seed.ndim != 0:
+        raise TypeError("seed must be a scalar int64 array")
 
     groups = arrays["parameter_group_id"]
     if groups.dtype.kind != "U" or groups.ndim != 1 or groups.size == 0:
@@ -217,7 +212,7 @@ def load_completed_batch(path: Path) -> CompletedBatch:
 
     return CompletedBatch(
         family_id,
-        dataset_split,
+        int(seed.item()),
         parameter_group_ids,
         accepted_simulations,
         shard,

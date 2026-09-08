@@ -27,7 +27,6 @@ from solver.gen_data.jonswap_tma_sampling import (
     JonswapTmaSample,
     sample_jonswap_tma_simulation,
 )
-from solver.gen_data.pipeline.types import DatasetSplit
 
 
 BAND = ResolvedBand(2.0 * np.pi, 128.0)
@@ -36,12 +35,12 @@ BAND = ResolvedBand(2.0 * np.pi, 128.0)
 def sample_parameter_group(
     parameter_group_index: int,
     *,
-    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    seed: int = 2026072210,
     attempt_number: int | None = None,
 ) -> JonswapTmaSample:
     return sample_jonswap_tma_simulation(
         tuple(JONSWAP_TMA_PARAMETER_GROUPS)[parameter_group_index],
-        dataset_split=dataset_split,
+        seed=seed,
         attempt_number=(
             parameter_group_index if attempt_number is None else attempt_number
         ),

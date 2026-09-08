@@ -76,6 +76,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument(
+        "--require-final-paper-dataset",
+        action="store_true",
+        help="Require the original fixed family/split release counts.",
+    )
+    parser.add_argument(
         "--output-stem",
         type=Path,
         default=ROOT / "notes/figures/parameterized_dataset_simulation_examples",
@@ -87,7 +92,8 @@ if __name__ == "__main__":
     retained_rows = sum(
         trajectory.row_count for source in sources for trajectory in source.trajectories
     )
-    validate_final_paper_dataset(sources, retained_rows=retained_rows)
+    if args.require_final_paper_dataset:
+        validate_final_paper_dataset(sources, retained_rows=retained_rows)
     arrays = {
         name: np.load(dataset_path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
         for name in ("eta", "xi", "depth", "time", "x")

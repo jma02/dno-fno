@@ -15,7 +15,6 @@ from solver.gen_data.pipeline.batch_storage import (
 )
 from solver.gen_data.pipeline.build_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -25,7 +24,6 @@ def _write_batch(
     path: Path,
     *,
     family_id: PhysicalFamilyId,
-    dataset_split: DatasetSplit,
     simulation_count: int,
     accepted_local_indices: tuple[int, ...],
     frames_per_simulation: int,
@@ -57,7 +55,7 @@ def _write_batch(
             for local_index in range(simulation_count)
         ),
         family_id=family_id,
-        dataset_split=dataset_split,
+        seed=2026072210,
     )
 
 
@@ -71,19 +69,18 @@ class DatasetTests(unittest.TestCase):
         self,
     ) -> None:
         batches: list[Path] = []
-        for batch_id, (family, split, count, accepted, frames) in enumerate(
+        for batch_id, (family, count, accepted, frames) in enumerate(
             (
-                (PhysicalFamilyId.STOKES, DatasetSplit.TRAIN, 2, (), 1),
-                (PhysicalFamilyId.TANAKA, DatasetSplit.TRAIN, 3, (0, 2), 1),
-                (PhysicalFamilyId.STOKES, DatasetSplit.TEST, 1, (0,), 1),
-                (PhysicalFamilyId.STOKES, DatasetSplit.TRAIN, 2, (1,), 2),
+                (PhysicalFamilyId.STOKES, 2, (), 1),
+                (PhysicalFamilyId.TANAKA, 3, (0, 2), 1),
+                (PhysicalFamilyId.STOKES, 1, (0,), 1),
+                (PhysicalFamilyId.STOKES, 2, (1,), 2),
             )
         ):
             path = self.root / f"batch_{batch_id:06d}.npz"
             _write_batch(
                 path,
                 family_id=family,
-                dataset_split=split,
                 simulation_count=count,
                 accepted_local_indices=accepted,
                 frames_per_simulation=frames,
@@ -100,7 +97,9 @@ class DatasetTests(unittest.TestCase):
         self.assertFalse((self.root / "dataset").exists())
         self.assertEqual(list(self.root.glob(".dataset-*")), [])
 
-        dataset = build_dataset(self.root / "dataset", batches)
+        dataset = build_dataset(
+            self.root / "dataset", batches, validation_fraction=0.25, test_fraction=0.25
+        )
         for batch in batches:
             batch.unlink()
         arrays = {
@@ -110,10 +109,10 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(len(tuple(dataset.iterdir())), 11)
         self.assertTrue(all(isinstance(array, np.memmap) for array in arrays.values()))
         np.testing.assert_array_equal(arrays["family_id"], [2, 2, 1, 1, 1])
-        np.testing.assert_array_equal(arrays["simulation_id"], [0, 2, 0, 3, 3])
+        np.testing.assert_array_equal(arrays["simulation_id"], [0, 1, 2, 3, 3])
         np.testing.assert_array_equal(arrays["frame_index"], [0, 0, 0, 0, 1])
         np.testing.assert_array_equal(
-            arrays["dataset_split"], ["train", "train", "test", "train", "train"]
+            arrays["dataset_split"], ["test", "validation", "train", "train", "train"]
         )
         np.testing.assert_array_equal(
             arrays["parameter_group_id"],
@@ -128,12 +127,11 @@ class DatasetTests(unittest.TestCase):
             build_dataset(dataset, batches)
 
     def test_mixed_spatial_grids_are_rejected_before_publication(self) -> None:
-        first = batch_path(self.root, family="stokes", split="test", batch_id=0)
-        second = batch_path(self.root, family="stokes", split="test", batch_id=1)
+        first = batch_path(self.root, family="stokes", batch_id=0)
+        second = batch_path(self.root, family="stokes", batch_id=1)
         _write_batch(
             first,
             family_id=PhysicalFamilyId.STOKES,
-            dataset_split=DatasetSplit.TEST,
             simulation_count=1,
             accepted_local_indices=(0,),
             frames_per_simulation=1,
@@ -142,7 +140,6 @@ class DatasetTests(unittest.TestCase):
         _write_batch(
             second,
             family_id=PhysicalFamilyId.STOKES,
-            dataset_split=DatasetSplit.TEST,
             simulation_count=1,
             accepted_local_indices=(0,),
             frames_per_simulation=1,
@@ -152,6 +149,44 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same spatial grid"):
             build_dataset(self.root / "dataset", (first, second))
         self.assertFalse((self.root / "dataset").exists())
+
+    def test_split_seed_changes_only_labels_and_input_order_does_not_matter(
+        self,
+    ) -> None:
+        batches = [self.root / f"batch_{i}.npz" for i in range(2)]
+        for i, path in enumerate(batches):
+            _write_batch(
+                path,
+                family_id=PhysicalFamilyId.STOKES,
+                simulation_count=5,
+                accepted_local_indices=tuple(range(5)),
+                frames_per_simulation=i + 1,
+            )
+        outputs = [
+            build_dataset(self.root / "first", batches),
+            build_dataset(self.root / "reordered", tuple(reversed(batches))),
+            build_dataset(self.root / "reseeded", batches, seed=7),
+        ]
+        for path in outputs[0].glob("*.npy"):
+            expected = np.load(path)
+            np.testing.assert_array_equal(np.load(outputs[1] / path.name), expected)
+            if path.stem != "dataset_split":
+                np.testing.assert_array_equal(np.load(outputs[2] / path.name), expected)
+        first_labels, _, new_labels = [
+            np.load(output / "dataset_split.npy") for output in outputs
+        ]
+        self.assertFalse(np.array_equal(first_labels, new_labels))
+        ids = np.load(outputs[0] / "simulation_id.npy")
+        for labels in (first_labels, new_labels):
+            for simulation_id in range(10):
+                self.assertEqual(np.unique(labels[ids == simulation_id]).size, 1)
+            self.assertEqual(
+                {
+                    label: np.unique(ids[labels == label]).size
+                    for label in np.unique(labels)
+                },
+                {"train": 8, "validation": 1, "test": 1},
+            )
 
 
 if __name__ == "__main__":

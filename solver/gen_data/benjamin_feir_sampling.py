@@ -14,11 +14,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from solver.gen_data.pipeline.types import (
-    ROOT_SEED_BY_DATASET_SPLIT,
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import PhysicalFamilyId
 
 
 PAPER_DOMAIN_LENGTH = 2.0 * np.pi
@@ -55,20 +51,14 @@ BenjaminFeirSample = NamedTuple(
 def sample_benjamin_feir_simulation(
     parameter_group_id: str,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
     attempt_number: int,
 ) -> BenjaminFeirSample:
     """Sample one Benjamin--Feir state in the assigned mode-pair group."""
 
     carrier_mode, sideband_offset = BENJAMIN_FEIR_PARAMETER_GROUPS[parameter_group_id]
     rng = np.random.Generator(
-        np.random.PCG64(
-            (
-                ROOT_SEED_BY_DATASET_SPLIT[dataset_split],
-                PhysicalFamilyId.BENJAMIN_FEIR,
-                attempt_number,
-            )
-        )
+        np.random.PCG64((seed, PhysicalFamilyId.BENJAMIN_FEIR, attempt_number))
     )
     steepness_lower = max(
         CARRIER_STEEPNESS_MIN,

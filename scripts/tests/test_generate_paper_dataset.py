@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.generate_paper_dataset import main
-from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
+from solver.gen_data.pipeline.types import PhysicalFamilyId
 from solver.gen_data.stokes_sampling import STOKES_PARAMETER_GROUPS
 
 
@@ -35,8 +35,8 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                 (
                     "--family",
                     "stokes",
-                    "--split",
-                    "validation",
+                    "--seed",
+                    "42",
                     "--num-simulations",
                     "4",
                     "--output-root",
@@ -49,12 +49,13 @@ class PaperDatasetGenerationTests(unittest.TestCase):
             self.assertEqual(
                 generate.call_args.kwargs["family_id"], PhysicalFamilyId.STOKES
             )
-            self.assertEqual(
-                generate.call_args.kwargs["dataset_split"], DatasetSplit.VALIDATION
-            )
+            self.assertEqual(generate.call_args.kwargs["seed"], 42)
             files = list(root.iterdir())
             self.assertEqual(len(files), 1)
             summary = json.loads(files[0].read_text())
+            self.assertEqual(files[0].name, "paper_dataset_stokes.summary.json")
+            self.assertEqual(summary["run_spec"]["seed"], 42)
+            self.assertNotIn("dataset_split", summary["run_spec"])
             self.assertEqual(summary["status"], "complete")
             self.assertEqual(summary["batch_paths"], ["batches/batch_000000.npz"])
             self.assertEqual(summary["counts"]["accepted"], 4)
@@ -98,8 +99,6 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                             *flags,
                             "--family",
                             "stokes",
-                            "--split",
-                            "validation",
                             "--num-simulations",
                             "4",
                             "--output-root",
@@ -110,6 +109,7 @@ class PaperDatasetGenerationTests(unittest.TestCase):
                     )
 
                 configure.assert_any_call("jax_enable_x64", True)
+                self.assertEqual(generate.call_args.kwargs["seed"], 2026072210)
                 configure.assert_any_call("jax_platforms", "cuda" if flags else "cpu")
                 self.assertEqual(
                     os.environ["CUDA_VISIBLE_DEVICES"], "7" if flags else ""

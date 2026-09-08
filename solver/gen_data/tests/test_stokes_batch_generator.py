@@ -16,7 +16,6 @@ import numpy as np  # noqa: E402
 
 from solver.gen_data.pipeline.batch_storage import load_completed_batch  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
-    DatasetSplit,
     SimulationRows,
 )
 from solver.gen_data.stokes_batch_generator import (  # noqa: E402
@@ -55,7 +54,7 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
                 parameter_groups,
                 11,
                 path,
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
             )
 
         self.assertEqual(
@@ -63,12 +62,12 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
             [
                 call(
                     parameter_groups[0],
-                    dataset_split=DatasetSplit.TEST,
+                    seed=2026072205,
                     attempt_number=11,
                 ),
                 call(
                     parameter_groups[1],
-                    dataset_split=DatasetSplit.TEST,
+                    seed=2026072205,
                     attempt_number=12,
                 ),
             ],

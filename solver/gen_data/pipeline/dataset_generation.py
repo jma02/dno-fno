@@ -8,7 +8,6 @@ from typing import TypeAlias
 
 from solver.gen_data.pipeline.batch_storage import load_completed_batch
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     RequestedSimulationsPerGroup,
 )
@@ -22,7 +21,7 @@ def generate_simulations(
     root: Path,
     *,
     family_id: PhysicalFamilyId,
-    dataset_split: DatasetSplit,
+    seed: int,
     requested_simulations_per_group: RequestedSimulationsPerGroup,
     batch_size: int,
     generate_batch: BatchGenerator,
@@ -30,7 +29,7 @@ def generate_simulations(
     """Generate the requested successful simulations for each parameter group."""
 
     family_name = family_id.name.lower()
-    directory = root / "batches" / family_name / dataset_split.value
+    directory = root / "batches" / family_name
     completed_batches = sorted(
         directory.glob("batch_*.npz"),
         key=lambda path: int(path.stem.removeprefix("batch_")),
@@ -45,8 +44,8 @@ def generate_simulations(
         batch = load_completed_batch(directory / f"batch_{batch_id:06d}.npz")
         if batch.family_id != family_id:
             raise RuntimeError("completed batch belongs to a different family")
-        if batch.dataset_split != dataset_split:
-            raise RuntimeError("completed batch belongs to a different dataset split")
+        if batch.seed != seed:
+            raise RuntimeError("completed batch belongs to a different seed")
 
         for group, succeeded in zip(
             batch.parameter_group_ids,

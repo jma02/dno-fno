@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum, IntEnum
-from typing import Any, Final, NamedTuple, TypeAlias, TypedDict
+from typing import Any, NamedTuple, TypeAlias, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
@@ -20,13 +20,6 @@ class PhysicalFamilyId(IntEnum):
     TANAKA = 2
     BENJAMIN_FEIR = 3
     JONSWAP_TMA = 4
-
-
-ROOT_SEED_BY_DATASET_SPLIT: Final = {
-    DatasetSplit.TRAIN: 2026072210,
-    DatasetSplit.VALIDATION: 2026072204,
-    DatasetSplit.TEST: 2026072205,
-}
 
 
 # Parameter-group name -> requested successful simulations; names come from the sampler.

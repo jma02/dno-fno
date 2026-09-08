@@ -16,7 +16,6 @@ from solver.gen_data.pipeline.batch_storage import (
     simulation_row_blocks,
 )
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -46,7 +45,6 @@ class BatchStorageTests(unittest.TestCase):
         self.path = batch_path(
             Path(self.temporary.name),
             family="tanaka",
-            split="train",
             batch_id=7,
         )
 
@@ -61,12 +59,13 @@ class BatchStorageTests(unittest.TestCase):
             ("low", "high", "low"),
             rows,
             family_id=PhysicalFamilyId.TANAKA,
-            dataset_split=DatasetSplit.TRAIN,
+            seed=2026072210,
         )
 
         batch = load_completed_batch(self.path)
         self.assertEqual(batch.family_id, PhysicalFamilyId.TANAKA)
-        self.assertEqual(batch.dataset_split, DatasetSplit.TRAIN)
+        self.assertEqual(batch.seed, 2026072210)
+        self.assertEqual(load_npz(self.path)["seed"].dtype, np.dtype(np.int64))
         self.assertEqual(batch.parameter_group_ids, ("low", "high", "low"))
         np.testing.assert_array_equal(
             batch.accepted_simulations,
@@ -89,7 +88,7 @@ class BatchStorageTests(unittest.TestCase):
                 ("low",),
                 (_simulation_rows(offset=9.0),),
                 family_id=PhysicalFamilyId.TANAKA,
-                dataset_split=DatasetSplit.TRAIN,
+                seed=2026072210,
             )
         np.testing.assert_array_equal(
             load_completed_batch(self.path).accepted_simulations,
@@ -102,7 +101,7 @@ class BatchStorageTests(unittest.TestCase):
             ("a", "b", "c"),
             (None, None, None),
             family_id=PhysicalFamilyId.JONSWAP_TMA,
-            dataset_split=DatasetSplit.TEST,
+            seed=2026072205,
         )
 
         batch = load_completed_batch(self.path)
@@ -129,7 +128,7 @@ class BatchStorageTests(unittest.TestCase):
                     ("group",),
                     (rows,),
                     family_id=PhysicalFamilyId.STOKES,
-                    dataset_split=DatasetSplit.VALIDATION,
+                    seed=2026072204,
                 )
             self.assertFalse(self.path.exists())
 
@@ -139,7 +138,7 @@ class BatchStorageTests(unittest.TestCase):
             ("group",),
             (_simulation_rows(frame_count=3),),
             family_id=PhysicalFamilyId.BENJAMIN_FEIR,
-            dataset_split=DatasetSplit.TRAIN,
+            seed=2026072210,
         )
         valid = load_npz(self.path)
         corruptions = (

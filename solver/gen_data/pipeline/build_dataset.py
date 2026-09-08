@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
 import math
 from pathlib import Path
@@ -11,26 +10,27 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from solver.gen_data.pipeline.batch_storage import load_completed_batch
-from solver.gen_data.pipeline.types import DatasetSplit
 
 
 def build_dataset(
     root: Path,
     batches: Sequence[Path],
     *,
+    seed: int = 42,
+    validation_fraction: float = 0.1,
+    test_fraction: float = 0.1,
     length: float = 2.0 * math.pi,
 ) -> Path:
-    """Save accepted rows and their family, group, simulation ID, and split.
-
-    Wave data is already saved. This function does not generate it.
-    Each simulation keeps the split assigned during generation. Rejected attempts
-    stay in the batch files; they have no rows in the training dataset.
-    """
+    """Split accepted simulations once, then save all their retained rows."""
     root = root.expanduser().resolve()
     if root.exists():
         raise FileExistsError(f"dataset output already exists: {root}")
+    batches = tuple(sorted(path.resolve() for path in batches))
+    if len(set(batches)) != len(batches):
+        raise ValueError("a completed batch must not appear twice")
 
     total_rows = 0
+    total_simulations = 0
     spatial_size: int | None = None
     group_width = 0
     # Count first so the final arrays can be filled one batch at a time.
@@ -44,9 +44,19 @@ def build_dataset(
             raise ValueError("all dataset batches must use the same spatial grid")
         spatial_size = nx
         total_rows += row_count
+        total_simulations += int(batch.accepted_simulations.sum())
         del batch
     if spatial_size is None:
         raise ValueError("a dataset must contain at least one accepted row")
+
+    # Assign each simulation once. Its snapshots never cross split boundaries.
+    order = np.random.default_rng(seed).permutation(total_simulations)
+    validation_count = int(total_simulations * validation_fraction)
+    test_count = int(total_simulations * test_fraction)
+    train_count = total_simulations - validation_count - test_count
+    splits = np.full(total_simulations, "train", dtype="U10")
+    splits[order[train_count : train_count + validation_count]] = "validation"
+    splits[order[train_count + validation_count :]] = "test"
 
     root.parent.mkdir(parents=True, exist_ok=True)
     # Publish the directory only when every array has been written successfully.
@@ -74,15 +84,10 @@ def build_dataset(
                 "dataset_split": "U10",
             }.items()
         }
-        next_simulation_id: defaultdict[tuple[int, DatasetSplit], int] = defaultdict(
-            int
-        )
+        next_simulation_id = 0
         first_row = 0
         for path in batches:
             batch = load_completed_batch(path)
-            family_split = (int(batch.family_id), batch.dataset_split)
-            first_simulation_id = next_simulation_id[family_split]
-            next_simulation_id[family_split] += len(batch.parameter_group_ids)
             if batch.shard is None:
                 continue
             shard = batch.shard
@@ -91,15 +96,18 @@ def build_dataset(
             for name in ("eta", "xi", "gxi", "depth", "time", "frame_index"):
                 arrays[name][rows] = shard[name]
             local_index = shard["simulation_local_index"]
-            arrays["simulation_id"][rows] = first_simulation_id + local_index.astype(
-                np.int64
+            accepted_indices, row_simulation = np.unique(
+                local_index, return_inverse=True
             )
+            simulation_ids = next_simulation_id + row_simulation
+            arrays["simulation_id"][rows] = simulation_ids
             arrays["family_id"][rows] = int(batch.family_id)
-            arrays["dataset_split"][rows] = batch.dataset_split.value
+            arrays["dataset_split"][rows] = splits[simulation_ids]
             arrays["parameter_group_id"][rows] = np.asarray(batch.parameter_group_ids)[
                 local_index
             ]
             first_row += row_count
+            next_simulation_id += accepted_indices.size
             del batch, shard
         for array in arrays.values():
             array.flush()

@@ -19,11 +19,7 @@ from solver.reference_solutions.stokes_wave import (
     FINITE_DEPTH_STOKES_URSELL_LIMIT,
     finite_depth_stokes_ursell_upper_bound,
 )
-from solver.gen_data.pipeline.types import (
-    ROOT_SEED_BY_DATASET_SPLIT,
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import PhysicalFamilyId
 
 
 StokesBranch: TypeAlias = Literal["finite", "deep"]
@@ -66,7 +62,7 @@ StokesSample = NamedTuple(
 def sample_stokes_simulation(
     parameter_group_id: str,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
     attempt_number: int,
 ) -> StokesSample | None:
     """Sample one Stokes state, or return ``None`` if amplitude redraws expire."""
@@ -76,13 +72,7 @@ def sample_stokes_simulation(
     ]
 
     rng = np.random.Generator(
-        np.random.PCG64(
-            (
-                ROOT_SEED_BY_DATASET_SPLIT[dataset_split],
-                PhysicalFamilyId.STOKES,
-                attempt_number,
-            )
-        )
+        np.random.PCG64((seed, PhysicalFamilyId.STOKES, attempt_number))
     )
     carrier_mode = carrier_modes[int(rng.integers(0, len(carrier_modes)))]
     wavenumber = 2.0 * math.pi * carrier_mode / PAPER_DOMAIN_LENGTH

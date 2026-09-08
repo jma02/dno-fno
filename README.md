@@ -3,7 +3,13 @@
 Minimal FNO training repo for the 1D Dirichlet--Neumann operator dataset.
 This repo assumes NVIDIA GPU execution for JAX training.
 
-## What is here
+For the current paper dataset and C27 training workflow, see
+[`scripts/README.md`](scripts/README.md) and the
+[dataset-generation guide](solver/gen_data/README.md). Generate simulations first,
+split them once when building the arrays, then train on shuffled rows. The C27
+launchers default to `outputs/paper_dataset/arrays`.
+
+## Baseline workflow
 
 - `data/dno_dataset.npz`: unified NumPy dataset with `soliton`, `stokes`, and `linear` samples.
 - `models/fno-jax/fno1d.py`: JAX/Flax FNO model.

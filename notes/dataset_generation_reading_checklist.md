@@ -4,9 +4,14 @@ Read these in order. Checkmarks track the completed simplification pass.
 The main path covers control flow and scientific choices; optional implementation
 details can usually be skimmed.
 
+Current workflow: choose simulation counts, generate without dataset splits,
+pool completed runs, split whole accepted simulations once, then train on shuffled
+rows. The builder imposes no family quotas; its default is a global 80/10/10 split
+with seed `42`. Generation has a separate seed, default `2026072210`.
+
 ## Main path
 
-- [x] `scripts/generate_paper_dataset.py` — command-line entry point and family dispatch
+- [x] `scripts/generate_paper_dataset.py` — requested simulation count, sampling seed, and family dispatch
 - [x] `solver/gen_data/pipeline/dataset_generation.py` — read saved progress, then finish each parameter group in batches with replacement attempts for failures
 - [x] `solver/gen_data/pipeline/trajectory_config.py` — the three fixed numerical rollout profiles
 - [x] `solver/gen_data/stokes_sampling.py` — Stokes parameter distribution
@@ -25,8 +30,15 @@ details can usually be skimmed.
 - [x] `solver/gen_data/pipeline/time_selection.py` — saved-time grids, frame selection, and dataset rows
 - [x] ~~`solver/gen_data/pipeline/trajectory_subsampling.py`~~ — folded into `time_selection.py`
 - [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
-- [x] `solver/gen_data/pipeline/build_dataset.py` — saved batches to training arrays and per-row simulation metadata
-- [x] `scripts/build_paper_dataset.py` — combination of all family/split runs
+- [x] `scripts/build_paper_dataset.py` — pool chosen completed runs and choose split fractions/seed
+- [x] `solver/gen_data/pipeline/build_dataset.py` — split whole accepted simulations once, then save their rows and metadata
+
+Continue into `train-jax-10m/util.py` for training-only normalization and shuffled
+row batches, then `train-jax-10m/1d_dno_fno_jax.py` for the training loop.
+`scripts/launch_c27_paper_dataset_full.sh` checks the arrays and launches C27;
+its default dataset is `outputs/paper_dataset/arrays`. Training uses all retained
+rows with no family reweighting; equal simulation counts need not mean equal row
+counts.
 
 ## Physical constructors worth reading separately
 

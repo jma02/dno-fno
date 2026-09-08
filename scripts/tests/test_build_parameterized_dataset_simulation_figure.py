@@ -12,7 +12,6 @@ from unittest import mock
 import numpy as np
 
 from scripts import build_parameterized_dataset_simulation_figure as illustration
-from scripts import render_paper_dataset_worst_simulations as renderer
 from scripts.tests.test_render_paper_dataset_worst_simulations import (
     _write_dataset,
 )
@@ -22,7 +21,7 @@ def _illustration_dataset(root: Path) -> Path:
     dataset = _write_dataset(
         root,
         tuple((family, 1) for family in illustration.FAMILY_ORDER),
-        simulation_ids=(10, 20, 30, 40),
+        accepted_attempts=(10, 20, 30, 40),
         categories=illustration.CENTRAL_VALIDATION_CATEGORIES,
     )
     # Put complete simulations out of ID order to exercise the median-ID rule.
@@ -49,8 +48,6 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
                         str(root / "figure"),
                     ],
                 ),
-                # Population validation has separate tests; this fixture has four small sources.
-                mock.patch.object(renderer, "validate_final_paper_dataset"),
                 redirect_stdout(io.StringIO()),
             ):
                 state = runpy.run_path(illustration.__file__, run_name="__main__")
@@ -62,7 +59,7 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
                 list(illustration.FAMILY_ORDER),
             )
             for row, simulation in enumerate(record["simulations"]):
-                self.assertEqual(simulation["simulation_id"], 20)
+                self.assertEqual(simulation["simulation_id"], row * 4 + 1)
                 self.assertEqual(simulation["selection"]["candidate_count"], 4)
                 self.assertEqual(
                     simulation["selection"]["lower_median_index_zero_based"], 1
@@ -112,7 +109,6 @@ class ParameterizedDatasetFigureTest(unittest.TestCase):
                         str(root / "figure"),
                     ],
                 ),
-                mock.patch.object(renderer, "validate_final_paper_dataset"),
                 self.assertRaisesRegex(ValueError, "frame indices"),
             ):
                 runpy.run_path(illustration.__file__, run_name="__main__")

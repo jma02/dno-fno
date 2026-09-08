@@ -5,7 +5,7 @@
 set -euo pipefail
 cd /home/johnma/dno-fno
 
-DATASET="${DATASET:-outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays}"
+DATASET="${DATASET:-outputs/paper_dataset/arrays}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 LR="${LR:-2e-5}"
 HADAMARD_WEIGHT="${HADAMARD_WEIGHT:-1e-2}"

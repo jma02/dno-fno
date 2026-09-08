@@ -15,7 +15,8 @@ GPU_SPEC="${GPU_SPEC:-A100-80GB:2}"
 GPU_TAG="${GPU_SPEC//:/x}"
 GPU_TAG="${GPU_TAG,,}"
 RUN_NAME="${RUN_NAME:-c27_all_family_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
-DATASET="/data/outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays"
+DATASET="${DATASET:-/data/outputs/paper_dataset/arrays}"
+EPOCHS="${EPOCHS:-40}"
 mkdir -p logs
 LOG="logs/${RUN_NAME}.log"
 
@@ -33,8 +34,8 @@ MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --batch-size 1024 \
   --lr 2e-5 \
   --weight-decay 1e-4 \
-  --epochs 40 \
-  --total-epochs 40 \
+  --epochs "$EPOCHS" \
+  --total-epochs "${TOTAL_EPOCHS:-$EPOCHS}" \
   --cs-mult-hidden 160 \
   --spawn \
   --trainer-args "$TRAINER_ARGS" 2>&1 | tee "$LOG"

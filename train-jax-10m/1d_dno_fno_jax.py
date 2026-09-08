@@ -441,7 +441,7 @@ def main() -> None:
     data_sharding = NamedSharding(mesh, P("batch"))
     replicated = NamedSharding(mesh, P())
 
-    dataset_path = REPO_ROOT / "data" / args.dataset
+    dataset_path = Path(args.dataset).expanduser().resolve()
     outputs_dir = REPO_ROOT / args.output_root
     outputs_dir.mkdir(parents=True, exist_ok=True)
     run_name = args.run_name or datetime.now().strftime("fno_jax_10m_%Y%m%d_%H%M%S")
@@ -450,7 +450,7 @@ def main() -> None:
 
     dataset = load_dataset_arrays(dataset_path)
     nx = int(dataset["x"].shape[0])
-    train_indices, val_indices, _ = build_dataset_split_indices(dataset, args.seed)
+    train_indices, val_indices, _ = build_dataset_split_indices(dataset)
     stats = dict(
         load_or_compute_stats(
             dataset_path,
@@ -460,18 +460,10 @@ def main() -> None:
     )
     stats["target_kind"] = "gxi"
     ns = NormStats.from_dict(stats, mode=args.norm)
-    if train_indices.size % args.batch_size != 0:
-        raise ValueError(
-            "training rows must be divisible by batch_size so every "
-            f"stored row is consumed; got {train_indices.size} rows and "
-            f"batch_size={args.batch_size}"
-        )
-    if val_indices.size % n_devices != 0:
-        raise ValueError(
-            "validation rows must be divisible by device count; got "
-            f"{val_indices.size} rows and {n_devices} devices"
-        )
-    train_steps_per_epoch = train_indices.shape[0] // args.batch_size
+    full_batches, remainder = divmod(train_indices.size, args.batch_size)
+    train_steps_per_epoch = (
+        full_batches + bool(remainder // n_devices) + bool(remainder % n_devices)
+    )
 
     domain_length = float(dataset["domain_length"])
     # FNO1d's linear-baseline path needs to recover physical xi from the normalized
@@ -908,15 +900,18 @@ def main() -> None:
             mode_balanced_metrics,
         )
 
-    train_step = jax.jit(
-        shard_map(
-            _train_step_body,
-            mesh=mesh,
-            in_specs=(P(), P(), P("batch"), P("batch"), P("batch"), P("batch")),
-            out_specs=(P(), P(), P(), P(), P()),
-            check_rep=False,
+    train_steps = {
+        partition: jax.jit(
+            shard_map(
+                _train_step_body,
+                mesh=mesh,
+                in_specs=(P(), P(), partition, partition, partition, partition),
+                out_specs=(P(), P(), P(), P(), P()),
+                check_rep=False,
+            )
         )
-    )
+        for partition in (P("batch"), P())
+    }
 
     def _eval_loss_body(
         current_params: FlatParams,
@@ -978,21 +973,18 @@ def main() -> None:
             jax.lax.pmean(tangent_loss, axis_name="batch"),
         )
 
-    eval_loss_step = jax.jit(
-        shard_map(
-            _eval_loss_body,
-            mesh=mesh,
-            in_specs=(
-                P(),
-                P("batch"),
-                P("batch"),
-                P("batch"),
-                P("batch"),
-            ),
-            out_specs=(P(), P(), P()),
-            check_rep=False,
+    eval_loss_steps = {
+        partition: jax.jit(
+            shard_map(
+                _eval_loss_body,
+                mesh=mesh,
+                in_specs=(P(), partition, partition, partition, partition),
+                out_specs=(P(), P(), P()),
+                check_rep=False,
+            )
         )
-    )
+        for partition in (P("batch"), P())
+    }
 
     best_val_loss = float("inf")
     best_epoch = 0
@@ -1060,22 +1052,15 @@ def main() -> None:
             train_indices,
             args.batch_size,
             epoch_rng,
-            drop_last=True,
+            device_count=n_devices,
         )
         batch_iter = (
             (eta_b, xi_b, gxi_b, depth_b)
             for eta_b, xi_b, gxi_b, depth_b, _ in batch_iter
         )
-        train_destinations = (
-            data_sharding,
-            data_sharding,
-            data_sharding,
-            data_sharding,
-        )
-        batch_iter = device_prefetch(
-            batch_iter, destinations=train_destinations, depth=2
-        )
+        batch_iter = device_prefetch(batch_iter, sharding=data_sharding, depth=2)
         batch_losses: list[float] = []
+        train_batch_sizes: list[int] = []
         hadamard_metric_sums = np.zeros(
             (len(hadamard_metric_names),),
             dtype=np.float64,
@@ -1095,6 +1080,10 @@ def main() -> None:
             leave=False,
         )
         for eta_b, xi_b, gxi_b, depth_b in train_bar:
+            train_batch_sizes.append(int(eta_b.shape[0]))
+            train_step = train_steps[
+                P("batch") if eta_b.shape[0] % n_devices == 0 else P()
+            ]
             train_rng, step_key = jax.random.split(train_rng)
             (
                 training_state,
@@ -1113,14 +1102,17 @@ def main() -> None:
                 jax.device_get(batch_translation_tangent_metrics),
                 dtype=np.float64,
             )
+            if eta_b.shape[0] % n_devices:
+                tangent_metrics_np[-1] /= n_devices
             mode_metrics_np = np.asarray(
                 jax.device_get(batch_mode_balanced_metrics),
                 dtype=np.float64,
             )
             if translation_tangent_weight > 0.0:
+                tangent_metrics_np[:-1] *= eta_b.shape[0]
                 translation_tangent_metric_sums += tangent_metrics_np
             if mode_balanced_weight > 0.0:
-                mode_balanced_metric_sums += mode_metrics_np
+                mode_balanced_metric_sums += mode_metrics_np * eta_b.shape[0]
             active_hadamard = bool(
                 hadamard_weight > 0.0 and hadamard_metrics_np[0] > 0.5
             )
@@ -1161,7 +1153,11 @@ def main() -> None:
                 f"{epoch_end_optimizer_count - epoch_start_optimizer_count}, "
                 f"expected {completed_steps}"
             )
-        train_loss = float(np.mean(batch_losses)) if batch_losses else float("inf")
+        train_loss = (
+            float(np.average(batch_losses, weights=train_batch_sizes))
+            if batch_losses
+            else float("inf")
+        )
 
         val_batches = get_batches(
             dataset["eta"],
@@ -1171,27 +1167,22 @@ def main() -> None:
             val_indices,
             args.batch_size,
             None,
-            drop_last=False,
+            device_count=n_devices,
         )
         val_batches = (
             (eta_b, xi_b, gxi_b, depth_b)
             for eta_b, xi_b, gxi_b, depth_b, _ in val_batches
         )
-        val_destinations = (
-            data_sharding,
-            data_sharding,
-            data_sharding,
-            data_sharding,
-        )
-        val_batches = device_prefetch(
-            val_batches, destinations=val_destinations, depth=2
-        )
+        val_batches = device_prefetch(val_batches, sharding=data_sharding, depth=2)
         val_data_losses: list[float] = []
         val_mode_losses: list[float] = []
         val_tangent_losses: list[float] = []
         val_batch_sizes: list[int] = []
         for eta_b, xi_b, gxi_b, depth_b in val_batches:
             val_batch_sizes.append(int(eta_b.shape[0]))
+            eval_loss_step = eval_loss_steps[
+                P("batch") if eta_b.shape[0] % n_devices == 0 else P()
+            ]
             (
                 data_bl,
                 mode_bl,
@@ -1243,8 +1234,7 @@ def main() -> None:
                 for name, value in zip(hadamard_metric_names[1:], hadamard_means[1:]):
                     epoch_record[name] = float(value)
         if translation_tangent_weight > 0.0:
-            n_batches = float(len(batch_losses)) if batch_losses else 1.0
-            tangent_means = translation_tangent_metric_sums / n_batches
+            tangent_means = translation_tangent_metric_sums / sum(train_batch_sizes)
             for name, value in zip(
                 translation_tangent_metric_names[1:-1], tangent_means[1:-1]
             ):
@@ -1253,8 +1243,7 @@ def main() -> None:
                 translation_tangent_metric_sums[-1] * n_devices
             )
         if mode_balanced_weight > 0.0:
-            n_batches = float(len(batch_losses)) if batch_losses else 1.0
-            mode_means = mode_balanced_metric_sums / n_batches
+            mode_means = mode_balanced_metric_sums / sum(train_batch_sizes)
             for name, value in zip(mode_balanced_metric_names[1:], mode_means[1:]):
                 epoch_record[name] = float(value)
         history.append(epoch_record)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import unittest
 
-from solver.gen_data.pipeline.types import DatasetSplit
 from solver.gen_data.tanaka_sampling import (
     MAIN_DEPTH_BOUNDS,
     MAIN_TOTAL_ALPHA_BOUNDS,
@@ -40,28 +39,28 @@ class TanakaSamplingTest(unittest.TestCase):
             },
         )
 
-    def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
+    def test_sampling_is_deterministic_for_seed_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
             TANAKA_PARAMETER_GROUPS, start=90
         ):
             with self.subTest(parameter_group=parameter_group_id):
                 first = sample_tanaka_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
                 second = sample_tanaka_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
-                validation = sample_tanaka_simulation(
+                different_seed = sample_tanaka_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.VALIDATION,
+                    seed=2026072204,
                     attempt_number=attempt_number,
                 )
                 self.assertEqual(first, second)
-                self.assertNotEqual(first, validation)
+                self.assertNotEqual(first, different_seed)
 
     def test_many_draws_obey_amplitude_depth_direction_and_separation_support(
         self,
@@ -75,7 +74,7 @@ class TanakaSamplingTest(unittest.TestCase):
             for attempt_number in range(512):
                 sample = sample_tanaka_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
                 alphas = tuple(crest.alpha for crest in sample.crests)

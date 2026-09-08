@@ -9,14 +9,16 @@ dataset:
 - JONSWAP/TMA random seas.
 
 The families use different initial-condition formulas, but share the same DNO
-target, split rules, acceptance checks, batch format, and dataset-array format.
+target, acceptance checks, batch format, and dataset-array format.
 Older implementations remain available in Git history and should not be mixed
 into a new dataset.
 
 ## Generation flow
 
-Each attempted simulation is numbered in order within one family/split run. Its
-family, split, and number determine its random draws. A run then:
+Choose the number of accepted simulations for each family run. Generation divides
+that count across the family's parameter groups; it imposes no cross-family quota.
+Each attempt's family, integer seed, and attempt number determine its random draws.
+The generation seed defaults to `2026072210`. A run then:
 
 1. samples parameters from one declared parameter group;
 2. constructs the initial state;
@@ -36,8 +38,11 @@ batch-size limit or that group's remaining quota. A group stops the run if it
 still needs successes after twice its requested count in attempts. This ordering
 controls generation only; it does not balance training epochs.
 
-All accepted trajectory rows stay together in one split. The generator never
-makes row-level train/validation/test splits.
+Generation does not assign dataset splits. After pooling completed runs, the
+builder randomly splits whole accepted simulations once, globally: 80% train,
+10% validation, and 10% test by default, with split seed `42`. Fractions are
+applied to simulation counts, not row counts; every simulation's snapshots stay
+together. There is no per-family stratification or balance requirement.
 
 ## Main modules
 
@@ -85,9 +90,11 @@ autonomous production rollout is checked separately.
 
 ## Stored files
 
-Each finished batch is one NPZ containing its family, split, parameter-group
+Each finished batch is one NPZ containing its family, seed, parameter-group
 assignments, and any accepted rows. Row ownership identifies accepted attempts;
 a batch with no accepted simulations simply omits the row arrays.
+Files live at `batches/<family>/batch_<number>.npz`; resume verifies the seed
+before reusing them.
 
 The NPZ is written to a temporary sibling and published only after it is
 complete. If generation stops before publication, the next run restarts the
@@ -102,23 +109,35 @@ The final dataset directory contains:
 - `frame_index.npy`: int32 frame number per row;
 - `x.npy`: the shared float64 spatial grid.
 
-Simulation IDs are scoped to a family/split. Only accepted simulations contribute
-rows. Training reads these arrays directly, selects the stored split, and shuffles
-its rows together; there is no manifest, trajectory map, or per-family epoch sampling.
+Simulation IDs are unique across the built dataset. Only accepted simulations
+contribute rows. Training memory-maps these arrays, uses the saved splits, and
+shuffles all training rows together each epoch. Normalization statistics come
+only from training rows and are reused for validation/test. There is no manifest,
+trajectory map, per-family reweighting, or per-simulation epoch sampling.
+
+Retained frames per accepted simulation remain family-specific: Stokes contributes
+1, Tanaka and Benjamin--Feir 200 each, and JONSWAP/TMA 16. Equal simulation counts
+therefore do not mean equal row counts or equal training contributions.
 
 ## Entrypoints
 
 The supported generation entrypoints live in `scripts/`:
 
-- `generate_paper_dataset.py` saves batches and a run summary for one family/split;
-- `build_paper_dataset.py` combines completed runs into one training dataset directory.
+- `generate_paper_dataset.py` takes a family, simulation count, and optional seed,
+  then saves batches and `paper_dataset_<family>.summary.json`;
+- `build_paper_dataset.py` pools completed runs, assigns the simulation split,
+  and writes one training dataset directory.
 
-The build command requires all 12 generation summaries: four families, each with
-train, validation, and test. Pass each using `--run-summary` and supply
-`--output-root`. Families must have equal successful simulation counts within each split.
-Existing completed batches can be exported without regenerating simulations.
-Use a new output directory (the C27 launchers expect `.../c16384_v01024_t01024/arrays`);
-allow about 100 GB of additional disk for the full dataset.
+Pass the chosen summaries with repeated `--run-summary` arguments and supply
+`--output-root`. Any completed runs can be pooled; all four families and equal
+counts are not required. Repeated runs of the same family must use different seeds
+and separate generation roots. The builder's `--seed`, `--validation-fraction`,
+and `--test-fraction` control splitting independently of generation.
+
+Existing completed batches can be exported without regenerating simulations;
+write to a new output directory. The C27 launchers default to
+`outputs/paper_dataset/arrays`. See [`scripts/README.md`](../../scripts/README.md)
+for generation, build, and training commands.
 
 ## Development checks
 

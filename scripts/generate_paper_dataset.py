@@ -1,4 +1,4 @@
-"""Generate one family and split of the paper dataset.
+"""Generate accepted simulations from one paper-dataset family.
 
 Existing completed batches are reused; an interrupted batch is run again from
 the beginning.
@@ -25,7 +25,6 @@ from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.dataset_generation import generate_simulations
 from solver.gen_data.pipeline.trajectory_config import PAPER_ROLLOUT_NUMERICS
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     RequestedSimulationsPerGroup,
 )
@@ -41,7 +40,6 @@ FAMILIES = {
     "benjamin_feir": BENJAMIN_FEIR_PARAMETER_GROUPS,
     "jonswap_tma": JONSWAP_TMA_PARAMETER_GROUPS,
 }
-SPLITS = ("train", "validation", "test")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -53,17 +51,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Physical paper-dataset family to generate.",
     )
     parser.add_argument(
-        "--split",
-        choices=SPLITS,
-        required=True,
-        help="Simulation-level dataset split.",
+        "--seed",
+        type=int,
+        default=2026072210,
+        help="Random seed for sampling simulations.",
     )
     parser.add_argument(
         "--num-simulations",
         type=int,
         required=True,
         help=(
-            "Number of valid simulations to generate for this family and split. "
+            "Number of valid simulations to generate for this family. "
             "Rejected attempts do not count."
         ),
     )
@@ -92,7 +90,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     output_root = args.output_root.expanduser().resolve()
-    dataset_split = DatasetSplit(args.split)
     family_parameter_groups = FAMILIES[args.family]
     per_group, remainder = divmod(args.num_simulations, len(family_parameter_groups))
     requested_simulations_per_group: RequestedSimulationsPerGroup = {
@@ -106,13 +103,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.family == "stokes":
         generate_batch = partial(
             generate_static_stokes_batch,
-            dataset_split=dataset_split,
+            seed=args.seed,
         )
     else:
         numerical = PAPER_ROLLOUT_NUMERICS[args.family]
         generate_batch = partial(
             generate_trajectory_batch,
-            dataset_split=dataset_split,
+            seed=args.seed,
             family=args.family,
             numerical=numerical,
             solver_batch_size=args.solver_batch_size,
@@ -122,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     attempts_per_group, completed_batches = generate_simulations(
         output_root,
         family_id=family_id,
-        dataset_split=dataset_split,
+        seed=args.seed,
         requested_simulations_per_group=requested_simulations_per_group,
         batch_size=args.batch_size,
         generate_batch=generate_batch,
@@ -147,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     run_spec: dict[str, object] = {
         "family_name": args.family,
         "family_id": int(family_id),
-        "dataset_split": dataset_split.value,
+        "seed": args.seed,
         "batch_size": args.batch_size,
         "accepted_simulation_count": sum(requested_simulations_per_group.values()),
         "quotas": [
@@ -173,9 +170,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "total": perf_counter() - total_started,
         },
     }
-    summary_path = (
-        output_root / f"paper_dataset_{args.family}_{dataset_split.value}.summary.json"
-    )
+    summary_path = output_root / f"paper_dataset_{args.family}.summary.json"
     write_json_atomic(summary_path, summary)
     output: dict[str, object] = {
         "status": summary["status"],

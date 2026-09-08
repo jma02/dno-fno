@@ -6,7 +6,6 @@ from pathlib import Path
 
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -19,7 +18,7 @@ def generate_static_stokes_batch(
     first_attempt_number: int,
     output_path: Path,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
 ) -> None:
     """Sample, evaluate, and save one static Stokes batch."""
 
@@ -27,7 +26,7 @@ def generate_static_stokes_batch(
     for offset, parameter_group_id in enumerate(parameter_group_ids):
         sample = sample_stokes_simulation(
             parameter_group_id,
-            dataset_split=dataset_split,
+            seed=seed,
             attempt_number=first_attempt_number + offset,
         )
         rows_by_simulation.append(
@@ -39,5 +38,5 @@ def generate_static_stokes_batch(
         parameter_group_ids,
         rows_by_simulation,
         family_id=PhysicalFamilyId.STOKES,
-        dataset_split=dataset_split,
+        seed=seed,
     )

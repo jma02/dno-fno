@@ -17,7 +17,6 @@ from scripts import render_paper_dataset_worst_simulations as renderer
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.build_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -27,12 +26,12 @@ def _write_dataset(
     root: Path,
     families: tuple[tuple[str, int], ...],
     *,
-    simulation_ids: tuple[int, ...] = (17,),
+    accepted_attempts: tuple[int, ...] = (17,),
     categories: dict[str, str] | None = None,
 ) -> Path:
     batches = []
     x = 2.0 * np.pi * np.arange(256) / 256
-    for family, frames in families:
+    for batch_index, (family, frames) in enumerate(families):
         scale = np.arange(1, frames + 1, dtype=np.float64)[:, None]
         rows = SimulationRows(
             eta=scale * np.sin(x),
@@ -41,20 +40,22 @@ def _write_dataset(
             depth=8.0,
             time=np.arange(frames, dtype=np.float64),
         )
-        batch = root / f"{family}.npz"
+        batch = root / f"batch_{batch_index:02d}.npz"
         attempts = tuple(
-            rows if index in simulation_ids else None
-            for index in range(max(simulation_ids) + 1)
+            rows if index in accepted_attempts else None
+            for index in range(max(accepted_attempts) + 1)
         )
         save_completed_batch(
             batch,
             ((categories or {}).get(family, "known"),) * len(attempts),
             attempts,
             family_id=PhysicalFamilyId(tuple(renderer.FAMILY_LABELS).index(family) + 1),
-            dataset_split=DatasetSplit.VALIDATION,
+            seed=42,
         )
         batches.append(batch)
-    return build_dataset(root / "dataset", batches)
+    return build_dataset(
+        root / "dataset", batches, validation_fraction=1.0, test_fraction=0.0
+    )
 
 
 class DatasetRenderingTests(unittest.TestCase):
@@ -64,10 +65,16 @@ class DatasetRenderingTests(unittest.TestCase):
             groups = renderer.load_dataset_groups(dataset)
             self.assertEqual([group.family for group in groups], ["stokes", "tanaka"])
             self.assertEqual([group.split for group in groups], ["validation"] * 2)
-            for group, first, count in zip(groups, (0, 1), (1, 4), strict=True):
+            for simulation_id, (group, first, count) in enumerate(
+                zip(groups, (0, 1), (1, 4), strict=True)
+            ):
                 self.assertEqual(
                     group.trajectories,
-                    (renderer.TrajectoryIndex(0, 17, "known", first, count),),
+                    (
+                        renderer.TrajectoryIndex(
+                            0, simulation_id, "known", first, count
+                        ),
+                    ),
                 )
             np.save(dataset / "frame_index.npy", np.zeros(5, dtype=np.int32))
             with self.assertRaisesRegex(ValueError, "frame indices"):

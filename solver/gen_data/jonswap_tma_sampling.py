@@ -22,11 +22,7 @@ from solver.gen_data.jonswap_tma import (
     finite_depth_angular_frequency,
     positive_mode_wavenumbers,
 )
-from solver.gen_data.pipeline.types import (
-    ROOT_SEED_BY_DATASET_SPLIT,
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import PhysicalFamilyId
 
 
 FloatArray: TypeAlias = NDArray[np.float64]
@@ -64,7 +60,7 @@ JonswapTmaSample = NamedTuple(
 def sample_jonswap_tma_simulation(
     parameter_group_id: str,
     *,
-    dataset_split: DatasetSplit,
+    seed: int,
     attempt_number: int,
     band: ResolvedBand,
 ) -> JonswapTmaSample:
@@ -74,13 +70,7 @@ def sample_jonswap_tma_simulation(
         parameter_group_id
     ]
     rng = np.random.Generator(
-        np.random.PCG64(
-            (
-                ROOT_SEED_BY_DATASET_SPLIT[dataset_split],
-                PhysicalFamilyId.JONSWAP_TMA,
-                attempt_number,
-            )
-        )
+        np.random.PCG64((seed, PhysicalFamilyId.JONSWAP_TMA, attempt_number))
     )
     peak_wavenumber = (
         2.0 * np.pi * int(rng.choice(PAPER_SHALLOW_PEAK_MODES)) / band.length

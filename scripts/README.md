@@ -22,24 +22,55 @@ training to the canonical JAX engine or `modal_train.py`; it is not another
 trainer implementation. Superseded exploratory and scheduled launch scripts
 remain available through Git history rather than in the working tree.
 
-Generation saves batches and a run summary. Combine completed runs into a dataset
-directory with `scripts/build_paper_dataset.py`, passing all 12 summaries via
-repeated `--run-summary` arguments (four families × train/validation/test).
-Choose `--output-root` for the resulting NPY arrays; partial exports are not supported.
-Existing completed batches can be reused without rerunning simulations. Export
-to a new directory; allow about 100 GB of additional disk for the full dataset:
+Generate the requested number of accepted simulations for each chosen family.
+Generation uses `--seed` (default `2026072210`), not a train/validation/test split:
 
 ```sh
-uv run python scripts/build_paper_dataset.py --run-summary ... \
-  --output-root outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays
+uv run python scripts/generate_paper_dataset.py --family stokes \
+  --num-simulations 100 --batch-size 32 \
+  --output-root outputs/paper_dataset/generated
 ```
 
-Local paper training and Modal training take that directory as `--dataset`; no
-manifest or trajectory map is needed. Upload its arrays for Modal training with:
+The count above is just a small example; choose each family's count explicitly.
+Generation saves batches and `paper_dataset_<family>.summary.json`. Pool any
+completed runs with repeated `--run-summary` arguments; the builder requires
+neither all four families nor equal family counts. It randomly assigns whole
+accepted simulations to a global 80/10/10 train/validation/test split once, using
+its separate `--seed` (default `42`). All snapshots from a simulation stay together.
+Use `--validation-fraction` and `--test-fraction` to change those proportions.
 
 ```sh
-modal run scripts/modal_train.py::upload_dataset --dataset outputs/.../arrays
-modal run scripts/modal_train.py::train --dataset /data/outputs/.../arrays
+uv run python scripts/build_paper_dataset.py \
+  --run-summary outputs/paper_dataset/generated/paper_dataset_stokes.summary.json \
+  --output-root outputs/paper_dataset/arrays
+```
+
+Export to a new directory; existing arrays are not overwritten. Existing completed
+batches can be exported again without rerunning simulations. Storage depends on
+the chosen simulation counts and retained frames: the three float32 fields alone
+need `12 × rows × grid_points` bytes.
+
+Local and Modal training take the array directory as `--dataset`. Normalization
+is fitted on training rows only, then reused for validation/test. Each epoch
+shuffles all retained training rows together, without family reweighting or
+one-frame-per-simulation sampling. Simulation counts and retained-frame counts
+therefore determine each family's contribution to training.
+
+The C27 launchers default to `outputs/paper_dataset/arrays`:
+
+```sh
+PREFLIGHT_ONLY=1 bash scripts/launch_c27_paper_dataset_full.sh
+bash scripts/launch_c27_paper_dataset_full.sh
+```
+
+The first command checks loading and training-only normalization without training.
+The second starts a fresh run; set `EPOCHS` to change its length.
+
+Upload the arrays for Modal training with:
+
+```sh
+modal run scripts/modal_train.py::upload_dataset --dataset outputs/paper_dataset/arrays
+modal run scripts/modal_train.py::train --dataset /data/outputs/paper_dataset/arrays
 ```
 
 Compare two saved evaluation archives directly:

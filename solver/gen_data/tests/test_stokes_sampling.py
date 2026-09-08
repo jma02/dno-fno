@@ -15,7 +15,6 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 from solver.gen_data.stokes_sampling import (  # noqa: E402
     DEEP_DEPTH_BOUNDS,
     DEEP_DEPTH_WAVENUMBER_MINIMUM,
@@ -40,11 +39,11 @@ def sample_stokes(
     parameter_group_id: str,
     *,
     attempt_number: int,
-    dataset_split: DatasetSplit = DatasetSplit.TRAIN,
+    seed: int = 2026072210,
 ) -> StokesSample | None:
     return sample_stokes_simulation(
         parameter_group_id,
-        dataset_split=dataset_split,
+        seed=seed,
         attempt_number=attempt_number,
     )
 
@@ -65,7 +64,7 @@ class StokesSamplingTest(unittest.TestCase):
             },
         )
 
-    def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
+    def test_sampling_is_deterministic_for_seed_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
             STOKES_PARAMETER_GROUPS, start=90
         ):
@@ -78,13 +77,13 @@ class StokesSamplingTest(unittest.TestCase):
                     parameter_group_id,
                     attempt_number=attempt_number,
                 )
-                validation = sample_stokes(
+                different_seed = sample_stokes(
                     parameter_group_id,
                     attempt_number=attempt_number,
-                    dataset_split=DatasetSplit.VALIDATION,
+                    seed=2026072204,
                 )
                 self.assertEqual(first, second)
-                self.assertNotEqual(first, validation)
+                self.assertNotEqual(first, different_seed)
 
     def test_many_draws_cover_modes_and_obey_support(self) -> None:
         for parameter_group_id, (

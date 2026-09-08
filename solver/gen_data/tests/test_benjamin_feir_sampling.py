@@ -19,7 +19,6 @@ from solver.gen_data.benjamin_feir_sampling import (
     PAPER_PERTURBATION_RATIO_MAX,
     sample_benjamin_feir_simulation,
 )
-from solver.gen_data.pipeline.types import DatasetSplit
 
 
 class BenjaminFeirSamplingTest(unittest.TestCase):
@@ -34,28 +33,28 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
         self.assertEqual(tuple(BENJAMIN_FEIR_PARAMETER_GROUPS.values()), expected)
         self.assertEqual(len(BENJAMIN_FEIR_PARAMETER_GROUPS), 66)
 
-    def test_sampling_is_deterministic_for_split_group_and_attempt(self) -> None:
+    def test_sampling_is_deterministic_for_seed_group_and_attempt(self) -> None:
         for attempt_number, parameter_group_id in enumerate(
             BENJAMIN_FEIR_PARAMETER_GROUPS, start=90
         ):
             with self.subTest(parameter_group=parameter_group_id):
                 first = sample_benjamin_feir_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
                 second = sample_benjamin_feir_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
-                validation = sample_benjamin_feir_simulation(
+                different_seed = sample_benjamin_feir_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.VALIDATION,
+                    seed=2026072204,
                     attempt_number=attempt_number,
                 )
                 self.assertEqual(first, second)
-                self.assertNotEqual(first, validation)
+                self.assertNotEqual(first, different_seed)
 
     def test_many_draws_obey_mode_steepness_and_sideband_support(self) -> None:
         for parameter_group_id, (
@@ -65,7 +64,7 @@ class BenjaminFeirSamplingTest(unittest.TestCase):
             for attempt_number in range(128):
                 sample = sample_benjamin_feir_simulation(
                     parameter_group_id,
-                    dataset_split=DatasetSplit.TRAIN,
+                    seed=2026072210,
                     attempt_number=attempt_number,
                 )
                 self.assertEqual(sample.carrier_mode, carrier_mode)

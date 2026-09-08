@@ -8,8 +8,7 @@ Typical use::
 
     uv run python -m solver.evals.eval_suite \
         --run_dir outputs/c27_rerun \
-        --dataset outputs/paper_dataset_literature_aligned_v1/combined/\
-c16384_v01024_t01024/arrays \
+        --dataset outputs/paper_dataset/arrays \
         --n_ics 16 --gpu
 """
 
@@ -44,10 +43,7 @@ from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # 
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_DATASET = (
-    REPO_ROOT
-    / "outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays"
-)
+DEFAULT_DATASET = REPO_ROOT / "outputs/paper_dataset/arrays"
 RolloutPayload = dict[str, np.ndarray | float]
 TRUTH_DRIFT_TOL = 1e-3
 TERMINAL_FAILURE_THRESHOLDS = (0.25, 0.5, 0.75, 1.0)

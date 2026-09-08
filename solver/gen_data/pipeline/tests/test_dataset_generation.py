@@ -15,7 +15,6 @@ from solver.gen_data.pipeline.dataset_generation import (
     generate_simulations,
 )
 from solver.gen_data.pipeline.types import (
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
     RequestedSimulationsPerGroup,
@@ -24,7 +23,7 @@ from solver.gen_data.pipeline.types import (
 
 FAMILY_NAME = "tanaka"
 FAMILY_ID = PhysicalFamilyId.TANAKA
-DATASET_SPLIT = DatasetSplit.TRAIN
+SEED = 2026072210
 
 
 class InjectedInterruption(RuntimeError):
@@ -40,7 +39,7 @@ def _generate(
     return generate_simulations(
         root,
         family_id=FAMILY_ID,
-        dataset_split=DATASET_SPLIT,
+        seed=SEED,
         requested_simulations_per_group=requested_simulations_per_group,
         batch_size=batch_size,
         generate_batch=generate_batch,
@@ -83,7 +82,7 @@ def _fake_generator(
             parameter_group_ids,
             rows_by_simulation,
             family_id=FAMILY_ID,
-            dataset_split=DATASET_SPLIT,
+            seed=SEED,
         )
 
     return generate_batch, calls
@@ -138,7 +137,7 @@ class DatasetGenerationTests(unittest.TestCase):
                 )
                 with self.assertRaises(InjectedInterruption):
                     _generate(root, targets, 2, interrupt)
-                directory = root / "batches" / FAMILY_NAME / DATASET_SPLIT.value
+                directory = root / "batches" / FAMILY_NAME
                 self.assertEqual(len(tuple(directory.glob("*.npz"))), completed_count)
                 generator, resumed_calls = _fake_generator(rejected_attempts=rejected)
                 attempts, paths = _generate(root, targets, 2, generator)
@@ -149,6 +148,22 @@ class DatasetGenerationTests(unittest.TestCase):
                         self.assertEqual(a.files, b.files)
                         for name in a.files:
                             np.testing.assert_array_equal(a[name], b[name])
+
+    def test_resume_rejects_a_different_sampling_seed(self) -> None:
+        generator, _ = _fake_generator()
+        targets = {"main_m1_q0": 1}
+        _generate(self.root, targets, 1, generator)
+        must_not_run, calls = _fake_generator(interrupt_after_batches=0)
+        with self.assertRaisesRegex(RuntimeError, "different seed"):
+            generate_simulations(
+                self.root,
+                family_id=FAMILY_ID,
+                seed=SEED + 1,
+                requested_simulations_per_group=targets,
+                batch_size=1,
+                generate_batch=must_not_run,
+            )
+        self.assertEqual(calls, [])
 
     def test_generation_respects_attempt_limit(self) -> None:
         for requested, batch_size in ((32, 32), (5, 3)):
@@ -195,9 +210,7 @@ class DatasetGenerationTests(unittest.TestCase):
                 generator(
                     ("main_m1_q1",) * saved_count,
                     0,
-                    batch_path(
-                        root, family=FAMILY_NAME, split=DATASET_SPLIT.value, batch_id=0
-                    ),
+                    batch_path(root, family=FAMILY_NAME, batch_id=0),
                 )
                 must_not_run, _ = _fake_generator(interrupt_after_batches=0)
                 with self.assertRaisesRegex(RuntimeError, error):
@@ -217,7 +230,6 @@ class DatasetGenerationTests(unittest.TestCase):
             batch_path(
                 self.root,
                 family=FAMILY_NAME,
-                split=DATASET_SPLIT.value,
                 batch_id=1,
             ),
         )

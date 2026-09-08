@@ -50,7 +50,6 @@ from solver.gen_data.pipeline.time_selection import (  # noqa: E402
     subsample_trajectories,
 )
 from solver.gen_data.pipeline.types import (  # noqa: E402
-    DatasetSplit,
     PhysicalFamilyId,
     SimulationRows,
 )
@@ -100,14 +99,14 @@ def _generate(
     return generate_simulations(
         root,
         family_id=PhysicalFamilyId[family.upper()],
-        dataset_split=DatasetSplit.TEST,
+        seed=2026072205,
         requested_simulations_per_group=dict(
             zip(parameter_group_ids, targets, strict=True)
         ),
         batch_size=batch_size,
         generate_batch=partial(
             generate_trajectory_batch,
-            dataset_split=DatasetSplit.TEST,
+            seed=2026072205,
             family=family,
             numerical=numerical,
             solver_batch_size=batch_size if family == "jonswap_tma" else None,
@@ -332,7 +331,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                         groups,
                         0,
                         output,
-                        dataset_split=DatasetSplit.TEST,
+                        seed=2026072205,
                         family="jonswap_tma",
                         numerical=numerical,
                         solver_batch_size=2,
@@ -376,7 +375,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                     (group,),
                     0,
                     output,
-                    dataset_split=DatasetSplit.TEST,
+                    seed=2026072205,
                     family=family,
                     numerical=numerical,
                     solver_batch_size=1,
@@ -414,7 +413,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 groups,
                 0,
                 output_path,
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 family="jonswap_tma",
                 numerical=numerical,
                 solver_batch_size=2,
@@ -425,7 +424,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
         for offset, group in enumerate(groups):
             sample = sample_jonswap_tma_simulation(
                 group,
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 attempt_number=offset,
                 band=band,
             )
@@ -472,7 +471,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 groups,
                 0,
                 output_path,
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 family="benjamin_feir",
                 numerical=numerical,
             )
@@ -481,7 +480,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
         for offset, group in enumerate(groups):
             sample = sample_benjamin_feir_simulation(
                 group,
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 attempt_number=offset,
             )
             carrier_wavenumber = 2.0 * math.pi * sample.carrier_mode / numerical.length
@@ -507,7 +506,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                 ("shallow__gamma_1__right_0",),
                 0,
                 self.root / "batch.npz",
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 family="jonswap_tma",
                 numerical=_config(),
             )

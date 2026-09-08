@@ -30,7 +30,6 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     PAPER_ROLLOUT_NUMERICS,
     RolloutNumerics,
 )
-from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 from solver.gen_data.tanaka_sampling import (  # noqa: E402
     sample_tanaka_simulation,
 )
@@ -110,7 +109,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         tanaka_samples = tuple(
             sample_tanaka_simulation(
                 "main_m1_q0",
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 attempt_number=19,
             )
             for _ in range(2)
@@ -118,7 +117,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         bf_samples = tuple(
             sample_benjamin_feir_simulation(
                 "n_c_04__delta_n_01",
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 attempt_number=23,
             )
             for _ in range(2)
@@ -126,7 +125,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         jonswap_samples = tuple(
             sample_jonswap_tma_simulation(
                 "finite__gamma_1__right_0",
-                dataset_split=DatasetSplit.TEST,
+                seed=2026072205,
                 attempt_number=29,
                 band=band,
             )
@@ -169,7 +168,7 @@ class TrajectoryFamilyAdapterTest(unittest.TestCase):
         band = _resolved_band(config)
         sample = sample_jonswap_tma_simulation(
             "finite__gamma_1__right_0",
-            dataset_split=DatasetSplit.TEST,
+            seed=2026072205,
             attempt_number=31,
             band=band,
         )
