@@ -459,69 +459,20 @@ def main() -> None:
     checkpoint_async_manager = checkpoints.AsyncManager(max_workers=1)
 
     config_payload: dict[str, object] = {
-        "model": args.model,
-        "norm": args.norm,
-        "dataset": args.dataset,
+        **vars(args),
+        "run_name": run_name,
+        "total_epochs": schedule_epochs,
         "device": backend,
         "device_count": n_devices,
-        "width": args.width,
-        "n_blocks": args.n_blocks,
-        "batch_size": args.batch_size,
-        "lr": args.lr,
-        "lr_warmup_steps": int(args.lr_warmup_steps),
-        "epochs": args.epochs,
-        "total_epochs": schedule_epochs,
-        "weight_decay": args.weight_decay,
-        "early_stopping_patience": args.early_stopping_patience,
         "param_count": count_params(params),
         "train_examples": int(train_indices.shape[0]),
         "val_examples": int(val_indices.shape[0]),
+        "domain_length": domain_length,
+        "xi_scale": xi_scale,
+        "eta_scale": eta_scale,
+        "target_scale": target_scale,
+        "translation_tangent_scope": "all_nonflat_rows",
     }
-    config_payload["domain_length"] = domain_length
-    config_payload["xi_scale"] = xi_scale
-    config_payload["eta_scale"] = eta_scale
-    config_payload["target_scale"] = target_scale
-    config_payload["translation_tangent_weight"] = float(
-        args.translation_tangent_weight
-    )
-    config_payload["translation_tangent_smoothing_scale"] = float(
-        args.translation_tangent_smoothing_scale
-    )
-    config_payload["translation_tangent_denominator_eps"] = float(
-        args.translation_tangent_denominator_eps
-    )
-    config_payload["translation_tangent_scope"] = "all_nonflat_rows"
-    config_payload["mode_balanced_weight"] = float(args.mode_balanced_weight)
-    config_payload["mode_balanced_warmup_steps"] = int(args.mode_balanced_warmup_steps)
-    config_payload["mode_balanced_k_max"] = float(args.mode_balanced_k_max)
-    config_payload["mode_balanced_activity_threshold"] = float(
-        args.mode_balanced_activity_threshold
-    )
-    config_payload["mode_balanced_denominator_eps"] = float(
-        args.mode_balanced_denominator_eps
-    )
-    config_payload["hadamard_weight"] = float(args.hadamard_weight)
-    config_payload["hadamard_interval"] = int(args.hadamard_interval)
-    config_payload["hadamard_microbatch"] = int(args.hadamard_microbatch)
-    config_payload["hadamard_warmup_steps"] = int(args.hadamard_warmup_steps)
-    config_payload["hadamard_k_max"] = float(args.hadamard_k_max)
-    config_payload["hadamard_sobolev_order"] = int(args.hadamard_sobolev_order)
-    config_payload["hadamard_fd_step_min"] = float(args.hadamard_fd_step_min)
-    config_payload["hadamard_fd_step_max"] = float(args.hadamard_fd_step_max)
-    config_payload["hadamard_eta_scale_floor"] = float(args.hadamard_eta_scale_floor)
-    config_payload["hadamard_denominator_floor"] = float(
-        args.hadamard_denominator_floor
-    )
-    if args.model == "fno":
-        config_payload["modes"] = args.modes
-    if args.model == "cs_dno":
-        config_payload["latent"] = args.latent
-        config_payload["cs_n_polys"] = args.cs_n_polys
-        config_payload["cs_use_first_deriv"] = bool(args.cs_use_first_deriv)
-        config_payload["cs_use_second_deriv"] = bool(args.cs_use_second_deriv)
-        config_payload["cs_use_half_deriv"] = bool(args.cs_use_half_deriv)
-        config_payload["cs_use_hilbert"] = bool(args.cs_use_hilbert)
-        config_payload["cs_mult_hidden"] = args.cs_mult_hidden
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
 
