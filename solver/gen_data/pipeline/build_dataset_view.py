@@ -29,11 +29,7 @@ def build_dataset_view(
     name: str = "paper_dataset",
     length: float = 2.0 * math.pi,
 ) -> DatasetViewPaths:
-    """Write the dataset's JSON file list and NPZ row-to-simulation map.
-
-    Batches keep the supplied order. Rejected simulations are recorded
-    but contribute no data rows.
-    """
+    """Write the dataset's JSON file list and NPZ row-to-simulation map."""
 
     if not name or any(
         not (character.isascii() and (character.isalnum() or character in "_-"))
