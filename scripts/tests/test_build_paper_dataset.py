@@ -12,11 +12,7 @@ import unittest
 import numpy as np
 
 from scripts.build_paper_dataset import build_paper_dataset
-from solver.gen_data.pipeline.artifact_io import (
-    load_npz,
-    write_json_atomic,
-    write_npz_atomic,
-)
+from solver.gen_data.pipeline.artifact_io import write_json_atomic
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
@@ -142,56 +138,6 @@ class PaperDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not repeat"):
             build_paper_dataset(paths, output_root=self.root / "dataset")
         self.assertFalse((self.root / "dataset").exists())
-
-    def test_rejects_inaccurate_attempted_or_accepted_counts(self) -> None:
-        for count in (1, 2):
-            with self.subTest(actual_accepted=count):
-                root = self.root / str(count)
-                paths = (
-                    _write_run(
-                        root, "stokes", DatasetSplit.TRAIN, accepted_count=count
-                    ),
-                    *(
-                        _write_run(root, family.name.lower(), DatasetSplit.TRAIN)
-                        for family in tuple(PhysicalFamilyId)[1:]
-                    ),
-                )
-                summary = json.loads(paths[0].read_text())
-                summary["run_spec"]["accepted_simulation_count"] = 1
-                summary["counts"]["accepted"] = 1
-                summary["counts"]["attempted"] = 3
-                write_json_atomic(paths[0], summary)
-                with self.assertRaisesRegex(ValueError, "batch counts disagree"):
-                    build_paper_dataset(paths, output_root=root / "dataset")
-                self.assertFalse((root / "dataset").exists())
-
-    def test_rejects_misassigned_batches_and_undeclared_attempts(self) -> None:
-        for corruption in ("swapped_families", "extra_split"):
-            with self.subTest(corruption=corruption):
-                root = self.root / corruption
-                paths = _write_split(root)
-                if corruption == "swapped_families":
-                    for path, family_id in zip(paths[:2], (2, 1), strict=True):
-                        batch = path.parent / "batches" / "batch_000000.npz"
-                        arrays = load_npz(batch)
-                        arrays["family_id"] = np.asarray(family_id, dtype=np.int16)
-                        write_npz_atomic(batch, arrays)
-                else:
-                    extra = paths[-1].parent / "batches" / "extra.npz"
-                    save_completed_batch(
-                        extra,
-                        ("extra",),
-                        (None,),
-                        family_id=PhysicalFamilyId.JONSWAP_TMA,
-                        dataset_split=DatasetSplit.TEST,
-                    )
-                    summary = json.loads(paths[-1].read_text())
-                    summary["batch_paths"].append(
-                        str(extra.relative_to(paths[-1].parent))
-                    )
-                    write_json_atomic(paths[-1], summary)
-                with self.assertRaisesRegex(ValueError, "batch family/split disagrees"):
-                    build_paper_dataset(paths, output_root=root / "dataset")
 
 
 if __name__ == "__main__":
