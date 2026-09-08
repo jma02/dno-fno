@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -74,10 +75,7 @@ class CheckpointMetadata(TypedDict):
 
 def save_checkpoint(
     output_dir: Path,
-    epoch: int,
     state: train_state.TrainState,
-    train_loss: float,
-    val_loss: float,
     history: list[dict[str, float]],
     best_val_loss: float,
     best_epoch: int,
@@ -94,9 +92,9 @@ def save_checkpoint(
     }
 
     metadata = {
-        "epoch": epoch,
-        "train_loss": train_loss,
-        "val_loss": val_loss,
+        "epoch": int(history[-1]["epoch"]),
+        "train_loss": history[-1]["train_loss"],
+        "val_loss": history[-1]["val_loss"],
         "history": history,
         "best_val_loss": best_val_loss,
         "best_epoch": best_epoch,
@@ -105,7 +103,7 @@ def save_checkpoint(
     checkpoints.save_checkpoint(
         ckpt_dir=output_dir,
         target=payload,
-        step=epoch,
+        step=metadata["epoch"],
         prefix="ckpt_",
         keep=2,
         overwrite=True,
@@ -178,18 +176,10 @@ def main() -> None:
         help="Highest power of η used in the CS-DNO spatial features. "
         "n_polys=3 includes η, η², η³.",
     )
-    parser.add_argument(
-        "--cs_use_first_deriv", action=argparse.BooleanOptionalAction, default=True
-    )
-    parser.add_argument(
-        "--cs_use_second_deriv", action=argparse.BooleanOptionalAction, default=True
-    )
-    parser.add_argument(
-        "--cs_use_half_deriv", action=argparse.BooleanOptionalAction, default=True
-    )
-    parser.add_argument(
-        "--cs_use_hilbert", action=argparse.BooleanOptionalAction, default=True
-    )
+    for feature in ("first_deriv", "second_deriv", "half_deriv", "hilbert"):
+        parser.add_argument(
+            f"--cs_use_{feature}", action=argparse.BooleanOptionalAction, default=True
+        )
     parser.add_argument(
         "--cs_mult_hidden",
         type=int,
@@ -274,7 +264,7 @@ def main() -> None:
         "--mode_balanced_activity_threshold",
         type=float,
         default=1e-4,
-        help="Downweight weak Fourier modes. At 1e-4, a mode with 0.01% of the "
+        help="Downweight weak Fourier modes. At 1e-4, a mode with 0.01%% of the "
         "strongest mode's strength in the same sample gets about half weight.",
     )
     parser.add_argument(
@@ -370,7 +360,6 @@ def main() -> None:
 
     dataset_path = Path(args.dataset).expanduser().resolve()
     outputs_dir = REPO_ROOT / args.output_root
-    outputs_dir.mkdir(parents=True, exist_ok=True)
     run_name = args.run_name or datetime.now().strftime("fno_jax_10m_%Y%m%d_%H%M%S")
     run_dir = outputs_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -426,7 +415,6 @@ def main() -> None:
             jnp.zeros((1, nx, 2), dtype=training_dtype),
             jnp.zeros((1, 1), dtype=training_dtype),
         )["params"]
-    loss_fn = relative_l2_loss
 
     schedule_epochs = (
         args.total_epochs if args.total_epochs is not None else args.epochs
@@ -475,37 +463,76 @@ def main() -> None:
         stats, args.norm
     )
 
-    gravity = 1.0
     log_h_max = float(np.log(5.0))
-    translation_tangent_weight = float(args.translation_tangent_weight)
     translation_tangent_cfg = TranslationTangentConfig(
-        smoothing_scale=float(args.translation_tangent_smoothing_scale),
-        denominator_eps=float(args.translation_tangent_denominator_eps),
-        gravity=gravity,
+        smoothing_scale=args.translation_tangent_smoothing_scale,
+        denominator_eps=args.translation_tangent_denominator_eps,
     )
-    mode_balanced_weight = float(args.mode_balanced_weight)
-    mode_balanced_warmup_steps = int(args.mode_balanced_warmup_steps)
     mode_balanced_cfg = ModeBalancedConfig(
-        k_max=float(args.mode_balanced_k_max),
-        gravity=gravity,
-        activity_threshold=float(args.mode_balanced_activity_threshold),
-        denominator_eps=float(args.mode_balanced_denominator_eps),
+        k_max=args.mode_balanced_k_max,
+        activity_threshold=args.mode_balanced_activity_threshold,
+        denominator_eps=args.mode_balanced_denominator_eps,
     )
-    hadamard_weight = float(args.hadamard_weight)
-    hadamard_interval = int(args.hadamard_interval)
-    hadamard_microbatch_local = int(args.hadamard_microbatch) // n_devices
-    hadamard_warmup_steps = int(args.hadamard_warmup_steps)
+    hadamard_microbatch_local = args.hadamard_microbatch // n_devices
     hadamard_cfg = HadamardRegConfig(
-        k_max=float(args.hadamard_k_max),
-        sobolev_order=int(args.hadamard_sobolev_order),
-        fd_step_min=float(args.hadamard_fd_step_min),
-        fd_step_max=float(args.hadamard_fd_step_max),
-        eta_scale_floor=float(args.hadamard_eta_scale_floor),
-        denominator_floor=float(args.hadamard_denominator_floor),
+        k_max=args.hadamard_k_max,
+        sobolev_order=args.hadamard_sobolev_order,
+        fd_step_min=args.hadamard_fd_step_min,
+        fd_step_max=args.hadamard_fd_step_max,
+        eta_scale_floor=args.hadamard_eta_scale_floor,
+        denominator_floor=args.hadamard_denominator_floor,
     )
     _, _k_grid = build_grid(nx, domain_length)
     k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
+
+    def loss_components(
+        current_params: FlatParams,
+        eta: jax.Array,
+        xi: jax.Array,
+        gxi: jax.Array,
+        batch_depth: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
+        batch_targets = norm_targets_jax(gxi)
+        predictions = cast(
+            jax.Array,
+            model.apply(
+                {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth
+            ),
+        )
+        data_loss = relative_l2_loss(predictions, batch_targets)
+        h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
+        gxi_prediction = denorm_targets_jax(predictions)[..., 0]
+        mode_loss = jnp.float32(0.0)
+        if args.mode_balanced_weight > 0.0:
+            mode_loss = compute_mode_balanced_loss(
+                eta=eta,
+                gxi_prediction=gxi_prediction,
+                gxi_target=denorm_targets_jax(batch_targets)[..., 0],
+                depth=h_phys,
+                k_rfft=k_rfft_jax,
+                config=mode_balanced_cfg,
+            )
+        tangent_loss = jnp.float32(0.0)
+        if args.translation_tangent_weight > 0.0:
+            tangent_loss, local_selected = compute_translation_tangent_loss(
+                eta=eta,
+                gxi_prediction=gxi_prediction,
+                gxi_target=gxi,
+                depth=h_phys,
+                k=k_grid_jax,
+                config=translation_tangent_cfg,
+            )
+            global_selected = jax.lax.psum(local_selected, axis_name="batch")
+            device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
+            shard_weight = (
+                device_count
+                * local_selected
+                / jnp.maximum(global_selected, jnp.float32(1.0))
+            )
+            tangent_loss = tangent_loss * shard_weight
+        return data_loss, mode_loss, tangent_loss
 
     def _train_step_body(
         current_state: train_state.TrainState,
@@ -515,70 +542,29 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
-        eta = eta.astype(training_dtype)
-        xi = xi.astype(training_dtype)
-        gxi = gxi.astype(training_dtype)
-        batch_depth = batch_depth.astype(training_dtype)
-        batch_inputs = norm_inputs_jax(eta, xi)
-        batch_targets = norm_targets_jax(gxi)
-        log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
-        h_phys = jnp.exp(log_h)
-
         def loss_for_params(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
-            predictions_0 = current_state.apply_fn(
-                {"params": current_params}, batch_inputs, batch_depth
+            data_loss, mode_loss, tangent_loss = loss_components(
+                current_params, eta, xi, gxi, batch_depth
             )
-            data_loss = loss_fn(predictions_0, batch_targets)
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {"train_l2_loss": data_loss}
-
-            if mode_balanced_weight > 0.0:
-                gxi_pred_phys_mode = denorm_targets_jax(predictions_0)[..., 0]
-                gxi_target_phys_mode = denorm_targets_jax(batch_targets)[..., 0]
-                loss_mode = compute_mode_balanced_loss(
-                    eta=eta,
-                    gxi_prediction=gxi_pred_phys_mode,
-                    gxi_target=gxi_target_phys_mode,
-                    depth=h_phys,
-                    k_rfft=k_rfft_jax,
-                    config=mode_balanced_cfg,
-                )
-                mode_weight_eff = mode_balanced_weight * jnp.minimum(
+            if args.mode_balanced_weight > 0.0:
+                mode_weight_eff = args.mode_balanced_weight * jnp.minimum(
                     jnp.asarray(current_state.step, dtype=training_dtype)
-                    / max(mode_balanced_warmup_steps, 1),
+                    / max(args.mode_balanced_warmup_steps, 1),
                     1.0,
                 )
-                physics_loss = physics_loss + mode_weight_eff * loss_mode
-                metrics["mode_balanced_loss"] = loss_mode
-
-            if translation_tangent_weight > 0.0:
-                gxi_pred_phys_tan = denorm_targets_jax(predictions_0)[..., 0]
-                loss_tangent, local_selected = compute_translation_tangent_loss(
-                    eta=eta,
-                    gxi_prediction=gxi_pred_phys_tan,
-                    gxi_target=gxi,
-                    depth=h_phys,
-                    k=k_grid_jax,
-                    config=translation_tangent_cfg,
+                physics_loss = physics_loss + mode_weight_eff * mode_loss
+                metrics["mode_balanced_loss"] = mode_loss
+            if args.translation_tangent_weight > 0.0:
+                physics_loss = (
+                    physics_loss + args.translation_tangent_weight * tangent_loss
                 )
-                global_selected = jax.lax.psum(local_selected, axis_name="batch")
-                device_count = jax.lax.psum(
-                    jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"
-                )
-                shard_weight = (
-                    device_count
-                    * local_selected
-                    / jnp.maximum(
-                        global_selected, jnp.asarray(1.0, dtype=training_dtype)
-                    )
-                )
-                loss_tangent = loss_tangent * shard_weight
-                physics_loss = physics_loss + translation_tangent_weight * loss_tangent
-                metrics["translation_tangent_loss"] = loss_tangent
-            if hadamard_weight > 0.0:
-                step_active = current_state.step % hadamard_interval == 0
+                metrics["translation_tangent_loss"] = tangent_loss
+            if args.hadamard_weight > 0.0:
+                step_active = current_state.step % args.hadamard_interval == 0
 
                 def _hadamard_active_branch(_operand: None) -> dict[str, jax.Array]:
                     rng_base = jax.random.fold_in(
@@ -587,10 +573,13 @@ def main() -> None:
                     )
                     rng_hadamard = jax.random.fold_in(rng_base, current_state.step)
                     rng_perm, rng_probe = jax.random.split(rng_hadamard)
+                    h_phys = jnp.exp(
+                        jnp.minimum(batch_depth.astype(training_dtype)[:, 0], log_h_max)
+                    )
                     eta_sub, xi_sub, depth_sub = sample_microbatch(
                         rng_perm,
-                        eta,
-                        xi,
+                        eta.astype(training_dtype),
+                        xi.astype(training_dtype),
                         h_phys,
                         hadamard_microbatch_local,
                     )
@@ -610,10 +599,10 @@ def main() -> None:
                     )
                     warmup = jnp.minimum(
                         jnp.asarray(current_state.step, dtype=jnp.float64)
-                        / max(hadamard_warmup_steps, 1),
+                        / max(args.hadamard_warmup_steps, 1),
                         1.0,
                     )
-                    weight_eff = hadamard_weight * warmup
+                    weight_eff = args.hadamard_weight * warmup
                     return {
                         "hadamard_active": jnp.float32(1.0),
                         "hadamard_loss": training_dtype(loss_hadamard),
@@ -672,53 +661,10 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        eta = eta.astype(training_dtype)
-        xi = xi.astype(training_dtype)
-        gxi = gxi.astype(training_dtype)
-        batch_depth = batch_depth.astype(training_dtype)
-        batch_inputs = norm_inputs_jax(eta, xi)
-        batch_targets = norm_targets_jax(gxi)
-        predictions = cast(
-            jax.Array,
-            model.apply({"params": current_params}, batch_inputs, batch_depth),
+        return jax.lax.pmean(
+            loss_components(current_params, eta, xi, gxi, batch_depth),
+            axis_name="batch",
         )
-        data_loss = loss_fn(predictions, batch_targets)
-        log_h = jnp.minimum(batch_depth[:, 0], log_h_max)
-        h_phys = jnp.exp(log_h)
-        mode_loss = jnp.asarray(0.0, dtype=training_dtype)
-        if mode_balanced_weight > 0.0:
-            mode_loss = compute_mode_balanced_loss(
-                eta=eta,
-                gxi_prediction=denorm_targets_jax(predictions)[..., 0],
-                gxi_target=denorm_targets_jax(batch_targets)[..., 0],
-                depth=h_phys,
-                k_rfft=k_rfft_jax,
-                config=mode_balanced_cfg,
-            )
-        tangent_loss = jnp.asarray(0.0, dtype=training_dtype)
-        if translation_tangent_weight > 0.0:
-            tangent_loss, local_selected = compute_translation_tangent_loss(
-                eta=eta,
-                gxi_prediction=denorm_targets_jax(predictions)[..., 0],
-                gxi_target=gxi,
-                depth=h_phys,
-                k=k_grid_jax,
-                config=translation_tangent_cfg,
-            )
-            global_selected = jax.lax.psum(local_selected, axis_name="batch")
-            device_count = jax.lax.psum(
-                jnp.asarray(1.0, dtype=training_dtype), axis_name="batch"
-            )
-            shard_weight = (
-                device_count
-                * local_selected
-                / jnp.maximum(
-                    global_selected,
-                    jnp.asarray(1.0, dtype=training_dtype),
-                )
-            )
-            tangent_loss = tangent_loss * shard_weight
-        return jax.lax.pmean((data_loss, mode_loss, tangent_loss), axis_name="batch")
 
     eval_loss_steps = {
         partition: jax.jit(
@@ -797,6 +743,7 @@ def main() -> None:
         )
         training_state = replicate_pytree_from_host(training_state, replicated)
         history = metadata["history"]
+        train_loss = metadata["train_loss"]
         best_val_loss = metadata["best_val_loss"]
         best_epoch = metadata["best_epoch"]
         start_epoch = resume_epoch + 1
@@ -812,6 +759,21 @@ def main() -> None:
     )
     assert_pytree_replicated(training_state, name="training startup state")
 
+    def prefetch_batches(
+        indices: np.ndarray, rng: np.random.Generator | None
+    ) -> Iterator[tuple[jax.Array, ...]]:
+        batches = get_batches(
+            dataset["eta"],
+            dataset["xi"],
+            dataset["gxi"],
+            dataset["depth"],
+            indices,
+            args.batch_size,
+            rng,
+            device_count=n_devices,
+        )
+        return device_prefetch((batch[:4] for batch in batches), sharding=data_sharding)
+
     seed_seq = np.random.SeedSequence(args.seed)
     epoch_seeds = seed_seq.spawn(args.epochs)
     train_rng = jax.random.PRNGKey(args.seed + 1)
@@ -823,26 +785,11 @@ def main() -> None:
             context=f"epoch {epoch} start",
         )
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
-        batch_iter = get_batches(
-            dataset["eta"],
-            dataset["xi"],
-            dataset["gxi"],
-            dataset["depth"],
-            train_indices,
-            args.batch_size,
-            epoch_rng,
-            device_count=n_devices,
-        )
-        batch_iter = (
-            (eta_b, xi_b, gxi_b, depth_b)
-            for eta_b, xi_b, gxi_b, depth_b, _ in batch_iter
-        )
-        batch_iter = device_prefetch(batch_iter, sharding=data_sharding, depth=2)
         batch_losses: list[float] = []
         train_batch_sizes: list[int] = []
         metric_sums: dict[str, float] = {}
         train_bar = tqdm(
-            batch_iter,
+            prefetch_batches(train_indices, epoch_rng),
             total=train_steps_per_epoch,
             desc=f"Train {epoch:03d}",
             leave=False,
@@ -862,8 +809,8 @@ def main() -> None:
             active_hadamard = float(batch_metrics.get("hadamard_active", 0.0)) > 0.5
             batch_index = len(batch_losses) - 1
             current_step = epoch_start_step + batch_index
-            if hadamard_weight > 0.0:
-                expected_hadamard = current_step % hadamard_interval == 0
+            if args.hadamard_weight > 0.0:
+                expected_hadamard = current_step % args.hadamard_interval == 0
                 if active_hadamard != expected_hadamard:
                     raise RuntimeError(
                         "Hadamard regularizer firing mismatch at "
@@ -885,41 +832,26 @@ def main() -> None:
             context=f"epoch {epoch} end",
         )
         completed_steps = len(batch_losses)
-        if epoch_end_step - epoch_start_step != completed_steps:
-            raise RuntimeError(
-                f"epoch {epoch} TrainState.step advanced by "
-                f"{epoch_end_step - epoch_start_step}, expected {completed_steps}"
-            )
-        if epoch_end_optimizer_count - epoch_start_optimizer_count != completed_steps:
-            raise RuntimeError(
-                f"epoch {epoch} optimizer count advanced by "
-                f"{epoch_end_optimizer_count - epoch_start_optimizer_count}, "
-                f"expected {completed_steps}"
-            )
+        for name, advanced in (
+            ("TrainState.step", epoch_end_step - epoch_start_step),
+            (
+                "optimizer count",
+                epoch_end_optimizer_count - epoch_start_optimizer_count,
+            ),
+        ):
+            if advanced != completed_steps:
+                raise RuntimeError(
+                    f"epoch {epoch} {name} advanced by {advanced}, expected {completed_steps}"
+                )
         train_loss = (
             float(np.average(batch_losses, weights=train_batch_sizes))
             if batch_losses
             else float("inf")
         )
 
-        val_batches = get_batches(
-            dataset["eta"],
-            dataset["xi"],
-            dataset["gxi"],
-            dataset["depth"],
-            val_indices,
-            args.batch_size,
-            None,
-            device_count=n_devices,
-        )
-        val_batches = (
-            (eta_b, xi_b, gxi_b, depth_b)
-            for eta_b, xi_b, gxi_b, depth_b, _ in val_batches
-        )
-        val_batches = device_prefetch(val_batches, sharding=data_sharding, depth=2)
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
-        for eta_b, xi_b, gxi_b, depth_b in val_batches:
+        for eta_b, xi_b, gxi_b, depth_b in prefetch_batches(val_indices, None):
             val_batch_sizes.append(int(eta_b.shape[0]))
             eval_loss_step = eval_loss_steps[
                 P("batch") if eta_b.shape[0] % n_devices == 0 else P()
@@ -939,8 +871,8 @@ def main() -> None:
         )
         val_loss = (
             val_data_loss
-            + mode_balanced_weight * val_mode_loss
-            + translation_tangent_weight * val_tangent_loss
+            + args.mode_balanced_weight * val_mode_loss
+            + args.translation_tangent_weight * val_tangent_loss
         )
         epoch_record = {
             "epoch": epoch,
@@ -966,10 +898,7 @@ def main() -> None:
         # Per-epoch checkpoint for preemption-safe resume. Overwrites prior latest_ckpt.
         save_checkpoint(
             run_dir / "latest_ckpt",
-            epoch=epoch,
             state=training_state,
-            train_loss=train_loss,
-            val_loss=val_loss,
             history=history,
             best_val_loss=best_val_loss if val_loss >= best_val_loss else val_loss,
             best_epoch=best_epoch if val_loss >= best_val_loss else epoch,
@@ -983,10 +912,7 @@ def main() -> None:
             epochs_without_improvement = 0
             save_checkpoint(
                 run_dir / "best_val_ckpt",
-                epoch=epoch,
                 state=training_state,
-                train_loss=train_loss,
-                val_loss=val_loss,
                 history=history,
                 best_val_loss=best_val_loss,
                 best_epoch=best_epoch,
@@ -1004,10 +930,7 @@ def main() -> None:
 
     save_checkpoint(
         run_dir / "final_ckpt",
-        epoch=int(history[-1]["epoch"]),
         state=training_state,
-        train_loss=train_loss,
-        val_loss=history[-1]["val_loss"],
         history=history,
         best_val_loss=best_val_loss,
         best_epoch=best_epoch,
