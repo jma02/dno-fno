@@ -17,7 +17,7 @@ class ModeBalancedConfig:
     k_max: float = 128.0
     gravity: float = 1.0
     activity_threshold: float = 1e-4
-    denominator_floor_relative: float = 1e-6
+    denominator_eps: float = 1e-6
     absolute_floor: float = 1e-24
     huber_delta: float = 1.0
     ratio_cap: float = 100.0
@@ -96,7 +96,7 @@ def compute_mode_balanced_loss(
     sample_scale = jnp.max(band_scale, axis=-1, keepdims=True)
     absolute_floor = jnp.asarray(config.absolute_floor, dtype=real_dtype)
     denominator_floor = (
-        jnp.asarray(config.denominator_floor_relative, dtype=real_dtype)
+        jnp.asarray(config.denominator_eps, dtype=real_dtype)
         * sample_scale
         + absolute_floor
     )

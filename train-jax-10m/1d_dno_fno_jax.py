@@ -274,14 +274,15 @@ def main() -> None:
         "--mode_balanced_activity_threshold",
         type=float,
         default=1e-4,
-        help="Modes at this fraction of each sample's peak reference scale receive "
-        "about half activity weight; weaker modes receive less.",
+        help="Downweight weak Fourier modes. At 1e-4, a mode with 0.01% of the "
+        "strongest mode's strength in the same sample gets about half weight.",
     )
     parser.add_argument(
-        "--mode_balanced_denominator_floor_relative",
+        "--mode_balanced_denominator_eps",
         type=float,
         default=1e-6,
-        help="Relative floor in the physical modal-error denominator.",
+        help="Add eps times the strongest mode's strength in each sample to every "
+        "mode's error denominator.",
     )
     parser.add_argument(
         "--hadamard_weight",
@@ -496,8 +497,8 @@ def main() -> None:
     config_payload["mode_balanced_activity_threshold"] = float(
         args.mode_balanced_activity_threshold
     )
-    config_payload["mode_balanced_denominator_floor_relative"] = float(
-        args.mode_balanced_denominator_floor_relative
+    config_payload["mode_balanced_denominator_eps"] = float(
+        args.mode_balanced_denominator_eps
     )
     config_payload["hadamard_weight"] = float(args.hadamard_weight)
     config_payload["hadamard_interval"] = int(args.hadamard_interval)
@@ -542,7 +543,7 @@ def main() -> None:
         k_max=float(args.mode_balanced_k_max),
         gravity=gravity,
         activity_threshold=float(args.mode_balanced_activity_threshold),
-        denominator_floor_relative=float(args.mode_balanced_denominator_floor_relative),
+        denominator_eps=float(args.mode_balanced_denominator_eps),
     )
     hadamard_weight = float(args.hadamard_weight)
     hadamard_interval = int(args.hadamard_interval)
