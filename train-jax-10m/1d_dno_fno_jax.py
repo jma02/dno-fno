@@ -274,7 +274,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         required=True,
-        help="Paper-dataset *.dataset.json manifest.",
+        help="Dataset directory containing the saved .npy arrays.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--modes", type=int, default=32)

@@ -25,8 +25,8 @@ details can usually be skimmed.
 - [x] `solver/gen_data/pipeline/time_selection.py` — saved-time grids, frame selection, and dataset rows
 - [x] ~~`solver/gen_data/pipeline/trajectory_subsampling.py`~~ — folded into `time_selection.py`
 - [x] ~~`solver/gen_data/pipeline/writer.py`~~ — folded into `batch_storage.py`
-- [x] `solver/gen_data/pipeline/build_dataset_view.py` — loader manifest and row-to-simulation map
-- [x] `scripts/build_paper_dataset_view.py` — combination of all family/split runs
+- [x] `solver/gen_data/pipeline/build_dataset.py` — saved batches to training arrays and per-row simulation metadata
+- [x] `scripts/build_paper_dataset.py` — combination of all family/split runs
 
 ## Physical constructors worth reading separately
 

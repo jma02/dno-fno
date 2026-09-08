@@ -14,110 +14,70 @@ import numpy as np
 from PIL import Image
 
 from scripts import render_paper_dataset_worst_simulations as renderer
+from solver.gen_data.pipeline.batch_storage import save_completed_batch
+from solver.gen_data.pipeline.build_dataset import build_dataset
+from solver.gen_data.pipeline.types import (
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
+)
 
 
-def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value) + "\n", encoding="utf-8")
-
-
-def _write_source(
+def _write_dataset(
     root: Path,
-    family: str,
-    frames: int,
+    families: tuple[tuple[str, int], ...],
     *,
     simulation_ids: tuple[int, ...] = (17,),
-    category: str = "known",
+    categories: dict[str, str] | None = None,
 ) -> Path:
-    root.mkdir()
-    count = len(simulation_ids)
-    rows = count * frames
+    batches = []
     x = 2.0 * np.pi * np.arange(256) / 256
-    scale = np.tile(np.arange(1, frames + 1), count)[:, None]
-    np.savez(
-        root / "shard.npz",
-        eta=(scale * np.sin(x)).astype(np.float32),
-        xi=(2.0 * scale * np.cos(x)).astype(np.float32),
-        gxi=np.tile(np.sin(100.0 * x), (rows, 1)).astype(np.float32),
-        depth=np.full(rows, 8.0),
-        time=np.tile(np.arange(frames, dtype=np.float64), count),
-    )
-    family_id = tuple(renderer.FAMILY_LABELS).index(family) + 1
-    np.savez(
-        root / "map.npz",
-        trajectory_accepted=np.ones(count, dtype=np.bool_),
-        trajectory_simulation_id=np.asarray(simulation_ids),
-        trajectory_parameter_group_id=np.full(count, category),
-        trajectory_first_row=np.arange(count) * frames,
-        trajectory_row_count=np.full(count, frames),
-        trajectory_family_id=np.full(count, family_id),
-        trajectory_dataset_split=np.full(count, "validation"),
-        trajectory_index=np.repeat(np.arange(count), frames),
-        shard_index=np.zeros(rows, dtype=np.int32),
-        shard_row=np.arange(rows),
-        frame_index=np.tile(np.arange(frames), count),
-    )
-    _write_json(
-        root / "dataset.json",
-        {
-            "trajectory_map_npz": "map.npz",
-            "dataset_shards": [{"path": "shard.npz"}],
-            "n_accepted_trajectories": count,
-            "n_rows": rows,
-            "grid": {"length": 2.0 * np.pi, "nx": 256},
-        },
-    )
-    summary = root / f"paper_dataset_{family}_validation.summary.json"
-    _write_json(
-        summary,
-        {
-            "status": "complete",
-            "output_root": str(root),
-            "run_spec": {"family_name": family, "dataset_split": "validation"},
-            "dataset_view": {"manifest": "dataset.json", "trajectory_map": "map.npz"},
-        },
-    )
-    return summary
+    for family, frames in families:
+        scale = np.arange(1, frames + 1, dtype=np.float64)[:, None]
+        rows = SimulationRows(
+            eta=scale * np.sin(x),
+            xi=2.0 * scale * np.cos(x),
+            gxi=np.tile(np.sin(100.0 * x), (frames, 1)),
+            depth=8.0,
+            time=np.arange(frames, dtype=np.float64),
+        )
+        batch = root / f"{family}.npz"
+        attempts = tuple(
+            rows if index in simulation_ids else None
+            for index in range(max(simulation_ids) + 1)
+        )
+        save_completed_batch(
+            batch,
+            ((categories or {}).get(family, "known"),) * len(attempts),
+            attempts,
+            family_id=PhysicalFamilyId(tuple(renderer.FAMILY_LABELS).index(family) + 1),
+            dataset_split=DatasetSplit.VALIDATION,
+        )
+        batches.append(batch)
+    return build_dataset(root / "dataset", batches)
 
 
 class DatasetRenderingTests(unittest.TestCase):
-    def test_combined_summary_binds_source_paths_and_counts(self) -> None:
+    def test_groups_preserve_simulation_ids_and_row_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source_path = _write_source(root / "stokes", "stokes", 1)
-            source = renderer.load_source_summary(source_path)
-            combined = root / "combined.summary.json"
-            record = {
-                "status": "complete",
-                "run_summaries": [str(source_path)],
-                "accepted_simulations": 1,
-                "rows": 1,
-            }
-            _write_json(combined, record)
-            binding = renderer.load_combined_summary_binding(combined)
-            renderer.validate_bound_sources(binding, (source,))
-            renderer.validate_scanned_population(
-                binding, source_count=1, accepted_simulations=1, retained_rows=1
-            )
-            with self.assertRaisesRegex(ValueError, "counts differ"):
-                renderer.validate_scanned_population(
-                    binding, source_count=1, accepted_simulations=1, retained_rows=2
+            dataset = _write_dataset(Path(temporary), (("stokes", 1), ("tanaka", 4)))
+            groups = renderer.load_dataset_groups(dataset)
+            self.assertEqual([group.family for group in groups], ["stokes", "tanaka"])
+            self.assertEqual([group.split for group in groups], ["validation"] * 2)
+            for group, first, count in zip(groups, (0, 1), (1, 4), strict=True):
+                self.assertEqual(
+                    group.trajectories,
+                    (renderer.TrajectoryIndex(0, 17, "known", first, count),),
                 )
-            for paths, message in (
-                ([source_path.name], "not absolute"),
-                ([str(source_path)] * 2, "repeats"),
-            ):
-                _write_json(combined, {**record, "run_summaries": paths})
-                with (
-                    self.subTest(paths=paths),
-                    self.assertRaisesRegex(ValueError, message),
-                ):
-                    renderer.load_combined_summary_binding(combined)
+            np.save(dataset / "frame_index.npy", np.zeros(5, dtype=np.int32))
+            with self.assertRaisesRegex(ValueError, "frame indices"):
+                renderer.load_dataset_groups(dataset)
 
-    def test_final_population_is_recovered_from_source_maps(self) -> None:
+    def test_final_population_is_recovered_from_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            source = renderer.load_source_summary(
-                _write_source(Path(temporary) / "stokes", "stokes", 1)
-            )
+            source = renderer.load_dataset_groups(
+                _write_dataset(Path(temporary), (("stokes", 1),))
+            )[0]
             sources = tuple(
                 source._replace(
                     family=family, split=split, trajectories=source.trajectories * count
@@ -146,17 +106,14 @@ class DatasetRenderingTests(unittest.TestCase):
     def test_cli_ranks_known_waves_and_decodes_static_and_multiframe_gifs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for family, frames in (("stokes", 1), ("tanaka", 4)):
-                _write_source(root / family, family, frames)
+            dataset = _write_dataset(root, (("stokes", 1), ("tanaka", 4)))
             output = root / "diagnostics"
             completed = subprocess.run(
                 [
                     sys.executable,
                     str(Path(renderer.__file__)),
-                    "--source",
-                    str(root / "stokes"),
-                    "--source",
-                    str(root / "tanaka"),
+                    "--dataset",
+                    str(dataset),
                     "--output-dir",
                     str(output),
                     "--workers",
@@ -207,17 +164,14 @@ class DatasetRenderingTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            _write_source(root / "tanaka", "tanaka", 2)
-            shard = root / "tanaka" / "shard.npz"
-            with np.load(shard) as archive:
-                arrays = {name: archive[name] for name in archive.files}
-            np.savez(shard, **{**arrays, "time": np.zeros(2)})
+            dataset = _write_dataset(root, (("tanaka", 2),))
+            np.save(dataset / "time.npy", np.zeros(2))
             output = root / "diagnostics"
             command = [
                 sys.executable,
                 str(Path(renderer.__file__)),
-                "--source",
-                str(root / "tanaka"),
+                "--dataset",
+                str(dataset),
                 "--output-dir",
                 str(output),
                 "--workers",

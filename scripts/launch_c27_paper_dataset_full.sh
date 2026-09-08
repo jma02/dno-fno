@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 RUN_NAME="${RUN_NAME:-c27_all_family_tangent_paper_dataset_full_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="outputs/$RUN_NAME"
-DATASET_PATH="/home/johnma/dno-fno/outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json"
+DATASET_PATH="/home/johnma/dno-fno/outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays"
 
 if [[ -e "$RUN_DIR" ]]; then
   echo "refusing to resume or overwrite existing run: $RUN_DIR" >&2
@@ -16,14 +16,14 @@ fi
 uv run python - "$DATASET_PATH" <<'PY'
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 dataset_path = Path(sys.argv[1])
-manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
-if sum(record["n_rows"] for record in manifest["dataset_shards"]) != 7_686_144:
-    raise SystemExit("paper-dataset manifest does not contain the expected rows")
+if np.load(dataset_path / "eta.npy", mmap_mode="r", allow_pickle=False).shape[0] != 7_686_144:
+    raise SystemExit("paper dataset does not contain the expected rows")
 print("paper-dataset structure preflight passed")
 PY
 

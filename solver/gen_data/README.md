@@ -9,7 +9,7 @@ dataset:
 - JONSWAP/TMA random seas.
 
 The families use different initial-condition formulas, but share the same DNO
-target, split rules, acceptance checks, batch format, and dataset-view format.
+target, split rules, acceptance checks, batch format, and dataset-array format.
 Older implementations remain available in Git history and should not be mixed
 into a new dataset.
 
@@ -70,8 +70,7 @@ Shared pipeline:
 - `pipeline/batch_storage.py` validates, reads, and writes one completed NPZ per
   batch.
 - `pipeline/artifact_io.py` performs atomic JSON and NPZ writes.
-- `pipeline/build_dataset_view.py` creates the manifest and trajectory map used
-  by training.
+- `pipeline/build_dataset.py` combines saved batches into the arrays used by training.
 - `pipeline/dataset_generation.py` counts completed batches and generates the
   remaining simulations needed by each parameter group.
 
@@ -94,25 +93,32 @@ The NPZ is written to a temporary sibling and published only after it is
 complete. If generation stops before publication, the next run restarts the
 same deterministic batch from the beginning.
 
-The dataset view contains:
+The final dataset directory contains:
 
-- a JSON manifest listing shards, counts, grid settings, and splits;
-- a trajectory-map NPZ mapping every attempted simulation to its acceptance decision
-  and every stored row to its trajectory, frame, and shard row.
+- `eta.npy`, `xi.npy`, `gxi.npy`: float32 fields, each shaped `(rows, grid_points)`;
+- `depth.npy`, `time.npy`: float64 values per row;
+- `family_id.npy`, `simulation_id.npy`: int16 family and int64 simulation IDs per row;
+- `parameter_group_id.npy`, `dataset_split.npy`: parameter-group and split strings per row;
+- `frame_index.npy`: int32 frame number per row;
+- `x.npy`: the shared float64 spatial grid.
 
-The training loader uses those two files directly.
+Simulation IDs are scoped to a family/split. Only accepted simulations contribute
+rows. Training reads these arrays directly, selects the stored split, and shuffles
+its rows together; there is no manifest, trajectory map, or per-family epoch sampling.
 
 ## Entrypoints
 
 The supported generation entrypoints live in `scripts/`:
 
-- `generate_paper_dataset.py` handles all four families;
-- `build_paper_dataset_view.py` combines completed family/split runs into one training
-  view.
+- `generate_paper_dataset.py` saves batches and a run summary for one family/split;
+- `build_paper_dataset.py` combines completed runs into one training dataset directory.
 
-The combined-view command builds immediately. Repeat `--run-summary` for each
+The build command runs immediately. Repeat `--run-summary` for each
 completed family/split run and supply `--output-root`; each included split must
 have all four families with equal accepted simulation counts.
+Existing completed batches can be exported without regenerating simulations.
+Use a new output directory (the C27 launchers expect `.../c16384_v01024_t01024/arrays`);
+allow about 100 GB of additional disk for the full dataset.
 
 ## Development checks
 
@@ -120,8 +126,8 @@ From the repository root:
 
 ```bash
 uv run ruff check solver/gen_data scripts/generate_paper_dataset.py \
-  scripts/build_paper_dataset_view.py
+  scripts/build_paper_dataset.py
 uv run pyright solver/gen_data scripts/generate_paper_dataset.py \
-  scripts/build_paper_dataset_view.py
+  scripts/build_paper_dataset.py
 uv run pytest solver/gen_data/tests solver/gen_data/pipeline/tests
 ```

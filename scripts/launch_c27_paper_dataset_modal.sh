@@ -15,7 +15,7 @@ GPU_SPEC="${GPU_SPEC:-A100-80GB:2}"
 GPU_TAG="${GPU_SPEC//:/x}"
 GPU_TAG="${GPU_TAG,,}"
 RUN_NAME="${RUN_NAME:-c27_all_family_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
-DATASET="/data/outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json"
+DATASET="/data/outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays"
 mkdir -p logs
 LOG="logs/${RUN_NAME}.log"
 

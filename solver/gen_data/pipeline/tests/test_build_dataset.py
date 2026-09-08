@@ -1,11 +1,11 @@
-"""CPU tests for building a training view from committed batches."""
+"""CPU tests for exporting accepted simulations into training arrays."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -13,7 +13,7 @@ from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.build_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
@@ -61,13 +61,15 @@ def _write_batch(
     )
 
 
-class DatasetViewTests(unittest.TestCase):
+class DatasetTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def test_view_preserves_sparse_simulation_ids_and_row_ownership(self) -> None:
+    def test_export_preserves_rows_and_simulation_splits_without_batch_files(
+        self,
+    ) -> None:
         batches: list[Path] = []
         for batch_id, (family, split, count, accepted, frames) in enumerate(
             (
@@ -89,53 +91,41 @@ class DatasetViewTests(unittest.TestCase):
             batches.append(path)
 
         with self.assertRaisesRegex(ValueError, "at least one accepted row"):
-            build_dataset_view(self.root, batches[:1])
-        self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
-        self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())
+            build_dataset(self.root / "empty", batches[:1])
+        self.assertFalse((self.root / "empty").exists())
 
-        view = build_dataset_view(self.root, batches)
-        manifest = json.loads(view.manifest.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["n_rows"], 5)
-        self.assertEqual(manifest["n_trajectories"], 8)
-        self.assertEqual(manifest["n_accepted_trajectories"], 4)
-        self.assertEqual(
-            manifest["split_counts"],
-            {
-                "train": {"attempted": 7, "accepted": 3},
-                "validation": {"attempted": 0, "accepted": 0},
-                "test": {"attempted": 1, "accepted": 1},
-            },
+        with patch("numpy.save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                build_dataset(self.root / "dataset", batches)
+        self.assertFalse((self.root / "dataset").exists())
+        self.assertEqual(list(self.root.glob(".dataset-*")), [])
+
+        dataset = build_dataset(self.root / "dataset", batches)
+        for batch in batches:
+            batch.unlink()
+        arrays = {
+            path.stem: np.load(path, mmap_mode="r", allow_pickle=False)
+            for path in dataset.glob("*.npy")
+        }
+        self.assertEqual(len(tuple(dataset.iterdir())), 11)
+        self.assertTrue(all(isinstance(array, np.memmap) for array in arrays.values()))
+        np.testing.assert_array_equal(arrays["family_id"], [2, 2, 1, 1, 1])
+        np.testing.assert_array_equal(arrays["simulation_id"], [0, 2, 0, 3, 3])
+        np.testing.assert_array_equal(arrays["frame_index"], [0, 0, 0, 0, 1])
+        np.testing.assert_array_equal(
+            arrays["dataset_split"], ["train", "train", "test", "train", "train"]
         )
-        self.assertEqual(
-            [record["n_rows"] for record in manifest["dataset_shards"]],
-            [2, 1, 2],
+        np.testing.assert_array_equal(
+            arrays["parameter_group_id"],
+            ["group_0", "group_2", "group_0", "group_1", "group_1"],
         )
-        self.assertEqual(manifest["grid"]["nx"], 4)
-        with np.load(view.trajectory_map, allow_pickle=False) as trajectory_map:
-            np.testing.assert_array_equal(
-                trajectory_map["trajectory_accepted"],
-                np.asarray([False, False, True, False, True, True, False, True]),
-            )
-            np.testing.assert_array_equal(
-                trajectory_map["trajectory_first_row"],
-                np.asarray([-1, -1, 0, -1, 1, 2, -1, 3], dtype=np.int64),
-            )
-            np.testing.assert_array_equal(
-                trajectory_map["trajectory_index"],
-                np.asarray([2, 4, 5, 7, 7], dtype=np.int32),
-            )
-            np.testing.assert_array_equal(
-                trajectory_map["trajectory_simulation_id"],
-                np.asarray([0, 1, 0, 1, 2, 0, 2, 3], dtype=np.int64),
-            )
-            np.testing.assert_array_equal(
-                trajectory_map["trajectory_row_count"],
-                np.asarray([0, 0, 1, 0, 1, 1, 0, 2], dtype=np.int32),
-            )
-            np.testing.assert_array_equal(
-                trajectory_map["shard_index"],
-                np.asarray([0, 0, 1, 2, 2], dtype=np.int32),
-            )
+        np.testing.assert_array_equal(
+            arrays["eta"], np.repeat([[1], [3], [1], [2], [2]], 4, axis=1)
+        )
+        np.testing.assert_array_equal(arrays["time"], [0, 0, 0, 0, 1])
+        np.testing.assert_allclose(arrays["x"], np.arange(4) * np.pi / 2)
+        with self.assertRaises(FileExistsError):
+            build_dataset(dataset, batches)
 
     def test_mixed_spatial_grids_are_rejected_before_publication(self) -> None:
         first = batch_path(self.root, family="stokes", split="test", batch_id=0)
@@ -160,9 +150,8 @@ class DatasetViewTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "same spatial grid"):
-            build_dataset_view(self.root, (first, second))
-        self.assertFalse((self.root / "paper_dataset.dataset.json").exists())
-        self.assertFalse((self.root / "paper_dataset.trajectory_map.npz").exists())
+            build_dataset(self.root / "dataset", (first, second))
+        self.assertFalse((self.root / "dataset").exists())
 
 
 if __name__ == "__main__":

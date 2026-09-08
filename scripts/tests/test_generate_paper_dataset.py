@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,9 +12,53 @@ import unittest
 from unittest.mock import patch
 
 from scripts.generate_paper_dataset import main
+from solver.gen_data.pipeline.types import DatasetSplit, PhysicalFamilyId
+from solver.gen_data.stokes_sampling import STOKES_PARAMETER_GROUPS
 
 
 class PaperDatasetGenerationTests(unittest.TestCase):
+    def test_completed_generation_only_saves_batches_and_summary(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("jax.config.update"),
+            patch("jax.default_backend", return_value="cpu"),
+            patch("builtins.print"),
+            patch("scripts.generate_paper_dataset.generate_simulations") as generate,
+        ):
+            root = Path(directory)
+            batches = [root / "batches" / "batch_000000.npz"]
+            generate.return_value = (
+                {group: 1 for group in STOKES_PARAMETER_GROUPS},
+                batches,
+            )
+            main(
+                (
+                    "--family",
+                    "stokes",
+                    "--split",
+                    "validation",
+                    "--num-simulations",
+                    "4",
+                    "--output-root",
+                    directory,
+                    "--batch-size",
+                    "2",
+                )
+            )
+            generate.assert_called_once()
+            self.assertEqual(
+                generate.call_args.kwargs["family_id"], PhysicalFamilyId.STOKES
+            )
+            self.assertEqual(
+                generate.call_args.kwargs["dataset_split"], DatasetSplit.VALIDATION
+            )
+            files = list(root.iterdir())
+            self.assertEqual(len(files), 1)
+            summary = json.loads(files[0].read_text())
+            self.assertEqual(summary["status"], "complete")
+            self.assertEqual(summary["batch_paths"], ["batches/batch_000000.npz"])
+            self.assertEqual(summary["counts"]["accepted"], 4)
+
     def test_import_sets_float64_without_initializing_backends(self) -> None:
         subprocess.run(
             (

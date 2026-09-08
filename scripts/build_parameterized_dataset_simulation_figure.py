@@ -15,7 +15,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-from typing import Final, NamedTuple
+from typing import Final
 
 import numpy as np
 
@@ -36,19 +36,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.render_paper_dataset_worst_simulations import (  # noqa: E402
-    DatasetSource,
-    _mapping,
-    load_combined_summary_binding,
-    load_source_summary,
-    read_json,
-    validate_bound_sources,
+    load_dataset_groups,
     validate_final_paper_dataset,
-    validate_scanned_population,
 )
-from solver.gen_data.pipeline.types import (  # noqa: E402
-    DatasetSplit,
-    PhysicalFamilyId,
-)
+from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 
 
 DESCRIPTION = (
@@ -73,12 +64,6 @@ FAMILY_LABELS: Final = {
     "benjamin_feir": "Benjamin--Feir",
     "jonswap_tma": "JONSWAP/TMA",
 }
-FAMILY_IDS: Final = {
-    "stokes": PhysicalFamilyId.STOKES,
-    "tanaka": PhysicalFamilyId.TANAKA,
-    "benjamin_feir": PhysicalFamilyId.BENJAMIN_FEIR,
-    "jonswap_tma": PhysicalFamilyId.JONSWAP_TMA,
-}
 CENTRAL_VALIDATION_CATEGORIES: Final = {
     "stokes": "finite_moderate",
     "tanaka": "main_m2_q1",
@@ -87,28 +72,9 @@ CENTRAL_VALIDATION_CATEGORIES: Final = {
 }
 
 
-SourceDetails = NamedTuple(
-    "SourceDetails",
-    [
-        ("source", DatasetSource),
-        ("length", float),
-        ("stored_nx", int),
-    ],
-)
-
-
-def _positive_float(value: object, *, context: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{context} must be numeric")
-    result = float(value)
-    if not math.isfinite(result) or result <= 0.0:
-        raise ValueError(f"{context} must be finite and positive")
-    return result
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--combined-summary", type=Path, required=True)
+    parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument(
         "--output-stem",
         type=Path,
@@ -116,54 +82,23 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    binding = load_combined_summary_binding(args.combined_summary)
-    sources = tuple(load_source_summary(path) for path in binding.source_summary_paths)
-    validate_bound_sources(binding, sources)
-    accepted_simulations = sum(len(source.trajectories) for source in sources)
+    dataset_path = args.dataset.expanduser().resolve(strict=True)
+    sources = load_dataset_groups(dataset_path)
     retained_rows = sum(
         trajectory.row_count for source in sources for trajectory in source.trajectories
     )
-    validate_scanned_population(
-        binding,
-        source_count=len(sources),
-        accepted_simulations=accepted_simulations,
-        retained_rows=retained_rows,
-    )
     validate_final_paper_dataset(sources, retained_rows=retained_rows)
-    source_details: list[SourceDetails] = []
-    for source in sources:
-        with np.load(source.map_path, allow_pickle=False) as archive:
-            accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
-            family_ids = np.asarray(archive["trajectory_family_id"], dtype=np.int64)
-            dataset_splits = np.asarray(archive["trajectory_dataset_split"])
-        if accepted.ndim != 1 or any(
-            values.shape != accepted.shape for values in (family_ids, dataset_splits)
-        ):
-            raise ValueError("source trajectory arrays have inconsistent shapes")
-        if not np.all(family_ids == int(FAMILY_IDS[source.family])):
-            raise ValueError(f"{source.family} trajectory map has a wrong family ID")
-        if not np.all(dataset_splits == source.split):
-            raise ValueError(
-                f"{source.family} trajectory map has a wrong dataset split"
-            )
-        grid = _mapping(
-            read_json(source.manifest_path).get("grid"), context="source stored grid"
-        )
-        length = _positive_float(grid.get("length"), context="stored grid length")
-        stored_nx = grid.get("nx")
-        if (
-            isinstance(stored_nx, bool)
-            or not isinstance(stored_nx, int)
-            or stored_nx < 2
-        ):
-            raise ValueError("stored grid nx must be an integer at least two")
-        source_details.append(
-            SourceDetails(
-                source=source,
-                length=length,
-                stored_nx=stored_nx,
-            )
-        )
+    arrays = {
+        name: np.load(dataset_path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+        for name in ("eta", "xi", "depth", "time", "x")
+    }
+    x = arrays["x"]
+    if x.ndim != 1 or x.size < 2 or not np.isfinite(x).all():
+        raise ValueError("stored grid must contain finite coordinates")
+    stored_nx = x.size
+    length = float((x[1] - x[0]) * stored_nx)
+    if length <= 0.0:
+        raise ValueError("stored grid length must be positive")
     resolved_stem = args.output_stem.expanduser().resolve()
     resolved_stem.parent.mkdir(parents=True, exist_ok=True)
     final_pdf = resolved_stem.with_suffix(".pdf")
@@ -193,11 +128,11 @@ if __name__ == "__main__":
             category = CENTRAL_VALIDATION_CATEGORIES[family]
             candidates = sorted(
                 (
-                    (item, trajectory)
-                    for item in source_details
-                    if item.source.family == family
-                    and item.source.split == DatasetSplit.VALIDATION.value
-                    for trajectory in item.source.trajectories
+                    (source, trajectory)
+                    for source in sources
+                    if source.family == family
+                    and source.split == DatasetSplit.VALIDATION.value
+                    for trajectory in source.trajectories
                     if trajectory.category == category
                 ),
                 key=lambda pair: pair[1].simulation_id,
@@ -210,77 +145,24 @@ if __name__ == "__main__":
             if len(simulation_ids) != len(set(simulation_ids)):
                 raise ValueError(f"duplicate simulation IDs in {family}/{category}")
             lower_median_index = (len(candidates) - 1) // 2
-            details, trajectory = candidates[lower_median_index]
-            source = details.source
-            with np.load(source.map_path, allow_pickle=False) as archive:
-                first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
-                row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int64)
-                row_trajectories = np.asarray(
-                    archive["trajectory_index"], dtype=np.int64
-                )
-                row_shards = np.asarray(archive["shard_index"], dtype=np.int64)
-                shard_rows = np.asarray(archive["shard_row"], dtype=np.int64)
-                frame_indices = np.asarray(archive["frame_index"], dtype=np.int64)
-            index = trajectory.trajectory_index
-            if not 0 <= index < first_rows.size:
-                raise ValueError("selected trajectory index is outside its source map")
-            first = int(first_rows[index])
-            if first < 0 or int(row_counts[index]) != trajectory.row_count:
-                raise ValueError(
-                    "selected trajectory ownership differs from its source map"
-                )
-            if not 0 <= first < row_trajectories.size:
-                raise ValueError("selected first row is outside its source map")
-            observed = (
-                int(row_trajectories[first]),
-                int(row_shards[first]),
-                int(shard_rows[first]),
-            )
-            expected = (
-                index,
-                trajectory.shard_index,
-                trajectory.first_shard_row,
-            )
-            if observed != expected:
-                raise ValueError(
-                    "selected first-row ownership differs from its source map"
-                )
-            frame_index = int(frame_indices[first])
-            if frame_index != 0:
-                raise ValueError("selected trajectory's first row is not frame zero")
-            row_index = trajectory.first_shard_row
-            shard_path = details.source.shard_paths[trajectory.shard_index]
-            with np.load(shard_path, allow_pickle=False) as archive:
-                missing = {"eta", "xi", "depth", "time"}.difference(archive.files)
-                if missing:
-                    raise ValueError(f"selected shard lacks fields: {sorted(missing)}")
-                eta_all = np.asarray(archive["eta"])
-                xi_all = np.asarray(archive["xi"])
-                depths = np.asarray(archive["depth"], dtype=np.float64)
-                times = np.asarray(archive["time"], dtype=np.float64)
-            if eta_all.ndim != 2 or xi_all.shape != eta_all.shape:
-                raise ValueError("selected shard eta/xi shapes differ")
-            if eta_all.shape[1] != details.stored_nx:
-                raise ValueError("selected shard width differs from the stored grid")
-            if depths.shape != (eta_all.shape[0],) or times.shape != (
-                eta_all.shape[0],
-            ):
-                raise ValueError("selected shard scalar-row shapes differ")
-            if not 0 <= row_index < eta_all.shape[0]:
-                raise ValueError("selected shard row is outside the shard")
-            eta = np.asarray(eta_all[row_index], dtype=np.float64)
-            xi = np.asarray(xi_all[row_index], dtype=np.float64)
-            depth = float(depths[row_index])
-            time = float(times[row_index])
+            source, trajectory = candidates[lower_median_index]
+            row_index = trajectory.first_row
+            eta = np.asarray(arrays["eta"][row_index], dtype=np.float64)
+            xi = np.asarray(arrays["xi"][row_index], dtype=np.float64)
+            depth = float(arrays["depth"][row_index])
+            time = float(arrays["time"][row_index])
+            if eta.shape != (stored_nx,) or xi.shape != eta.shape:
+                raise ValueError("selected eta/xi shapes differ from the stored grid")
             if time != 0.0:
                 raise ValueError("selected frame-zero row must have time zero")
             if not np.all(np.isfinite(eta)) or not np.all(np.isfinite(xi)):
                 raise ValueError("profile fields must be finite")
-            positive_depth = _positive_float(depth, context="profile depth")
+            if not math.isfinite(depth) or depth <= 0.0:
+                raise ValueError("profile depth must be finite and positive")
             x_over_length = np.arange(eta.size, dtype=np.float64) / eta.size
-            eta_over_depth = eta / positive_depth
+            eta_over_depth = eta / depth
             # All paper families use nondimensional gravity g = 1.
-            xi_over_depth_speed = xi / (positive_depth * math.sqrt(positive_depth))
+            xi_over_depth_speed = xi / (depth * math.sqrt(depth))
             axes[row, 0].plot(
                 x_over_length,
                 eta_over_depth,
@@ -317,22 +199,15 @@ if __name__ == "__main__":
                     "time": time,
                     "depth": depth,
                     "gravity": 1.0,
-                    "domain_length": details.length,
-                    "stored_nx": details.stored_nx,
+                    "domain_length": length,
+                    "stored_nx": stored_nx,
                     "selection": {
                         "rule": SELECTION_RULE,
                         "candidate_count": len(candidates),
                         "lower_median_index_zero_based": lower_median_index,
                     },
-                    "owned_row": {
-                        "trajectory_index": trajectory.trajectory_index,
-                        "frame_index": frame_index,
-                        "shard_index": trajectory.shard_index,
-                        "shard_row": trajectory.first_shard_row,
-                    },
+                    "dataset_row": row_index,
                     "dimensionless_variables": dict(DIMENSIONLESS_VARIABLES),
-                    "source_summary": str(source.summary_path),
-                    "selected_shard": str(source.shard_paths[trajectory.shard_index]),
                 }
             )
         axes[0, 0].set_title("surface elevation")
@@ -360,7 +235,7 @@ if __name__ == "__main__":
                 {
                     "status": "complete",
                     "description": DESCRIPTION,
-                    "combined_summary": str(binding.path),
+                    "dataset": str(dataset_path),
                     "simulations": simulations,
                     "artifacts": {
                         "pdf": {

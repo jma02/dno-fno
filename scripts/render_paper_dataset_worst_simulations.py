@@ -1,4 +1,4 @@
-"""Rank and render diagnostic tails across completed paper-dataset runs.
+"""Rank and render diagnostic tails in the accepted paper-dataset rows.
 
 The rankings are descriptive and do not alter dataset acceptance. Each simulation
 is scanned at every retained time, then ranked within its initial-condition
@@ -24,9 +24,6 @@ from PIL import Image
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FuncAnimation, PillowWriter  # noqa: E402
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 FIELD_NAMES = ("eta", "xi", "gxi")
@@ -108,39 +105,21 @@ TrajectoryIndex = NamedTuple(
     "TrajectoryIndex",
     [
         ("accepted_index", int),
-        ("trajectory_index", int),
         ("simulation_id", int),
         ("category", str),
-        ("shard_index", int),
-        ("first_shard_row", int),
+        ("first_row", int),
         ("row_count", int),
     ],
 )
 
 
-DatasetSource = NamedTuple(
-    "DatasetSource",
+DatasetGroup = NamedTuple(
+    "DatasetGroup",
     [
         ("root", Path),
         ("family", str),
         ("split", str),
-        ("summary_path", Path),
-        ("manifest_path", Path),
-        ("map_path", Path),
-        ("shard_paths", dict[int, Path]),
         ("trajectories", tuple[TrajectoryIndex, ...]),
-    ],
-)
-
-
-CombinedSummaryBinding = NamedTuple(
-    "CombinedSummaryBinding",
-    [
-        ("path", Path),
-        ("source_summary_paths", tuple[Path, ...]),
-        ("expected_source_count", int),
-        ("expected_accepted_simulations", int),
-        ("expected_retained_rows", int),
     ],
 )
 
@@ -150,13 +129,11 @@ SimulationMetrics = NamedTuple(
     [
         ("source_index", int),
         ("accepted_index", int),
-        ("trajectory_index", int),
         ("family", str),
         ("split", str),
         ("simulation_id", int),
         ("category", str),
-        ("shard_index", int),
-        ("first_shard_row", int),
+        ("first_row", int),
         ("row_count", int),
         ("depth", float),
         ("all_frames_finite", bool),
@@ -188,121 +165,12 @@ LoadedTrajectory = NamedTuple(
 )
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    """Read one JSON object."""
-
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise TypeError(f"expected a JSON object in {path}")
-    return value
-
-
-def _mapping(value: object, *, context: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{context} must be a JSON object")
-    return value
-
-
-def _sequence(value: object, *, context: str) -> Sequence[object]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise TypeError(f"{context} must be a JSON array")
-    return value
-
-
-def _nonnegative_integer(value: object, *, context: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{context} must be a nonnegative integer")
-    return value
-
-
-def load_combined_summary_binding(path: Path) -> CombinedSummaryBinding:
-    """Load the generation runs and counts recorded by a combined view."""
-
-    resolved = path.expanduser().resolve(strict=True)
-    summary = read_json(resolved)
-    if summary.get("status") != "complete":
-        raise ValueError("combined summary is not complete")
-    raw_summary_paths = _sequence(
-        summary.get("run_summaries"),
-        context="combined run_summaries",
-    )
-    if not raw_summary_paths:
-        raise ValueError("combined summary contains no generation runs")
-
-    summary_paths: list[Path] = []
-    for run_index, raw_summary_path in enumerate(raw_summary_paths):
-        if not isinstance(raw_summary_path, str) or not raw_summary_path:
-            raise ValueError(f"combined generation run {run_index} has no summary path")
-        summary_path = Path(raw_summary_path).expanduser()
-        if not summary_path.is_absolute():
-            raise ValueError(
-                f"combined generation run {run_index} summary path is not absolute"
-            )
-        summary_path = summary_path.resolve(strict=True)
-        summary_paths.append(summary_path)
-
-    if len(set(summary_paths)) != len(summary_paths):
-        raise ValueError("combined summary repeats a generation run")
-    expected_accepted_simulations = _nonnegative_integer(
-        summary.get("accepted_simulations"),
-        context="combined accepted_simulations",
-    )
-    expected_retained_rows = _nonnegative_integer(
-        summary.get("rows"),
-        context="combined rows",
-    )
-    return CombinedSummaryBinding(
-        path=resolved,
-        source_summary_paths=tuple(summary_paths),
-        expected_source_count=len(summary_paths),
-        expected_accepted_simulations=expected_accepted_simulations,
-        expected_retained_rows=expected_retained_rows,
-    )
-
-
-def validate_bound_sources(
-    binding: CombinedSummaryBinding,
-    sources: Sequence[DatasetSource],
-) -> None:
-    """Require loaded sources to be exactly those named by the combined view."""
-
-    if len(sources) != binding.expected_source_count:
-        raise ValueError("scanned source count differs from combined summary")
-    observed_paths = tuple(source.summary_path.resolve() for source in sources)
-    if observed_paths != binding.source_summary_paths:
-        raise ValueError(
-            "scanned source order or identity differs from combined summary"
-        )
-
-
-def validate_scanned_population(
-    binding: CombinedSummaryBinding,
-    *,
-    source_count: int,
-    accepted_simulations: int,
-    retained_rows: int,
-) -> None:
-    """Compare final scan totals with the combined-view plan."""
-
-    observed = (source_count, accepted_simulations, retained_rows)
-    expected = (
-        binding.expected_source_count,
-        binding.expected_accepted_simulations,
-        binding.expected_retained_rows,
-    )
-    if observed != expected:
-        raise ValueError(
-            "scanned source/simulation/row counts differ from combined summary: "
-            f"observed={observed}, expected={expected}"
-        )
-
-
 def validate_final_paper_dataset(
-    sources: Sequence[DatasetSource],
+    sources: Sequence[DatasetGroup],
     *,
     retained_rows: int,
 ) -> None:
-    """Require the paper release counts recovered from source trajectory maps."""
+    """Require the paper release population in the stored rows."""
 
     source_count = len(sources)
     observed_family_split_counts: dict[tuple[str, str], int] = {}
@@ -344,128 +212,65 @@ def validate_final_paper_dataset(
         )
 
 
-def _artifact_path(root: Path, value: object, *, context: str) -> Path:
-    """Resolve one named source artifact without allowing root escape."""
-
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{context} path must be a nonempty string")
-    path = (root / value).resolve(strict=True)
-    if not path.is_relative_to(root):
-        raise ValueError(f"{context} path escapes its source root")
-    return path
-
-
-def load_source_summary(summary_path: Path) -> DatasetSource:
-    """Load one completed generation-run summary and its dataset view."""
-
-    summary_path = summary_path.expanduser().resolve(strict=True)
-    resolved = summary_path.parent
-    summary = read_json(summary_path)
-    if summary.get("status") != "complete":
-        raise RuntimeError(f"source is not complete: {resolved}")
-    raw_output_root = summary.get("output_root")
-    if not isinstance(raw_output_root, str) or (
-        Path(raw_output_root).expanduser().resolve() != resolved
+def load_dataset_groups(dataset_path: Path) -> tuple[DatasetGroup, ...]:
+    """Group contiguous simulations by family and split without loading wave fields."""
+    root = dataset_path.expanduser().resolve(strict=True)
+    arrays = {
+        name: np.load(root / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+        for name in (
+            "family_id",
+            "dataset_split",
+            "simulation_id",
+            "parameter_group_id",
+            "frame_index",
+        )
+    }
+    family_ids = arrays["family_id"]
+    splits = arrays["dataset_split"]
+    simulation_ids = arrays["simulation_id"]
+    if family_ids.size == 0 or any(
+        values.shape != (family_ids.size,) for values in arrays.values()
     ):
-        raise RuntimeError(f"source summary has the wrong output root: {summary_path}")
-
-    run_spec = _mapping(summary.get("run_spec"), context="source run_spec")
-    family = run_spec.get("family_name")
-    split = run_spec.get("dataset_split")
-    if not isinstance(family, str) or family not in FAMILY_LABELS:
-        raise ValueError("source run_spec has an unknown family_name")
-    if not isinstance(split, str) or split not in ("train", "validation", "test"):
-        raise ValueError("source run_spec has an unknown dataset_split")
-
-    view = _mapping(summary.get("dataset_view"), context="source dataset_view")
-    manifest_path = _artifact_path(
-        resolved,
-        view.get("manifest"),
-        context="source dataset manifest",
-    )
-    map_path = _artifact_path(
-        resolved,
-        view.get("trajectory_map"),
-        context="source trajectory map",
-    )
-    manifest = read_json(manifest_path)
-    manifest_map_path = _artifact_path(
-        resolved,
-        manifest.get("trajectory_map_npz"),
-        context="dataset manifest trajectory map",
-    )
-    if manifest_map_path != map_path:
-        raise RuntimeError("dataset manifest names a different trajectory map")
-
-    raw_shards = _sequence(
-        manifest.get("dataset_shards"),
-        context="dataset manifest shards",
-    )
-    shard_paths: dict[int, Path] = {}
-    for shard_index, raw_record in enumerate(raw_shards):
-        record = _mapping(
-            raw_record,
-            context=f"dataset manifest shard {shard_index}",
+        raise ValueError("dataset row metadata must have matching nonempty shapes")
+    starts = np.r_[
+        0,
+        np.flatnonzero(
+            (family_ids[1:] != family_ids[:-1])
+            | (splits[1:] != splits[:-1])
+            | (simulation_ids[1:] != simulation_ids[:-1])
         )
-        shard_path = _artifact_path(
-            resolved,
-            record.get("path"),
-            context=f"dataset manifest shard {shard_index}",
-        )
-        shard_paths[shard_index] = shard_path
-
-    with np.load(map_path, allow_pickle=False) as archive:
-        accepted = np.asarray(archive["trajectory_accepted"], dtype=np.bool_)
-        simulation_ids = np.asarray(archive["trajectory_simulation_id"], dtype=np.int64)
-        parameter_group_ids = np.asarray(archive["trajectory_parameter_group_id"])
-        first_rows = np.asarray(archive["trajectory_first_row"], dtype=np.int64)
-        row_counts = np.asarray(archive["trajectory_row_count"], dtype=np.int32)
-        row_trajectories = np.asarray(archive["trajectory_index"], dtype=np.int32)
-        row_shards = np.asarray(archive["shard_index"], dtype=np.int32)
-        shard_rows = np.asarray(archive["shard_row"], dtype=np.int64)
-    records: list[TrajectoryIndex] = []
-    for accepted_index, trajectory_index_value in enumerate(np.flatnonzero(accepted)):
-        trajectory_index = int(trajectory_index_value)
-        first = int(first_rows[trajectory_index])
-        count = int(row_counts[trajectory_index])
-        if count < 1:
-            raise RuntimeError(f"accepted trajectory {trajectory_index} has no rows")
-        positions = slice(first, first + count)
-        if not np.all(row_trajectories[positions] == trajectory_index):
-            raise RuntimeError("trajectory-map rows are not contiguous")
-        shards = np.unique(row_shards[positions])
-        if shards.size != 1:
-            raise RuntimeError("one accepted trajectory crosses shard boundaries")
-        local_rows = shard_rows[positions]
-        if not np.array_equal(
-            local_rows, np.arange(local_rows[0], local_rows[0] + count)
-        ):
-            raise RuntimeError("trajectory rows are not contiguous in its shard")
-        records.append(
+        + 1,
+    ]
+    ends = np.r_[starts[1:], family_ids.size]
+    family_names = dict(enumerate(FAMILY_LABELS, start=1))
+    groups: dict[tuple[str, str], list[TrajectoryIndex]] = {}
+    seen: set[tuple[str, str, int]] = set()
+    for first, end in zip(starts, ends, strict=True):
+        family = family_names[int(family_ids[first])]
+        split = str(splits[first])
+        simulation_id = int(simulation_ids[first])
+        identity = (family, split, simulation_id)
+        if identity in seen:
+            raise ValueError("simulation rows must form one contiguous block")
+        seen.add(identity)
+        if not np.array_equal(arrays["frame_index"][first:end], np.arange(end - first)):
+            raise ValueError("simulation frame indices must start at zero and increase")
+        category = str(arrays["parameter_group_id"][first])
+        if np.any(arrays["parameter_group_id"][first:end] != category):
+            raise ValueError("simulation parameter group must not change between rows")
+        trajectories = groups.setdefault((family, split), [])
+        trajectories.append(
             TrajectoryIndex(
-                accepted_index=accepted_index,
-                trajectory_index=trajectory_index,
-                simulation_id=int(simulation_ids[trajectory_index]),
-                category=str(parameter_group_ids[trajectory_index]),
-                shard_index=int(shards[0]),
-                first_shard_row=int(local_rows[0]),
-                row_count=count,
+                accepted_index=len(trajectories),
+                simulation_id=simulation_id,
+                category=category,
+                first_row=int(first),
+                row_count=int(end - first),
             )
         )
-    trajectories = tuple(records)
-    if len(trajectories) != int(manifest["n_accepted_trajectories"]):
-        raise RuntimeError(f"accepted trajectory count mismatch in {resolved}")
-    if sum(value.row_count for value in trajectories) != int(manifest["n_rows"]):
-        raise RuntimeError(f"accepted row count mismatch in {resolved}")
-    return DatasetSource(
-        root=resolved,
-        family=family,
-        split=split,
-        summary_path=summary_path,
-        manifest_path=manifest_path,
-        map_path=map_path,
-        shard_paths=shard_paths,
-        trajectories=trajectories,
+    return tuple(
+        DatasetGroup(root, family, split, tuple(trajectories))
+        for (family, split), trajectories in groups.items()
     )
 
 
@@ -474,24 +279,24 @@ def _argmax(values: np.ndarray) -> tuple[float, int]:
     return float(values[index]), index
 
 
-def _audit_shard(
-    task: tuple[int, str, str, int, Path, tuple[TrajectoryIndex, ...], int],
+def _audit_simulations(
+    task: tuple[int, DatasetGroup, int],
 ) -> tuple[SimulationMetrics, ...]:
-    source_index, family, split, shard_index, shard_path, trajectories, block_rows = (
-        task
+    source_index, source, block_rows = task
+    trajectories = source.trajectories
+    offset = trajectories[0].first_row
+    end = trajectories[-1].first_row + trajectories[-1].row_count
+    eta, xi, gxi, depth, time = (
+        np.load(source.root / f"{name}.npy", mmap_mode="r", allow_pickle=False)[
+            offset:end
+        ]
+        for name in (*FIELD_NAMES, "depth", "time")
     )
-    with np.load(shard_path, allow_pickle=False) as archive:
-        eta = np.asarray(archive["eta"])
-        xi = np.asarray(archive["xi"])
-        gxi = np.asarray(archive["gxi"])
-        depth = np.asarray(archive["depth"], dtype=np.float64)
-        time = np.asarray(archive["time"], dtype=np.float64)
-
     if eta.shape != xi.shape or eta.shape != gxi.shape or eta.ndim != 2:
-        raise RuntimeError(f"field shape mismatch in {shard_path}")
+        raise RuntimeError(f"field shape mismatch in {source.root}")
     row_count, nx = eta.shape
     if depth.shape != (row_count,) or time.shape != (row_count,):
-        raise RuntimeError(f"scalar row shape mismatch in {shard_path}")
+        raise RuntimeError(f"scalar row shape mismatch in {source.root}")
 
     finite = np.empty(row_count, dtype=np.bool_)
     minimum_water = np.empty(row_count, dtype=np.float64)
@@ -584,7 +389,7 @@ def _audit_shard(
 
     records: list[SimulationMetrics] = []
     for trajectory in trajectories:
-        first = trajectory.first_shard_row
+        first = trajectory.first_row - offset
         rows = slice(first, first + trajectory.row_count)
         simulation_time = time[rows]
         simulation_depth = depth[rows]
@@ -604,13 +409,11 @@ def _audit_shard(
             SimulationMetrics(
                 source_index=source_index,
                 accepted_index=trajectory.accepted_index,
-                trajectory_index=trajectory.trajectory_index,
-                family=family,
-                split=split,
+                family=source.family,
+                split=source.split,
                 simulation_id=trajectory.simulation_id,
                 category=trajectory.category,
-                shard_index=shard_index,
-                first_shard_row=first,
+                first_row=trajectory.first_row,
                 row_count=trajectory.row_count,
                 depth=float(simulation_depth[0]),
                 all_frames_finite=bool(np.all(finite[rows])),
@@ -765,23 +568,7 @@ def _quantiles(values: np.ndarray) -> dict[str, float]:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(
-        "--source",
-        action="append",
-        type=Path,
-        help=(
-            "Completed family/split run root. Repeat for development scans; final "
-            "dataset review should use --combined-summary."
-        ),
-    )
-    source_group.add_argument(
-        "--combined-summary",
-        type=Path,
-        help=(
-            "Completed combined-view summary listing the family/split runs it combines."
-        ),
-    )
+    parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--block-rows", type=int, default=256)
@@ -789,52 +576,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--require-final-paper-dataset",
         action="store_true",
-        help=(
-            "Require the exact four-family paper release population. Valid only "
-            "with --combined-summary."
-        ),
+        help=("Require the exact four-family paper release population."),
     )
     args = parser.parse_args()
-    if args.require_final_paper_dataset and args.combined_summary is None:
-        parser.error("--require-final-paper-dataset requires --combined-summary")
-
-    binding = (
-        load_combined_summary_binding(args.combined_summary)
-        if args.combined_summary is not None
-        else None
-    )
-    if binding is not None:
-        sources = tuple(
-            load_source_summary(summary_path)
-            for summary_path in binding.source_summary_paths
-        )
-    else:
-        loaded_sources: list[DatasetSource] = []
-        for source_root in tuple(args.source if args.source is not None else ()):
-            resolved = source_root.expanduser().resolve(strict=True)
-            summaries = tuple(resolved.glob("paper_dataset_*_*.summary.json"))
-            if len(summaries) != 1:
-                raise RuntimeError(
-                    f"expected one dataset summary in {resolved}, "
-                    f"found {len(summaries)}"
-                )
-            loaded_sources.append(load_source_summary(summaries[0]))
-        sources = tuple(loaded_sources)
-    retained_rows_from_maps = sum(
+    sources = load_dataset_groups(args.dataset)
+    retained_rows_from_metadata = sum(
         trajectory.row_count for source in sources for trajectory in source.trajectories
     )
-    if binding is not None:
-        validate_bound_sources(binding, sources)
-        validate_scanned_population(
-            binding,
-            source_count=len(sources),
-            accepted_simulations=sum(len(source.trajectories) for source in sources),
-            retained_rows=retained_rows_from_maps,
-        )
     if args.require_final_paper_dataset:
         validate_final_paper_dataset(
             sources,
-            retained_rows=retained_rows_from_maps,
+            retained_rows=retained_rows_from_metadata,
         )
 
     final_output_dir = args.output_dir.expanduser().resolve()
@@ -847,37 +599,21 @@ if __name__ == "__main__":
         )
     )
     try:
-        tasks = []
-        for source_index, source in enumerate(sources):
-            by_shard: dict[int, list[TrajectoryIndex]] = {}
-            for trajectory in source.trajectories:
-                by_shard.setdefault(trajectory.shard_index, []).append(trajectory)
-            tasks.extend(
-                (
-                    source_index,
-                    source.family,
-                    source.split,
-                    shard_index,
-                    source.shard_paths[shard_index],
-                    tuple(trajectories),
-                    args.block_rows,
-                )
-                for shard_index, trajectories in sorted(by_shard.items())
+        tasks = (
+            (
+                source_index,
+                source._replace(trajectories=source.trajectories[start : start + 32]),
+                args.block_rows,
             )
-
+            for source_index, source in enumerate(sources)
+            for start in range(0, len(source.trajectories), 32)
+        )
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            simulation_groups = tuple(pool.map(_audit_shard, tasks))
+            simulation_groups = tuple(pool.map(_audit_simulations, tasks))
         simulations = tuple(
             simulation for group in simulation_groups for simulation in group
         )
         retained_rows = sum(simulation.row_count for simulation in simulations)
-        if binding is not None:
-            validate_scanned_population(
-                binding,
-                source_count=len(sources),
-                accepted_simulations=len(simulations),
-                retained_rows=retained_rows,
-            )
         if args.require_final_paper_dataset:
             validate_final_paper_dataset(sources, retained_rows=retained_rows)
         if any(
@@ -1006,34 +742,23 @@ if __name__ == "__main__":
                 },
             }
 
-        selected_by_shard: dict[tuple[int, int], list[SimulationMetrics]] = {}
-        for simulation in all_selected:
-            selected_by_shard.setdefault(
-                (simulation.source_index, simulation.shard_index), []
-            ).append(simulation)
-
+        arrays = {
+            name: np.load(
+                sources[0].root / f"{name}.npy", mmap_mode="r", allow_pickle=False
+            )
+            for name in (*FIELD_NAMES, "depth", "time")
+        }
         loaded: dict[tuple[int, int], LoadedTrajectory] = {}
-        for (source_index, shard_index), selected in sorted(selected_by_shard.items()):
-            source = sources[source_index]
-            with np.load(
-                source.shard_paths[shard_index], allow_pickle=False
-            ) as archive:
-                arrays = {
-                    name: np.asarray(archive[name])
-                    for name in (*FIELD_NAMES, "depth", "time")
+        for simulation in all_selected:
+            rows = slice(
+                simulation.first_row, simulation.first_row + simulation.row_count
+            )
+            loaded[_simulation_key(simulation)] = LoadedTrajectory(
+                **{
+                    name: np.asarray(values[rows], dtype=np.float64)
+                    for name, values in arrays.items()
                 }
-            for simulation in selected:
-                rows = slice(
-                    simulation.first_shard_row,
-                    simulation.first_shard_row + simulation.row_count,
-                )
-                loaded[_simulation_key(simulation)] = LoadedTrajectory(
-                    eta=np.asarray(arrays["eta"][rows], dtype=np.float64),
-                    xi=np.asarray(arrays["xi"][rows], dtype=np.float64),
-                    gxi=np.asarray(arrays["gxi"][rows], dtype=np.float64),
-                    depth=np.asarray(arrays["depth"][rows], dtype=np.float64),
-                    time=np.asarray(arrays["time"][rows], dtype=np.float64),
-                )
+            )
         figures: list[Path] = []
         animations: dict[str, object] = {}
         overview_simulations: list[SimulationMetrics] = []
@@ -1234,7 +959,6 @@ if __name__ == "__main__":
                     "rank": 1,
                     "source_index": top_simulation.source_index,
                     "accepted_index": top_simulation.accepted_index,
-                    "trajectory_index": top_simulation.trajectory_index,
                     "simulation_id": top_simulation.simulation_id,
                     "category": top_simulation.category,
                     "split": top_simulation.split,
@@ -1271,20 +995,7 @@ if __name__ == "__main__":
             "schema": DIAGNOSTIC_SCHEMA,
             "status": "complete",
             "interpretation": INTERPRETATION,
-            "dataset": (
-                {
-                    "mode": "combined_summary",
-                    "combined_summary_path": str(binding.path),
-                    "expected_sources": binding.expected_source_count,
-                    "expected_accepted_simulations": binding.expected_accepted_simulations,
-                    "expected_retained_rows": binding.expected_retained_rows,
-                }
-                if binding is not None
-                else {
-                    "mode": "explicit_sources_development_fallback",
-                    "combined_summary_path": None,
-                }
-            ),
+            "dataset": str(sources[0].root),
             "parameters": {
                 **PARAMETERS,
                 "final_paper_dataset_contract_required": bool(
@@ -1306,9 +1017,6 @@ if __name__ == "__main__":
                     "retained_rows": sum(
                         trajectory.row_count for trajectory in source.trajectories
                     ),
-                    "summary_path": str(source.summary_path),
-                    "manifest_path": str(source.manifest_path),
-                    "trajectory_map_path": str(source.map_path),
                 }
                 for source in sources
             ],

@@ -1,4 +1,4 @@
-"""CPU integration test for paper-dataset views."""
+"""CPU integration tests for saved dataset arrays."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from solver.gen_data.pipeline.batch_storage import (
     batch_path,
     save_completed_batch,
 )
-from solver.gen_data.pipeline.build_dataset_view import build_dataset_view
+from solver.gen_data.pipeline.build_dataset import build_dataset
 from solver.gen_data.pipeline.types import (
     DatasetSplit,
     PhysicalFamilyId,
@@ -25,6 +25,7 @@ sys.path.insert(0, str(TRAIN_DIR))
 
 from util import (  # noqa: E402
     build_dataset_split_indices,
+    get_batches,
     load_dataset_arrays,
     load_or_compute_stats,
 )
@@ -54,7 +55,8 @@ def _write_batch(
         tuple(
             SimulationRows(
                 eta=np.full((frames_per_simulation, 4), local_index + 1.0),
-                xi=np.full((frames_per_simulation, 4), local_index + 1.1),
+                xi=np.full((frames_per_simulation, 4), local_index + 1.1)
+                + np.linspace(-0.5, 0.5, 4),
                 gxi=np.full((frames_per_simulation, 4), local_index + 0.9),
                 depth=float(local_index + 1),
                 time=np.arange(frames_per_simulation, dtype=np.float64),
@@ -69,7 +71,7 @@ def _write_batch(
     return path
 
 
-def test_loads_shards_and_uses_preassigned_splits() -> None:
+def test_loads_readonly_arrays_and_keeps_simulation_splits() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
         root = Path(raw_directory)
         train = _write_batch(
@@ -90,13 +92,17 @@ def test_loads_shards_and_uses_preassigned_splits() -> None:
             simulation_count=1,
             accepted_local_indices=(0,),
         )
-        paths = build_dataset_view(
-            root,
+        dataset_path = build_dataset(
+            root / "dataset",
             (train, validation),
         )
 
-        dataset = load_dataset_arrays(paths.manifest)
+        dataset = load_dataset_arrays(dataset_path)
         assert dataset["eta"].shape == (4, 4)
+        assert all(
+            isinstance(dataset[name], np.memmap) and not dataset[name].flags.writeable
+            for name in ("eta", "xi", "gxi", "depth", "time", "dataset_split", "x")
+        )
         assert np.array_equal(
             dataset["dataset_split"],
             np.asarray(
@@ -108,13 +114,6 @@ def test_loads_shards_and_uses_preassigned_splits() -> None:
                 ]
             ),
         )
-        assert np.array_equal(
-            dataset["accepted_mask"],
-            np.ones(4, dtype=np.bool_),
-        )
-        assert "trajectory_index" not in dataset
-        assert "family_id" not in dataset
-
         train_rows, validation_rows, test_rows = build_dataset_split_indices(
             dataset,
             seed=17,
@@ -130,6 +129,31 @@ def test_loads_shards_and_uses_preassigned_splits() -> None:
                 repeated,
             )
         )
+        stored_xi = np.array(dataset["xi"])
+        batches = list(
+            get_batches(
+                dataset["eta"],
+                dataset["xi"],
+                dataset["gxi"],
+                dataset["depth"],
+                train_rows,
+                batch_size=1,
+                rng=np.random.default_rng(17),
+                drop_last=False,
+            )
+        )
+        batch_indices = np.concatenate([batch[-1] for batch in batches])
+        assert set(batch_indices) == set(train_rows)
+        np.testing.assert_array_equal(
+            np.concatenate([batch[1] for batch in batches]),
+            (stored_xi - stored_xi.mean(axis=1, keepdims=True))[batch_indices],
+        )
+        stats = load_or_compute_stats(dataset_path, dataset, indices=train_rows)
+        centered_xi = stored_xi[train_rows] - stored_xi[train_rows].mean(
+            axis=1, keepdims=True
+        )
+        assert np.asarray(stats["feature_absmax"])[1] == np.abs(centered_xi).max()
+        np.testing.assert_array_equal(dataset["xi"], stored_xi)
 
 
 def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
@@ -144,48 +168,50 @@ def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
             simulation_count=1,
             accepted_local_indices=(0,),
         )
-        manifest_path = build_dataset_view(root, (batch,)).manifest
-        dataset = load_dataset_arrays(manifest_path)
+        dataset_path = build_dataset(root / "dataset", (batch,))
+        dataset = load_dataset_arrays(dataset_path)
         indices = np.arange(dataset["eta"].shape[0], dtype=np.int64)
         first = load_or_compute_stats(
-            manifest_path,
+            dataset_path,
             dataset=dataset,
             indices=indices,
         )
 
-        cache_path = manifest_path.with_suffix(".stats.json")
+        cache_path = dataset_path / "stats.json"
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         cached["target_absmax"] = 123456.0
         cache_path.write_text(json.dumps(cached), encoding="utf-8")
 
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["view_note"] = "changed"
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        target_path = dataset_path / "gxi.npy"
+        targets = np.load(target_path, mmap_mode="r+")
+        targets *= 2
+        targets.flush()
         second = load_or_compute_stats(
-            manifest_path,
+            dataset_path,
             dataset=dataset,
             indices=indices,
         )
-        assert second["target_absmax"] == first["target_absmax"]
+        assert second["target_absmax"] == 2 * np.asarray(first["target_absmax"])
         assert second["target_absmax"] != 123456.0
 
 
-def test_direct_npz_dataset_is_rejected() -> None:
+def test_manifest_is_not_a_dataset_directory() -> None:
     with tempfile.TemporaryDirectory() as raw_directory:
-        flat_dataset_path = Path(raw_directory) / "flat_dataset.npz"
+        manifest_path = Path(raw_directory) / "old.dataset.json"
+        manifest_path.write_text("{}", encoding="utf-8")
         try:
-            load_dataset_arrays(flat_dataset_path)
-        except ValueError as error:
-            assert "*.dataset.json manifest" in str(error)
+            load_dataset_arrays(manifest_path)
+        except NotADirectoryError:
+            pass
         else:
-            raise AssertionError("direct NPZ dataset did not fail closed")
+            raise AssertionError("manifest was accepted as a dataset directory")
 
 
 def main() -> int:
-    test_loads_shards_and_uses_preassigned_splits()
+    test_loads_readonly_arrays_and_keeps_simulation_splits()
     test_stats_cache_is_refreshed_when_dataset_inputs_change()
-    test_direct_npz_dataset_is_rejected()
-    print("[PASS] paper-dataset view and preassigned splits")
+    test_manifest_is_not_a_dataset_directory()
+    print("[PASS] dataset arrays, preassigned splits, and read-only preprocessing")
     return 0
 
 

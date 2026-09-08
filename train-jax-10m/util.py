@@ -17,18 +17,7 @@ from solver.gen_data.pipeline.types import DatasetSplit
 FlatParams = dict[str, jax.Array]
 StatsDict = dict[str, object]
 
-_TRAINING_MAP_DTYPES = {
-    "trajectory_index": np.dtype(np.int32),
-    "trajectory_accepted": np.dtype(np.bool_),
-}
-_TRAINING_MAP_FIELDS = (*_TRAINING_MAP_DTYPES, "trajectory_dataset_split")
-
-
-@dataclass(frozen=True)
-class DatasetLocation:
-    dataset_shard_paths: tuple[Path, ...]
-    trajectory_map_path: Path
-    manifest: dict[str, object]
+_TRAINING_ARRAY_NAMES = ("eta", "xi", "gxi", "depth", "time", "dataset_split", "x")
 
 
 def replicate_pytree_from_host(tree: Any, sharding: jax.sharding.Sharding) -> Any:
@@ -69,215 +58,51 @@ def require_jax_devices() -> tuple[str, list[Any]]:
     return backend, devices
 
 
-def _resolve_dataset_location(dataset_path: Path) -> DatasetLocation:
-    """Resolve a paper-dataset view."""
-    if not dataset_path.name.endswith(".dataset.json"):
-        raise ValueError(
-            f"Training requires a *.dataset.json manifest, got {dataset_path}"
-        )
-
-    manifest_raw = json.loads(dataset_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest_raw, dict):
-        raise ValueError(f"Dataset manifest must contain a JSON object: {dataset_path}")
-    manifest: dict[str, object] = manifest_raw
-    shard_records = manifest.get("dataset_shards")
-    if not isinstance(shard_records, list) or not shard_records:
-        raise ValueError(
-            f"Dataset manifest requires a nonempty dataset_shards list: {dataset_path}"
-        )
-    resolved_shards: list[Path] = []
-    for record in shard_records:
-        if not isinstance(record, dict):
-            raise TypeError("every dataset_shards entry must be an object")
-        shard_name = record.get("path")
-        if not isinstance(shard_name, str) or not shard_name:
-            raise ValueError("every dataset shard requires a nonempty path")
-        shard_path = (dataset_path.parent / shard_name).resolve()
-        if not shard_path.exists():
-            raise FileNotFoundError(f"Dataset shard is missing: {shard_path}")
-        resolved_shards.append(shard_path)
-
-    trajectory_map_name = manifest.get("trajectory_map_npz")
-    if not isinstance(trajectory_map_name, str) or not trajectory_map_name:
-        raise ValueError(
-            f"Dataset manifest requires a nonempty trajectory_map_npz: {dataset_path}"
-        )
-    trajectory_map_path = (dataset_path.parent / trajectory_map_name).resolve()
-    if not trajectory_map_path.exists():
-        raise FileNotFoundError(
-            "Dataset manifest requires a trajectory map, but the sidecar is missing: "
-            f"{trajectory_map_path}"
-        )
-
-    return DatasetLocation(
-        dataset_shard_paths=tuple(resolved_shards),
-        trajectory_map_path=trajectory_map_path,
-        manifest=manifest,
-    )
-
-
-def _load_trajectory_map_arrays(
-    trajectory_map_path: Path,
-    *,
-    num_examples: int,
-) -> dict[str, np.ndarray]:
-    """Load only the row ownership needed to apply release-defined splits."""
-    with np.load(trajectory_map_path, allow_pickle=False) as archive:
-        missing = sorted(set(_TRAINING_MAP_FIELDS) - set(archive.files))
-        if missing:
-            raise ValueError(
-                f"Trajectory map {trajectory_map_path} is missing required arrays: {missing}"
-            )
-        arrays = {name: np.asarray(archive[name]) for name in _TRAINING_MAP_FIELDS}
-
-    for name, expected_dtype in _TRAINING_MAP_DTYPES.items():
-        array = arrays[name]
-        if array.ndim != 1:
-            raise ValueError(f"Trajectory-map array {name!r} must be one-dimensional")
-        if array.dtype != expected_dtype:
-            raise TypeError(
-                f"Trajectory-map array {name!r} has dtype {array.dtype}; "
-                f"expected {expected_dtype}"
-            )
-
-    trajectory_index = arrays["trajectory_index"]
-    if trajectory_index.shape[0] != num_examples:
-        raise ValueError(
-            f"trajectory_index must have {num_examples} entries; got "
-            f"{trajectory_index.shape[0]}"
-        )
-
-    accepted = arrays["trajectory_accepted"]
-    dataset_split = arrays["trajectory_dataset_split"]
-    if dataset_split.ndim != 1 or dataset_split.dtype.kind not in {"U", "S"}:
-        raise TypeError(
-            "trajectory_dataset_split must be a one-dimensional string array"
-        )
-    num_trajectories = accepted.shape[0]
-    if dataset_split.shape[0] != num_trajectories:
-        raise ValueError(
-            "Trajectory acceptance and split tables must have equal lengths"
-        )
-    if num_examples and num_trajectories == 0:
-        raise ValueError("Nonempty datasets require a nonempty trajectory table")
-    if trajectory_index.size and (
-        int(trajectory_index.min()) < 0
-        or int(trajectory_index.max()) >= num_trajectories
-    ):
-        raise ValueError("trajectory_index contains an out-of-range table index")
-    unknown_splits = set(map(str, dataset_split)).difference(
-        split.value for split in DatasetSplit
-    )
-    if unknown_splits:
-        raise ValueError(f"unknown dataset splits: {sorted(unknown_splits)}")
-
-    return arrays
-
-
-def _zero_mean_xi(xi: np.ndarray) -> np.ndarray:
-    # G(eta) annihilates the xi mode-0 (Dirichlet-Neumann of a constant is zero),
-    # so projecting xi to zero-mean leaves gxi unchanged while keeping the model
-    # input distribution consistent with eval/rollout, which both project too.
-    return xi - xi.mean(axis=1, keepdims=True)
-
-
-def _load_paper_dataset_shards(
-    location: DatasetLocation,
-) -> dict[str, np.ndarray]:
-    manifest = location.manifest
-    shard_records = cast(list[dict[str, object]], manifest["dataset_shards"])
-    grid = manifest.get("grid")
-    if not isinstance(grid, dict):
-        raise ValueError("Dataset manifest requires grid")
-    nx = grid.get("nx")
-    length = grid.get("length")
-    if (
-        not isinstance(nx, int)
-        or isinstance(nx, bool)
-        or nx <= 0
-        or not isinstance(length, (int, float))
-        or isinstance(length, bool)
-        or not np.isfinite(length)
-        or length <= 0.0
-    ):
-        raise ValueError("Dataset manifest has an invalid spatial grid")
-    field_parts: dict[str, list[np.ndarray]] = {
-        name: [] for name in ("eta", "xi", "gxi", "depth", "time")
-    }
-    for path, record in zip(location.dataset_shard_paths, shard_records):
-        with np.load(path, allow_pickle=False) as archive:
-            missing = sorted(set(field_parts) - set(archive.files))
-            if missing:
-                raise ValueError(f"Dataset shard {path} is missing {missing}")
-            arrays = {name: np.asarray(archive[name]) for name in field_parts}
-        eta = arrays["eta"]
-        if eta.ndim != 2 or eta.shape[1] != nx:
-            raise ValueError(
-                f"Dataset shard {path} has eta shape {eta.shape}; expected (rows, {nx})"
-            )
-        row_count = eta.shape[0]
-        if record.get("n_rows") != row_count:
-            raise ValueError(f"Dataset shard row count does not match: {path}")
-        if arrays["xi"].shape != eta.shape or arrays["gxi"].shape != eta.shape:
-            raise ValueError(f"Dataset shard fields have inconsistent shapes: {path}")
-        if arrays["depth"].shape != (row_count,) or arrays["time"].shape != (
-            row_count,
-        ):
-            raise ValueError(f"Dataset shard scalars have inconsistent shapes: {path}")
-        for name, array in arrays.items():
-            field_parts[name].append(np.asarray(array, dtype=np.float32))
-    eta = np.concatenate(field_parts["eta"], axis=0)
+def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
+    """Memory-map the saved arrays without copying the dataset into RAM."""
     dataset = {
-        "eta": eta,
-        "xi": _zero_mean_xi(np.concatenate(field_parts["xi"], axis=0)),
-        "gxi": np.concatenate(field_parts["gxi"], axis=0),
-        "depth": np.concatenate(field_parts["depth"], axis=0),
-        "time": np.concatenate(field_parts["time"], axis=0),
-        "x": np.linspace(
-            0.0,
-            float(length),
-            nx,
-            endpoint=False,
-            dtype=np.float32,
-        ),
-        "domain_length": float(length),
+        name: np.load(dataset_path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+        for name in _TRAINING_ARRAY_NAMES
     }
-    trajectory_map = _load_trajectory_map_arrays(
-        location.trajectory_map_path,
-        num_examples=eta.shape[0],
-    )
-    trajectory_index = trajectory_map["trajectory_index"]
-    dataset["accepted_mask"] = trajectory_map["trajectory_accepted"][trajectory_index]
-    dataset["dataset_split"] = trajectory_map["trajectory_dataset_split"][
-        trajectory_index
-    ]
+    eta = dataset["eta"]
+    x = dataset["x"]
+    if eta.ndim != 2 or x.shape != (eta.shape[1],):
+        raise ValueError("Dataset eta and spatial grid have inconsistent shapes")
+    if any(dataset[name].shape != eta.shape for name in ("xi", "gxi")):
+        raise ValueError("Dataset fields have inconsistent shapes")
+    if any(
+        dataset[name].shape != (eta.shape[0],)
+        for name in ("depth", "time", "dataset_split")
+    ):
+        raise ValueError("Dataset row metadata has inconsistent shapes")
+    if not np.isin(
+        dataset["dataset_split"], tuple(split.value for split in DatasetSplit)
+    ).all():
+        raise ValueError("Dataset contains unknown splits")
+    length = float((x[1] - x[0]) * x.size)
+    if not np.isfinite(length) or length <= 0:
+        raise ValueError("Dataset spatial grid has an invalid domain length")
+    dataset["domain_length"] = np.asarray(length)
     return dataset
 
 
-def load_dataset_arrays(dataset_path: Path) -> dict[str, np.ndarray]:
-    """Load one paper-dataset view."""
-    location = _resolve_dataset_location(dataset_path)
-    return _load_paper_dataset_shards(location)
+def _zero_mean_xi(xi: np.ndarray) -> np.ndarray:
+    # G(eta) annihilates xi's constant mode. Center only gathered batches/chunks
+    # so the read-only memory map stays unchanged and the full array is not copied.
+    return xi - xi.mean(axis=1, keepdims=True)
 
 
 def build_dataset_split_indices(
     dataset: dict[str, np.ndarray],
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return every accepted row from the dataset's preassigned splits."""
+    """Return all rows from the dataset's simulation-level splits."""
     dataset_split = np.asarray(dataset["dataset_split"])
-    eligible = np.asarray(dataset["accepted_mask"])
     rng = np.random.default_rng(seed)
     return (
-        rng.permutation(
-            np.flatnonzero(eligible & (dataset_split == DatasetSplit.TRAIN.value))
-        ),
-        rng.permutation(
-            np.flatnonzero(eligible & (dataset_split == DatasetSplit.VALIDATION.value))
-        ),
-        rng.permutation(
-            np.flatnonzero(eligible & (dataset_split == DatasetSplit.TEST.value))
-        ),
+        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.TRAIN.value)),
+        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.VALIDATION.value)),
+        rng.permutation(np.flatnonzero(dataset_split == DatasetSplit.TEST.value)),
     )
 
 
@@ -305,19 +130,20 @@ def _compute_selected_extrema(
     indices: np.ndarray | None,
     *,
     chunk_size: int = 65_536,
+    zero_mean: bool = False,
 ) -> tuple[float, float, float]:
-    if indices is None:
-        return (
-            float(np.min(array)),
-            float(np.max(array)),
-            float(np.max(np.abs(array))),
-        )
-
     minimum = np.inf
     maximum = -np.inf
     absmax = 0.0
-    for start in range(0, indices.shape[0], chunk_size):
-        selected = array[indices[start : start + chunk_size]]
+    number_of_rows = array.shape[0] if indices is None else indices.shape[0]
+    for start in range(0, number_of_rows, chunk_size):
+        selected = (
+            array[start : start + chunk_size]
+            if indices is None
+            else array[indices[start : start + chunk_size]]
+        )
+        if zero_mean:
+            selected = _zero_mean_xi(selected)
         minimum = min(minimum, float(np.min(selected)))
         maximum = max(maximum, float(np.max(selected)))
         absmax = max(absmax, float(np.max(np.abs(selected))))
@@ -330,14 +156,9 @@ def load_or_compute_stats(
     *,
     indices: np.ndarray | None = None,
 ) -> StatsDict:
-    location = _resolve_dataset_location(dataset_path.resolve())
     input_file_state: list[dict[str, int]] = []
-    for path in (
-        dataset_path.resolve(),
-        location.trajectory_map_path,
-        *location.dataset_shard_paths,
-    ):
-        state = path.stat()
+    for name in _TRAINING_ARRAY_NAMES:
+        state = (dataset_path / f"{name}.npy").stat()
         input_file_state.append(
             {
                 "size_bytes": state.st_size,
@@ -353,7 +174,7 @@ def load_or_compute_stats(
             )
         selection = {"count": int(indices.shape[0])}
 
-    stats_path = dataset_path.with_suffix(".stats.json")
+    stats_path = dataset_path / "stats.json"
     if stats_path.exists():
         cached: object = None
         with suppress(json.JSONDecodeError, OSError):
@@ -385,7 +206,9 @@ def load_or_compute_stats(
     num_examples = int(dataset["eta"].shape[0])
 
     eta_min, eta_max, eta_absmax = _compute_selected_extrema(dataset["eta"], indices)
-    xi_min, xi_max, xi_absmax = _compute_selected_extrema(dataset["xi"], indices)
+    xi_min, xi_max, xi_absmax = _compute_selected_extrema(
+        dataset["xi"], indices, zero_mean=True
+    )
     target_min, target_max, target_absmax = _compute_selected_extrema(
         dataset["gxi"], indices
     )
@@ -526,7 +349,7 @@ def get_batches(
         batch_indices = ordered_indices[start:end]
         yield (
             eta[batch_indices],
-            xi[batch_indices],
+            _zero_mean_xi(xi[batch_indices]),
             gxi[batch_indices],
             compute_log_depth(depth[batch_indices]),
             batch_indices,

@@ -4,17 +4,17 @@ Workflow:
     # 0. Log in once:
     modal token new
 
-    # 1. Upload a training dataset manifest and its referenced files:
-    modal run scripts/modal_train.py::upload_dataset_view --dataset outputs/.../paper.dataset.json
+    # 1. Upload a training dataset directory:
+    modal run scripts/modal_train.py::upload_dataset --dataset outputs/.../arrays
 
     # 2. Train (single-GPU H100 by default):
     modal run scripts/modal_train.py::train \\
-        --dataset /data/outputs/.../paper.dataset.json \\
+        --dataset /data/outputs/.../arrays \\
         --epochs 30 --batch-size 1024 --modes 64 --width 64 --n-blocks 4
 
     # multi-GPU example:
     MODAL_GPU=H100:4 modal run scripts/modal_train.py::train \\
-        --dataset /data/outputs/.../paper.dataset.json --batch-size 4096
+        --dataset /data/outputs/.../arrays --batch-size 4096
 
     # 3. Download a finished run dir to local outputs/:
     modal run scripts/modal_train.py::download_run --run-name fno_jax_10m_20260507_103000
@@ -28,7 +28,6 @@ The volume keeps both the input files and the run outputs, so re-running
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Protocol, cast
@@ -88,8 +87,8 @@ def status() -> dict[str, list[str]]:
     out_dir = f"{VOLUME_MOUNT}/outputs"
     summary = {
         "datasets": [
-            str(path.relative_to(VOLUME_MOUNT))
-            for path in sorted(Path(VOLUME_MOUNT).rglob("*.dataset.json"))
+            str(path.parent.relative_to(VOLUME_MOUNT))
+            for path in sorted(Path(VOLUME_MOUNT).rglob("eta.npy"))
         ],
         "runs": sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else [],
     }
@@ -98,31 +97,12 @@ def status() -> dict[str, list[str]]:
 
 
 @app.local_entrypoint()
-def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
-    """Upload one manifest dataset view while preserving repo-relative paths."""
+def upload_dataset(dataset: str) -> None:
+    """Upload the dataset's NPY arrays while preserving repo-relative paths."""
     dataset_path = Path(dataset).resolve()
-    manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
-    shard_records = manifest.get("dataset_shards")
-    if not isinstance(shard_records, list) or not shard_records:
-        raise ValueError(f"dataset manifest has no dataset_shards: {dataset_path}")
-    trajectory_map = manifest.get("trajectory_map_npz")
-    if not isinstance(trajectory_map, str) or not trajectory_map:
-        raise ValueError(f"dataset manifest has no trajectory_map_npz: {dataset_path}")
-
-    targets = [
-        dataset_path,
-        (dataset_path.parent / trajectory_map).resolve(),
-        dataset_path.with_suffix(".stats.json"),
-    ]
-    for record in shard_records:
-        shard = record.get("path") if isinstance(record, dict) else None
-        if not isinstance(shard, str) or not shard:
-            raise ValueError(f"invalid dataset_shards record: {record!r}")
-        targets.append((dataset_path.parent / shard).resolve())
-
-    if len(set(targets)) != len(targets):
-        raise ValueError("dataset view contains duplicate upload targets")
-
+    targets = sorted(dataset_path.glob("*.npy"))
+    if not targets:
+        raise ValueError(f"dataset directory contains no NPY arrays: {dataset_path}")
     repo_root = REPO_ROOT.resolve()
     relative_targets = [
         (path, f"/{path.relative_to(repo_root).as_posix()}") for path in targets
@@ -133,19 +113,10 @@ def upload_dataset_view(dataset: str, files_per_commit: int = 32) -> None:
         f"Uploading {len(relative_targets):,} files "
         f"({total_bytes / 1e9:.2f} GB) -> volume {VOLUME_NAME!r}"
     )
-    for start in range(0, len(relative_targets), files_per_commit):
-        batch_targets = relative_targets[start : start + files_per_commit]
-        batch_bytes = sum(path.stat().st_size for path, _ in batch_targets)
-        end = start + len(batch_targets)
-        print(
-            f"  commit {start + 1:,}-{end:,}/{len(relative_targets):,} "
-            f"({batch_bytes / 1e9:.2f} GB)",
-            flush=True,
-        )
-        with volume.batch_upload(force=True) as batch:
-            for path, remote in batch_targets:
-                batch.put_file(str(path), remote)
-    print("dataset-view upload complete.")
+    with volume.batch_upload(force=True) as batch:
+        for path, remote in relative_targets:
+            batch.put_file(str(path), remote)
+    print("dataset upload complete.")
 
 
 @app.function(

@@ -9,7 +9,7 @@ Typical use::
     uv run python -m solver.evals.eval_suite \
         --run_dir outputs/c27_rerun \
         --dataset outputs/paper_dataset_literature_aligned_v1/combined/\
-c16384_v01024_t01024/paper_dataset_all_splits_c16384.dataset.json \
+c16384_v01024_t01024/arrays \
         --n_ics 16 --gpu
 """
 
@@ -46,8 +46,7 @@ from solver.solvers.dno_series_jax import build_grid, make_linear_dno_symbol  # 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DATASET = (
     REPO_ROOT
-    / "outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024"
-    / "paper_dataset_all_splits_c16384.dataset.json"
+    / "outputs/paper_dataset_literature_aligned_v1/combined/c16384_v01024_t01024/arrays"
 )
 RolloutPayload = dict[str, np.ndarray | float]
 TRUTH_DRIFT_TOL = 1e-3
@@ -80,12 +79,6 @@ FAMILY_CONFIGS: dict[str, FamilyConfig] = {
 }
 
 
-def _resolve_manifest_path(manifest_path: Path, value: object, label: str) -> Path:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"dataset manifest must define nonempty {label}")
-    return (manifest_path.parent / value).resolve()
-
-
 def _load_paper_dataset_ics(
     dataset_path: Path,
     family: str,
@@ -93,129 +86,49 @@ def _load_paper_dataset_ics(
 ) -> tuple[list[IC], dict[str, object], int, float]:
     """Load the first accepted test initial conditions for one family."""
     dataset_path = dataset_path.resolve()
-    manifest = json.loads(dataset_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError(f"dataset manifest must contain a JSON object: {dataset_path}")
-    grid = manifest.get("grid")
-    if not isinstance(grid, dict):
-        raise ValueError("dataset manifest is missing grid metadata")
-    nx = int(grid["nx"])
-    length = float(grid["length"])
-    if nx <= 0 or not np.isfinite(length) or length <= 0.0:
-        raise ValueError(f"invalid dataset grid: nx={nx}, length={length}")
-
-    trajectory_map_path = _resolve_manifest_path(
-        dataset_path, manifest.get("trajectory_map_npz"), "trajectory_map_npz"
-    )
-    family_id = FAMILY_CONFIGS[family].family_id
-
-    with np.load(trajectory_map_path, mmap_mode="r", allow_pickle=False) as mapping:
-        required = {
+    arrays = {
+        name: np.load(dataset_path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+        for name in (
+            "eta",
+            "xi",
+            "depth",
+            "family_id",
+            "dataset_split",
+            "simulation_id",
             "frame_index",
-            "shard_index",
-            "shard_row",
-            "trajectory_accepted",
-            "trajectory_simulation_id",
-            "trajectory_family_id",
-            "trajectory_first_row",
-            "trajectory_index",
-            "trajectory_row_count",
-            "trajectory_dataset_split",
-        }
-        missing = sorted(required.difference(mapping.files))
-        if missing:
-            raise ValueError(f"trajectory map is missing arrays: {missing}")
-
-        accepted = np.asarray(mapping["trajectory_accepted"], dtype=bool)
-        family_ids = np.asarray(mapping["trajectory_family_id"])
-        dataset_splits = np.asarray(mapping["trajectory_dataset_split"])
-        candidates = np.flatnonzero(
-            accepted
-            & (family_ids == family_id)
-            & (dataset_splits == DatasetSplit.TEST.value)
+            "x",
         )
-        if candidates.size < n_ics:
-            raise ValueError(
-                f"family {family!r} has only {candidates.size} accepted test trajectories; "
-                f"requested {n_ics}"
-            )
-        selected = candidates[:n_ics]
-        first_rows = np.asarray(mapping["trajectory_first_row"])[selected].astype(
-            np.int64
-        )
-        row_counts = np.asarray(mapping["trajectory_row_count"])[selected]
-        simulation_ids = np.asarray(mapping["trajectory_simulation_id"])[
-            selected
-        ].astype(np.int64)
-        trajectory_index = np.asarray(mapping["trajectory_index"])[first_rows]
-        frame_indices = np.asarray(mapping["frame_index"])[first_rows]
-        shard_indices = np.asarray(mapping["shard_index"])[first_rows].astype(np.int64)
-        shard_rows = np.asarray(mapping["shard_row"])[first_rows].astype(np.int64)
-
-    if np.any(row_counts <= 0):
-        raise ValueError(f"family {family!r} contains an empty selected trajectory")
-    if not np.array_equal(trajectory_index, selected):
+    }
+    x = arrays["x"]
+    nx = x.size
+    if x.ndim != 1 or nx < 2:
+        raise ValueError(f"invalid dataset grid in {dataset_path}")
+    length = float((x[1] - x[0]) * nx)
+    if not np.isfinite(x).all() or length <= 0.0:
+        raise ValueError(f"invalid dataset grid in {dataset_path}")
+    family_id = FAMILY_CONFIGS[family].family_id
+    candidates = np.flatnonzero(
+        (arrays["family_id"] == family_id)
+        & (arrays["dataset_split"] == DatasetSplit.TEST.value)
+        & (arrays["frame_index"] == 0)
+    )
+    if candidates.size < n_ics:
         raise ValueError(
-            f"family {family!r} has inconsistent trajectory first-row pointers"
+            f"family {family!r} has only {candidates.size} accepted test trajectories; "
+            f"requested {n_ics}"
         )
-    if np.any(frame_indices != 0):
-        raise ValueError(
-            f"family {family!r} selected trajectory does not begin at frame 0"
-        )
+    selected = candidates[:n_ics]
+    simulation_ids = arrays["simulation_id"][selected]
     if np.unique(simulation_ids).size != n_ics:
         raise ValueError(
             f"family {family!r} selected test simulation IDs are not unique"
         )
 
-    shard_specs = manifest.get("dataset_shards")
-    if not isinstance(shard_specs, list):
-        raise ValueError("dataset manifest is missing dataset_shards")
-    loaded_rows: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    loaded_shards: list[dict[str, object]] = []
-    for shard_index in np.unique(shard_indices):
-        try:
-            shard_spec = shard_specs[int(shard_index)]
-        except (IndexError, TypeError) as exc:
-            raise ValueError(
-                f"trajectory map references invalid shard {shard_index}"
-            ) from exc
-        if not isinstance(shard_spec, dict):
-            raise ValueError(f"dataset shard {shard_index} metadata is not an object")
-        shard_path = _resolve_manifest_path(
-            dataset_path, shard_spec.get("path"), f"shard {shard_index}"
-        )
-        positions = np.flatnonzero(shard_indices == shard_index)
-        rows = shard_rows[positions]
-        with np.load(shard_path, mmap_mode="r", allow_pickle=False) as shard:
-            required_arrays = {"eta", "xi", "depth", "frame_index"}
-            missing = sorted(required_arrays.difference(shard.files))
-            if missing:
-                raise ValueError(
-                    f"dataset shard {shard_path} is missing arrays: {missing}"
-                )
-            if np.any(rows < 0) or np.any(rows >= shard["eta"].shape[0]):
-                raise ValueError(f"trajectory map references rows outside {shard_path}")
-            if np.any(np.asarray(shard["frame_index"])[rows] != 0):
-                raise ValueError(
-                    f"trajectory map frame-0 rows disagree with {shard_path}"
-                )
-            for position, row in zip(positions, rows, strict=True):
-                loaded_rows[int(position)] = (
-                    np.asarray(shard["eta"][row], dtype=np.float64),
-                    np.asarray(shard["xi"][row], dtype=np.float64),
-                    np.asarray(shard["depth"][row], dtype=np.float64),
-                )
-        loaded_shards.append(
-            {
-                "index": int(shard_index),
-                "path": str(shard_path),
-            }
-        )
-
     ics = []
-    for position, simulation_id in enumerate(simulation_ids):
-        eta, xi, depth_array = loaded_rows[position]
-        depth = float(depth_array)
+    for row, simulation_id in zip(selected, simulation_ids, strict=True):
+        eta = np.asarray(arrays["eta"][row], dtype=np.float64)
+        xi = np.asarray(arrays["xi"][row], dtype=np.float64)
+        depth = float(arrays["depth"][row])
         if eta.shape != (nx,) or xi.shape != (nx,):
             raise ValueError(
                 f"family {family!r} IC shape mismatch: eta={eta.shape}, xi={xi.shape}, "
@@ -233,11 +146,7 @@ def _load_paper_dataset_ics(
                 xi=xi,
                 depth=depth,
                 simulation_id=int(simulation_id),
-                meta={
-                    "trajectory_index": int(selected[position]),
-                    "shard_index": int(shard_indices[position]),
-                    "shard_row": int(shard_rows[position]),
-                },
+                meta={"dataset_row": int(row)},
             )
         )
 
@@ -246,9 +155,7 @@ def _load_paper_dataset_ics(
         "family": family,
         "family_id": family_id,
         "dataset_split": DatasetSplit.TEST.value,
-        "dataset_manifest": str(dataset_path),
-        "trajectory_map": str(trajectory_map_path),
-        "loaded_shards": loaded_shards,
+        "dataset": str(dataset_path),
     }
     return ics, source, nx, length
 

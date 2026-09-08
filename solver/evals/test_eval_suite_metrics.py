@@ -15,15 +15,70 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 from solver.evals.eval_suite import (  # noqa: E402
     IC,
     _json_ready,
+    _load_paper_dataset_ics,
     _rollout_ic_chunks,
     _try_load_cached_truth,
     _write_truth_cache,
     compute_macro_summary,
     compute_metrics,
 )
+from solver.gen_data.pipeline.batch_storage import save_completed_batch  # noqa: E402
+from solver.gen_data.pipeline.build_dataset import build_dataset  # noqa: E402
+from solver.gen_data.pipeline.types import (  # noqa: E402
+    DatasetSplit,
+    PhysicalFamilyId,
+    SimulationRows,
+)
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_dataset_ics_select_test_initial_rows_with_original_simulation_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batches = []
+            rows = SimulationRows(
+                eta=np.arange(16, dtype=np.float64).reshape(2, 8),
+                xi=np.ones((2, 8)),
+                gxi=np.zeros((2, 8)),
+                depth=2.0,
+                time=np.asarray((0.0, 1.0)),
+            )
+            for index, (family, split, accepted) in enumerate(
+                (
+                    (PhysicalFamilyId.STOKES, DatasetSplit.TEST, (rows,)),
+                    (PhysicalFamilyId.TANAKA, DatasetSplit.VALIDATION, (rows,)),
+                    (
+                        PhysicalFamilyId.TANAKA,
+                        DatasetSplit.TEST,
+                        (None, rows, None, rows),
+                    ),
+                    (PhysicalFamilyId.TANAKA, DatasetSplit.TEST, (rows,)),
+                )
+            ):
+                batch = root / f"batch_{index}.npz"
+                save_completed_batch(
+                    batch,
+                    ("known",) * len(accepted),
+                    accepted,
+                    family_id=family,
+                    dataset_split=split,
+                )
+                batches.append(batch)
+            dataset = build_dataset(root / "dataset", batches)
+            ics, source, nx, length = _load_paper_dataset_ics(dataset, "tanaka", 3)
+            self.assertEqual([ic.simulation_id for ic in ics], [1, 3, 4])
+            self.assertEqual([ic.meta["dataset_row"] for ic in ics], [4, 6, 8])
+            self.assertEqual(source["dataset"], str(dataset))
+            self.assertEqual(nx, 8)
+            self.assertAlmostEqual(length, 2.0 * np.pi)
+            for ic in ics:
+                np.testing.assert_array_equal(ic.eta, rows.eta[0])
+                np.testing.assert_array_equal(ic.xi, rows.xi[0])
+            with self.assertRaisesRegex(ValueError, "only 3"):
+                _load_paper_dataset_ics(dataset, "tanaka", 4)
+
     def test_truth_cache_uses_simulation_ids_consistently(self) -> None:
         values = np.ones((2, 1, 3), dtype=np.float64)
         truth = {
