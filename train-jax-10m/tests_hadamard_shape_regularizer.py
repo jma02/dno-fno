@@ -100,16 +100,16 @@ def _config(
     *,
     k_max: float = 20.0,
     sobolev_order: int = 1,
-    relative_eps_min: float = 1e-3,
-    relative_eps_max: float = 1e-3,
+    fd_step_min: float = 1e-3,
+    fd_step_max: float = 1e-3,
     eta_scale_floor: float = 2e-2,
     denominator_floor: float = 1e-24,
 ) -> HadamardRegConfig:
     return HadamardRegConfig(
         k_max=k_max,
         sobolev_order=sobolev_order,
-        relative_eps_min=relative_eps_min,
-        relative_eps_max=relative_eps_max,
+        fd_step_min=fd_step_min,
+        fd_step_max=fd_step_max,
         eta_scale_floor=eta_scale_floor,
         denominator_floor=denominator_floor,
     )
@@ -155,8 +155,8 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
     np.testing.assert_allclose(np.asarray(jnp.mean(zeta, axis=-1)), 0.0, atol=1e-15)
     zeta_hat = jnp.fft.fft(zeta, axis=-1)
     assert float(jnp.max(jnp.abs(zeta_hat[:, jnp.abs(k) > cfg.k_max]))) < 1e-13
-    assert bool(jnp.all(eps >= cfg.relative_eps_min))
-    assert bool(jnp.all(eps <= cfg.relative_eps_max))
+    assert bool(jnp.all(eps >= cfg.fd_step_min))
+    assert bool(jnp.all(eps <= cfg.fd_step_max))
 
 
 def test_exact_g01_has_zero_flat_surface_defect() -> None:
@@ -182,7 +182,7 @@ def test_exact_g01_has_zero_flat_surface_defect() -> None:
         "hadamard_residual_hs_rms",
         "hadamard_forcing_hs_rms",
         "hadamard_secant_hs_rms",
-        "hadamard_relative_eps",
+        "hadamard_fd_step",
         "hadamard_eta_scale",
     }
     assert all(value.shape == () for value in diagnostics.values())
@@ -262,7 +262,7 @@ def test_loss_is_jittable_and_differentiable() -> None:
     eta, xi, depth, k = _base_inputs(batch_size=2)
     x = jnp.arange(eta.shape[-1], dtype=jnp.float64) * (2.0 * jnp.pi / eta.shape[-1])
     eta = 0.015 * jnp.cos(2.0 * x)[None, :] * jnp.ones((2, 1))
-    cfg = _config(relative_eps_min=2e-3, relative_eps_max=2e-3)
+    cfg = _config(fd_step_min=2e-3, fd_step_max=2e-3)
 
     def perturbed_apply(
         variables: dict[str, Any], inputs: Array, batch_depth: Array

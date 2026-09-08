@@ -33,15 +33,15 @@ Diagnostics: TypeAlias = dict[str, Array]
 class HadamardRegConfig:
     """Static controls for :func:`compute_hadamard_reg`.
 
-    ``relative_eps_*`` are dimensionless because the sampled direction is
+    ``fd_step_*`` are dimensionless because the sampled direction is
     scaled to the RMS amplitude of each input surface.  ``eta_scale_floor`` is
     the physical-amplitude fallback for flat or nearly flat surfaces.
     """
 
     k_max: float = 128.0
     sobolev_order: int = 1
-    relative_eps_min: float = 1e-3
-    relative_eps_max: float = 3e-3
+    fd_step_min: float = 1e-3
+    fd_step_max: float = 3e-3
     eta_scale_floor: float = 1e-3
     denominator_floor: float = 1e-12
 
@@ -106,7 +106,7 @@ def construct_relative_eta_probe(
     cfg: HadamardRegConfig,
     dtype: jnp.dtype,
 ) -> tuple[Array, Array, Array]:
-    """Sample ``(zeta, relative_eps, eta_scale)`` for a finite secant.
+    """Sample ``(zeta, fd_step, eta_scale)`` for a finite difference.
 
     The zero-mean random direction is supported on ``0 < |k| <= k_max``.  Its
     spectrum is divided by the Sobolev weight before RMS normalisation; hence
@@ -140,20 +140,20 @@ def construct_relative_eta_probe(
     )
     zeta = unit_probe * eta_scale[:, None]
 
-    eps_min = jnp.asarray(cfg.relative_eps_min, dtype=dtype)
-    eps_max = jnp.asarray(cfg.relative_eps_max, dtype=dtype)
-    if cfg.relative_eps_min == cfg.relative_eps_max:
-        relative_eps = jnp.full((batch_size,), eps_min, dtype=dtype)
+    fd_step_min = jnp.asarray(cfg.fd_step_min, dtype=dtype)
+    fd_step_max = jnp.asarray(cfg.fd_step_max, dtype=dtype)
+    if cfg.fd_step_min == cfg.fd_step_max:
+        fd_step = jnp.full((batch_size,), fd_step_min, dtype=dtype)
     else:
-        log_eps = jax.random.uniform(
+        log_step = jax.random.uniform(
             key_eps,
             (batch_size,),
             dtype=dtype,
-            minval=jnp.log(eps_min),
-            maxval=jnp.log(eps_max),
+            minval=jnp.log(fd_step_min),
+            maxval=jnp.log(fd_step_max),
         )
-        relative_eps = jnp.clip(jnp.exp(log_eps), eps_min, eps_max)
-    return zeta, relative_eps, eta_scale
+        fd_step = jnp.clip(jnp.exp(log_step), fd_step_min, fd_step_max)
+    return zeta, fd_step, eta_scale
 
 
 def evaluate_operator(
@@ -209,7 +209,7 @@ def compute_hadamard_reg(
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)
     depth = batch_depth_local.astype(dtype)
-    zeta, relative_eps, eta_scale = construct_relative_eta_probe(
+    zeta, fd_step, eta_scale = construct_relative_eta_probe(
         rng, eta, k_typed, cfg, dtype
     )
 
@@ -228,18 +228,18 @@ def compute_hadamard_reg(
     b_velocity = (gxi + eta_x * xi_x) / (1.0 + eta_x * eta_x)
     v_velocity = xi_x - b_velocity * eta_x
 
-    eps_broadcast = relative_eps[:, None]
+    fd_step_broadcast = fd_step[:, None]
     gxi_perturbed = evaluate_operator(
         apply_fn,
         model_params,
-        eta + eps_broadcast * zeta,
+        eta + fd_step_broadcast * zeta,
         xi,
         depth,
         norm_inputs_fn,
         denorm_targets_fn,
         dtype,
     )
-    secant = (gxi_perturbed - gxi) / eps_broadcast
+    secant = (gxi_perturbed - gxi) / fd_step_broadcast
 
     zeta_b = zeta * b_velocity
     g_zeta_b = evaluate_operator(
@@ -277,7 +277,7 @@ def compute_hadamard_reg(
         "hadamard_residual_hs_rms": jnp.mean(jnp.sqrt(residual_energy)),
         "hadamard_forcing_hs_rms": jnp.mean(jnp.sqrt(forcing_energy)),
         "hadamard_secant_hs_rms": jnp.mean(jnp.sqrt(secant_energy)),
-        "hadamard_relative_eps": jnp.mean(relative_eps),
+        "hadamard_fd_step": jnp.mean(fd_step),
         "hadamard_eta_scale": jnp.mean(eta_scale),
     }
     return loss, diagnostics

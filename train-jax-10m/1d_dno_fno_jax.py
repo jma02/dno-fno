@@ -322,16 +322,16 @@ def main() -> None:
         help="Sobolev order used to scale probes and weight the Hadamard defect.",
     )
     parser.add_argument(
-        "--hadamard_relative_eps_min",
+        "--hadamard_fd_step_min",
         type=float,
         default=1e-3,
-        help="Minimum relative surface perturbation for the finite secant.",
+        help="Minimum relative finite-difference step (fraction of surface RMS).",
     )
     parser.add_argument(
-        "--hadamard_relative_eps_max",
+        "--hadamard_fd_step_max",
         type=float,
         default=3e-3,
-        help="Maximum relative surface perturbation for the finite secant.",
+        help="Maximum relative finite-difference step (fraction of surface RMS).",
     )
     parser.add_argument(
         "--hadamard_eta_scale_floor",
@@ -506,8 +506,8 @@ def main() -> None:
     config_payload["hadamard_warmup_steps"] = int(args.hadamard_warmup_steps)
     config_payload["hadamard_k_max"] = float(args.hadamard_k_max)
     config_payload["hadamard_sobolev_order"] = int(args.hadamard_sobolev_order)
-    config_payload["hadamard_relative_eps_min"] = float(args.hadamard_relative_eps_min)
-    config_payload["hadamard_relative_eps_max"] = float(args.hadamard_relative_eps_max)
+    config_payload["hadamard_fd_step_min"] = float(args.hadamard_fd_step_min)
+    config_payload["hadamard_fd_step_max"] = float(args.hadamard_fd_step_max)
     config_payload["hadamard_eta_scale_floor"] = float(args.hadamard_eta_scale_floor)
     config_payload["hadamard_denominator_floor"] = float(
         args.hadamard_denominator_floor
@@ -552,8 +552,8 @@ def main() -> None:
     hadamard_cfg = HadamardRegConfig(
         k_max=float(args.hadamard_k_max),
         sobolev_order=int(args.hadamard_sobolev_order),
-        relative_eps_min=float(args.hadamard_relative_eps_min),
-        relative_eps_max=float(args.hadamard_relative_eps_max),
+        fd_step_min=float(args.hadamard_fd_step_min),
+        fd_step_max=float(args.hadamard_fd_step_max),
         eta_scale_floor=float(args.hadamard_eta_scale_floor),
         denominator_floor=float(args.hadamard_denominator_floor),
     )
@@ -568,7 +568,7 @@ def main() -> None:
         "hadamard_residual_hs_rms",
         "hadamard_forcing_hs_rms",
         "hadamard_secant_hs_rms",
-        "hadamard_relative_eps",
+        "hadamard_fd_step",
         "hadamard_eta_scale",
         "hadamard_extra",
         "hadamard_warmup",
@@ -759,7 +759,7 @@ def main() -> None:
                             diagnostics["hadamard_residual_hs_rms"],
                             diagnostics["hadamard_forcing_hs_rms"],
                             diagnostics["hadamard_secant_hs_rms"],
-                            diagnostics["hadamard_relative_eps"],
+                            diagnostics["hadamard_fd_step"],
                             diagnostics["hadamard_eta_scale"],
                             hadamard_extra,
                             warmup,
