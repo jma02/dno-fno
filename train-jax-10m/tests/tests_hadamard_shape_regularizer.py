@@ -28,7 +28,6 @@ import numpy as np  # noqa: E402
 
 from hadamard_shape_regularizer import (  # noqa: E402
     compute_hadamard_reg,
-    construct_relative_eta_probe,
     evaluate_operator,
     projected_sobolev_energy,
 )
@@ -127,29 +126,45 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
             jnp.zeros_like(x),
         )
     )
-    k = _wavenumbers(nx)
-    zeta, eps = construct_relative_eta_probe(
+    _, xi, depth, k = _base_inputs(nx)
+    surfaces: list[Array] = []
+
+    def recording_apply(
+        variables: dict[str, Any], inputs: Array, depth: Array
+    ) -> Array:
+        surfaces.append(inputs[..., 0])
+        return _g01_apply(variables, inputs, depth)
+
+    _hadamard_loss(
         jax.random.PRNGKey(4),
+        recording_apply,
+        {},
         eta,
+        xi,
+        depth,
+        _identity_norm_inputs,
+        _identity_targets,
         k,
         jnp.float64,
         k_max=12.0,
-        sobolev_order=1,
         fd_step_min=1e-3,
         fd_step_max=1e-3,
         eta_scale_floor=5e-3,
     )
 
+    base, perturbed, repeated = surfaces
+    np.testing.assert_array_equal(base, eta)
+    np.testing.assert_array_equal(repeated, eta)
+    perturbation = perturbed - base
     expected_scale = jnp.maximum(jnp.sqrt(jnp.mean(eta * eta, axis=-1)), 5e-3)
     np.testing.assert_allclose(
-        np.asarray(jnp.sqrt(jnp.mean(zeta * zeta, axis=-1))),
-        np.asarray(expected_scale),
-        rtol=1e-13,
+        jnp.sqrt(jnp.mean(perturbation * perturbation, axis=-1)),
+        1e-3 * expected_scale,
+        rtol=1e-12,
     )
-    np.testing.assert_allclose(np.asarray(jnp.mean(zeta, axis=-1)), 0.0, atol=1e-15)
-    zeta_hat = jnp.fft.fft(zeta, axis=-1)
-    assert float(jnp.max(jnp.abs(zeta_hat[:, jnp.abs(k) > 12.0]))) < 1e-13
-    np.testing.assert_array_equal(eps, jnp.full_like(eps, 1e-3))
+    np.testing.assert_allclose(jnp.mean(perturbation, axis=-1), 0.0, atol=1e-15)
+    perturbation_hat = jnp.fft.fft(perturbation, axis=-1)
+    assert float(jnp.max(jnp.abs(perturbation_hat[:, jnp.abs(k) > 12.0]))) < 1e-13
 
 
 def test_exact_g01_has_zero_flat_surface_defect() -> None:

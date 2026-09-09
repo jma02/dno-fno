@@ -68,64 +68,6 @@ def projected_sobolev_energy(
     )
 
 
-def construct_relative_eta_probe(
-    rng: Array,
-    eta_phys: Array,
-    k: Array,
-    dtype: jnp.dtype,
-    *,
-    k_max: float,
-    sobolev_order: int,
-    fd_step_min: float,
-    fd_step_max: float,
-    eta_scale_floor: float,
-) -> tuple[Array, Array]:
-    """Sample ``(zeta, fd_step)`` for a finite difference.
-
-    The zero-mean random direction is supported on ``0 < |k| <= k_max``.  Its
-    spectrum is divided by the Sobolev weight before RMS normalisation; hence
-    weighted probe energy is spread across the retained modes instead of being
-    dominated by the largest wavenumbers.  Finally, its physical RMS is set to
-    ``max(rms(eta - mean(eta)), eta_scale_floor)`` independently per sample.
-    """
-    eta = eta_phys.astype(dtype)
-    k_typed = k.astype(dtype)
-    batch_size = eta.shape[0]
-    key_probe, key_eps = jax.random.split(rng)
-
-    raw = jax.random.normal(key_probe, eta.shape, dtype=dtype)
-    raw_hat = jnp.fft.fft(raw, axis=-1)
-    k_abs = jnp.abs(k_typed)
-    projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(k_max, dtype=dtype))
-    weight = jnp.sqrt(sobolev_weight_sq(k_typed, sobolev_order))
-    probe_hat = raw_hat * projector[None, :] / weight[None, :]
-    probe = jnp.real(jnp.fft.ifft(probe_hat, axis=-1))
-    probe_rms = jnp.sqrt(jnp.mean(probe * probe, axis=-1))
-    unit_probe = probe / jnp.maximum(
-        probe_rms[:, None], jnp.asarray(1e-30, dtype=dtype)
-    )
-
-    eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)
-    eta_rms = jnp.sqrt(jnp.mean(eta_centered * eta_centered, axis=-1))
-    eta_scale = jnp.maximum(eta_rms, jnp.asarray(eta_scale_floor, dtype=dtype))
-    zeta = unit_probe * eta_scale[:, None]
-
-    step_min = jnp.asarray(fd_step_min, dtype=dtype)
-    step_max = jnp.asarray(fd_step_max, dtype=dtype)
-    if fd_step_min == fd_step_max:
-        fd_step = jnp.full((batch_size,), step_min, dtype=dtype)
-    else:
-        log_step = jax.random.uniform(
-            key_eps,
-            (batch_size,),
-            dtype=dtype,
-            minval=jnp.log(step_min),
-            maxval=jnp.log(step_max),
-        )
-        fd_step = jnp.clip(jnp.exp(log_step), step_min, step_max)
-    return zeta, fd_step
-
-
 def evaluate_operator(
     apply_fn: ApplyFn,
     model_params: Any,
@@ -187,17 +129,42 @@ def compute_hadamard_reg(
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)
     depth = batch_depth_local.astype(dtype)
-    zeta, fd_step = construct_relative_eta_probe(
-        rng,
-        eta,
-        k_typed,
-        dtype,
-        k_max=k_max,
-        sobolev_order=sobolev_order,
-        fd_step_min=fd_step_min,
-        fd_step_max=fd_step_max,
-        eta_scale_floor=eta_scale_floor,
+    batch_size = eta.shape[0]
+    key_probe, key_eps = jax.random.split(rng)
+
+    # Keep nonzero modes up to k_max, dividing by the Sobolev weight so
+    # the largest wavenumbers do not dominate the weighted probe energy.
+    raw = jax.random.normal(key_probe, eta.shape, dtype=dtype)
+    raw_hat = jnp.fft.fft(raw, axis=-1)
+    k_abs = jnp.abs(k_typed)
+    projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(k_max, dtype=dtype))
+    weight = jnp.sqrt(sobolev_weight_sq(k_typed, sobolev_order))
+    probe_hat = raw_hat * projector[None, :] / weight[None, :]
+    probe = jnp.real(jnp.fft.ifft(probe_hat, axis=-1))
+    probe_rms = jnp.sqrt(jnp.mean(probe * probe, axis=-1))
+    unit_probe = probe / jnp.maximum(
+        probe_rms[:, None], jnp.asarray(1e-30, dtype=dtype)
     )
+
+    # Match each direction's RMS to its mean-subtracted surface amplitude.
+    eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)
+    eta_rms = jnp.sqrt(jnp.mean(eta_centered * eta_centered, axis=-1))
+    eta_scale = jnp.maximum(eta_rms, jnp.asarray(eta_scale_floor, dtype=dtype))
+    zeta = unit_probe * eta_scale[:, None]
+
+    step_min = jnp.asarray(fd_step_min, dtype=dtype)
+    step_max = jnp.asarray(fd_step_max, dtype=dtype)
+    if fd_step_min == fd_step_max:
+        fd_step = jnp.full((batch_size,), step_min, dtype=dtype)
+    else:
+        log_step = jax.random.uniform(
+            key_eps,
+            (batch_size,),
+            dtype=dtype,
+            minval=jnp.log(step_min),
+            maxval=jnp.log(step_max),
+        )
+        fd_step = jnp.clip(jnp.exp(log_step), step_min, step_max)
 
     operator = partial(
         evaluate_operator,
