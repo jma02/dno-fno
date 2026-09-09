@@ -691,40 +691,22 @@ def main() -> None:
         for key in ("epoch", "best_epoch"):
             if type(metadata.get(key)) is not int:
                 raise ValueError(f"checkpoint metadata {key!r} must be an integer")
-        for key in ("train_loss", "val_loss", "best_val_loss"):
+        for key in ("train_loss", "best_val_loss"):
             if type(metadata.get(key)) not in (int, float):
                 raise ValueError(f"checkpoint metadata {key!r} must be numeric")
 
-        checkpoint_history = metadata.get("history")
-        if not isinstance(checkpoint_history, list):
+        if not isinstance(metadata.get("history"), list):
             raise ValueError("checkpoint metadata 'history' must be a list")
-        for index, entry in enumerate(checkpoint_history):
-            if not isinstance(entry, dict) or any(
-                type(value) not in (int, float) for value in entry.values()
-            ):
-                raise ValueError(
-                    f"checkpoint history entry {index} must be an object with numeric values"
-                )
-
-        if not isinstance(metadata.get("stats"), dict):
-            raise ValueError("checkpoint metadata 'stats' must be an object")
 
         metadata = cast(CheckpointMetadata, metadata)
         resume_epoch = metadata["epoch"]
-        payload_path = latest_ckpt_dir / f"ckpt_{resume_epoch}"
-        if not payload_path.is_dir():
-            raise RuntimeError(
-                f"checkpoint metadata advertises epoch {resume_epoch}, but {payload_path} "
-                "does not exist; refusing a potentially torn checkpoint"
-            )
-        template = {
-            "params": training_state.params,
-            "opt_state": training_state.opt_state,
-            "step": int(training_state.step),
-        }
         restored = checkpoints.restore_checkpoint(
             ckpt_dir=latest_ckpt_dir,
-            target=template,
+            target={
+                "params": training_state.params,
+                "opt_state": training_state.opt_state,
+                "step": int(training_state.step),
+            },
             step=resume_epoch,
             prefix="ckpt_",
             orbax_checkpointer=ocp.PyTreeCheckpointer(),
