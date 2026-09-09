@@ -553,9 +553,9 @@ def main() -> None:
                 metrics["translation_tangent_loss"] = tangent_loss
             if args.hadamard_weight > 0.0:
                 # Evaluate Hadamard on a small random subset, only on scheduled steps.
-                step_active = current_state.step % args.hadamard_interval == 0
+                hadamard_scheduled = current_state.step % args.hadamard_interval == 0
 
-                def _hadamard_active_branch(_operand: None) -> dict[str, jax.Array]:
+                def evaluate_hadamard(_operand: None) -> tuple[jax.Array, jax.Array]:
                     rng_base = jax.random.fold_in(
                         rng_key,
                         jax.lax.axis_index("batch") * 53 + 127,
@@ -572,7 +572,7 @@ def main() -> None:
                     xi_sub = xi.astype(training_dtype)[sample_indices]
                     depth_sub = h_phys[sample_indices]
                     batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
-                    loss_hadamard = compute_hadamard_reg(
+                    hadamard_loss = compute_hadamard_reg(
                         rng=rng_probe,
                         apply_fn=current_state.apply_fn,
                         model_params=current_params,
@@ -596,26 +596,22 @@ def main() -> None:
                         1.0,
                     )
                     weight_eff = args.hadamard_weight * warmup
-                    return {
-                        "hadamard_active": jnp.float32(1.0),
-                        "hadamard_loss": training_dtype(loss_hadamard),
-                        "hadamard_extra": training_dtype(weight_eff * loss_hadamard),
-                    }
-
-                # Both branches must return the same metric keys and scalar dtypes.
-                metrics.update(
-                    jax.lax.cond(
-                        step_active,
-                        _hadamard_active_branch,
-                        lambda _: {
-                            "hadamard_active": jnp.float32(0.0),
-                            "hadamard_loss": jnp.float32(0.0),
-                            "hadamard_extra": jnp.float32(0.0),
-                        },
-                        operand=None,
+                    return (
+                        training_dtype(hadamard_loss),
+                        training_dtype(weight_eff * hadamard_loss),
                     )
+
+                hadamard_loss, weighted_hadamard_loss = jax.lax.cond(
+                    hadamard_scheduled,
+                    evaluate_hadamard,
+                    lambda _: (jnp.float32(0.0), jnp.float32(0.0)),
+                    operand=None,
                 )
-                physics_loss = physics_loss + metrics.pop("hadamard_extra")
+                physics_loss = physics_loss + weighted_hadamard_loss
+                metrics.update(
+                    hadamard_active=training_dtype(hadamard_scheduled),
+                    hadamard_loss=hadamard_loss,
+                )
 
             return data_loss + physics_loss, metrics
 
