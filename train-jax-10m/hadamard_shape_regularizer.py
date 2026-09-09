@@ -17,7 +17,7 @@ the range of surface amplitudes in the clean training data.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -29,26 +29,13 @@ NormalizeInputsFn: TypeAlias = Callable[[Array, Array], Array]
 DenormalizeTargetsFn: TypeAlias = Callable[[Array], Array]
 
 
-def sobolev_weight_sq(k: Array, order: int) -> Array:
-    """Return the squared spectral weight for Hadamard probes and energies.
-
-    The order-``s`` convention is
-    ``W(k)^2 = 1 + |k|^2 + ... + |k|^(2s)`` rather than ``(1+k^2)^s``.
-    """
-    k_abs = jnp.abs(k)
-    weight_sq = jnp.ones_like(k_abs)
-    for derivative_order in range(1, order + 1):
-        weight_sq = weight_sq + k_abs ** (2 * derivative_order)
-    return weight_sq
-
-
 def projected_sobolev_energy(
     field: Array,
     k: Array,
     k_max: float,
-    sobolev_order: int,
+    sobolev_order: Literal[0, 1],
 ) -> Array:
-    """Per-sample mean-square ``H^s`` energy after ``|k| <= k_max`` projection.
+    """Per-sample L2 or H1 energy after ``|k| <= k_max`` projection.
 
     ``field`` has shape ``(..., nx)`` and ``k`` has shape ``(nx,)``.  The
     unnormalised FFT is divided by ``nx**2``, so order zero agrees with the
@@ -59,7 +46,7 @@ def projected_sobolev_energy(
     projector = (jnp.abs(k) <= jnp.asarray(k_max, dtype=k.dtype)).astype(
         field_hat.real.dtype
     )
-    weight_sq = sobolev_weight_sq(k, sobolev_order)
+    weight_sq = jnp.ones_like(k) if sobolev_order == 0 else 1 + k**2
     weighted_energy = (
         projector * weight_sq.astype(field_hat.real.dtype) * jnp.abs(field_hat) ** 2
     )
@@ -104,7 +91,7 @@ def compute_hadamard_reg(
     dtype: jnp.dtype,
     *,
     k_max: float = 128.0,
-    sobolev_order: int = 1,
+    sobolev_order: Literal[0, 1] = 1,
     fd_step_min: float = 1e-3,
     fd_step_max: float = 3e-3,
     eta_scale_floor: float = 1e-3,
@@ -138,8 +125,8 @@ def compute_hadamard_reg(
     raw_hat = jnp.fft.fft(raw, axis=-1)
     k_abs = jnp.abs(k_typed)
     projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(k_max, dtype=dtype))
-    weight = jnp.sqrt(sobolev_weight_sq(k_typed, sobolev_order))
-    probe_hat = raw_hat * projector[None, :] / weight[None, :]
+    weight_sq = jnp.ones_like(k_typed) if sobolev_order == 0 else 1 + k_typed**2
+    probe_hat = raw_hat * projector[None, :] / jnp.sqrt(weight_sq)[None, :]
     probe = jnp.real(jnp.fft.ifft(probe_hat, axis=-1))
     probe_rms = jnp.sqrt(jnp.mean(probe * probe, axis=-1))
     unit_probe = probe / jnp.maximum(

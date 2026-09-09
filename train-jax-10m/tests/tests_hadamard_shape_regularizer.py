@@ -109,6 +109,8 @@ def test_projected_sobolev_energy_matches_known_mode() -> None:
     x = jnp.arange(nx, dtype=jnp.float64) * (2.0 * jnp.pi / nx)
     k = _wavenumbers(nx)
     field = jnp.cos(3.0 * x)[None, :]
+    l2_energy = projected_sobolev_energy(field, k, 20.0, 0)
+    np.testing.assert_allclose(np.asarray(l2_energy), [0.5], rtol=1e-13)
     energy = projected_sobolev_energy(field, k, 20.0, 1)
     np.testing.assert_allclose(np.asarray(energy), np.asarray([5.0]), rtol=1e-13)
 

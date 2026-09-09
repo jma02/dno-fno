@@ -308,8 +308,9 @@ def main() -> None:
     parser.add_argument(
         "--hadamard_sobolev_order",
         type=int,
+        choices=(0, 1),
         default=1,
-        help="Sobolev order used to scale probes and weight the Hadamard defect.",
+        help="Hadamard norm: 0 = L2, 1 = H1 (includes the first derivative).",
     )
     parser.add_argument(
         "--hadamard_fd_step_min",
