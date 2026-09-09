@@ -23,7 +23,12 @@ def relative_l2_loss(
 
     diff_w = (pred_fft - tgt_fft) * weight
     tgt_w = tgt_fft * weight
-    diff_norm = jnp.sqrt(jnp.sum(jnp.abs(diff_w) ** 2, axis=(1, 2)))
+    squared_error = jnp.sum(jnp.abs(diff_w) ** 2, axis=(1, 2))
+    zero_error = squared_error == 0.0
+    # Mask before sqrt as well, so exact fits have a finite zero gradient.
+    diff_norm = jnp.where(
+        zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error))
+    )
     tgt_norm = jnp.sqrt(jnp.clip(jnp.sum(jnp.abs(tgt_w) ** 2, axis=(1, 2)), 1e-12))
     return jnp.mean(diff_norm / tgt_norm)
 

@@ -264,7 +264,6 @@ def main() -> None:
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
     stats = load_or_compute_stats(dataset_path, dataset, indices=train_indices)
-    stats["target_kind"] = "gxi"
     full_batches, remainder = divmod(train_indices.size, args.batch_size)
     train_steps_per_epoch = (
         full_batches + bool(remainder // n_devices) + bool(remainder % n_devices)
@@ -575,7 +574,6 @@ def main() -> None:
 
     best_val_loss = float("inf")
     best_epoch = 0
-    epochs_without_improvement = 0
     history: list[dict[str, float]] = []
     train_loss = float("inf")
     start_epoch = 1
@@ -584,8 +582,7 @@ def main() -> None:
     latest_ckpt_dir = run_dir / "latest_ckpt"
     metadata_path = latest_ckpt_dir / "metadata.json"
     if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata = cast(CheckpointMetadata, metadata)
+        metadata: CheckpointMetadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         resume_epoch = metadata["epoch"]
         restored = checkpoints.restore_checkpoint(
             ckpt_dir=latest_ckpt_dir,
@@ -622,6 +619,21 @@ def main() -> None:
     )
     assert_pytree_replicated(training_state, name="training startup state")
 
+    # Repair a best checkpoint interrupted after its latest checkpoint was saved.
+    if history and history[-1]["epoch"] == best_epoch and np.isfinite(best_val_loss):
+        save_checkpoint(
+            run_dir / "best_val_ckpt",
+            state=training_state,
+            history=history,
+            best_val_loss=best_val_loss,
+            best_epoch=best_epoch,
+            stats=stats,
+            async_manager=checkpoint_async_manager,
+        )
+    # Discard log rows not backed by the restored checkpoint, including partial rows.
+    with open(run_dir / "train_log.jsonl", "w", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(row) + "\n" for row in history)
+
     # Load batches and copy the next one to GPUs in the background.
     def prefetch_batches(
         indices: np.ndarray, rng: np.random.Generator | None
@@ -640,12 +652,15 @@ def main() -> None:
 
     seed_seq = np.random.SeedSequence(args.seed)
     epoch_seeds = seed_seq.spawn(args.epochs)
+    # Hadamard folds this fixed key with the GPU index and restored optimizer step.
     train_rng = jax.random.PRNGKey(args.seed + 1)
     validation_rng = jax.random.PRNGKey(args.seed + 2)
 
     # Train on every sample once per epoch, in a newly shuffled order.
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="Epochs", leave=False)
     for epoch in epoch_bar:
+        if 0 < args.early_stopping_patience <= epoch - 1 - best_epoch:
+            break
         epoch_start_step, epoch_start_optimizer_count = training_counter_values(
             training_state,
             context=f"epoch {epoch} start",
@@ -666,10 +681,9 @@ def main() -> None:
             batch_size = int(eta_b.shape[0])
             train_batch_sizes.append(batch_size)
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
-            train_rng, step_key = jax.random.split(train_rng)
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
-                training_state, step_key, eta_b, xi_b, gxi_b, depth_b
+                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b
             )
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
@@ -760,11 +774,10 @@ def main() -> None:
             async_manager=checkpoint_async_manager,
         )
 
-        # Save a separate best checkpoint and track epochs without validation improvement.
+        # Save a separate copy whenever validation improves.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
-            epochs_without_improvement = 0
             save_checkpoint(
                 run_dir / "best_val_ckpt",
                 state=training_state,
@@ -774,14 +787,6 @@ def main() -> None:
                 stats=stats,
                 async_manager=checkpoint_async_manager,
             )
-        else:
-            epochs_without_improvement += 1
-
-        if (
-            args.early_stopping_patience > 0
-            and epochs_without_improvement >= args.early_stopping_patience
-        ):
-            break
 
     # Save the final state, whether training reached the epoch limit or stopped early.
     save_checkpoint(
@@ -793,7 +798,6 @@ def main() -> None:
         stats=stats,
         async_manager=checkpoint_async_manager,
     )
-    checkpoint_async_manager.wait_previous_save()
 
     summary_payload = {
         "dataset": args.dataset,
