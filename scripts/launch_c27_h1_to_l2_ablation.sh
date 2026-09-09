@@ -93,7 +93,6 @@ expected = {
     "cs_use_hilbert": True,
     "cs_mult_hidden": 160,
     "translation_tangent_weight": float(tangent_weight),
-    "translation_tangent_scope": "all_nonflat_rows",
     "translation_tangent_smoothing_scale": 1.0,
     "translation_tangent_denominator_eps": 1e-3,
     "mode_balanced_weight": float(mode_weight),

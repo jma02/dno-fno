@@ -130,8 +130,6 @@ def read_parameter_update_count(update_counter: jax.Array, *, counter_name: str)
         int(np.asarray(device_copy.data))
         for device_copy in update_counter.addressable_shards
     ]
-    if not update_counts_per_device:
-        raise RuntimeError(f"{counter_name} has no readable device copies")
     if len(set(update_counts_per_device)) != 1:
         raise RuntimeError(
             f"{counter_name} differs across devices: {update_counts_per_device}"
@@ -463,7 +461,6 @@ def main() -> None:
         "xi_scale": xi_scale,
         "eta_scale": eta_scale,
         "target_scale": target_scale,
-        "translation_tangent_scope": "all_nonflat_rows",
     }
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
