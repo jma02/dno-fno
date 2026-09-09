@@ -110,7 +110,7 @@ class CraigSulemDNO(nn.Module):
     mult_hidden: int = 32            # hidden size of multiplier MLP
 
     # Physical scaling parameters.
-    domain_length: float = 6.283185307179586
+    domain_length: float = 2 * jnp.pi
     xi_scale: float = 1.0
     # η-channel feature_absmax used to recover physical η for the analytic
     # G_1 baseline. Only meaningful under norm=scale.
