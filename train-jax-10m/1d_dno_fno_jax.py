@@ -166,6 +166,7 @@ def training_counter_values(
 
 
 def main() -> None:
+    # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
     parser.add_argument(
@@ -221,6 +222,7 @@ def main() -> None:
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
+    # Additional losses; a zero weight disables each one.
     parser.add_argument(
         "--translation_tangent_weight",
         type=float,
@@ -341,6 +343,7 @@ def main() -> None:
 
     training_dtype = jnp.float32
 
+    # Split batches across GPUs, but keep a full model/optimizer copy on each GPU.
     backend = jax.default_backend()
     if backend != "gpu":
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
@@ -365,6 +368,7 @@ def main() -> None:
     run_dir = outputs_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use the saved simulation splits and fit normalization on training samples only.
     dataset = load_dataset_arrays(dataset_path)
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
@@ -385,6 +389,7 @@ def main() -> None:
     eta_scale, xi_scale = map(float, np.where(feature_scale > 0, feature_scale, 1.0))
     target_absmax = float(cast(float, stats["target_absmax"]))
     target_scale = target_absmax if target_absmax > 0 else 1.0
+    # Construct the selected model and initialize its parameters.
     if args.model == "cs_dno":
         model = CraigSulemDNO(
             width=args.width,
@@ -417,6 +422,7 @@ def main() -> None:
             jnp.zeros((1, 1), dtype=training_dtype),
         )["params"]
 
+    # Set the learning-rate schedule and initialize AdamW's update state.
     schedule_epochs = (
         args.total_epochs if args.total_epochs is not None else args.epochs
     )
@@ -442,6 +448,7 @@ def main() -> None:
     training_state = replicate_pytree_from_host(training_state, replicated)
     checkpoint_async_manager = checkpoints.AsyncManager(max_workers=1)
 
+    # Save the resolved settings and dataset sizes alongside the checkpoints.
     config_payload: dict[str, object] = {
         **vars(args),
         "run_name": run_name,
@@ -469,6 +476,7 @@ def main() -> None:
     k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
+    # Losses shared by training and validation; Hadamard is added only during training.
     def loss_components(
         current_params: FlatParams,
         eta: jax.Array,
@@ -485,6 +493,7 @@ def main() -> None:
             ),
         )
         data_loss = relative_l2_loss(predictions, batch_targets)
+        # Data fit uses normalized Gxi; the physics losses below use physical fields.
         h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
         gxi_prediction = denorm_targets_jax(predictions)[..., 0]
         mode_loss = jnp.float32(0.0)
@@ -510,6 +519,7 @@ def main() -> None:
                 smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
             )
+            # Weight each GPU's contribution by its number of selected nonflat samples.
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
             shard_weight = (
@@ -550,6 +560,7 @@ def main() -> None:
                 )
                 metrics["translation_tangent_loss"] = tangent_loss
             if args.hadamard_weight > 0.0:
+                # Evaluate Hadamard on a small random subset, only on scheduled steps.
                 step_active = current_state.step % args.hadamard_interval == 0
 
                 def _hadamard_active_branch(_operand: None) -> dict[str, jax.Array]:
@@ -616,6 +627,7 @@ def main() -> None:
 
             return data_loss + physics_loss, metrics
 
+        # Differentiate the total loss, average gradients across GPUs, then update weights.
         (loss_value, metrics), grads = jax.value_and_grad(
             loss_for_params, has_aux=True
         )(current_state.params)
@@ -623,6 +635,7 @@ def main() -> None:
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
         metrics = jax.lax.pmean(metrics, axis_name="batch")
         next_state = current_state.apply_gradients(grads=grads)
+        # Copy the first GPU's updated parameters to every GPU to keep them identical.
         next_state = next_state.replace(
             params=jax.tree.map(
                 lambda x: jax.lax.all_gather(x, axis_name="batch", tiled=False)[0],
@@ -631,6 +644,8 @@ def main() -> None:
         )
         return next_state, loss_value, metrics
 
+    # Split divisible batches across GPUs; replicate tiny remainder batches instead.
+    # Creating these callables does not train the model; the epoch loop calls them.
     train_steps = {
         partition: jax.jit(
             shard_map(
@@ -644,6 +659,7 @@ def main() -> None:
         for partition in (P("batch"), P())
     }
 
+    # Validation evaluates the shared losses without gradients or Hadamard.
     def _eval_loss_body(
         current_params: FlatParams,
         eta: jax.Array,
@@ -676,8 +692,7 @@ def main() -> None:
     train_loss = float("inf")
     start_epoch = 1
 
-    # Auto-resume from the current run's per-epoch checkpoint so Modal preemption
-    # does not lose progress.
+    # Resume the last saved epoch, including optimizer state and metric history.
     latest_ckpt_dir = run_dir / "latest_ckpt"
     metadata_path = latest_ckpt_dir / "metadata.json"
     if metadata_path.exists():
@@ -742,6 +757,7 @@ def main() -> None:
             f"resuming at epoch {start_epoch}"
         )
 
+    # Verify all GPU copies agree before training, including after checkpoint restore.
     training_counter_values(
         training_state,
         context="training startup",
@@ -749,6 +765,7 @@ def main() -> None:
     )
     assert_pytree_replicated(training_state, name="training startup state")
 
+    # Load batches and copy the next one to GPUs in the background.
     def prefetch_batches(
         indices: np.ndarray, rng: np.random.Generator | None
     ) -> Iterator[tuple[jax.Array, ...]]:
@@ -768,6 +785,7 @@ def main() -> None:
     epoch_seeds = seed_seq.spawn(args.epochs)
     train_rng = jax.random.PRNGKey(args.seed + 1)
 
+    # Train on every sample once per epoch, in a newly shuffled order.
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="Epochs", leave=False)
     for epoch in epoch_bar:
         epoch_start_step, epoch_start_optimizer_count = training_counter_values(
@@ -777,7 +795,9 @@ def main() -> None:
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
         batch_losses: list[float] = []
         train_batch_sizes: list[int] = []
-        metric_sums: dict[str, float] = {}
+        loss_sums: dict[str, float] = {}
+        hadamard_loss_sum = 0.0
+        active_hadamard_batches = 0.0
         train_bar = tqdm(
             prefetch_batches(train_indices, epoch_rng),
             total=train_steps_per_epoch,
@@ -785,22 +805,28 @@ def main() -> None:
             leave=False,
         )
         for eta_b, xi_b, gxi_b, depth_b in train_bar:
-            train_batch_sizes.append(int(eta_b.shape[0]))
-            train_step = train_steps[
-                P("batch") if eta_b.shape[0] % n_devices == 0 else P()
-            ]
+            batch_size = int(eta_b.shape[0])
+            train_batch_sizes.append(batch_size)
+            train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             train_rng, step_key = jax.random.split(train_rng)
+            # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = train_step(
                 training_state, step_key, eta_b, xi_b, gxi_b, depth_b
             )
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             batch_metrics = jax.device_get(batch_metrics)
-            for name, metric in batch_metrics.items():
-                weight = 1 if name.startswith("hadamard_") else eta_b.shape[0]
-                metric_sums[name] = metric_sums.get(name, 0.0) + float(metric) * weight
+            # Skipped Hadamard batches add zero loss and zero to the evaluation count.
+            hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
+            active_hadamard_batches += float(batch_metrics.pop("hadamard_active", 0.0))
+            # Other losses are batch means; convert them to sums over samples.
+            for name, batch_mean in batch_metrics.items():
+                loss_sums[name] = (
+                    loss_sums.get(name, 0.0) + float(batch_mean) * batch_size
+                )
             train_bar.set_postfix(loss=batch_loss_value)
 
+        # Require one optimizer update per batch and matching counters across GPUs.
         epoch_end_step, epoch_end_optimizer_count = training_counter_values(
             training_state,
             context=f"epoch {epoch} end",
@@ -823,6 +849,7 @@ def main() -> None:
             else float("inf")
         )
 
+        # Evaluate validation samples without shuffling or changing model parameters.
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
         for eta_b, xi_b, gxi_b, depth_b in prefetch_batches(val_indices, None):
@@ -856,14 +883,11 @@ def main() -> None:
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
         }
-        active_hadamard_batches = metric_sums.pop("hadamard_active", 0.0)
-        # Average Hadamard over active batches and the other losses over training rows.
-        for name, total in metric_sums.items():
-            if name == "hadamard_loss":
-                if active_hadamard_batches:
-                    epoch_record[name] = total / active_hadamard_batches
-            else:
-                epoch_record[name] = total / sum(train_batch_sizes)
+        # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
+        for name, total in loss_sums.items():
+            epoch_record[name] = total / sum(train_batch_sizes)
+        if active_hadamard_batches:
+            epoch_record["hadamard_loss"] = hadamard_loss_sum / active_hadamard_batches
         history.append(epoch_record)
         epoch_bar.set_postfix(train_loss=train_loss, val_loss=val_loss)
 
@@ -881,6 +905,7 @@ def main() -> None:
             async_manager=checkpoint_async_manager,
         )
 
+        # Save a separate best checkpoint and track epochs without validation improvement.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
@@ -903,6 +928,7 @@ def main() -> None:
         ):
             break
 
+    # Save the final state, whether training reached the epoch limit or stopped early.
     save_checkpoint(
         run_dir / "final_ckpt",
         state=training_state,
