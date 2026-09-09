@@ -7,41 +7,8 @@ multiplier on both sides to preserve self-adjointness. Zero-initialized
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import jax.numpy as jnp
 from flax import linen as nn
-
-
-_LEGACY_FIXED_CONFIG: tuple[tuple[str, object], ...] = (
-    ("cs_use_g0_eta", False),
-    ("cs_use_g0_eta_dx", False),
-    ("cs_use_g1_baseline", True),
-    ("cs_g1_k_cut", 0),
-    ("cs_fft_fp64", False),
-    ("cs_g1_fft_fp64", True),
-    ("cs_tie_xi_out_mult", True),
-    ("cs_phi_bias_free", True),
-    ("cs_residual_eta_order", 2),
-    ("cs_depth_scaled_residual", False),
-    ("cs_block_k_cut", 0),
-    ("cs_residual_highband_cap", False),
-    ("cs_output_highband_cap", False),
-)
-
-
-def validate_fixed_craig_sulem_config(config: Mapping[str, object]) -> None:
-    """Reject legacy checkpoints that do not match the fixed C27 architecture."""
-    mismatches = [
-        f"{key}={config[key]!r} (expected {expected!r})"
-        for key, expected in _LEGACY_FIXED_CONFIG
-        if key in config and config[key] != expected
-    ]
-    if mismatches:
-        raise ValueError(
-            "checkpoint uses a removed experimental CS-DNO architecture: "
-            + ", ".join(mismatches)
-        )
 
 
 class DepthAwareMultiplier(nn.Module):

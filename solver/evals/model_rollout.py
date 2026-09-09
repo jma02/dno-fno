@@ -24,10 +24,7 @@ for _directory in (
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 
-from dno_net_v2 import (  # noqa: E402
-    CraigSulemDNO,
-    validate_fixed_craig_sulem_config,
-)
+from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import myfft, myifft  # noqa: E402
@@ -82,7 +79,6 @@ def load_run(
     params = jax.tree_util.tree_map(jnp.asarray, restored["params"])
 
     if model_name == "cs_dno":
-        validate_fixed_craig_sulem_config(config)
         model = CraigSulemDNO(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),

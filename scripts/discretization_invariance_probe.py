@@ -2,7 +2,7 @@
 """Discretization invariance probe for a trained CS-DNO checkpoint.
 
 Loads a checkpoint produced by the canonical JAX trainer, picks test simulations
-from a flat .npz dataset, and runs one-step inference at the native grid
+from the array dataset, and runs one-step inference at the native grid
 resolution and at an arbitrary other resolution.  The test resolution may be
 finer or coarser than the native 1024 grid.  For refined inputs the test output
 is downsampled to the native grid; for coarser inputs the native output is
@@ -48,7 +48,8 @@ from model_rollout import (  # noqa: E402
     build_predict_gxi_batched,
     load_run,
 )
-from util import compute_log_depth  # noqa: E402
+from util import compute_log_depth, load_dataset_arrays  # noqa: E402
+from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 
 
 def change_resolution_rfft(f: np.ndarray, n_new: int) -> np.ndarray:
@@ -113,14 +114,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--run_dir",
         type=Path,
-        default=Path("outputs/c27_h1_to_l2_full_20260717_212550"),
+        required=True,
         help="Checkpoint run directory (must contain config.json and best_val_ckpt).",
     )
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("data/combined_dataset_v9.npz"),
-        help="Flat .npz dataset with eta, xi, gxi, depth, x.",
+        default=Path("outputs/paper_dataset/arrays"),
+        help="Dataset directory containing the saved .npy arrays.",
     )
     parser.add_argument(
         "--output_dir",
@@ -139,7 +140,7 @@ if __name__ == "__main__":
         type=int,
         nargs="+",
         default=None,
-        help="Explicit simulation indices (overrides --n_simulations).",
+        help="Explicit dataset row indices (bypasses test-split simulation sampling).",
     )
     parser.add_argument(
         "--n_test",
@@ -189,25 +190,23 @@ if __name__ == "__main__":
     print(f"Epoch: {loaded.epoch}, config model: {loaded.config.get('model')}")
     print(f"Model domain_length: {loaded.model.domain_length}")
 
-    with np.load(args.dataset, mmap_mode="r") as z:
-        eta = z["eta"]
-        xi = z["xi"]
-        gxi = z["gxi"]
-        depth = z["depth"]
-        x = z["x"]
-        n_native = int(eta.shape[-1])
-        print(f"Dataset: {args.dataset}")
-        print(
-            f"  simulations: {eta.shape[0]}, n_native: {n_native}, "
-            f"domain: [{x[0]}, {x[-1]}]"
-        )
+    arrays = load_dataset_arrays(args.dataset)
+    eta, xi, gxi, depth, x = (arrays[name] for name in ("eta", "xi", "gxi", "depth", "x"))
+    n_native = int(eta.shape[-1])
+    print(f"Dataset: {args.dataset}")
+    print(f"  rows: {eta.shape[0]}, n_native: {n_native}, domain: [{x[0]}, {x[-1]}]")
 
     if args.indices is not None:
         test_indices = list(args.indices)
     else:
         rng = np.random.default_rng(42)
+        frame_index = np.load(args.dataset / "frame_index.npy", mmap_mode="r", allow_pickle=False)
+        # One initial row per held-out simulation, matching rollout evaluation.
+        candidates = np.flatnonzero(
+            (arrays["dataset_split"] == DatasetSplit.TEST.value) & (frame_index == 0)
+        )
         test_indices = rng.choice(
-            eta.shape[0], size=args.n_simulations, replace=False
+            candidates, size=args.n_simulations, replace=False
         ).tolist()
 
     rng = np.random.default_rng(43)

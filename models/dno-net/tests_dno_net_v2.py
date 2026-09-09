@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemDNO, validate_fixed_craig_sulem_config
+from dno_net_v2 import CraigSulemDNO
 
 jax.config.update("jax_enable_x64", True)
 
@@ -165,24 +165,12 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
         assert jnp.all(jnp.isfinite(output))
 
 
-def test_legacy_config_guard_accepts_only_c27_architecture() -> None:
-    """Archived C27 configs load, while removed CS-DNO variants fail loudly."""
-    validate_fixed_craig_sulem_config({"cs_use_g1_baseline": True})
-    try:
-        validate_fixed_craig_sulem_config({"cs_use_g1_baseline": False})
-    except ValueError as exc:
-        assert "removed experimental CS-DNO architecture" in str(exc)
-    else:
-        raise AssertionError("legacy non-C27 architecture was accepted")
-
-
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
         test_order_two_residual_is_self_adjoint,
         test_eta_feature_configuration_controls_trunk_shape,
-        test_legacy_config_guard_accepts_only_c27_architecture,
     )
     for test in tests:
         test()
