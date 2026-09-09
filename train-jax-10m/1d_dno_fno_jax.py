@@ -801,23 +801,15 @@ def main() -> None:
             training_state,
             context=f"epoch {epoch} end",
         )
-        completed_steps = len(batch_losses)
-        for name, advanced in (
-            ("TrainState.step", epoch_end_step - epoch_start_step),
-            (
-                "optimizer count",
-                epoch_end_optimizer_count - epoch_start_optimizer_count,
-            ),
-        ):
-            if advanced != completed_steps:
-                raise RuntimeError(
-                    f"epoch {epoch} {name} advanced by {advanced}, expected {completed_steps}"
-                )
-        train_loss = (
-            float(np.average(batch_losses, weights=train_batch_sizes))
-            if batch_losses
-            else float("inf")
-        )
+        state_updates = epoch_end_step - epoch_start_step
+        optimizer_updates = epoch_end_optimizer_count - epoch_start_optimizer_count
+        expected_updates = len(batch_losses)
+        if state_updates != expected_updates or optimizer_updates != expected_updates:
+            raise RuntimeError(
+                f"epoch {epoch}: expected {expected_updates} updates; "
+                f"TrainState={state_updates}, optimizer={optimizer_updates}"
+            )
+        train_loss = float(np.average(batch_losses, weights=train_batch_sizes))
 
         # Evaluate validation samples without shuffling or changing model parameters.
         val_batch_losses: list[tuple[float, ...]] = []
