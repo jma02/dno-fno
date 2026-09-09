@@ -35,7 +35,6 @@ MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --lr 2e-5 \
   --weight-decay 1e-4 \
   --epochs "$EPOCHS" \
-  --total-epochs "${TOTAL_EPOCHS:-$EPOCHS}" \
   --cs-mult-hidden 160 \
   --spawn \
   --trainer-args "$TRAINER_ARGS" 2>&1 | tee "$LOG"

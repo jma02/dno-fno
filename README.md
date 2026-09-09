@@ -31,8 +31,9 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --model fno --norm scale --batch_size 256
 ```
 
-Use `--help` for model and loss options. `scripts/modal_train.py` runs the same
-trainer on Modal; see the [script guide](scripts/README.md). Retired trainers and
+Use `--help` for model and loss options. Run the same C27 recipe on Modal with
+`bash scripts/launch_c27_paper_dataset_modal.sh` after uploading the arrays;
+see the [script guide](scripts/README.md). Retired trainers and
 the CARBS workflow remain available in Git history.
 
 ## Outputs

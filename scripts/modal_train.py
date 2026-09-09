@@ -5,25 +5,22 @@ Workflow:
     modal token new
 
     # 1. Upload a training dataset directory:
-    modal run scripts/modal_train.py::upload_dataset --dataset outputs/.../arrays
+    modal run scripts/modal_train.py::upload_dataset --dataset outputs/paper_dataset/arrays
 
-    # 2. Train (single-GPU H100 by default):
-    modal run scripts/modal_train.py::train \\
-        --dataset /data/outputs/.../arrays \\
-        --epochs 30 --batch-size 1024 --modes 64 --width 64 --n-blocks 4
+    # 2. Train with the C27 recipe (two A100-80GB GPUs by default):
+    bash scripts/launch_c27_paper_dataset_modal.sh
 
-    # multi-GPU example:
-    MODAL_GPU=H100:4 modal run scripts/modal_train.py::train \\
-        --dataset /data/outputs/.../arrays --batch-size 4096
+    # Optional GPU shape override for that same recipe:
+    GPU_SPEC=H100:4 bash scripts/launch_c27_paper_dataset_modal.sh
 
     # 3. Download a finished run dir to local outputs/:
-    modal run scripts/modal_train.py::download_run --run-name fno_jax_10m_20260507_103000
+    modal run scripts/modal_train.py::download_run --run-name YOUR_RUN_NAME
 
     # Quick peek at what's on the volume:
     modal run scripts/modal_train.py::status
 
-The volume keeps both the input files and the run outputs, so re-running
-``train`` re-uses the same dataset upload.
+The volume keeps both input files and run outputs, so later runs reuse the upload.
+Use the lower-level ``train`` entrypoint directly only when configuring a custom run.
 """
 
 from __future__ import annotations
@@ -143,7 +140,6 @@ def run_training(
     seed: int,
     latent: int,
     cs_mult_hidden: int,
-    total_epochs: int,
     trainer_args: str,
 ) -> dict[str, object]:
     import json
@@ -199,8 +195,6 @@ def run_training(
     ]
     if model_kind == "fno":
         cmd.extend(["--modes", str(modes)])
-    if total_epochs > 0:
-        cmd.extend(["--total_epochs", str(total_epochs)])
     cmd.extend(shlex.split(trainer_args))
 
     print("$", " ".join(cmd))
@@ -276,7 +270,6 @@ def train(
     seed: int = 0,
     latent: int = 64,
     cs_mult_hidden: int = 32,
-    total_epochs: int = 0,
     trainer_args: str = "",
     spawn: bool = False,
 ) -> None:
@@ -308,7 +301,6 @@ def train(
         seed=seed,
         latent=latent,
         cs_mult_hidden=cs_mult_hidden,
-        total_epochs=total_epochs,
         trainer_args=trainer_args,
     )
     remote_training = cast(_ModalTrainingFunction, run_training)

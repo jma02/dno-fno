@@ -63,13 +63,15 @@ bash scripts/launch_c27_paper_dataset_full.sh
 ```
 
 The first command checks loading and training-only normalization without training.
-The second starts a fresh run; set `EPOCHS` to change its length.
+The second starts a fresh run. `EPOCHS` (default 40) controls both the final
+epoch and the learning-rate schedule. A resumed 40-epoch run still uses 40,
+not the number of epochs remaining.
 
-Upload the arrays for Modal training with:
+Upload the arrays, then run the same C27 model and losses on two Modal GPUs:
 
 ```sh
 modal run scripts/modal_train.py::upload_dataset --dataset outputs/paper_dataset/arrays
-modal run scripts/modal_train.py::train --dataset /data/outputs/paper_dataset/arrays
+bash scripts/launch_c27_paper_dataset_modal.sh
 ```
 
 Compare two saved evaluation archives directly:

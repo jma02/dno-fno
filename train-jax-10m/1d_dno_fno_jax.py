@@ -198,16 +198,12 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument(
-        "--total_epochs",
+        "--epochs",
         type=int,
-        default=None,
-        help="LR-schedule budget in epochs (decay_steps = total_epochs * "
-        "steps_per_epoch). Defaults to --epochs. Use when resuming a "
-        "partial run to keep the cosine shape matched to the original "
-        "budget — e.g. resume from ep 13 of a 40-epoch run with "
-        "--epochs 27 --total_epochs 40.",
+        default=100,
+        help="Final epoch number and learning-rate schedule length. "
+        "Keep the same value when resuming; completed epochs are not repeated.",
     )
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument(
@@ -423,10 +419,7 @@ def main() -> None:
         )["params"]
 
     # Set the learning-rate schedule and initialize AdamW's update state.
-    schedule_epochs = (
-        args.total_epochs if args.total_epochs is not None else args.epochs
-    )
-    total_steps = schedule_epochs * train_steps_per_epoch
+    total_steps = args.epochs * train_steps_per_epoch
     if args.lr_warmup_steps > 0:
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
@@ -452,7 +445,6 @@ def main() -> None:
     config_payload: dict[str, object] = {
         **vars(args),
         "run_name": run_name,
-        "total_epochs": schedule_epochs,
         "device": backend,
         "device_count": n_devices,
         "param_count": count_params(params),

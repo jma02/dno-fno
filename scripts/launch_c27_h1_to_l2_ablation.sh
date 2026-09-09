@@ -19,7 +19,6 @@ EPOCHS="${EPOCHS:-40}"
 RUN_PREFIX="c27_all_family_tangent_full"
 
 RUN_NAME="${RUN_NAME:-${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-$EPOCHS}"
 
 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -55,7 +54,6 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --lr_warmup_steps "$LR_WARMUP_STEPS" \
   --weight_decay 1e-4 \
   --epochs "$EPOCHS" \
-  --total_epochs "$TOTAL_EPOCHS" \
   --run_name "$RUN_NAME" 2>&1 | tee "/tmp/${RUN_NAME}.log"
 
 uv run python - \
