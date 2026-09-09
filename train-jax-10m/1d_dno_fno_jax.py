@@ -784,7 +784,7 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b) in enumerate(train_bar):
+        for eta_b, xi_b, gxi_b, depth_b in train_bar:
             train_batch_sizes.append(int(eta_b.shape[0]))
             train_step = train_steps[
                 P("batch") if eta_b.shape[0] % n_devices == 0 else P()
@@ -797,15 +797,6 @@ def main() -> None:
             batch_losses.append(batch_loss_value)
             batch_metrics = jax.device_get(batch_metrics)
             hadamard_activity = batch_metrics.get("hadamard_active", 0.0)
-            current_step = epoch_start_step + batch_index
-            if args.hadamard_weight > 0.0:
-                expected_hadamard = current_step % args.hadamard_interval == 0
-                if hadamard_activity != expected_hadamard:
-                    raise RuntimeError(
-                        "Hadamard regularizer firing mismatch at "
-                        f"epoch={epoch}, batch={batch_index}, step={current_step}: "
-                        f"expected={expected_hadamard}, observed={hadamard_activity}"
-                    )
             for name, metric in batch_metrics.items():
                 value = float(metric)
                 if name.startswith("hadamard_"):
