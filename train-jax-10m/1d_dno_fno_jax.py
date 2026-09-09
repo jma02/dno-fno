@@ -362,7 +362,7 @@ def main() -> None:
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
     # Full-batch losses shared by training and validation.
-    def loss_components(
+    def compute_loss_components(
         current_params: FlatParams,
         eta: jax.Array,
         xi: jax.Array,
@@ -463,7 +463,7 @@ def main() -> None:
         def loss_for_params(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
-            data_loss, mode_loss, tangent_loss = loss_components(
+            data_loss, mode_loss, tangent_loss = compute_loss_components(
                 current_params, eta, xi, gxi, batch_depth
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
@@ -567,7 +567,7 @@ def main() -> None:
                 current_params, eta, xi, batch_depth,
             ))
         return jax.lax.pmean(
-            (*loss_components(current_params, eta, xi, gxi, batch_depth), hadamard_loss),
+            (*compute_loss_components(current_params, eta, xi, gxi, batch_depth), hadamard_loss),
             axis_name="batch",
         )
 
