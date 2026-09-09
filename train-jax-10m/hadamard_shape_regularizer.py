@@ -16,7 +16,6 @@ the range of surface amplitudes in the clean training data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, TypeAlias
 
@@ -28,23 +27,6 @@ Array: TypeAlias = jax.Array
 ApplyFn: TypeAlias = Callable[[dict[str, Any], Array, Array], Array]
 NormalizeInputsFn: TypeAlias = Callable[[Array, Array], Array]
 DenormalizeTargetsFn: TypeAlias = Callable[[Array], Array]
-
-
-@dataclass(frozen=True)
-class HadamardRegConfig:
-    """Static controls for :func:`compute_hadamard_reg`.
-
-    ``fd_step_*`` are dimensionless because the sampled direction is
-    scaled to the RMS amplitude of each input surface.  ``eta_scale_floor`` is
-    the physical-amplitude fallback for flat or nearly flat surfaces.
-    """
-
-    k_max: float = 128.0
-    sobolev_order: int = 1
-    fd_step_min: float = 1e-3
-    fd_step_max: float = 3e-3
-    eta_scale_floor: float = 1e-3
-    denominator_floor: float = 1e-12
 
 
 def sobolev_weight_sq(k: Array, order: int) -> Array:
@@ -90,8 +72,13 @@ def construct_relative_eta_probe(
     rng: Array,
     eta_phys: Array,
     k: Array,
-    cfg: HadamardRegConfig,
     dtype: jnp.dtype,
+    *,
+    k_max: float,
+    sobolev_order: int,
+    fd_step_min: float,
+    fd_step_max: float,
+    eta_scale_floor: float,
 ) -> tuple[Array, Array]:
     """Sample ``(zeta, fd_step)`` for a finite difference.
 
@@ -109,8 +96,8 @@ def construct_relative_eta_probe(
     raw = jax.random.normal(key_probe, eta.shape, dtype=dtype)
     raw_hat = jnp.fft.fft(raw, axis=-1)
     k_abs = jnp.abs(k_typed)
-    projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(cfg.k_max, dtype=dtype))
-    weight = jnp.sqrt(sobolev_weight_sq(k_typed, cfg.sobolev_order))
+    projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(k_max, dtype=dtype))
+    weight = jnp.sqrt(sobolev_weight_sq(k_typed, sobolev_order))
     probe_hat = raw_hat * projector[None, :] / weight[None, :]
     probe = jnp.real(jnp.fft.ifft(probe_hat, axis=-1))
     probe_rms = jnp.sqrt(jnp.mean(probe * probe, axis=-1))
@@ -120,22 +107,22 @@ def construct_relative_eta_probe(
 
     eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)
     eta_rms = jnp.sqrt(jnp.mean(eta_centered * eta_centered, axis=-1))
-    eta_scale = jnp.maximum(eta_rms, jnp.asarray(cfg.eta_scale_floor, dtype=dtype))
+    eta_scale = jnp.maximum(eta_rms, jnp.asarray(eta_scale_floor, dtype=dtype))
     zeta = unit_probe * eta_scale[:, None]
 
-    fd_step_min = jnp.asarray(cfg.fd_step_min, dtype=dtype)
-    fd_step_max = jnp.asarray(cfg.fd_step_max, dtype=dtype)
-    if cfg.fd_step_min == cfg.fd_step_max:
-        fd_step = jnp.full((batch_size,), fd_step_min, dtype=dtype)
+    step_min = jnp.asarray(fd_step_min, dtype=dtype)
+    step_max = jnp.asarray(fd_step_max, dtype=dtype)
+    if fd_step_min == fd_step_max:
+        fd_step = jnp.full((batch_size,), step_min, dtype=dtype)
     else:
         log_step = jax.random.uniform(
             key_eps,
             (batch_size,),
             dtype=dtype,
-            minval=jnp.log(fd_step_min),
-            maxval=jnp.log(fd_step_max),
+            minval=jnp.log(step_min),
+            maxval=jnp.log(step_max),
         )
-        fd_step = jnp.clip(jnp.exp(log_step), fd_step_min, fd_step_max)
+        fd_step = jnp.clip(jnp.exp(log_step), step_min, step_max)
     return zeta, fd_step
 
 
@@ -172,8 +159,14 @@ def compute_hadamard_reg(
     norm_inputs_fn: NormalizeInputsFn,
     denorm_targets_fn: DenormalizeTargetsFn,
     k: Array,
-    cfg: HadamardRegConfig,
     dtype: jnp.dtype,
+    *,
+    k_max: float = 128.0,
+    sobolev_order: int = 1,
+    fd_step_min: float = 1e-3,
+    fd_step_max: float = 3e-3,
+    eta_scale_floor: float = 1e-3,
+    denominator_floor: float = 1e-12,
 ) -> Array:
     """Return the normalized finite-secant Hadamard loss.
 
@@ -186,12 +179,25 @@ def compute_hadamard_reg(
     where ``S`` is the Hadamard residual and
     ``R = G(eta)(zeta B) + d_x(zeta V)`` is the identity's right-hand-side
     magnitude (up to sign).
+
+    ``fd_step_*`` are dimensionless: the direction is scaled to each surface's
+    RMS amplitude, with ``eta_scale_floor`` as the physical fallback near flatness.
     """
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)
     depth = batch_depth_local.astype(dtype)
-    zeta, fd_step = construct_relative_eta_probe(rng, eta, k_typed, cfg, dtype)
+    zeta, fd_step = construct_relative_eta_probe(
+        rng,
+        eta,
+        k_typed,
+        dtype,
+        k_max=k_max,
+        sobolev_order=sobolev_order,
+        fd_step_min=fd_step_min,
+        fd_step_max=fd_step_max,
+        eta_scale_floor=eta_scale_floor,
+    )
 
     operator = partial(
         evaluate_operator,
@@ -215,11 +221,7 @@ def compute_hadamard_reg(
     forcing = operator(eta, zeta * b_velocity) + spectral_dx(zeta * v_velocity, k_typed)
     residual = secant + forcing
 
-    residual_energy = projected_sobolev_energy(
-        residual, k_typed, cfg.k_max, cfg.sobolev_order
-    )
-    forcing_energy = projected_sobolev_energy(
-        forcing, k_typed, cfg.k_max, cfg.sobolev_order
-    )
-    denominator = forcing_energy + jnp.asarray(cfg.denominator_floor, dtype=dtype)
+    residual_energy = projected_sobolev_energy(residual, k_typed, k_max, sobolev_order)
+    forcing_energy = projected_sobolev_energy(forcing, k_typed, k_max, sobolev_order)
+    denominator = forcing_energy + jnp.asarray(denominator_floor, dtype=dtype)
     return jnp.mean(residual_energy / denominator)

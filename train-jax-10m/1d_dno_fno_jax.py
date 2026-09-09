@@ -44,17 +44,11 @@ from util import (  # noqa: E402
     replicate_pytree_from_host,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
-from hadamard_shape_regularizer import (  # noqa: E402
-    HadamardRegConfig,
-    compute_hadamard_reg,
-)
+from hadamard_shape_regularizer import compute_hadamard_reg  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_translation_tangent_loss,
 )
-from mode_balanced_regularizer import (  # noqa: E402
-    ModeBalancedConfig,
-    compute_mode_balanced_loss,
-)
+from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 
 from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
@@ -468,20 +462,7 @@ def main() -> None:
     )
 
     log_h_max = float(np.log(5.0))
-    mode_balanced_cfg = ModeBalancedConfig(
-        k_max=args.mode_balanced_k_max,
-        activity_threshold=args.mode_balanced_activity_threshold,
-        denominator_eps=args.mode_balanced_denominator_eps,
-    )
     hadamard_microbatch_local = args.hadamard_microbatch // n_devices
-    hadamard_cfg = HadamardRegConfig(
-        k_max=args.hadamard_k_max,
-        sobolev_order=args.hadamard_sobolev_order,
-        fd_step_min=args.hadamard_fd_step_min,
-        fd_step_max=args.hadamard_fd_step_max,
-        eta_scale_floor=args.hadamard_eta_scale_floor,
-        denominator_floor=args.hadamard_denominator_floor,
-    )
     _, _k_grid = build_grid(nx, domain_length)
     k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
@@ -512,7 +493,9 @@ def main() -> None:
                 gxi_target=denorm_targets_jax(batch_targets)[..., 0],
                 depth=h_phys,
                 k_rfft=k_rfft_jax,
-                config=mode_balanced_cfg,
+                k_max=args.mode_balanced_k_max,
+                activity_threshold=args.mode_balanced_activity_threshold,
+                denominator_eps=args.mode_balanced_denominator_eps,
             )
         tangent_loss = jnp.float32(0.0)
         if args.translation_tangent_weight > 0.0:
@@ -594,8 +577,13 @@ def main() -> None:
                         norm_inputs_fn=norm_inputs_jax,
                         denorm_targets_fn=denorm_targets_jax,
                         k=k_grid_jax,
-                        cfg=hadamard_cfg,
                         dtype=jnp.float64,
+                        k_max=args.hadamard_k_max,
+                        sobolev_order=args.hadamard_sobolev_order,
+                        fd_step_min=args.hadamard_fd_step_min,
+                        fd_step_max=args.hadamard_fd_step_max,
+                        eta_scale_floor=args.hadamard_eta_scale_floor,
+                        denominator_floor=args.hadamard_denominator_floor,
                     )
                     warmup = jnp.minimum(
                         jnp.asarray(current_state.step, dtype=jnp.float64)

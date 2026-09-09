@@ -1,7 +1,7 @@
 """CPU invariants for the universal mode-balanced complex DNO loss."""
+
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -12,7 +12,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mode_balanced_regularizer import (  # noqa: E402
-    ModeBalancedConfig,
     compute_mode_balanced_loss,
 )
 
@@ -35,11 +34,19 @@ def _loss(
     prediction: jax.Array,
     target: jax.Array,
     depth: jax.Array,
-    config: ModeBalancedConfig = ModeBalancedConfig(),
+    *,
+    k_max: float = 128.0,
+    dispersion_weighting: bool = False,
 ) -> jax.Array:
     _, k_rfft = _grid(eta.shape[-1])
     return compute_mode_balanced_loss(
-        eta, prediction, target, depth, k_rfft, config
+        eta,
+        prediction,
+        target,
+        depth,
+        k_rfft,
+        k_max=k_max,
+        dispersion_weighting=dispersion_weighting,
     )
 
 
@@ -47,9 +54,7 @@ def test_exact_prediction_has_zero_loss() -> None:
     x, _ = _grid()
     eta = jnp.sin(5.0 * x)[None, :]
     target = jnp.cos(5.0 * x)[None, :]
-    loss = _loss(
-        eta, target, target, jnp.asarray([0.3], dtype=eta.dtype)
-    )
+    loss = _loss(eta, target, target, jnp.asarray([0.3], dtype=eta.dtype))
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-15)
     assert loss.shape == ()
@@ -119,22 +124,22 @@ def test_loss_is_translation_invariant() -> None:
     depth = jnp.asarray([0.25], dtype=eta.dtype)
     shift = 73
     for dispersion_weighting in (False, True):
-        config = replace(
-            ModeBalancedConfig(),
+        loss = _loss(
+            eta,
+            prediction,
+            target,
+            depth,
             dispersion_weighting=dispersion_weighting,
         )
-        loss = _loss(eta, prediction, target, depth, config)
         shifted_loss = _loss(
             jnp.roll(eta, shift, axis=-1),
             jnp.roll(prediction, shift, axis=-1),
             jnp.roll(target, shift, axis=-1),
             depth,
-            config,
+            dispersion_weighting=dispersion_weighting,
         )
 
-        np.testing.assert_allclose(
-            shifted_loss, loss, rtol=1e-12, atol=1e-15
-        )
+        np.testing.assert_allclose(shifted_loss, loss, rtol=1e-12, atol=1e-15)
 
 
 def test_prediction_gradient_is_finite_and_nonzero() -> None:
@@ -145,7 +150,7 @@ def test_prediction_gradient_is_finite_and_nonzero() -> None:
     depth = jnp.asarray([0.5], dtype=eta.dtype)
 
     gradient = jax.grad(compute_mode_balanced_loss, argnums=1)(
-        eta, prediction, target, depth, k_rfft, ModeBalancedConfig()
+        eta, prediction, target, depth, k_rfft
     )
     assert bool(jnp.all(jnp.isfinite(gradient)))
     assert float(jnp.linalg.norm(gradient)) > 0.0
@@ -159,17 +164,13 @@ def test_dispersion_weighting_scales_single_mode_by_frequency_squared() -> None:
     target = _omega(mode, depth_value) * jnp.sin(mode * x)[None, :]
     prediction = target + 0.02 * jnp.cos(mode * x)[None, :]
     depth = jnp.asarray([depth_value], dtype=eta.dtype)
-    base_config = ModeBalancedConfig()
-
-    unweighted_loss = _loss(
-        eta, prediction, target, depth, base_config
-    )
+    unweighted_loss = _loss(eta, prediction, target, depth)
     weighted_loss = _loss(
         eta,
         prediction,
         target,
         depth,
-        replace(base_config, dispersion_weighting=True),
+        dispersion_weighting=True,
     )
     omega_squared = _omega(mode, depth_value) ** 2
 
@@ -180,20 +181,11 @@ def test_dispersion_weighting_scales_single_mode_by_frequency_squared() -> None:
         atol=1e-14,
     )
 
-    _, k_rfft = _grid()
-
-    def objective(value: jax.Array, weighted: bool) -> jax.Array:
-        return compute_mode_balanced_loss(
-            eta,
-            value,
-            target,
-            depth,
-            k_rfft,
-            replace(base_config, dispersion_weighting=weighted),
-        )
-
-    unweighted_gradient = jax.grad(objective, argnums=0)(prediction, False)
-    weighted_gradient = jax.grad(objective, argnums=0)(prediction, True)
+    gradient = jax.grad(_loss, argnums=1)
+    unweighted_gradient = gradient(eta, prediction, target, depth)
+    weighted_gradient = gradient(
+        eta, prediction, target, depth, dispersion_weighting=True
+    )
     np.testing.assert_allclose(
         weighted_gradient,
         omega_squared * unweighted_gradient,
@@ -212,9 +204,6 @@ def test_dispersion_weighting_is_applied_before_batch_average() -> None:
     prediction_rows = []
     individual_losses = []
     individual_frequencies = []
-    base_config = ModeBalancedConfig()
-    weighted_config = replace(base_config, dispersion_weighting=True)
-
     for mode, depth_value, fractional_error in zip(
         modes, depth_values, fractional_errors
     ):
@@ -222,9 +211,7 @@ def test_dispersion_weighting_is_applied_before_batch_average() -> None:
         target = _omega(mode, depth_value) * jnp.sin(mode * x)[None, :]
         prediction = target * (1.0 + fractional_error)
         depth = jnp.asarray([depth_value], dtype=eta.dtype)
-        loss = _loss(
-            eta, prediction, target, depth, base_config
-        )
+        loss = _loss(eta, prediction, target, depth)
         eta_rows.append(eta[0])
         target_rows.append(target[0])
         prediction_rows.append(prediction[0])
@@ -236,14 +223,14 @@ def test_dispersion_weighting_is_applied_before_batch_average() -> None:
         jnp.stack(prediction_rows),
         jnp.stack(target_rows),
         jnp.asarray(depth_values, dtype=x.dtype),
-        weighted_config,
+        dispersion_weighting=True,
     )
     expected = jnp.mean(
         jnp.stack(individual_losses) * jnp.stack(individual_frequencies)
     )
-    incorrect_product_of_means = jnp.mean(
-        jnp.stack(individual_losses)
-    ) * jnp.mean(jnp.stack(individual_frequencies))
+    incorrect_product_of_means = jnp.mean(jnp.stack(individual_losses)) * jnp.mean(
+        jnp.stack(individual_frequencies)
+    )
 
     np.testing.assert_allclose(batch_loss, expected, rtol=1e-12, atol=1e-15)
     assert not np.isclose(
@@ -268,11 +255,16 @@ def test_effective_frequency_uses_scored_band_and_parseval_weights() -> None:
         target = jnp.sin(3.0 * x)[None, :]
         prediction = target + 0.1 * jnp.cos(3.0 * x)[None, :]
         depth = jnp.asarray([depth_value], dtype=x.dtype)
-        config = ModeBalancedConfig(k_max=float(highest_mode))
-        unweighted_loss = _loss(eta, prediction, target, depth, config)
+        unweighted_loss = _loss(
+            eta, prediction, target, depth, k_max=float(highest_mode)
+        )
         weighted_loss = _loss(
-            eta, prediction, target, depth,
-            replace(config, dispersion_weighting=True),
+            eta,
+            prediction,
+            target,
+            depth,
+            k_max=float(highest_mode),
+            dispersion_weighting=True,
         )
         high_energy = amplitude_high**2 / (2.0 if n % 2 else 1.0)
         expected = (
@@ -289,16 +281,11 @@ def test_effective_frequency_uses_scored_band_and_parseval_weights() -> None:
     target = jnp.sin(5.0 * x)[None, :]
     prediction = target + 0.1 * jnp.cos(5.0 * x)[None, :]
     depth = jnp.asarray([depth_value], dtype=x.dtype)
-    config = ModeBalancedConfig(dispersion_weighting=True)
-    base_loss = _loss(
-        base_eta, prediction, target, depth, config
-    )
+    base_loss = _loss(base_eta, prediction, target, depth, dispersion_weighting=True)
     contaminated_loss = _loss(
-        out_of_band_eta, prediction, target, depth, config
+        out_of_band_eta, prediction, target, depth, dispersion_weighting=True
     )
-    np.testing.assert_allclose(
-        contaminated_loss, base_loss, rtol=1e-12, atol=1e-15
-    )
+    np.testing.assert_allclose(contaminated_loss, base_loss, rtol=1e-12, atol=1e-15)
 
 
 def test_dispersion_weighting_is_finite_for_flat_surface() -> None:
@@ -306,15 +293,13 @@ def test_dispersion_weighting_is_finite_for_flat_surface() -> None:
     eta = jnp.zeros((1, x.size), dtype=x.dtype)
     target = jnp.sin(5.0 * x)[None, :]
     prediction = target + 0.1 * jnp.cos(5.0 * x)[None, :]
-    config = replace(ModeBalancedConfig(), dispersion_weighting=True)
-
     loss, gradient = jax.value_and_grad(compute_mode_balanced_loss, argnums=1)(
         eta,
         prediction,
         target,
         jnp.asarray([0.2], dtype=eta.dtype),
         k_rfft,
-        config,
+        dispersion_weighting=True,
     )
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-15)

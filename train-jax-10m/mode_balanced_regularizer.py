@@ -2,24 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import jax
 import jax.numpy as jnp
-
-
-@dataclass(frozen=True)
-class ModeBalancedConfig:
-    """Configuration for balancing errors over reference-active modes."""
-
-    k_max: float = 128.0
-    gravity: float = 1.0
-    activity_threshold: float = 1e-4
-    denominator_eps: float = 1e-6
-    absolute_floor: float = 1e-24
-    huber_delta: float = 1.0
-    ratio_cap: float = 100.0
-    dispersion_weighting: bool = False
 
 
 def compute_mode_balanced_loss(
@@ -28,7 +12,15 @@ def compute_mode_balanced_loss(
     gxi_target: jax.Array,
     depth: jax.Array,
     k_rfft: jax.Array,
-    config: ModeBalancedConfig,
+    *,
+    k_max: float = 128.0,
+    gravity: float = 1.0,
+    activity_threshold: float = 1e-4,
+    denominator_eps: float = 1e-6,
+    absolute_floor: float = 1e-24,
+    huber_delta: float = 1.0,
+    ratio_cap: float = 100.0,
+    dispersion_weighting: bool = False,
 ) -> jax.Array:
     """Compare complex DNO coefficients with soft balance over active modes.
 
@@ -43,9 +35,9 @@ def compute_mode_balanced_loss(
     by a large carrier.  The mask and all target-derived scales are detached;
     gradients act only through the complex prediction error.
 
-    The zero mode and modes above ``config.k_max`` are excluded.  Fourier
+    The zero mode and modes above ``k_max`` are excluded.  Fourier
     transforms use forward normalization, making the floors independent of
-    grid resolution.  With ``config.dispersion_weighting``, the outer sample
+    grid resolution.  With ``dispersion_weighting``, the outer sample
     average is weighted by the elevation-energy-averaged linear frequency
 
     ``Omega_eff^2 = sum_k omega(k, h)^2 |eta_hat_k|^2 / sum_k |eta_hat_k|^2``,
@@ -65,7 +57,7 @@ def compute_mode_balanced_loss(
 
     k_abs = jnp.abs(k_rfft).astype(real_dtype)
     omega_squared = (
-        jnp.asarray(config.gravity, dtype=real_dtype)
+        jnp.asarray(gravity, dtype=real_dtype)
         * k_abs[None, :]
         * jnp.tanh(depth[:, None] * k_abs[None, :])
     )
@@ -74,32 +66,28 @@ def compute_mode_balanced_loss(
     ).astype(real_dtype)
     physical_scale = jax.lax.stop_gradient(physical_scale)
 
-    band = (k_abs > 0.0) & (k_abs <= jnp.asarray(config.k_max, dtype=real_dtype))
+    band = (k_abs > 0.0) & (k_abs <= jnp.asarray(k_max, dtype=real_dtype))
     band_scale = jnp.where(band[None, :], physical_scale, 0.0)
     sample_scale = jnp.max(band_scale, axis=-1, keepdims=True)
-    absolute_floor = jnp.asarray(config.absolute_floor, dtype=real_dtype)
+    floor = jnp.asarray(absolute_floor, dtype=real_dtype)
     denominator_floor, activity_floor = (
-        jnp.asarray(coefficient, dtype=real_dtype) * sample_scale + absolute_floor
-        for coefficient in (config.denominator_eps, config.activity_threshold)
+        jnp.asarray(coefficient, dtype=real_dtype) * sample_scale + floor
+        for coefficient in (denominator_eps, activity_threshold)
     )
     soft_activity = physical_scale / (physical_scale + activity_floor)
     mode_weight = jax.lax.stop_gradient(jnp.where(band[None, :], soft_activity, 0.0))
 
     squared_error = jnp.abs(prediction_hat - target_hat) ** 2
     squared_ratio = squared_error / (physical_scale + denominator_floor)
-    clipped_ratio = jnp.minimum(
-        squared_ratio, jnp.asarray(config.ratio_cap, dtype=real_dtype)
-    )
-    scaled_ratio = (
-        clipped_ratio / jnp.asarray(config.huber_delta, dtype=real_dtype) ** 2
-    )
+    clipped_ratio = jnp.minimum(squared_ratio, jnp.asarray(ratio_cap, dtype=real_dtype))
+    scaled_ratio = clipped_ratio / jnp.asarray(huber_delta, dtype=real_dtype) ** 2
     penalty = 2.0 * clipped_ratio / (jnp.sqrt(1.0 + scaled_ratio) + 1.0)
 
     active_weight = jnp.sum(mode_weight, axis=-1)
     per_sample_loss = jnp.sum(mode_weight * penalty, axis=-1) / jnp.maximum(
-        active_weight, absolute_floor
+        active_weight, floor
     )
-    if config.dispersion_weighting:
+    if dispersion_weighting:
         parseval_weight = jnp.full_like(k_abs, 2.0)
         parseval_weight = parseval_weight.at[0].set(1.0)
         if eta.shape[-1] % 2 == 0:

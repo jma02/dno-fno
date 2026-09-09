@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,7 +27,6 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from hadamard_shape_regularizer import (  # noqa: E402
-    HadamardRegConfig,
     compute_hadamard_reg,
     construct_relative_eta_probe,
     evaluate_operator,
@@ -96,23 +96,13 @@ def _base_inputs(
     return eta, xi, depth, _wavenumbers(nx)
 
 
-def _config(
-    *,
-    k_max: float = 20.0,
-    sobolev_order: int = 1,
-    fd_step_min: float = 1e-3,
-    fd_step_max: float = 1e-3,
-    eta_scale_floor: float = 2e-2,
-    denominator_floor: float = 1e-24,
-) -> HadamardRegConfig:
-    return HadamardRegConfig(
-        k_max=k_max,
-        sobolev_order=sobolev_order,
-        fd_step_min=fd_step_min,
-        fd_step_max=fd_step_max,
-        eta_scale_floor=eta_scale_floor,
-        denominator_floor=denominator_floor,
-    )
+_hadamard_loss = partial(
+    compute_hadamard_reg,
+    k_max=20.0,
+    fd_step_max=1e-3,
+    eta_scale_floor=2e-2,
+    denominator_floor=1e-24,
+)
 
 
 def test_projected_sobolev_energy_matches_known_mode() -> None:
@@ -138,14 +128,19 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
         )
     )
     k = _wavenumbers(nx)
-    cfg = _config(k_max=12.0, eta_scale_floor=5e-3)
     zeta, eps = construct_relative_eta_probe(
-        jax.random.PRNGKey(4), eta, k, cfg, jnp.float64
+        jax.random.PRNGKey(4),
+        eta,
+        k,
+        jnp.float64,
+        k_max=12.0,
+        sobolev_order=1,
+        fd_step_min=1e-3,
+        fd_step_max=1e-3,
+        eta_scale_floor=5e-3,
     )
 
-    expected_scale = jnp.maximum(
-        jnp.sqrt(jnp.mean(eta * eta, axis=-1)), cfg.eta_scale_floor
-    )
+    expected_scale = jnp.maximum(jnp.sqrt(jnp.mean(eta * eta, axis=-1)), 5e-3)
     np.testing.assert_allclose(
         np.asarray(jnp.sqrt(jnp.mean(zeta * zeta, axis=-1))),
         np.asarray(expected_scale),
@@ -153,14 +148,13 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
     )
     np.testing.assert_allclose(np.asarray(jnp.mean(zeta, axis=-1)), 0.0, atol=1e-15)
     zeta_hat = jnp.fft.fft(zeta, axis=-1)
-    assert float(jnp.max(jnp.abs(zeta_hat[:, jnp.abs(k) > cfg.k_max]))) < 1e-13
-    assert bool(jnp.all(eps >= cfg.fd_step_min))
-    assert bool(jnp.all(eps <= cfg.fd_step_max))
+    assert float(jnp.max(jnp.abs(zeta_hat[:, jnp.abs(k) > 12.0]))) < 1e-13
+    np.testing.assert_array_equal(eps, jnp.full_like(eps, 1e-3))
 
 
 def test_exact_g01_has_zero_flat_surface_defect() -> None:
     eta, xi, depth, k = _base_inputs()
-    loss = compute_hadamard_reg(
+    loss = _hadamard_loss(
         rng=jax.random.PRNGKey(8),
         apply_fn=_g01_apply,
         model_params={},
@@ -170,7 +164,6 @@ def test_exact_g01_has_zero_flat_surface_defect() -> None:
         norm_inputs_fn=_identity_norm_inputs,
         denorm_targets_fn=_identity_targets,
         k=k,
-        cfg=_config(),
         dtype=jnp.float64,
     )
     assert float(loss) < 1e-18
@@ -178,7 +171,7 @@ def test_exact_g01_has_zero_flat_surface_defect() -> None:
 
 def test_g0_only_detects_missing_shape_derivative() -> None:
     eta, xi, depth, k = _base_inputs()
-    loss = compute_hadamard_reg(
+    loss = _hadamard_loss(
         rng=jax.random.PRNGKey(8),
         apply_fn=_g0_apply,
         model_params={},
@@ -188,7 +181,6 @@ def test_g0_only_detects_missing_shape_derivative() -> None:
         norm_inputs_fn=_identity_norm_inputs,
         denorm_targets_fn=_identity_targets,
         k=k,
-        cfg=_config(),
         dtype=jnp.float64,
     )
     assert float(loss) > 0.99
@@ -229,7 +221,7 @@ def test_normalizers_and_output_mean_match_production() -> None:
         np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14
     )
 
-    loss = compute_hadamard_reg(
+    loss = _hadamard_loss(
         jax.random.PRNGKey(3),
         scaled_apply,
         {},
@@ -239,7 +231,6 @@ def test_normalizers_and_output_mean_match_production() -> None:
         norm_inputs,
         denorm_targets,
         k,
-        _config(),
         jnp.float64,
     )
     assert float(loss) < 1e-17
@@ -249,7 +240,6 @@ def test_loss_is_jittable_and_differentiable() -> None:
     eta, xi, depth, k = _base_inputs(batch_size=2)
     x = jnp.arange(eta.shape[-1], dtype=jnp.float64) * (2.0 * jnp.pi / eta.shape[-1])
     eta = 0.015 * jnp.cos(2.0 * x)[None, :] * jnp.ones((2, 1))
-    cfg = _config(fd_step_min=2e-3, fd_step_max=2e-3)
 
     def perturbed_apply(
         variables: dict[str, Any], inputs: Array, batch_depth: Array
@@ -262,7 +252,7 @@ def test_loss_is_jittable_and_differentiable() -> None:
         return output[..., None]
 
     def loss_of_params(params: dict[str, Array]) -> Array:
-        return compute_hadamard_reg(
+        return _hadamard_loss(
             jax.random.PRNGKey(15),
             perturbed_apply,
             params,
@@ -272,8 +262,9 @@ def test_loss_is_jittable_and_differentiable() -> None:
             _identity_norm_inputs,
             _identity_targets,
             k,
-            cfg,
             jnp.float64,
+            fd_step_min=2e-3,
+            fd_step_max=2e-3,
         )
 
     params = {"alpha": jnp.asarray(0.4, dtype=jnp.float64)}
