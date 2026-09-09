@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import TypedDict, cast
+from typing import cast
 
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
@@ -44,7 +44,7 @@ from util import (  # noqa: E402
     replicate_pytree_from_host,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
-from hadamard_shape_regularizer import compute_hadamard_reg  # noqa: E402
+from hadamard_shape_regularizer import ApplyFn, compute_hadamard_reg  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_translation_tangent_loss,
 )
@@ -53,116 +53,11 @@ from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
 from losses import count_params, relative_l2_loss  # noqa: E402
-
-
-class CheckpointMetadata(TypedDict):
-    epoch: int
-    train_loss: float
-    val_loss: float
-    history: list[dict[str, float]]
-    best_val_loss: float
-    best_epoch: int
-    stats: dict[str, object]
-
-
-def save_checkpoint(
-    output_dir: Path,
-    state: train_state.TrainState,
-    history: list[dict[str, float]],
-    best_val_loss: float,
-    best_epoch: int,
-    stats: dict[str, object],
-    async_manager: checkpoints.AsyncManager,
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    host_state = jax.device_get(state)
-
-    payload = {
-        "params": jax.tree_util.tree_map(np.asarray, host_state.params),
-        "opt_state": jax.tree_util.tree_map(np.asarray, host_state.opt_state),
-        "step": int(host_state.step),
-    }
-
-    metadata = {
-        "epoch": int(history[-1]["epoch"]),
-        "train_loss": history[-1]["train_loss"],
-        "val_loss": history[-1]["val_loss"],
-        "history": history,
-        "best_val_loss": best_val_loss,
-        "best_epoch": best_epoch,
-        "stats": stats,
-    }
-    checkpoints.save_checkpoint(
-        ckpt_dir=output_dir,
-        target=payload,
-        step=metadata["epoch"],
-        prefix="ckpt_",
-        keep=2,
-        overwrite=True,
-        async_manager=async_manager,
-        orbax_checkpointer=ocp.PyTreeCheckpointer(),
-    )
-    # Do not advertise an epoch until its Orbax files have been written. Keeping
-    # previous payload and restoring the exact metadata epoch makes interruption
-    # during this wait recoverable instead of silently mixing epochs.
-    async_manager.wait_previous_save()
-    metadata_path = output_dir / "metadata.json"
-    metadata_tmp = output_dir / "metadata.json.tmp"
-    metadata_tmp.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    metadata_tmp.replace(metadata_path)
-
-
-def read_parameter_update_count(update_counter: jax.Array, *, counter_name: str) -> int:
-    """Read the model parameter update counter from every local device, requiring equal counts.
-
-    For example, [100, 100] returns 100; [100, 99] stops training with an error.
-    This checks the counters; it does not advance or synchronize them.
-    """
-    update_counts_per_device = [
-        int(np.asarray(device_copy.data))
-        for device_copy in update_counter.addressable_shards
-    ]
-    if len(set(update_counts_per_device)) != 1:
-        raise RuntimeError(
-            f"{counter_name} differs across devices: {update_counts_per_device}"
-        )
-    return update_counts_per_device[0]
-
-
-def training_counter_values(
-    state: train_state.TrainState,
-    *,
-    context: str,
-    announce: bool = False,
-) -> tuple[int, int]:
-    """Validate replicated TrainState/Adam/schedule counters."""
-    state_step = read_parameter_update_count(
-        cast(jax.Array, state.step),
-        counter_name=f"{context} TrainState.step",
-    )
-    optimizer_state = cast(
-        tuple[optax.ScaleByAdamState, object, optax.ScaleByScheduleState],
-        state.opt_state,
-    )
-    adam_step = read_parameter_update_count(
-        cast(jax.Array, optimizer_state[0].count),
-        counter_name=f"{context} Adam count",
-    )
-    schedule_step = read_parameter_update_count(
-        cast(jax.Array, optimizer_state[-1].count),
-        counter_name=f"{context} LR schedule count",
-    )
-    if adam_step != schedule_step:
-        raise RuntimeError(
-            f"{context} optimizer counters disagree: Adam={adam_step}, "
-            f"schedule={schedule_step}"
-        )
-    if announce:
-        print(
-            f"{context}: replicated counters verified "
-            f"(state.step={state_step}, optimizer_count={schedule_step})"
-        )
-    return state_step, schedule_step
+from checkpoint_util import (  # noqa: E402
+    CheckpointMetadata,
+    save_checkpoint,
+    training_counter_values,
+)
 
 
 def main() -> None:
@@ -468,7 +363,7 @@ def main() -> None:
     k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
-    # Losses shared by training and validation; Hadamard is added only during training.
+    # Full-batch losses shared by training and validation.
     def loss_components(
         current_params: FlatParams,
         eta: jax.Array,
@@ -522,6 +417,43 @@ def main() -> None:
             tangent_loss = tangent_loss * shard_weight
         return data_loss, mode_loss, tangent_loss
 
+    def hadamard_loss_on_subset(
+        rng: jax.Array,
+        current_params: FlatParams,
+        eta: jax.Array,
+        xi: jax.Array,
+        batch_depth: jax.Array,
+    ) -> jax.Array:
+        rng_perm, rng_probe = jax.random.split(rng)
+        h_phys = jnp.exp(
+            jnp.minimum(batch_depth.astype(training_dtype)[:, 0], log_h_max)
+        )
+        sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
+            :hadamard_microbatch_local
+        ]
+        eta_sub = eta.astype(training_dtype)[sample_indices]
+        xi_sub = xi.astype(training_dtype)[sample_indices]
+        depth_sub = h_phys[sample_indices]
+        batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
+        return compute_hadamard_reg(
+            rng=rng_probe,
+            apply_fn=cast(ApplyFn, model.apply),
+            model_params=current_params,
+            eta_phys=eta_sub,
+            xi_phys=xi_sub,
+            batch_depth_local=batch_depth_sub,
+            norm_inputs_fn=norm_inputs_jax,
+            denorm_targets_fn=denorm_targets_jax,
+            k=k_grid_jax,
+            dtype=jnp.float64,
+            k_max=args.hadamard_k_max,
+            sobolev_order=args.hadamard_sobolev_order,
+            fd_step_min=args.hadamard_fd_step_min,
+            fd_step_max=args.hadamard_fd_step_max,
+            eta_scale_floor=args.hadamard_eta_scale_floor,
+            denominator_floor=args.hadamard_denominator_floor,
+        )
+
     def _train_step_body(
         current_state: train_state.TrainState,
         rng_key: jax.Array,
@@ -561,34 +493,8 @@ def main() -> None:
                         jax.lax.axis_index("batch") * 53 + 127,
                     )
                     rng_hadamard = jax.random.fold_in(rng_base, current_state.step)
-                    rng_perm, rng_probe = jax.random.split(rng_hadamard)
-                    h_phys = jnp.exp(
-                        jnp.minimum(batch_depth.astype(training_dtype)[:, 0], log_h_max)
-                    )
-                    sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
-                        :hadamard_microbatch_local
-                    ]
-                    eta_sub = eta.astype(training_dtype)[sample_indices]
-                    xi_sub = xi.astype(training_dtype)[sample_indices]
-                    depth_sub = h_phys[sample_indices]
-                    batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
-                    hadamard_loss = compute_hadamard_reg(
-                        rng=rng_probe,
-                        apply_fn=current_state.apply_fn,
-                        model_params=current_params,
-                        eta_phys=eta_sub,
-                        xi_phys=xi_sub,
-                        batch_depth_local=batch_depth_sub,
-                        norm_inputs_fn=norm_inputs_jax,
-                        denorm_targets_fn=denorm_targets_jax,
-                        k=k_grid_jax,
-                        dtype=jnp.float64,
-                        k_max=args.hadamard_k_max,
-                        sobolev_order=args.hadamard_sobolev_order,
-                        fd_step_min=args.hadamard_fd_step_min,
-                        fd_step_max=args.hadamard_fd_step_max,
-                        eta_scale_floor=args.hadamard_eta_scale_floor,
-                        denominator_floor=args.hadamard_denominator_floor,
+                    hadamard_loss = hadamard_loss_on_subset(
+                        rng_hadamard, current_params, eta, xi, batch_depth
                     )
                     warmup = jnp.minimum(
                         jnp.asarray(current_state.step, dtype=jnp.float64)
@@ -647,16 +553,23 @@ def main() -> None:
         for partition in (P("batch"), P())
     }
 
-    # Validation evaluates the shared losses without gradients or Hadamard.
+    # Validation uses fixed Hadamard samples/probes and takes no parameter gradients.
     def _eval_loss_body(
         current_params: FlatParams,
+        rng_key: jax.Array,
         eta: jax.Array,
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        hadamard_loss = jnp.float32(0.0)
+        if args.hadamard_weight > 0.0:
+            hadamard_loss = training_dtype(hadamard_loss_on_subset(
+                jax.random.fold_in(rng_key, jax.lax.axis_index("batch")),
+                current_params, eta, xi, batch_depth,
+            ))
         return jax.lax.pmean(
-            loss_components(current_params, eta, xi, gxi, batch_depth),
+            (*loss_components(current_params, eta, xi, gxi, batch_depth), hadamard_loss),
             axis_name="batch",
         )
 
@@ -665,8 +578,8 @@ def main() -> None:
             shard_map(
                 _eval_loss_body,
                 mesh=mesh,
-                in_specs=(P(), partition, partition, partition, partition),
-                out_specs=(P(), P(), P()),
+                in_specs=(P(), P(), partition, partition, partition, partition),
+                out_specs=(P(), P(), P(), P()),
                 check_rep=False,
             )
         )
@@ -754,6 +667,7 @@ def main() -> None:
     seed_seq = np.random.SeedSequence(args.seed)
     epoch_seeds = seed_seq.spawn(args.epochs)
     train_rng = jax.random.PRNGKey(args.seed + 1)
+    validation_rng = jax.random.PRNGKey(args.seed + 2)
 
     # Train on every sample once per epoch, in a newly shuffled order.
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="Epochs", leave=False)
@@ -814,23 +728,27 @@ def main() -> None:
         # Evaluate validation samples without shuffling or changing model parameters.
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
-        for eta_b, xi_b, gxi_b, depth_b in prefetch_batches(val_indices, None):
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b) in enumerate(
+            prefetch_batches(val_indices, None)
+        ):
             val_batch_sizes.append(int(eta_b.shape[0]))
             eval_loss_step = eval_loss_steps[
                 P("batch") if eta_b.shape[0] % n_devices == 0 else P()
             ]
             batch_val_losses = eval_loss_step(
-                training_state.params, eta_b, xi_b, gxi_b, depth_b
+                training_state.params, jax.random.fold_in(validation_rng, batch_index),
+                eta_b, xi_b, gxi_b, depth_b,
             )
             val_batch_losses.append(tuple(map(float, jax.device_get(batch_val_losses))))
 
-        val_data_loss, val_mode_loss, val_tangent_loss = (
+        # Each Hadamard subset estimates its full batch's mean, so use full batch sizes.
+        val_data_loss, val_mode_loss, val_tangent_loss, val_hadamard_loss = (
             tuple(
                 float(np.average(losses, weights=val_batch_sizes))
                 for losses in zip(*val_batch_losses)
             )
             if val_batch_losses
-            else (float("inf"),) * 3
+            else (float("inf"),) * 4
         )
         val_loss = (
             val_data_loss
@@ -844,6 +762,7 @@ def main() -> None:
             "val_l2_loss": val_data_loss,
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
+            "val_hadamard_loss": val_hadamard_loss,
         }
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
