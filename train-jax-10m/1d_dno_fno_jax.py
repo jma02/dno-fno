@@ -271,9 +271,7 @@ def main() -> None:
     )
 
     domain_length = float(dataset["domain_length"])
-    # FNO1d's linear-baseline path needs to recover physical xi from the normalized
-    # input channel. That's only exact under norm=scale, where the channel is divided
-    # by feature_absmax. norm=minmax shifts as well, so the baseline is approximate.
+    # Physical-unit scaling for both models' analytic DNO terms, matched to norm=scale.
     feature_scale = np.asarray(
         cast(list[float], stats["feature_absmax"]), dtype=np.float32
     )
