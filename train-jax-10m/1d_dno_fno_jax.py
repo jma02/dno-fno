@@ -44,7 +44,7 @@ from util import (  # noqa: E402
     replicate_pytree_from_host,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
-from hadamard_shape_regularizer import ApplyFn, compute_hadamard_reg  # noqa: E402
+from hadamard_shape_regularizer import ApplyFn, compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_translation_tangent_loss,
 )
@@ -433,7 +433,7 @@ def main() -> None:
         xi_sub = xi.astype(training_dtype)[sample_indices]
         depth_sub = h_phys[sample_indices]
         batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
-        return compute_hadamard_reg(
+        return compute_hadamard_loss(
             rng=rng_probe,
             apply_fn=cast(ApplyFn, model.apply),
             model_params=current_params,

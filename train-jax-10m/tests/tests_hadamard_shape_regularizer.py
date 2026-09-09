@@ -27,7 +27,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from hadamard_shape_regularizer import (  # noqa: E402
-    compute_hadamard_reg,
+    compute_hadamard_loss,
     projected_sobolev_energy,
 )
 
@@ -95,7 +95,7 @@ def _base_inputs(
 
 
 _hadamard_loss = partial(
-    compute_hadamard_reg,
+    compute_hadamard_loss,
     k_max=20.0,
     fd_step_max=1e-3,
     min_surface_rms=2e-2,

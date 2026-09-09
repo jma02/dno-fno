@@ -60,7 +60,7 @@ def spectral_dx(field: Array, k: Array) -> Array:
     return jnp.real(jnp.fft.ifft(1j * k * field_hat, axis=-1))
 
 
-def compute_hadamard_reg(
+def compute_hadamard_loss(
     rng: Array,
     apply_fn: ApplyFn,
     model_params: Any,
