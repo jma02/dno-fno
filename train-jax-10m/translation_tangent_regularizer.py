@@ -2,19 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import jax
 import jax.numpy as jnp
-
-
-@dataclass(frozen=True)
-class TranslationTangentConfig:
-    """Configuration for the local projection of DNO error onto ``eta_x``."""
-
-    smoothing_scale: float = 1.0
-    denominator_eps: float = 1e-3
-    gravity: float = 1.0
 
 
 def compute_translation_tangent_loss(
@@ -23,7 +12,10 @@ def compute_translation_tangent_loss(
     gxi_target: jax.Array,
     depth: jax.Array,
     k: jax.Array,
-    config: TranslationTangentConfig,
+    *,
+    smoothing_scale: float = 1.0,
+    denominator_eps: float = 1e-3,
+    gravity: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Return the local translation loss and the number of nonflat samples used.
 
@@ -44,7 +36,7 @@ def compute_translation_tangent_loss(
     error = centered_prediction - centered_target
     fields = jnp.stack((eta_x * error, eta_x**2), axis=1)
     k_rfft = jnp.abs(k[: eta.shape[-1] // 2 + 1])
-    sigma = jnp.asarray(config.smoothing_scale, dtype=fields.dtype) * depth
+    sigma = jnp.asarray(smoothing_scale, dtype=fields.dtype) * depth
     multiplier = jnp.exp(-0.5 * (sigma[:, None] * k_rfft[None, :]) ** 2)
     fields_hat = jnp.fft.rfft(fields, axis=-1)
     smoothed = jnp.fft.irfft(
@@ -53,14 +45,12 @@ def compute_translation_tangent_loss(
     local_cross = smoothed[:, 0]
     local_energy = jnp.maximum(smoothed[:, 1], 0.0)
     peak_energy = jnp.max(local_energy, axis=-1)
-    energy_floor = (
-        jnp.asarray(config.denominator_eps, dtype=dtype) * peak_energy[:, None]
-    )
+    energy_floor = jnp.asarray(denominator_eps, dtype=dtype) * peak_energy[:, None]
     local_speed_error = -local_cross / (
         local_energy + energy_floor + jnp.asarray(1e-30, dtype=dtype)
     )
     physical_speed = jnp.sqrt(
-        jnp.asarray(config.gravity, dtype=dtype)
+        jnp.asarray(gravity, dtype=dtype)
         * jnp.maximum(depth, jnp.asarray(1e-12, dtype=dtype))
     )
     local_relative_error = jnp.abs(local_speed_error) / physical_speed[:, None]

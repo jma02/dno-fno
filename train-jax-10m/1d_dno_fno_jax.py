@@ -49,7 +49,6 @@ from hadamard_shape_regularizer import (  # noqa: E402
     compute_hadamard_reg,
 )
 from translation_tangent_regularizer import (  # noqa: E402
-    TranslationTangentConfig,
     compute_translation_tangent_loss,
 )
 from mode_balanced_regularizer import (  # noqa: E402
@@ -469,10 +468,6 @@ def main() -> None:
     )
 
     log_h_max = float(np.log(5.0))
-    translation_tangent_cfg = TranslationTangentConfig(
-        smoothing_scale=args.translation_tangent_smoothing_scale,
-        denominator_eps=args.translation_tangent_denominator_eps,
-    )
     mode_balanced_cfg = ModeBalancedConfig(
         k_max=args.mode_balanced_k_max,
         activity_threshold=args.mode_balanced_activity_threshold,
@@ -527,7 +522,8 @@ def main() -> None:
                 gxi_target=gxi,
                 depth=h_phys,
                 k=k_grid_jax,
-                config=translation_tangent_cfg,
+                smoothing_scale=args.translation_tangent_smoothing_scale,
+                denominator_eps=args.translation_tangent_denominator_eps,
             )
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
