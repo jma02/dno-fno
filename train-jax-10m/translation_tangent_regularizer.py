@@ -1,10 +1,12 @@
 """Localized translation-tangent matching for Dirichlet--Neumann data."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+
 
 @dataclass(frozen=True)
 class TranslationTangentConfig:
@@ -34,15 +36,11 @@ def compute_translation_tangent_loss(
     """
     dtype = eta.dtype
     eta_hat = jnp.fft.fft(eta, axis=-1)
-    eta_x = jnp.real(
-        jnp.fft.ifft(1j * k[None, :] * eta_hat, axis=-1)
-    ).astype(dtype)
+    eta_x = jnp.real(jnp.fft.ifft(1j * k[None, :] * eta_hat, axis=-1)).astype(dtype)
     centered_prediction = gxi_prediction - jnp.mean(
         gxi_prediction, axis=-1, keepdims=True
     )
-    centered_target = gxi_target - jnp.mean(
-        gxi_target, axis=-1, keepdims=True
-    )
+    centered_target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
     error = centered_prediction - centered_target
     fields = jnp.stack((eta_x * error, eta_x**2), axis=1)
     k_rfft = jnp.abs(k[: eta.shape[-1] // 2 + 1])
@@ -53,10 +51,10 @@ def compute_translation_tangent_loss(
         fields_hat * multiplier[:, None, :], n=fields.shape[-1], axis=-1
     ).astype(fields.dtype)
     local_cross = smoothed[:, 0]
-    local_energy = jnp.maximum(smoothed[:, 1], jnp.asarray(0.0, dtype=dtype))
+    local_energy = jnp.maximum(smoothed[:, 1], 0.0)
+    peak_energy = jnp.max(local_energy, axis=-1)
     energy_floor = (
-        jnp.asarray(config.denominator_eps, dtype=dtype)
-        * jnp.max(local_energy, axis=-1, keepdims=True)
+        jnp.asarray(config.denominator_eps, dtype=dtype) * peak_energy[:, None]
     )
     local_speed_error = -local_cross / (
         local_energy + energy_floor + jnp.asarray(1e-30, dtype=dtype)
@@ -67,18 +65,13 @@ def compute_translation_tangent_loss(
     )
     local_relative_error = jnp.abs(local_speed_error) / physical_speed[:, None]
     local_weight = local_energy / (
-        jnp.sum(local_energy, axis=-1, keepdims=True)
-        + jnp.asarray(1e-30, dtype=dtype)
+        jnp.sum(local_energy, axis=-1, keepdims=True) + jnp.asarray(1e-30, dtype=dtype)
     )
     per_sample_loss = jnp.sum(
         local_weight * local_relative_error**2,
         axis=-1,
     )
-    selected = (
-        jnp.max(local_energy, axis=-1) > jnp.asarray(1e-20, dtype=dtype)
-    ).astype(dtype)
+    selected = (peak_energy > jnp.asarray(1e-20, dtype=dtype)).astype(dtype)
     selected_count = jnp.sum(selected)
-    selected_denom = jnp.maximum(selected_count, jnp.asarray(1.0, dtype=dtype))
-
-    loss = jnp.sum(selected * per_sample_loss) / selected_denom
+    loss = jnp.sum(selected * per_sample_loss) / jnp.maximum(selected_count, 1.0)
     return loss, selected_count

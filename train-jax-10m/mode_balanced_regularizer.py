@@ -1,4 +1,5 @@
 """Active-mode phase-space-normalized complex loss for DNO data."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -57,11 +58,10 @@ def compute_mode_balanced_loss(
     loss within each sample is unchanged.
     """
     real_dtype = eta.dtype
-    eta_hat = jnp.fft.rfft(eta, axis=-1, norm="forward")
-    prediction_hat = jnp.fft.rfft(
-        gxi_prediction, axis=-1, norm="forward"
+    eta_hat, prediction_hat, target_hat = (
+        jnp.fft.rfft(field, axis=-1, norm="forward")
+        for field in (eta, gxi_prediction, gxi_target)
     )
-    target_hat = jnp.fft.rfft(gxi_target, axis=-1, norm="forward")
 
     k_abs = jnp.abs(k_rfft).astype(real_dtype)
     omega_squared = (
@@ -74,34 +74,25 @@ def compute_mode_balanced_loss(
     ).astype(real_dtype)
     physical_scale = jax.lax.stop_gradient(physical_scale)
 
-    band = jnp.logical_and(
-        k_abs > jnp.asarray(0.0, dtype=real_dtype),
-        k_abs <= jnp.asarray(config.k_max, dtype=real_dtype),
-    )
+    band = (k_abs > 0.0) & (k_abs <= jnp.asarray(config.k_max, dtype=real_dtype))
     band_scale = jnp.where(band[None, :], physical_scale, 0.0)
     sample_scale = jnp.max(band_scale, axis=-1, keepdims=True)
     absolute_floor = jnp.asarray(config.absolute_floor, dtype=real_dtype)
-    denominator_floor = (
-        jnp.asarray(config.denominator_eps, dtype=real_dtype)
-        * sample_scale
-        + absolute_floor
-    )
-    activity_floor = (
-        jnp.asarray(config.activity_threshold, dtype=real_dtype)
-        * sample_scale
-        + absolute_floor
+    denominator_floor, activity_floor = (
+        jnp.asarray(coefficient, dtype=real_dtype) * sample_scale + absolute_floor
+        for coefficient in (config.denominator_eps, config.activity_threshold)
     )
     soft_activity = physical_scale / (physical_scale + activity_floor)
-    mode_weight = jax.lax.stop_gradient(
-        jnp.where(band[None, :], soft_activity, 0.0)
-    )
+    mode_weight = jax.lax.stop_gradient(jnp.where(band[None, :], soft_activity, 0.0))
 
     squared_error = jnp.abs(prediction_hat - target_hat) ** 2
     squared_ratio = squared_error / (physical_scale + denominator_floor)
     clipped_ratio = jnp.minimum(
         squared_ratio, jnp.asarray(config.ratio_cap, dtype=real_dtype)
     )
-    scaled_ratio = clipped_ratio / jnp.asarray(config.huber_delta, dtype=real_dtype)**2
+    scaled_ratio = (
+        clipped_ratio / jnp.asarray(config.huber_delta, dtype=real_dtype) ** 2
+    )
     penalty = 2.0 * clipped_ratio / (jnp.sqrt(1.0 + scaled_ratio) + 1.0)
 
     active_weight = jnp.sum(mode_weight, axis=-1)
@@ -113,20 +104,11 @@ def compute_mode_balanced_loss(
         parseval_weight = parseval_weight.at[0].set(1.0)
         if eta.shape[-1] % 2 == 0:
             parseval_weight = parseval_weight.at[-1].set(1.0)
-        eta_energy = (
-            parseval_weight[None, :]
-            * jnp.abs(eta_hat) ** 2
-            * band[None, :]
-        )
+        eta_energy = parseval_weight[None, :] * jnp.abs(eta_hat) ** 2 * band[None, :]
         total_eta_energy = jnp.sum(eta_energy, axis=-1)
-        safe_eta_energy = jnp.where(
-            total_eta_energy > 0.0,
-            total_eta_energy,
-            jnp.ones_like(total_eta_energy),
-        )
+        safe_eta_energy = jnp.where(total_eta_energy > 0.0, total_eta_energy, 1.0)
         effective_frequency_squared = jax.lax.stop_gradient(
-            jnp.sum(omega_squared * eta_energy, axis=-1)
-            / safe_eta_energy
+            jnp.sum(omega_squared * eta_energy, axis=-1) / safe_eta_energy
         )
         per_sample_loss = effective_frequency_squared * per_sample_loss
     return jnp.mean(per_sample_loss)

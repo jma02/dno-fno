@@ -139,14 +139,13 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
     )
     k = _wavenumbers(nx)
     cfg = _config(k_max=12.0, eta_scale_floor=5e-3)
-    zeta, eps, eta_scale = construct_relative_eta_probe(
+    zeta, eps = construct_relative_eta_probe(
         jax.random.PRNGKey(4), eta, k, cfg, jnp.float64
     )
 
     expected_scale = jnp.maximum(
         jnp.sqrt(jnp.mean(eta * eta, axis=-1)), cfg.eta_scale_floor
     )
-    np.testing.assert_allclose(np.asarray(eta_scale), np.asarray(expected_scale))
     np.testing.assert_allclose(
         np.asarray(jnp.sqrt(jnp.mean(zeta * zeta, axis=-1))),
         np.asarray(expected_scale),

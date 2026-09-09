@@ -47,7 +47,6 @@ from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from hadamard_shape_regularizer import (  # noqa: E402
     HadamardRegConfig,
     compute_hadamard_reg,
-    sample_microbatch,
 )
 from translation_tangent_regularizer import (  # noqa: E402
     TranslationTangentConfig,
@@ -582,13 +581,12 @@ def main() -> None:
                     h_phys = jnp.exp(
                         jnp.minimum(batch_depth.astype(training_dtype)[:, 0], log_h_max)
                     )
-                    eta_sub, xi_sub, depth_sub = sample_microbatch(
-                        rng_perm,
-                        eta.astype(training_dtype),
-                        xi.astype(training_dtype),
-                        h_phys,
-                        hadamard_microbatch_local,
-                    )
+                    sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
+                        :hadamard_microbatch_local
+                    ]
+                    eta_sub = eta.astype(training_dtype)[sample_indices]
+                    xi_sub = xi.astype(training_dtype)[sample_indices]
+                    depth_sub = h_phys[sample_indices]
                     batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
                     loss_hadamard = compute_hadamard_reg(
                         rng=rng_probe,

@@ -13,9 +13,11 @@ The finite secant avoids differentiating a JVP through the parameter loss.  A
 small, relative perturbation is used so the same configuration applies across
 the range of surface amplitudes in the clean training data.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, TypeAlias
 
 import jax
@@ -45,22 +47,10 @@ class HadamardRegConfig:
     denominator_floor: float = 1e-12
 
 
-def sample_microbatch(
-    rng: Array,
-    eta: Array,
-    xi: Array,
-    depth_per_sample: Array,
-    local_size: int,
-) -> tuple[Array, Array, Array]:
-    """Sample a device-local microbatch without replacement."""
-    indices = jax.random.permutation(rng, eta.shape[0])[:local_size]
-    return eta[indices], xi[indices], depth_per_sample[indices]
-
-
 def sobolev_weight_sq(k: Array, order: int) -> Array:
-    """Return the squared spectral weight used by the supervised loss.
+    """Return the squared spectral weight for Hadamard probes and energies.
 
-    The trainer's order-``s`` convention is
+    The order-``s`` convention is
     ``W(k)^2 = 1 + |k|^2 + ... + |k|^(2s)`` rather than ``(1+k^2)^s``.
     """
     k_abs = jnp.abs(k)
@@ -89,9 +79,7 @@ def projected_sobolev_energy(
     )
     weight_sq = sobolev_weight_sq(k, sobolev_order)
     weighted_energy = (
-        projector.astype(field_hat.real.dtype)
-        * weight_sq.astype(field_hat.real.dtype)
-        * jnp.abs(field_hat) ** 2
+        projector * weight_sq.astype(field_hat.real.dtype) * jnp.abs(field_hat) ** 2
     )
     return jnp.sum(weighted_energy, axis=-1) / jnp.asarray(
         nx * nx, dtype=field_hat.real.dtype
@@ -104,8 +92,8 @@ def construct_relative_eta_probe(
     k: Array,
     cfg: HadamardRegConfig,
     dtype: jnp.dtype,
-) -> tuple[Array, Array, Array]:
-    """Sample ``(zeta, fd_step, eta_scale)`` for a finite difference.
+) -> tuple[Array, Array]:
+    """Sample ``(zeta, fd_step)`` for a finite difference.
 
     The zero-mean random direction is supported on ``0 < |k| <= k_max``.  Its
     spectrum is divided by the Sobolev weight before RMS normalisation; hence
@@ -121,9 +109,7 @@ def construct_relative_eta_probe(
     raw = jax.random.normal(key_probe, eta.shape, dtype=dtype)
     raw_hat = jnp.fft.fft(raw, axis=-1)
     k_abs = jnp.abs(k_typed)
-    projector = (k_abs > 0.0) & (
-        k_abs <= jnp.asarray(cfg.k_max, dtype=dtype)
-    )
+    projector = (k_abs > 0.0) & (k_abs <= jnp.asarray(cfg.k_max, dtype=dtype))
     weight = jnp.sqrt(sobolev_weight_sq(k_typed, cfg.sobolev_order))
     probe_hat = raw_hat * projector[None, :] / weight[None, :]
     probe = jnp.real(jnp.fft.ifft(probe_hat, axis=-1))
@@ -134,9 +120,7 @@ def construct_relative_eta_probe(
 
     eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)
     eta_rms = jnp.sqrt(jnp.mean(eta_centered * eta_centered, axis=-1))
-    eta_scale = jnp.maximum(
-        eta_rms, jnp.asarray(cfg.eta_scale_floor, dtype=dtype)
-    )
+    eta_scale = jnp.maximum(eta_rms, jnp.asarray(cfg.eta_scale_floor, dtype=dtype))
     zeta = unit_probe * eta_scale[:, None]
 
     fd_step_min = jnp.asarray(cfg.fd_step_min, dtype=dtype)
@@ -152,7 +136,7 @@ def construct_relative_eta_probe(
             maxval=jnp.log(fd_step_max),
         )
         fd_step = jnp.clip(jnp.exp(log_step), fd_step_min, fd_step_max)
-    return zeta, fd_step, eta_scale
+    return zeta, fd_step
 
 
 def evaluate_operator(
@@ -207,51 +191,28 @@ def compute_hadamard_reg(
     xi = xi_phys.astype(dtype)
     k_typed = k.astype(dtype)
     depth = batch_depth_local.astype(dtype)
-    zeta, fd_step, _ = construct_relative_eta_probe(
-        rng, eta, k_typed, cfg, dtype
-    )
+    zeta, fd_step = construct_relative_eta_probe(rng, eta, k_typed, cfg, dtype)
 
-    gxi = evaluate_operator(
+    operator = partial(
+        evaluate_operator,
         apply_fn,
         model_params,
-        eta,
-        xi,
-        depth,
-        norm_inputs_fn,
-        denorm_targets_fn,
-        dtype,
+        batch_depth_local=depth,
+        norm_inputs_fn=norm_inputs_fn,
+        denorm_targets_fn=denorm_targets_fn,
+        dtype=dtype,
     )
+    gxi = operator(eta, xi)
     eta_x = spectral_dx(eta, k_typed)
     xi_x = spectral_dx(xi, k_typed)
     b_velocity = (gxi + eta_x * xi_x) / (1.0 + eta_x * eta_x)
     v_velocity = xi_x - b_velocity * eta_x
 
     fd_step_broadcast = fd_step[:, None]
-    gxi_perturbed = evaluate_operator(
-        apply_fn,
-        model_params,
-        eta + fd_step_broadcast * zeta,
-        xi,
-        depth,
-        norm_inputs_fn,
-        denorm_targets_fn,
-        dtype,
-    )
+    gxi_perturbed = operator(eta + fd_step_broadcast * zeta, xi)
     secant = (gxi_perturbed - gxi) / fd_step_broadcast
 
-    zeta_b = zeta * b_velocity
-    g_zeta_b = evaluate_operator(
-        apply_fn,
-        model_params,
-        eta,
-        zeta_b,
-        depth,
-        norm_inputs_fn,
-        denorm_targets_fn,
-        dtype,
-    )
-    product_dx = spectral_dx(zeta * v_velocity, k_typed)
-    forcing = g_zeta_b + product_dx
+    forcing = operator(eta, zeta * b_velocity) + spectral_dx(zeta * v_velocity, k_typed)
     residual = secant + forcing
 
     residual_energy = projected_sobolev_energy(
@@ -260,7 +221,5 @@ def compute_hadamard_reg(
     forcing_energy = projected_sobolev_energy(
         forcing, k_typed, cfg.k_max, cfg.sobolev_order
     )
-    denominator = forcing_energy + jnp.asarray(
-        cfg.denominator_floor, dtype=dtype
-    )
+    denominator = forcing_energy + jnp.asarray(cfg.denominator_floor, dtype=dtype)
     return jnp.mean(residual_energy / denominator)
