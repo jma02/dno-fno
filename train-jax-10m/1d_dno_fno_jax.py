@@ -52,7 +52,7 @@ from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 
 from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
-from losses import count_params, relative_l2_loss  # noqa: E402
+from losses import relative_l2_loss  # noqa: E402
 from checkpoint_util import (  # noqa: E402
     CheckpointMetadata,
     save_checkpoint,
@@ -339,7 +339,7 @@ def main() -> None:
         "run_name": run_name,
         "device": backend,
         "device_count": n_devices,
-        "param_count": count_params(params),
+        "param_count": sum(leaf.size for leaf in jax.tree_util.tree_leaves(params)),
         "train_examples": int(train_indices.shape[0]),
         "val_examples": int(val_indices.shape[0]),
         "domain_length": domain_length,
