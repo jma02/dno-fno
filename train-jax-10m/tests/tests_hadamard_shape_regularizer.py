@@ -28,7 +28,6 @@ import numpy as np  # noqa: E402
 
 from hadamard_shape_regularizer import (  # noqa: E402
     compute_hadamard_reg,
-    evaluate_operator,
     projected_sobolev_energy,
 )
 
@@ -223,20 +222,6 @@ def test_normalizers_and_output_mean_match_production() -> None:
         xi_phys = inputs[..., 1] * xi_scale
         # The removable DC offset checks rollout-compatible mean subtraction.
         return (_g01(eta_phys, xi_phys) / target_scale + 7.0)[..., None]
-
-    evaluated = evaluate_operator(
-        scaled_apply,
-        {},
-        eta,
-        xi,
-        depth,
-        norm_inputs,
-        denorm_targets,
-        jnp.float64,
-    )
-    np.testing.assert_allclose(
-        np.asarray(evaluated), np.asarray(_g01(eta, xi)), atol=2e-14
-    )
 
     loss = _hadamard_loss(
         jax.random.PRNGKey(3),

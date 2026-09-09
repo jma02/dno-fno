@@ -16,7 +16,6 @@ the range of surface amplitudes in the clean training data.
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any, Callable, Literal, TypeAlias
 
 import jax
@@ -53,23 +52,6 @@ def projected_sobolev_energy(
     return jnp.sum(weighted_energy, axis=-1) / jnp.asarray(
         nx * nx, dtype=field_hat.real.dtype
     )
-
-
-def evaluate_operator(
-    apply_fn: ApplyFn,
-    model_params: Any,
-    eta_phys: Array,
-    xi_phys: Array,
-    batch_depth_local: Array,
-    norm_inputs_fn: NormalizeInputsFn,
-    denorm_targets_fn: DenormalizeTargetsFn,
-    dtype: jnp.dtype,
-) -> Array:
-    """Evaluate the learned DNO in physical units with production zero-mean output."""
-    inputs = norm_inputs_fn(eta_phys, xi_phys)
-    predictions = apply_fn({"params": model_params}, inputs, batch_depth_local)
-    gxi = denorm_targets_fn(predictions)[..., 0].astype(dtype)
-    return gxi - jnp.mean(gxi, axis=-1, keepdims=True)
 
 
 def spectral_dx(field: Array, k: Array) -> Array:
@@ -153,15 +135,13 @@ def compute_hadamard_reg(
         )
         fd_step = jnp.clip(jnp.exp(log_step), step_min, step_max)
 
-    operator = partial(
-        evaluate_operator,
-        apply_fn,
-        model_params,
-        batch_depth_local=depth,
-        norm_inputs_fn=norm_inputs_fn,
-        denorm_targets_fn=denorm_targets_fn,
-        dtype=dtype,
-    )
+    def operator(eta: Array, xi: Array) -> Array:
+        """Evaluate in physical units and subtract the output's spatial mean."""
+        inputs = norm_inputs_fn(eta, xi)
+        predictions = apply_fn({"params": model_params}, inputs, depth)
+        gxi = denorm_targets_fn(predictions)[..., 0].astype(dtype)
+        return gxi - jnp.mean(gxi, axis=-1, keepdims=True)
+
     gxi = operator(eta, xi)
     eta_x = spectral_dx(eta, k_typed)
     xi_x = spectral_dx(xi, k_typed)
