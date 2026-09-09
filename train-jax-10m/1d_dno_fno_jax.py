@@ -452,7 +452,7 @@ def main() -> None:
             denominator_eps=args.hadamard_denominator_eps,
         )
 
-    def _train_step_body(
+    def train_step(
         current_state: train_state.TrainState,
         rng_key: jax.Array,
         eta: jax.Array,
@@ -460,7 +460,7 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
-        def loss_for_params(
+        def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
             data_loss, mode_loss, tangent_loss = compute_loss_components(
@@ -469,59 +469,48 @@ def main() -> None:
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {"train_l2_loss": data_loss}
             if args.mode_balanced_weight > 0.0:
-                mode_weight_eff = args.mode_balanced_weight * jnp.minimum(
+                mode_weight = args.mode_balanced_weight * jnp.minimum(
                     jnp.asarray(current_state.step, dtype=training_dtype)
                     / max(args.mode_balanced_warmup_steps, 1),
                     1.0,
                 )
-                physics_loss = physics_loss + mode_weight_eff * mode_loss
+                physics_loss += mode_weight * mode_loss
                 metrics["mode_balanced_loss"] = mode_loss
             if args.translation_tangent_weight > 0.0:
-                physics_loss = (
-                    physics_loss + args.translation_tangent_weight * tangent_loss
-                )
+                physics_loss += args.translation_tangent_weight * tangent_loss
                 metrics["translation_tangent_loss"] = tangent_loss
             if args.hadamard_weight > 0.0:
                 # Evaluate Hadamard on a small random subset, only on scheduled steps.
                 hadamard_scheduled = current_state.step % args.hadamard_interval == 0
 
-                def evaluate_hadamard(_operand: None) -> tuple[jax.Array, jax.Array]:
-                    rng_base = jax.random.fold_in(
-                        rng_key,
-                        jax.lax.axis_index("batch") * 53 + 127,
-                    )
-                    rng_hadamard = jax.random.fold_in(rng_base, current_state.step)
-                    hadamard_loss = hadamard_loss_on_subset(
-                        rng_hadamard, current_params, eta, xi, batch_depth
-                    )
-                    warmup = jnp.minimum(
-                        jnp.asarray(current_state.step, dtype=jnp.float64)
-                        / max(args.hadamard_warmup_steps, 1),
-                        1.0,
-                    )
-                    weight_eff = args.hadamard_weight * warmup
-                    return (
-                        training_dtype(hadamard_loss),
-                        training_dtype(weight_eff * hadamard_loss),
-                    )
-
-                hadamard_loss, weighted_hadamard_loss = jax.lax.cond(
-                    hadamard_scheduled,
-                    evaluate_hadamard,
-                    lambda _: (jnp.float32(0.0), jnp.float32(0.0)),
-                    operand=None,
+                rng_hadamard = jax.random.fold_in(
+                    jax.random.fold_in(rng_key, jax.lax.axis_index("batch") * 53 + 127),
+                    current_state.step,
                 )
-                physics_loss = physics_loss + weighted_hadamard_loss
+                hadamard_loss = jax.lax.cond(
+                    hadamard_scheduled,
+                    lambda rng: hadamard_loss_on_subset(
+                        rng, current_params, eta, xi, batch_depth
+                    ),
+                    lambda _: jnp.float64(0.0),
+                    rng_hadamard,
+                )
+                hadamard_weight = args.hadamard_weight * jnp.minimum(
+                    jnp.asarray(current_state.step, dtype=jnp.float64)
+                    / max(args.hadamard_warmup_steps, 1),
+                    1.0,
+                )
+                physics_loss += training_dtype(hadamard_weight * hadamard_loss)
                 metrics.update(
                     hadamard_active=training_dtype(hadamard_scheduled),
-                    hadamard_loss=hadamard_loss,
+                    hadamard_loss=training_dtype(hadamard_loss),
                 )
 
             return data_loss + physics_loss, metrics
 
         # Differentiate the total loss, average gradients across GPUs, then update weights.
         (loss_value, metrics), grads = jax.value_and_grad(
-            loss_for_params, has_aux=True
+            compute_training_loss, has_aux=True
         )(current_state.params)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
@@ -541,7 +530,7 @@ def main() -> None:
     train_steps = {
         partition: jax.jit(
             shard_map(
-                _train_step_body,
+                train_step,
                 mesh=mesh,
                 in_specs=(P(), P(), partition, partition, partition, partition),
                 out_specs=(P(), P(), P()),
@@ -552,7 +541,7 @@ def main() -> None:
     }
 
     # Validation uses fixed Hadamard samples/probes and takes no parameter gradients.
-    def _eval_loss_body(
+    def eval_step(
         current_params: FlatParams,
         rng_key: jax.Array,
         eta: jax.Array,
@@ -571,10 +560,10 @@ def main() -> None:
             axis_name="batch",
         )
 
-    eval_loss_steps = {
+    eval_steps = {
         partition: jax.jit(
             shard_map(
-                _eval_loss_body,
+                eval_step,
                 mesh=mesh,
                 in_specs=(P(), P(), partition, partition, partition, partition),
                 out_specs=(P(), P(), P(), P()),
@@ -689,10 +678,10 @@ def main() -> None:
         for eta_b, xi_b, gxi_b, depth_b in train_bar:
             batch_size = int(eta_b.shape[0])
             train_batch_sizes.append(batch_size)
-            train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
+            compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             train_rng, step_key = jax.random.split(train_rng)
             # Apply one optimizer update; the returned metrics are only for logging.
-            training_state, batch_loss, batch_metrics = train_step(
+            training_state, batch_loss, batch_metrics = compiled_train_step(
                 training_state, step_key, eta_b, xi_b, gxi_b, depth_b
             )
             batch_loss_value = float(jax.device_get(batch_loss))
@@ -730,10 +719,10 @@ def main() -> None:
             prefetch_batches(val_indices, None)
         ):
             val_batch_sizes.append(int(eta_b.shape[0]))
-            eval_loss_step = eval_loss_steps[
+            compiled_eval_step = eval_steps[
                 P("batch") if eta_b.shape[0] % n_devices == 0 else P()
             ]
-            batch_val_losses = eval_loss_step(
+            batch_val_losses = compiled_eval_step(
                 training_state.params, jax.random.fold_in(validation_rng, batch_index),
                 eta_b, xi_b, gxi_b, depth_b,
             )
