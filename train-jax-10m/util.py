@@ -309,7 +309,7 @@ def device_prefetch(
                 )
                 q.put(tuple(jax.device_put(field, destination) for field in item))
         except BaseException as exc:  # surface in main thread
-            q.put(("__prefetch_error__", exc))
+            q.put(exc)
         finally:
             q.put(sentinel)
 
@@ -319,10 +319,6 @@ def device_prefetch(
         item = q.get()
         if item is sentinel:
             return
-        if (
-            isinstance(item, tuple)
-            and len(item) == 2
-            and item[0] == "__prefetch_error__"
-        ):
-            raise item[1]
+        if isinstance(item, BaseException):
+            raise item
         yield item

@@ -8,6 +8,8 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
+from solver.evals.model_rollout import rollout_surrogate
+from solver.solvers.dno_series_jax import dno_series_eval
 from solver.solvers.time_integrator import (
     SpectralState,
     State,
@@ -133,6 +135,55 @@ class GaussLegendreTelemetryTest(unittest.TestCase):
             eta=0.03 * jnp.cos(self.x),
             xi=0.02 * jnp.sin(self.x),
         )
+
+    def test_surrogate_true_dno_matches_fixed_truth_without_truth_ramping(self) -> None:
+        initial = State(
+            eta=jnp.stack((self.zero.eta, self.mild.eta)),
+            xi=jnp.stack((self.zero.xi, self.mild.xi + 0.01)),
+        )
+        times = jnp.asarray([0.0, 0.1, 0.2])
+        for fraction in (1.0, 2.0 / 3.0):
+            with self.subTest(filter_fraction=fraction):
+                params = self.params._replace(filter_fraction=fraction)
+
+                def predict(eta: jnp.ndarray, xi: jnp.ndarray) -> jnp.ndarray:
+                    return dno_series_eval(
+                        eta,
+                        xi,
+                        params.k,
+                        params.depth,
+                        params.dno_order,
+                        pad_factor=params.pad_factor,
+                    )
+
+                truth = rollout(
+                    initial,
+                    times,
+                    params,
+                    save_gxi=False,
+                    substeps_per_interval=2,
+                    implicit_iterations=4,
+                    zero_mean_xi=True,
+                )
+                surrogate = rollout_surrogate(
+                    initial, times, params, predict, substeps=2
+                )
+                ramped = rollout_surrogate(
+                    initial,
+                    times,
+                    params._replace(nonlinear_ramp_time=10.0),
+                    predict,
+                    substeps=2,
+                )
+                for field in ("eta", "xi"):
+                    np.testing.assert_allclose(
+                        surrogate[field], truth[field], rtol=1e-12, atol=1e-14
+                    )
+                for field in surrogate:
+                    np.testing.assert_array_equal(ramped[field], surrogate[field])
+                np.testing.assert_allclose(
+                    surrogate["xi"].mean(axis=-1), 0.0, rtol=0.0, atol=1e-14
+                )
 
     def test_zero_state_converges_without_picard_update(self) -> None:
         result = gauss_legendre_2_if_step_with_telemetry(

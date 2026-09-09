@@ -1,7 +1,7 @@
 # dno-fno
 
-Minimal FNO training repo for the 1D Dirichlet--Neumann operator dataset.
-This repo assumes NVIDIA GPU execution for JAX training.
+JAX FNO and CS-DNO surrogates for the 1D Dirichlet--Neumann operator.
+Training requires an NVIDIA GPU.
 
 For the current paper dataset and C27 training workflow, see
 [`scripts/README.md`](scripts/README.md) and the
@@ -9,88 +9,49 @@ For the current paper dataset and C27 training workflow, see
 use `scripts/build_paper_dataset.py` to split whole simulations and assemble the
 training arrays. C27 launchers default to `outputs/paper_dataset/arrays`.
 
-## Baseline workflow
-
-- `data/dno_dataset.npz`: unified NumPy dataset with `soliton`, `stokes`, and `linear` samples.
-- `models/fno-jax/fno1d.py`: JAX/Flax FNO model.
-- `models/fno-jax/losses.py`: JAX loss functions and parameter counting.
-- `train-jax/1d_dno_fno_jax.py`: JAX training script.
-- `train-jax/carbs_fno_jax.py`: CARBS runner for the JAX trainer.
-- `train-jax/util.py`: JAX data loading, normalization, batching, and plotting helpers.
-
 ## Setup
 
 ```bash
 uv sync --python 3.11
 ```
 
-## GPU Requirement
-
-The JAX trainer requires a GPU-backed JAX install and will refuse to run on CPU.
-
 ## Train
 
+Run the current C27 recipe against the assembled array dataset:
+
 ```bash
-uv run --python 3.11 python train-jax/1d_dno_fno_jax.py \
-  --dataset dno_dataset.npz \
-  --sources all \
-  --batch_size 128
+bash scripts/launch_c27_paper_dataset_full.sh
 ```
 
-## Useful flags
+All local launchers use `train-jax-10m/1d_dno_fno_jax.py`. For a custom run:
 
-- `--modes 128`
-- `--width 64`
-- `--n_blocks 10`
-- `--sobolev_k 1` (derivative orders to penalize)
-- `--sobolev_weight 1.0` (0 = pure relative L2, higher = more derivative penalty)
-- `--batch_size 128`
-- `--epochs 600`
-- `--lr 5e-3`
-- `--weight_decay 1e-4`
-- `--sources all` or `--sources soliton,stokes`
+```bash
+uv run python train-jax-10m/1d_dno_fno_jax.py \
+  --dataset outputs/paper_dataset/arrays \
+  --model fno --norm scale --batch_size 256
+```
+
+Use `--help` for model and loss options. `scripts/modal_train.py` runs the same
+trainer on Modal; see the [script guide](scripts/README.md). Retired trainers and
+the CARBS workflow remain available in Git history.
 
 ## Outputs
 
-Each run creates `outputs/fno_jax_YYYYMMDD_HHMMSS/` with:
+Each run creates `outputs/<run_name>/` with:
 
 - `config.json`
-- `train_log.json`
+- `train_log.jsonl`
 - `summary.json`
-- `loss_curve.png`
+- `latest_ckpt/`
 - `best_val_ckpt/`
 - `final_ckpt/`
 
 `best_val_ckpt/` stores the best validation model seen during training.
-`final_ckpt/` stores the model at the final epoch.
-`loss_curve.png` is overwritten every epoch.
-
-## CARBS
-
-The CARBS runner treats:
-
-- `best_val_loss` as the objective to minimize
-- `runtime_seconds` as the observed cost
-- failed training runs as CARBS failures
-
-```bash
-uv run --python 3.11 python train-jax/carbs_fno_jax.py --trials 20
-```
-
-Each CARBS run writes:
-
-- `carbs_history.json`
-- `best_result.json`
-- one subdirectory per trial containing the normal trainer outputs
-
-The CARBS runner automatically disables plotting inside trainer runs to keep search overhead low.
+`final_ckpt/` stores the final model; `latest_ckpt/` supports automatic resumption
+when the same run directory is reused.
 
 ## Split
 
-The trainer reserves an `80/10/10` split:
-
-- `80%` train
-- `10%` validation
-- `10%` held out for later
-
-The training script only uses the train and validation splits. It does not run test evaluation.
+The dataset builder assigns whole simulations to train/validation/test splits
+(80/10/10 by default). The trainer uses those saved splits and fits normalization
+on training rows only. Test evaluation is separate, through `solver/evals/eval_suite.py`.

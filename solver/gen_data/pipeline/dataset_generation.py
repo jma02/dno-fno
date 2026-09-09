@@ -26,7 +26,7 @@ def generate_simulations(
     batch_size: int,
     generate_batch: BatchGenerator,
 ) -> GenerationResult:
-    """Generate the requested successful simulations for each parameter group."""
+    """ Generate successful simulations as specified in requested_simulations_per_group """
 
     family_name = family_id.name.lower()
     directory = root / "batches" / family_name
@@ -68,7 +68,7 @@ def generate_simulations(
                 f"completed batches exceed the attempt limit for {group}"
             )
 
-    # Finish each group in order; only the final dataset needs the requested mix.
+    # Generate one group at a time until its requested number of successes is reached.
     for group, requested in requested_simulations_per_group.items():
         attempt_limit = 2 * requested
         while successful_per_group[group] < requested:

@@ -10,7 +10,6 @@ There are two paper-workflow training entrypoints:
 The files under `train-jax-10m/` are the internal training engine and its
 importable helpers. Superseded trainers remain available through Git history
 rather than in the working tree.
-The separate `train-jax/` trainer remains available for baseline experiments.
 
 The directory is intentionally limited to the current paper workflow:
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -125,14 +125,7 @@ def cast_state_dtype(state: State, dtype: jnp.dtype) -> State:
 
 
 def cast_solver_params_dtype(params: SolverParams, dtype: jnp.dtype) -> SolverParams:
-    return SolverParams(
-        nx=params.nx,
-        length=params.length,
-        depth=params.depth,
-        gravity=params.gravity,
-        dno_order=params.dno_order,
-        pad_factor=params.pad_factor,
-        filter_fraction=params.filter_fraction,
+    return params._replace(
         k=jnp.asarray(params.k, dtype=dtype),
         g0=jnp.asarray(params.g0, dtype=dtype),
         nonlinear_ramp_time=(
@@ -140,7 +133,6 @@ def cast_solver_params_dtype(params: SolverParams, dtype: jnp.dtype) -> SolverPa
             if params.nonlinear_ramp_time is None
             else jnp.asarray(params.nonlinear_ramp_time, dtype=dtype)
         ),
-        nonlinear_ramp_order=params.nonlinear_ramp_order,
     )
 
 
@@ -325,28 +317,6 @@ def apply_linear_flow_hat(
     return SpectralState(eta_hat=eta_hat, xi_hat=xi_hat)
 
 
-def rhs_full(state: State, params: SolverParams) -> State:
-    eta_x = spectral_dx(state.eta, params.k)
-    xi_x = spectral_dx(state.xi, params.k)
-    gxi = dno_series_eval(
-        state.eta,
-        state.xi,
-        params.k,
-        params.depth,
-        params.dno_order,
-        pad_factor=params.pad_factor,
-    )
-
-    eta_t = gxi
-    numerator = gxi + eta_x * xi_x
-    xi_t = (
-        -params.gravity * state.eta
-        - 0.5 * xi_x**2
-        + 0.5 * numerator**2 / (1.0 + eta_x**2)
-    )
-    return State(eta=eta_t, xi=xi_t)
-
-
 def rhs_nonlinear(state: State, params: SolverParams) -> State:
     eta_x = spectral_dx(state.eta, params.k)
     xi_x = spectral_dx(state.xi, params.k)
@@ -484,9 +454,12 @@ def _gauss_legendre_2_stage_map(
     a12: float | jnp.ndarray,
     a21: float | jnp.ndarray,
     a22: float | jnp.ndarray,
+    rhs: Callable[
+        [SpectralState, float | jnp.ndarray, SolverParams], SpectralState
+    ] = rhs_nonlinear_if,
 ) -> tuple[SpectralState, SpectralState, SpectralState, SpectralState]:
-    f1 = rhs_nonlinear_if(stage1, stage_time1, params)
-    f2 = rhs_nonlinear_if(stage2, stage_time2, params)
+    f1 = rhs(stage1, stage_time1, params)
+    f2 = rhs(stage2, stage_time2, params)
     candidate1 = _tree_add(
         v0,
         _tree_scale(
@@ -712,8 +685,12 @@ def gauss_legendre_2_if_step(
     params: SolverParams,
     iterations: int = 4,
     relaxation: float = 1.0,
+    *,
+    rhs: Callable[
+        [SpectralState, float | jnp.ndarray, SolverParams], SpectralState
+    ] = rhs_nonlinear_if,
 ) -> State:
-    """Take a GL2 integrating-factor step with a fixed number of iterations."""
+    """Take a fixed-iteration GL2 step; ``rhs`` uses integrating-factor coordinates."""
 
     sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
     c1 = 0.5 - sqrt3 / 6.0
@@ -743,6 +720,7 @@ def gauss_legendre_2_if_step(
             a12=a12,
             a21=a21,
             a22=a22,
+            rhs=rhs,
         )
         if relaxation == 1.0:
             return candidate1, candidate2
@@ -777,6 +755,7 @@ def gauss_legendre_2_if_step(
         a12=a12,
         a21=a21,
         a22=a22,
+        rhs=rhs,
     )
     return _finish_gauss_legendre_2_step(
         v0,

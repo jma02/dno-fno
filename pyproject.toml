@@ -9,7 +9,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "carbs @ git+https://github.com/imbue-ai/carbs.git ; python_full_version >= '3.11'",
     "h5py>=3.14.0",
     "flax>=0.11 ; python_full_version >= '3.11' and sys_platform == 'linux'",
     "jax[cuda12]>=0.7 ; python_full_version >= '3.11' and sys_platform == 'linux'",
@@ -36,7 +35,6 @@ venvPath = "."
 venv = ".venv"
 extraPaths = ["models/fno-jax", "models/dno-net"]
 executionEnvironments = [
-    { root = "train-jax", extraPaths = [".", "train-jax", "models/fno-jax"] },
     { root = "train-jax-10m", extraPaths = [".", "train-jax-10m", "models/fno-jax", "models/dno-net"] },
     { root = "scripts", extraPaths = [".", "train-jax-10m", "solver/evals", "models/fno-jax", "models/dno-net"] },
     { root = "solver/evals", extraPaths = [".", "models/fno-jax", "models/dno-net"] },

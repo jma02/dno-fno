@@ -113,7 +113,7 @@ def save_checkpoint(
 
 
 def read_parameter_update_count(update_counter: jax.Array, *, counter_name: str) -> int:
-    """Read this update counter from every local device, requiring equal counts.
+    """Read the model parameter update counter from every local device, requiring equal counts.
 
     For example, [100, 100] returns 100; [100, 99] stops training with an error.
     This checks the counters; it does not advance or synchronize them.
@@ -173,7 +173,7 @@ def main() -> None:
         type=int,
         default=3,
         help="Highest power of η used in the CS-DNO spatial features. "
-        "n_polys=3 includes η, η², η³.",
+        "n_polys=3 includes eta, eta^2, eta^3.",
     )
     for feature in ("first_deriv", "second_deriv", "half_deriv", "hilbert"):
         parser.add_argument(
@@ -233,13 +233,14 @@ def main() -> None:
         "--translation_tangent_smoothing_scale",
         type=float,
         default=1.0,
-        help="Gaussian smoothing standard deviation = this value × water depth.",
+        help="Gaussian smoothing standard deviation = this value * water depth.",
     )
     parser.add_argument(
         "--translation_tangent_denominator_eps",
         type=float,
         default=1e-3,
-        help="Epsilon relative to each sample's maximum smoothed squared slope.",
+        help="Add eps * max_x(smoothed eta_x^2) to the speed-error denominator "
+        "for each sample, preventing large estimates in nearly flat regions.",
     )
     parser.add_argument(
         "--mode_balanced_weight",

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from typing import Iterator
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,7 @@ sys.path.insert(0, str(TRAIN_DIR.parent))
 from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from util import (  # noqa: E402
     build_dataset_split_indices,
+    device_prefetch,
     get_batches,
     load_dataset_arrays,
     load_or_compute_stats,
@@ -227,12 +229,41 @@ def test_normalizers_preserve_both_modes_and_constant_fields() -> None:
             )
 
 
+def test_prefetch_preserves_batches_and_producer_exceptions() -> None:
+    mesh = jax.sharding.Mesh(np.asarray(jax.local_devices()), axis_names=("batch",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
+    batch = (np.arange(mesh.size * 4).reshape(mesh.size, 4), np.ones((mesh.size, 1)))
+    assert list(device_prefetch((), sharding=sharding, depth=1)) == []
+    prefetched = list(device_prefetch((batch, batch), sharding=sharding, depth=1))
+    assert len(prefetched) == 2
+    for result in prefetched:
+        for actual, expected in zip(result, batch, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+
+    for expected_error in (RuntimeError("producer failure"), KeyboardInterrupt()):
+
+        def failing_batches() -> Iterator[tuple[np.ndarray, ...]]:
+            yield batch
+            raise expected_error
+
+        stream = device_prefetch(failing_batches(), sharding=sharding, depth=1)
+        for actual, expected in zip(next(stream), batch, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+        try:
+            next(stream)
+        except BaseException as error:
+            assert error is expected_error
+        else:
+            raise AssertionError("Producer failure did not reach the consumer")
+
+
 def main() -> int:
     test_loads_readonly_arrays_and_keeps_simulation_splits()
     test_stats_cache_is_refreshed_when_dataset_inputs_change()
     test_normalizers_preserve_both_modes_and_constant_fields()
+    test_prefetch_preserves_batches_and_producer_exceptions()
     print(
-        "[PASS] dataset splits, epoch shuffles, train-only/cache stats, both normalizers"
+        "[PASS] dataset splits, epoch shuffles, train-only/cache stats, both normalizers, prefetch"
     )
     return 0
 
