@@ -796,15 +796,9 @@ def main() -> None:
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             batch_metrics = jax.device_get(batch_metrics)
-            hadamard_activity = batch_metrics.get("hadamard_active", 0.0)
             for name, metric in batch_metrics.items():
-                value = float(metric)
-                if name.startswith("hadamard_"):
-                    if not hadamard_activity:
-                        continue
-                else:
-                    value *= eta_b.shape[0]
-                metric_sums[name] = metric_sums.get(name, 0.0) + value
+                weight = 1 if name.startswith("hadamard_") else eta_b.shape[0]
+                metric_sums[name] = metric_sums.get(name, 0.0) + float(metric) * weight
             train_bar.set_postfix(loss=batch_loss_value)
 
         epoch_end_step, epoch_end_optimizer_count = training_counter_values(
@@ -866,7 +860,8 @@ def main() -> None:
         # Average Hadamard over active batches and the other losses over training rows.
         for name, total in metric_sums.items():
             if name == "hadamard_loss":
-                epoch_record[name] = total / active_hadamard_batches
+                if active_hadamard_batches:
+                    epoch_record[name] = total / active_hadamard_batches
             else:
                 epoch_record[name] = total / sum(train_batch_sizes)
         history.append(epoch_record)
