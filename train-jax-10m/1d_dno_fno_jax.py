@@ -585,19 +585,6 @@ def main() -> None:
     metadata_path = latest_ckpt_dir / "metadata.json"
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if not isinstance(metadata, dict):
-            raise ValueError(f"invalid checkpoint metadata object: {metadata_path}")
-
-        for key in ("epoch", "best_epoch"):
-            if type(metadata.get(key)) is not int:
-                raise ValueError(f"checkpoint metadata {key!r} must be an integer")
-        for key in ("train_loss", "best_val_loss"):
-            if type(metadata.get(key)) not in (int, float):
-                raise ValueError(f"checkpoint metadata {key!r} must be numeric")
-
-        if not isinstance(metadata.get("history"), list):
-            raise ValueError("checkpoint metadata 'history' must be a list")
-
         metadata = cast(CheckpointMetadata, metadata)
         resume_epoch = metadata["epoch"]
         restored = checkpoints.restore_checkpoint(
