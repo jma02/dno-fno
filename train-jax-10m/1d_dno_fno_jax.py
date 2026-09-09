@@ -797,7 +797,7 @@ def main() -> None:
         train_batch_sizes: list[int] = []
         loss_sums: dict[str, float] = {}
         hadamard_loss_sum = 0.0
-        hadamard_evaluation_count = 0.0
+        hadamard_batch_evaluation_count = 0.0
         train_bar = tqdm(
             prefetch_batches(train_indices, epoch_rng),
             total=train_steps_per_epoch,
@@ -818,7 +818,7 @@ def main() -> None:
             batch_metrics = jax.device_get(batch_metrics)
             # Skipped Hadamard batches add zero loss and zero to the evaluation count.
             hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
-            hadamard_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
+            hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
             # Other losses are batch means; convert them to sums over samples.
             for name, batch_mean in batch_metrics.items():
                 loss_sums[name] = (
@@ -886,8 +886,8 @@ def main() -> None:
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)
-        if hadamard_evaluation_count:
-            epoch_record["hadamard_loss"] = hadamard_loss_sum / hadamard_evaluation_count
+        if hadamard_batch_evaluation_count:
+            epoch_record["hadamard_loss"] = hadamard_loss_sum / hadamard_batch_evaluation_count
         history.append(epoch_record)
         epoch_bar.set_postfix(train_loss=train_loss, val_loss=val_loss)
 
