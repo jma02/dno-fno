@@ -796,20 +796,20 @@ def main() -> None:
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
             batch_metrics = jax.device_get(batch_metrics)
-            hadamard_ran = batch_metrics.get("hadamard_active", 0.0) > 0.5
+            hadamard_activity = batch_metrics.get("hadamard_active", 0.0)
             current_step = epoch_start_step + batch_index
             if args.hadamard_weight > 0.0:
                 expected_hadamard = current_step % args.hadamard_interval == 0
-                if hadamard_ran != expected_hadamard:
+                if hadamard_activity != expected_hadamard:
                     raise RuntimeError(
                         "Hadamard regularizer firing mismatch at "
                         f"epoch={epoch}, batch={batch_index}, step={current_step}: "
-                        f"expected={expected_hadamard}, observed={hadamard_ran}"
+                        f"expected={expected_hadamard}, observed={hadamard_activity}"
                     )
             for name, metric in batch_metrics.items():
                 value = float(metric)
                 if name.startswith("hadamard_"):
-                    if not hadamard_ran:
+                    if not hadamard_activity:
                         continue
                 else:
                     value *= eta_b.shape[0]
