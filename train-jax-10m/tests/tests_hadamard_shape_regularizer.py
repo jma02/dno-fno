@@ -98,8 +98,8 @@ _hadamard_loss = partial(
     compute_hadamard_reg,
     k_max=20.0,
     fd_step_max=1e-3,
-    eta_scale_floor=2e-2,
-    denominator_floor=1e-24,
+    min_surface_rms=2e-2,
+    denominator_eps=1e-24,
 )
 
 
@@ -150,7 +150,7 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
         k_max=12.0,
         fd_step_min=1e-3,
         fd_step_max=1e-3,
-        eta_scale_floor=5e-3,
+        min_surface_rms=5e-3,
     )
 
     base, perturbed, repeated = surfaces

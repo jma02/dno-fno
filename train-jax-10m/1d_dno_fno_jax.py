@@ -218,16 +218,16 @@ def main() -> None:
         help="Maximum relative finite-difference step (fraction of surface RMS).",
     )
     parser.add_argument(
-        "--hadamard_eta_scale_floor",
+        "--hadamard_min_surface_rms",
         type=float,
         default=1e-3,
-        help="Physical RMS floor used when scaling a probe relative to eta.",
+        help="Minimum surface RMS used to set the perturbation's scale.",
     )
     parser.add_argument(
-        "--hadamard_denominator_floor",
+        "--hadamard_denominator_eps",
         type=float,
         default=1e-12,
-        help="Floor in the normalized Hadamard response denominator.",
+        help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
     start_time = perf_counter()
@@ -450,8 +450,8 @@ def main() -> None:
             sobolev_order=args.hadamard_sobolev_order,
             fd_step_min=args.hadamard_fd_step_min,
             fd_step_max=args.hadamard_fd_step_max,
-            eta_scale_floor=args.hadamard_eta_scale_floor,
-            denominator_floor=args.hadamard_denominator_floor,
+            min_surface_rms=args.hadamard_min_surface_rms,
+            denominator_eps=args.hadamard_denominator_eps,
         )
 
     def _train_step_body(

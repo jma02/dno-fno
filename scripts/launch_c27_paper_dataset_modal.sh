@@ -20,7 +20,7 @@ EPOCHS="${EPOCHS:-40}"
 mkdir -p logs
 LOG="logs/${RUN_NAME}.log"
 
-TRAINER_ARGS="--cs_n_polys 3 --translation_tangent_weight 10 --translation_tangent_smoothing_scale 1 --translation_tangent_denominator_eps 1e-3 --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 --mode_balanced_k_max 128 --mode_balanced_activity_threshold 1e-4 --mode_balanced_denominator_eps 1e-6 --hadamard_weight 1e-2 --hadamard_interval 16 --hadamard_microbatch 8 --hadamard_warmup_steps 500 --hadamard_k_max 128 --hadamard_sobolev_order 1 --hadamard_fd_step_min 1e-3 --hadamard_fd_step_max 3e-3 --hadamard_eta_scale_floor 1e-3 --hadamard_denominator_floor 1e-12 --lr_warmup_steps 500"
+TRAINER_ARGS="--cs_n_polys 3 --translation_tangent_weight 10 --translation_tangent_smoothing_scale 1 --translation_tangent_denominator_eps 1e-3 --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 --mode_balanced_k_max 128 --mode_balanced_activity_threshold 1e-4 --mode_balanced_denominator_eps 1e-6 --hadamard_weight 1e-2 --hadamard_interval 16 --hadamard_microbatch 8 --hadamard_warmup_steps 500 --hadamard_k_max 128 --hadamard_sobolev_order 1 --hadamard_fd_step_min 1e-3 --hadamard_fd_step_max 3e-3 --hadamard_min_surface_rms 1e-3 --hadamard_denominator_eps 1e-12 --lr_warmup_steps 500"
 
 MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --dataset "$DATASET" \

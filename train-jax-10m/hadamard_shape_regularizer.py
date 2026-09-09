@@ -76,8 +76,8 @@ def compute_hadamard_reg(
     sobolev_order: Literal[0, 1] = 1,
     fd_step_min: float = 1e-3,
     fd_step_max: float = 3e-3,
-    eta_scale_floor: float = 1e-3,
-    denominator_floor: float = 1e-12,
+    min_surface_rms: float = 1e-3,
+    denominator_eps: float = 1e-12,
 ) -> Array:
     """Return the normalized finite-secant Hadamard loss.
 
@@ -85,14 +85,14 @@ def compute_hadamard_reg(
     ``batch_depth_local`` is the model's usual depth input for those samples.
     The loss is
 
-    ``mean(||W P S||^2 / (||W P R||^2 + denominator_floor))``,
+    ``mean(||W P S||^2 / (||W P R||^2 + denominator_eps))``,
 
     where ``S`` is the Hadamard residual and
     ``R = G(eta)(zeta B) + d_x(zeta V)`` is the identity's right-hand-side
     magnitude (up to sign).
 
     ``fd_step_*`` are dimensionless: the direction is scaled to each surface's
-    RMS amplitude, with ``eta_scale_floor`` as the physical fallback near flatness.
+    RMS amplitude, with ``min_surface_rms`` as the physical fallback near flatness.
     """
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
@@ -118,7 +118,7 @@ def compute_hadamard_reg(
     # Match each direction's RMS to its mean-subtracted surface amplitude.
     eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)
     eta_rms = jnp.sqrt(jnp.mean(eta_centered * eta_centered, axis=-1))
-    eta_scale = jnp.maximum(eta_rms, jnp.asarray(eta_scale_floor, dtype=dtype))
+    eta_scale = jnp.maximum(eta_rms, jnp.asarray(min_surface_rms, dtype=dtype))
     zeta = unit_probe * eta_scale[:, None]
 
     step_min = jnp.asarray(fd_step_min, dtype=dtype)
@@ -157,5 +157,5 @@ def compute_hadamard_reg(
 
     residual_energy = projected_sobolev_energy(residual, k_typed, k_max, sobolev_order)
     forcing_energy = projected_sobolev_energy(forcing, k_typed, k_max, sobolev_order)
-    denominator = forcing_energy + jnp.asarray(denominator_floor, dtype=dtype)
+    denominator = forcing_energy + jnp.asarray(denominator_eps, dtype=dtype)
     return jnp.mean(residual_energy / denominator)

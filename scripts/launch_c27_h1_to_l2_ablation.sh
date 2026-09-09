@@ -47,8 +47,8 @@ uv run python train-jax-10m/1d_dno_fno_jax.py \
   --hadamard_sobolev_order 1 \
   --hadamard_fd_step_min 1e-3 \
   --hadamard_fd_step_max 3e-3 \
-  --hadamard_eta_scale_floor 1e-3 \
-  --hadamard_denominator_floor 1e-12 \
+  --hadamard_min_surface_rms 1e-3 \
+  --hadamard_denominator_eps 1e-12 \
   --batch_size "$BATCH_SIZE" \
   --lr "$LR" \
   --lr_warmup_steps "$LR_WARMUP_STEPS" \
@@ -106,8 +106,8 @@ expected = {
     "hadamard_sobolev_order": 1,
     "hadamard_fd_step_min": 1e-3,
     "hadamard_fd_step_max": 3e-3,
-    "hadamard_eta_scale_floor": 1e-3,
-    "hadamard_denominator_floor": 1e-12,
+    "hadamard_min_surface_rms": 1e-3,
+    "hadamard_denominator_eps": 1e-12,
     "param_count": 1_342_400,
 }
 mismatches = {
