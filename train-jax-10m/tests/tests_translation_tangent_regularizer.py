@@ -216,6 +216,64 @@ def test_gradient_is_finite_and_nonzero() -> None:
     assert float(jnp.linalg.norm(gradient)) > 0.0
 
 
+def test_sample_mask_matches_selected_loss_and_gradient() -> None:
+    eta, prediction, target, depth, k = _batched_inputs()
+    selected = jnp.asarray([0, 2])
+    mask = jnp.asarray([True, False, True])
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = tuple(
+            value.astype(dtype) for value in (eta, prediction, target, depth)
+        )
+        (loss, count), gradient = loss_and_gradient(
+            *inputs, k.astype(dtype), sample_mask=mask
+        )
+        (expected_loss, expected_count), expected_gradient = loss_and_gradient(
+            *(value[selected] for value in inputs), k.astype(dtype)
+        )
+        tolerance = 1e-6 if dtype == jnp.float32 else 1e-12
+        np.testing.assert_allclose(loss, expected_loss, rtol=tolerance, atol=1e-14)
+        np.testing.assert_array_equal(count, expected_count)
+        np.testing.assert_allclose(
+            gradient[selected], expected_gradient, rtol=tolerance, atol=1e-14
+        )
+        np.testing.assert_array_equal(gradient[1], 0.0)
+
+
+def test_mask_with_no_nonflat_samples_has_zero_loss_and_gradient() -> None:
+    eta, prediction, target, depth, k = _batched_inputs()
+    eta = eta.at[2].set(0.0)
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for mask in (jnp.zeros(3, dtype=jnp.bool_), jnp.asarray([False, False, True])):
+        (loss, count), gradient = loss_and_gradient(
+            eta, prediction, target, depth, k, sample_mask=mask
+        )
+        np.testing.assert_array_equal((loss, count), (0.0, 0.0))
+        np.testing.assert_array_equal(gradient, 0.0)
+
+
+def test_all_selected_mask_matches_default_exactly() -> None:
+    eta, prediction, target, depth, k = _batched_inputs()
+    eta = eta.at[2].set(0.0)
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = tuple(
+            value.astype(dtype) for value in (eta, prediction, target, depth, k)
+        )
+        (loss, count), gradient = loss_and_gradient(*inputs)
+        (masked_loss, masked_count), masked_gradient = loss_and_gradient(
+            *inputs, sample_mask=jnp.ones(3, dtype=jnp.bool_)
+        )
+        np.testing.assert_array_equal((masked_loss, masked_count), (loss, count))
+        np.testing.assert_array_equal(masked_gradient, gradient)
+
+
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
@@ -228,6 +286,9 @@ if __name__ == "__main__":
         test_flat_sample_is_gated_out,
         test_flat_samples_do_not_change_selected_mean,
         test_gradient_is_finite_and_nonzero,
+        test_sample_mask_matches_selected_loss_and_gradient,
+        test_mask_with_no_nonflat_samples_has_zero_loss_and_gradient,
+        test_all_selected_mask_matches_default_exactly,
     )
     for test in tests:
         test()

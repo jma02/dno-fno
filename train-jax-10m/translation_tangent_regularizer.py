@@ -13,11 +13,14 @@ def compute_translation_tangent_loss(
     depth: jax.Array,
     k: jax.Array,
     *,
+    sample_mask: jax.Array | None = None,
     smoothing_scale: float = 1.0,
     denominator_eps: float = 1e-3,
     gravity: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Return the local translation loss and the number of nonflat samples used.
+    """Return the local translation loss and count of selected nonflat samples.
+
+    An optional boolean ``sample_mask`` selects which batch rows contribute.
 
     At each location, a periodic Gaussian window defines the least-squares
     coefficient of ``gxi_prediction - gxi_target`` along ``eta_x`` after each
@@ -61,7 +64,10 @@ def compute_translation_tangent_loss(
         local_weight * local_relative_error**2,
         axis=-1,
     )
-    selected = (peak_energy > jnp.asarray(1e-20, dtype=dtype)).astype(dtype)
+    selected = peak_energy > jnp.asarray(1e-20, dtype=dtype)
+    if sample_mask is not None:
+        selected = selected & sample_mask
+    selected = selected.astype(dtype)
     selected_count = jnp.sum(selected)
     loss = jnp.sum(selected * per_sample_loss) / jnp.maximum(selected_count, 1.0)
     return loss, selected_count
