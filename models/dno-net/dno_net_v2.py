@@ -1,5 +1,6 @@
 """Craig-Sulem neural DNO: analytic G0 + G1 plus a learned correction.
 
+Here eta is surface elevation and xi is surface velocity potential.
 Each correction branch applies M[spatial_weights(eta) * M[xi]], where M is
 a depth-dependent real Fourier filter. The correction is self-adjoint,
 linear in xi, and starts at order eta^2.
@@ -106,10 +107,9 @@ class CraigSulemDNO(nn.Module):
 
     def _linear_baseline(self, xi_norm: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         grid_size = xi_norm.shape[1]
-        out_dtype = xi_norm.dtype
         xi_phys = xi_norm * self.xi_scale
         h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max)))
-        return (self._g0_apply(xi_phys, h, grid_size) / self.target_scale).astype(out_dtype)
+        return (self._g0_apply(xi_phys, h, grid_size) / self.target_scale).astype(xi_norm.dtype)
 
     def _g1_baseline(
         self, eta_norm: jnp.ndarray, xi_norm: jnp.ndarray, depth: jnp.ndarray,
@@ -119,7 +119,6 @@ class CraigSulemDNO(nn.Module):
         Use physical inputs and float64 to reduce FFT roundoff; return the input dtype.
         """
         grid_size = xi_norm.shape[1]
-        out_dtype = xi_norm.dtype
         eta_phys = (eta_norm * self.eta_scale).astype(jnp.float64)
         xi_phys = (xi_norm * self.xi_scale).astype(jnp.float64)
         h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max))).astype(jnp.float64)
@@ -140,17 +139,15 @@ class CraigSulemDNO(nn.Module):
         dx_term_hat = -(1j * k)[None, :] * jnp.fft.rfft(eta_phys * dx_xi, axis=-1)
         dx_term = jnp.fft.irfft(dx_term_hat, n=grid_size, axis=-1)
 
-        return ((g0_term + dx_term) / self.target_scale).astype(out_dtype)
+        return ((g0_term + dx_term) / self.target_scale).astype(xi_norm.dtype)
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        n_freq = grid_size // 2 + 1
-        depth_clip = jnp.minimum(depth, jnp.log(self.h_clip_max))
+        clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
 
-        eta_norm = inputs[..., 0]
-        xi_norm = inputs[..., 1]
+        eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
         xi_phys = xi_norm * self.xi_scale
 
         # Compute the analytic baseline in physical units, then normalize its output.
@@ -162,7 +159,7 @@ class CraigSulemDNO(nn.Module):
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
         k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
-            n_freq, dtype=eta_norm.dtype,
+            grid_size // 2 + 1, dtype=eta_norm.dtype,
         )
         k_op = k_arr[None, :]
         eta_hat = jnp.fft.rfft(eta_norm, axis=-1)
@@ -181,10 +178,9 @@ class CraigSulemDNO(nn.Module):
 
         # No biases: zero eta must produce zero features.
         for name in ("eta_feat_proj", "eta_feat_mix"):
-            eta_features = nn.Dense(
-                self.width // 2, name=name, use_bias=False,
-            )(eta_features)
-            eta_features = nn.gelu(eta_features)
+            eta_features = nn.gelu(
+                nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
+            )
         # Near zero, z * tanh(z) behaves like z^2: the correction starts at eta^2.
         eta_features = eta_features * jnp.tanh(eta_features)
 
@@ -197,7 +193,7 @@ class CraigSulemDNO(nn.Module):
                 h_clip_max=self.h_clip_max,
                 mult_hidden=self.mult_hidden,
                 name=f"cs_block_{block_idx}",
-            )(eta_features, xi_phys, depth_clip)
+            )(eta_features, xi_phys, clipped_log_depth)
 
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5
