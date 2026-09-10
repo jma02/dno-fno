@@ -44,6 +44,7 @@ from util import (  # noqa: E402
     replicate_pytree_from_host,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
+from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from hadamard_shape_regularizer import ApplyFn, compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_translation_tangent_loss,
@@ -118,7 +119,7 @@ def main() -> None:
         "--translation_tangent_weight",
         type=float,
         default=0.0,
-        help="Weight of the localized translation-tangent error. Projects "
+        help="Weight of the localized translation-tangent error on Tanaka rows only. Projects "
         "the DNO error onto eta_x in periodic windows and normalizes "
         "by sqrt(g*h). 0 disables.",
     )
@@ -261,6 +262,7 @@ def main() -> None:
 
     # Use the saved simulation splits and fit normalization on training samples only.
     dataset = load_dataset_arrays(dataset_path)
+    family_ids = np.load(dataset_path / "family_id.npy", mmap_mode="r")
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
     stats = load_or_compute_stats(dataset_path, dataset, indices=train_indices)
@@ -346,6 +348,7 @@ def main() -> None:
         "xi_scale": xi_scale,
         "eta_scale": eta_scale,
         "target_scale": target_scale,
+        "translation_tangent_scope": "tanaka",
     }
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
@@ -367,7 +370,8 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        tanaka: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
         predictions = cast(
@@ -393,6 +397,7 @@ def main() -> None:
                 denominator_eps=args.mode_balanced_denominator_eps,
             )
         tangent_loss = jnp.float32(0.0)
+        local_selected = jnp.float32(0.0)
         if args.translation_tangent_weight > 0.0:
             tangent_loss, local_selected = compute_translation_tangent_loss(
                 eta=eta,
@@ -400,6 +405,7 @@ def main() -> None:
                 gxi_target=gxi,
                 depth=h_phys,
                 k=k_grid_jax,
+                sample_mask=tanaka,
                 smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
             )
@@ -412,7 +418,7 @@ def main() -> None:
                 / jnp.maximum(global_selected, jnp.float32(1.0))
             )
             tangent_loss = tangent_loss * shard_weight
-        return data_loss, mode_loss, tangent_loss
+        return data_loss, mode_loss, tangent_loss, local_selected / eta.shape[0]
 
     def hadamard_loss_on_subset(
         rng: jax.Array,
@@ -458,12 +464,13 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
+        tanaka: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
         def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
-            data_loss, mode_loss, tangent_loss = compute_loss_components(
-                current_params, eta, xi, gxi, batch_depth
+            data_loss, mode_loss, tangent_loss, tangent_fraction = compute_loss_components(
+                current_params, eta, xi, gxi, batch_depth, tanaka
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {"train_l2_loss": data_loss}
@@ -478,6 +485,7 @@ def main() -> None:
             if args.translation_tangent_weight > 0.0:
                 physics_loss += args.translation_tangent_weight * tangent_loss
                 metrics["translation_tangent_loss"] = tangent_loss
+                metrics["translation_tangent_fraction"] = tangent_fraction
             if args.hadamard_weight > 0.0:
                 # Evaluate Hadamard on a small random subset, only on scheduled steps.
                 hadamard_scheduled = current_state.step % args.hadamard_interval == 0
@@ -531,7 +539,7 @@ def main() -> None:
             shard_map(
                 train_step,
                 mesh=mesh,
-                in_specs=(P(), P(), partition, partition, partition, partition),
+                in_specs=(P(), P(), partition, partition, partition, partition, partition),
                 out_specs=(P(), P(), P()),
                 check_rep=False,
             )
@@ -547,15 +555,19 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        tanaka: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         hadamard_loss = jnp.float32(0.0)
         if args.hadamard_weight > 0.0:
             hadamard_loss = training_dtype(hadamard_loss_on_subset(
                 jax.random.fold_in(rng_key, jax.lax.axis_index("batch")),
                 current_params, eta, xi, batch_depth,
             ))
+        data_loss, mode_loss, tangent_loss, tangent_fraction = compute_loss_components(
+            current_params, eta, xi, gxi, batch_depth, tanaka
+        )
         return jax.lax.pmean(
-            (*compute_loss_components(current_params, eta, xi, gxi, batch_depth), hadamard_loss),
+            (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction),
             axis_name="batch",
         )
 
@@ -564,8 +576,8 @@ def main() -> None:
             shard_map(
                 eval_step,
                 mesh=mesh,
-                in_specs=(P(), P(), partition, partition, partition, partition),
-                out_specs=(P(), P(), P(), P()),
+                in_specs=(P(), P(), partition, partition, partition, partition, partition),
+                out_specs=(P(), P(), P(), P(), P()),
                 check_rep=False,
             )
         )
@@ -648,7 +660,10 @@ def main() -> None:
             rng,
             device_count=n_devices,
         )
-        return device_prefetch((batch[:4] for batch in batches), sharding=data_sharding)
+        return device_prefetch(
+            ((*batch[:4], family_ids[batch[4]] == PhysicalFamilyId.TANAKA) for batch in batches),
+            sharding=data_sharding,
+        )
 
     seed_seq = np.random.SeedSequence(args.seed)
     epoch_seeds = seed_seq.spawn(args.epochs)
@@ -669,6 +684,7 @@ def main() -> None:
         batch_losses: list[float] = []
         train_batch_sizes: list[int] = []
         loss_sums: dict[str, float] = {}
+        tangent_loss_sum = tangent_sample_count = 0.0
         hadamard_loss_sum = 0.0
         hadamard_batch_evaluation_count = 0.0
         train_bar = tqdm(
@@ -677,13 +693,13 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for eta_b, xi_b, gxi_b, depth_b in train_bar:
+        for eta_b, xi_b, gxi_b, depth_b, tanaka_b in train_bar:
             batch_size = int(eta_b.shape[0])
             train_batch_sizes.append(batch_size)
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
-                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b
+                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, tanaka_b
             )
             batch_loss_value = float(jax.device_get(batch_loss))
             batch_losses.append(batch_loss_value)
@@ -691,6 +707,10 @@ def main() -> None:
             # Skipped Hadamard batches add zero loss and zero to the evaluation count.
             hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
             hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
+            # Translation loss is a mean over selected nonflat Tanaka rows only.
+            selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * batch_size
+            tangent_sample_count += selected_count
+            tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
             # Other losses are batch means; convert them to sums over samples.
             for name, batch_mean in batch_metrics.items():
                 loss_sums[name] = (
@@ -716,7 +736,7 @@ def main() -> None:
         # Evaluate validation samples without shuffling or changing model parameters.
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b) in enumerate(
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(
             prefetch_batches(val_indices, None)
         ):
             val_batch_sizes.append(int(eta_b.shape[0]))
@@ -725,19 +745,19 @@ def main() -> None:
             ]
             batch_val_losses = compiled_eval_step(
                 training_state.params, jax.random.fold_in(validation_rng, batch_index),
-                eta_b, xi_b, gxi_b, depth_b,
+                eta_b, xi_b, gxi_b, depth_b, tanaka_b,
             )
             val_batch_losses.append(tuple(map(float, jax.device_get(batch_val_losses))))
 
         # Each Hadamard subset estimates its full batch's mean, so use full batch sizes.
-        val_data_loss, val_mode_loss, val_tangent_loss, val_hadamard_loss = (
-            tuple(
-                float(np.average(losses, weights=val_batch_sizes))
-                for losses in zip(*val_batch_losses)
-            )
-            if val_batch_losses
-            else (float("inf"),) * 4
-        )
+        val_data_loss = val_mode_loss = val_tangent_loss = val_hadamard_loss = float("inf")
+        if val_batch_losses:
+            losses = np.asarray(val_batch_losses)
+            means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
+            # Validation is ordered by family: do not dilute Tanaka loss with other rows.
+            tangent_counts = losses[:, 4] * val_batch_sizes
+            means[2] = np.dot(losses[:, 2], tangent_counts) / max(tangent_counts.sum(), 1.0)
+            val_data_loss, val_mode_loss, val_tangent_loss, val_hadamard_loss = map(float, means)
         val_loss = (
             val_data_loss
             + args.mode_balanced_weight * val_mode_loss
@@ -755,6 +775,8 @@ def main() -> None:
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)
+        if args.translation_tangent_weight > 0.0:
+            epoch_record["translation_tangent_loss"] = tangent_loss_sum / max(tangent_sample_count, 1.0)
         if hadamard_batch_evaluation_count:
             epoch_record["hadamard_loss"] = hadamard_loss_sum / hadamard_batch_evaluation_count
         history.append(epoch_record)

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Fresh C27-derived all-family tangent run on the paper dataset.
+# Fresh C27 run with Tanaka-only translation loss on the paper dataset.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-RUN_NAME="${RUN_NAME:-c27_all_family_tangent_paper_dataset_full_$(date +%Y%m%d_%H%M%S)}"
+RUN_NAME="${RUN_NAME:-c27_tanaka_tangent_paper_dataset_full_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="outputs/$RUN_NAME"
 DATASET="${DATASET:-outputs/paper_dataset/arrays}"
 

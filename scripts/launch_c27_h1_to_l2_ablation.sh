@@ -1,6 +1,5 @@
 #!/bin/bash
-# C27-derived full-dataset run with the translation-tangent auxiliary extended
-# from Tanaka rows to every nonflat row.
+# C27 full-dataset run with translation loss on Tanaka rows only.
 
 set -euo pipefail
 cd /home/johnma/dno-fno
@@ -16,7 +15,7 @@ LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-500}"
 MODE_BALANCED_WARMUP_STEPS="${MODE_BALANCED_WARMUP_STEPS:-500}"
 CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 EPOCHS="${EPOCHS:-40}"
-RUN_PREFIX="c27_all_family_tangent_full"
+RUN_PREFIX="c27_tanaka_tangent_full"
 
 RUN_NAME="${RUN_NAME:-${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)}"
 
@@ -91,6 +90,7 @@ expected = {
     "cs_use_hilbert": True,
     "cs_mult_hidden": 160,
     "translation_tangent_weight": float(tangent_weight),
+    "translation_tangent_scope": "tanaka",
     "translation_tangent_smoothing_scale": 1.0,
     "translation_tangent_denominator_eps": 1e-3,
     "mode_balanced_weight": float(mode_weight),
@@ -116,11 +116,11 @@ mismatches = {
     if config.get(key) != value
 }
 if mismatches:
-    raise SystemExit(f"all-family tangent configuration guard failed: {mismatches}")
+    raise SystemExit(f"Tanaka tangent configuration guard failed: {mismatches}")
 
 records = [json.loads(line) for line in (run_dir / "train_log.jsonl").read_text().splitlines()]
 if not records:
-    raise SystemExit("all-family tangent configuration guard failed: empty training log")
+    raise SystemExit("Tanaka tangent configuration guard failed: empty training log")
 nonfinite = {
     f"epoch_{record.get('epoch', index + 1)}.{key}": value
     for index, record in enumerate(records)
@@ -128,9 +128,9 @@ nonfinite = {
     if isinstance(value, (int, float)) and not math.isfinite(value)
 }
 if nonfinite:
-    raise SystemExit(f"all-family tangent finiteness guard failed: {nonfinite}")
+    raise SystemExit(f"Tanaka tangent finiteness guard failed: {nonfinite}")
 print(
-    "C27-derived all-family tangent guard passed; "
+    "C27 Tanaka-only tangent guard passed; "
     "1,342,400 parameters; all logged scalars finite"
 )
 PY
