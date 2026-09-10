@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterator
 import json
+import os
 from pathlib import Path
 import sys
 from time import perf_counter
 from typing import Literal, cast
+
+os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
 import jax
 import jax.numpy as jnp
