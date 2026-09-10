@@ -41,7 +41,7 @@ class SpectralConv1d(nn.Module):
 
         out_fft = jnp.zeros(
             (batch_size, grid_size // 2 + 1, self.out_channels),  # (B, F, C_out)
-            dtype=jnp.complex64,
+            dtype=x_fft.dtype,
         )
         out_fft = out_fft.at[:, :kept_modes, :].set(transformed)  # (B, F, C_out)
         return jnp.fft.irfft(out_fft, n=grid_size, axis=1, norm="forward")  # (B, N, C_out)

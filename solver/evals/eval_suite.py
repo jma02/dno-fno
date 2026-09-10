@@ -215,6 +215,9 @@ def _try_load_cached_truth(
                 f"[{family}] truth cache rejected ({path}): shape mismatch", flush=True
             )
             continue
+        if any(values.dtype != np.float64 for values in fields.values()):
+            print(f"[{family}] truth cache rejected ({path}): not float64", flush=True)
+            continue
         if simulation_ids != expected_simulation_ids:
             print(
                 f"[{family}] truth cache rejected ({path}): simulation IDs differ",
@@ -297,9 +300,9 @@ def truth_rollout_batched(
     )
     jax.block_until_ready(result["eta"])
     return {
-        "eta": np.asarray(result["eta"], dtype=np.float32),
-        "xi": np.asarray(result["xi"], dtype=np.float32),
-        "gxi": np.asarray(result["gxi"], dtype=np.float32),
+        "eta": np.asarray(result["eta"], dtype=np.float64),
+        "xi": np.asarray(result["xi"], dtype=np.float64),
+        "gxi": np.asarray(result["gxi"], dtype=np.float64),
         "wall_s": float(time.perf_counter() - started),
     }
 
@@ -312,13 +315,13 @@ def surrogate_rollout_batched(
     cfg: FamilyConfig,
     predict_gxi_batched: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
 ) -> RolloutPayload:
-    """Run the locked-in unguarded surrogate in an f64 integration harness."""
+    """Run the unguarded surrogate with float64 model and integration arithmetic."""
     dtype = jnp.float64
     _, k_grid_values = build_grid(nx, length)
     k_grid = jnp.asarray(k_grid_values, dtype=dtype)
     depths_values = np.asarray([ic.depth for ic in ics], dtype=np.float64)
     depths = jnp.asarray(depths_values, dtype=dtype)[:, None]
-    log_depths = jnp.asarray(np.log(depths_values), dtype=jnp.float32)
+    log_depths = jnp.asarray(np.log(depths_values), dtype=dtype)
     params = ti.SolverParams(
         nx=nx,
         length=length,
@@ -336,9 +339,7 @@ def surrogate_rollout_batched(
     )
 
     def predict(eta: jnp.ndarray, xi: jnp.ndarray) -> jnp.ndarray:
-        return predict_gxi_batched(
-            eta.astype(jnp.float32), xi.astype(jnp.float32), log_depths
-        ).astype(dtype)
+        return predict_gxi_batched(eta, xi, log_depths)
 
     @jax.jit
     def rollout() -> dict[str, jnp.ndarray]:
@@ -354,9 +355,9 @@ def surrogate_rollout_batched(
     result = rollout()
     jax.block_until_ready(result["eta"])
     return {
-        "eta": np.asarray(result["eta"], dtype=np.float32),
-        "xi": np.asarray(result["xi"], dtype=np.float32),
-        "gxi": np.asarray(result["gxi"], dtype=np.float32),
+        "eta": np.asarray(result["eta"], dtype=np.float64),
+        "xi": np.asarray(result["xi"], dtype=np.float64),
+        "gxi": np.asarray(result["gxi"], dtype=np.float64),
         "wall_s": float(time.perf_counter() - started),
     }
 
@@ -744,7 +745,7 @@ def run_family(
         )
     print(f"[{family}] truth wall={float(truth['wall_s']):.1f}s", flush=True)
 
-    print(f"[{family}] batched surrogate rollout (f64 harness, f32 model)", flush=True)
+    print(f"[{family}] batched surrogate rollout (float64 model and integration)", flush=True)
     pred = _rollout_ic_chunks(
         ics,
         rollout_batch_size,
@@ -768,8 +769,8 @@ def run_family(
     arrays = metrics["_arrays"]
     np.savez_compressed(
         out_dir / f"{family}_trajs.npz",
-        times=times_np.astype(np.float32),
-        depths=np.asarray([ic.depth for ic in ics], dtype=np.float32),
+        times=times_np.astype(np.float64),
+        depths=np.asarray([ic.depth for ic in ics], dtype=np.float64),
         simulation_ids=np.asarray([ic.simulation_id for ic in ics], dtype=np.int64),
         truth_eta=truth["eta"],
         truth_xi=truth["xi"],
@@ -805,7 +806,7 @@ def run_family(
             "truth_wall_s": truth["wall_s"],
             "surrogate_wall_s": pred["wall_s"],
             "truth_protocol": json.loads(protocol_json),
-            "precision": "f64 integration harness / f32 model",
+            "precision": "float64 model, integration, and saved trajectories",
             "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         }
     )

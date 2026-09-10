@@ -22,6 +22,11 @@ from solver.evals.eval_suite import (  # noqa: E402
     compute_macro_summary,
     compute_metrics,
 )
+from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched  # noqa: E402
+from dno_net_v2 import CraigSulemDNO  # noqa: E402
+from fno1d import SpectralConv1d  # noqa: E402
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 from solver.gen_data.pipeline.batch_storage import save_completed_batch  # noqa: E402
 from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
@@ -31,6 +36,38 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_evaluation_promotes_float32_inputs_before_model_arithmetic(self) -> None:
+        model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
+        inputs = 0.01 * jax.random.normal(jax.random.PRNGKey(3), (1, 16, 2), dtype=jnp.float32)
+        depth = jnp.zeros((1, 1), dtype=jnp.float32)
+        params = jax.tree_util.tree_map(
+            lambda value: value.astype(jnp.float64),
+            model.init(jax.random.PRNGKey(0), inputs, depth)["params"],
+        )
+        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full((4, 2), 0.1, dtype=jnp.float64)
+        loaded = LoadedRun(
+            model, params, {}, {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0},
+            "scale", 0,
+        )
+        output = build_predict_gxi_batched(loaded)(inputs[..., 0], inputs[..., 1], depth)
+        self.assertEqual(output.dtype, jnp.float64)
+        expected = cast(jax.Array, model.apply(
+            {"params": params}, inputs.astype(jnp.float64), depth.astype(jnp.float64)
+        ))[..., 0]
+        np.testing.assert_allclose(output, expected - expected.mean(axis=-1, keepdims=True), rtol=1e-12, atol=1e-14)
+
+    def test_fno_spectral_layer_preserves_evaluation_precision(self) -> None:
+        layer = SpectralConv1d(in_channels=2, out_channels=2, modes=4)
+        inputs = jax.random.normal(jax.random.PRNGKey(1), (1, 16, 2), dtype=jnp.float32)
+        variables = layer.init(jax.random.PRNGKey(2), inputs)
+        for input_dtype, param_dtype in (
+            (jnp.float32, jnp.float32), (jnp.float32, jnp.float64), (jnp.float64, jnp.float64),
+        ):
+            typed_variables = jax.tree_util.tree_map(lambda value: value.astype(param_dtype), variables)
+            output = cast(jax.Array, layer.apply(typed_variables, inputs.astype(input_dtype)))
+            self.assertEqual(output.dtype, input_dtype)
+            self.assertTrue(np.isfinite(output).all())
+
     def test_dataset_ics_select_test_initial_rows_with_global_simulation_ids(
         self,
     ) -> None:
@@ -126,6 +163,22 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         np.testing.assert_array_equal(loaded["eta"], values)
+
+    def test_truth_cache_rejects_float32_despite_float64_protocol(self) -> None:
+        values = np.ones((2, 1, 3))
+        protocol = '{"dtype":"float64"}'
+        for filename in ("tanaka_truth_cache.npz", "tanaka_trajs.npz"):
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                np.savez(
+                    directory / filename,
+                    truth_eta=values.astype(np.float32), truth_xi=values, truth_gxi=values,
+                    simulation_ids=np.asarray([17]), truth_protocol_json=np.asarray(protocol),
+                )
+                self.assertIsNone(_try_load_cached_truth(
+                    "tanaka", directory, expected_shape=values.shape,
+                    expected_simulation_ids=[17], expected_protocol_json=protocol,
+                ))
 
     def test_rollout_chunks_preserve_panel_order_and_sum_wall_time(self) -> None:
         ics = [

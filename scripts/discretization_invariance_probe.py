@@ -48,7 +48,7 @@ from model_rollout import (  # noqa: E402
     build_predict_gxi_batched,
     load_run,
 )
-from util import compute_log_depth, load_dataset_arrays  # noqa: E402
+from util import load_dataset_arrays  # noqa: E402
 from solver.gen_data.pipeline.types import DatasetSplit  # noqa: E402
 
 
@@ -90,8 +90,8 @@ def add_high_mode_noise(
     high_std = relative_std * low_rms
     n_high = n_test_freq - n_native_freq
 
-    real_part = rng.normal(0.0, high_std, size=n_high).astype(np.float32)
-    imag_part = rng.normal(0.0, high_std, size=n_high).astype(np.float32)
+    real_part = rng.normal(0.0, high_std, size=n_high)
+    imag_part = rng.normal(0.0, high_std, size=n_high)
     f_hat[n_native_freq:] = real_part + 1j * imag_part
     return np.fft.irfft(f_hat, n=n, norm="forward")
 
@@ -179,9 +179,9 @@ if __name__ == "__main__":
     ) -> np.ndarray:
         return np.asarray(
             predict_batched(
-                jnp.asarray(eta, dtype=jnp.float32)[None, :],
-                jnp.asarray(xi, dtype=jnp.float32)[None, :],
-                jnp.asarray([log_depth], dtype=jnp.float32),
+                jnp.asarray(eta, dtype=jnp.float64)[None, :],
+                jnp.asarray(xi, dtype=jnp.float64)[None, :],
+                jnp.asarray([log_depth], dtype=jnp.float64),
             )
         )[0]
 
@@ -216,11 +216,11 @@ if __name__ == "__main__":
             print(f"Skipping invalid index {idx}")
             continue
 
-        eta_c = np.asarray(eta[idx], dtype=np.float32)
-        xi_c = np.asarray(xi[idx], dtype=np.float32)
-        gxi_c = np.asarray(gxi[idx], dtype=np.float32)
+        eta_c = np.asarray(eta[idx], dtype=np.float64)
+        xi_c = np.asarray(xi[idx], dtype=np.float64)
+        gxi_c = np.asarray(gxi[idx], dtype=np.float64)
         depth_phys = float(depth[idx])
-        log_h = float(compute_log_depth(np.asarray([depth_phys]))[0, 0])
+        log_h = float(np.log(max(depth_phys, 1e-12)))
 
         print(f"\nCase index {idx}: depth={depth_phys:.6f}, log_h={log_h:.6f}")
 

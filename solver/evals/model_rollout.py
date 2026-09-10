@@ -76,7 +76,9 @@ def load_run(
         prefix="ckpt_",
         orbax_checkpointer=ocp.PyTreeCheckpointer(),
     )
-    params = jax.tree_util.tree_map(jnp.asarray, restored["params"])
+    params = jax.tree_util.tree_map(
+        lambda value: jnp.asarray(value, dtype=jnp.float64), restored["params"]
+    )
 
     if model_name == "cs_dno":
         model = CraigSulemDNO(
@@ -122,7 +124,7 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
     ``eta`` and ``xi`` have shape ``(batch, nx)``. ``log_depth`` has shape
     ``(batch,)`` or ``(batch, 1)``. The returned field is mean-free per sample.
     """
-    model_dtype = jnp.float32
+    model_dtype = jnp.float64
     feature_min = target_min = 0.0
     if loaded.norm_mode == "scale":
         feature_scale = jnp.asarray(
@@ -161,8 +163,7 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
             denormalized = output[..., 0] * target_scale
         else:
             denormalized = ((output[..., 0] + 1.0) * 0.5) * target_scale + target_min
-        gxi = denormalized.astype(eta.dtype)
-        return gxi - gxi.mean(axis=-1, keepdims=True)
+        return denormalized - denormalized.mean(axis=-1, keepdims=True)
 
     return predict
 
@@ -201,11 +202,12 @@ def rollout_surrogate(
     *,
     substeps: int = 8,
 ) -> dict[str, jnp.ndarray]:
-    """Integrate a surrogate DNO action with the fixed hard-filtered GL2 scheme."""
+    """Integrate a surrogate DNO action in float64 with hard-filtered GL2."""
     state = ti.State(
-        eta=jnp.asarray(initial.eta),
-        xi=jnp.asarray(initial.xi),
+        eta=jnp.asarray(initial.eta, dtype=jnp.float64),
+        xi=jnp.asarray(initial.xi, dtype=jnp.float64),
     )
+    times = jnp.asarray(times, dtype=jnp.float64)
     state = ti.project_zero_mean_xi(state)
     initial_gxi = predict_gxi(state.eta, state.xi)
     if times.shape[0] == 1:
