@@ -1,0 +1,278 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\DeclareMathOperator{\FFT}{FFT}
+\DeclareMathOperator{\IFFT}{IFFT}
+\DeclareMathOperator{\filter}{filter}
+
+\title{From the Craig--Sulem Recurrence\\
+to a Learned Fourier-Filter Architecture}
+\author{}
+\date{September 11, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The Craig--Sulem expansion builds the water-wave Dirichlet--Neumann operator
+from Fourier filters and multiplication by surface-dependent fields. An exact
+polarization identity rewrites a symmetric pair of two-filter terms as a
+difference of branches that each use the same filter twice. This gives a
+mathematical motivation for our learned correction, while preserving an
+important distinction: higher-order terms also contain nested, nonlocal
+operations, so the finite branch sum is an approximation, not an exact
+reformulation of the recurrence.
+\end{abstract}
+
+\section{The general recurrence}
+
+We use nondimensional spatial variables; network input/output normalization
+is a separate operation. Let $x$ be periodic with period $L$, let $\eta(x)$ denote surface elevation,
+and let $h>0$ denote the undisturbed depth. The potential $\phi$ satisfies
+Laplace's equation between the impermeable bottom $z=-h$ and the surface
+$z=\eta(x)$, with surface value $\xi(x)$. We use the water-wave convention
+\begin{equation}
+  G(\eta;h)\xi
+  =\left.(\phi_z-\eta_x\phi_x)\right|_{z=\eta(x)}.
+  \label{eq:dno}
+\end{equation}
+This is the \emph{unnormalized} normal derivative; with this convention,
+$G$ is self-adjoint in $L^2(dx)$.
+
+For wavenumbers $k=2\pi\ell/L$, $\ell\in\mathbb Z$, define the known Fourier
+filters $F_j$ by
+\begin{equation}
+  F_j f=\mathcal F^{-1}\!\left[s_j(k,h)\,\mathcal F f\right],
+  \qquad
+  s_j(k,h)=
+  \begin{cases}
+    |k|^j, & j\text{ even},\\
+    |k|^j\tanh(h|k|), & j\text{ odd}.
+  \end{cases}
+  \label{eq:known-filters}
+\end{equation}
+Here $s_0=1$, including at $k=0$. In particular,
+$F_0=I$, $F_1=G_0$, and $F_2=-\partial_x^2$.
+
+Write $G(\eta;h)=\sum_{n\geq0}G_n(\eta;h)$, where $G_n$ is homogeneous
+of degree $n$ in $\eta$, and set $g_n=G_n(\eta;h)\xi$. A compact adjoint
+form of the Craig--Sulem recurrence is
+\begin{align}
+  g_0 &= F_1\xi,\\
+  g_n &= -F_{n-1}\!\left[\partial_x\!\left(
+                  \frac{\eta^n}{n!}\,\partial_x\xi\right)\right]
+          -\sum_{j=1}^{n}F_j\!\left[\frac{\eta^j}{j!}\,g_{n-j}\right],
+          \qquad n\geq1.
+  \label{eq:recurrence}
+\end{align}
+All products inside brackets are pointwise products in physical space.
+The finite-depth recurrence is given in parity-split form by
+Nicholls~\cite{nicholls1998}; Appendix~\ref{sec:derivation} derives the
+ordering used here. We use it as a local shape expansion about $\eta=0$,
+not as a claim of convergence for arbitrary steep surfaces.
+
+The structural message is simple: \emph{Fourier filters handle wavenumber
+and depth; multiplication by powers of $\eta$ introduces the surface geometry.}
+Substituting lower-order terms repeatedly produces sums of alternating chains
+of these operations.
+
+\section{What the first corrections reveal}
+
+The first two corrections are~\cite{wilkening2015}
+\begin{align}
+  G_1(\eta;h)\xi
+    &= -G_0\!\left[\eta\,G_0\xi\right]
+       -\partial_x\!\left[\eta\,\partial_x\xi\right],
+       \label{eq:g1}\\
+  G_2(\eta;h)\xi
+    &= G_0\!\left[\eta\,G_0\!\left[\eta\,G_0\xi\right]\right]
+       \notag\\[-2pt]
+    &\quad+\frac12G_0\!\left[\eta^2\,\partial_x^2\xi\right]
+       +\frac12\partial_x^2\!\left[\eta^2\,G_0\xi\right].
+       \label{eq:g2}
+\end{align}
+Depth dependence in $G_0$ is suppressed to keep the expressions readable.
+
+The last two terms in~\eqref{eq:g2} use the same physical-space weight
+$\eta^2$, with the inner and outer filters exchanged. Together they form a
+self-adjoint pair. The first term is different: it contains three filters
+and two surface multiplications. It will identify the approximation made by
+the architecture.
+
+\section{Why use the same filter twice?}
+
+For a Fourier coefficient vector $m$, define its action explicitly:
+\begin{equation}
+  \filter(m,f)=\IFFT\!\left[m\,\FFT(f)\right].
+  \label{eq:filter}
+\end{equation}
+Thus $m$ is a vector of filter coefficients, not an operator or a function of
+the input field $f$. For compact algebra, write $M_m f=\filter(m,f)$.
+Let $A_a f=a(x)f(x)$ denote multiplication by a real spatial field $a$.
+
+For two filter vectors $p$ and $q$, the identity
+\begin{equation}
+  \boxed{
+  \frac12\left(M_p A_a M_q+M_q A_a M_p\right)
+  =\frac14 M_{p+q} A_a M_{p+q}
+   -\frac14 M_{p-q} A_a M_{p-q}}
+  \label{eq:polarization}
+\end{equation}
+is exact. Expanding the right-hand side cancels the $M_p A_a M_p$ and
+$M_q A_a M_q$ terms and leaves the two cross terms. No multiplication
+operator has been commuted past a Fourier filter.
+
+Consequently, a symmetric pair with different inner and outer filters is
+exactly a sum of two \emph{tied-filter} branches: each branch uses one filter
+on both sides of a spatial multiplication. Their spatial weights are $a/4$
+and $-a/4$. For real, even Fourier symbols and real $a$, each branch is
+self-adjoint and maps real fields to real fields.
+
+For example, the last two terms of~\eqref{eq:g2} have
+\begin{equation}
+  p(k)=|k|\tanh(h|k|),\qquad q(k)=-k^2,\qquad a(x)=\eta(x)^2.
+\end{equation}
+Equation~\eqref{eq:polarization} therefore applies directly to this pair.
+The identity concerns the filter operations themselves; representing the
+required coefficient functions with finite neural networks remains a
+separate approximation.
+
+\clearpage
+\section{The resulting architectural motivation}
+
+Before network input/output normalization, the model has the form
+\begin{equation}
+\begin{split}
+  G_{\mathrm{learned}}(\eta;h)\xi
+  ={}&G_0(h)\xi+G_1(\eta;h)\xi\\
+     &+\frac1{\sqrt B}\sum_{b=1}^{B}
+       \filter\!\left(m_b,\,
+          a_b[\eta]\,\filter(m_b,\xi)\right).
+\end{split}
+\label{eq:architecture}
+\end{equation}
+Here $B$ is the number of branches, $m_b(k,h)$ is a learned real, even Fourier
+symbol, and $a_b[\eta](x)$ is a learned real spatial field computed from
+surface features. The brackets emphasize that $a_b$ may depend on derivatives
+and transforms of $\eta$, not only on its value at $x$. Neither $m_b$ nor
+$a_b$ depends on $\xi$.
+
+For fixed $\eta$ and $h$, each branch is linear in $\xi$ and self-adjoint:
+\begin{equation}
+  (M_{m_b}A_{a_b}M_{m_b})^*
+   =M_{m_b}A_{a_b}M_{m_b}.
+\end{equation}
+The current surface network also ensures
+$a_b[\varepsilon\eta]=O(\varepsilon^2)$ as $\varepsilon\to0$:
+its bias-free features vanish at zero, and its final nonlinear lift is
+$z\tanh z=O(z^2)$. The learned correction therefore starts at second order,
+leaving the analytic zeroth- and first-order terms unchanged.
+
+\paragraph{Signed weights are intentional.}
+For real $\xi$,
+\begin{equation}
+  \langle\xi,M_m A_a M_m\xi\rangle
+    =\int_0^L a(x)\,|M_m\xi(x)|^2\,dx.
+\end{equation}
+Nonnegative $a$ would make a branch positive semidefinite, but would exclude
+the negative branch used in~\eqref{eq:polarization}. The full physical DNO
+is positive semidefinite; its individual Taylor corrections need not be.
+Self-adjointness alone does not enforce positivity of the learned total.
+
+\paragraph{The approximation is the shallow branch sum.}
+The nested term $G_0[\eta\,G_0[\eta\,G_0\xi]]$ in~\eqref{eq:g2}
+does not generally reduce to $M_m[a\,M_m\xi]$: the middle operation
+$f\mapsto\eta\,G_0[\eta f]$ is nonlocal, not multiplication by one fixed
+field. Our finite sum approximates such effects instead of explicitly
+executing the full recurrence. Neither the recurrence nor the polarization
+identity establishes a sufficient branch count, universal expressivity,
+constant-nullspace preservation, or rollout stability.
+
+\paragraph{Implementation scope.}
+The expression above describes the analytic structure. In
+\path{models/dno-net/dno_net_v2.py}, normalization is handled separately,
+depth is replaced by $\min(h,5)$, and the baseline products use the model's
+collocation grid. Thus ``analytic baseline'' means the prescribed $G_0+G_1$
+formulas, not an exact continuum evaluation for every depth and discretization.
+
+\paragraph{Suggested manuscript wording.}
+We retain the analytic $G_0+G_1$ baseline and approximate the higher-order
+correction using signed, self-adjoint branches composed of Fourier filters
+and surface-dependent multiplication. These are the operations appearing in
+the Craig--Sulem recurrence; an exact polarization identity motivates tying
+the inner and outer filters. The finite branch sum is a structured
+approximation to the remaining, generally nested terms.
+
+\clearpage
+\appendix
+\section{Derivation of the compact recurrence}
+\label{sec:derivation}
+
+For the formal expansion, parameterize a harmonic field by its flat-level
+trace $f$. Its Fourier coefficients satisfy
+\begin{equation}
+  \widehat\phi(k,z)
+    =\frac{\cosh((z+h)|k|)}{\cosh(h|k|)}\,\widehat f(k).
+\end{equation}
+At $z=0$, the $j$th vertical derivative is $F_j f$, which explains the
+even/odd symbols in~\eqref{eq:known-filters}.
+
+Let $E_j$ mean multiplication by $\eta^j/j!$, with $E_0=I$. Taylor expansion
+of the surface trace gives
+\begin{equation}
+  \xi=\sum_{j\geq0}E_j F_j f.
+\end{equation}
+The order-$n$ contribution to its unnormalized normal derivative, for
+$n\geq1$, is
+\begin{align}
+  E_n F_{n+1}f-\eta_x E_{n-1}\partial_x F_{n-1}f
+    &=-\partial_x E_n\partial_x F_{n-1}f.
+\end{align}
+This uses $F_{n+1}=-\partial_x^2 F_{n-1}$ and
+$\partial_x(\eta^n/n!)=\eta_x\eta^{n-1}/(n-1)!$.
+
+Apply $G(\eta;h)=\sum_{n\geq0}G_n$ to the expanded trace and match powers
+of $\eta$. Since the flat-level trace $f$ is arbitrary, the result is the
+operator recurrence
+\begin{equation}
+  G_n=-\partial_x E_n\partial_x F_{n-1}
+      -\sum_{j=1}^{n}G_{n-j}E_jF_j,
+  \qquad G_0=F_1.
+  \label{eq:direct-recurrence}
+\end{equation}
+Every Taylor coefficient $G_n$ is self-adjoint, as follows by differentiating
+the self-adjoint family $G(\varepsilon\eta;h)$ at $\varepsilon=0$.
+Taking adjoints, using $E_j^*=E_j$, $F_j^*=F_j$, and
+$\partial_x^*=-\partial_x$, gives
+\begin{equation}
+  G_n=-F_{n-1}\partial_x E_n\partial_x
+      -\sum_{j=1}^{n}F_jE_jG_{n-j}.
+\end{equation}
+Applying this identity to $\xi$ yields~\eqref{eq:recurrence}. It is the
+ordering implemented, with even and odd orders separated, in
+\path{solver/solvers/dno_series_jax.py}.
+
+\begin{thebibliography}{9}
+\bibitem{nicholls1998}
+David P. Nicholls.
+\href{https://homepages.math.uic.edu/~nicholls/papers/Final/twwnum.jcp.pdf}
+{Traveling Water Waves: Spectral Continuation Methods with Parallel Implementation}.
+\emph{Journal of Computational Physics}, 143:224--240, 1998.
+See Section~2.2, especially equations~(2.7)--(2.11).
+
+\bibitem{wilkening2015}
+Jon Wilkening and Vishal Vasan.
+\href{https://math.berkeley.edu/~wilken/papers/afm_dno.pdf}
+{Comparison of five methods of computing the Dirichlet--Neumann operator
+for the water wave problem}.
+\emph{Contemporary Mathematics}, 635:175--210, 2015.
+Preprint: arXiv:1406.5226, 2014. See Section~2.1.
+\end{thebibliography}
+
+\end{document}
