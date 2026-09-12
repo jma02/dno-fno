@@ -1,13 +1,13 @@
 | Date | Time | File / Variant | Motivation | What Tried / Evidence | Correctness | Timing | Decision |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-12 | 00:16 | Two-GPU FP64 Tanaka evaluation handoff | GPU 0 has already computed most of the 32 reference trajectories; GPU 1 is idle. Compute independent surrogate IC halves concurrently while preserving the original reference work. | Add an optional precomputed prediction argument to the existing evaluator, leaving its metrics and output code unchanged. Launch the coordinator below: GPU 1 evaluates ICs 0:16 immediately; after the original process atomically publishes a matching full FP64 truth cache, stop only that original process and evaluate ICs 16:32 on GPU 0. Concatenate in original IC order, then call the existing evaluator with all predictions and cached truth. Same final epoch-40 checkpoint, dt=0.8, tmax=200, 80 substeps, batch=2, no soliton damping; NCCL_P2P_LEVEL=PHB. | Prelaunch PASS: 12 evaluator tests, including identical saved arrays and nonfinite-failure metrics with ordinary versus precomputed predictions; Ruff and Pyright clean. Runtime asserts verify model/input-output FP64 device placement and full reference cache protocol/IDs/shape before terminating the old job. Rollout results PENDING; numerical failures remain evaluation outcomes, not suppressed. | 00:00 (5.706 s focused CPU tests); GPU run pending launch verification and completion. | IN PROGRESS: preserve all original reference work; use both GPUs for the remaining surrogate evaluation. No training, model, dataset, or rollout-protocol changes. |
+| 2026-09-12 | 00:16 | Two-GPU FP64 Tanaka evaluation handoff | GPU 0 has computed most of the 32 reference trajectories; GPU 1 is idle. Run independent surrogate IC halves concurrently without losing reference work. | Add optional precomputed predictions to the existing evaluator; metrics and output code stay unchanged. Coordinator below: GPU 1 evaluates ICs 0:16 immediately; after full matching FP64 truth is saved, stop only the old evaluator and run ICs 16:32 on GPU 0. Concatenate in original order. Final epoch40, dt=0.8, tmax=200, 80 substeps, batch2, no soliton damping; NCCL_P2P_LEVEL=PHB. | PASS: 12 evaluator tests, including identical saved arrays and nonfinite metrics with ordinary/precomputed predictions; Ruff/Pyright clean. At00:21 both GPUs100%; GPU1 FP64 parameter/output/device probe passed. Full reference cache protocol/IDs/shape checked before old-job termination. Final rollout results PENDING. First launcher exited harmlessly on unavailable pidfd API; corrected with installed psutil. | 00:00 (5.706 s CPU tests); corrected GPU launch00:21, completion pending. | IN PROGRESS: original references preserved; both GPUs active. No training, model, dataset, or rollout-protocol changes. |
 
 ### Launch details
 
 Run: `outputs/c27_tanaka_tangent_paper_dataset_20260910_144736`.
 Output: `eval_final_tanaka_n32_fp64` within that run.
-The original evaluator is PID `3953921`; the coordinator opens a PID file
-descriptor before waiting, so its later signal cannot target a reused PID.
+The original evaluator is PID `3953921`; a `psutil.Process` handle verifies
+process identity before termination, protecting against PID reuse.
 Partial prediction halves are saved as `parallel_pred_gpu0.npz` and
 `parallel_pred_gpu1.npz` for recovery; final metrics use all 32 ICs in their
 original order. Cached-truth timing in the merged evaluator measures reuse,
@@ -20,6 +20,21 @@ Executed as an inline Python command in persistent tmux session
 `MPLCONFIGDIR=/tmp/matplotlib-c27-dual-eval`.
 Console: `outputs/c27_tanaka_tangent_paper_dataset_20260910_144736/eval_dual_gpu.console.log`.
 
+Verified at 00:21: corrected coordinator PID `3987236` is running in tmux;
+GPU 0 and GPU 1 both report 100% utilization. GPU 1 passed the FP64 parameter,
+output, and device-placement checks and started IC chunk 0:2 of its first 16
+simulations, including the previously problematic simulation `16471` later in
+that half. GPU 0's original PID `3953921` continues reference generation;
+its second-half prediction assignment will include simulation `16624`.
+Final rollouts and metrics remain pending. The production evaluator change
+adds only three lines (optional argument and condition); the rest of the
+code diff is indentation and a regression test. Source/test commit: `4f4ebab`.
+
+The first launch at 00:19 exited before starting either worker or signaling the
+original job: this standalone Python build lacks `os.pidfd_open`. The corrected
+launcher uses the already-installed `psutil` process handle instead. Original
+reference generation was uninterrupted.
+
 ```python
 import os
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
@@ -27,8 +42,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import select
-import signal
+import psutil
 import time
 import numpy as np
 import jax
@@ -44,7 +58,7 @@ original_pid = 3953921
 argv = Path(f"/proc/{original_pid}/cmdline").read_bytes().decode().split("\0")
 assert "solver/evals/eval_suite.py" in argv
 assert Path(argv[argv.index("--run_dir") + 1]).resolve() == run_dir
-original_fd = os.pidfd_open(original_pid)
+original_process = psutil.Process(original_pid)
 devices = jax.devices("gpu")
 assert len(devices) == 2
 cfg = ev.FAMILY_CONFIGS["tanaka"]
@@ -93,7 +107,7 @@ with ThreadPoolExecutor(max_workers=2) as pool:
     while not cache_path.is_file():
         if first.done():
             first.result()
-        if select.select([original_fd], [], [], 0)[0]:
+        if not original_process.is_running():
             raise RuntimeError("Original evaluation exited before publishing reference cache")
         time.sleep(5)
     truth = ev._try_load_cached_truth(
@@ -103,9 +117,8 @@ with ThreadPoolExecutor(max_workers=2) as pool:
     )
     assert truth is not None, "Do not stop the original job without matching FP64 truth"
     del truth
-    signal.pidfd_send_signal(original_fd, signal.SIGTERM)
-    select.select([original_fd], [], [])
-    os.close(original_fd)
+    original_process.terminate()
+    original_process.wait()
     print("All 32 references verified and preserved; GPU 0 starts ICs 16:32", flush=True)
     second = pool.submit(predict_half, 0, ics[16:])
     halves = [first.result(), second.result()]
