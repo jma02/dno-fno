@@ -1,8 +1,9 @@
 | Date | Time | File / Variant | Motivation | What Tried / Evidence | Correctness | Timing | Decision |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-12 | 00:16 | Two-GPU FP64 Tanaka evaluation handoff | GPU 0 has computed most of the 32 reference trajectories; GPU 1 is idle. Run independent surrogate IC halves concurrently without losing reference work. | Add optional precomputed predictions to the existing evaluator; metrics and output code stay unchanged. Coordinator below: GPU 1 evaluates ICs 0:16 immediately; after full matching FP64 truth is saved, stop only the old evaluator and run ICs 16:32 on GPU 0. Concatenate in original order. Final epoch40, dt=0.8, tmax=200, 80 substeps, batch2, no soliton damping; NCCL_P2P_LEVEL=PHB. | PASS: 12 evaluator tests, including identical saved arrays and nonfinite metrics with ordinary/precomputed predictions; Ruff/Pyright clean. At00:21 both GPUs100%; GPU1 FP64 parameter/output/device probe passed. Full reference cache protocol/IDs/shape checked before old-job termination. Final rollout results PENDING. First launcher exited harmlessly on unavailable pidfd API; corrected with installed psutil. | 00:00 (5.706 s CPU tests); corrected GPU launch00:21, completion pending. | IN PROGRESS: original references preserved; both GPUs active. No training, model, dataset, or rollout-protocol changes. |
+| 2026-09-12 | 00:16 | Two-GPU FP64 Tanaka evaluation handoff | GPU 0 has computed most of the 32 reference trajectories; GPU 1 is idle. Run independent surrogate IC halves concurrently without losing reference work. | Add optional precomputed predictions to the existing evaluator; metrics and output code stay unchanged. Coordinator below: GPU 1 evaluates ICs 0:16 immediately; after full matching FP64 truth is saved, stop only the old evaluator and run ICs 16:32 on GPU 0. Concatenate in original order. Final epoch40, dt=0.8, tmax=200, 80 substeps, batch2, no soliton damping; NCCL_P2P_LEVEL=PHB. | PASS: 12 evaluator tests, including identical saved arrays and nonfinite metrics with ordinary/precomputed predictions; Ruff/Pyright clean. At00:21 both GPUs100%; GPU1 FP64 parameter/output/device probe passed. Full reference cache protocol/IDs/shape checked before old-job termination. Final rollout results PENDING. First launcher exited harmlessly on unavailable pidfd API; corrected with installed psutil. | 00:00 (5.706 s CPU tests); corrected GPU launch00:21; paused01:02. | PAUSED at user direction to prioritize only the two previous failures. Both original processes suspended with progress retained in memory; no automatic resumption scheduled. |
+| 2026-09-12 | 01:04 | Final Tanaka-only-tangent model: failed-case finiteness test | The immediate question is whether retraining fixes the two previously problematic ICs, not performance across a new 32-case benchmark. No reference trajectories are required to test finiteness. | Pause broad-evaluation PIDs3953921/3987236 with identity-checked psutil handles. Launch simulation16471 on GPU0 and16624 on GPU1 in separate persistent sessions, using final epoch40 and existing surrogate_rollout_batched only. Dataset rows33784/64384, T200, save interval0.8, 80 substeps, internal dt0.01, four GL2 iterations, cutoff128; float64 model/integration, no adaptive stabilizer. Each job writes all predicted fields plus first nonfinite saved time. | Launch PASS: both logs confirm correct ID/GPU/epoch/FP64 protocol, both GPUs100%; broad workers in stopped state. Independent IC audit: eta matches archived frame0 exactly; xi matches after one float64 mean subtraction, already performed by rollout_surrogate. Depths and saved times agree. No truth generation or accuracy metric. Final finiteness results PENDING. | Launched01:04; wall time pending. | RUNNING TARGETED TEST ONLY. Broad evaluation remains paused. Training/model/data/solver unchanged; one IC per GPU. |
 
-### Launch details
+### Broad evaluation launch details (paused at 01:02)
 
 Run: `outputs/c27_tanaka_tangent_paper_dataset_20260910_144736`.
 Output: `eval_final_tanaka_n32_fp64` within that run.
@@ -143,5 +144,76 @@ summaries = {"tanaka": summary}
 ev._write_json(out_dir / "all_summaries.json", summaries)
 ev._write_json(out_dir / "macro_summary.json", ev.compute_macro_summary(summaries))
 print(f"Done. Results written to {out_dir}", flush=True)
+
+```
+
+### Targeted failed-case launch at 01:04
+
+Two inline commands run the same code below with argument `16471` and
+`CUDA_VISIBLE_DEVICES=0`, or argument `16624` and `CUDA_VISIBLE_DEVICES=1`.
+Persistent sessions: `c27_failed_16471_20260912_gpu0` and
+`c27_failed_16624_20260912_gpu1`. Environment otherwise matches the broad
+launcher above; `MPLCONFIGDIR=/tmp/matplotlib-c27-failed`.
+Outputs: `eval_final_failed_tanaka_fp64/simulation_<id>.npz` and `.json`
+within the trained run; consoles are `eval_failed_<id>.console.log`.
+PIDs at launch: GPU0 `3997936`, GPU1 `3997852`.
+
+```python
+import os
+os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+import json
+from pathlib import Path
+import sys
+import numpy as np
+import jax
+import jax.numpy as jnp
+from solver.evals import eval_suite as ev
+
+jax.config.update("jax_enable_x64", True)
+simulation_id = int(sys.argv[1])
+run_dir = Path("outputs/c27_tanaka_tangent_paper_dataset_20260910_144736").resolve()
+dataset = Path("outputs/paper_dataset/arrays").resolve()
+out_dir = run_dir / "eval_final_failed_tanaka_fp64"
+out_dir.mkdir(exist_ok=True)
+ics, _, nx, length = ev._load_paper_dataset_ics(dataset, "tanaka", 32)
+ic = next(ic for ic in ics if ic.simulation_id == simulation_id)
+cfg = ev.FAMILY_CONFIGS["tanaka"]
+times = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
+loaded = ev.load_run(run_dir, checkpoint="final")
+assert loaded.epoch == 40
+assert all(p.dtype == jnp.float64 for p in jax.tree_util.tree_leaves(loaded.params))
+predict = ev.build_predict_gxi_batched(loaded)
+print(f"START simulation={simulation_id} GPU={os.environ['CUDA_VISIBLE_DEVICES']} "
+      f"epoch={loaded.epoch} FP64 T={cfg.tmax} internal_dt={cfg.dt/cfg.substeps} "
+      f"no extra stabilizer, no reference generation", flush=True)
+pred = ev.surrogate_rollout_batched(
+    [ic], jnp.asarray(times), nx, length, cfg, predict,
+)
+assert all(np.asarray(pred[name]).dtype == np.float64 for name in ("eta", "xi", "gxi"))
+finite = np.logical_and.reduce([
+    np.isfinite(np.asarray(pred[name])).all(axis=(1, 2))
+    for name in ("eta", "xi", "gxi")
+])
+bad = np.flatnonzero(~finite)
+np.savez_compressed(
+    out_dir / f"simulation_{simulation_id}.npz",
+    times=times, simulation_ids=np.asarray([simulation_id]),
+    depths=np.asarray([ic.depth]),
+    pred_eta=pred["eta"], pred_xi=pred["xi"], pred_gxi=pred["gxi"],
+)
+summary = {
+    "simulation_id": simulation_id, "dataset_row": ic.meta["dataset_row"],
+    "depth": ic.depth, "checkpoint": str(run_dir / "final_ckpt"), "epoch": loaded.epoch,
+    "model_and_integration_dtype": "float64", "extra_stabilizer": False,
+    "internal_dt": cfg.dt / cfg.substeps, "save_dt": cfg.dt, "tmax": cfg.tmax,
+    "picard_iterations": ev.GL2_ITERATIONS, "cutoff": cfg.filter_fraction * nx / 2,
+    "reference_generation": False, "gpu": os.environ["CUDA_VISIBLE_DEVICES"],
+    "all_saved_values_finite": bool(finite.all()),
+    "first_nonfinite_saved_time": float(times[bad[0]]) if bad.size else None,
+    "wall_s": float(pred["wall_s"]),
+}
+ev._write_json(out_dir / f"simulation_{simulation_id}.json", summary)
+print(json.dumps(summary, indent=2, allow_nan=False), flush=True)
 
 ```
