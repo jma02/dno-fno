@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 from typing import cast
 import unittest
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -14,6 +15,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from solver.evals.eval_suite import (  # noqa: E402
     IC,
+    FamilyConfig,
     _json_ready,
     _load_paper_dataset_ics,
     _rollout_ic_chunks,
@@ -21,6 +23,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     _write_truth_cache,
     compute_macro_summary,
     compute_metrics,
+    run_family,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched  # noqa: E402
 from dno_net_v2 import CraigSulemDNO  # noqa: E402
@@ -36,6 +39,37 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
+        values = np.ones((2, 2, 8), dtype=np.float64)
+        truth = {"eta": values, "xi": values * 0, "gxi": values * 0, "wall_s": 1.0}
+        pred = {**truth, "eta": values.copy()}
+        pred["eta"][-1, 1, 0] = np.nan
+        ics = [IC(values[0, i], values[0, i] * 0, 1.0, i + 17) for i in range(2)]
+        loaded = LoadedRun(None, {}, {}, {}, "scale", 40)
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "solver.evals.eval_suite._load_paper_dataset_ics",
+            return_value=(ics, {}, 8, 2 * np.pi),
+        ), patch(
+            "solver.evals.eval_suite._try_load_cached_truth", return_value=truth,
+        ), patch(
+            "solver.evals.eval_suite._rollout_ic_chunks", return_value=pred,
+        ) as rollout:
+            directory = Path(temporary)
+            summaries, saved = [], []
+            for reuse in (False, True):
+                summaries.append(run_family(
+                    "tanaka", FamilyConfig(2, 1.0, 1.0, 1), loaded, Mock(),
+                    directory, directory, 2, directory, {}, 2,
+                    pred=pred if reuse else None,
+                ))
+                with np.load(directory / "tanaka_trajs.npz") as archive:
+                    saved.append({name: archive[name].copy() for name in archive.files})
+            self.assertEqual(rollout.call_count, 1)
+            self.assertEqual(_json_ready(summaries[0]), _json_ready(summaries[1]))
+            for name in saved[0]:
+                np.testing.assert_array_equal(saved[0][name], saved[1][name])
+            self.assertEqual(summaries[1]["model_nonfinite_any_count_truth_valid"], 1)
+
     def test_evaluation_promotes_float32_inputs_before_model_arithmetic(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
         inputs = 0.01 * jax.random.normal(jax.random.PRNGKey(3), (1, 16, 2), dtype=jnp.float32)

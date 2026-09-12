@@ -696,6 +696,8 @@ def run_family(
     truth_cache_dir: Path | None,
     checkpoint_source: dict[str, object],
     rollout_batch_size: int | None,
+    *,
+    pred: RolloutPayload | None = None,
 ) -> dict[str, Any]:
     ics, source, nx, length = _load_paper_dataset_ics(dataset_path, family, n_ics)
     times_np = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
@@ -745,20 +747,21 @@ def run_family(
         )
     print(f"[{family}] truth wall={float(truth['wall_s']):.1f}s", flush=True)
 
-    print(f"[{family}] batched surrogate rollout (float64 model and integration)", flush=True)
-    pred = _rollout_ic_chunks(
-        ics,
-        rollout_batch_size,
-        lambda chunk: surrogate_rollout_batched(
-            chunk,
-            jnp.asarray(times_np, dtype=jnp.float64),
-            nx,
-            length,
-            cfg,
-            predict_gxi_batched,
-        ),
-        label=f"{family} surrogate",
-    )
+    if pred is None:
+        print(f"[{family}] batched surrogate rollout (float64 model and integration)", flush=True)
+        pred = _rollout_ic_chunks(
+            ics,
+            rollout_batch_size,
+            lambda chunk: surrogate_rollout_batched(
+                chunk,
+                jnp.asarray(times_np, dtype=jnp.float64),
+                nx,
+                length,
+                cfg,
+                predict_gxi_batched,
+            ),
+            label=f"{family} surrogate",
+        )
     print(f"[{family}] surrogate wall={float(pred['wall_s']):.1f}s", flush=True)
     metrics = compute_metrics(
         {name: np.asarray(truth[name]) for name in ("eta", "xi", "gxi")},
