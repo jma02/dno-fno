@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh C27-derived all-family tangent training on two Modal A100s.
+# Fresh C27 training with Tanaka-only translation loss on two Modal A100s.
 
 set -euo pipefail
 cd /home/johnma/dno-fno
@@ -14,7 +14,7 @@ fi
 GPU_SPEC="${GPU_SPEC:-A100-80GB:2}"
 GPU_TAG="${GPU_SPEC//:/x}"
 GPU_TAG="${GPU_TAG,,}"
-RUN_NAME="${RUN_NAME:-c27_all_family_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
+RUN_NAME="${RUN_NAME:-c27_tanaka_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
 DATASET="${DATASET:-/data/outputs/paper_dataset/arrays}"
 EPOCHS="${EPOCHS:-40}"
 mkdir -p logs

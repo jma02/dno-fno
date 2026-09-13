@@ -53,17 +53,17 @@ class _ModalTrainingFunction(Protocol):
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     .pip_install(
-        "numpy>=2.0.2",
-        "scipy>=1.13",
+        "numpy==2.4.2",
+        "scipy==1.17.0",
         "tqdm>=4.66",
         "matplotlib>=3.8",
-        "flax>=0.11",
-        "optax>=0.2.5",
-        "orbax-checkpoint>=0.11.6",
-        "jax[cuda12]>=0.7",
+        "flax==0.12.6",
+        "optax==0.2.5",
+        "orbax-checkpoint==0.11.33",
+        "jax[cuda12]==0.9.2",
     )
     .add_local_dir(REPO_ROOT / "train-jax-10m", remote_path="/repo/train-jax-10m")
     .add_local_dir(REPO_ROOT / "models" / "fno-jax", remote_path="/repo/models/fno-jax")
