@@ -14,6 +14,7 @@ from typing import Sequence
 
 # Tanaka chooses its precision at import time.
 os.environ["DNO_TANAKA_DTYPE"] = "float64"
+os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
 import jax
 

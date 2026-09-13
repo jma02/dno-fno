@@ -27,6 +27,24 @@ jax.config.update("jax_enable_x64", True)
 
 
 class StokesStaticPipelineTest(unittest.TestCase):
+    def test_compiled_rows_match_eager_float64_labels_for_both_branches(self) -> None:
+        for sample in (
+            StokesSample("finite", 20, 0.25, 0.3, 0.003),
+            StokesSample("deep", 8, 5.0, 0.3, 0.01),
+        ):
+            with self.subTest(branch=sample.branch):
+                with jax.disable_jit():
+                    expected = evaluate_static_stokes_sample(sample)
+                actual = evaluate_static_stokes_sample(sample)
+                assert expected is not None and actual is not None
+                for name in ("eta", "xi", "gxi"):
+                    field = getattr(actual, name)
+                    self.assertEqual(field.dtype, np.float64)
+                    self.assertTrue(np.isfinite(field).all())
+                    np.testing.assert_allclose(
+                        field, getattr(expected, name), rtol=1e-10, atol=1e-12
+                    )
+
     def test_invalid_constructed_states_are_rejected_before_dno_evaluation(
         self,
     ) -> None:

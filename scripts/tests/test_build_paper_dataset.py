@@ -24,10 +24,12 @@ def _write_run(
     *,
     seed: int = 2026072210,
     accepted_count: int = 1,
+    frame_count: int | None = None,
 ) -> Path:
     run_root = root / f"{family}_{seed}"
     batch = run_root / "batches" / "batch_000000.npz"
-    frame_count = int(PhysicalFamilyId[family.upper()])
+    if frame_count is None:
+        frame_count = int(PhysicalFamilyId[family.upper()])
     eta = np.arange(frame_count * 4, dtype=np.float64).reshape(frame_count, 4)
     rows = SimulationRows(
         eta, eta + 1.0, eta - 1.0, 1.0, np.arange(frame_count, dtype=np.float64)
@@ -117,6 +119,62 @@ class PaperDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not appear twice"):
             build_dataset(self.root / "dataset", (*paths, alias))
         self.assertFalse((self.root / "dataset").exists())
+
+    def test_balances_raw_families_without_changing_selected_fields_or_splits(
+        self,
+    ) -> None:
+        paths = tuple(
+            _write_run(self.root, family, accepted_count=5, frame_count=frames)
+            for family, frames in (
+                ("stokes", 1),
+                ("tanaka", 4),
+                ("benjamin_feir", 4),
+                ("jonswap_tma", 2),
+            )
+        )
+        paths += (_write_run(self.root, "stokes", seed=19, accepted_count=5),)
+        source = build_dataset(self.root / "uncapped", paths)
+        original = {path.stem: np.load(path) for path in source.glob("*.npy")}
+        output = build_dataset(
+            self.root / "balanced",
+            paths,
+            max_snapshots_per_simulation=2,
+        )
+        arrays = {path.stem: np.load(path) for path in output.glob("*.npy")}
+        np.testing.assert_array_equal(
+            np.unique(arrays["family_id"], return_counts=True)[1], [10] * 4
+        )
+        np.testing.assert_array_equal(np.unique(arrays["simulation_id"]), np.arange(25))
+        np.testing.assert_array_equal(arrays["x"], original["x"])
+        for simulation_id in range(25):
+            with self.subTest(simulation_id=simulation_id):
+                rows = arrays["simulation_id"] == simulation_id
+                self.assertEqual(np.unique(arrays["dataset_split"][rows]).size, 1)
+                np.testing.assert_array_equal(
+                    arrays["frame_index"][rows], np.arange(np.count_nonzero(rows))
+                )
+                source_rows = np.flatnonzero(original["simulation_id"] == simulation_id)
+                selected = source_rows[
+                    np.linspace(
+                        0, source_rows.size - 1, min(source_rows.size, 2), dtype=int
+                    )
+                ]
+                for name in arrays.keys() - {"x", "frame_index"}:
+                    np.testing.assert_array_equal(
+                        arrays[name][rows], original[name][selected]
+                    )
+        with self.assertRaises(FileExistsError):
+            build_dataset(output, paths)
+
+    def test_snapshot_cap_selects_spaced_frames_including_endpoints(self) -> None:
+        path = _write_run(self.root, "tanaka", accepted_count=10, frame_count=5)
+        raw = build_dataset(self.root / "raw", (path,), max_snapshots_per_simulation=3)
+        np.testing.assert_array_equal(np.load(raw / "time.npy"), [0, 2, 4] * 10)
+        np.testing.assert_array_equal(np.load(raw / "frame_index.npy"), [0, 1, 2] * 10)
+        np.testing.assert_array_equal(
+            np.load(raw / "eta.npy"),
+            np.tile(np.arange(20).reshape(5, 4)[[0, 2, 4]], (10, 1)),
+        )
 
 
 if __name__ == "__main__":
