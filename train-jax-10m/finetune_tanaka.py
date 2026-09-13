@@ -1,4 +1,4 @@
-"""Fine-tune C27 with translation loss averaged over Tanaka samples only."""
+"""Fine-tune C27 on a dataset, applying translation loss only to Tanaka rows."""
 
 from __future__ import annotations
 
@@ -65,6 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run_dir", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
+    parser.add_argument("--dataset", type=Path)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-6)
     parser.add_argument("--batch_size", type=int, default=1024)
@@ -78,7 +79,7 @@ def main() -> None:
     # Keep the source model and normalization; start a new optimizer and schedule.
     loaded = load_run(args.run_dir, checkpoint="final")
     config = loaded.config
-    dataset_path = Path(config["dataset"]).resolve()
+    dataset_path = (args.dataset or Path(config["dataset"])).resolve()
     dataset = load_dataset_arrays(dataset_path)
     families = np.load(dataset_path / "family_id.npy", mmap_mode="r")
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
@@ -112,6 +113,10 @@ def main() -> None:
         **vars(args),
         "run_dir": str(args.output_dir.resolve()),
         "output_dir": str(args.output_dir.resolve()),
+        "run_name": args.output_dir.name,
+        "dataset": str(dataset_path),
+        "train_examples": int(train_indices.size),
+        "val_examples": int(val_indices.size),
         "finetune_from": str(args.run_dir.resolve()),
         "source_epoch": loaded.epoch,
         "total_epochs": args.epochs,
