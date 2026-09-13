@@ -7,6 +7,7 @@
 | 2026-09-13 | 18:42 | Mixed-wave fine-tune: real two-GPU warm-start smoke | The new dataset changes input amplitudes and has no Tanaka rows; verify the actual checkpoint, zero-selection loss path, two-device batches and checkpoint saving before a full run. | Execute existing fine-tuner in memory with2,049 evenly spaced TRAIN rows and1,025 validation rows, global batch1024 and1epoch/LR2e-6. Three real updates include a replicated singleton tail; validation uses FP64. Restore the saved final checkpoint and compare normalization metadata with the balanced source. | PASS: three replicated optimizer/state updates, finite training/validation/parameters; train/val translation loss exactly0; source statistics unchanged; final epoch1 checkpoint reloads. Smoke validation L2.00273133 and composite.00381602 are subset results, not rollout evidence. Initial harness import failed before training; adding its script-directory import path fixed the harness, with no further production changes. | 00:01 (successful smoke18:42–18:43, about43s including import/checkpoint validation). | Proceed with the existing five-epoch trainer. Smoke checkpoint is not used as the full-run initialization. |
 | 2026-09-13 | 18:44 | Balanced C27 fine-tuned on old mixed-wave families | Adding the missing mixed wavetrains may improve learned dynamics away from clean solitary-wave profiles. Test this intervention by warm-starting the balanced model while keeping its normalization and architecture fixed. | Launch c27_balanced_mixed_wave_finetune_20260913 from original balanced epoch260, source0e74921. Five epochs,1,125 updates/epoch, batch1024,two RTX6000Ada GPUs, fresh AdamW cosine LR2e-6,weight decay1e-4,no warmup. Train exclusively on1,152,000 old packet rows with simulation-disjoint144,000-row validation. L2+mode6+Hadamard.01/every16/global8 retained; Tanaka-only translation naturally0 because packet IDs11/12/13 are not Tanaka. | RUNNING: startup config/scales audited, PID251906; at19:08 epochs1–2 complete with finite metrics and epoch3 underway. Epoch2 validation L2.00222811, composite.00268095, tangent0; both GPUs remain assigned. FP32 training/FP64 validation. Queued all128 exact previous ICs for FP64 unguarded final-checkpoint rollouts, two failed Tanakas first; no reference generation. Source checkpoint and datasets unchanged. | Submitted18:44, trainer started18:45. Warm speed about2.6updates/s; final training/evaluation timings pending. | Evaluate as an ablation, not a proven fix. Fine-tuned workers resume original balanced panel PIDs213458/213464 after their first priority case; remaining old/new panels share GPUs. Coordinator also resumes these identities on exit. Older reference-generation jobs stay suspended. |
 | 2026-09-13 | 19:06 | Balanced NaN diagnosis: historical audit and same-state FP64 CPU probes | Earlier investigations found that accurate predictions on clean waves can coexist with unstable responses to developing distortions. Compare the surviving July C27 and balanced checkpoints on identical pre-failure states while both GPUs fine-tune. Also test mean/depth coordinates, raw output above cutoff and energy consistency instead of assuming missing data alone causes NaNs. | Actual-error feedback separates the models: for16624 at t116/t124, July instantaneous log-error-energy feedback rates are-.0974/-.1594, balanced+.1621/+.7394. At16471 t107.2/t115.2 both amplify, balanced more strongly. Initial mean/depth defects are nearly identical (~.036–.040%); raw Gxi above128 has negligible early effect. Shape-consistency defect worsens markedly for balanced16624 but not universally for16471; total-energy injection is not supported. Detailed methods, caveats, artifacts and executed code below. | PASS: CPU-only FP64; final checkpoints July40/balanced260, identical P128 states, no new rollouts or reference labels. Production-RHS agreement <=2.42e-15; canonical zero-mode control corrected before accepting results. Actual-error references are archived FP32 promoted to FP64. Feedback excludes model-reference forcing: local evidence, not a causal dataset result. | 00:01 combined successful numerical probes (energy7.10s, coordinate teacher2.09s/models1.60s, feedback2.88s); completed18:56–19:02. Earlier sandbox checkpoint restores timed out; host CPU restores succeeded without loader changes. Historical audit completed19:06. | No production change. Next discriminating experiment: short same-state checkpoint handoffs before error growth, comparing July, balanced and fine-tuned models without damping. Test stability around slightly distorted waves before broadening generation or increasing loss weights. Current five-epoch fine-tune and queued128-case panel continue unchanged. |
+| 2026-09-13 | 19:13 | Dataset-first follow-up: balanced training composition at failing depths | User correctly redirects the investigation toward the main changed variable: dataset coverage. Equal global family shares need not restore the old variety near the failing depths. Recompute the depth-conditioned counts after balancing rather than repeat obsolete pre-balance99% Tanaka figures. | Scan current TRAIN metadata at depths.20–.35:95,442 rows, comprising74,640 Tanaka (78.20%),12,354 Stokes,8,448 JONSWAP and0 BF. Original v9 at the same depths has738,216 rows:48.76% Tanaka plus246,663 mixed-wave,53,057 single-mode,42,017 Stokes and36,490 Gaussian-sea rows. Globally the old mixed-wave18.86%, single-mode6.55% and Gaussian6.04% populations are not explicitly present in balanced pretraining. Current packet-only fine-tune restores only the first population. | PASS: read-only NumPy metadata scan, no wave arrays, GPUs or training changes. Old counts reused from exact July TRAIN audit; current counts from balanced arrays. These are depth-conditioned exposures, not joint height/spectrum matches or proof of causality. Existing constructor/config audits independently cross-checked. | 00:00 (0.0309s metadata scan,19:13); surrounding source review19:11–19:13. | Prioritize dataset comparisons/add-back experiments. Do not launch the proposed common-state restart campaign. Keep current mixed-wave fine-tune and its queued evaluation unchanged; a null short fine-tune would not conclusively rule out the missing population. No production changes. |
 
 ### Executed commands (upload01:59; training submitted02:03)
 
@@ -1002,4 +1003,92 @@ result["elapsed_seconds"]=time.monotonic()-start
 result["completed_local"]=datetime.now().astimezone().isoformat()
 (destination/"summary.json").write_text(json.dumps(result,indent=2)+"\n")
 print("DONE",result["elapsed_seconds"],result["completed_local"],flush=True)
+```
+
+### Dataset-first follow-up (19:13)
+
+The user requested focusing on differences in the datasets, not additional
+same-state restart diagnostics. No such restart job was launched; the current
+fine-tune and its evaluation queue are unchanged.
+
+The main architecture, active objectives (including Tanaka-only translation),
+batch size and optimizer recipe now match July C27. Dataset-derived scales,
+simulation-disjoint rather than row-random splits, and a nearly matched update
+budget still differ. These are caveats, not a reason to defer the data audit.
+
+Current balanced TRAIN rows at depths.20–.35, recomputed from metadata:
+
+| Population | July TRAIN rows | Balanced TRAIN rows |
+| --- | --- | --- |
+| Tanaka | 359,989 | 74,640 |
+| Stokes | 42,017 | 12,354 |
+| BF | 0 | 0 |
+| Gaussian random seas | 36,490 | 0 |
+| JONSWAP/TMA | 0 | 8,448 |
+| Single-mode | 53,057 | 0 |
+| Mixed wavetrains | 246,663 | 0 |
+| Total | 738,216 | 95,442 |
+| Tanaka share | 48.76% | 78.20% |
+
+This replaces the *pre-balancing*99.02% Tanaka statistic for the current model.
+The smaller row total is partly intentional temporal subsampling; it is not
+itself a count of missing independent wave shapes. The global balanced mixture
+is25% per family but remains far from equally varied within this depth interval.
+This comparison is depth-only, not a joint amplitude/spectrum comparison.
+
+The confirmed omissions to investigate, in order of direct relevance here:
+
+1. Old mixed wavetrains:1–5 components with randomized amplitudes, phases and
+   directions.18.86% of July TRAIN; absent from balanced pretraining. Mid/wide
+   variants overlap failing depths and wave heights. The current fine-tune tests
+   their return:1,152,000 rows/9,600 TRAIN simulations,120 frames each.
+2. Dedicated single-mode and Gaussian-sea populations:6.55% and6.04% of July
+   TRAIN respectively. JONSWAP retains genuine random/bidirectional variation,
+   but is not the same sampling distribution as the old Gaussian population.
+3. Narrowed BF initial conditions: old depths.5–4 and independent sideband
+   amplitudes/phases versus current depth5, equal sideband amplitudes and fixed
+   relative phase. Neither BF population directly covers these failing depths,
+   so this is a broader diversity difference, not the first depth-specific lead.
+
+Current fine-tuning is100% old packets for five epochs, preserving the balanced
+normalization and using a new simulation-level split. It does not recreate
+July's mixture or train from scratch. Improvement would support the usefulness
+of that missing data; no improvement would not by itself disprove it.
+Further comparisons should examine wave shapes, spectra and eta/xi relationships
+at matched depth and wave height, and teacher/preprocessing differences. Do not
+equate spectral tails caused by interpolation error with useful physical diversity.
+
+Existing evidence:
+`outputs/c27_paper_dataset_20260908_141423/eval_final_n32/old_new_training_composition_audit_20260910.json`,
+`dataset_richness_constructor_audit_20260910.json` beside it,
+`outputs/paper_dataset_balanced_20260912/balance_audit.json`,
+and `outputs/c27_mixed_wave_finetune_20260913_dataset/preparation.json`.
+
+Executed CPU metadata scan (stdout result is the table above;0.0309s):
+
+```python
+import json
+from datetime import datetime
+from pathlib import Path
+from time import perf_counter
+import numpy as np
+start = perf_counter()
+root = Path("outputs/paper_dataset_balanced_20260912/arrays")
+arrays = {name: np.load(root / f"{name}.npy", mmap_mode="r")
+          for name in ("dataset_split", "family_id", "depth", "simulation_id")}
+train = arrays["dataset_split"] == "train"
+selected = train & (arrays["depth"] >= .2) & (arrays["depth"] <= .35)
+names = {1: "stokes", 2: "tanaka", 3: "benjamin_feir", 4: "jonswap_tma"}
+by_family = {name: {"train_rows": int(np.count_nonzero(selected & (arrays["family_id"] == family))),
+                    "train_simulations": int(np.unique(arrays["simulation_id"][selected & (arrays["family_id"] == family)]).size)}
+             for family, name in names.items()}
+old = json.loads(Path("outputs/c27_paper_dataset_20260908_141423/eval_final_n32/old_new_training_composition_audit_20260910.json").read_text())["target_depth_train_rows"]["old"]
+result = {"completed_local": datetime.now().astimezone().isoformat(), "dataset": str(root),
+          "depth_interval_inclusive": [.2, .35], "balanced_by_family": by_family,
+          "balanced_total": int(selected.sum()), "old_train_by_family": old,
+          "balanced_tanaka_fraction": by_family["tanaka"]["train_rows"] / int(selected.sum()),
+          "old_tanaka_fraction": old["tanaka"] / sum(old.values()),
+          "elapsed_seconds": perf_counter() - start,
+          "limitation": "Depth only: no joint matching of wave height, slope, spectrum, or eta-xi relationship. Old counts reused from exact TRAIN-split audit; balanced counts recomputed from current arrays. No full wave fields read."}
+print(json.dumps(result, indent=2))
 ```
