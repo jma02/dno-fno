@@ -5,7 +5,8 @@
 | 2026-09-13 | 17:31 | Balanced C27 final checkpoint: full previous FP64 rollout panel | Equal family row counts may improve stability beyond Tanaka-only translation regularization; test the same held-out ICs, including both previous NaN failures, without changing the integrator or adding soliton damping. | Downloaded completed epoch260 checkpoint from approved Modal volume. Two local workers cover128 exact previous ICs, known Tanaka failures first. Model-only FP64 rollouts reuse archived FP32 reference fields only for labeled error comparisons; no truth generation. | PARTIAL:70/128 complete before fine-tuning preparation; all32 Stokes and32 JONSWAP plus4 other Tanaka cases finite. Both known Tanaka failures persist:16471 first saved NaNs179.2;16624 at150.4. IDs and initial arrays match originals; internal dt.01, GL2 four iterations, cutoff128, no soliton damping. | Started17:31; both workers paused during18:35–18:37 fine-tuning preparation, preserving their current batches. Remaining58 cases not complete. | Balancing did not remove either targeted failure. Workers213458/213464 are paused for the requested local fine-tune; queued fine-tuned tests will resume them after the priority pair. Old reference-generation workers remain suspended. |
 | 2026-09-13 | 18:38 | Old mixed-wave data preparation for balanced-model fine-tuning | The current dataset omits old shallow/mid/wide mixed wavetrains. User requested a short local fine-tune to test whether restoring these examples improves rollout performance without damping. | Copy six original shallow_steep shards into experiment-only NPY arrays; retain120 frames per simulation and original order-six labels. Seed0 split by whole simulation into80/10/10. Reuse existing fine-tuner with a dataset-path override and corrected output provenance, source commit0e74921 (+5 net lines). Preserve the balanced checkpoint and its normalization; do not add legacy input support to production loaders. | PASS:1,440,000 finite rows,12,000 distinct initial-state hashes; train1,152,000/9600 simulations, validation and test144,000/1200 each. Physical fields bit-identical float32; metadata only promoted to float64. IDs11/12/13 mean zero Tanaka selection. Loader,13 tangent tests, exact-fit gradient regression, Ruff and scoped Pyright pass. | 00:03 (18:38–18:41;183.4135s conversion). | Dataset ready. Original balanced rollout workers paused with70 results saved; source dataset/checkpoint unchanged. Real-checkpoint smoke and full fine-tune recorded separately below. |
 | 2026-09-13 | 18:42 | Mixed-wave fine-tune: real two-GPU warm-start smoke | The new dataset changes input amplitudes and has no Tanaka rows; verify the actual checkpoint, zero-selection loss path, two-device batches and checkpoint saving before a full run. | Execute existing fine-tuner in memory with2,049 evenly spaced TRAIN rows and1,025 validation rows, global batch1024 and1epoch/LR2e-6. Three real updates include a replicated singleton tail; validation uses FP64. Restore the saved final checkpoint and compare normalization metadata with the balanced source. | PASS: three replicated optimizer/state updates, finite training/validation/parameters; train/val translation loss exactly0; source statistics unchanged; final epoch1 checkpoint reloads. Smoke validation L2.00273133 and composite.00381602 are subset results, not rollout evidence. Initial harness import failed before training; adding its script-directory import path fixed the harness, with no further production changes. | 00:01 (successful smoke18:42–18:43, about43s including import/checkpoint validation). | Proceed with the existing five-epoch trainer. Smoke checkpoint is not used as the full-run initialization. |
-| 2026-09-13 | 18:44 | Balanced C27 fine-tuned on old mixed-wave families | Adding the missing mixed wavetrains may improve learned dynamics away from clean solitary-wave profiles. Test this intervention by warm-starting the balanced model while keeping its normalization and architecture fixed. | Launch c27_balanced_mixed_wave_finetune_20260913 from original balanced epoch260, source0e74921. Five epochs,1,125 updates/epoch, batch1024,two RTX6000Ada GPUs, fresh AdamW cosine LR2e-6,weight decay1e-4,no warmup. Train exclusively on1,152,000 old packet rows with simulation-disjoint144,000-row validation. L2+mode6+Hadamard.01/every16/global8 retained; Tanaka-only translation naturally0 because packet IDs11/12/13 are not Tanaka. | RUNNING: startup config/scales audited, PID251906; at18:46 both GPUs100% and120+ finite updates. FP32 training/FP64 validation. Queued all128 exact previous ICs for FP64 unguarded final-checkpoint rollouts, two failed Tanakas first; no reference generation. Source checkpoint and datasets unchanged. | Submitted18:44, trainer started18:45. Warm speed about2.6updates/s; final training/evaluation timings pending. | Evaluate as an ablation, not a proven fix. Fine-tuned workers resume original balanced panel PIDs213458/213464 after their first priority case; remaining old/new panels share GPUs. Coordinator also resumes these identities on exit. Older reference-generation jobs stay suspended. |
+| 2026-09-13 | 18:44 | Balanced C27 fine-tuned on old mixed-wave families | Adding the missing mixed wavetrains may improve learned dynamics away from clean solitary-wave profiles. Test this intervention by warm-starting the balanced model while keeping its normalization and architecture fixed. | Launch c27_balanced_mixed_wave_finetune_20260913 from original balanced epoch260, source0e74921. Five epochs,1,125 updates/epoch, batch1024,two RTX6000Ada GPUs, fresh AdamW cosine LR2e-6,weight decay1e-4,no warmup. Train exclusively on1,152,000 old packet rows with simulation-disjoint144,000-row validation. L2+mode6+Hadamard.01/every16/global8 retained; Tanaka-only translation naturally0 because packet IDs11/12/13 are not Tanaka. | RUNNING: startup config/scales audited, PID251906; at19:08 epochs1–2 complete with finite metrics and epoch3 underway. Epoch2 validation L2.00222811, composite.00268095, tangent0; both GPUs remain assigned. FP32 training/FP64 validation. Queued all128 exact previous ICs for FP64 unguarded final-checkpoint rollouts, two failed Tanakas first; no reference generation. Source checkpoint and datasets unchanged. | Submitted18:44, trainer started18:45. Warm speed about2.6updates/s; final training/evaluation timings pending. | Evaluate as an ablation, not a proven fix. Fine-tuned workers resume original balanced panel PIDs213458/213464 after their first priority case; remaining old/new panels share GPUs. Coordinator also resumes these identities on exit. Older reference-generation jobs stay suspended. |
+| 2026-09-13 | 19:06 | Balanced NaN diagnosis: historical audit and same-state FP64 CPU probes | Earlier investigations found that accurate predictions on clean waves can coexist with unstable responses to developing distortions. Compare the surviving July C27 and balanced checkpoints on identical pre-failure states while both GPUs fine-tune. Also test mean/depth coordinates, raw output above cutoff and energy consistency instead of assuming missing data alone causes NaNs. | Actual-error feedback separates the models: for16624 at t116/t124, July instantaneous log-error-energy feedback rates are-.0974/-.1594, balanced+.1621/+.7394. At16471 t107.2/t115.2 both amplify, balanced more strongly. Initial mean/depth defects are nearly identical (~.036–.040%); raw Gxi above128 has negligible early effect. Shape-consistency defect worsens markedly for balanced16624 but not universally for16471; total-energy injection is not supported. Detailed methods, caveats, artifacts and executed code below. | PASS: CPU-only FP64; final checkpoints July40/balanced260, identical P128 states, no new rollouts or reference labels. Production-RHS agreement <=2.42e-15; canonical zero-mode control corrected before accepting results. Actual-error references are archived FP32 promoted to FP64. Feedback excludes model-reference forcing: local evidence, not a causal dataset result. | 00:01 combined successful numerical probes (energy7.10s, coordinate teacher2.09s/models1.60s, feedback2.88s); completed18:56–19:02. Earlier sandbox checkpoint restores timed out; host CPU restores succeeded without loader changes. Historical audit completed19:06. | No production change. Next discriminating experiment: short same-state checkpoint handoffs before error growth, comparing July, balanced and fine-tuned models without damping. Test stability around slightly distorted waves before broadening generation or increasing loss weights. Current five-epoch fine-tune and queued128-case panel continue unchanged. |
 
 ### Executed commands (upload01:59; training submitted02:03)
 
@@ -464,4 +465,541 @@ finally:
             if str(source.relative_to(Path.cwd())) in command and "surrogate_rollout_batched" in command:
                 os.kill(pid, signal.SIGCONT)
                 print(f"Baseline rollout worker {pid} resumed", flush=True)
+```
+
+### NaN follow-up during mixed-wave fine-tuning (audited19:06)
+
+Models compared:
+
+- Original July C27: `outputs/c27_h1_to_l2_full_20260717_212550`, final epoch40,
+  trained from scratch on v9 with L2 despite the directory name. Its later
+  FP64, damping-off evaluations survived both exact ICs.
+- Balanced September C27: `outputs/c27_balanced_tanaka_tangent_modal_20260913`,
+  final epoch260. First saved NaNs:16471 at179.2,16624 at150.4.
+- These probes do not use the fine-tuned checkpoint. Fine-tuning still runs on
+  both GPUs; epoch1 completed with finite validation L2.00231120 and Hadamard.0176020.
+
+#### Historical evidence and hypotheses not to recycle blindly
+
+[July root-cause report](../notes/nan_root_cause_investigation_20260709.md)
+found small errors on truth states alongside large disagreement between the
+geometric xi evolution equation and the derivative of the learned Hamiltonian.
+Short-wave growth preceded late aliasing and fixed-point failures. C16 improved
+stability with several simultaneous changes, so it did not isolate a single
+cause; today's model already includes its main architecture/RHS ingredients.
+
+[C25 tail diagnosis](../notes/c25_tail_diagnosis_20260717.md) concerned finite,
+mostly phase-drifting rollouts, unlike the present catastrophic failures.
+The September9–10 logs already show FP64 delays rather than cures failure,
+and initial positive DNO spectra do not guarantee stable coupled dynamics.
+Unprojected high-order teacher outputs were not sufficiently converged for
+arbitrary perturbed states. Some older hard-negative retraining worsened
+rollouts; do not turn late corrupted states into labels without checking the teacher.
+
+#### 1. Developing errors, measured on identical state pairs
+
+For each saved balanced state, compare its eta/xi with the archived reference
+at the same simulation/time. Both inputs are projected to modes at most128;
+xi is mean-free. Reference storage is FP32, promoted for this FP64 computation.
+
+For each model separately, subtract its evolution RHS at the reference state
+from its RHS at the balanced state. Dot that difference with the actual state
+error using the positive flat-water energy norm:
+`E = mean(delta_eta^2 + delta_xi*G0(delta_xi))/2`.
+The reported rate is the resulting `dE/dt / E`, i.e. instantaneous
+log-error-energy feedback. It excludes the model's error at the reference state;
+it is neither the full observed error derivative nor an eigenvalue.
+
+| IC | Time | Surface relative error | July feedback rate | Balanced feedback rate |
+| --- | --- | --- | --- | --- |
+| 16471 | 107.2 | .0853% | +.0462 | +.0671 |
+| 16471 | 115.2 | .1060% | +.0263 | +.0713 |
+| 16624 | 116.0 | .0993% | -.0974 | +.1621 |
+| 16624 | 124.0 | .3777% | -.1594 | +.7394 |
+
+At16624/t124, the65–128 band has rates-.3799/+1.2052 (July/balanced);
+the1–32 band has-.0811/+.5739. The mechanism is not exclusively high-frequency.
+At16471 the high-band rate alone is not uniformly worse for balanced, despite
+its larger total feedback at both tested times.
+
+This is a concrete local difference in response to the *actual developing
+error*, stronger evidence than random-direction tests at an initial clean wave.
+It does not prove that the omitted mixed-wave families caused the difference,
+or that switching checkpoints will reverse the full trajectory.
+
+Artifacts:
+`outputs/c27_balanced_tanaka_tangent_modal_20260913/diagnostics_error_feedback_20260913/summary.json`.
+Eight evaluations of state pairs, two checkpoints, CPU-only:2.8805s at19:02.
+Independent read-only audit confirmed matching simulation/frame indices, the
+energy formula and band contributions summing to the total within6.4e-16.
+The xi RHS constant does not affect this norm because G0 annihilates it.
+
+#### 2. Energy and shape consistency: conditional support, not universal failure
+
+The six balanced states are t0/107.2/115.2 for16471 and t0/116/124 for16624.
+The last time in each group is the first saved state whose65–128 eta RMS exceeds
+both10x the reference band RMS and1e-4 of reference total RMS. At those times
+surface errors are only.106%/.378%, before the1% crossings at170.4/128.
+
+Differentiate `H_theta = dx*sum(eta^2 + xi*G_theta(eta,depth)xi)/2`.
+Compare its canonical RHS with the actual projected, dealiased production RHS.
+Both canonical components must omit the zero mode: eta's mean is fixed and xi
+has an arbitrary constant. An initial control retained the eta zero mode;
+correcting that diagnostic projection removed a false control failure. The
+reported production-flow energy rates were unchanged.
+
+Relative xi-equation disagreement:
+
+| IC / time | July | Balanced |
+| --- | --- | --- |
+| 16471 /0 | 7.98% | 6.31% |
+| 16471 /107.2 | 41.83% | 36.36% |
+| 16471 /115.2 | 61.86% | 55.06% |
+| 16624 /0 | 13.61% | 10.46% |
+| 16624 /116 | 123.04% | 133.38% |
+| 16624 /124 | 89.85% | 187.46% |
+
+Balanced is initially better and remains better on these16471 states.
+Thus shape inconsistency alone does not distinguish both failures. At16624/t124,
+normalized total-energy rates are negative: July-1.094e-4,
+balanced-7.067e-4. The model can amplify trajectory errors without injecting
+net total energy; do not report a simple energy-addition cause.
+
+Controls: production-RHS agreement <=2.42e-15; reverse-gradient versus JVP
+energy-rate agreement <=5.38e-16 after normalization; canonical energy-rate
+residual <=1.73e-16; eta-equation relative defect <=7.59e-15; flat control passes.
+Fourteen evaluations including flat controls:7.1008s, completed18:59.
+
+Artifacts: `diagnostics_energy_20260913/{summary.json,states.npz,console.log}`
+under the balanced run.
+
+#### 3. Weakened alternatives
+
+- **Output above128 entering nonlinear products:** a saved-field NumPy audit
+  found the old surviving16471 rollout already has larger early tail effects.
+  For balanced16624/t124, projecting Gxi before nonlinear products changes the
+  total xi RHS by only.00148%, and shape defect187.4625% to187.4623%.
+  Tail effects become large near the final finite frames (e.g.16624/t149.6),
+  consistent with a late amplifier, not an established trigger. No filter change.
+- **Positive eta mean / depth coordinates:** compare physically equivalent
+  `(eta, h)` and `(eta-c, h+c)`, c=half/full mean.
+  Full-mean prediction changes for16471 are July.03584% versus balanced.03650%;
+  for16624,.03850% versus.03977%. Small and almost identical: deprioritize.
+  Projected teacher orders6/8/10 converge; M10 full-shift discrepancies are
+  1.79e-7/4.44e-7. CPU teacher2.0926s at18:56, models1.6036s at18:59.
+  Artifacts: `diagnostics_mean_depth_20260913/{summary.json,teacher.json}`.
+
+Initial sandbox model restores hung inside Orbax checkpoint finalization checks;
+a bounded175s attempt timed out. Host execution with CPU-only JAX restored the
+same checkpoints promptly. No checkpoint loader changes, GPU diagnostics, new
+teacher trajectories, rollout damping or production refactor were needed.
+
+#### Next experiment
+
+Use a short common-state restart before ripple growth: feed the same saved
+eta/xi into July, balanced and (once finished) fine-tuned models, holding FP64,
+dt, iterations and cutoff fixed. Compare whether the error-feedback difference
+persists over time, and separate response to an existing error from error
+created on a clean reference state. This is a recommendation, not an additional
+queued GPU job. The already queued full128-case panel is unchanged.
+
+If the distinction survives that test, target training around controlled small
+distortions of solitary waves, with converged projected labels/shape checks.
+Neither equal family counts nor more copies of clean travelling waves guarantee
+coverage of those directions.
+
+#### Executed CPU diagnostic code
+
+These are experiment-only commands, preserved here rather than adding production
+utilities. All successful model probes used host execution with
+`JAX_PLATFORMS=cpu`, empty `CUDA_VISIBLE_DEVICES`, bounded CPU affinity and FP64.
+The mean/depth and error-feedback blocks set their CPU environment explicitly.
+
+Energy/shape probe invocation (host CPU, repository working directory):
+
+```sh
+timeout 280s taskset -c 0-3 env JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES='' \
+  OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+  UV_OFFLINE=1 UV_NO_SYNC=1 UV_NO_CACHE=1 \
+  XLA_FLAGS='--xla_cpu_multi_thread_eigen=false --xla_force_host_platform_device_count=1' \
+  .venv/bin/python -u /tmp/dno_energy_diagnostic_20260913.py \
+  > outputs/c27_balanced_tanaka_tangent_modal_20260913/diagnostics_energy_20260913/console.log 2>&1
+```
+
+Energy/shape probe (the corrected final scratch program):
+
+```python
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from time import perf_counter
+
+import numpy as np
+
+ROOT = Path('/home/johnma/dno-fno')
+RUN = ROOT / 'outputs/c27_balanced_tanaka_tangent_modal_20260913'
+OLD = ROOT / 'outputs/c27_h1_to_l2_full_20260717_212550'
+ARCHIVE = ROOT / 'outputs/c27_paper_dataset_20260908_141423/eval_final_n32/tanaka_trajs.npz'
+OUT = RUN / 'diagnostics_energy_20260913'
+OUT.mkdir(exist_ok=True)
+started = perf_counter()
+started_local = datetime.now().astimezone().isoformat()
+nx = 1024
+length = 2 * np.pi
+dx = length / nx
+k_np = np.fft.fftfreq(nx, 1 / nx)
+retained = np.abs(k_np) <= 128
+high = (np.abs(k_np) > 64) & retained
+states: list[dict[str, object]] = []
+eta_states: list[np.ndarray] = []
+xi_states: list[np.ndarray] = []
+depth_states: list[float] = []
+onsets: list[dict[str, object]] = []
+with np.load(ARCHIVE, allow_pickle=False) as archive:
+    old_ids = archive['simulation_ids'].tolist()
+    old_eta = archive['truth_eta']
+    for sid in (16471, 16624):
+        with np.load(RUN / f'eval_final_n32_fp64/simulation_{sid}.npz') as saved:
+            times = saved['times']
+            eta = saved['pred_eta'][:, 0]
+            xi = saved['pred_xi'][:, 0]
+            relative_error = saved['rel_l2_eta'][:, 0]
+            depth = float(saved['depths'][0])
+        reference = old_eta[:, old_ids.index(sid)].astype(np.float64)
+        with np.errstate(invalid='ignore', over='ignore'):
+            eta_fft = np.fft.fft(eta, axis=-1, norm='forward')
+            ref_fft = np.fft.fft(reference, axis=-1, norm='forward')
+            high_rms = np.sqrt(np.sum(np.abs(eta_fft[:, high]) ** 2, axis=-1))
+            ref_high_rms = np.sqrt(np.sum(np.abs(ref_fft[:, high]) ** 2, axis=-1))
+            ref_rms = np.sqrt(np.mean(reference ** 2, axis=-1))
+        finite = np.isfinite(eta).all(axis=-1) & np.isfinite(xi).all(axis=-1)
+        growth = np.flatnonzero(finite & (high_rms > 10 * ref_high_rms) & (high_rms > 1e-4 * ref_rms))
+        if not growth.size:
+            raise RuntimeError(f'No finite high-band onset for {sid}')
+        onset = int(growth[0])
+        pre = max(1, onset - 10)
+        errors = {
+            str(threshold): float(times[indices[0]]) if indices.size else None
+            for threshold in (0.001, 0.01, 0.05)
+            for indices in (np.flatnonzero(finite & (relative_error > threshold)),)
+        }
+        onsets.append({'simulation_id': sid, 'growth_time': float(times[onset]), 'eta_error_crossing_times': errors})
+        for label, index in (('initial', 0), ('pre_growth', pre), ('growth_onset', onset)):
+            projected_eta = np.fft.ifft(np.fft.fft(eta[index]) * retained).real
+            projected_xi = np.fft.ifft(np.fft.fft(xi[index]) * retained).real
+            projected_xi -= projected_xi.mean()
+            states.append({
+                'simulation_id': sid, 'selection': label, 'time': float(times[index]),
+                'depth': depth, 'relative_eta_error': float(relative_error[index]),
+                'eta_highband_rms': float(high_rms[index]),
+                'reference_eta_highband_rms': float(ref_high_rms[index]),
+                'projection_eta_rms_change': float(np.sqrt(np.mean((projected_eta - eta[index]) ** 2))),
+                'projection_xi_rms_change': float(np.sqrt(np.mean((projected_xi - xi[index]) ** 2))),
+            })
+            eta_states.append(projected_eta)
+            xi_states.append(projected_xi)
+            depth_states.append(depth)
+states.append({'simulation_id': None, 'selection': 'flat_control', 'time': 0.0, 'depth': depth_states[0]})
+eta_states.append(np.zeros(nx))
+xi_states.append(0.01 * np.sin(3 * np.arange(nx) * dx))
+depth_states.append(depth_states[0])
+np.savez_compressed(OUT / 'states.npz', eta=np.stack(eta_states), xi=np.stack(xi_states), depth=np.array(depth_states))
+report: dict[str, object] = {
+    'started_local': started_local, 'onset_definition': 'eta RMS in 64<abs(k)<=128 exceeds 10x archived reference band RMS and 1e-4 reference total RMS',
+    'onsets': onsets, 'states': states, 'records': [],
+    'state_protocol': 'Same saved balanced states for both models; project eta/xi to abs(k)<=128 and center xi, matching the retained phase space. Archived references used only for onset selection, not teacher labels.',
+    'energy': 'H_theta = 0.5*dx*sum(eta**2 + xi*meanfree_model_Gxi)',
+    'normalization': 'Energy rate divided by positive flat-wave E0=0.5*dx*sum(eta**2 + xi*G0(xi)); coupled defect uses sqrt(mean(delta_eta**2 + delta_xi*G0(delta_xi))).',
+    'finite_difference_time_step': 1e-4,
+}
+(OUT / 'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False))
+print(json.dumps({'onsets': onsets, 'selected_states': states}), flush=True)
+
+import sys
+sys.path.insert(0, str(ROOT))
+import jax
+import jax.numpy as jnp
+from solver.evals import model_rollout as mr
+from solver.solvers import time_integrator as ti
+from solver.solvers.dno_series_jax import myfft, myifft
+
+jax.config.update('jax_enable_x64', True)
+assert jax.default_backend() == 'cpu'
+k = jnp.asarray(k_np)
+projector = jnp.asarray(retained)
+
+def project(field: jax.Array) -> jax.Array:
+    return jnp.fft.ifft(jnp.fft.fft(field, axis=-1) * projector, axis=-1).real
+
+for model_name, run_dir in (('july_c27', OLD), ('balanced_c27', RUN)):
+    model_started = perf_counter()
+    loaded = mr.load_run(run_dir, checkpoint='final')
+    assert all(x.dtype == jnp.float64 for x in jax.tree.leaves(loaded.params))
+    predict = mr.build_predict_gxi_batched(loaded)
+
+    def energy(eta: jax.Array, xi: jax.Array, log_depth: jax.Array) -> jax.Array:
+        return 0.5 * dx * jnp.sum(eta * eta + xi * predict(eta, xi, log_depth))
+
+    @jax.jit
+    def diagnose(eta: jax.Array, xi: jax.Array, log_depth: jax.Array) -> dict[str, jax.Array]:
+        h = jnp.exp(log_depth).reshape(-1, 1)
+        g0 = jnp.abs(k)[None, :] * jnp.tanh(h * jnp.abs(k)[None, :])
+        q = predict(eta, xi, log_depth)
+        eta_x = ti.spectral_dx(eta, k)
+        xi_x = ti.spectral_dx(xi, k)
+        rhs_eta = project(q)
+        rhs_xi = project(-eta + ti.dealiased_zakharov_xi_rhs(eta_x, xi_x, q))
+        rhs_xi -= rhs_xi.mean(axis=-1, keepdims=True)
+        H, (grad_eta, grad_xi) = jax.value_and_grad(energy, argnums=(0, 1))(eta, xi, log_depth)
+        canonical_eta = project(grad_xi / dx)
+        canonical_eta -= canonical_eta.mean(axis=-1, keepdims=True)
+        canonical_xi = -project(grad_eta / dx)
+        canonical_xi -= canonical_xi.mean(axis=-1, keepdims=True)
+        defect_eta = rhs_eta - canonical_eta
+        defect_xi = rhs_xi - canonical_xi
+        Hdot = jnp.sum(grad_eta * rhs_eta + grad_xi * rhs_xi)
+        filtered_rhs_xi = project(-eta + ti.dealiased_zakharov_xi_rhs(eta_x, xi_x, project(q)))
+        filtered_rhs_xi -= filtered_rhs_xi.mean(axis=-1, keepdims=True)
+        filtered_Hdot = jnp.sum(grad_eta * rhs_eta + grad_xi * filtered_rhs_xi)
+        filtered_defect_xi = filtered_rhs_xi - canonical_xi
+        _, Hdot_jvp = jax.jvp(energy, (eta, xi, log_depth), (rhs_eta, rhs_xi, jnp.zeros_like(log_depth)))
+        eps = 1e-4
+        Hdot_fd = (energy(eta + eps * rhs_eta, xi + eps * rhs_xi, log_depth) - energy(eta - eps * rhs_eta, xi - eps * rhs_xi, log_depth)) / (2 * eps)
+        xi_g0 = jnp.fft.ifft(jnp.fft.fft(xi, axis=-1) * g0, axis=-1).real
+        E0 = 0.5 * dx * jnp.sum(eta * eta + xi * xi_g0)
+        rhs_xi_g0 = jnp.fft.ifft(jnp.fft.fft(rhs_xi, axis=-1) * g0, axis=-1).real
+        defect_xi_g0 = jnp.fft.ifft(jnp.fft.fft(defect_xi, axis=-1) * g0, axis=-1).real
+        coupled_defect = jnp.sqrt(jnp.maximum(jnp.mean(defect_eta**2 + defect_xi * defect_xi_g0), 0))
+        coupled_rhs = jnp.sqrt(jnp.maximum(jnp.mean(rhs_eta**2 + rhs_xi * rhs_xi_g0), 0))
+        params = ti.SolverParams(nx=nx, length=length, depth=h, gravity=1.0, dno_order=6, pad_factor=8, filter_fraction=0.25, k=k, g0=g0)
+        spectral = ti.SpectralState(myfft(eta, nx), myfft(xi, nx))
+        nonlinear = mr._rhs_nonlinear_if_surrogate(spectral, jnp.float64(0), params, lambda e, x: predict(e, x, log_depth))
+        actual_eta = project(myifft(nonlinear.eta_hat) + xi_g0)
+        actual_xi = project(myifft(nonlinear.xi_hat) - eta)
+        actual_xi -= actual_xi.mean(axis=-1, keepdims=True)
+        return {
+            'H': H, 'flat_energy': E0, 'Hdot': Hdot, 'Hdot_over_flat_energy': Hdot / E0,
+            'filtered_Gxi_Hdot_over_flat_energy': filtered_Hdot / E0,
+            'filtered_Gxi_rhs_xi_relative_difference': jnp.linalg.norm(filtered_rhs_xi - rhs_xi) / jnp.maximum(jnp.linalg.norm(rhs_xi), 1e-30),
+            'filtered_Gxi_xi_hamiltonian_defect_relative': jnp.linalg.norm(filtered_defect_xi) / jnp.maximum(jnp.linalg.norm(filtered_rhs_xi), 1e-30),
+            'Hdot_jvp': Hdot_jvp, 'Hdot_fd': Hdot_fd,
+            'jvp_absolute_disagreement_over_flat_energy': jnp.abs(Hdot_jvp - Hdot) / E0,
+            'fd_absolute_disagreement_over_flat_energy': jnp.abs(Hdot_fd - Hdot) / E0,
+            'canonical_flow_energy_rate_over_flat_energy': jnp.sum(grad_eta * canonical_eta + grad_xi * canonical_xi) / E0,
+            'coupled_hamiltonian_defect_relative': coupled_defect / jnp.maximum(coupled_rhs, 1e-30),
+            'eta_hamiltonian_defect_relative': jnp.linalg.norm(defect_eta) / jnp.maximum(jnp.linalg.norm(rhs_eta), 1e-30),
+            'xi_hamiltonian_defect_relative': jnp.linalg.norm(defect_xi) / jnp.maximum(jnp.linalg.norm(rhs_xi), 1e-30),
+            'actual_rhs_max_absolute_disagreement': jnp.maximum(jnp.max(jnp.abs(actual_eta - rhs_eta)), jnp.max(jnp.abs(actual_xi - rhs_xi))),
+            'rms_rhs_eta': jnp.sqrt(jnp.mean(rhs_eta**2)), 'rms_rhs_xi': jnp.sqrt(jnp.mean(rhs_xi**2)),
+        }
+
+    for index, state_meta in enumerate(states):
+        values = diagnose(jnp.asarray(eta_states[index][None]), jnp.asarray(xi_states[index][None]), jnp.asarray([np.log(depth_states[index])]))
+        values = {key: float(value) for key, value in jax.device_get(values).items()}
+        if not all(np.isfinite(value) for value in values.values()):
+            raise FloatingPointError(values)
+        if values['actual_rhs_max_absolute_disagreement'] > 1e-10 or values['jvp_absolute_disagreement_over_flat_energy'] > 1e-10 or abs(values['canonical_flow_energy_rate_over_flat_energy']) > 1e-10:
+            raise AssertionError(values)
+        record = {'model': model_name, 'checkpoint_epoch': loaded.epoch, 'state_index': index, **state_meta, **values}
+        report['records'].append(record)
+        report['elapsed_seconds'] = perf_counter() - started
+        (OUT / 'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False))
+        print(json.dumps(record, allow_nan=False), flush=True)
+    print(f'MODEL_COMPLETE {model_name} seconds={perf_counter() - model_started:.3f}', flush=True)
+    jax.clear_caches()
+
+report['completed_local'] = datetime.now().astimezone().isoformat()
+report['elapsed_seconds'] = perf_counter() - started
+report['status'] = 'complete'
+(OUT / 'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False))
+print(f'COMPLETE {report["elapsed_seconds"]:.3f}s {OUT}', flush=True)
+```
+
+Mean/depth projected teacher:
+
+```python
+import os
+os.environ.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", XLA_FLAGS="--xla_cpu_multi_thread_eigen=false")
+os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[-4:])
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+import numpy as np
+import jax
+import jax.numpy as jnp
+from solver.solvers.dno_series_jax import dno_series_eval
+jax.config.update("jax_enable_x64", True)
+start=time.monotonic()
+root=Path("outputs/c27_balanced_tanaka_tangent_modal_20260913")
+eta,xi,h=[],[],[]
+mask=np.arange(513)<=128
+for sim in (16471,16624):
+    with np.load(root/"eval_final_n32_fp64"/f"simulation_{sim}.npz") as z:
+        e,x,d=z["initial_eta"],z["initial_xi"],float(z["depths"][0])
+    e=np.fft.irfft(np.fft.rfft(e)*mask,n=1024)
+    x=np.fft.irfft(np.fft.rfft(x)*mask,n=1024);x-=x.mean()
+    for fraction in (0.,.5,1.):
+        c=float(e.mean())*fraction
+        eta.append(e-c);xi.append(x);h.append(d+c)
+eta,xi,h=map(jnp.asarray,(np.stack(eta),np.stack(xi),np.array(h)[:,None]))
+k=jnp.asarray(2*np.pi*np.fft.fftfreq(1024,d=2*np.pi/1024))
+teachers={}
+result=dict(started_local=datetime.now().astimezone().isoformat(),state_order="16471 c=0,halfmean,mean;16624 c=0,halfmean,mean",pad_factor=8,output_cutoff=128,dtype="float64",models_not_evaluated_here=True)
+for order in (6,8,10):
+    stage=time.monotonic()
+    value=np.asarray(dno_series_eval(eta,xi,k,h,order,pad_factor=8))
+    value=np.fft.irfft(np.fft.rfft(value)*mask,n=1024)
+    value-=value.mean(axis=-1,keepdims=True)
+    teachers[order]=value
+    result[str(order)]=dict(seconds=time.monotonic()-stage,invariance_relative_to_same_order_c0=[float(np.linalg.norm(value[i]-value[(i//3)*3])/np.linalg.norm(value[(i//3)*3])) for i in range(6)])
+    print(order,result[str(order)],flush=True)
+result["order_comparisons"]={f"{lo}_to_{hi}":[float(v) for v in np.linalg.norm(teachers[hi]-teachers[lo],axis=-1)/np.linalg.norm(teachers[hi],axis=-1)] for lo,hi in ((6,8),(8,10))}
+result["all_finite"]=all(np.isfinite(v).all() for v in teachers.values())
+result["elapsed_seconds"]=time.monotonic()-start
+result["completed_local"]=datetime.now().astimezone().isoformat()
+(root/"diagnostics_mean_depth_20260913"/"teacher.json").write_text(json.dumps(result,indent=2)+"\n")
+print("FINAL",json.dumps(result),flush=True)
+```
+
+Mean/depth successful model probe:
+
+```python
+import os
+os.environ.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", TF_NUM_INTRAOP_THREADS="1", TF_NUM_INTEROP_THREADS="1", XLA_FLAGS="--xla_cpu_multi_thread_eigen=false", MPLCONFIGDIR="/tmp/dno-mean-depth-matplotlib")
+os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
+os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[-4:])
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+import numpy as np
+import jax
+import jax.numpy as jnp
+from solver.evals.model_rollout import load_run, build_predict_gxi_batched
+jax.config.update("jax_enable_x64", True)
+start=time.monotonic()
+root=Path("outputs/c27_balanced_tanaka_tangent_modal_20260913")
+destination=root/"diagnostics_mean_depth_20260913"
+result=json.loads((destination/"summary.json").read_text())
+result["host_model_attempt"]=dict(started_local=datetime.now().astimezone().isoformat(),cpu_affinity=sorted(os.sched_getaffinity(0)),jax_devices=[str(d) for d in jax.devices()],protocol="Same physical domain eta-c,h+c; xi unchanged and mean-free; P128 inputs and reported model outputs; six initial states, final checkpoints, float64 CPU.")
+eta,xi,h=[],[],[]
+states=[]
+mask=np.arange(513)<=128
+for sim in (16471,16624):
+    with np.load(root/"eval_final_n32_fp64"/f"simulation_{sim}.npz") as z:
+        e,x,d=z["initial_eta"],z["initial_xi"],float(z["depths"][0])
+    e=np.fft.irfft(np.fft.rfft(e)*mask,n=1024)
+    x=np.fft.irfft(np.fft.rfft(x)*mask,n=1024)
+    x-=x.mean()
+    for fraction in (0.,.5,1.):
+        c=float(e.mean())*fraction
+        eta.append(e-c);xi.append(x);h.append(d+c)
+        states.append(dict(simulation_id=sim,mean_removed_fraction=fraction,c=c,depth=d+c,eta_mean=float((e-c).mean())))
+eta,xi,h=map(jnp.asarray,(np.stack(eta),np.stack(xi),np.array(h)))
+result["models"]={}
+for name,run in (("july",Path("outputs/c27_h1_to_l2_full_20260717_212550")),("balanced",root)):
+    stage=time.monotonic()
+    loaded=load_run(run,checkpoint="final")
+    print("LOADED",name,time.monotonic()-stage,flush=True)
+    predict=build_predict_gxi_batched(loaded)
+    raw=np.asarray(predict(eta,xi,jnp.log(h)))
+    value=np.fft.irfft(np.fft.rfft(raw)*mask,n=1024)
+    cases=[]
+    for i in range(6):
+        base=(i//3)*3
+        cases.append(dict(**states[i],relative_invariance_defect=float(np.linalg.norm(value[i]-value[base])/np.linalg.norm(value[base])),absolute_rms_defect=float(np.sqrt(np.mean((value[i]-value[base])**2))),raw_high_band_relative_norm=float(np.linalg.norm(raw[i]-value[i])/np.linalg.norm(value[i]))))
+    result["models"][name]=dict(run=str(run),epoch=loaded.epoch,seconds=time.monotonic()-stage,all_finite=bool(np.isfinite(raw).all()),cases=cases)
+    (destination/"summary.json").write_text(json.dumps(result,indent=2)+"\n")
+    print("MODEL",name,json.dumps(result["models"][name]),flush=True)
+result["status"]="complete"
+result["host_model_attempt"]["elapsed_seconds"]=time.monotonic()-start
+result["host_model_attempt"]["completed_local"]=datetime.now().astimezone().isoformat()
+result["interpretation_limits"]=["Model coordinate-invariance defect is not itself a proof of rollout instability; compare the surviving July model.","Teacher finite-order coordinate dependence falls with order; the completed order10/P128 check is reused unchanged."]
+(destination/"summary.json").write_text(json.dumps(result,indent=2)+"\n")
+print("FINAL",json.dumps(result["host_model_attempt"]),flush=True)
+```
+
+Actual-error feedback:
+
+```python
+import os
+os.environ.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", TF_NUM_INTRAOP_THREADS="1", TF_NUM_INTEROP_THREADS="1", XLA_FLAGS="--xla_cpu_multi_thread_eigen=false", MPLCONFIGDIR="/tmp/dno-error-feedback-matplotlib")
+os.environ.setdefault("NCCL_P2P_LEVEL","PHB")
+os.sched_setaffinity(0,sorted(os.sched_getaffinity(0))[-4:])
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+import numpy as np
+import jax
+import jax.numpy as jnp
+from solver.evals.model_rollout import load_run,build_predict_gxi_batched
+from solver.solvers import time_integrator as ti
+jax.config.update("jax_enable_x64",True)
+start=time.monotonic()
+root=Path("outputs/c27_balanced_tanaka_tangent_modal_20260913")
+source=root/"diagnostics_energy_20260913"
+destination=root/"diagnostics_error_feedback_20260913"
+destination.mkdir(exist_ok=True)
+metadata=json.loads((source/"summary.json").read_text())
+indices=[1,2,4,5]
+states=[metadata["states"][i] for i in indices]
+with np.load(source/"states.npz") as z:
+    pred_eta,pred_xi,depth=z["eta"][indices],z["xi"][indices],z["depth"][indices]
+reference=Path("outputs/c27_paper_dataset_20260908_141423/eval_final_n32/tanaka_trajs.npz")
+with np.load(reference) as z:
+    ids=z["simulation_ids"]
+    frame_indices=[int(round(s["time"]/.8)) for s in states]
+    columns=[int(np.flatnonzero(ids==s["simulation_id"])[0]) for s in states]
+    truth_eta=z["truth_eta"][frame_indices,columns].astype(np.float64)
+    truth_xi=z["truth_xi"][frame_indices,columns].astype(np.float64)
+eta=np.concatenate((pred_eta,truth_eta))
+xi=np.concatenate((pred_xi,truth_xi))
+k=2*np.pi*np.fft.fftfreq(1024,d=2*np.pi/1024)
+mask=abs(k)<=128
+eta=np.fft.ifft(np.fft.fft(eta)*mask).real
+xi=np.fft.ifft(np.fft.fft(xi)*mask).real
+xi-=xi.mean(axis=-1,keepdims=True)
+delta_eta=eta[:4]-eta[4:]
+delta_xi=xi[:4]-xi[4:]
+g0=k[None,:]*np.tanh(depth[:,None]*k[None,:])
+depth_all=np.concatenate((depth,depth))
+eta_j,xi_j,k_j=map(jnp.asarray,(eta,xi,k))
+eta_x=ti.spectral_dx(eta_j,k_j)
+xi_x=ti.spectral_dx(xi_j,k_j)
+result=dict(started_local=datetime.now().astimezone().isoformat(),cpu_affinity=sorted(os.sched_getaffinity(0)),jax_devices=[str(d) for d in jax.devices()],source_states=str(source/"states.npz"),reference=str(reference),reference_storage_dtype="float32 promoted to float64; no new reference generation",protocol="For each identical balanced-error state pair, evaluate both models at pred and archived-truth states. P128 eta/xi and centered xi. Full physical RHS=(P128 Gxi, -eta+P128 dealiased_Zakharov_xi_rhs), gravity1. Raw Gxi enters nonlinear products before final projection. No teacher needed for model-increment difference.",rate_definition="E=.5*mean(delta_eta^2+delta_xi*G0(delta_xi)); feedback_dE=mean(delta_eta*delta_Feta+delta_xi*G0(delta_Fxi)); rate=feedback_dE/E. This is instantaneous log-energy growth due to same-model error feedback, not total observed error derivative, which also includes model-reference forcing.",states=states,records=[])
+for name,run in (("july",Path("outputs/c27_h1_to_l2_full_20260717_212550")),("balanced",root)):
+    stage=time.monotonic()
+    loaded=load_run(run,checkpoint="final")
+    predict=build_predict_gxi_batched(loaded)
+    gxi=predict(eta_j,xi_j,jnp.log(jnp.asarray(depth_all)))
+    rhs_eta=np.asarray(ti.apply_lowpass(gxi,k_j,.25))
+    rhs_xi=np.asarray(-eta_j+ti.apply_lowpass(ti.dealiased_zakharov_xi_rhs(eta_x,xi_x,gxi),k_j,.25))
+    df_eta=rhs_eta[:4]-rhs_eta[4:]
+    df_xi=rhs_xi[:4]-rhs_xi[4:]
+    bands={}
+    for label,lo,hi in (("all",0,128),("1_32",1,32),("33_64",33,64),("65_128",65,128)):
+        band=(abs(k)>=lo)&(abs(k)<=hi)
+        de,dx,dfe,dfx=[np.fft.ifft(np.fft.fft(v)*band).real for v in (delta_eta,delta_xi,df_eta,df_xi)]
+        g0dx=np.fft.ifft(g0*np.fft.fft(dx)).real
+        g0dfx=np.fft.ifft(g0*np.fft.fft(dfx)).real
+        energy=.5*np.mean(de**2+dx*g0dx,axis=-1)
+        feedback=np.mean(de*dfe+dx*g0dfx,axis=-1)
+        bands[label]=(energy,feedback)
+    for i,state in enumerate(states):
+        record=dict(model=name,checkpoint_epoch=loaded.epoch,**state,bands={})
+        for label,(energy,feedback) in bands.items():
+            record["bands"][label]=dict(error_energy=float(energy[i]),feedback_dE=float(feedback[i]),feedback_log_energy_growth_rate=float(feedback[i]/energy[i]),fraction_of_total_error_energy=float(energy[i]/bands["all"][0][i]),contribution_to_total_growth_rate=float(feedback[i]/bands["all"][0][i]))
+        result["records"].append(record)
+    result[name+"_seconds"]=time.monotonic()-stage
+    assert np.isfinite(rhs_eta).all() and np.isfinite(rhs_xi).all()
+    print(name,json.dumps(result["records"][-4:]),flush=True)
+result["all_rhs_finite"]=True
+result["elapsed_seconds"]=time.monotonic()-start
+result["completed_local"]=datetime.now().astimezone().isoformat()
+(destination/"summary.json").write_text(json.dumps(result,indent=2)+"\n")
+print("DONE",result["elapsed_seconds"],result["completed_local"],flush=True)
 ```
