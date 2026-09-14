@@ -46,4 +46,5 @@ fi
 
 RUN_NAME="$RUN_NAME" \
 DATASET="$DATASET" \
+EPOCHS=40 \
   bash scripts/launch_c27_h1_to_l2_ablation.sh

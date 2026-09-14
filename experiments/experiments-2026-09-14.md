@@ -20,3 +20,14 @@ IDs and251-frame time grids against the baseline for both priority ICs; all
 saved physical fields are float64. Recomputed errors agree within7.9e-13.
 The completed families are not a random subset of128: known Tanaka failures ran
 first, then Stokes/JONSWAP, then remaining Tanaka. BF has not yet saved results.
+
+Training prescription correction, 02:17: the user requires exactly 40 epochs,
+with all TRAIN rows shuffled together once per epoch. No family row weighting,
+oversampling, downsampling or epoch adjustment to match previous optimizer-update
+counts. The earlier 117-epoch proposal remains canceled. The Modal C27 launcher
+now passes literal `--epochs 40`; the local paper-dataset launcher sets `EPOCHS=40`
+when calling its training script, overriding inherited values. Existing physics
+loss coefficients are unchanged. Shell syntax checks pass. Pytest is unavailable,
+so the existing split/shuffled-epoch test was called directly; it and 21 additional
+two-device row-coverage checks pass, including odd tails (00:00, under one second).
+Merge these launch settings; no upload, generation or training was started.

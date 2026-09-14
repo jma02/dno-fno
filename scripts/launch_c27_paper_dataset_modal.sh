@@ -16,7 +16,6 @@ GPU_TAG="${GPU_SPEC//:/x}"
 GPU_TAG="${GPU_TAG,,}"
 RUN_NAME="${RUN_NAME:-c27_tanaka_tangent_modal_${GPU_TAG}_$(date +%Y%m%d_%H%M%S)}"
 DATASET="${DATASET:-/data/outputs/paper_dataset/arrays}"
-EPOCHS="${EPOCHS:-40}"
 mkdir -p logs
 LOG="logs/${RUN_NAME}.log"
 
@@ -34,7 +33,7 @@ MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --batch-size 1024 \
   --lr 2e-5 \
   --weight-decay 1e-4 \
-  --epochs "$EPOCHS" \
+  --epochs 40 \
   --cs-mult-hidden 160 \
   --spawn \
   --trainer-args "$TRAINER_ARGS" 2>&1 | tee "$LOG"
