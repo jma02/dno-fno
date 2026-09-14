@@ -31,11 +31,11 @@ class TemporalSelectionTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(indices) > 0))
 
     def test_uniform_selection_is_exact_endpoint_pinned_and_unique(self) -> None:
-        indices = select_uniform_times(359, keep_samples=16)
-        expected = np.floor(np.arange(16) * 358 / 15 + 0.5).astype(np.int32)
+        indices = select_uniform_times(270, keep_samples=200)
+        expected = np.floor(np.arange(200) * 269 / 199 + 0.5).astype(np.int32)
 
         np.testing.assert_array_equal(indices, expected)
-        self.assertEqual((indices[0], indices[-1]), (0, 358))
+        self.assertEqual((indices[0], indices[-1]), (0, 269))
         self.assertTrue(np.all(np.diff(indices) > 0))
 
 

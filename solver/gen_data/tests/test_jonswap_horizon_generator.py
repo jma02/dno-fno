@@ -192,7 +192,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         ):
             rows_by_simulation = integrate_and_subsample_jonswap(
                 initial,
-                (_grid(16),) * 3,
+                (_grid(200),) * 3,
                 peak_periods,
                 numerical=numerical,
                 solver_batch_size=3,
@@ -240,7 +240,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         ):
             (rows,) = integrate_and_subsample_jonswap(
                 initial,
-                (_grid(16),),
+                (_grid(200),),
                 np.asarray([0.4]),
                 numerical=numerical,
                 solver_batch_size=1,
@@ -278,7 +278,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         ):
             rows_by_simulation = integrate_and_subsample_jonswap(
                 initial,
-                tuple(map(_grid, (19, 16, 18, 16, 20))),
+                tuple(map(_grid, (203, 200, 202, 200, 204))),
                 peak_periods,
                 numerical=numerical,
                 solver_batch_size=2,
@@ -293,7 +293,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
             np.concatenate([call[2] for call in adjustment_calls]),
             10.0 * peak_periods[[1, 3, 2, 0, 4]],
         )
-        self.assertEqual(production_calls, [(1, 16), (2, 19)])
+        self.assertEqual(production_calls, [(1, 200), (2, 203)])
         realized = (
             np.floor(20.0 * peak_periods / numerical.saved_dt) * numerical.saved_dt
         )
@@ -324,7 +324,7 @@ class JonswapHorizonGeneratorTests(unittest.TestCase):
         ):
             (rows,) = integrate_and_subsample_jonswap(
                 initial,
-                (_grid(16),),
+                (_grid(200),),
                 np.asarray([0.4]),
                 numerical=numerical,
                 solver_batch_size=1,

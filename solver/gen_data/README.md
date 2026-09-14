@@ -113,9 +113,10 @@ shuffles all training rows together each epoch. Normalization statistics come
 only from training rows and are reused for validation/test. There is no manifest,
 trajectory map, per-family reweighting, or per-simulation epoch sampling.
 
-Retained frames per accepted simulation remain family-specific: Stokes contributes
-1, Tanaka and Benjamin--Feir 200 each, and JONSWAP/TMA 16. Equal simulation counts
-therefore do not mean equal row counts or equal training contributions.
+Stokes contributes one row per accepted simulation; Tanaka, Benjamin--Feir and
+JONSWAP/TMA each retain 200 frames. Equal simulation counts still give Stokes
+fewer training rows. Existing 16-frame JONSWAP files need regeneration in a new
+output directory; resuming an old run will reuse its completed batches.
 
 ## Entrypoints
 

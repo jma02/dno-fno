@@ -12,8 +12,9 @@ from solver.gen_data.pipeline.time_selection import subsample_trajectories
 
 
 class TrajectorySubsamplingTest(unittest.TestCase):
-    def test_each_family_keeps_its_declared_number_of_frames(self) -> None:
-        times = 0.08 * np.arange(359, dtype=np.float64)
+    def test_each_family_keeps_200_distinct_endpoint_pinned_frames(self) -> None:
+        # The shortest allowed JONSWAP production grid contains 270 frames.
+        times = 0.08 * np.arange(270, dtype=np.float64)
         x = 2.0 * np.pi * np.arange(8) / 8
         eta = times[:, None] + np.cos(x)[None]
         trajectory = TrajectorySamples(times, eta, 2.0 * eta, 3.0 * eta)
@@ -21,7 +22,7 @@ class TrajectorySubsamplingTest(unittest.TestCase):
         families: tuple[tuple[TrajectoryFamily, int], ...] = (
             ("tanaka", 200),
             ("benjamin_feir", 200),
-            ("jonswap_tma", 16),
+            ("jonswap_tma", 200),
         )
         for family, expected_count in families:
             with self.subTest(family=family):
@@ -38,6 +39,7 @@ class TrajectorySubsamplingTest(unittest.TestCase):
                     (rows.time[0], rows.time[-1]),
                     (times[0], times[-1]),
                 )
+                self.assertTrue(np.all(np.diff(rows.time) > 0))
                 np.testing.assert_allclose(rows.xi, 2.0 * rows.eta)
                 np.testing.assert_allclose(rows.gxi, 3.0 * rows.eta)
 

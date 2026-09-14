@@ -118,7 +118,7 @@ def subsample_trajectories(
             else:
                 indices = select_uniform_times(
                     trajectory.times.size,
-                    keep_samples=200 if family == "benjamin_feir" else 16,
+                    keep_samples=200,
                 )
             rows = SimulationRows(
                 eta=trajectory.eta[indices],
