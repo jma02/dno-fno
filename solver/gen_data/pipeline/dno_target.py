@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 
@@ -22,6 +24,10 @@ def project_fixed_band(
     return jnp.fft.ifft(projected, axis=-1).real
 
 
+@partial(
+    jax.jit,
+    static_argnames=("nx", "length", "dno_order", "pad_factor", "maximum_wavenumber"),
+)
 def compute_dno_target(
     eta: jax.Array,
     xi: jax.Array,

@@ -25,10 +25,6 @@ PAPER_STATIC_STOKES_MAXIMUM_WAVENUMBER = 128.0
 
 # Compile the numerical work once; keep state validation on the host.
 stokes_eta_xi_at_phase = jax.jit(stokes_eta_xi_at_phase, static_argnames=("ichoi",))
-compute_dno_target = jax.jit(
-    compute_dno_target,
-    static_argnames=("nx", "length", "dno_order", "pad_factor", "maximum_wavenumber"),
-)
 
 
 def evaluate_static_stokes_sample(sample: StokesSample) -> SimulationRows | None:

@@ -13,7 +13,7 @@ from solver.gen_data.pipeline.types import (
 )
 
 
-BatchGenerator: TypeAlias = Callable[[tuple[str, ...], int, Path], None]
+BatchGenerator: TypeAlias = Callable[[tuple[str, ...], int, Path], int]
 GenerationResult: TypeAlias = tuple[dict[str, int], tuple[Path, ...]]
 
 
@@ -84,15 +84,12 @@ def generate_simulations(
                     f"attempts={attempts_per_group[group]}/{attempt_limit}"
                 )
             output_path = directory / f"batch_{len(completed_batches):06d}.npz"
-            generate_batch(
+            successful_per_group[group] += generate_batch(
                 (group,) * number_of_simulations,
                 sum(attempts_per_group.values()),
                 output_path,
             )
-            batch = load_completed_batch(output_path)
             attempts_per_group[group] += number_of_simulations
-            successful_per_group[group] += int(batch.accepted_simulations.sum())
-            del batch  # Release loaded rows before generating the next batch.
             completed_batches.append(output_path)
 
     return attempts_per_group, tuple(completed_batches)

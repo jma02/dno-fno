@@ -18,15 +18,18 @@ def select_simulation_rows(
     simulation_ids: np.ndarray,
     maximum: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Keep evenly spaced saved frames per simulation, including both endpoints."""
-    _, starts, counts = np.unique(simulation_ids, return_index=True, return_counts=True)
+    """Select frames from ordered simulation blocks, including both endpoints."""
+    starts = np.r_[0, np.flatnonzero(simulation_ids[1:] != simulation_ids[:-1]) + 1]
+    counts = np.diff(np.r_[starts, simulation_ids.size])
     kept = counts if maximum is None else np.minimum(counts, maximum)
-    rows = np.concatenate(
-        [
-            start + np.linspace(0, count - 1, keep, dtype=np.int64)
-            for start, count, keep in zip(starts, counts, kept, strict=True)
-        ]
-    )
+    rows = np.arange(simulation_ids.size)
+    if maximum is not None and np.any(counts > maximum):
+        rows = np.concatenate(
+            [
+                start + np.linspace(0, count - 1, keep, dtype=np.int64)
+                for start, count, keep in zip(starts, counts, kept, strict=True)
+            ]
+        )
     frame_indices = np.arange(rows.size) - np.repeat(np.cumsum(kept) - kept, kept)
     return rows, frame_indices
 

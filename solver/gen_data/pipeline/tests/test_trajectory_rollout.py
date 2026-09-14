@@ -121,16 +121,17 @@ class TrajectoryRolloutTest(unittest.TestCase):
 
         target_eta = resample_to_target_grid(jnp.asarray(eta), config=config)
         target_xi = resample_to_target_grid(jnp.asarray(xi), config=config)
-        expected = compute_dno_target(
-            target_eta,
-            target_xi,
-            jnp.asarray(depths)[:, None],
-            nx=config.target_nx,
-            length=config.length,
-            dno_order=config.label_dno_order,
-            pad_factor=config.pad_factor,
-            maximum_wavenumber=config.target_maximum_wavenumber,
-        )
+        with jax.disable_jit():
+            expected = compute_dno_target(
+                target_eta,
+                target_xi,
+                jnp.asarray(depths)[:, None],
+                nx=config.target_nx,
+                length=config.length,
+                dno_order=config.label_dno_order,
+                pad_factor=config.pad_factor,
+                maximum_wavenumber=config.target_maximum_wavenumber,
+            )
         np.testing.assert_allclose(delivered.eta, np.asarray(expected[0])[:1])
         np.testing.assert_allclose(delivered.xi, np.asarray(expected[1])[:1])
         np.testing.assert_allclose(delivered.gxi, np.asarray(expected[2])[:1])
@@ -138,11 +139,12 @@ class TrajectoryRolloutTest(unittest.TestCase):
 
     def test_solver_health_and_labels_use_their_declared_dno_orders(self) -> None:
         config = _config(
+            nx=64,
             maximum_wavenumber=6.0,
-            label_dno_order=1,
+            label_dno_order=6,
             target_maximum_wavenumber=3.0,
             health_threshold=1.0,
-        )
+        )._replace(integration_dno_order=4, pad_factor=8)
         x = config.length * np.arange(config.nx) / config.nx
         eta = np.stack((0.04 * np.cos(x), 0.05 * np.cos(x)))[:, None]
         xi = np.stack((0.08 * np.sin(2.0 * x), 0.07 * np.sin(2.0 * x)))[:, None]
@@ -166,27 +168,30 @@ class TrajectoryRolloutTest(unittest.TestCase):
                 config=config,
             )
 
-        expected_label_q = compute_dno_target(
-            jnp.asarray(eta),
-            jnp.asarray(xi),
-            jnp.asarray(depths)[:, None],
-            nx=config.target_nx,
-            length=config.length,
-            dno_order=config.label_dno_order,
-            pad_factor=config.pad_factor,
-            maximum_wavenumber=config.target_maximum_wavenumber,
-        )[2]
-        expected_solver_q = compute_dno_target(
-            jnp.asarray(eta),
-            jnp.asarray(xi),
-            jnp.asarray(depths)[:, None],
-            nx=config.nx,
-            length=config.length,
-            dno_order=config.integration_dno_order,
-            pad_factor=config.pad_factor,
-            maximum_wavenumber=config.maximum_wavenumber,
-        )[2]
-        np.testing.assert_allclose(delivered.gxi, np.asarray(expected_label_q))
+        with jax.disable_jit():
+            expected_label_q = compute_dno_target(
+                jnp.asarray(eta),
+                jnp.asarray(xi),
+                jnp.asarray(depths)[:, None],
+                nx=config.target_nx,
+                length=config.length,
+                dno_order=config.label_dno_order,
+                pad_factor=config.pad_factor,
+                maximum_wavenumber=config.target_maximum_wavenumber,
+            )[2]
+            expected_solver_q = compute_dno_target(
+                jnp.asarray(eta),
+                jnp.asarray(xi),
+                jnp.asarray(depths)[:, None],
+                nx=config.nx,
+                length=config.length,
+                dno_order=config.integration_dno_order,
+                pad_factor=config.pad_factor,
+                maximum_wavenumber=config.maximum_wavenumber,
+            )[2]
+        np.testing.assert_allclose(
+            delivered.gxi, np.asarray(expected_label_q), rtol=1e-12, atol=1e-14
+        )
         assert delivered.solver_grid_health is not None
         expected_hamiltonian = (
             0.5
@@ -397,6 +402,8 @@ class TrajectoryRolloutTest(unittest.TestCase):
             terminal_eta, terminal_xi = endpoint
             np.testing.assert_allclose(terminal_eta, expected)
             np.testing.assert_allclose(terminal_xi, -grids[index][-1])
+            self.assertIsNone(terminal_eta.base)
+            self.assertIsNone(terminal_xi.base)
         self.assertIsNone(simulations[2])
 
 

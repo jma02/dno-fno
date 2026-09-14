@@ -7,10 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
-from scripts.build_paper_dataset import build_dataset
+from scripts.build_paper_dataset import build_dataset, select_simulation_rows
 from solver.gen_data.pipeline.batch_storage import save_completed_batch
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
@@ -175,6 +176,22 @@ class PaperDatasetTests(unittest.TestCase):
             np.load(raw / "eta.npy"),
             np.tile(np.arange(20).reshape(5, 4)[[0, 2, 4]], (10, 1)),
         )
+
+    def test_keep_all_rows_skips_per_simulation_selection(self) -> None:
+        counts = [1, 5, 2, 200]
+        ids = np.repeat([1, 4, 5, 9], counts)
+        expected_frames = np.concatenate([np.arange(count) for count in counts])
+        for maximum in (None, 200, 300):
+            with (
+                self.subTest(maximum=maximum),
+                patch("numpy.unique", side_effect=AssertionError("unexpected sorting")),
+                patch(
+                    "numpy.linspace", side_effect=AssertionError("unexpected sampling")
+                ),
+            ):
+                rows, frames = select_simulation_rows(ids, maximum)
+            np.testing.assert_array_equal(rows, np.arange(ids.size))
+            np.testing.assert_array_equal(frames, expected_frames)
 
 
 if __name__ == "__main__":

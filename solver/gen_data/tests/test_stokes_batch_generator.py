@@ -50,12 +50,13 @@ class StaticStokesBatchExecutionTests(unittest.TestCase):
                 return_value=accepted,
             ) as evaluate,
         ):
-            generate_static_stokes_batch(
+            accepted_count = generate_static_stokes_batch(
                 parameter_groups,
                 11,
                 path,
                 seed=2026072205,
             )
+        self.assertEqual(accepted_count, 1)
 
         self.assertEqual(
             sampler.call_args_list,

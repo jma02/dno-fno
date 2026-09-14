@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -57,7 +58,7 @@ def _fake_generator(
         parameter_group_ids: tuple[str, ...],
         first_attempt_number: int,
         output_path: Path,
-    ) -> None:
+    ) -> int:
         if len(calls) == interrupt_after_batches:
             raise InjectedInterruption("batch stopped")
         calls.append((first_attempt_number, parameter_group_ids))
@@ -77,7 +78,7 @@ def _fake_generator(
                 )
             rows_by_simulation.append(rows)
 
-        save_completed_batch(
+        return save_completed_batch(
             output_path,
             parameter_group_ids,
             rows_by_simulation,
@@ -100,7 +101,9 @@ class DatasetGenerationTests(unittest.TestCase):
         targets = {"main_m1_q0": 2, "main_m1_q1": 2}
         generator, calls = _fake_generator(rejected_attempts=frozenset({1}))
 
-        attempts, paths = _generate(self.root, targets, 2, generator)
+        with patch("solver.gen_data.pipeline.dataset_generation.load_completed_batch") as load:
+            attempts, paths = _generate(self.root, targets, 2, generator)
+        load.assert_not_called()
 
         self.assertEqual(attempts, {"main_m1_q0": 3, "main_m1_q1": 2})
         self.assertEqual(

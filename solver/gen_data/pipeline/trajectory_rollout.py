@@ -178,7 +178,7 @@ def execute_adjustment_batch(
             config.substeps_per_saved_frame,
         )
         results.append(
-            (trajectory_eta[-1], trajectory_xi[-1])
+            (trajectory_eta[-1].copy(), trajectory_xi[-1].copy())
             if state_finite and not nonpositive_water_height and not integration_failure
             else None
         )

@@ -93,17 +93,17 @@ def _validate_shard(
     row_blocks = simulation_row_blocks(
         shard["simulation_local_index"], number_of_simulations=number_of_simulations
     )
-    for first_row, frame_count in row_blocks.values():
-        rows = slice(first_row, first_row + frame_count)
-        if not np.array_equal(
-            shard["frame_index"][rows], np.arange(frame_count, dtype=np.int32)
-        ):
-            raise ValueError("frame_index must be 0, 1, ... within every simulation")
-        if np.any(np.diff(shard["time"][rows]) <= 0.0):
-            raise ValueError("stored times must increase within every simulation")
-        depths = shard["depth"][rows]
-        if not np.all(depths == depths[0]):
-            raise ValueError("depth must remain constant within each simulation")
+    starts, counts = np.asarray(tuple(row_blocks.values())).T
+    if not np.array_equal(
+        shard["frame_index"], np.arange(row_count) - np.repeat(starts, counts)
+    ):
+        raise ValueError("frame_index must be 0, 1, ... within every simulation")
+    same_simulation = np.diff(shard["simulation_local_index"]) == 0
+    times, depths = shard["time"], shard["depth"]
+    if np.any(same_simulation & (times[1:] <= times[:-1])):
+        raise ValueError("stored times must increase within every simulation")
+    if np.any(same_simulation & (depths[1:] != depths[:-1])):
+        raise ValueError("depth must remain constant within each simulation")
     return row_blocks
 
 
@@ -114,8 +114,8 @@ def save_completed_batch(
     *,
     family_id: PhysicalFamilyId,
     seed: int,
-) -> None:
-    """Atomically save one finished batch without replacing an existing batch."""
+) -> int:
+    """Atomically save one batch and return its accepted simulation count."""
 
     simulation_count = len(parameter_group_ids)
 
@@ -153,6 +153,7 @@ def save_completed_batch(
         np.savez(temporary, **arrays)  # pyright: ignore[reportArgumentType]
         temporary.flush()
         os.link(temporary.name, path)
+    return len(parts["eta"])
 
 
 def load_completed_batch(path: Path) -> CompletedBatch:

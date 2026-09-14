@@ -327,7 +327,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                         wraps=_integrate_jonswap_without_adjustment,
                     ) as integrate,
                 ):
-                    generate_trajectory_batch(
+                    accepted_count = generate_trajectory_batch(
                         groups,
                         0,
                         output,
@@ -336,6 +336,7 @@ class TrajectoryBatchGenerationTests(unittest.TestCase):
                         numerical=numerical,
                         solver_batch_size=2,
                     )
+                self.assertEqual(accepted_count, len(indices))
                 construct.assert_called_once()
                 self.assertEqual(integrate.call_count, bool(indices))
                 self.assertEqual([count for count, _ in calls], [2] if indices else [])

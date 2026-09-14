@@ -52,8 +52,8 @@ def generate_trajectory_batch(
     family: TrajectoryFamily,
     numerical: RolloutNumerics,
     solver_batch_size: int | None = None,
-) -> None:
-    """Sample, simulate, and save one trajectory batch."""
+) -> int:
+    """Save one trajectory batch and return its accepted simulation count."""
 
     valid_indices = tuple(range(len(parameter_group_ids)))
     peak_periods: FloatArray | None = None
@@ -188,7 +188,7 @@ def generate_trajectory_batch(
                 length=numerical.length,
             )
     rows_by_index = dict(zip(valid_indices, produced, strict=True))
-    save_completed_batch(
+    return save_completed_batch(
         output_path,
         parameter_group_ids,
         tuple(rows_by_index.get(index) for index in range(len(parameter_group_ids))),

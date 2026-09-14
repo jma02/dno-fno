@@ -19,8 +19,8 @@ def generate_static_stokes_batch(
     output_path: Path,
     *,
     seed: int,
-) -> None:
-    """Sample, evaluate, and save one static Stokes batch."""
+) -> int:
+    """Save one static Stokes batch and return its accepted simulation count."""
 
     rows_by_simulation: list[SimulationRows | None] = []
     for offset, parameter_group_id in enumerate(parameter_group_ids):
@@ -33,7 +33,7 @@ def generate_static_stokes_batch(
             evaluate_static_stokes_sample(sample) if sample is not None else None
         )
 
-    save_completed_batch(
+    return save_completed_batch(
         output_path,
         parameter_group_ids,
         rows_by_simulation,

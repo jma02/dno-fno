@@ -49,13 +49,14 @@ class BatchStorageTests(unittest.TestCase):
             None,
             _simulation_rows(frame_count=3, depth=2.0, offset=1.0),
         )
-        save_completed_batch(
+        accepted = save_completed_batch(
             self.path,
             ("low", "high", "low"),
             rows,
             family_id=PhysicalFamilyId.TANAKA,
             seed=2026072210,
         )
+        self.assertEqual(accepted, 2)
 
         batch = load_completed_batch(self.path)
         self.assertEqual(batch.family_id, PhysicalFamilyId.TANAKA)
@@ -92,13 +93,14 @@ class BatchStorageTests(unittest.TestCase):
         )
 
     def test_all_rejected_batch_has_no_shard(self) -> None:
-        save_completed_batch(
+        accepted = save_completed_batch(
             self.path,
             ("a", "b", "c"),
             (None, None, None),
             family_id=PhysicalFamilyId.JONSWAP_TMA,
             seed=2026072205,
         )
+        self.assertEqual(accepted, 0)
 
         batch = load_completed_batch(self.path)
         self.assertIsNone(batch.shard)
