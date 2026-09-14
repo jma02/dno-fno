@@ -81,6 +81,10 @@ image = (
         REPO_ROOT / "scripts/assemble_regenerated_dataset.py",
         remote_path="/repo/scripts/assemble_regenerated_dataset.py",
     )
+    .add_local_file(
+        REPO_ROOT / "scripts/benchmark_jonswap_replay.py",
+        remote_path="/repo/scripts/benchmark_jonswap_replay.py",
+    )
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -373,6 +377,111 @@ def regenerate_dataset(training_options: dict[str, object]) -> dict[str, object]
     volume.commit()
     print(json.dumps(result), flush=True)
     return result
+
+
+@app.function(
+    gpu="H100:1",
+    volumes={VOLUME_MOUNT: volume},
+    timeout=4 * 3600,
+    cpu=8,
+    memory=256 * 1024,
+)
+def benchmark_jonswap(
+    batch_sizes: str = "32,64,128,256",
+    full_horizon: bool = False,
+    longest: bool = False,
+    repeats: int = 2,
+) -> dict[str, object]:
+    """Benchmark one H100 only; never generate a dataset or dispatch training."""
+    import csv
+    import json
+    import subprocess
+    import sys
+
+    volume.reload()
+    root = Path("/data/outputs/paper_dataset_regenerated_20260914")
+    mode = "full_longest" if longest else "full_median" if full_horizon else "short"
+    directory = root / "benchmarks" / mode
+    directory.mkdir(parents=True, exist_ok=True)
+    os.environ.update(PYTHONPATH="/repo", DNO_TANAKA_DTYPE="float64", JAX_LOG_COMPILES="1")
+    os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    results: dict[str, object] = {}
+    for batch_size in map(int, batch_sizes.split(",")):
+        output = directory / f"batch_{batch_size}.json"
+        if output.exists():
+            previous = json.loads(output.read_text())
+            if len(previous["runs"]) == repeats and all(run["status"] == "passed" for run in previous["runs"]):
+                results[str(batch_size)] = previous
+                continue
+        command = [
+            sys.executable,
+            "-u",
+            "-m",
+            "scripts.benchmark_jonswap_replay",
+            "--inputs",
+            str(root / "replay_inputs.npz"),
+            "--output",
+            str(output),
+            "--batch-size",
+            str(batch_size),
+            "--repeats",
+            str(repeats),
+        ]
+        command += [
+            flag
+            for flag, enabled in (
+                ("--full-horizon", full_horizon),
+                ("--longest", longest),
+            )
+            if enabled
+        ]
+        print(f"Benchmark batch={batch_size}, mode={mode}", flush=True)
+        with (
+            output.with_suffix(".csv").open("w") as metrics,
+            output.with_suffix(".log").open("w") as log,
+        ):
+            monitor = subprocess.Popen(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used,utilization.gpu,power.draw",
+                    "--format=csv,noheader,nounits",
+                    "--loop-ms=250",
+                ],
+                stdout=metrics,
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd="/repo",
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=3600,
+                )
+            finally:
+                monitor.terminate()
+                monitor.wait()
+                volume.commit()
+        if completed.returncode:
+            print(output.with_suffix(".log").read_text()[-8000:], flush=True)
+            results[str(batch_size)] = {"returncode": completed.returncode}
+            break
+        result = json.loads(output.read_text())
+        with output.with_suffix(".csv").open() as metrics:
+            samples = [
+                [float(value) for value in row]
+                for row in csv.reader(metrics)
+                if len(row) == 3
+            ]
+        result["sampled_peak_gpu_memory_mib"] = max(row[0] for row in samples)
+        result["sampled_mean_gpu_busy_percent"] = sum(row[1] for row in samples) / len(
+            samples
+        )
+        output.write_text(json.dumps(result, indent=2) + "\n")
+        volume.commit()
+        results[str(batch_size)] = result
+        print(json.dumps(result), flush=True)
+    return results
 
 
 @app.local_entrypoint()
