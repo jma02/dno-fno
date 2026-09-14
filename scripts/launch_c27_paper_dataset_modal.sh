@@ -36,7 +36,7 @@ MODAL_GPU="$GPU_SPEC" modal run --detach scripts/modal_train.py::train \
   --epochs 40 \
   --cs-mult-hidden 160 \
   --spawn \
-  --trainer-args "$TRAINER_ARGS" "$@" 2>&1 | tee "$LOG"
+  --trainer-args "$TRAINER_ARGS" "$@" 2>&1 | tee -a "$LOG"
 
 echo "run_name=$RUN_NAME"
 echo "gpu_spec=$GPU_SPEC"

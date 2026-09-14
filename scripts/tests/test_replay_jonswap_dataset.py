@@ -68,7 +68,7 @@ class JonswapReplayTest(unittest.TestCase):
                 bulk = [*arguments, "--source-dataset", str(source)]
                 replay.main([*bulk, "--max-batches", "1"])
                 self.assertFalse((root / "out" / "complete.json").exists())
-                replay.main(bulk)
+                replay.main([*bulk, "--batch-size", "128"])
                 self.assertTrue((root / "out" / "complete.json").exists())
                 times = np.load(root / "out" / "time.npy").reshape(2, 200)
                 for index, case in enumerate(trajectories):

@@ -308,7 +308,13 @@ def regenerate_dataset(training_options: dict[str, object]) -> dict[str, object]
     )
     commands = (
         ("pilot", replay_command + " --batch-size 4 --pilot-only"),
-        ("jonswap", replay_command + " --batch-size 32"),
+        (
+            "longest128",
+            f"scripts.benchmark_jonswap_replay --inputs {quoted_root}/replay_inputs.npz "
+            f"--output {quoted_root}/longest128.json "
+            "--batch-size 128 --full-horizon --longest --repeats 1",
+        ),
+        ("jonswap", replay_command + " --batch-size 128"),
         (
             "stokes",
             "scripts.generate_paper_dataset --family stokes --seed 2026091400 "
