@@ -24,6 +24,7 @@ from solver.evals.eval_suite import surrogate_rollout_batched
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--regime", choices=("tanaka_g0", "tanaka_g1"), required=True)
+    parser.add_argument("--case-index", type=int)
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args()
 
@@ -40,6 +41,8 @@ def main() -> None:
     with np.load(source_path, allow_pickle=False) as source:
         case_ids = np.asarray(source["case_id_batch_0000"])
         first_rows = np.flatnonzero(np.r_[True, case_ids[1:] != case_ids[:-1]])[:32]
+        if args.case_index is not None:
+            first_rows = first_rows[args.case_index:args.case_index + 1]
         ics = [
             IC(
                 eta=np.asarray(source["eta_batch_0000"][row], dtype=np.float64),
@@ -51,10 +54,11 @@ def main() -> None:
             for row in first_rows
         ]
     with np.load(truth_path, allow_pickle=False) as archive:
-        expected_ids = np.asarray(archive["case_ids"], dtype=np.int64)
+        selection = slice(None) if args.case_index is None else slice(args.case_index, args.case_index + 1)
+        expected_ids = np.asarray(archive["case_ids"][selection], dtype=np.int64)
         times = np.asarray(archive["times"], dtype=np.float64)
         truth = {
-            name: np.asarray(archive[f"truth_{name}"], dtype=np.float64)
+            name: np.asarray(archive[f"truth_{name}"][:, selection], dtype=np.float64)
             for name in ("eta", "xi", "gxi")
         }
     np.testing.assert_array_equal([ic.simulation_id for ic in ics], expected_ids)
