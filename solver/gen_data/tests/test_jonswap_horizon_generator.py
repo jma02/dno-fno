@@ -22,7 +22,6 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     RolloutNumerics,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
-    IntegratedAdjustmentBatch,
     IntegratedTrajectoryBatch,
     SolverGridHealth,
 )
@@ -123,7 +122,7 @@ def _adjustment_integrator(
     failing_markers: tuple[float, ...] = (),
     terminal_addition: np.ndarray | None = None,
 ) -> tuple[
-    Callable[..., IntegratedAdjustmentBatch],
+    Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]],
     list[tuple[int, int, np.ndarray, int]],
 ]:
     calls: list[tuple[int, int, np.ndarray, int]] = []
@@ -137,8 +136,9 @@ def _adjustment_integrator(
         config: RolloutNumerics,
         nonlinear_ramp_times: np.ndarray,
         nonlinear_ramp_order: int,
-    ) -> IntegratedAdjustmentBatch:
-        del depths
+        saved_time_counts: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        del depths, config
         batch_size, nx = eta0.shape
         calls.append(
             (
@@ -148,21 +148,14 @@ def _adjustment_integrator(
                 nonlinear_ramp_order,
             )
         )
-        eta = np.repeat(eta0[None], saved_times.size, axis=0)
-        eta += saved_times[:, None, None]
+        eta = eta0 + saved_times[saved_time_counts - 1, None]
         if terminal_addition is not None:
-            eta[1:] += terminal_addition[None, None, :]
-        xi = np.repeat(xi0[None], saved_times.size, axis=0)
-        step_shape = (
-            (saved_times.size - 1) * config.substeps_per_saved_frame,
-            batch_size,
-        )
-        converged = np.ones(step_shape, dtype=np.bool_)
+            eta += terminal_addition[None, :]
+        accepted = np.ones(batch_size, dtype=np.bool_)
         markers = eta0[:, 0]
         for marker in failing_markers:
-            failed = np.isclose(markers, marker, rtol=0.0, atol=1.0e-14)
-            converged[:, failed] = False
-        return IntegratedAdjustmentBatch(eta, xi, converged)
+            accepted[np.isclose(markers, marker, rtol=0.0, atol=1.0e-14)] = False
+        return eta, xi0.copy(), accepted
 
     return integrate, calls
 

@@ -21,7 +21,6 @@ from solver.gen_data.pipeline.trajectory_config import (  # noqa: E402
     RolloutNumerics,
 )
 from solver.gen_data.pipeline.trajectory_integration import (  # noqa: E402
-    IntegratedAdjustmentBatch,
     IntegratedTrajectoryBatch,
     SolverGridHealth,
     integrate_batch,
@@ -346,16 +345,16 @@ class TrajectoryRolloutTest(unittest.TestCase):
         calls: list[tuple[np.ndarray, int]] = []
 
         def integrate(
-            *,
             eta0: np.ndarray,
             xi0: np.ndarray,
             depths: np.ndarray,
             saved_times: np.ndarray,
             config: RolloutNumerics,
+            *,
             nonlinear_ramp_times: np.ndarray,
             nonlinear_ramp_order: int,
-        ) -> IntegratedAdjustmentBatch:
-            del depths, config
+        ) -> tuple[dict[str, jax.Array], jax.Array]:
+            del config
             calls.append(
                 (
                     nonlinear_ramp_times.copy(),
@@ -374,10 +373,19 @@ class TrajectoryRolloutTest(unittest.TestCase):
             xi -= saved_times[:, None, None]
             converged = np.ones((saved_times.size - 1, eta0.shape[0]), dtype=np.bool_)
             converged[0, 2] = False
-            return IntegratedAdjustmentBatch(eta, xi, converged)
+            eta[3:, 0] = np.nan
+            xi[3:, 0] = np.nan
+            return (
+                {
+                    "eta": jnp.asarray(eta),
+                    "xi": jnp.asarray(xi),
+                    "gl2_converged": jnp.asarray(converged),
+                },
+                jnp.asarray(depths),
+            )
 
         with patch(
-            "solver.gen_data.pipeline.trajectory_rollout.integrate_adjustment_batch",
+            "solver.gen_data.pipeline.trajectory_integration._integrate_gl2",
             new=integrate,
         ):
             simulations = execute_adjustment_batch(

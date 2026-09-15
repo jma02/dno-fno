@@ -14,7 +14,6 @@ from solver.gen_data.pipeline.trajectory_integration import (
 )
 
 FloatArray: TypeAlias = NDArray[np.float64]
-BoolArray: TypeAlias = NDArray[np.bool_]
 
 
 # Saved times, states, and DNO targets for one trajectory.
@@ -29,16 +28,6 @@ TrajectorySamples = NamedTuple(
 )
 
 
-def _all_gl2_steps_converged(
-    convergence: BoolArray,
-    simulation_index: int,
-    saved_time_count: int,
-    substeps_per_saved_frame: int,
-) -> bool:
-    step_count = (saved_time_count - 1) * substeps_per_saved_frame
-    return bool(np.all(convergence[:step_count, simulation_index]))
-
-
 def execute_trajectory_batch(
     eta0: FloatArray,
     xi0: FloatArray,
@@ -49,41 +38,35 @@ def execute_trajectory_batch(
 ) -> tuple[TrajectorySamples | None, ...]:
     """Integrate a batch, then evaluate each requested trajectory prefix."""
 
-    eta = np.asarray(eta0, dtype=np.float64)
-    xi = np.asarray(xi0, dtype=np.float64)
-    depth_values = np.asarray(depths, dtype=np.float64)
-    grids = tuple(np.asarray(times, dtype=np.float64) for times in time_grids)
-    integration_times = max(grids, key=len)
+    integration_times = max(time_grids, key=len)
     rollout = integrate_batch(
-        eta0=eta,
-        xi0=xi,
-        depths=depth_values,
+        eta0=eta0,
+        xi0=xi0,
+        depths=depths,
         saved_times=integration_times,
         config=config,
     )
     health = rollout.solver_grid_health
 
     results: list[TrajectorySamples | None] = []
-    for index, saved_times in enumerate(grids):
+    for index, saved_times in enumerate(time_grids):
         saved_count = saved_times.size
         trajectory = TrajectorySamples(
-            np.asarray(saved_times, dtype=np.float64),
-            np.asarray(rollout.eta[:saved_count, index], dtype=np.float64),
-            np.asarray(rollout.xi[:saved_count, index], dtype=np.float64),
-            np.asarray(rollout.gxi[:saved_count, index], dtype=np.float64),
+            saved_times,
+            rollout.eta[:saved_count, index],
+            rollout.xi[:saved_count, index],
+            rollout.gxi[:saved_count, index],
         )
         state_finite = bool(
             np.isfinite(trajectory.eta).all() and np.isfinite(trajectory.xi).all()
         )
         target_finite = bool(np.isfinite(trajectory.gxi).all())
         nonpositive_water_height = (
-            state_finite and float(np.min(depth_values[index] + trajectory.eta)) <= 0.0
+            state_finite and float(np.min(depths[index] + trajectory.eta)) <= 0.0
         )
-        integration_failure = not _all_gl2_steps_converged(
-            rollout.gl2_converged,
-            index,
-            saved_count,
-            config.substeps_per_saved_frame,
+        step_count = (saved_count - 1) * config.substeps_per_saved_frame
+        integration_failure = not bool(
+            np.all(rollout.gl2_converged[:step_count, index])
         )
         hamiltonian_drift = False
 
@@ -143,43 +126,23 @@ def execute_adjustment_batch(
 ) -> tuple[tuple[FloatArray, FloatArray] | None, ...]:
     """Warm up JONSWAP simulations and return valid nonlinear endpoints."""
 
-    eta = np.asarray(eta0, dtype=np.float64)
-    xi = np.asarray(xi0, dtype=np.float64)
-    depth_values = np.asarray(depths, dtype=np.float64)
-    grids = tuple(np.asarray(times, dtype=np.float64) for times in time_grids)
-    integration_times = max(grids, key=len)
-    ramp_times = np.asarray(nonlinear_ramp_times, dtype=np.float64)
+    integration_times = max(time_grids, key=len)
 
-    rollout = integrate_adjustment_batch(
-        eta0=eta,
-        xi0=xi,
-        depths=depth_values,
+    eta, xi, accepted = integrate_adjustment_batch(
+        eta0=eta0,
+        xi0=xi0,
+        depths=depths,
         saved_times=integration_times,
         config=config,
-        nonlinear_ramp_times=ramp_times,
+        nonlinear_ramp_times=nonlinear_ramp_times,
         nonlinear_ramp_order=nonlinear_ramp_order,
+        saved_time_counts=np.fromiter(
+            (times.size for times in time_grids),
+            dtype=np.int32,
+            count=len(time_grids),
+        ),
     )
-
-    results: list[tuple[FloatArray, FloatArray] | None] = []
-    for index, saved_times in enumerate(grids):
-        saved_count = saved_times.size
-        trajectory_eta = np.asarray(rollout.eta[:saved_count, index], dtype=np.float64)
-        trajectory_xi = np.asarray(rollout.xi[:saved_count, index], dtype=np.float64)
-        state_finite = bool(
-            np.isfinite(trajectory_eta).all() and np.isfinite(trajectory_xi).all()
-        )
-        nonpositive_water_height = (
-            state_finite and float(np.min(depth_values[index] + trajectory_eta)) <= 0.0
-        )
-        integration_failure = not _all_gl2_steps_converged(
-            rollout.gl2_converged,
-            index,
-            saved_count,
-            config.substeps_per_saved_frame,
-        )
-        results.append(
-            (trajectory_eta[-1].copy(), trajectory_xi[-1].copy())
-            if state_finite and not nonpositive_water_height and not integration_failure
-            else None
-        )
-    return tuple(results)
+    return tuple(
+        (eta[index].copy(), xi[index].copy()) if is_accepted else None
+        for index, is_accepted in enumerate(accepted)
+    )

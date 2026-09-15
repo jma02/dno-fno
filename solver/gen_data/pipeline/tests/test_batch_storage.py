@@ -12,7 +12,6 @@ import numpy as np
 from solver.gen_data.pipeline.batch_storage import (
     load_completed_batch,
     save_completed_batch,
-    simulation_row_blocks,
 )
 from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
@@ -131,6 +130,7 @@ class BatchStorageTests(unittest.TestCase):
     def test_save_rejects_invalid_stored_rows(self) -> None:
         valid = _simulation_rows()
         invalid_rows = (
+            _simulation_rows(frame_count=0),
             valid._replace(xi=np.zeros((2, 3), dtype=np.float64)),
             valid._replace(time=np.asarray([1.0, 0.0])),
             valid._replace(depth=0.0),
@@ -148,6 +148,20 @@ class BatchStorageTests(unittest.TestCase):
                     seed=2026072204,
                 )
             self.assertFalse(self.path.exists())
+
+        with self.assertRaises(ValueError):
+            save_completed_batch(
+                self.path,
+                ("first", "second"),
+                (
+                    valid._replace(xi=np.zeros((3, 4), dtype=np.float64)),
+                    _simulation_rows(frame_count=3)._replace(
+                        xi=np.zeros((2, 4), dtype=np.float64)
+                    ),
+                ),
+                family_id=PhysicalFamilyId.STOKES,
+                seed=2026072204,
+            )
 
     def test_load_validates_frame_time_depth_and_complete_shard(self) -> None:
         save_completed_batch(
@@ -186,26 +200,6 @@ class BatchStorageTests(unittest.TestCase):
         np.savez(unexpected_path, **arrays)
         with self.assertRaisesRegex(ValueError, "unexpected arrays"):
             load_completed_batch(unexpected_path)
-
-    def test_simulation_row_blocks_requires_sparse_ordered_blocks(self) -> None:
-        self.assertEqual(
-            simulation_row_blocks(
-                np.asarray([0, 0, 2, 2, 2], dtype=np.int32),
-                number_of_simulations=3,
-            ),
-            {0: (0, 2), 2: (2, 3)},
-        )
-        with self.assertRaisesRegex(ValueError, "ordered block"):
-            simulation_row_blocks(
-                np.asarray([0, 2, 1], dtype=np.int32),
-                number_of_simulations=3,
-            )
-        with self.assertRaisesRegex(ValueError, "absent from the batch"):
-            simulation_row_blocks(
-                np.asarray([3], dtype=np.int32),
-                number_of_simulations=3,
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

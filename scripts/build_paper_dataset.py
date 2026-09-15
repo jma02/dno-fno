@@ -14,26 +14,6 @@ from solver.gen_data.pipeline.batch_storage import load_completed_batch
 from solver.gen_data.pipeline.types import PhysicalFamilyId
 
 
-def select_simulation_rows(
-    simulation_ids: np.ndarray,
-    maximum: int | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Select frames from ordered simulation blocks, including both endpoints."""
-    starts = np.r_[0, np.flatnonzero(simulation_ids[1:] != simulation_ids[:-1]) + 1]
-    counts = np.diff(np.r_[starts, simulation_ids.size])
-    kept = counts if maximum is None else np.minimum(counts, maximum)
-    rows = np.arange(simulation_ids.size)
-    if maximum is not None and np.any(counts > maximum):
-        rows = np.concatenate(
-            [
-                start + np.linspace(0, count - 1, keep, dtype=np.int64)
-                for start, count, keep in zip(starts, counts, kept, strict=True)
-            ]
-        )
-    frame_indices = np.arange(rows.size) - np.repeat(np.cumsum(kept) - kept, kept)
-    return rows, frame_indices
-
-
 def build_dataset(
     root: Path,
     batches: Sequence[Path],
@@ -42,9 +22,8 @@ def build_dataset(
     validation_fraction: float = 0.1,
     test_fraction: float = 0.1,
     length: float = 2.0 * math.pi,
-    max_snapshots_per_simulation: int | None = None,
 ) -> Path:
-    """Split simulations once and save their selected snapshots as training rows."""
+    """Split simulations once and save their snapshots as training rows."""
     if not (
         0 <= validation_fraction <= 1
         and 0 <= test_fraction <= 1
@@ -65,29 +44,27 @@ def build_dataset(
     spatial_size: int | None = None
     group_width = 0
     run_directories: dict[tuple[PhysicalFamilyId, int], Path] = {}
-    # Count first so the final arrays can be filled one batch at a time.
+    # Size the final arrays without loading every numerical field twice.
     for path in batches:
-        batch = load_completed_batch(path)
-        # Copies of the same seeded run must not enter different dataset splits.
-        run = (batch.family_id, batch.seed)
-        if run_directories.setdefault(run, path.parent) != path.parent:
-            raise ValueError(
-                "separate generation directories must use distinct family/seed pairs"
+        with np.load(path, allow_pickle=False) as batch:
+            run = (
+                PhysicalFamilyId(int(batch["family_id"])),
+                int(batch["seed"]),
             )
-        group_width = max(group_width, max(map(len, batch.parameter_group_ids)))
-        if batch.shard is None:
-            continue
-        selected, _ = select_simulation_rows(
-            batch.shard["simulation_local_index"],
-            max_snapshots_per_simulation,
-        )
-        nx = batch.shard["eta"].shape[1]
-        if spatial_size is not None and nx != spatial_size:
-            raise ValueError("all dataset batches must use the same spatial grid")
-        spatial_size = nx
-        total_rows += selected.size
-        total_simulations += int(batch.accepted_simulations.sum())
-        del batch
+            if run_directories.setdefault(run, path.parent) != path.parent:
+                raise ValueError(
+                    "separate generation directories must use distinct family/seed pairs"
+                )
+            group_width = max(
+                group_width, max(map(len, batch["parameter_group_id"]))
+            )
+            if "simulation_local_index" not in batch:
+                continue
+            local_indices = batch["simulation_local_index"]
+            total_rows += local_indices.size
+            total_simulations += np.unique(local_indices).size
+            if spatial_size is None:
+                spatial_size = batch["eta"].shape[1]
     if spatial_size is None:
         raise ValueError("a dataset must contain at least one accepted row")
 
@@ -133,16 +110,14 @@ def build_dataset(
             if batch.shard is None:
                 continue
             shard = batch.shard
-            selected, frame_indices = select_simulation_rows(
-                shard["simulation_local_index"],
-                max_snapshots_per_simulation,
-            )
-            row_count = selected.size
+            if shard["eta"].shape[1] != spatial_size:
+                raise ValueError("all dataset batches must use the same spatial grid")
+            row_count = len(shard["eta"])
             rows = slice(first_row, first_row + row_count)
             for name in ("eta", "xi", "gxi", "depth", "time"):
-                arrays[name][rows] = shard[name][selected]
-            arrays["frame_index"][rows] = frame_indices
-            local_index = shard["simulation_local_index"][selected]
+                arrays[name][rows] = shard[name]
+            arrays["frame_index"][rows] = shard["frame_index"]
+            local_index = shard["simulation_local_index"]
             accepted_indices, row_simulation = np.unique(
                 local_index, return_inverse=True
             )
@@ -175,11 +150,6 @@ if __name__ == "__main__":
         help="Directory containing saved batch_*.npz files; repeat to combine directories.",
     )
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument(
-        "--max-snapshots-per-simulation",
-        type=int,
-        help="Keep at most this many saved frames per simulation, including endpoints.",
-    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--test-fraction", type=float, default=0.1)
@@ -196,6 +166,5 @@ if __name__ == "__main__":
             seed=args.seed,
             validation_fraction=args.validation_fraction,
             test_fraction=args.test_fraction,
-            max_snapshots_per_simulation=args.max_snapshots_per_simulation,
         )
     )

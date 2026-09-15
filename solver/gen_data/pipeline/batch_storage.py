@@ -40,40 +40,9 @@ CompletedBatch = NamedTuple(
 )
 
 
-def simulation_row_blocks(
-    simulation_local_index: NDArray[Any],
-    *,
-    number_of_simulations: int,
-) -> dict[int, tuple[int, int]]:
-    """Return each simulation's contiguous ``(first_row, row_count)`` block."""
-
-    indices = np.asarray(simulation_local_index)
-    if indices.ndim != 1 or indices.dtype.kind not in {"i", "u"}:
-        raise ValueError(
-            "simulation_local_index must be a one-dimensional integer array"
-        )
-    if indices.size == 0:
-        return {}
-    if np.any(indices < 0) or int(np.max(indices)) >= number_of_simulations:
-        raise ValueError(
-            "simulation_local_index references a simulation absent from the batch"
-        )
-    if np.any(indices[1:] < indices[:-1]):
-        raise ValueError("rows from each simulation must form one ordered block")
-
-    starts = np.concatenate(
-        (np.asarray([0]), np.flatnonzero(indices[1:] != indices[:-1]) + 1)
-    )
-    ends = np.concatenate((starts[1:], np.asarray([indices.size])))
-    return {
-        int(indices[first_row]): (int(first_row), int(end - first_row))
-        for first_row, end in zip(starts, ends, strict=True)
-    }
-
-
 def _validate_shard(
     shard: DatasetShardArrays, number_of_simulations: int
-) -> dict[int, tuple[int, int]]:
+) -> NDArray[np.int32]:
     eta = shard["eta"]
     if eta.ndim != 2 or min(eta.shape) == 0:
         raise ValueError("eta must have nonempty shape (row, space)")
@@ -90,10 +59,15 @@ def _validate_shard(
     if np.any(shard["depth"] <= 0.0):
         raise ValueError("every stored depth must be positive")
 
-    row_blocks = simulation_row_blocks(
-        shard["simulation_local_index"], number_of_simulations=number_of_simulations
-    )
-    starts, counts = np.asarray(tuple(row_blocks.values())).T
+    indices = shard["simulation_local_index"]
+    if np.any(indices < 0) or int(np.max(indices)) >= number_of_simulations:
+        raise ValueError(
+            "simulation_local_index references a simulation absent from the batch"
+        )
+    if np.any(indices[1:] < indices[:-1]):
+        raise ValueError("rows from each simulation must form one ordered block")
+    starts = np.r_[0, np.flatnonzero(indices[1:] != indices[:-1]) + 1]
+    counts = np.diff(np.r_[starts, row_count])
     if not np.array_equal(
         shard["frame_index"], np.arange(row_count) - np.repeat(starts, counts)
     ):
@@ -104,7 +78,7 @@ def _validate_shard(
         raise ValueError("stored times must increase within every simulation")
     if np.any(same_simulation & (depths[1:] != depths[:-1])):
         raise ValueError("depth must remain constant within each simulation")
-    return row_blocks
+    return indices[starts]
 
 
 def save_completed_batch(
@@ -127,17 +101,23 @@ def save_completed_batch(
             eta = np.asarray(rows.eta, dtype=np.float32)
             xi = np.asarray(rows.xi, dtype=np.float32)
             gxi = np.asarray(rows.gxi, dtype=np.float32)
+        time = np.asarray(rows.time, dtype=np.float64)
+        if eta.ndim != 2 or min(eta.shape) == 0:
+            raise ValueError("eta must have nonempty shape (row, space)")
+        if xi.shape != eta.shape or gxi.shape != eta.shape:
+            raise ValueError("eta, xi, and gxi must have the same shape")
         row_count = eta.shape[0]
+        if time.shape != (row_count,):
+            raise ValueError("time must have one entry per stored row")
         shard = DatasetShardArrays(
             eta=eta,
             xi=xi,
             gxi=gxi,
             depth=np.full(row_count, float(rows.depth), dtype=np.float64),
-            time=np.asarray(rows.time, dtype=np.float64),
+            time=time,
             simulation_local_index=np.full(row_count, local_index, dtype=np.int32),
             frame_index=np.arange(row_count, dtype=np.int32),
         )
-        _validate_shard(shard, simulation_count)
         for name in parts:
             parts[name].append(shard[name])
 
@@ -147,7 +127,12 @@ def save_completed_batch(
         "parameter_group_id": np.asarray(parameter_group_ids, dtype=np.str_),
     }
     if parts["eta"]:
-        arrays.update({name: np.concatenate(values) for name, values in parts.items()})
+        shard = cast(
+            DatasetShardArrays,
+            {name: np.concatenate(values) for name, values in parts.items()},
+        )
+        _validate_shard(shard, simulation_count)
+        arrays.update({name: shard[name] for name in _SHARD_DTYPES})
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.") as temporary:
         np.savez(temporary, **arrays)  # pyright: ignore[reportArgumentType]
@@ -203,8 +188,7 @@ def load_completed_batch(path: Path) -> CompletedBatch:
     )
     accepted_simulations = np.zeros(len(parameter_group_ids), dtype=np.bool_)
     if shard is not None:
-        row_blocks = _validate_shard(shard, len(parameter_group_ids))
-        accepted_simulations[list(row_blocks)] = True
+        accepted_simulations[_validate_shard(shard, len(parameter_group_ids))] = True
 
     return CompletedBatch(
         family_id,

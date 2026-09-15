@@ -18,6 +18,9 @@ PAPER_RELATIVE_FREQUENCY_MINIMUM = 0.5
 PAPER_RELATIVE_FREQUENCY_MAXIMUM = 2.5
 PAPER_RESOLVED_BAND_MAXIMUM_WAVENUMBER = 128.0
 PAPER_RESOLVED_BAND_QUADRATURE_ORDER = 16
+_QUADRATURE_NODES, _QUADRATURE_WEIGHTS = np.polynomial.legendre.leggauss(
+    PAPER_RESOLVED_BAND_QUADRATURE_ORDER
+)
 
 
 JonswapTmaParameters = NamedTuple(
@@ -122,12 +125,11 @@ def jonswap_tma_spectrum(
     spacing = 2.0 * np.pi / band.length
     lower = np.maximum(0.0, centers - 0.5 * spacing)
     upper = np.minimum(band.maximum_wavenumber, centers + 0.5 * spacing)
-    nodes, weights = np.polynomial.legendre.leggauss(
-        PAPER_RESOLVED_BAND_QUADRATURE_ORDER
-    )
     half_width = 0.5 * (upper - lower)
     midpoint = 0.5 * (upper + lower)
-    cell_wavenumbers = midpoint[:, None] + half_width[:, None] * nodes[None, :]
+    cell_wavenumbers = (
+        midpoint[:, None] + half_width[:, None] * _QUADRATURE_NODES[None, :]
+    )
 
     depth = parameters.depth
     angular_frequency = finite_depth_angular_frequency(
@@ -167,7 +169,9 @@ def jonswap_tma_spectrum(
         )
         * sharp_band
     )
-    cell_energy = half_width * np.sum(weights[None, :] * density, axis=1)
+    cell_energy = half_width * np.sum(
+        _QUADRATURE_WEIGHTS[None, :] * density, axis=1
+    )
     total_energy = float(np.sum(cell_energy))
     if not np.isfinite(total_energy) or total_energy <= 0.0:
         raise ValueError("resolved JONSWAP/TMA spectrum has no finite energy")

@@ -57,7 +57,6 @@ def _preprocess_initial_conditions(
         maximum_wavenumber=numerical.target_maximum_wavenumber,
     )
     projected_xi = projected_xi - projected_xi.mean(axis=-1, keepdims=True)
-    jax.block_until_ready(projected_xi)
     return (
         np.asarray(jax.device_get(projected_eta), dtype=np.float64),
         np.asarray(jax.device_get(projected_xi), dtype=np.float64),
@@ -155,21 +154,10 @@ def construct_jonswap_tma_trajectory_batch(
     depths = np.asarray(
         [sample.parameters.depth for sample in samples], dtype=np.float64
     )
-    state_finite = (
+    valid = np.flatnonzero(
         np.isfinite(eta0).all(axis=1)
         & np.isfinite(xi0).all(axis=1)
-        & np.isfinite(depths)
-        & (depths > 0.0)
-    )
-    minimum_water_columns = np.full(len(samples), np.nan, dtype=np.float64)
-    finite_indices = np.flatnonzero(state_finite)
-    minimum_water_columns[finite_indices] = np.min(
-        depths[finite_indices, None] + eta0[finite_indices], axis=1
-    )
-    valid = np.flatnonzero(
-        state_finite
-        & np.isfinite(minimum_water_columns)
-        & (minimum_water_columns > 0.0)
+        & np.all(depths[:, None] + eta0 > 0.0, axis=1)
     )
     if not valid.size:
         return None, ()

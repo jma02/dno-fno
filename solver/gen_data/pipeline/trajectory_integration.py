@@ -46,17 +46,6 @@ IntegratedTrajectoryBatch = NamedTuple(
     ],
 )
 
-# States and GL2 convergence from a JONSWAP nonlinear warm-up.
-IntegratedAdjustmentBatch = NamedTuple(
-    "IntegratedAdjustmentBatch",
-    [
-        ("eta", FloatArray),
-        ("xi", FloatArray),
-        ("gl2_converged", BoolArray),
-    ],
-)
-
-
 def resample_to_target_grid(field: jax.Array, *, config: RolloutNumerics) -> jax.Array:
     """Keep the target Fourier band and resample it onto the target grid."""
 
@@ -154,13 +143,12 @@ def integrate_batch(
     eta_result = np.empty(delivered_shape, dtype=np.float64)
     xi_result = np.empty(delivered_shape, dtype=np.float64)
     gxi_result = np.empty(delivered_shape, dtype=np.float64)
-    health_shape = eta.shape[:2]
+    evaluate_health = config.internal_hamiltonian_drift_threshold is not None
+    health_shape = eta.shape[:2] if evaluate_health else (0, 0)
     hamiltonian_result = np.empty(health_shape, dtype=np.float64)
     state_finite_result = np.empty(health_shape, dtype=np.bool_)
     dno_finite_result = np.empty(health_shape, dtype=np.bool_)
     water_column_result = np.empty(health_shape, dtype=np.float64)
-    evaluate_health = config.internal_hamiltonian_drift_threshold is not None
-
     chunk_size = 8
     for start in range(0, eta.shape[0], chunk_size):
         stop = min(start + chunk_size, eta.shape[0])
@@ -258,10 +246,11 @@ def integrate_adjustment_batch(
     config: RolloutNumerics,
     nonlinear_ramp_times: FloatArray,
     nonlinear_ramp_order: int,
-) -> IntegratedAdjustmentBatch:
-    """Warm up a JONSWAP batch by gradually enabling nonlinearity."""
+    saved_time_counts: NDArray[np.int32],
+) -> tuple[FloatArray, FloatArray, BoolArray]:
+    """Warm up JONSWAP states and return valid endpoints."""
 
-    payload, _ = _integrate_gl2(
+    payload, depth_device = _integrate_gl2(
         eta0,
         xi0,
         depths,
@@ -270,11 +259,32 @@ def integrate_adjustment_batch(
         nonlinear_ramp_times=nonlinear_ramp_times,
         nonlinear_ramp_order=nonlinear_ramp_order,
     )
-    eta, xi, converged = jax.device_get(
-        (payload["eta"], payload["xi"], payload["gl2_converged"])
+    eta, xi = payload["eta"], payload["xi"]
+    counts = jnp.asarray(saved_time_counts, dtype=jnp.int32)
+    used_frames = jnp.arange(eta.shape[0])[:, None] < counts[None, :]
+    valid_state = jnp.all(
+        ~used_frames[..., None]
+        | (
+            jnp.isfinite(eta)
+            & jnp.isfinite(xi)
+            & (eta + depth_device[None, :, None] > 0.0)
+        ),
+        axis=(0, 2),
     )
-    return IntegratedAdjustmentBatch(
-        np.asarray(eta, dtype=np.float64),
-        np.asarray(xi, dtype=np.float64),
-        np.asarray(converged, dtype=np.bool_),
+    used_steps = jnp.arange(payload["gl2_converged"].shape[0])[:, None] < (
+        (counts - 1) * config.substeps_per_saved_frame
+    )
+    converged = jnp.all(~used_steps | payload["gl2_converged"], axis=0)
+    simulations = jnp.arange(eta.shape[1])
+    endpoint_eta, endpoint_xi, accepted = jax.device_get(
+        (
+            eta[counts - 1, simulations],
+            xi[counts - 1, simulations],
+            valid_state & converged,
+        )
+    )
+    return (
+        np.asarray(endpoint_eta, dtype=np.float64),
+        np.asarray(endpoint_xi, dtype=np.float64),
+        np.asarray(accepted, dtype=np.bool_),
     )

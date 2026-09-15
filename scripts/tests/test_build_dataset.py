@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -25,6 +27,7 @@ def _write_batch(
     accepted_local_indices: tuple[int, ...],
     frames_per_simulation: int,
     spatial_size: int = 4,
+    seed: int = 2026072210,
 ) -> None:
     accepted = set(accepted_local_indices)
     save_completed_batch(
@@ -52,7 +55,7 @@ def _write_batch(
             for local_index in range(simulation_count)
         ),
         family_id=family_id,
-        seed=2026072210,
+        seed=seed,
     )
 
 
@@ -97,12 +100,30 @@ class DatasetTests(unittest.TestCase):
         dataset = build_dataset(
             self.root / "dataset", batches, validation_fraction=0.25, test_fraction=0.25
         )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.build_paper_dataset",
+                f"--input-root={self.root}",
+                f"--output-root={self.root / 'cli_dataset'}",
+                "--validation-fraction=0.25",
+                "--test-fraction=0.25",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        cli_dataset = Path(result.stdout.strip())
+        self.assertEqual(cli_dataset, self.root / "cli_dataset")
         for batch in batches:
             batch.unlink()
         arrays = {
             path.stem: np.load(path, mmap_mode="r", allow_pickle=False)
             for path in dataset.glob("*.npy")
         }
+        for name, array in arrays.items():
+            np.testing.assert_array_equal(np.load(cli_dataset / f"{name}.npy"), array)
         self.assertEqual(len(tuple(dataset.iterdir())), 11)
         self.assertTrue(all(isinstance(array, np.memmap) for array in arrays.values()))
         np.testing.assert_array_equal(arrays["family_id"], [2, 2, 1, 1, 1])
@@ -122,6 +143,31 @@ class DatasetTests(unittest.TestCase):
         np.testing.assert_allclose(arrays["x"], np.arange(4) * np.pi / 2)
         with self.assertRaises(FileExistsError):
             build_dataset(dataset, batches)
+
+    def test_rejects_invalid_split_fractions_and_duplicate_inputs(self) -> None:
+        first = self.root / "first/batch_000000.npz"
+        second = self.root / "second/batch_000000.npz"
+        for path in (first, second):
+            _write_batch(
+                path,
+                family_id=PhysicalFamilyId.STOKES,
+                simulation_count=1,
+                accepted_local_indices=(0,),
+                frames_per_simulation=1,
+            )
+        for validation, test in ((-0.1, 0.1), (0.1, -0.1), (0.6, 0.5)):
+            with self.subTest(validation=validation, test=test):
+                with self.assertRaisesRegex(ValueError, "fractions"):
+                    build_dataset(
+                        self.root / "invalid",
+                        (first,),
+                        validation_fraction=validation,
+                        test_fraction=test,
+                    )
+        with self.assertRaisesRegex(ValueError, "must not appear twice"):
+            build_dataset(self.root / "duplicate_batch", (first, first))
+        with self.assertRaisesRegex(ValueError, "distinct family/seed pairs"):
+            build_dataset(self.root / "duplicate_run", (first, second))
 
     def test_mixed_spatial_grids_are_rejected_before_publication(self) -> None:
         first = self.root / "batches/stokes/batch_000000.npz"
