@@ -5,6 +5,7 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 from .dno_series_jax import (
+    _dno_series_hat,
     build_grid,
     dno_series_eval,
     make_linear_dno_symbol,
@@ -325,24 +326,6 @@ def apply_linear_flow_hat(
     return SpectralState(eta_hat=eta_hat, xi_hat=xi_hat)
 
 
-def rhs_nonlinear(state: State, params: SolverParams) -> State:
-    eta_x = spectral_dx(state.eta, params.k)
-    xi_x = spectral_dx(state.xi, params.k)
-    gxi = dno_series_eval(
-        state.eta,
-        state.xi,
-        params.k,
-        params.depth,
-        params.dno_order,
-        pad_factor=params.pad_factor,
-    )
-    linear_gxi = linear_dno_action(state.xi, params.g0)
-
-    eta_t = gxi - linear_gxi
-    xi_t = dealiased_zakharov_xi_rhs(eta_x, xi_x, gxi)
-    return State(eta=eta_t, xi=xi_t)
-
-
 def nonlinear_ramp_factor(
     time: float | jnp.ndarray,
     params: SolverParams,
@@ -369,9 +352,37 @@ def rhs_nonlinear_if(
     v_hat: SpectralState, t: float | jnp.ndarray, params: SolverParams
 ) -> SpectralState:
     physical_hat = apply_linear_flow_hat(v_hat, t, params)
-    physical_state = _hat_to_state(physical_hat)
-    nonlinear_state = rhs_nonlinear(physical_state, params)
-    nonlinear_hat = _state_to_hat(nonlinear_state, params.nx)
+    nx = params.nx
+    positive_modes = slice(0, nx // 2 + 1)
+    k = params.k[positive_modes]
+    eta_hat = physical_hat.eta_hat[..., positive_modes]
+    xi_hat = physical_hat.xi_hat[..., positive_modes]
+    gxi_hat = _dno_series_hat(
+        eta_hat,
+        xi_hat,
+        k,
+        params.g0[..., positive_modes],
+        nx=nx,
+        order=params.dno_order,
+        pad_factor=params.pad_factor,
+    )
+
+    # Evaluate the nonlinear xi equation on the same two-times grid as before.
+    eta_x = 2.0 * jnp.fft.irfft(1j * k * eta_hat, n=2 * nx, axis=-1)
+    xi_x = 2.0 * jnp.fft.irfft(1j * k * xi_hat, n=2 * nx, axis=-1)
+    gxi = 2.0 * jnp.fft.irfft(gxi_hat, n=2 * nx, axis=-1)
+    numerator = gxi + eta_x * xi_x
+    xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+    xi_t_hat = 0.5 * jnp.fft.rfft(xi_t, axis=-1)[..., positive_modes]
+    xi_t_hat = xi_t_hat.at[..., nx // 2].set(0)
+    eta_t_hat = gxi_hat - params.g0[..., positive_modes] * xi_hat
+
+    def full_spectrum(coefficients: jnp.ndarray) -> jnp.ndarray:
+        return jnp.concatenate(
+            (coefficients, jnp.conj(coefficients[..., 1:-1][..., ::-1])), axis=-1
+        )
+
+    nonlinear_hat = SpectralState(full_spectrum(eta_t_hat), full_spectrum(xi_t_hat))
     # Cut high modes before the fixed-point iteration reuses the nonlinear residual.
     if params.filter_fraction < 1.0:
         nonlinear_hat = _lowpass_hat(nonlinear_hat, params)

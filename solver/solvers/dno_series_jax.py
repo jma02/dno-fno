@@ -70,50 +70,73 @@ def multiply(
     return pad_factor * myifft(fy)
 
 
-def compute_gm_term(
-    m: int,
-    etam: list[jnp.ndarray],
-    gm_terms: list[jnp.ndarray],
-    xi_x: jnp.ndarray,
+def _dno_series_hat(
+    eta_hat: jnp.ndarray,
+    xi_hat: jnp.ndarray,
     k: jnp.ndarray,
     g0: jnp.ndarray,
+    *,
     nx: int,
+    order: int,
     pad_factor: int = DEFAULT_PAD_FACTOR,
 ) -> jnp.ndarray:
-    """Compute the m-th DNO correction term G_m(eta) xi."""
-    if m % 2 == 0:
-        r = m // 2
-        tmp = multiply(etam[m], xi_x, nx, pad_factor=pad_factor)
-        gm_term = -myifft(g0 * k ** (2 * (r - 1)) * (1j * k) * myfft(tmp, nx))
-        for s in range(r):
-            tmp = multiply(
-                etam[2 * (r - s)], gm_terms[2 * s], nx, pad_factor=pad_factor
-            )
-            gm_term = gm_term - myifft(k ** (2 * (r - s)) * myfft(tmp, nx))
+    """Evaluate the DNO series while keeping every recurrence term spectral."""
+    padded_nx = pad_factor * nx
 
-            tmp = multiply(
-                etam[2 * (r - s) - 1], gm_terms[2 * s + 1], nx, pad_factor=pad_factor
-            )
-            gm_term = gm_term - myifft(g0 * k ** (2 * (r - s - 1)) * myfft(tmp, nx))
-        return gm_term
+    def pad(coefficients: jnp.ndarray) -> jnp.ndarray:
+        return jnp.fft.irfft(coefficients, n=padded_nx, axis=-1)
 
-    r = (m + 1) // 2
-    tmp = multiply(etam[m], xi_x, nx, pad_factor=pad_factor)
-    gm_term = -myifft(k ** (2 * (r - 1)) * (1j * k) * myfft(tmp, nx))
-    for s in range(r - 1):
-        tmp = multiply(
-            etam[2 * (r - s) - 1], gm_terms[2 * s], nx, pad_factor=pad_factor
+    def product_hat(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+        coefficients = jnp.fft.rfft(a * b, axis=-1)[..., : nx // 2 + 1]
+        return pad_factor * coefficients.at[..., nx // 2].set(0)
+
+    eta_padded = pad(eta_hat)
+    eta_powers = [eta_padded, eta_padded]
+    for m in range(2, order + 1):
+        eta_powers.append(pad(product_hat(eta_padded, eta_powers[m - 1]) / m))
+
+    xi_x = pad(1j * k * xi_hat)
+    gm_hats = [g0 * xi_hat]
+    gm_padded = [pad(gm_hats[0])]
+    for m in range(1, order + 1):
+        if m % 2 == 0:
+            r = m // 2
+            products = [(eta_powers[m], xi_x)]
+            symbols = [g0 * k ** (2 * (r - 1)) * (1j * k)]
+            for s in range(r):
+                products.extend(
+                    (
+                        (eta_powers[2 * (r - s)], gm_padded[2 * s]),
+                        (eta_powers[2 * (r - s) - 1], gm_padded[2 * s + 1]),
+                    )
+                )
+                symbols.extend((k ** (2 * (r - s)), g0 * k ** (2 * (r - s - 1))))
+        else:
+            r = (m + 1) // 2
+            products = [(eta_powers[m], xi_x)]
+            symbols = [k ** (2 * (r - 1)) * (1j * k)]
+            for s in range(r - 1):
+                products.extend(
+                    (
+                        (eta_powers[2 * (r - s) - 1], gm_padded[2 * s]),
+                        (eta_powers[2 * (r - s - 1)], gm_padded[2 * s + 1]),
+                    )
+                )
+                symbols.extend((g0 * k ** (2 * (r - s - 1)), k ** (2 * (r - s - 1))))
+            products.append((eta_powers[1], gm_padded[2 * (r - 1)]))
+            symbols.append(g0)
+
+        gm_hat = -sum(
+            (
+                symbol * product_hat(*product)
+                for symbol, product in zip(symbols, products, strict=True)
+            ),
+            start=jnp.zeros_like(gm_hats[0]),
         )
-        gm_term = gm_term - myifft(g0 * k ** (2 * (r - s - 1)) * myfft(tmp, nx))
-
-        tmp = multiply(
-            etam[2 * (r - s - 1)], gm_terms[2 * s + 1], nx, pad_factor=pad_factor
-        )
-        gm_term = gm_term - myifft(k ** (2 * (r - s - 1)) * myfft(tmp, nx))
-
-    tmp = multiply(etam[1], gm_terms[2 * (r - 1)], nx, pad_factor=pad_factor)
-    gm_term = gm_term - myifft(g0 * myfft(tmp, nx))
-    return gm_term
+        gm_hats.append(gm_hat)
+        if m < order:
+            gm_padded.append(pad(gm_hat))
+    return sum(gm_hats, start=jnp.zeros_like(gm_hats[0]))
 
 
 def dno_series_eval(
@@ -130,31 +153,16 @@ def dno_series_eval(
     k = jnp.asarray(k)
 
     nx = int(eta.shape[-1])
-    g0 = make_linear_dno_symbol(k, depth)
-
-    etam: list[jnp.ndarray] = [jnp.ones_like(eta), eta]
-    for m in range(2, order + 1):
-        etam.append(multiply(eta, etam[m - 1], nx, pad_factor=pad_factor) / m)
-
-    fxi = myfft(xi, nx)
-    xi_x = myifft(1j * k * fxi)
-
-    gm_terms: list[jnp.ndarray] = [myifft(g0 * fxi)]
-    for m in range(1, order + 1):
-        gm_terms.append(
-            compute_gm_term(
-                m,
-                etam,
-                gm_terms,
-                xi_x,
-                k,
-                g0,
-                nx,
-                pad_factor=pad_factor,
-            )
-        )
-
-    g = gm_terms[0]
-    for gm_term in gm_terms[1:]:
-        g = g + gm_term
-    return g
+    k = k[: nx // 2 + 1]
+    eta_hat = jnp.fft.rfft(eta, axis=-1).at[..., nx // 2].set(0)
+    xi_hat = jnp.fft.rfft(xi, axis=-1).at[..., nx // 2].set(0)
+    gxi_hat = _dno_series_hat(
+        eta_hat,
+        xi_hat,
+        k,
+        make_linear_dno_symbol(k, depth),
+        nx=nx,
+        order=order,
+        pad_factor=pad_factor,
+    )
+    return jnp.fft.irfft(gxi_hat, n=nx, axis=-1)
