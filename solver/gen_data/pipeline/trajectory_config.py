@@ -61,6 +61,8 @@ PAPER_ROLLOUT_NUMERICS: dict[TrajectoryFamily, RolloutNumerics] = {
     "benjamin_feir": _BASE_ROLLOUT_NUMERICS,
     "jonswap_tma": _BASE_ROLLOUT_NUMERICS._replace(
         nx=2048,
+        # Every binary product is truncated before reuse, so 2x padding is alias-free.
+        pad_factor=2,
         maximum_wavenumber=704.0,
         gl2_iteration_cap=5,
     ),
