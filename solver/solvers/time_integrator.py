@@ -191,8 +191,9 @@ def apply_lowpass(
 
     k_max = jnp.max(jnp.abs(k))
     cutoff = filter_fraction * k_max
-    mask = (jnp.abs(k) <= cutoff).astype(myfft(field, field.shape[-1]).dtype)
-    return myifft(mask * myfft(field, field.shape[-1]))
+    coefficients = myfft(field, field.shape[-1])
+    mask = (jnp.abs(k) <= cutoff).astype(coefficients.dtype)
+    return myifft(mask * coefficients)
 
 
 def _state_to_hat(state: State, nx: int) -> SpectralState:
@@ -574,18 +575,28 @@ def _gauss_legendre_2_if_step_result(
         )
         counts = carry.iteration_count + carry.active.astype(jnp.int32)
 
-        candidate1, candidate2, f1, f2 = _gauss_legendre_2_stage_map(
-            stage1,
-            stage2,
-            v0=v0,
-            stage_time1=t + c1 * dt,
-            stage_time2=t + c2 * dt,
-            dt=dt,
-            params=params,
-            a11=a11,
-            a12=a12,
-            a21=a21,
-            a22=a22,
+        candidate1, candidate2, f1, f2 = jax.lax.cond(
+            jnp.any(carry.active),
+            lambda stages: _gauss_legendre_2_stage_map(
+                stages[0],
+                stages[1],
+                v0=v0,
+                stage_time1=t + c1 * dt,
+                stage_time2=t + c2 * dt,
+                dt=dt,
+                params=params,
+                a11=a11,
+                a12=a12,
+                a21=a21,
+                a22=a22,
+            ),
+            lambda _stages: (
+                carry.candidate1,
+                carry.candidate2,
+                carry.f1,
+                carry.f2,
+            ),
+            (stage1, stage2),
         )
         residual = relative_implicit_stage_residual(
             stage1,

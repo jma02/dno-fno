@@ -167,6 +167,7 @@ if __name__ == "__main__":
                     result = integration.integrate_adjustment_batch(
                         **kwargs, nonlinear_ramp_times=inputs["nonlinear_ramp_time"][indices],
                         nonlinear_ramp_order=4,
+                        saved_time_counts=np.asarray(counts, dtype=np.int32),
                     )
                 else:
                     result = integration.integrate_batch(**kwargs)
