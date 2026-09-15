@@ -523,13 +523,6 @@ def main() -> None:
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
         metrics = jax.lax.pmean(metrics, axis_name="batch")
         next_state = current_state.apply_gradients(grads=grads)
-        # Copy the first GPU's updated parameters to every GPU to keep them identical.
-        next_state = next_state.replace(
-            params=jax.tree.map(
-                lambda x: jax.lax.all_gather(x, axis_name="batch", tiled=False)[0],
-                next_state.params,
-            )
-        )
         return next_state, loss_value, metrics
 
     # Split divisible batches across GPUs; replicate tiny remainder batches instead.
