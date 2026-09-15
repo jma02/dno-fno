@@ -64,6 +64,7 @@ def run_benchmark(
     *,
     expected_source_sha: str,
     expected_solver_sha256: str,
+    expected_gpu: str,
     pad_factor: int,
     repeats: int,
 ) -> dict[str, object]:
@@ -96,7 +97,6 @@ def run_benchmark(
 
     volume.reload()
     jax.config.update("jax_enable_x64", True)
-    expected_gpu = GPU_SPEC.split(":", maxsplit=1)[0].removesuffix("!")
     device = jax.local_devices()[0]
     if expected_gpu not in device.device_kind.upper():
         raise RuntimeError(f"requested {expected_gpu}, received {device.device_kind}")
@@ -152,7 +152,7 @@ def run_benchmark(
         "source_sha": expected_source_sha,
         "solver_sha256": expected_solver_sha256,
         "replay_sha256": REPLAY_SHA256,
-        "requested_gpu": GPU_SPEC,
+        "requested_gpu": expected_gpu,
         "device": device.device_kind,
         "pad_factor": pad_factor,
         "numerical": numerical._asdict(),
@@ -268,6 +268,7 @@ def main(expected_source_sha: str, pad_factor: int = 8, repeats: int = 2) -> Non
     report = cast(_RemoteBenchmark, run_benchmark).remote(
         expected_source_sha=expected_source_sha,
         expected_solver_sha256=_python_tree_sha256(REPO_ROOT / "solver"),
+        expected_gpu=GPU_SPEC.split(":", maxsplit=1)[0].removesuffix("!"),
         pad_factor=pad_factor,
         repeats=repeats,
     )
