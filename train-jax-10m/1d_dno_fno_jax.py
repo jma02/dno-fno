@@ -694,9 +694,9 @@ def main() -> None:
             training_state, batch_loss, batch_metrics = compiled_train_step(
                 training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, tanaka_b
             )
-            batch_loss_value = float(jax.device_get(batch_loss))
+            batch_loss, batch_metrics = jax.device_get((batch_loss, batch_metrics))
+            batch_loss_value = float(batch_loss)
             batch_losses.append(batch_loss_value)
-            batch_metrics = jax.device_get(batch_metrics)
             # Skipped Hadamard batches add zero loss and zero to the evaluation count.
             hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
             hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
@@ -709,7 +709,7 @@ def main() -> None:
                 loss_sums[name] = (
                     loss_sums.get(name, 0.0) + float(batch_mean) * batch_size
                 )
-            train_bar.set_postfix(loss=batch_loss_value)
+            train_bar.set_postfix(loss=batch_loss_value, refresh=False)
 
         # Require one optimizer update per batch and matching counters across GPUs.
         epoch_end_step, epoch_end_optimizer_count = training_counter_values(
