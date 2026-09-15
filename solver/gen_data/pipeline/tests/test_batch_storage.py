@@ -109,7 +109,7 @@ class BatchStorageTests(unittest.TestCase):
         )
 
     def test_write_failures_leave_no_published_batch_or_temporary_file(self) -> None:
-        for operation in ("np.savez", "os.link"):
+        for operation in ("np.savez", "Path.rename"):
             with (
                 self.subTest(operation=operation),
                 patch(

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 from typing import Any, NamedTuple, cast
 
 import numpy as np
@@ -134,10 +133,12 @@ def save_completed_batch(
         _validate_shard(shard, simulation_count)
         arrays.update({name: shard[name] for name in _SHARD_DTYPES})
     path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.") as temporary:
-        np.savez(temporary, **arrays)  # pyright: ignore[reportArgumentType]
-        temporary.flush()
-        os.link(temporary.name, path)
+    if path.exists():
+        raise FileExistsError(f"batch already exists: {path}")
+    with TemporaryDirectory(dir=path.parent, prefix=f".{path.name}.") as temporary:
+        temporary_path = Path(temporary) / path.name
+        np.savez(temporary_path, **arrays)  # pyright: ignore[reportArgumentType]
+        temporary_path.rename(path)
     return len(parts["eta"])
 
 
