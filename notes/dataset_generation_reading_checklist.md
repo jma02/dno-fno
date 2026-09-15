@@ -18,8 +18,7 @@ with seed `42`. Generation uses seed `2026072210` by default, with no summary fi
 - [x] `solver/gen_data/tanaka_sampling.py` — Tanaka parameter distribution
 - [x] `solver/gen_data/benjamin_feir_sampling.py` — Benjamin--Feir parameter distribution
 - [x] `solver/gen_data/jonswap_tma_sampling.py` — JONSWAP/TMA parameter distribution
-- [x] `solver/gen_data/stokes_static_pipeline.py` — static Stokes construction, target, and checks
-- [x] `solver/gen_data/stokes_batch_generator.py` — one function that samples, checks, and saves a Stokes batch
+- [x] `solver/gen_data/stokes_batch_generator.py` — sample, construct, label, check, and save one Stokes batch
 - [x] `solver/gen_data/trajectory_batch_generator.py` — functional Tanaka/BF/JONSWAP batch flow
 - [x] `solver/gen_data/trajectory_family_adapters.py` — sampled parameters to solver-ready initial states
 - [x] `solver/gen_data/jonswap_horizon_generator.py` — JONSWAP adjustment and memory-bounded grouping by rollout length
