@@ -803,17 +803,6 @@ def main() -> None:
                 async_manager=checkpoint_async_manager,
             )
 
-    # Save the final state, whether training reached the epoch limit or stopped early.
-    save_checkpoint(
-        run_dir / "final_ckpt",
-        state=training_state,
-        history=history,
-        best_val_loss=best_val_loss,
-        best_epoch=best_epoch,
-        stats=stats,
-        async_manager=checkpoint_async_manager,
-    )
-
     summary_payload = {
         "dataset": args.dataset,
         "device": backend,
