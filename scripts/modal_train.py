@@ -69,22 +69,6 @@ image = (
     .add_local_dir(REPO_ROOT / "models" / "fno-jax", remote_path="/repo/models/fno-jax")
     .add_local_dir(REPO_ROOT / "models" / "dno-net", remote_path="/repo/models/dno-net")
     .add_local_dir(REPO_ROOT / "solver", remote_path="/repo/solver")
-    .add_local_file(
-        REPO_ROOT / "scripts/generate_paper_dataset.py",
-        remote_path="/repo/scripts/generate_paper_dataset.py",
-    )
-    .add_local_file(
-        REPO_ROOT / "scripts/replay_jonswap_dataset.py",
-        remote_path="/repo/scripts/replay_jonswap_dataset.py",
-    )
-    .add_local_file(
-        REPO_ROOT / "scripts/assemble_regenerated_dataset.py",
-        remote_path="/repo/scripts/assemble_regenerated_dataset.py",
-    )
-    .add_local_file(
-        REPO_ROOT / "scripts/benchmark_jonswap_replay.py",
-        remote_path="/repo/scripts/benchmark_jonswap_replay.py",
-    )
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -270,226 +254,6 @@ def run_training(
     }
 
 
-@app.function(
-    gpu="H100:1",
-    volumes={VOLUME_MOUNT: volume},
-    timeout=TIMEOUT_SECONDS,
-    cpu=8,
-    memory=256 * 1024,
-    retries=modal.Retries(max_retries=10, backoff_coefficient=1.0, initial_delay=0.0),
-)
-def regenerate_dataset(training_options: dict[str, object]) -> dict[str, object]:
-    """Replay JONSWAP, add independent Stokes states, then start fresh training."""
-    import json
-    import shlex
-    import subprocess
-    import sys
-    import time
-
-    volume.reload()
-    root = Path(str(training_options["dataset"])).parent
-    root.mkdir(parents=True, exist_ok=True)
-    training_call_path = root / "training_call.json"
-    if training_call_path.exists():
-        return json.loads(training_call_path.read_text())
-    os.environ.update(PYTHONPATH="/repo", DNO_TANAKA_DTYPE="float64")
-    os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    print(
-        subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], text=True
-        )
-    )
-    quoted_root = shlex.quote(str(root))
-    replay_command = (
-        f"scripts.replay_jonswap_dataset --inputs {quoted_root}/replay_inputs.npz "
-        f"--output-root {quoted_root}/jonswap_arrays "
-        "--source-dataset /data/outputs/paper_dataset/arrays"
-    )
-    commands = (
-        ("pilot", replay_command + " --batch-size 4 --pilot-only"),
-        (
-            "longest128",
-            f"scripts.benchmark_jonswap_replay --inputs {quoted_root}/replay_inputs.npz "
-            f"--output {quoted_root}/longest128.json "
-            "--batch-size 128 --full-horizon --longest --repeats 1",
-        ),
-        ("jonswap", replay_command + " --batch-size 128"),
-        (
-            "stokes",
-            "scripts.generate_paper_dataset --family stokes --seed 2026091400 "
-            "--num-simulations 3391488 --batch-size 256 --gpu "
-            f"--output-root {quoted_root}/stokes",
-        ),
-        (
-            "assembly",
-            f"scripts.assemble_regenerated_dataset --jonswap {quoted_root}/jonswap_arrays "
-            f"--new-stokes {quoted_root}/stokes --output {quoted_root}/arrays",
-        ),
-    )
-    for stage, arguments in commands:
-        print(f"Starting {stage}: {arguments}", flush=True)
-        with (root / f"{stage}.log").open("a") as log:
-            process = subprocess.Popen(
-                [sys.executable, "-u", "-m", *shlex.split(arguments)],
-                cwd="/repo",
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-            next_commit = time.monotonic() + 300
-            try:
-                while process.poll() is None:
-                    try:
-                        process.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        if time.monotonic() >= next_commit:
-                            volume.commit()
-                            next_commit = time.monotonic() + 300
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-                volume.commit()
-        print(f"Finished {stage}: returncode={process.returncode}", flush=True)
-        if process.returncode:
-            # A failed numerical check must stop the workflow, not trigger retries.
-            failure = {
-                "status": "failed",
-                "stage": stage,
-                "returncode": process.returncode,
-            }
-            (root / "failure.json").write_text(json.dumps(failure) + "\n")
-            volume.commit()
-            print((root / f"{stage}.log").read_text()[-8000:], flush=True)
-            return failure
-
-    # If interrupted during dispatch, stop for inspection instead of launching twice.
-    training_call_path.write_text(
-        json.dumps({"status": "training_dispatch_incomplete", **training_options})
-        + "\n"
-    )
-    volume.commit()
-    call = cast(_ModalTrainingFunction, run_training).spawn(**training_options)
-    result = {
-        "status": "training_started",
-        "function_call_id": call.object_id,
-        **training_options,
-    }
-    training_call_path.write_text(json.dumps(result, indent=2) + "\n")
-    volume.commit()
-    print(json.dumps(result), flush=True)
-    return result
-
-
-@app.function(
-    gpu="H100:1",
-    volumes={VOLUME_MOUNT: volume},
-    timeout=4 * 3600,
-    cpu=8,
-    memory=256 * 1024,
-)
-def benchmark_jonswap(
-    batch_sizes: str = "32,64,128,256",
-    full_horizon: bool = False,
-    longest: bool = False,
-    repeats: int = 2,
-) -> dict[str, object]:
-    """Benchmark one H100 only; never generate a dataset or dispatch training."""
-    import csv
-    import json
-    import subprocess
-    import sys
-
-    volume.reload()
-    root = Path("/data/outputs/paper_dataset_regenerated_20260914")
-    mode = "full_longest" if longest else "full_median" if full_horizon else "short"
-    directory = root / "benchmarks" / mode
-    directory.mkdir(parents=True, exist_ok=True)
-    os.environ.update(PYTHONPATH="/repo", DNO_TANAKA_DTYPE="float64", JAX_LOG_COMPILES="1")
-    os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    results: dict[str, object] = {}
-    for batch_size in map(int, batch_sizes.split(",")):
-        output = directory / f"batch_{batch_size}.json"
-        if output.exists():
-            previous = json.loads(output.read_text())
-            if len(previous["runs"]) == repeats and all(run["status"] == "passed" for run in previous["runs"]):
-                results[str(batch_size)] = previous
-                continue
-        command = [
-            sys.executable,
-            "-u",
-            "-m",
-            "scripts.benchmark_jonswap_replay",
-            "--inputs",
-            str(root / "replay_inputs.npz"),
-            "--output",
-            str(output),
-            "--batch-size",
-            str(batch_size),
-            "--repeats",
-            str(repeats),
-        ]
-        command += [
-            flag
-            for flag, enabled in (
-                ("--full-horizon", full_horizon),
-                ("--longest", longest),
-            )
-            if enabled
-        ]
-        print(f"Benchmark batch={batch_size}, mode={mode}", flush=True)
-        with (
-            output.with_suffix(".csv").open("w") as metrics,
-            output.with_suffix(".log").open("w") as log,
-        ):
-            monitor = subprocess.Popen(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.used,utilization.gpu,power.draw",
-                    "--format=csv,noheader,nounits",
-                    "--loop-ms=250",
-                ],
-                stdout=metrics,
-            )
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd="/repo",
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    timeout=3600,
-                )
-            finally:
-                monitor.terminate()
-                monitor.wait()
-                volume.commit()
-        if completed.returncode:
-            print(output.with_suffix(".log").read_text()[-8000:], flush=True)
-            results[str(batch_size)] = {"returncode": completed.returncode}
-            break
-        result = json.loads(output.read_text())
-        with output.with_suffix(".csv").open() as metrics:
-            samples = [
-                [float(value) for value in row]
-                for row in csv.reader(metrics)
-                if len(row) == 3
-            ]
-        result["sampled_peak_gpu_memory_mib"] = max(row[0] for row in samples)
-        result["sampled_mean_gpu_busy_percent"] = sum(row[1] for row in samples) / len(
-            samples
-        )
-        output.write_text(json.dumps(result, indent=2) + "\n")
-        volume.commit()
-        results[str(batch_size)] = result
-        print(json.dumps(result), flush=True)
-    return results
-
-
 @app.local_entrypoint()
 def train(
     dataset: str,
@@ -508,7 +272,6 @@ def train(
     cs_mult_hidden: int = 32,
     trainer_args: str = "",
     spawn: bool = False,
-    regenerate: bool = False,
 ) -> None:
     """Local entrypoint: dispatch a training run on a Modal GPU worker.
 
@@ -540,11 +303,7 @@ def train(
         cs_mult_hidden=cs_mult_hidden,
         trainer_args=trainer_args,
     )
-    remote_training = cast(
-        _ModalTrainingFunction, regenerate_dataset if regenerate else run_training
-    )
-    if regenerate:
-        call_kwargs = {"training_options": call_kwargs}
+    remote_training = cast(_ModalTrainingFunction, run_training)
     if spawn:
         call = remote_training.spawn(**call_kwargs)
         print(f"function_call_id = {call.object_id}")
