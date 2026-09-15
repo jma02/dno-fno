@@ -46,6 +46,7 @@ IntegratedTrajectoryBatch = NamedTuple(
     ],
 )
 
+
 def resample_to_target_grid(field: jax.Array, *, config: RolloutNumerics) -> jax.Array:
     """Keep the target Fourier band and resample it onto the target grid."""
 
@@ -149,7 +150,7 @@ def integrate_batch(
     state_finite_result = np.empty(health_shape, dtype=np.bool_)
     dno_finite_result = np.empty(health_shape, dtype=np.bool_)
     water_column_result = np.empty(health_shape, dtype=np.float64)
-    chunk_size = 8
+    chunk_size = 16
     for start in range(0, eta.shape[0], chunk_size):
         stop = min(start + chunk_size, eta.shape[0])
         count = stop - start
@@ -171,13 +172,7 @@ def integrate_batch(
             pad_factor=config.pad_factor,
             maximum_wavenumber=config.target_maximum_wavenumber,
         )
-        eta_host, xi_host, gxi_host = jax.device_get(
-            (target_eta[:count], target_xi[:count], target_gxi[:count])
-        )
-        eta_result[start:stop] = np.asarray(eta_host, dtype=np.float64)
-        xi_result[start:stop] = np.asarray(xi_host, dtype=np.float64)
-        gxi_result[start:stop] = np.asarray(gxi_host, dtype=np.float64)
-
+        health: tuple[jax.Array, ...] = ()
         if evaluate_health:
             _, _, internal_gxi = compute_dno_target(
                 eta_chunk,
@@ -189,34 +184,38 @@ def integrate_batch(
                 pad_factor=config.pad_factor,
                 maximum_wavenumber=config.maximum_wavenumber,
             )
-            health = jax.device_get(
-                (
-                    0.5
-                    * (config.length / config.nx)
-                    * jnp.sum(
-                        xi_chunk * internal_gxi + config.gravity * eta_chunk**2,
-                        axis=-1,
-                    ),
-                    jnp.all(jnp.isfinite(eta_chunk) & jnp.isfinite(xi_chunk), axis=-1),
-                    jnp.all(jnp.isfinite(internal_gxi), axis=-1),
-                    jnp.min(
-                        eta_chunk + depth_device[None, :, None],
-                        axis=-1,
-                    ),
-                )
+            health = (
+                0.5
+                * (config.length / config.nx)
+                * jnp.sum(
+                    xi_chunk * internal_gxi + config.gravity * eta_chunk**2,
+                    axis=-1,
+                ),
+                jnp.all(jnp.isfinite(eta_chunk) & jnp.isfinite(xi_chunk), axis=-1),
+                jnp.all(jnp.isfinite(internal_gxi), axis=-1),
+                jnp.min(
+                    eta_chunk + depth_device[None, :, None],
+                    axis=-1,
+                ),
             )
-            hamiltonian_result[start:stop] = np.asarray(
-                health[0][:count], dtype=np.float64
+        eta_host, xi_host, gxi_host, health_host = jax.device_get(
+            (
+                target_eta[:count],
+                target_xi[:count],
+                target_gxi[:count],
+                tuple(field[:count] for field in health),
             )
-            state_finite_result[start:stop] = np.asarray(
-                health[1][:count], dtype=np.bool_
-            )
-            dno_finite_result[start:stop] = np.asarray(
-                health[2][:count], dtype=np.bool_
-            )
-            water_column_result[start:stop] = np.asarray(
-                health[3][:count], dtype=np.float64
-            )
+        )
+        eta_result[start:stop] = eta_host
+        xi_result[start:stop] = xi_host
+        gxi_result[start:stop] = gxi_host
+        if evaluate_health:
+            (
+                hamiltonian_result[start:stop],
+                state_finite_result[start:stop],
+                dno_finite_result[start:stop],
+                water_column_result[start:stop],
+            ) = health_host
 
     solver_grid_health = (
         SolverGridHealth(

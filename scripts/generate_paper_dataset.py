@@ -73,13 +73,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--batch-size",
         type=int,
         required=True,
-        help="Maximum attempted simulations in one batch.",
+        help="Simulations sampled and saved together; also JONSWAP's rollout-sort pool.",
     )
     parser.add_argument("--gpu", action="store_true", help="Use GPU instead of CPU.")
     parser.add_argument(
         "--solver-batch-size",
         type=int,
-        help="JONSWAP simulations solved together after sorting by rollout length.",
+        help="Maximum JONSWAP simulations solved together within each saved batch.",
     )
     args = parser.parse_args(argv)
     jax.config.update("jax_enable_x64", True)

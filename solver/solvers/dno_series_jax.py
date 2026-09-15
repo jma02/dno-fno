@@ -132,8 +132,8 @@ def dno_series_eval(
     nx = int(eta.shape[-1])
     g0 = make_linear_dno_symbol(k, depth)
 
-    etam: list[jnp.ndarray] = [jnp.ones_like(eta)]
-    for m in range(1, order + 1):
+    etam: list[jnp.ndarray] = [jnp.ones_like(eta), eta]
+    for m in range(2, order + 1):
         etam.append(multiply(eta, etam[m - 1], nx, pad_factor=pad_factor) / m)
 
     fxi = myfft(xi, nx)

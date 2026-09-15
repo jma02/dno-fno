@@ -32,6 +32,9 @@ uv run python scripts/generate_paper_dataset.py --family stokes \
 
 The count above is just a small example; choose each family's count explicitly.
 Generation saves self-contained, resumable NPZ batches, not summary files.
+For JONSWAP, make `--batch-size` large enough to sort a full parameter group by
+rollout length, while `--solver-batch-size` limits how many run on the GPU at once.
+For 18,432 simulations across the current 27 groups, use 683 and 128 respectively.
 `build_paper_dataset.py` contains all assembly and split logic: it recursively
 reads `batch_*.npz` under each `--input-root` (repeat to pool directories).
 It uses every completed batch present, even before generation reaches its quota.

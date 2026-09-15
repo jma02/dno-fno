@@ -210,6 +210,13 @@ def _hat_to_state(state_hat: SpectralState) -> State:
     )
 
 
+def _lowpass_hat(state_hat: SpectralState, params: SolverParams) -> SpectralState:
+    mask = (
+        jnp.abs(params.k) <= params.filter_fraction * jnp.max(jnp.abs(params.k))
+    ).astype(state_hat.eta_hat.dtype)
+    return SpectralState(mask * state_hat.eta_hat, mask * state_hat.xi_hat)
+
+
 def _tree_add(a: SpectralState, b: SpectralState) -> SpectralState:
     return SpectralState(
         eta_hat=a.eta_hat + b.eta_hat,
@@ -333,10 +340,6 @@ def rhs_nonlinear(state: State, params: SolverParams) -> State:
 
     eta_t = gxi - linear_gxi
     xi_t = dealiased_zakharov_xi_rhs(eta_x, xi_x, gxi)
-    # Filter inside rhs: at k_max ≳ 100 the DNO series' k^M factor amplifies high-k roundoff faster than the implicit-iteration accumulates, so post-step filtering alone is too late.
-    if params.filter_fraction < 1.0:
-        eta_t = apply_lowpass(eta_t, params.k, params.filter_fraction)
-        xi_t = apply_lowpass(xi_t, params.k, params.filter_fraction)
     return State(eta=eta_t, xi=xi_t)
 
 
@@ -369,6 +372,9 @@ def rhs_nonlinear_if(
     physical_state = _hat_to_state(physical_hat)
     nonlinear_state = rhs_nonlinear(physical_state, params)
     nonlinear_hat = _state_to_hat(nonlinear_state, params.nx)
+    # Cut high modes before the fixed-point iteration reuses the nonlinear residual.
+    if params.filter_fraction < 1.0:
+        nonlinear_hat = _lowpass_hat(nonlinear_hat, params)
     nonlinear_hat = _tree_scale(
         nonlinear_hat,
         nonlinear_ramp_factor(t, params),
@@ -488,13 +494,10 @@ def _finish_gauss_legendre_2_step(
     params: SolverParams,
 ) -> State:
     v1 = _tree_add(v0, _tree_scale(_tree_add(f1, f2), 0.5 * dt))
-    next_state = _hat_to_state(apply_linear_flow_hat(v1, t + dt, params))
+    next_state_hat = apply_linear_flow_hat(v1, t + dt, params)
     if params.filter_fraction < 1.0:
-        next_state = State(
-            eta=apply_lowpass(next_state.eta, params.k, params.filter_fraction),
-            xi=apply_lowpass(next_state.xi, params.k, params.filter_fraction),
-        )
-    return next_state
+        next_state_hat = _lowpass_hat(next_state_hat, params)
+    return _hat_to_state(next_state_hat)
 
 
 def _gauss_legendre_2_if_step_result(
