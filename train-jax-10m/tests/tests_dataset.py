@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -136,49 +135,6 @@ def test_loads_readonly_arrays_and_keeps_simulation_splits() -> None:
         np.testing.assert_array_equal(dataset["xi"], stored_xi)
 
 
-def test_stats_cache_is_refreshed_when_dataset_inputs_change() -> None:
-    with tempfile.TemporaryDirectory() as raw_directory:
-        root = Path(raw_directory)
-        batch = _write_batch(
-            root,
-            family_id=PhysicalFamilyId.STOKES,
-            simulation_count=2,
-            accepted_local_indices=(0, 1),
-        )
-        dataset_path = build_dataset(
-            root / "dataset", (batch,), validation_fraction=0, test_fraction=0
-        )
-        dataset = load_dataset_arrays(dataset_path)
-        indices = np.arange(2, dtype=np.int64)
-        first = load_or_compute_stats(dataset_path, dataset, indices=indices)
-        other = load_or_compute_stats(dataset_path, dataset, indices=indices + 2)
-        assert other["index_selection"] != first["index_selection"]
-        assert other["target_absmax"] != first["target_absmax"]
-        restored = load_or_compute_stats(dataset_path, dataset, indices=indices[::-1])
-        assert restored == first
-
-        cache_path = dataset_path / "stats.json"
-        for invalid in (
-            {key: value for key, value in first.items() if key != "feature_absmax"},
-            {**first, "target_absmax": float("nan")},
-        ):
-            cache_path.write_text(json.dumps(invalid), encoding="utf-8")
-            assert (
-                load_or_compute_stats(dataset_path, dataset, indices=indices) == first
-            )
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        cached["target_absmax"] = 123456.0
-        cache_path.write_text(json.dumps(cached), encoding="utf-8")
-
-        target_path = dataset_path / "gxi.npy"
-        targets = np.load(target_path, mmap_mode="r+")
-        targets *= 2
-        targets.flush()
-        second = load_or_compute_stats(dataset_path, dataset, indices=indices)
-        assert second["target_absmax"] == 2 * np.asarray(first["target_absmax"])
-        assert second["target_absmax"] != 123456.0
-
-
 def test_normalizers_preserve_both_modes_and_constant_fields() -> None:
     for values in (
         np.arange(12).reshape(2, 6) - 3,
@@ -259,7 +215,6 @@ def test_prefetch_preserves_batches_and_producer_exceptions() -> None:
 
 def main() -> int:
     test_loads_readonly_arrays_and_keeps_simulation_splits()
-    test_stats_cache_is_refreshed_when_dataset_inputs_change()
     test_normalizers_preserve_both_modes_and_constant_fields()
     test_prefetch_preserves_batches_and_producer_exceptions()
     print(

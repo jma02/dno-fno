@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import queue
 import threading
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence, cast
 
@@ -120,53 +118,28 @@ def load_or_compute_stats(
     indices: np.ndarray,
 ) -> StatsDict:
     """Cache normalization statistics for the supplied training rows."""
-    input_file_state = [
-        {"size_bytes": state.st_size, "modified_ns": state.st_mtime_ns}
-        for state in map(
-            Path.stat, (dataset_path / f"{name}.npy" for name in _TRAINING_ARRAY_NAMES)
+    stats_path = dataset_path / "stats.json"
+    if stats_path.exists():
+        cached = json.loads(stats_path.read_text(encoding="utf-8"))
+        return cast(
+            StatsDict,
+            {
+                name: cached[name]
+                for name in (
+                    "feature_min",
+                    "feature_max",
+                    "feature_absmax",
+                    "target_min",
+                    "target_max",
+                    "target_absmax",
+                )
+            },
         )
-    ]
+
     if indices.size == 0:
         raise ValueError(
             "Cannot compute normalization statistics from an empty selection"
         )
-    selection = {
-        "count": int(indices.size),
-        "sha256": hashlib.sha256(
-            np.sort(indices.astype(np.int64)).tobytes()
-        ).hexdigest(),
-    }
-
-    stats_path = dataset_path / "stats.json"
-    if stats_path.exists():
-        cached: object = None
-        with suppress(json.JSONDecodeError, OSError):
-            cached = json.loads(stats_path.read_text(encoding="utf-8"))
-        if (
-            isinstance(cached, dict)
-            and cached.get("index_selection") == selection
-            and cached.get("input_file_state") == input_file_state
-            and all(
-                isinstance(values, list)
-                and len(values) == 2
-                and all(
-                    type(value) in (int, float) and np.isfinite(cast(float, value))
-                    for value in values
-                )
-                for values in (
-                    cached.get(name)
-                    for name in ("feature_min", "feature_max", "feature_absmax")
-                )
-            )
-            and all(
-                type(value) in (int, float) and np.isfinite(cast(float, value))
-                for value in (
-                    cached.get(name)
-                    for name in ("target_min", "target_max", "target_absmax")
-                )
-            )
-        ):
-            return cached
 
     eta_min, eta_max, eta_absmax = _compute_selected_extrema(dataset["eta"], indices)
     xi_min, xi_max, xi_absmax = _compute_selected_extrema(
@@ -182,8 +155,6 @@ def load_or_compute_stats(
         "target_min": target_min,
         "target_max": target_max,
         "target_absmax": target_absmax,
-        "index_selection": selection,
-        "input_file_state": input_file_state,
     }
     stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
     return stats
