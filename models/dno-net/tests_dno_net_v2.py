@@ -252,6 +252,31 @@ def test_spectral_mlp_learns_full_grid_correction() -> None:
     assert jnp.linalg.norm(jnp.fft.rfft(residual, axis=-1)[:, 33:64]) > 1e-8
 
 
+def test_canonical_fno_gradient_and_translation() -> None:
+    eta, xi, depth = _state()
+    model = _model().clone(learned_grid=32, correction_kind="canonical_fno")
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = model.init(jax.random.key(51), inputs, depth)
+    assert jnp.max(jnp.abs(_learned_residual(model, variables, eta, xi, depth))) < 1e-14
+    gradients = jax.grad(lambda params: jnp.sum(
+        (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert all(jnp.isfinite(leaf).all() for leaf in jax.tree.leaves(gradients))
+    assert jnp.linalg.norm(gradients["canonical_fno"]["decoder_out"]["kernel"]) > 0
+    variables = unfreeze(variables)
+    kernel = variables["params"]["canonical_fno"]["decoder_out"]["kernel"]
+    variables["params"]["canonical_fno"]["decoder_out"]["kernel"] = 0.1 * jax.random.normal(
+        jax.random.key(52), kernel.shape, dtype=kernel.dtype,
+    )
+    residual = _learned_residual(model, variables, eta, xi, depth)
+    assert residual.shape == xi.shape and jnp.linalg.norm(residual) > 0
+    assert jnp.max(jnp.abs(residual.mean(axis=-1))) < 1e-12
+    shifted = _learned_residual(
+        model, variables, jnp.roll(eta, 8, axis=1), jnp.roll(xi, 8, axis=1), depth,
+    )
+    assert jnp.allclose(shifted, jnp.roll(residual, 8, axis=1), rtol=1e-9, atol=1e-11)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -261,6 +286,7 @@ def main() -> int:
         test_coarse_correction_keeps_output_grid_and_linearity,
         test_compact_correction_invariants_and_initial_gradient,
         test_spectral_mlp_learns_full_grid_correction,
+        test_canonical_fno_gradient_and_translation,
     )
     for test in tests:
         test()

@@ -173,6 +173,29 @@ class SpectralMLPCorrection(nn.Module):
         return correction - correction.mean(axis=1, keepdims=True)
 
 
+class CanonicalFNOCorrection(nn.Module):
+    """Benchmark candidate: four width-32 Fourier blocks retaining every mode."""
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        batch, size, _ = inputs.shape
+        condition = jnp.broadcast_to(depth[:, None, :], (batch, size, 1))
+        hidden = nn.Dense(32, name="encoder")(jnp.concatenate((inputs, condition), axis=-1))
+        for index in range(4):
+            spectrum = jnp.fft.rfft(hidden, axis=1, norm="ortho")
+            shape = (size // 2 + 1, 32, 32)
+            real = self.param(f"spectral_real_{index}", nn.initializers.normal(1 / 32**0.5), shape)
+            imaginary = self.param(f"spectral_imag_{index}", nn.initializers.normal(1 / 32**0.5), shape)
+            mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
+            spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm="ortho")
+            hidden = nn.gelu(spatial + nn.Dense(32, name=f"spatial_{index}")(hidden))
+        hidden = nn.gelu(nn.Dense(64, name="decoder_hidden")(hidden))
+        correction = nn.Dense(
+            1, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
+        )(hidden)[..., 0]
+        return correction - correction.mean(axis=1, keepdims=True)
+
+
 class CraigSulemDNO(nn.Module):
     """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
     width: int                        # Each shared eta layer has width // 2 channels.
@@ -252,7 +275,7 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        if self.correction_kind not in ("branches", "compact", "spectral_mlp"):
+        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno"):
             raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
         if self.correction_kind != "branches" and self.fuse_fft:
             raise ValueError("FFT fusion applies only to the branches correction")
@@ -272,11 +295,13 @@ class CraigSulemDNO(nn.Module):
             grid_size = inputs.shape[1]
             eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
             xi_phys = xi_norm * self.xi_scale
-        if self.correction_kind in ("compact", "spectral_mlp"):
+        if self.correction_kind in ("compact", "spectral_mlp", "canonical_fno"):
             if self.correction_kind == "compact":
                 correction = CompactCorrection(
                     rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
                 )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
+            elif self.correction_kind == "canonical_fno":
+                correction = CanonicalFNOCorrection(name="canonical_fno")(inputs, clipped_log_depth)
             else:
                 correction = SpectralMLPCorrection(
                     hidden=self.spectral_hidden, layers=self.spectral_layers,

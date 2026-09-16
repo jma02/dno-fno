@@ -83,7 +83,7 @@ def prepare(run_name: str) -> dict:
 
 def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
               profile_step: bool = False, compact_pilot: bool = False,
-              spectral_benchmark: bool = False) -> str:
+              spectral_benchmark: bool = False, fno_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -173,6 +173,14 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         variants = (
             ("spectral_reference", 2, 64, True, "branches", 64),
             ("spectral_mlp", 2, 64, False, "spectral_mlp", 64),
+        )
+    if fno_benchmark:
+        result["scope"] = "Paired batch4096 throughput only: spectral MLP versus four canonical FNO blocks, width32, all129 Fourier bins, decoder64. Learned grid256 and full1024 G0+G1 baseline. Resident real data, relative-L2/mode-balanced/Tanaka losses and AdamW; excludes Hadamard, loading and compilation. Three warmups and21 synchronized trials. GPU hard cap180s."
+        batch = tuple(array[:4096] for array in datasets["train"])
+        jax.block_until_ready(batch)
+        variants = (
+            ("spectral_mlp", 2, 64, False, "spectral_mlp", 64),
+            ("canonical_fno", 4, 32, False, "canonical_fno", 64),
         )
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
@@ -326,6 +334,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             output = jax.block_until_ready(executable(state, *batch))
             timings.append((perf_counter() - tick) * 1000)
         assert np.isfinite(float(output[1]))
+        if fno_benchmark:
+            assert all(bool(jnp.isfinite(leaf).all()) for leaf in jax.tree.leaves(output[0]))
         record = {
             "blocks": blocks, "latent": latent, "fused": fused,
             "correction_kind": correction_kind, "compact_rank": rank, "compact_hidden": 128,
@@ -337,7 +347,9 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         result["variants"][name] = record
         compiled[name] = [state, executable, evaluate]
         print(f"{name}: {record['step_median_ms']:.3f}ms, params={record['parameters']}", flush=True)
-        if compact_pilot or spectral_benchmark:
+        if fno_benchmark:
+            record["batch_size"] = 4096
+        if compact_pilot or (spectral_benchmark and not fno_benchmark):
             large_batch = tuple(array[:4096] for array in datasets["train"])
             large_step = jax.jit(step).lower(state, *large_batch).compile()
             for _ in range(3):
@@ -357,7 +369,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
 
     if spectral_benchmark:
         result["function_wall_seconds"] = perf_counter() - started
-        (destination / "spectral_benchmark_h100.json").write_text(json.dumps(result, indent=2))
+        filename = "fno_benchmark_h100.json" if fno_benchmark else "spectral_benchmark_h100.json"
+        (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
 
@@ -468,20 +481,21 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
     image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
     timeout=180, retries=0, scaledown_window=2,
 )
-def compact_check(run_name: str, spectral_benchmark: bool = False) -> str:
+def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
-                     spectral_benchmark=spectral_benchmark)
+                     spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark)
 
 
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
-         compact_pilot: bool = False, spectral_benchmark: bool = False) -> None:
+         compact_pilot: bool = False, spectral_benchmark: bool = False,
+         fno_benchmark: bool = False) -> None:
     if not prepared:
         print(prepare.remote(run_name))
-    if compact_pilot or spectral_benchmark:
-        result = compact_check.remote(run_name, spectral_benchmark)
-        suffix = "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
+    if compact_pilot or spectral_benchmark or fno_benchmark:
+        result = compact_check.remote(run_name, spectral_benchmark or fno_benchmark, fno_benchmark)
+        suffix = "_fno_benchmark_h100" if fno_benchmark else "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
