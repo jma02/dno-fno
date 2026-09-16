@@ -7,6 +7,7 @@ linear in xi, and starts at order eta^2.
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
@@ -192,9 +193,13 @@ class CanonicalFNOCorrection(nn.Module):
             multiplicity = np.full(size, 2.0)
             multiplicity[[0, size // 2]] = 1
             inverse = (basis * multiplicity[None, :]).T
+            # Single-pass TF32 loses too much accuracy over repeated transforms.
+            precision = "TF32_TF32_F32_X3" if hidden.dtype == jnp.float32 and jax.default_backend() == "gpu" else None
         for index in range(4):
             if self.transform == "dft":
-                coefficients = jnp.einsum("bnc,nk->bkc", hidden, jnp.asarray(basis, dtype=hidden.dtype))
+                coefficients = jnp.einsum(
+                    "bnc,nk->bkc", hidden, jnp.asarray(basis, dtype=hidden.dtype), precision=precision,
+                )
                 spectrum = coefficients[:, :size // 2 + 1] + 1j * jnp.pad(
                     coefficients[:, size // 2 + 1:], ((0, 0), (1, 1), (0, 0)),
                 )
@@ -230,7 +235,9 @@ class CanonicalFNOCorrection(nn.Module):
                 raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
             if self.transform == "dft":
                 coefficients = jnp.concatenate((mixed.real, mixed[:, 1:-1].imag), axis=1)
-                spatial = jnp.einsum("bkc,kn->bnc", coefficients, jnp.asarray(inverse, dtype=coefficients.dtype))
+                spatial = jnp.einsum(
+                    "bkc,kn->bnc", coefficients, jnp.asarray(inverse, dtype=coefficients.dtype), precision=precision,
+                )
             else:
                 spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm=norm)
             if not self.fold_spatial:
