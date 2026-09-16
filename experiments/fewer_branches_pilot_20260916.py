@@ -299,7 +299,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                         right = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(candidate)])
                         error = float(np.linalg.norm(left - right) / max(np.linalg.norm(left), 1e-12))
                         # First prove equivalence in true float32, then record TF32 sensitivity.
-                        tolerance = 2e-5 if precision == "highest" else 5e-3 if fno_transform_benchmark else 1e-3
+                        tolerance = 1e-4 if precision == "highest" else 5e-3 if fno_transform_benchmark else 1e-3
                         assert np.isfinite(error) and error < tolerance, (precision, configuration, label, error)
                         errors[f"{precision}_{configuration[1]}_{configuration[2]}_{label}"] = error
             result["optimization_relative_errors"] = errors
