@@ -186,10 +186,16 @@ class CanonicalFNOCorrection(nn.Module):
         batch, size, _ = inputs.shape
         condition = jnp.broadcast_to(depth[:, None, :], (batch, size, 1))
         hidden = nn.Dense(32, name="encoder")(jnp.concatenate((inputs, condition), axis=-1))
+        channels_first = self.transform == "fft_channels_first"
+        if channels_first:
+            hidden = hidden.swapaxes(1, 2)
+        fft_axis = 2 if channels_first else 1
+        channel_axis = 1 if channels_first else 2
+        equation = "bik,kio->bok" if channels_first else "bki,kio->bko"
         fused = self.transform == "fused" and hidden.dtype == jnp.float32 and size == 256
-        if self.transform == "fused" and not self.fold_spatial:
-            raise ValueError("Inter-block FFT fusion requires folding the spatial branch")
-        norm = "backward" if self.transform in ("fft_backward", "fused") else "ortho"
+        if (self.transform == "fused" or channels_first) and not self.fold_spatial:
+            raise ValueError("Fused/channel-first FFT requires folding the spatial branch")
+        norm = "backward" if self.transform in ("fft_backward", "fft_channels_first", "fused") else "ortho"
         if self.transform == "dft":
             angle = 2 * np.pi * np.arange(size)[:, None] * np.arange(size // 2 + 1)[None, :] / size
             basis = np.concatenate((np.cos(angle), -np.sin(angle[:, 1:-1])), axis=1) / size**0.5
@@ -207,7 +213,7 @@ class CanonicalFNOCorrection(nn.Module):
                     coefficients[:, size // 2 + 1:], ((0, 0), (1, 1), (0, 0)),
                 )
             elif not fused or index == 0:
-                spectrum = jnp.fft.rfft(hidden, axis=1, norm=norm)
+                spectrum = jnp.fft.rfft(hidden, axis=fft_axis, norm=norm)
             shape = (size // 2 + 1, 32, 32)
             # Global x64 is enabled for the analytic baseline and physics losses.
             # Learned parameters should match Dense's float32 default explicitly.
@@ -219,21 +225,22 @@ class CanonicalFNOCorrection(nn.Module):
                 # A constant channel matrix commutes with the spatial FFT.
                 real = real.astype(spectrum.real.dtype) + kernel
             if self.spectral_gemm == "packed":
-                packed = jnp.concatenate((spectrum.real, spectrum.imag), axis=-1)
+                packed = jnp.concatenate((spectrum.real, spectrum.imag), axis=channel_axis)
                 weights = jnp.concatenate((
                     jnp.concatenate((real, imaginary), axis=-1),
                     jnp.concatenate((-imaginary, real), axis=-1),
                 ), axis=-2)
-                product = jnp.einsum("bki,kio->bko", packed, weights)
-                mixed = product[..., :32] + 1j * product[..., 32:]
+                product = jnp.einsum(equation, packed, weights)
+                product_real, product_imag = jnp.split(product, 2, axis=channel_axis)
+                mixed = product_real + 1j * product_imag
             elif self.spectral_gemm == "split":
-                real_part = jnp.einsum("bki,kio->bko", spectrum.real, real)
-                real_part -= jnp.einsum("bki,kio->bko", spectrum.imag, imaginary)
-                imaginary_part = jnp.einsum("bki,kio->bko", spectrum.real, imaginary)
-                imaginary_part += jnp.einsum("bki,kio->bko", spectrum.imag, real)
+                real_part = jnp.einsum(equation, spectrum.real, real)
+                real_part -= jnp.einsum(equation, spectrum.imag, imaginary)
+                imaginary_part = jnp.einsum(equation, spectrum.real, imaginary)
+                imaginary_part += jnp.einsum(equation, spectrum.imag, real)
                 mixed = real_part + 1j * imaginary_part
             elif self.spectral_gemm == "complex":
-                mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
+                mixed = jnp.einsum(equation, spectrum, real + 1j * imaginary)
             else:
                 raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
             if fused and index < 3:
@@ -247,10 +254,12 @@ class CanonicalFNOCorrection(nn.Module):
                     "bkc,kn->bnc", coefficients, jnp.asarray(inverse, dtype=coefficients.dtype), precision=precision,
                 )
             else:
-                spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm=norm)
+                spatial = jnp.fft.irfft(mixed, n=size, axis=fft_axis, norm=norm)
             if not self.fold_spatial:
                 spatial = spatial + hidden @ kernel
-            hidden = nn.gelu(spatial + bias)
+            hidden = nn.gelu(spatial + (bias[None, :, None] if channels_first else bias))
+        if channels_first:
+            hidden = hidden.swapaxes(1, 2)
         hidden = nn.gelu(nn.Dense(64, name="decoder_hidden")(hidden))
         correction = nn.Dense(
             1, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",

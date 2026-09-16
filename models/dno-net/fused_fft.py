@@ -129,10 +129,10 @@ def _gelu_forward_kernel(
     tangent = jnp.tanh(0.7978845608028654 * (x + 0.044715 * x**3))
     activated = 0.5 * x * (1 + tangent)
     derivative = 0.5 * (1 + tangent) + 0.5 * x * (1 - tangent**2) * 0.7978845608028654 * (1 + 3 * 0.044715 * x**2)
+    plt.store(slope.at[batch, n, c], derivative)
     out_real, out_imag = _fft(activated, jnp.zeros_like(activated), inverse=False)
     plt.store(yr.at[batch, n, c], out_real, mask=n <= 128)
     plt.store(yi.at[batch, n, c], jnp.where(edge, 0.0, out_imag), mask=n <= 128)
-    plt.store(slope.at[batch, n, c], derivative)
 
 
 def _gelu_backward_kernel(

@@ -290,6 +290,7 @@ def test_canonical_fno_gradient_and_translation() -> None:
             (False, "complex", "fft"), (True, "complex", "fft"),
             (True, "packed", "fft"), (True, "split", "fft"),
             (True, "packed", "fft_backward"), (True, "packed", "dft"),
+            (True, "packed", "fft_channels_first"),
         )
         for folded, gemm, transform in configurations:
             candidate = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm, fno_transform=transform)

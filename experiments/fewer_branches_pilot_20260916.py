@@ -206,10 +206,10 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         if fno_transform_benchmark:
             result["scope"] = result["scope"].replace(
                 "complex, packed-real and split-real spectral GEMMs",
-                "packed-real GEMMs and backward-normalized cuFFT versus fused inter-block IFFT/GELU/FFT",
+                "packed-real GEMMs and backward-normalized cuFFT, channel-first layout or fused inter-block IFFT/GELU/FFT with early slope store",
             )
             variants = tuple((f"fno_{transform}", 4, 32, False, "canonical_fno", 64)
-                             for transform in ("fft_backward", "fused"))
+                             for transform in ("fft_backward", "fft_channels_first", "fused"))
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -274,7 +274,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             if fno_gemm_benchmark:
                 configurations = tuple((True, mode, "fft") for mode in ("complex", "packed", "split"))
             if fno_transform_benchmark:
-                configurations = tuple((True, "packed", transform) for transform in ("fft_backward", "fused"))
+                configurations = tuple((True, "packed", transform) for transform in ("fft_backward", "fft_channels_first", "fused"))
             errors = {}
             for precision in (("highest", "default") if fno_transform_benchmark else ("default",)):
                 checks = []
@@ -474,7 +474,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         if fno_gemm_benchmark:
             filename = "fno_gemm_fp32_benchmark_h100.json"
         if fno_transform_benchmark:
-            filename = "fno_fused_benchmark_h100.json"
+            filename = "fno_layout_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -616,7 +616,7 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
         if fno_gemm_benchmark:
             suffix = "_fno_gemm_fp32_benchmark_h100"
         if fno_transform_benchmark:
-            suffix = "_fno_fused_benchmark_h100"
+            suffix = "_fno_layout_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
