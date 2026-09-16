@@ -97,8 +97,8 @@ def main() -> None:
                         help="Optional even grid size for the learned correction; baseline stays full resolution.")
     parser.add_argument("--cs_fuse_fft", action="store_true",
                         help="Use the experimental fused float32 FFT kernel on a 256-point learned grid.")
-    parser.add_argument("--cs_correction", choices=("branches", "compact", "spectral_mlp"), default="branches",
-                        help="Learned correction architecture; compact and spectral_mlp are experimental.")
+    parser.add_argument("--cs_correction", choices=("branches", "compact", "spectral_mlp", "canonical_fno"), default="branches",
+                        help="Learned correction architecture; alternatives to branches are experimental.")
     parser.add_argument("--cs_compact_rank", type=int, default=64,
                         help="Even dimension of the compact correction's real Fourier basis.")
     parser.add_argument("--cs_compact_hidden", type=int, default=128,
