@@ -215,6 +215,9 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             eta_scale=float(scales[0]), xi_scale=float(scales[1]), target_scale=target_scale,
         )
         params = model.init(key, batch[0][:1], batch[1][:1])["params"]
+        if fno_gemm_benchmark:
+            assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(params))
+            assert model.apply({"params": params}, batch[0][:1], batch[1][:1]).dtype == jnp.float32
         # Use the same optimizer schedule and sample sequence for both capacities.
         schedule = optax.join_schedules(
             (optax.linear_schedule(0, 2e-5, 500), optax.constant_schedule(2e-5)), (500,),
@@ -395,6 +398,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             "correction_kind": correction_kind, "compact_rank": rank, "compact_hidden": 128,
             "fno_fold_spatial": model.fno_fold_spatial,
             "fno_spectral_gemm": model.fno_spectral_gemm,
+            "parameter_dtypes": sorted({str(leaf.dtype) for leaf in jax.tree.leaves(params)}),
             "parameters": sum(leaf.size for leaf in jax.tree.leaves(params)),
             "step_median_ms": statistics.median(timings), "step_trials_ms": timings,
             "compile_and_benchmark_seconds": perf_counter() - before,
@@ -449,7 +453,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         if fno_fold_benchmark:
             filename = "fno_fold_benchmark_h100.json"
         if fno_gemm_benchmark:
-            filename = "fno_gemm_benchmark_h100.json"
+            filename = "fno_gemm_fp32_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -586,7 +590,7 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
         if fno_fold_benchmark:
             suffix = "_fno_fold_benchmark_h100"
         if fno_gemm_benchmark:
-            suffix = "_fno_gemm_benchmark_h100"
+            suffix = "_fno_gemm_fp32_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"

@@ -186,10 +186,12 @@ class CanonicalFNOCorrection(nn.Module):
         for index in range(4):
             spectrum = jnp.fft.rfft(hidden, axis=1, norm="ortho")
             shape = (size // 2 + 1, 32, 32)
-            real = self.param(f"spectral_real_{index}", nn.initializers.normal(1 / 32**0.5), shape)
-            imaginary = self.param(f"spectral_imag_{index}", nn.initializers.normal(1 / 32**0.5), shape)
-            kernel = self.param(f"spatial_kernel_{index}", nn.initializers.lecun_normal(), (32, 32))
-            bias = self.param(f"spatial_bias_{index}", nn.initializers.zeros, (32,))
+            # Global x64 is enabled for the analytic baseline and physics losses.
+            # Learned parameters should match Dense's float32 default explicitly.
+            real = self.param(f"spectral_real_{index}", nn.initializers.normal(1 / 32**0.5), shape, jnp.float32)
+            imaginary = self.param(f"spectral_imag_{index}", nn.initializers.normal(1 / 32**0.5), shape, jnp.float32)
+            kernel = self.param(f"spatial_kernel_{index}", nn.initializers.lecun_normal(), (32, 32), jnp.float32)
+            bias = self.param(f"spatial_bias_{index}", nn.initializers.zeros, (32,), jnp.float32)
             if self.fold_spatial:
                 # A constant channel matrix commutes with the spatial FFT.
                 real = real.astype(spectrum.real.dtype) + kernel

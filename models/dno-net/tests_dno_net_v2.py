@@ -257,6 +257,8 @@ def test_canonical_fno_gradient_and_translation() -> None:
     model = _model().clone(learned_grid=32, correction_kind="canonical_fno")
     inputs = jnp.stack((eta, xi), axis=-1)
     variables = model.init(jax.random.key(51), inputs, depth)
+    assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(variables["params"]))
+    assert model.apply(variables, inputs.astype(jnp.float32), depth.astype(jnp.float32)).dtype == jnp.float32
     assert jnp.max(jnp.abs(_learned_residual(model, variables, eta, xi, depth))) < 1e-14
     gradients = jax.grad(lambda params: jnp.sum(
         (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
