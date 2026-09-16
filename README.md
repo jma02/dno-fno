@@ -36,6 +36,20 @@ Use `--help` for model and loss options. Run the same C27 recipe on Modal with
 see the [script guide](scripts/README.md). Retired trainers and
 the CARBS workflow remain available in Git history.
 
+### Narrower branch correction
+
+The smaller FFT branch model uses these options:
+
+```bash
+--model cs_dno --norm scale --width 128 --n_blocks 2 --latent 64 \
+  --cs_mult_hidden 160 --cs_correction branches --cs_learned_grid 256 --cs_fuse_fft
+```
+
+`--width 128` gives 64 shared channels; two groups of 64 give 128 branches.
+This keeps the branch architecture on the 256-point learned grid, with the
+analytic baseline on the original input grid. Reducing channels and branches
+does not impose the compact correction's fixed Fourier rank.
+
 ### Experimental compact correction
 
 CS-DNO keeps its branch correction by default. To try the separate compact
