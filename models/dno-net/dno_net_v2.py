@@ -176,6 +176,7 @@ class SpectralMLPCorrection(nn.Module):
 class CanonicalFNOCorrection(nn.Module):
     """Benchmark candidate: four width-32 Fourier blocks retaining every mode."""
     fold_spatial: bool = False
+    spectral_gemm: str = "complex"
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
@@ -192,7 +193,24 @@ class CanonicalFNOCorrection(nn.Module):
             if self.fold_spatial:
                 # A constant channel matrix commutes with the spatial FFT.
                 real = real.astype(spectrum.real.dtype) + kernel
-            mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
+            if self.spectral_gemm == "packed":
+                packed = jnp.concatenate((spectrum.real, spectrum.imag), axis=-1)
+                weights = jnp.concatenate((
+                    jnp.concatenate((real, imaginary), axis=-1),
+                    jnp.concatenate((-imaginary, real), axis=-1),
+                ), axis=-2)
+                product = jnp.einsum("bki,kio->bko", packed, weights)
+                mixed = product[..., :32] + 1j * product[..., 32:]
+            elif self.spectral_gemm == "split":
+                real_part = jnp.einsum("bki,kio->bko", spectrum.real, real)
+                real_part -= jnp.einsum("bki,kio->bko", spectrum.imag, imaginary)
+                imaginary_part = jnp.einsum("bki,kio->bko", spectrum.real, imaginary)
+                imaginary_part += jnp.einsum("bki,kio->bko", spectrum.imag, real)
+                mixed = real_part + 1j * imaginary_part
+            elif self.spectral_gemm == "complex":
+                mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
+            else:
+                raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
             spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm="ortho")
             if not self.fold_spatial:
                 spatial = spatial + hidden @ kernel
@@ -219,6 +237,7 @@ class CraigSulemDNO(nn.Module):
     spectral_channels: int = 16
     spectral_decoder_hidden: int = 64
     fno_fold_spatial: bool = False
+    fno_spectral_gemm: str = "complex"
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -311,7 +330,8 @@ class CraigSulemDNO(nn.Module):
                 )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
             elif self.correction_kind == "canonical_fno":
                 correction = CanonicalFNOCorrection(
-                    fold_spatial=self.fno_fold_spatial, name="canonical_fno",
+                    fold_spatial=self.fno_fold_spatial, spectral_gemm=self.fno_spectral_gemm,
+                    name="canonical_fno",
                 )(inputs, clipped_log_depth)
             else:
                 correction = SpectralMLPCorrection(
