@@ -188,7 +188,17 @@
     "spectral_batch": 4096,
     "production_updates": 11521,
     "spectral_updates": 2881,
-    "matched_schedule": false
+    "matched_schedule": false,
+    "production_app_url": "https://modal.com/apps/sciml-at-ud/main/ap-2xphInQaYySWtBMYBYEqLf",
+    "production_epoch1_loop_seconds": 1234.27,
+    "spectral_epoch1_loop_seconds": 180.49,
+    "first_epoch_wall_speedup": 6.838439802759155,
+    "first_epoch_h100_seconds_reduction_factor": 13.67687960551831,
+    "production_trainer_launch": "2026-09-16T02:03:56-04:00",
+    "production_epoch_loop_start": "2026-09-16T02:13:13-04:00",
+    "production_epoch1_complete": "2026-09-16T02:33:47-04:00",
+    "production_epoch2_complete": "2026-09-16T02:53:21-04:00",
+    "timing_scope": "First epoch loop includes training, validation, checkpoints and first-step compilation; excludes initialization before the epoch loop. Production2 H100, spectral1 H100. Source: timestamped Modal Epochs progress logs."
   },
   "analytic_baseline_validation": {
     "status": "not measured",
