@@ -175,6 +175,7 @@ class SpectralMLPCorrection(nn.Module):
 
 class CanonicalFNOCorrection(nn.Module):
     """Benchmark candidate: four width-32 Fourier blocks retaining every mode."""
+    fold_spatial: bool = False
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
@@ -186,9 +187,16 @@ class CanonicalFNOCorrection(nn.Module):
             shape = (size // 2 + 1, 32, 32)
             real = self.param(f"spectral_real_{index}", nn.initializers.normal(1 / 32**0.5), shape)
             imaginary = self.param(f"spectral_imag_{index}", nn.initializers.normal(1 / 32**0.5), shape)
+            kernel = self.param(f"spatial_kernel_{index}", nn.initializers.lecun_normal(), (32, 32))
+            bias = self.param(f"spatial_bias_{index}", nn.initializers.zeros, (32,))
+            if self.fold_spatial:
+                # A constant channel matrix commutes with the spatial FFT.
+                real = real.astype(spectrum.real.dtype) + kernel
             mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
             spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm="ortho")
-            hidden = nn.gelu(spatial + nn.Dense(32, name=f"spatial_{index}")(hidden))
+            if not self.fold_spatial:
+                spatial = spatial + hidden @ kernel
+            hidden = nn.gelu(spatial + bias)
         hidden = nn.gelu(nn.Dense(64, name="decoder_hidden")(hidden))
         correction = nn.Dense(
             1, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
@@ -210,6 +218,7 @@ class CraigSulemDNO(nn.Module):
     spectral_layers: int = 4
     spectral_channels: int = 16
     spectral_decoder_hidden: int = 64
+    fno_fold_spatial: bool = False
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -301,7 +310,9 @@ class CraigSulemDNO(nn.Module):
                     rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
                 )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
             elif self.correction_kind == "canonical_fno":
-                correction = CanonicalFNOCorrection(name="canonical_fno")(inputs, clipped_log_depth)
+                correction = CanonicalFNOCorrection(
+                    fold_spatial=self.fno_fold_spatial, name="canonical_fno",
+                )(inputs, clipped_log_depth)
             else:
                 correction = SpectralMLPCorrection(
                     hidden=self.spectral_hidden, layers=self.spectral_layers,

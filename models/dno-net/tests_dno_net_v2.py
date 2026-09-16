@@ -275,6 +275,24 @@ def test_canonical_fno_gradient_and_translation() -> None:
         model, variables, jnp.roll(eta, 8, axis=1), jnp.roll(xi, 8, axis=1), depth,
     )
     assert jnp.allclose(shifted, jnp.roll(residual, 8, axis=1), rtol=1e-9, atol=1e-11)
+    for index in range(4):
+        variables["params"]["canonical_fno"][f"spatial_bias_{index}"] = 0.01 * jax.random.normal(
+            jax.random.key(60 + index), (32,), dtype=jnp.float32,
+        )
+    # A nonzero decoder and biases exercise every block's parameter/input gradients.
+    for dtype in (jnp.float32, jnp.float64):
+        fields, depths = inputs.astype(dtype), depth.astype(dtype)
+        predictions = []
+        derivatives = []
+        for folded in (False, True):
+            candidate = model.clone(fno_fold_spatial=folded)
+            predictions.append(candidate.apply(variables, fields, depths))
+            derivatives.append(jax.grad(lambda params, values: jnp.sum(
+                (candidate.apply({"params": params}, values, depths)[..., 0] - xi)**2
+            ), argnums=(0, 1))(variables["params"], fields))
+        assert jnp.allclose(predictions[0], predictions[1], rtol=1e-5, atol=1e-7)
+        for original, folded in zip(jax.tree.leaves(derivatives[0]), jax.tree.leaves(derivatives[1]), strict=True):
+            assert jnp.allclose(original, folded, rtol=1e-4, atol=1e-7)
 
 
 def main() -> int:

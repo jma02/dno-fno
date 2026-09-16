@@ -83,7 +83,8 @@ def prepare(run_name: str) -> dict:
 
 def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
               profile_step: bool = False, compact_pilot: bool = False,
-              spectral_benchmark: bool = False, fno_benchmark: bool = False) -> str:
+              spectral_benchmark: bool = False, fno_benchmark: bool = False,
+              fno_fold_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -182,6 +183,15 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             ("spectral_mlp", 2, 64, False, "spectral_mlp", 64),
             ("canonical_fno", 4, 32, False, "canonical_fno", 64),
         )
+        if fno_fold_benchmark:
+            result["scope"] = result["scope"].replace(
+                "spectral MLP versus four canonical FNO blocks",
+                "unfolded versus folded spatial linear branch in four canonical FNO blocks",
+            )
+            variants = (
+                ("canonical_fno", 4, 32, False, "canonical_fno", 64),
+                ("canonical_fno_folded", 4, 32, False, "canonical_fno", 64),
+            )
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -193,6 +203,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             width=640, n_blocks=blocks, latent=latent, mult_hidden=160,
             learned_grid=256, fuse_fft=fused, domain_length=metadata["domain_length"],
             correction_kind=correction_kind, compact_rank=rank, compact_hidden=128,
+            fno_fold_spatial=name == "canonical_fno_folded",
             eta_scale=float(scales[0]), xi_scale=float(scales[1]), target_scale=target_scale,
         )
         params = model.init(key, batch[0][:1], batch[1][:1])["params"]
@@ -229,6 +240,37 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                 current.params, fields, depths, targets, mask, current.step,
             )
             return current.apply_gradients(grads=gradients), loss, relative
+
+        if fno_fold_benchmark and name == "canonical_fno":
+            check_params = jax.tree.map(lambda value: value, params)
+            decoder = check_params["canonical_fno"]["decoder_out"]["kernel"]
+            check_params["canonical_fno"]["decoder_out"]["kernel"] = 0.1 * jax.random.normal(
+                jax.random.key(52), decoder.shape, dtype=decoder.dtype,
+            )
+            checks = []
+            for folded in (False, True):
+                check_model = model.clone(fno_fold_spatial=folded)
+
+                def check_loss(parameters: dict, fields: jax.Array) -> tuple[jax.Array, jax.Array]:
+                    prediction = check_model.apply({"params": parameters}, fields, batch[1][:4])
+                    return jnp.mean((prediction - batch[2][:4])**2), prediction
+
+                checks.append(jax.block_until_ready(jax.jit(jax.value_and_grad(
+                    check_loss, argnums=(0, 1), has_aux=True,
+                ))(check_params, batch[0][:4])))
+            errors = {}
+            for label, original, folded in (
+                ("prediction", checks[0][0][1], checks[1][0][1]),
+                ("parameter_gradient", checks[0][1][0], checks[1][1][0]),
+                ("input_gradient", checks[0][1][1], checks[1][1][1]),
+            ):
+                left = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(original)])
+                right = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(folded)])
+                error = float(np.linalg.norm(left - right) / max(np.linalg.norm(left), 1e-12))
+                assert np.isfinite(error) and error < 1e-3, (label, error)
+                errors[label] = error
+            result["folding_relative_errors"] = errors
+            print(f"Folding output/gradient relative errors: {errors}", flush=True)
 
         if batch_sweep:
             rows = np.random.default_rng(123).permutation(metadata["train_rows"])
@@ -339,6 +381,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         record = {
             "blocks": blocks, "latent": latent, "fused": fused,
             "correction_kind": correction_kind, "compact_rank": rank, "compact_hidden": 128,
+            "fno_fold_spatial": model.fno_fold_spatial,
             "parameters": sum(leaf.size for leaf in jax.tree.leaves(params)),
             "step_median_ms": statistics.median(timings), "step_trials_ms": timings,
             "compile_and_benchmark_seconds": perf_counter() - before,
@@ -370,6 +413,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     if spectral_benchmark:
         result["function_wall_seconds"] = perf_counter() - started
         filename = "fno_benchmark_h100.json" if fno_benchmark else "spectral_benchmark_h100.json"
+        if fno_fold_benchmark:
+            filename = "fno_fold_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -481,21 +526,28 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
     image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
     timeout=180, retries=0, scaledown_window=2,
 )
-def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False) -> str:
+def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False,
+                  fno_fold_benchmark: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
-                     spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark)
+                     spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark,
+                     fno_fold_benchmark=fno_fold_benchmark)
 
 
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
          compact_pilot: bool = False, spectral_benchmark: bool = False,
-         fno_benchmark: bool = False) -> None:
+         fno_benchmark: bool = False, fno_fold_benchmark: bool = False) -> None:
+    fno_benchmark = fno_benchmark or fno_fold_benchmark
     if not prepared:
         print(prepare.remote(run_name))
     if compact_pilot or spectral_benchmark or fno_benchmark:
-        result = compact_check.remote(run_name, spectral_benchmark or fno_benchmark, fno_benchmark)
+        result = compact_check.remote(
+            run_name, spectral_benchmark or fno_benchmark, fno_benchmark, fno_fold_benchmark,
+        )
         suffix = "_fno_benchmark_h100" if fno_benchmark else "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
+        if fno_fold_benchmark:
+            suffix = "_fno_fold_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
