@@ -1,0 +1,999 @@
+{
+  "run_name": "fewer_branches_20260916_1545",
+  "data": {
+    "source": "/data/outputs/paper_dataset/arrays",
+    "seed": 42,
+    "stats": {
+      "feature_absmax": [
+        0.1511383354663849,
+        0.09148585051298141
+      ],
+      "target_absmax": 0.11534300446510315
+    },
+    "normalization": "Extrema fitted only on the pilot training subset, shared across variants.",
+    "train_rows": 16384,
+    "validation_rows": 2048,
+    "train_simulations": 5355,
+    "validation_simulations": 826,
+    "domain_length": 6.283185307179586,
+    "prepare_seconds": 39.278038024000004
+  },
+  "jax_version": "0.9.2",
+  "gpu": "NVIDIA H100 80GB HBM3, 81559 MiB",
+  "scope": "Batch-4096 memory, compiler-cost and GPU-kernel trace of the trained 128-branch fused model. Same losses and optimizer as the pilot; no Hadamard or convergence comparison. GPU hard cap 180s. Compiler costs are estimates, not hardware counters.",
+  "variants": {
+    "4096": {
+      "batch_size": 4096,
+      "step_median_ms": 26.317507000001683,
+      "samples_per_second": 155637.8421405849,
+      "step_trials_ms": [
+        26.185853999997732,
+        26.342530000000863,
+        26.317507000001683,
+        26.385113000003457,
+        26.37774700000506,
+        26.276195000001223,
+        26.40587599999833,
+        26.2345750000037,
+        26.294731000000127,
+        26.294712999998637,
+        26.332418999999163,
+        26.335512999999366,
+        26.3345040000047,
+        26.39217499999802,
+        26.370825000000764,
+        26.266716999998607,
+        26.29698100000155,
+        26.316600999997775,
+        26.21966499999928,
+        26.152228000000832,
+        26.33387400000231
+      ],
+      "compile_seconds": 12.153053421,
+      "compiler_buffer_bytes": 10658313632,
+      "finite_loss_and_updated_state": true,
+      "matmul_precision": null,
+      "compiler_cost_estimates": {
+        "bytes accessedout{1}": 2561555968.0,
+        "bytes accessed2{}": 2220298496.0,
+        "utilization29{}": 1.0,
+        "utilization16{}": 1.0,
+        "utilization23{}": 1.0,
+        "utilization36{}": 1.0,
+        "utilization9{}": 2.0,
+        "utilization2{}": 55.0,
+        "bytes accessedout{}": 15146233856.0,
+        "flops": 389223284736.0,
+        "bytes accessed8{}": 135282688.0,
+        "bytes accessed6{}": 7011840.0,
+        "bytes accessedout{4}": 8404992.0,
+        "utilization6{}": 17.0,
+        "utilization28{}": 1.0,
+        "utilization22{}": 1.0,
+        "bytes accessed3{}": 1705169408.0,
+        "utilization25{}": 1.0,
+        "bytes accessedout{3}": 426835968.0,
+        "utilization1{}": 159.0,
+        "utilization5{}": 20.0,
+        "utilization11{}": 1.0,
+        "utilization24{}": 1.0,
+        "utilization31{}": 1.0,
+        "utilization8{}": 3.0,
+        "utilization30{}": 1.0,
+        "utilization27{}": 1.0,
+        "bytes accessed5{}": 57360640.0,
+        "bytes accessed9{}": 135266304.0,
+        "utilization0{}": 295.0,
+        "utilization10{}": 2.0,
+        "utilization19{}": 1.0,
+        "utilization13{}": 1.0,
+        "utilization39{}": 1.0,
+        "utilization33{}": 1.0,
+        "utilization26{}": 1.0,
+        "utilization4{}": 27.0,
+        "optimal_seconds": -12.0,
+        "utilization32{}": 1.0,
+        "bytes accessedout{0}": 1725595136.0,
+        "bytes accessed1{}": 29193854976.0,
+        "utilization18{}": 1.0,
+        "bytes accessed4{}": 330071808.0,
+        "utilization38{}": 1.0,
+        "utilization12{}": 1.0,
+        "utilization15{}": 1.0,
+        "utilization3{}": 37.0,
+        "utilization35{}": 1.0,
+        "bytes accessed10{}": 135266304.0,
+        "utilization7{}": 3.0,
+        "transcendentals": 2198290432.0,
+        "bytes accessed0{}": 13860971520.0,
+        "bytes accessedout{2}": 376311296.0,
+        "bytes accessed": 40003178496.0,
+        "utilization34{}": 1.0,
+        "utilization21{}": 1.0,
+        "utilization14{}": 1.0,
+        "bytes accessed7{}": 135282688.0,
+        "utilization37{}": 1.0,
+        "utilization40{}": 1.0,
+        "utilization17{}": 1.0,
+        "utilization20{}": 1.0
+      },
+      "allocator_memory_stats": {
+        "num_allocs": 3598,
+        "bytes_in_use": 348324608,
+        "peak_bytes_in_use": 10987894784,
+        "largest_alloc_size": 10603933952,
+        "bytes_limit": 63763218432,
+        "bytes_reserved": 0,
+        "peak_bytes_reserved": 0,
+        "largest_free_block_bytes": 0,
+        "pool_bytes": 25769803776,
+        "peak_pool_bytes": 25769803776
+      },
+      "nvidia_smi_memory_used_mib": "25221",
+      "dense_operations": [
+        {
+          "name": "jvp(CraigSulemDNO)/eta_feat_proj",
+          "flops": 4697620480,
+          "lhs": [
+            4096,
+            256,
+            7
+          ],
+          "rhs": [
+            7,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/eta_feat_mix",
+          "flops": 214748364800,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            320,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_0/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            320,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_0/m_shared/hidden",
+          "flops": 676331520,
+          "lhs": [
+            4096,
+            129,
+            4
+          ],
+          "rhs": [
+            4,
+            160
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_0/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            160
+          ],
+          "rhs": [
+            160,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_1/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            320,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_1/m_shared/hidden",
+          "flops": 676331520,
+          "lhs": [
+            4096,
+            129,
+            4
+          ],
+          "rhs": [
+            4,
+            160
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "jvp(CraigSulemDNO)/cs_block_1/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            160
+          ],
+          "rhs": [
+            160,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_1/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            64
+          ],
+          "rhs": [
+            4096,
+            129,
+            160
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_1/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            64
+          ],
+          "rhs": [
+            160,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_1/m_shared/hidden",
+          "flops": 676331520,
+          "lhs": [
+            4096,
+            129,
+            160
+          ],
+          "rhs": [
+            4096,
+            129,
+            4
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_1/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            64
+          ],
+          "rhs": [
+            4096,
+            256,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_1/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            64
+          ],
+          "rhs": [
+            320,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_0/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            64
+          ],
+          "rhs": [
+            4096,
+            129,
+            160
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_0/m_shared/out",
+          "flops": 10821304320,
+          "lhs": [
+            4096,
+            129,
+            64
+          ],
+          "rhs": [
+            160,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_0/m_shared/hidden",
+          "flops": 676331520,
+          "lhs": [
+            4096,
+            129,
+            160
+          ],
+          "rhs": [
+            4096,
+            129,
+            4
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_0/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            64
+          ],
+          "rhs": [
+            4096,
+            256,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/cs_block_0/phi_proj",
+          "flops": 42949672960,
+          "lhs": [
+            4096,
+            256,
+            64
+          ],
+          "rhs": [
+            320,
+            64
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/eta_feat_mix",
+          "flops": 214748364800,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            4096,
+            256,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/eta_feat_mix",
+          "flops": 214748364800,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            320,
+            320
+          ],
+          "precision": "None"
+        },
+        {
+          "name": "transpose(jvp(CraigSulemDNO))/eta_feat_proj",
+          "flops": 4697620480,
+          "lhs": [
+            4096,
+            256,
+            320
+          ],
+          "rhs": [
+            4096,
+            256,
+            7
+          ],
+          "precision": "None"
+        }
+      ],
+      "dense_flops": 978971525120,
+      "trace_processes": [
+        {
+          "ph": "M",
+          "pid": 1,
+          "name": "process_name",
+          "args": {
+            "name": "/device:GPU:0"
+          }
+        },
+        {
+          "ph": "M",
+          "pid": 701,
+          "name": "process_name",
+          "args": {
+            "name": "/host:CPU"
+          }
+        }
+      ],
+      "gpu_trace_kernels": [
+        {
+          "name": "fused_fft_roundtrip_backward_256",
+          "total_us": 8122.112,
+          "count": 6
+        },
+        {
+          "name": "sm90_xmma_gemm_f32f32_tf32f32_f32_tn_n_tilesize128x128x32_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas",
+          "total_us": 7584.5830000000005,
+          "count": 15
+        },
+        {
+          "name": "fused_irfft_multiply_rfft_256",
+          "total_us": 7053.779,
+          "count": 6
+        },
+        {
+          "name": "loop_add_fusion_2",
+          "total_us": 6481.567000000001,
+          "count": 3
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_128x128_16x5_nt_align4>(cutlass_80_tensorop_s1688gemm_128x128_16x5_nt_align4::Params)",
+          "total_us": 5153.3099999999995,
+          "count": 3
+        },
+        {
+          "name": "gemm_fusion_dot_3",
+          "total_us": 4526.109,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_tanh_fusion",
+          "total_us": 4067.748,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_1",
+          "total_us": 3939.9330000000004,
+          "count": 3
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x128_32x4_nt_align4>(cutlass_80_tensorop_s1688gemm_64x128_32x4_nt_align4::Params)",
+          "total_us": 3817.366,
+          "count": 6
+        },
+        {
+          "name": "gemm_fusion_dot_4",
+          "total_us": 3206.5299999999997,
+          "count": 6
+        },
+        {
+          "name": "loop_multiply_fusion",
+          "total_us": 2664.2960000000003,
+          "count": 3
+        },
+        {
+          "name": "input_add_reduce_fusion_2",
+          "total_us": 2297.21,
+          "count": 6
+        },
+        {
+          "name": "input_add_reduce_fusion_1",
+          "total_us": 1398.841,
+          "count": 3
+        },
+        {
+          "name": "gemm_fusion_dot_2",
+          "total_us": 1398.459,
+          "count": 3
+        },
+        {
+          "name": "gemm_fusion_dot_28",
+          "total_us": 1396.472,
+          "count": 3
+        },
+        {
+          "name": "loop_tanh_fusion_1",
+          "total_us": 1339.145,
+          "count": 6
+        },
+        {
+          "name": "gemm_fusion_dot_22",
+          "total_us": 1296.742,
+          "count": 6
+        },
+        {
+          "name": "gemm_fusion_dot_1",
+          "total_us": 1085.689,
+          "count": 6
+        },
+        {
+          "name": "loop_imag_real_fusion",
+          "total_us": 839.183,
+          "count": 3
+        },
+        {
+          "name": "loop_imag_real_fusion_1",
+          "total_us": 834.026,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_2",
+          "total_us": 822.497,
+          "count": 6
+        },
+        {
+          "name": "gemm_fusion_dot_21",
+          "total_us": 769.6220000000001,
+          "count": 6
+        },
+        {
+          "name": "gemm_fusion_dot",
+          "total_us": 730.4560000000001,
+          "count": 6
+        },
+        {
+          "name": "MemcpyD2D",
+          "total_us": 606.355,
+          "count": 54
+        },
+        {
+          "name": "void vector_fft_symm_r2c<1024u, EPT<16u>, 1u, 0u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, float>(kernel_arguments_t<unsigned int>)",
+          "total_us": 491.92499999999995,
+          "count": 30
+        },
+        {
+          "name": "void scal_kernel_val<float, float>(cublasScalParamsVal<float, float>)",
+          "total_us": 392.70599999999996,
+          "count": 42
+        },
+        {
+          "name": "void vector_fft_c2r<1024u, EPT<16u>, 1u, 10u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, double>(kernel_arguments_t<unsigned int>)",
+          "total_us": 304.374,
+          "count": 12
+        },
+        {
+          "name": "void vector_fft_symm_c2r<1024u, EPT<16u>, 1u, 0u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, float>(kernel_arguments_t<unsigned int>)",
+          "total_us": 267.228,
+          "count": 18
+        },
+        {
+          "name": "void scal_kernel_val<double, double>(cublasScalParamsVal<double, double>)",
+          "total_us": 253.32899999999998,
+          "count": 12
+        },
+        {
+          "name": "void vector_fft_r2c<1024u, EPT<16u>, 1u, 10u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, double>(kernel_arguments_t<unsigned int>)",
+          "total_us": 246.47500000000002,
+          "count": 9
+        },
+        {
+          "name": "loop_multiply_fusion_6",
+          "total_us": 220.53300000000002,
+          "count": 3
+        },
+        {
+          "name": "input_add_exponential_multiply_reduce_fusion",
+          "total_us": 214.19099999999997,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_2",
+          "total_us": 195.80700000000002,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_8",
+          "total_us": 159.779,
+          "count": 3
+        },
+        {
+          "name": "loop_convert_multiply_fusion",
+          "total_us": 134.702,
+          "count": 3
+        },
+        {
+          "name": "void vector_fft<1024u, EPT<16u>, 1u, 11u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, float, HostConfigPlaceholder>(kernel_arguments_t<unsigned int>)",
+          "total_us": 130.98600000000002,
+          "count": 6
+        },
+        {
+          "name": "loop_add_fusion",
+          "total_us": 123.46000000000001,
+          "count": 3
+        },
+        {
+          "name": "void vector_fft_symm_c2r<256u, EPT<8u>, 2u, 32u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, float>(kernel_arguments_t<unsigned int>)",
+          "total_us": 121.988,
+          "count": 24
+        },
+        {
+          "name": "input_reduce_fusion",
+          "total_us": 104.66199999999999,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_5",
+          "total_us": 99.53900000000002,
+          "count": 3
+        },
+        {
+          "name": "loop_transpose_fusion_1",
+          "total_us": 95.91799999999999,
+          "count": 3
+        },
+        {
+          "name": "fusion_197",
+          "total_us": 90.85900000000001,
+          "count": 3
+        },
+        {
+          "name": "loop_transpose_fusion",
+          "total_us": 83.716,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_3",
+          "total_us": 83.139,
+          "count": 3
+        },
+        {
+          "name": "input_multiply_reduce_fusion",
+          "total_us": 81.379,
+          "count": 3
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, false, false>(cublasLt::cublasSplitKParams<float>, float const*, float const*, float*, float*, float const*, float const*, float const*, float const*, float*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "total_us": 81.155,
+          "count": 18
+        },
+        {
+          "name": "loop_multiply_fusion_4",
+          "total_us": 79.424,
+          "count": 3
+        },
+        {
+          "name": "wrapped_transpose",
+          "total_us": 73.211,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_7",
+          "total_us": 68.728,
+          "count": 3
+        },
+        {
+          "name": "void vector_fft_symm_r2c<256u, EPT<8u>, 2u, 32u, (padding_t)70, (twiddle_t)0, (loadstore_modifier_t)2, (layout_t)0, unsigned int, float>(kernel_arguments_t<unsigned int>)",
+          "total_us": 63.829,
+          "count": 12
+        },
+        {
+          "name": "void scal_kernel_val<float2, float2>(cublasScalParamsVal<float2, float2>)",
+          "total_us": 59.472,
+          "count": 3
+        },
+        {
+          "name": "loop_pad_fusion",
+          "total_us": 55.918,
+          "count": 3
+        },
+        {
+          "name": "wrapped_transpose_1",
+          "total_us": 51.914,
+          "count": 3
+        },
+        {
+          "name": "loop_concatenate_fusion",
+          "total_us": 48.455,
+          "count": 3
+        },
+        {
+          "name": "triton_softmax_5",
+          "total_us": 44.069,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_1",
+          "total_us": 40.962,
+          "count": 3
+        },
+        {
+          "name": "triton_softmax_4",
+          "total_us": 39.041,
+          "count": 3
+        },
+        {
+          "name": "wrapped_real",
+          "total_us": 36.574,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_10",
+          "total_us": 36.19,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_6",
+          "total_us": 33.533,
+          "count": 3
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4>(cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4::Params)",
+          "total_us": 31.482,
+          "count": 9
+        },
+        {
+          "name": "input_reduce_fusion_4",
+          "total_us": 20.208000000000002,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_9",
+          "total_us": 19.183,
+          "count": 3
+        },
+        {
+          "name": "loop_slice_fusion",
+          "total_us": 18.831,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_11",
+          "total_us": 16.174999999999997,
+          "count": 6
+        },
+        {
+          "name": "input_reduce_fusion_15",
+          "total_us": 15.788999999999998,
+          "count": 6
+        },
+        {
+          "name": "input_reduce_fusion_5",
+          "total_us": 14.988000000000001,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_3",
+          "total_us": 13.355,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_slice_fusion",
+          "total_us": 12.458,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_13",
+          "total_us": 11.85,
+          "count": 3
+        },
+        {
+          "name": "Memset 0",
+          "total_us": 11.37,
+          "count": 15
+        },
+        {
+          "name": "input_reduce_fusion_12",
+          "total_us": 10.793000000000001,
+          "count": 6
+        },
+        {
+          "name": "input_concatenate_fusion",
+          "total_us": 10.793,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_13",
+          "total_us": 8.679,
+          "count": 6
+        },
+        {
+          "name": "loop_negate_real_fusion",
+          "total_us": 8.519,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_11",
+          "total_us": 7.91,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_12",
+          "total_us": 7.462000000000001,
+          "count": 3
+        },
+        {
+          "name": "input_and_reduce_fusion",
+          "total_us": 6.758,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_3",
+          "total_us": 6.1819999999999995,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_7",
+          "total_us": 6.053,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_8",
+          "total_us": 5.924,
+          "count": 3
+        },
+        {
+          "name": "loop_tanh_fusion_2",
+          "total_us": 5.541,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_5",
+          "total_us": 5.541,
+          "count": 3
+        },
+        {
+          "name": "loop_dynamic_update_slice_fusion",
+          "total_us": 5.3790000000000004,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_4",
+          "total_us": 5.188000000000001,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_13",
+          "total_us": 5.093,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_7",
+          "total_us": 4.869,
+          "count": 3
+        },
+        {
+          "name": "loop_convert_fusion",
+          "total_us": 4.611,
+          "count": 3
+        },
+        {
+          "name": "loop_divide_multiply_fusion",
+          "total_us": 4.58,
+          "count": 3
+        },
+        {
+          "name": "input_reduce_fusion_17",
+          "total_us": 4.547,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_9",
+          "total_us": 4.484,
+          "count": 3
+        },
+        {
+          "name": "loop_add_multiply_fusion",
+          "total_us": 4.453,
+          "count": 3
+        },
+        {
+          "name": "loop_convert_select_fusion",
+          "total_us": 4.421,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_6",
+          "total_us": 4.419,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_10",
+          "total_us": 4.226999999999999,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_11",
+          "total_us": 4.194999999999999,
+          "count": 3
+        },
+        {
+          "name": "loop_exponential_sqrt_fusion",
+          "total_us": 4.130999999999999,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_14",
+          "total_us": 4.1,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_15",
+          "total_us": 4.067,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_12",
+          "total_us": 4.067,
+          "count": 3
+        },
+        {
+          "name": "loop_select_fusion",
+          "total_us": 3.8750000000000004,
+          "count": 3
+        },
+        {
+          "name": "loop_divide_fusion",
+          "total_us": 3.875,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_16",
+          "total_us": 3.619,
+          "count": 3
+        },
+        {
+          "name": "loop_multiply_fusion_14",
+          "total_us": 3.299,
+          "count": 3
+        },
+        {
+          "name": "loop_add_fusion_8",
+          "total_us": 3.235,
+          "count": 3
+        },
+        {
+          "name": "loop_select_fusion_1",
+          "total_us": 2.915,
+          "count": 3
+        }
+      ]
+    }
+  },
+  "validation_history": [],
+  "fusion_only": false,
+  "fused_kernel_relative_errors": {
+    "forward": 3.0678671691930504e-07,
+    "spectrum_gradient": 2.996221724060888e-07,
+    "spatial_gradient": 2.651209740633931e-07
+  },
+  "initial_checkpoint_step": 1024,
+  "function_wall_seconds": 35.343653274
+}

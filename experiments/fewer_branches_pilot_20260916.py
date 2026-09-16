@@ -81,7 +81,8 @@ def prepare(run_name: str) -> dict:
     return metadata
 
 
-def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False) -> str:
+def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
+              profile_step: bool = False) -> str:
     import json
     import os
     import statistics
@@ -137,6 +138,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False) ->
         result["scope"] = "Paired fused/unfused verification and 32 training updates from the same 128-branch step-1024 pilot checkpoint. Restored states and batches are GPU resident. Same losses as the pilot; no Hadamard or long rollouts. GPU hard cap 180s."
     if batch_sweep:
         result["scope"] = "Batch-size throughput sweep of the trained 128-branch fused model on resident real data. Same losses and optimizer as the pilot; no Hadamard, data loading or convergence comparison. GPU hard cap 180s."
+    if profile_step:
+        result["scope"] = "Batch-4096 memory, compiler-cost and GPU-kernel trace of the trained 128-branch fused model. Same losses and optimizer as the pilot; no Hadamard or convergence comparison. GPU hard cap 180s. Compiler costs are estimates, not hardware counters."
     print(result["gpu"], flush=True)
     fused_ok = False
     try:
@@ -202,7 +205,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False) ->
 
         if batch_sweep:
             rows = np.random.default_rng(123).permutation(metadata["train_rows"])
-            for size in (512, 1024, 2048, 4096, 8192):
+            for size in ((4096,) if profile_step else (512, 1024, 2048, 4096, 8192)):
                 if perf_counter() >= deadline:
                     break
                 batch = tuple(array[rows[:size]] for array in datasets["train"])
@@ -230,9 +233,65 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False) ->
                 }
                 result["variants"][str(size)] = record
                 print(f"Batch {size}: {median:.3f}ms, {record['samples_per_second']:.0f} samples/s", flush=True)
+                if profile_step:
+                    import gzip
+                    import math
+                    from collections import Counter
+
+                    record["matmul_precision"] = jax.config.jax_default_matmul_precision
+                    record["compiler_cost_estimates"] = executable.cost_analysis()
+                    record["allocator_memory_stats"] = jax.devices()[0].memory_stats()
+                    record["nvidia_smi_memory_used_mib"] = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                        check=True, capture_output=True, text=True,
+                    ).stdout.strip()
+                    (destination / "profile_4096_optimized_hlo.txt").write_text(executable.as_text())
+                    pending = [jax.make_jaxpr(step)(state, *batch).jaxpr]
+                    dots = []
+                    while pending:
+                        for equation in pending.pop().eqns:
+                            if equation.primitive.name == "dot_general":
+                                axes = equation.params["dimension_numbers"][0][0]
+                                contraction = math.prod(equation.invars[0].aval.shape[axis] for axis in axes)
+                                dots.append({
+                                    "name": str(equation.source_info.name_stack),
+                                    "flops": 2 * math.prod(equation.outvars[0].aval.shape) * contraction,
+                                    "lhs": equation.invars[0].aval.shape,
+                                    "rhs": equation.invars[1].aval.shape,
+                                    "precision": str(equation.params["precision"]),
+                                })
+                            for value in equation.params.values():
+                                if hasattr(value, "jaxpr"):
+                                    pending.append(value.jaxpr)
+                                elif hasattr(value, "eqns"):
+                                    pending.append(value)
+                    record["dense_operations"] = dots
+                    record["dense_flops"] = sum(dot["flops"] for dot in dots)
+                    trace_dir = destination / "profile_4096"
+                    with jax.profiler.trace(str(trace_dir)):
+                        for _ in range(3):
+                            jax.block_until_ready(executable(state, *batch))
+                    trace_path = max(trace_dir.rglob("*.trace.json.gz"), key=lambda path: path.stat().st_mtime)
+                    with gzip.open(trace_path, "rt") as stream:
+                        events = json.load(stream)["traceEvents"]
+                    processes = [event for event in events if event.get("name") == "process_name"]
+                    record["trace_processes"] = processes
+                    gpu_pids = {event["pid"] for event in processes if "GPU" in event.get("args", {}).get("name", "")}
+                    durations = Counter()
+                    counts = Counter()
+                    for event in events:
+                        if event.get("pid") in gpu_pids and event.get("ph") == "X":
+                            durations[event["name"]] += event.get("dur", 0)
+                            counts[event["name"]] += 1
+                    record["gpu_trace_kernels"] = [
+                        {"name": name, "total_us": duration, "count": counts[name]}
+                        for name, duration in durations.most_common()
+                    ]
+                    print(f"Dense FLOPs: {record['dense_flops']}; traced GPU kernels: {len(durations)}", flush=True)
             result["initial_checkpoint_step"] = int(state.step)
             result["function_wall_seconds"] = perf_counter() - started
-            (destination / "batch_sweep_results_h100.json").write_text(json.dumps(result, indent=2))
+            filename = "profile_results_h100.json" if profile_step else "batch_sweep_results_h100.json"
+            (destination / filename).write_text(json.dumps(result, indent=2))
             volume.commit()
             return json.dumps(result, indent=2)
 
@@ -345,18 +404,18 @@ def fusion_check(run_name: str) -> str:
     image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
     timeout=180, retries=0, scaledown_window=2,
 )
-def batch_size_check(run_name: str) -> str:
-    return run_pilot(run_name, fusion_only=False, batch_sweep=True)
+def batch_size_check(run_name: str, profile_step: bool = False) -> str:
+    return run_pilot(run_name, fusion_only=False, batch_sweep=True, profile_step=profile_step)
 
 
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
-         fusion_only: bool = False, batch_sweep: bool = False) -> None:
+         fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False) -> None:
     if not prepared:
         print(prepare.remote(run_name))
-    if batch_sweep:
-        result = batch_size_check.remote(run_name)
-        suffix = "_batch_sweep_h100"
+    if batch_sweep or profile_step:
+        result = batch_size_check.remote(run_name, profile_step)
+        suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
     else:
         result = fusion_check.remote(run_name) if fusion_only else pilot.remote(run_name)
         suffix = "_fusion_h100" if fusion_only else ""
