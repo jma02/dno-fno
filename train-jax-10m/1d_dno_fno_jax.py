@@ -116,6 +116,8 @@ def main() -> None:
         "Keep the same value when resuming; completed epochs are not repeated.",
     )
     parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr_schedule", choices=("cosine", "constant"), default="cosine",
+                        help="Constant keeps --lr fixed and ignores --lr_warmup_steps.")
     parser.add_argument(
         "--lr_warmup_steps",
         type=int,
@@ -337,7 +339,9 @@ def main() -> None:
 
     # Set the learning-rate schedule and initialize AdamW's update state.
     total_steps = args.epochs * train_steps_per_epoch
-    if args.lr_warmup_steps > 0:
+    if args.lr_schedule == "constant":
+        lr_schedule = optax.constant_schedule(args.lr)
+    elif args.lr_warmup_steps > 0:
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=args.lr,
@@ -351,6 +355,8 @@ def main() -> None:
             decay_steps=total_steps,
         )
     optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
+    print(f"learning rate: {args.lr_schedule}, first={float(lr_schedule(0)):.8g}, "
+          f"last={float(lr_schedule(total_steps - 1)):.8g}")
     training_state = train_state.TrainState.create(
         apply_fn=model.apply, params=params, tx=optimizer
     )
