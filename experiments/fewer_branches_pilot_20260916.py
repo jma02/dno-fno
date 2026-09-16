@@ -270,34 +270,38 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             check_params["canonical_fno"]["decoder_out"]["kernel"] = 0.1 * jax.random.normal(
                 jax.random.key(52), decoder.shape, dtype=decoder.dtype,
             )
-            checks = []
             configurations = ((False, "complex", "fft"), (True, "complex", "fft"))
             if fno_gemm_benchmark:
                 configurations = tuple((True, mode, "fft") for mode in ("complex", "packed", "split"))
             if fno_transform_benchmark:
                 configurations = tuple((True, "packed", transform) for transform in ("fft_backward", "fused"))
-            for folded, gemm, transform in configurations:
-                check_model = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm, fno_transform=transform)
-
-                def check_loss(parameters: dict, fields: jax.Array) -> tuple[jax.Array, jax.Array]:
-                    prediction = check_model.apply({"params": parameters}, fields, batch[1][:4])
-                    return jnp.mean((prediction - batch[2][:4])**2), prediction
-
-                checks.append(jax.block_until_ready(jax.jit(jax.value_and_grad(
-                    check_loss, argnums=(0, 1), has_aux=True,
-                ))(check_params, batch[0][:4])))
             errors = {}
-            for configuration, check in zip(configurations[1:], checks[1:], strict=True):
-                for label, original, candidate in (
-                    ("prediction", checks[0][0][1], check[0][1]),
-                    ("parameter_gradient", checks[0][1][0], check[1][0]),
-                    ("input_gradient", checks[0][1][1], check[1][1]),
-                ):
-                    left = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(original)])
-                    right = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(candidate)])
-                    error = float(np.linalg.norm(left - right) / max(np.linalg.norm(left), 1e-12))
-                    assert np.isfinite(error) and error < 1e-3, (configuration, label, error)
-                    errors[f"{configuration[1]}_{configuration[2]}_{label}"] = error
+            for precision in (("highest", "default") if fno_transform_benchmark else ("default",)):
+                checks = []
+                with jax.default_matmul_precision(precision):
+                    for folded, gemm, transform in configurations:
+                        check_model = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm, fno_transform=transform)
+
+                        def check_loss(parameters: dict, fields: jax.Array) -> tuple[jax.Array, jax.Array]:
+                            prediction = check_model.apply({"params": parameters}, fields, batch[1][:4])
+                            return jnp.mean((prediction - batch[2][:4])**2), prediction
+
+                        checks.append(jax.block_until_ready(jax.jit(jax.value_and_grad(
+                            check_loss, argnums=(0, 1), has_aux=True,
+                        ))(check_params, batch[0][:4])))
+                for configuration, check in zip(configurations[1:], checks[1:], strict=True):
+                    for label, original, candidate in (
+                        ("prediction", checks[0][0][1], check[0][1]),
+                        ("parameter_gradient", checks[0][1][0], check[1][0]),
+                        ("input_gradient", checks[0][1][1], check[1][1]),
+                    ):
+                        left = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(original)])
+                        right = np.concatenate([np.asarray(leaf).ravel() for leaf in jax.tree.leaves(candidate)])
+                        error = float(np.linalg.norm(left - right) / max(np.linalg.norm(left), 1e-12))
+                        # First prove equivalence in true float32, then record TF32 sensitivity.
+                        tolerance = 2e-5 if precision == "highest" else 5e-3 if fno_transform_benchmark else 1e-3
+                        assert np.isfinite(error) and error < tolerance, (precision, configuration, label, error)
+                        errors[f"{precision}_{configuration[1]}_{configuration[2]}_{label}"] = error
             result["optimization_relative_errors"] = errors
             print(f"Optimization output/gradient relative errors: {errors}", flush=True)
 
