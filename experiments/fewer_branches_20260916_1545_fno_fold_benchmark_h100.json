@@ -112,5 +112,6 @@
   "function_wall_seconds": 52.51315493,
   "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-XlV8KvLXbfgWX8EEP2CqOQ",
   "source_commit": "721ed1e",
-  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; correctness comparison separately uses nonzero decoder weights and checks predictions plus parameter/input gradients. No learning or accuracy comparison."
+  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; correctness comparison separately uses nonzero decoder weights and checks predictions plus parameter/input gradients. No learning or accuracy comparison.",
+  "precision_correction": "Later audit found implicit float64 custom FNO spectral parameters under global jax_enable_x64=True, promoting learned activations and FFTs to float64/complex128. These timings are valid for that implementation, but not a matched-precision comparison to the float32 spectral MLP. Corrected in source commit 6f4afd7."
 }

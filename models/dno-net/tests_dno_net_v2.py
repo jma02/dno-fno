@@ -286,8 +286,13 @@ def test_canonical_fno_gradient_and_translation() -> None:
         fields, depths = inputs.astype(dtype), depth.astype(dtype)
         predictions = []
         derivatives = []
-        for folded, gemm in ((False, "complex"), (True, "complex"), (True, "packed"), (True, "split")):
-            candidate = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm)
+        configurations = (
+            (False, "complex", "fft"), (True, "complex", "fft"),
+            (True, "packed", "fft"), (True, "split", "fft"),
+            (True, "packed", "fft_backward"), (True, "packed", "dft"),
+        )
+        for folded, gemm, transform in configurations:
+            candidate = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm, fno_transform=transform)
             predictions.append(candidate.apply(variables, fields, depths))
             derivatives.append(jax.grad(lambda params, values: jnp.sum(
                 (candidate.apply({"params": params}, values, depths)[..., 0] - xi)**2

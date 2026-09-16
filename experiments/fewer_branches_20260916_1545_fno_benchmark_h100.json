@@ -105,5 +105,6 @@
   "function_wall_seconds": 52.674473884,
   "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-shwEDkHEefDyKhZpMOSmbi",
   "source_commit": "512629b",
-  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; ordinary pilot objective and AdamW executable, no learning or accuracy comparison."
+  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; ordinary pilot objective and AdamW executable, no learning or accuracy comparison.",
+  "precision_correction": "Later audit found implicit float64 custom FNO spectral parameters under global jax_enable_x64=True, promoting learned activations and FFTs to float64/complex128. These timings are valid for that implementation, but not a matched-precision comparison to the float32 spectral MLP. Corrected in source commit 6f4afd7."
 }

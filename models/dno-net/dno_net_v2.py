@@ -8,6 +8,7 @@ linear in xi, and starts at order eta^2.
 from __future__ import annotations
 
 import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 
 
@@ -177,14 +178,28 @@ class CanonicalFNOCorrection(nn.Module):
     """Benchmark candidate: four width-32 Fourier blocks retaining every mode."""
     fold_spatial: bool = False
     spectral_gemm: str = "complex"
+    transform: str = "fft"
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         batch, size, _ = inputs.shape
         condition = jnp.broadcast_to(depth[:, None, :], (batch, size, 1))
         hidden = nn.Dense(32, name="encoder")(jnp.concatenate((inputs, condition), axis=-1))
+        norm = "backward" if self.transform == "fft_backward" else "ortho"
+        if self.transform == "dft":
+            angle = 2 * np.pi * np.arange(size)[:, None] * np.arange(size // 2 + 1)[None, :] / size
+            basis = np.concatenate((np.cos(angle), -np.sin(angle[:, 1:-1])), axis=1) / size**0.5
+            multiplicity = np.full(size, 2.0)
+            multiplicity[[0, size // 2]] = 1
+            inverse = (basis * multiplicity[None, :]).T
         for index in range(4):
-            spectrum = jnp.fft.rfft(hidden, axis=1, norm="ortho")
+            if self.transform == "dft":
+                coefficients = jnp.einsum("bnc,nk->bkc", hidden, jnp.asarray(basis, dtype=hidden.dtype))
+                spectrum = coefficients[:, :size // 2 + 1] + 1j * jnp.pad(
+                    coefficients[:, size // 2 + 1:], ((0, 0), (1, 1), (0, 0)),
+                )
+            else:
+                spectrum = jnp.fft.rfft(hidden, axis=1, norm=norm)
             shape = (size // 2 + 1, 32, 32)
             # Global x64 is enabled for the analytic baseline and physics losses.
             # Learned parameters should match Dense's float32 default explicitly.
@@ -213,7 +228,11 @@ class CanonicalFNOCorrection(nn.Module):
                 mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
             else:
                 raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
-            spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm="ortho")
+            if self.transform == "dft":
+                coefficients = jnp.concatenate((mixed.real, mixed[:, 1:-1].imag), axis=1)
+                spatial = jnp.einsum("bkc,kn->bnc", coefficients, jnp.asarray(inverse, dtype=coefficients.dtype))
+            else:
+                spatial = jnp.fft.irfft(mixed, n=size, axis=1, norm=norm)
             if not self.fold_spatial:
                 spatial = spatial + hidden @ kernel
             hidden = nn.gelu(spatial + bias)
@@ -240,6 +259,7 @@ class CraigSulemDNO(nn.Module):
     spectral_decoder_hidden: int = 64
     fno_fold_spatial: bool = False
     fno_spectral_gemm: str = "complex"
+    fno_transform: str = "fft"
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -333,7 +353,7 @@ class CraigSulemDNO(nn.Module):
             elif self.correction_kind == "canonical_fno":
                 correction = CanonicalFNOCorrection(
                     fold_spatial=self.fno_fold_spatial, spectral_gemm=self.fno_spectral_gemm,
-                    name="canonical_fno",
+                    transform=self.fno_transform, name="canonical_fno",
                 )(inputs, clipped_log_depth)
             else:
                 correction = SpectralMLPCorrection(
