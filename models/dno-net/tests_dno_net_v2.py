@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemDNO
+from dno_net_v2 import CraigSulemDNO, fourier_resample_even
 
 jax.config.update("jax_enable_x64", True)
 
@@ -165,12 +165,30 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
         assert jnp.all(jnp.isfinite(output))
 
 
+def test_coarse_correction_keeps_output_grid_and_linearity() -> None:
+    eta, xi, depth = _state()
+    model = _model().clone(learned_grid=32)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = _activate_residual(model.init(jax.random.PRNGKey(5), inputs, depth))
+    output = model.apply(variables, inputs, depth)
+    assert output.shape == (1, 64, 1)
+    psi = jnp.roll(xi, 7, axis=-1)
+    combined = _learned_residual(model, variables, eta, xi + psi, depth)
+    separate = _learned_residual(model, variables, eta, xi, depth)
+    separate += _learned_residual(model, variables, eta, psi, depth)
+    assert jnp.allclose(combined, separate, rtol=1e-10, atol=1e-12)
+    assert jnp.max(jnp.abs(_learned_residual(model, variables, jnp.zeros_like(eta), xi, depth))) < 1e-14
+    roundtrip = fourier_resample_even(fourier_resample_even(inputs, 32), 64)
+    assert jnp.allclose(roundtrip, inputs, rtol=1e-12, atol=1e-12)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
         test_order_two_residual_is_self_adjoint,
         test_eta_feature_configuration_controls_trunk_shape,
+        test_coarse_correction_keeps_output_grid_and_linearity,
     )
     for test in tests:
         test()

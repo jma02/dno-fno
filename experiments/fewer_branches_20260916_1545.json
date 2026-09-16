@@ -1,0 +1,144 @@
+{
+  "run_name": "fewer_branches_20260916_1545",
+  "data": {
+    "source": "/data/outputs/paper_dataset/arrays",
+    "seed": 42,
+    "stats": {
+      "feature_absmax": [
+        0.1511383354663849,
+        0.09148585051298141
+      ],
+      "target_absmax": 0.11534300446510315
+    },
+    "normalization": "Extrema fitted only on the pilot training subset, shared across variants.",
+    "train_rows": 16384,
+    "validation_rows": 2048,
+    "train_simulations": 5355,
+    "validation_simulations": 826,
+    "domain_length": 6.283185307179586,
+    "prepare_seconds": 39.278038024000004
+  },
+  "jax_version": "0.9.2",
+  "gpu": "NVIDIA H100 80GB HBM3, 81559 MiB",
+  "scope": "Real-data paired learning pilot, local batch 512, learned grid 256, width 640, multiplier hidden 160. Relative-L2 + mode-balanced + Tanaka-tangent losses; excludes periodic Hadamard and long-rollout evaluation. Fresh zero-residual initialization; train-only subset normalization. GPU function hard cap 600s.",
+  "variants": {
+    "2048_branches": {
+      "blocks": 8,
+      "latent": 256,
+      "fused": false,
+      "parameters": 1096128,
+      "step_median_ms": 27.55369900000204,
+      "step_trials_ms": [
+        27.191815000001895,
+        27.642353000004505,
+        27.510883000005038,
+        27.521169999999984,
+        27.41601700000018,
+        27.591383999997277,
+        27.55369900000204,
+        27.67905900000045,
+        27.836776000000896,
+        27.33212800000473,
+        27.62515199999882,
+        27.422913000002325,
+        27.398245999997073,
+        27.72210700000244,
+        27.66582000000284,
+        27.271839000000853,
+        27.3957220000014,
+        27.496147000000803,
+        27.913953000002323,
+        27.88324499999817,
+        27.84554400000161
+      ],
+      "compile_and_benchmark_seconds": 16.023666955,
+      "compiler_buffer_bytes": 5682386184,
+      "final_validation_relative_l2": 0.0010443652963472595
+    },
+    "128_branches": {
+      "blocks": 2,
+      "latent": 64,
+      "fused": false,
+      "parameters": 167808,
+      "step_median_ms": 4.868261999995127,
+      "step_trials_ms": [
+        5.271077999999818,
+        4.914882999997872,
+        4.806726999994737,
+        4.744580000000553,
+        4.669725999995933,
+        4.7462169999974435,
+        4.779964000000803,
+        4.77073300000086,
+        4.766386999996541,
+        4.716426000001661,
+        5.132578999997861,
+        5.079948999998862,
+        4.938447000000679,
+        4.781643000001168,
+        4.868261999995127,
+        4.9361860000018964,
+        5.028162999998642,
+        4.973274999997557,
+        4.847900000001459,
+        4.89327300000042,
+        4.9486559999962765
+      ],
+      "compile_and_benchmark_seconds": 9.990782600000003,
+      "compiler_buffer_bytes": 1275582888,
+      "final_validation_relative_l2": 0.0010740576533477364
+    }
+  },
+  "validation_history": [
+    {
+      "step": 0,
+      "2048_branches": 0.003760663070260575,
+      "128_branches": 0.003760663070260575
+    },
+    {
+      "step": 128,
+      "2048_branches": 0.002376972008320818,
+      "128_branches": 0.0029110065159636076
+    },
+    {
+      "step": 256,
+      "2048_branches": 0.001686981583278398,
+      "128_branches": 0.0020115237370006895
+    },
+    {
+      "step": 384,
+      "2048_branches": 0.0014187084594705192,
+      "128_branches": 0.0016413969051365246
+    },
+    {
+      "step": 512,
+      "2048_branches": 0.001295364927643137,
+      "128_branches": 0.001374460331389668
+    },
+    {
+      "step": 640,
+      "2048_branches": 0.0011226749755232105,
+      "128_branches": 0.0012270967722156365
+    },
+    {
+      "step": 768,
+      "2048_branches": 0.0011241950212221635,
+      "128_branches": 0.0012153441925637383
+    },
+    {
+      "step": 896,
+      "2048_branches": 0.0010158370131970293,
+      "128_branches": 0.0011258115997119533
+    },
+    {
+      "step": 1024,
+      "2048_branches": 0.0010443652963472595,
+      "128_branches": 0.0010740576533477364
+    }
+  ],
+  "fusion_error": "NotImplementedError('Only concatenate along the last dimension is supported.')",
+  "selected_small_implementation": "128_branches",
+  "steps_per_model": 1024,
+  "function_wall_seconds": 93.259730959,
+  "checkpoint_format": "Flax TrainState msgpack; restore with matching model, optimizer schedule and scales in this script. Pilot checkpoints, not production Orbax runs."
+}

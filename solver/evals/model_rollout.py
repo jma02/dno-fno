@@ -85,6 +85,7 @@ def load_run(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),
             latent=int(config["latent"]),
+            learned_grid=config.get("cs_learned_grid"),
             n_polys=int(config["cs_n_polys"]),
             use_first_deriv=bool(config["cs_use_first_deriv"]),
             use_second_deriv=bool(config["cs_use_second_deriv"]),

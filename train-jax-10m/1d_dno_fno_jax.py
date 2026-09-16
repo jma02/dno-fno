@@ -93,6 +93,10 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
+    parser.add_argument("--cs_learned_grid", type=int, default=None,
+                        help="Optional even grid size for the learned correction; baseline stays full resolution.")
+    parser.add_argument("--cs_fuse_fft", action="store_true",
+                        help="Use the experimental fused float32 FFT kernel on a 256-point learned grid.")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument(
         "--epochs",
@@ -285,6 +289,8 @@ def main() -> None:
             width=args.width,
             n_blocks=args.n_blocks,
             latent=args.latent,
+            learned_grid=args.cs_learned_grid,
+            fuse_fft=args.cs_fuse_fft,
             n_polys=args.cs_n_polys,
             use_first_deriv=args.cs_use_first_deriv,
             use_second_deriv=args.cs_use_second_deriv,

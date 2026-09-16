@@ -11,6 +11,22 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 
+def fourier_resample_even(field: jnp.ndarray, size: int) -> jnp.ndarray:
+    """Resample axis 1 between even grids, merging/splitting the Nyquist bin."""
+    source_size = field.shape[1]
+    if source_size == size:
+        return field
+    if size < 2 or size % 2 or source_size % 2:
+        raise ValueError("Fourier resampling requires positive even grid sizes")
+    spectrum = jnp.fft.rfft(field, axis=1, norm="forward")
+    if size < source_size:
+        spectrum = spectrum[:, :size // 2 + 1]
+        spectrum = spectrum.at[:, -1].set(2 * spectrum[:, -1].real)
+    else:
+        spectrum = spectrum.at[:, -1].multiply(0.5)
+    return jnp.fft.irfft(spectrum, n=size, axis=1, norm="forward")
+
+
 class DepthAwareMultiplier(nn.Module):
     """Learn a real Fourier multiplier for each wavenumber and branch.
 
@@ -40,6 +56,7 @@ class CraigSulemBlock(nn.Module):
     domain_length: float
     h_clip_max: float
     mult_hidden: int = 32
+    fuse_fft: bool = False
 
     @nn.compact
     def __call__(
@@ -66,11 +83,19 @@ class CraigSulemBlock(nn.Module):
         )(depth, grid_size // 2 + 1)
 
         xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
-        filtered_xi = jnp.fft.irfft(
-            multiplier * xi_hat[..., None], n=grid_size, axis=1, norm="forward",
-        )
-        weighted_xi = spatial_weights * filtered_xi
-        weighted_xi_hat = jnp.fft.rfft(weighted_xi, axis=1, norm="forward")
+        branched_spectrum = multiplier * xi_hat[..., None]
+        if self.fuse_fft and branched_spectrum.dtype == jnp.complex64:
+            from fused_fft import fused_roundtrip
+
+            weighted_xi_hat = fused_roundtrip(branched_spectrum, spatial_weights)
+        else:
+            # Keep the float64 path for finite-secant physics regularization.
+            filtered_xi = jnp.fft.irfft(
+                branched_spectrum, n=grid_size, axis=1, norm="forward",
+            )
+            weighted_xi_hat = jnp.fft.rfft(
+                spatial_weights * filtered_xi, axis=1, norm="forward",
+            )
         correction_hat = jnp.sum(multiplier * weighted_xi_hat, axis=-1)
         return jnp.fft.irfft(correction_hat, n=grid_size, axis=-1, norm="forward")
 
@@ -80,6 +105,8 @@ class CraigSulemDNO(nn.Module):
     width: int                        # Each shared eta layer has width // 2 channels.
     n_blocks: int = 4                 # Groups of parallel branches, summed together.
     latent: int = 64                  # Branches per group.
+    learned_grid: int | None = None   # Analytic baseline remains on the input grid.
+    fuse_fft: bool = False            # Experimental 256-point float32 kernel.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -155,6 +182,14 @@ class CraigSulemDNO(nn.Module):
             self._linear_baseline(xi_norm, depth)
             + self._g1_baseline(eta_norm, xi_norm, depth)
         )
+        output_grid = grid_size
+        if self.learned_grid is not None and self.learned_grid != grid_size:
+            inputs = fourier_resample_even(inputs, self.learned_grid)
+            grid_size = inputs.shape[1]
+            eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
+            xi_phys = xi_norm * self.xi_scale
+        if self.fuse_fft and (grid_size != 256 or self.latent % 8):
+            raise ValueError("Fused FFT requires a 256-point learned grid and latent divisible by 8")
 
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
@@ -192,10 +227,13 @@ class CraigSulemDNO(nn.Module):
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 mult_hidden=self.mult_hidden,
+                fuse_fft=self.fuse_fft,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, clipped_log_depth)
 
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5
         correction = correction / self.target_scale
+        if grid_size != output_grid:
+            correction = fourier_resample_even(correction[..., None], output_grid)[..., 0]
         return (baseline + correction)[..., None]

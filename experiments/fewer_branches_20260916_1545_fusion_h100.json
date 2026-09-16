@@ -1,0 +1,136 @@
+{
+  "run_name": "fewer_branches_20260916_1545",
+  "data": {
+    "source": "/data/outputs/paper_dataset/arrays",
+    "seed": 42,
+    "stats": {
+      "feature_absmax": [
+        0.1511383354663849,
+        0.09148585051298141
+      ],
+      "target_absmax": 0.11534300446510315
+    },
+    "normalization": "Extrema fitted only on the pilot training subset, shared across variants.",
+    "train_rows": 16384,
+    "validation_rows": 2048,
+    "train_simulations": 5355,
+    "validation_simulations": 826,
+    "domain_length": 6.283185307179586,
+    "prepare_seconds": 39.278038024000004
+  },
+  "jax_version": "0.9.2",
+  "gpu": "NVIDIA H100 80GB HBM3, 81559 MiB",
+  "scope": "Paired fused/unfused verification and 32 training updates from the same 128-branch step-1024 pilot checkpoint. Restored states and batches are GPU resident. Same losses as the pilot; no Hadamard or long rollouts. GPU hard cap 180s.",
+  "variants": {
+    "128_branches": {
+      "blocks": 2,
+      "latent": 64,
+      "fused": false,
+      "parameters": 167808,
+      "step_median_ms": 4.650202999997077,
+      "step_trials_ms": [
+        4.9985259999942855,
+        4.631023000001733,
+        4.739769000003946,
+        4.598700999999039,
+        4.659248999999477,
+        4.617340999999442,
+        4.656617000001972,
+        4.738770999999531,
+        4.650310999998908,
+        4.703542000001448,
+        4.685342999998454,
+        4.609573000003309,
+        4.650202999997077,
+        4.643649000001915,
+        4.635744999994529,
+        4.571200000000886,
+        4.510666000001606,
+        4.669208000002811,
+        4.677583000002983,
+        4.637463999998204,
+        4.63549200000557,
+        4.554925999997295,
+        4.680822000004525,
+        4.685698999999488,
+        4.680018999998481,
+        4.576621000005332,
+        4.671190999999908,
+        4.646164000000397,
+        4.550049000002332,
+        4.649389000000781,
+        4.746858000004295
+      ],
+      "compile_and_benchmark_seconds": 12.644820977000002,
+      "compiler_buffer_bytes": 1275582888,
+      "final_validation_relative_l2": 0.001059943241945722
+    },
+    "128_branches_fused": {
+      "blocks": 2,
+      "latent": 64,
+      "fused": true,
+      "parameters": 167808,
+      "step_median_ms": 4.502518000002453,
+      "step_trials_ms": [
+        4.733780999998771,
+        4.766125000003285,
+        4.570301999997639,
+        4.5007439999977805,
+        4.516760999997871,
+        4.58007799999649,
+        4.541758000002005,
+        4.5266770000012,
+        4.568173999999203,
+        4.574325000000101,
+        4.440811999998573,
+        4.52126100000072,
+        4.460068000000206,
+        4.47960400000369,
+        4.436229999996044,
+        4.4117659999969305,
+        4.484376000000623,
+        4.459920000002171,
+        4.427608000000305,
+        4.440369000000999,
+        4.502518000002453,
+        4.483295999996528,
+        4.568849000001762,
+        4.398836000000017,
+        4.446916999995665,
+        4.517061000001377,
+        4.552176000004238,
+        4.566173000000617,
+        4.376043999997137,
+        4.4132470000022295,
+        4.518185000002006
+      ],
+      "compile_and_benchmark_seconds": 12.758384526,
+      "compiler_buffer_bytes": 1291181480,
+      "final_validation_relative_l2": 0.0010599191538894902
+    }
+  },
+  "validation_history": [
+    {
+      "step": 0,
+      "128_branches": 0.0010740576533477364,
+      "128_branches_fused": 0.0010740577815864635
+    },
+    {
+      "step": 32,
+      "128_branches": 0.001059943241945722,
+      "128_branches_fused": 0.0010599191538894902
+    }
+  ],
+  "fusion_only": true,
+  "fused_kernel_relative_errors": {
+    "forward": 3.0678671691930504e-07,
+    "spectrum_gradient": 2.996221724060888e-07,
+    "spatial_gradient": 2.651209740633931e-07
+  },
+  "selected_small_implementation": "128_branches_fused",
+  "initial_checkpoint_step": 1024,
+  "whole_step_max_leaf_relative_error": 7.355344223469729e-06,
+  "steps_per_model": 32,
+  "function_wall_seconds": 56.322892055000004,
+  "checkpoint_format": "Flax TrainState msgpack; restore with matching model, optimizer schedule and scales in this script. Pilot checkpoints, not production Orbax runs."
+}
