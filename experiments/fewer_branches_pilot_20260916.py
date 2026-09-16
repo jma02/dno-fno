@@ -81,7 +81,7 @@ def prepare(run_name: str) -> dict:
     return metadata
 
 
-def run_pilot(run_name: str, *, fusion_only: bool) -> str:
+def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False) -> str:
     import json
     import os
     import statistics
@@ -105,7 +105,7 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
     from translation_tangent_regularizer import compute_translation_tangent_loss
 
     started = perf_counter()
-    deadline = started + (140 if fusion_only else 540)
+    deadline = started + (140 if fusion_only or batch_sweep else 540)
     jax.config.update("jax_enable_x64", True)
     volume.reload()
     destination = Path("/data/experiments") / run_name
@@ -135,6 +135,8 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
     }
     if fusion_only:
         result["scope"] = "Paired fused/unfused verification and 32 training updates from the same 128-branch step-1024 pilot checkpoint. Restored states and batches are GPU resident. Same losses as the pilot; no Hadamard or long rollouts. GPU hard cap 180s."
+    if batch_sweep:
+        result["scope"] = "Batch-size throughput sweep of the trained 128-branch fused model on resident real data. Same losses and optimizer as the pilot; no Hadamard, data loading or convergence comparison. GPU hard cap 180s."
     print(result["gpu"], flush=True)
     fused_ok = False
     try:
@@ -144,7 +146,7 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
     except Exception as error:
         result["fusion_error"] = repr(error)
         print(f"Fusion unavailable; retaining cuFFT for training: {error}", flush=True)
-        if fusion_only:
+        if fusion_only or batch_sweep:
             raise
 
     compiled = {}
@@ -152,6 +154,8 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
         ("2048_branches", 8, 256, False), ("128_branches", 2, 64, False),
         ("128_branches_fused", 2, 64, True),
     ):
+        if batch_sweep and not fused:
+            continue
         if fusion_only and name == "2048_branches":
             continue
         if fused and not fused_ok:
@@ -167,7 +171,7 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
             (optax.linear_schedule(0, 2e-5, 500), optax.constant_schedule(2e-5)), (500,),
         )
         state = TrainState.create(apply_fn=model.apply, params=params, tx=optax.adamw(schedule, weight_decay=1e-4))
-        if fusion_only:
+        if fusion_only or batch_sweep:
             state = jax.device_put(serialization.from_bytes(
                 state, (destination / "128_branches.msgpack").read_bytes(),
             ))
@@ -195,6 +199,42 @@ def run_pilot(run_name: str, *, fusion_only: bool) -> str:
                 current.params, fields, depths, targets, mask, current.step,
             )
             return current.apply_gradients(grads=gradients), loss, relative
+
+        if batch_sweep:
+            rows = np.random.default_rng(123).permutation(metadata["train_rows"])
+            for size in (512, 1024, 2048, 4096, 8192):
+                if perf_counter() >= deadline:
+                    break
+                batch = tuple(array[rows[:size]] for array in datasets["train"])
+                jax.block_until_ready(batch)
+                before = perf_counter()
+                executable = jax.jit(step).lower(state, *batch).compile()
+                compile_seconds = perf_counter() - before
+                for _ in range(3):
+                    jax.block_until_ready(executable(state, *batch))
+                timings = []
+                for _ in range(21):
+                    tick = perf_counter()
+                    output = jax.block_until_ready(executable(state, *batch))
+                    timings.append((perf_counter() - tick) * 1000)
+                assert np.isfinite(float(output[1]))
+                assert all(bool(jnp.isfinite(leaf).all()) for leaf in jax.tree.leaves(output[0]))
+                memory = executable.memory_analysis()
+                median = statistics.median(timings)
+                record = {
+                    "batch_size": size, "step_median_ms": median,
+                    "samples_per_second": size * 1000 / median,
+                    "step_trials_ms": timings, "compile_seconds": compile_seconds,
+                    "compiler_buffer_bytes": memory.argument_size_in_bytes + memory.output_size_in_bytes + memory.temp_size_in_bytes - memory.alias_size_in_bytes,
+                    "finite_loss_and_updated_state": True,
+                }
+                result["variants"][str(size)] = record
+                print(f"Batch {size}: {median:.3f}ms, {record['samples_per_second']:.0f} samples/s", flush=True)
+            result["initial_checkpoint_step"] = int(state.step)
+            result["function_wall_seconds"] = perf_counter() - started
+            (destination / "batch_sweep_results_h100.json").write_text(json.dumps(result, indent=2))
+            volume.commit()
+            return json.dumps(result, indent=2)
 
         before = perf_counter()
         executable = jax.jit(step).lower(state, *batch).compile()
@@ -301,11 +341,24 @@ def fusion_check(run_name: str) -> str:
     return run_pilot(run_name, fusion_only=True)
 
 
+@app.function(
+    image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
+    timeout=180, retries=0, scaledown_window=2,
+)
+def batch_size_check(run_name: str) -> str:
+    return run_pilot(run_name, fusion_only=False, batch_sweep=True)
+
+
 @app.local_entrypoint()
-def main(run_name: str = "fewer_branches_20260916", prepared: bool = False, fusion_only: bool = False) -> None:
+def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
+         fusion_only: bool = False, batch_sweep: bool = False) -> None:
     if not prepared:
         print(prepare.remote(run_name))
-    result = fusion_check.remote(run_name) if fusion_only else pilot.remote(run_name)
-    suffix = "_fusion_h100" if fusion_only else ""
+    if batch_sweep:
+        result = batch_size_check.remote(run_name)
+        suffix = "_batch_sweep_h100"
+    else:
+        result = fusion_check.remote(run_name) if fusion_only else pilot.remote(run_name)
+        suffix = "_fusion_h100" if fusion_only else ""
     (ROOT / "experiments" / f"{run_name}{suffix}.json").write_text(result)
     print(result)
