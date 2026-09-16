@@ -100,6 +100,41 @@ class CraigSulemBlock(nn.Module):
         return jnp.fft.irfft(correction_hat, n=grid_size, axis=-1, norm="forward")
 
 
+class CompactCorrection(nn.Module):
+    """Experimental P.T C(eta, depth) P xi using a fixed real Fourier basis.
+
+    C is symmetric and O(eta^2). The rank limit and lack of structural
+    translation equivariance are intentional restrictions of this option.
+    """
+    rank: int = 64
+    hidden: int = 128
+
+    @nn.compact
+    def __call__(self, eta: jnp.ndarray, xi: jnp.ndarray,
+                 depth: jnp.ndarray) -> jnp.ndarray:
+        size = eta.shape[1]
+        if self.rank < 2 or self.rank % 2 or self.rank >= size or self.hidden < 1:
+            raise ValueError("Compact correction needs positive hidden width and an even rank in [2, grid size)")
+        angle = (2 * jnp.pi / size) * jnp.arange(size, dtype=eta.dtype)[:, None]
+        angle = angle * jnp.arange(1, self.rank // 2 + 1, dtype=eta.dtype)[None, :]
+        basis = jnp.concatenate((jnp.cos(angle), jnp.sin(angle)), axis=1) * (2 / size) ** 0.5
+
+        # Bias-free eta maps vanish at eta=0. Depth only modulates their values.
+        hidden = nn.gelu(nn.Dense(self.hidden, use_bias=False, name="eta_encoder")(eta))
+        hidden *= 1 + nn.tanh(nn.Dense(self.hidden, name="depth_gate")(depth))
+        left = nn.Dense(self.rank**2, use_bias=False, name="matrix_left")(hidden)
+        right = nn.Dense(
+            self.rank**2, use_bias=False, name="matrix_right",
+            kernel_init=nn.initializers.zeros,
+        )(hidden)
+        # Zero only one factor: initial correction is zero, but its gradient is not.
+        matrix = (left * right).reshape(eta.shape[0], self.rank, self.rank)
+        matrix = (matrix + matrix.swapaxes(-1, -2)) / (2 * self.rank**0.5)
+        coefficients = xi @ basis
+        corrected = jnp.einsum("bij,bj->bi", matrix, coefficients)
+        return corrected @ basis.T
+
+
 class CraigSulemDNO(nn.Module):
     """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
     width: int                        # Each shared eta layer has width // 2 channels.
@@ -107,6 +142,9 @@ class CraigSulemDNO(nn.Module):
     latent: int = 64                  # Branches per group.
     learned_grid: int | None = None   # Analytic baseline remains on the input grid.
     fuse_fft: bool = False            # Experimental 256-point float32 kernel.
+    correction_kind: str = "branches"  # "compact" opts into a fixed-rank matrix.
+    compact_rank: int = 64
+    compact_hidden: int = 128
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -172,6 +210,10 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
+        if self.correction_kind not in ("branches", "compact"):
+            raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
+        if self.correction_kind == "compact" and self.fuse_fft:
+            raise ValueError("FFT fusion applies only to the branches correction")
         clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
 
         eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
@@ -188,6 +230,13 @@ class CraigSulemDNO(nn.Module):
             grid_size = inputs.shape[1]
             eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
             xi_phys = xi_norm * self.xi_scale
+        if self.correction_kind == "compact":
+            correction = CompactCorrection(
+                rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
+            )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
+            if grid_size != output_grid:
+                correction = fourier_resample_even(correction[..., None], output_grid)[..., 0]
+            return (baseline + correction)[..., None]
         if self.fuse_fft and (grid_size != 256 or self.latent % 8):
             raise ValueError("Fused FFT requires a 256-point learned grid and latent divisible by 8")
 

@@ -1,4 +1,4 @@
-"""Bounded real-data pilot: 2048 versus 128 branches, with optional fused FFTs."""
+"""Bounded real-data pilots for branch reduction, FFT fusion and compact corrections."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def prepare(run_name: str) -> dict:
 
 
 def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
-              profile_step: bool = False) -> str:
+              profile_step: bool = False, compact_pilot: bool = False) -> str:
     import json
     import os
     import statistics
@@ -106,7 +106,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from translation_tangent_regularizer import compute_translation_tangent_loss
 
     started = perf_counter()
-    deadline = started + (140 if fusion_only or batch_sweep else 540)
+    deadline = started + (140 if fusion_only or batch_sweep or compact_pilot else 540)
     jax.config.update("jax_enable_x64", True)
     volume.reload()
     destination = Path("/data/experiments") / run_name
@@ -140,6 +140,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         result["scope"] = "Batch-size throughput sweep of the trained 128-branch fused model on resident real data. Same losses and optimizer as the pilot; no Hadamard, data loading or convergence comparison. GPU hard cap 180s."
     if profile_step:
         result["scope"] = "Batch-4096 memory, compiler-cost and GPU-kernel trace of the trained 128-branch fused model. Same losses and optimizer as the pilot; no Hadamard or convergence comparison. GPU hard cap 180s. Compiler costs are estimates, not hardware counters."
+    if compact_pilot:
+        result["scope"] = "Fresh paired learning pilot: fused 128-branch reference versus compact Fourier ranks 32 and 64, compact hidden width 128. Same 16384/2048 real train/validation subset, normalization, batch-512 updates, sample order, optimizer and losses as the branch pilot. Also benchmark batch 4096 and validate shifted inputs/targets. No Hadamard or long rollouts. GPU hard cap 180s."
     print(result["gpu"], flush=True)
     fused_ok = False
     try:
@@ -149,14 +151,22 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     except Exception as error:
         result["fusion_error"] = repr(error)
         print(f"Fusion unavailable; retaining cuFFT for training: {error}", flush=True)
-        if fusion_only or batch_sweep:
+        if fusion_only or batch_sweep or compact_pilot:
             raise
 
     compiled = {}
-    for name, blocks, latent, fused in (
-        ("2048_branches", 8, 256, False), ("128_branches", 2, 64, False),
-        ("128_branches_fused", 2, 64, True),
-    ):
+    variants = (
+        ("2048_branches", 8, 256, False, "branches", 64),
+        ("128_branches", 2, 64, False, "branches", 64),
+        ("128_branches_fused", 2, 64, True, "branches", 64),
+    )
+    if compact_pilot:
+        variants = (
+            ("compact_reference", 2, 64, True, "branches", 64),
+            ("compact_rank32", 2, 64, False, "compact", 32),
+            ("compact_rank64", 2, 64, False, "compact", 64),
+        )
+    for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
         if fusion_only and name == "2048_branches":
@@ -166,6 +176,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         model = CraigSulemDNO(
             width=640, n_blocks=blocks, latent=latent, mult_hidden=160,
             learned_grid=256, fuse_fft=fused, domain_length=metadata["domain_length"],
+            correction_kind=correction_kind, compact_rank=rank, compact_hidden=128,
             eta_scale=float(scales[0]), xi_scale=float(scales[1]), target_scale=target_scale,
         )
         params = model.init(key, batch[0][:1], batch[1][:1])["params"]
@@ -309,6 +320,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         assert np.isfinite(float(output[1]))
         record = {
             "blocks": blocks, "latent": latent, "fused": fused,
+            "correction_kind": correction_kind, "compact_rank": rank, "compact_hidden": 128,
             "parameters": sum(leaf.size for leaf in jax.tree.leaves(params)),
             "step_median_ms": statistics.median(timings), "step_trials_ms": timings,
             "compile_and_benchmark_seconds": perf_counter() - before,
@@ -317,13 +329,33 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         result["variants"][name] = record
         compiled[name] = [state, executable, evaluate]
         print(f"{name}: {record['step_median_ms']:.3f}ms, params={record['parameters']}", flush=True)
+        if compact_pilot:
+            large_batch = tuple(array[:4096] for array in datasets["train"])
+            large_step = jax.jit(step).lower(state, *large_batch).compile()
+            for _ in range(3):
+                jax.block_until_ready(large_step(state, *large_batch))
+            timings = []
+            for _ in range(21):
+                tick = perf_counter()
+                output = jax.block_until_ready(large_step(state, *large_batch))
+                timings.append((perf_counter() - tick) * 1000)
+            assert np.isfinite(float(output[1]))
+            memory = large_step.memory_analysis()
+            record["batch4096"] = {
+                "step_median_ms": statistics.median(timings), "step_trials_ms": timings,
+                "compiler_buffer_bytes": memory.argument_size_in_bytes + memory.output_size_in_bytes + memory.temp_size_in_bytes - memory.alias_size_in_bytes,
+            }
+            print(f"{name}, batch 4096: {statistics.median(timings):.3f}ms", flush=True)
 
-    selected_small = min(
-        (name for name in compiled if name.startswith("128_")),
-        key=lambda name: result["variants"][name]["step_median_ms"],
-    )
-    result["selected_small_implementation"] = selected_small
-    names = tuple(compiled) if fusion_only else ("2048_branches", selected_small)
+    if compact_pilot:
+        names = tuple(compiled)
+    else:
+        selected_small = min(
+            (name for name in compiled if name.startswith("128_")),
+            key=lambda name: result["variants"][name]["step_median_ms"],
+        )
+        result["selected_small_implementation"] = selected_small
+        names = tuple(compiled) if fusion_only else ("2048_branches", selected_small)
     if fusion_only:
         result["initial_checkpoint_step"] = int(compiled[names[0]][0].step)
         outputs = [jax.block_until_ready(compiled[name][1](compiled[name][0], *batch)) for name in names]
@@ -375,11 +407,21 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         values = [float(evaluate(current.params, *(array[start:start + 512] for array in datasets["validation"]), jnp.asarray(1000, dtype=jnp.int64))[1])
                   for start in range(0, metadata["validation_rows"], 512)]
         result["variants"][name]["final_validation_relative_l2"] = float(np.mean(values))
+        if compact_pilot:
+            shifted_values = []
+            for start in range(0, metadata["validation_rows"], 512):
+                fields, depths, targets, mask = (array[start:start + 512] for array in datasets["validation"])
+                shifted_values.append(float(evaluate(
+                    current.params, jnp.roll(fields, 128, axis=1), depths,
+                    jnp.roll(targets, 128, axis=1), mask, jnp.asarray(1000, dtype=jnp.int64),
+                )[1]))
+            result["variants"][name]["shifted_validation_relative_l2"] = float(np.mean(shifted_values))
         prefix = "fusion_check_" if fusion_only else ""
         (destination / f"{prefix}{name}.msgpack").write_bytes(serialization.to_bytes(jax.device_get(current)))
     result["function_wall_seconds"] = perf_counter() - started
     result["checkpoint_format"] = "Flax TrainState msgpack; restore with matching model, optimizer schedule and scales in this script. Pilot checkpoints, not production Orbax runs."
-    (destination / ("fusion_results_h100.json" if fusion_only else "results.json")).write_text(json.dumps(result, indent=2))
+    filename = "compact_results_h100.json" if compact_pilot else ("fusion_results_h100.json" if fusion_only else "results.json")
+    (destination / filename).write_text(json.dumps(result, indent=2))
     volume.commit()
     return json.dumps(result, indent=2)
 
@@ -408,12 +450,24 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, batch_sweep=True, profile_step=profile_step)
 
 
+@app.function(
+    image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
+    timeout=180, retries=0, scaledown_window=2,
+)
+def compact_check(run_name: str) -> str:
+    return run_pilot(run_name, fusion_only=False, compact_pilot=True)
+
+
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
-         fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False) -> None:
+         fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
+         compact_pilot: bool = False) -> None:
     if not prepared:
         print(prepare.remote(run_name))
-    if batch_sweep or profile_step:
+    if compact_pilot:
+        result = compact_check.remote(run_name)
+        suffix = "_compact_h100"
+    elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
     else:

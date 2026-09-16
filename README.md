@@ -36,6 +36,35 @@ Use `--help` for model and loss options. Run the same C27 recipe on Modal with
 see the [script guide](scripts/README.md). Retired trainers and
 the CARBS workflow remain available in Git history.
 
+### Experimental compact correction
+
+CS-DNO keeps its branch correction by default. To try the separate compact
+matrix correction, add these flags to a training command and use a new run name:
+
+```bash
+--model cs_dno --norm scale --cs_correction compact \
+  --cs_learned_grid 256 --cs_compact_rank 64 --cs_compact_hidden 128
+```
+
+This keeps the full-resolution analytic baseline and learns a symmetric matrix
+acting on a fixed Fourier subspace. Rank 64 means 32 sine and 32 cosine modes;
+rank 32 is also supported. The correction remains linear in the input potential
+and quadratic near a flat surface. It cannot correct modes outside that subspace
+and does not enforce translation equivariance. Treat it as an accuracy/performance
+experiment, with validation and rollout checks before adoption.
+
+`--cs_compact_hidden` controls the per-example conditioning network. Branch
+settings (`--width`, `--n_blocks`, `--latent`, and spatial-feature/multiplier
+options) do not affect this correction; omit `--cs_fuse_fft`. The architecture
+settings are saved in `config.json` and restored by the rollout loader.
+Select `--cs_correction branches` to use the existing architecture.
+
+The [short H100 pilot](experiments/fewer_branches_20260916_1545_compact_h100.json)
+measured 10.4x faster steps at batch 4096 for rank 32, but 2.44x higher validation
+error after 1024 matched updates at batch 512. It is not an established replacement
+for the branch model; reducing channel width is a separate option without this
+fixed Fourier-subspace restriction.
+
 ## Outputs
 
 Each run creates `outputs/<run_name>/` with:

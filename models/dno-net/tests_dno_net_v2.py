@@ -182,6 +182,45 @@ def test_coarse_correction_keeps_output_grid_and_linearity() -> None:
     assert jnp.allclose(roundtrip, inputs, rtol=1e-12, atol=1e-12)
 
 
+def test_compact_correction_invariants_and_initial_gradient() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    for rank in (8, 16):
+        model = _model().clone(
+            learned_grid=32, correction_kind="compact", compact_rank=rank, compact_hidden=16,
+        )
+        variables = model.init(jax.random.key(rank), inputs, depth)
+        assert jnp.max(jnp.abs(_learned_residual(model, variables, eta, xi, depth))) < 1e-14
+        gradient = jax.grad(lambda params: jnp.sum(
+            (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
+        ))(variables["params"])
+        initial_gradient = gradient["compact"]["matrix_right"]["kernel"]
+        assert jnp.isfinite(initial_gradient).all() and jnp.linalg.norm(initial_gradient) > 0
+
+        variables = unfreeze(variables)
+        kernel = variables["params"]["compact"]["matrix_right"]["kernel"]
+        variables["params"]["compact"]["matrix_right"]["kernel"] = 0.2 * jax.random.normal(
+            jax.random.key(rank + 1), kernel.shape, dtype=kernel.dtype,
+        )
+
+        def residual(surface: jax.Array, potential: jax.Array) -> jax.Array:
+            return _learned_residual(model, variables, surface, potential, depth)
+
+        psi = jnp.roll(xi, 7, axis=-1)
+        actual = residual(eta, xi)
+        assert actual.shape == xi.shape and jnp.linalg.norm(actual) > 0
+        assert jnp.allclose(residual(eta, 2 * xi - psi), 2 * actual - residual(eta, psi), atol=1e-12)
+        assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(residual(eta, psi), xi), atol=1e-12)
+        assert jnp.max(jnp.abs(actual.mean(axis=-1))) < 1e-12
+        assert jnp.max(jnp.abs(residual(eta, jnp.ones_like(xi)))) < 1e-12
+        value, derivative = jax.jvp(lambda surface: residual(surface, xi), (jnp.zeros_like(eta),), (eta,))
+        assert jnp.max(jnp.abs(value)) < 1e-14 and jnp.max(jnp.abs(derivative)) < 1e-14
+        quadratic_ratio = jnp.linalg.norm(residual(0.02 * eta, xi)) / jnp.linalg.norm(residual(0.01 * eta, xi))
+        assert 3.9 < float(quadratic_ratio) < 4.1
+        outside_basis = jnp.sin((rank // 2 + 2) * 2 * jnp.pi * jnp.arange(64) / 64)[None, :]
+        assert jnp.max(jnp.abs(residual(eta, outside_basis))) < 1e-12
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -189,6 +228,7 @@ def main() -> int:
         test_order_two_residual_is_self_adjoint,
         test_eta_feature_configuration_controls_trunk_shape,
         test_coarse_correction_keeps_output_grid_and_linearity,
+        test_compact_correction_invariants_and_initial_gradient,
     )
     for test in tests:
         test()

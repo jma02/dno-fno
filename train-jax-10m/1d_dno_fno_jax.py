@@ -97,6 +97,12 @@ def main() -> None:
                         help="Optional even grid size for the learned correction; baseline stays full resolution.")
     parser.add_argument("--cs_fuse_fft", action="store_true",
                         help="Use the experimental fused float32 FFT kernel on a 256-point learned grid.")
+    parser.add_argument("--cs_correction", choices=("branches", "compact"), default="branches",
+                        help="Learned correction architecture; compact is experimental and not translation-equivariant by construction.")
+    parser.add_argument("--cs_compact_rank", type=int, default=64,
+                        help="Even dimension of the compact correction's real Fourier basis.")
+    parser.add_argument("--cs_compact_hidden", type=int, default=128,
+                        help="Width of the compact correction's per-example conditioning network.")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument(
         "--epochs",
@@ -291,6 +297,9 @@ def main() -> None:
             latent=args.latent,
             learned_grid=args.cs_learned_grid,
             fuse_fft=args.cs_fuse_fft,
+            correction_kind=args.cs_correction,
+            compact_rank=args.cs_compact_rank,
+            compact_hidden=args.cs_compact_hidden,
             n_polys=args.cs_n_polys,
             use_first_deriv=args.cs_use_first_deriv,
             use_second_deriv=args.cs_use_second_deriv,
