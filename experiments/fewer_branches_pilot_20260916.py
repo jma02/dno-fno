@@ -103,7 +103,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from flax.training.train_state import TrainState
 
     from dno_net_v2 import CraigSulemDNO
-    from fused_fft import check_fused_roundtrip
+    from fused_fft import check_fused_gelu_roundtrip, check_fused_roundtrip
     from losses import relative_l2_loss
     from mode_balanced_regularizer import compute_mode_balanced_loss
     from translation_tangent_regularizer import compute_translation_tangent_loss
@@ -148,6 +148,9 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     if spectral_benchmark:
         result["scope"] = "Throughput only: fused 128-branch reference (shared320) versus FFT/global MLP/IFFT/decoder, hidden256 x4, IFFT channels16, decoder hidden64. Batch512 and4096, resident real pilot data, relative-L2/mode-balanced/Tanaka losses and AdamW. No learning, Hadamard, data loading or convergence claim. GPU hard cap180s."
     print(result["gpu"], flush=True)
+    if fno_transform_benchmark:
+        result["fused_gelu_kernel_relative_errors"] = check_fused_gelu_roundtrip(interpret=False)
+        print(f"Fused GELU kernel correctness: {result['fused_gelu_kernel_relative_errors']}", flush=True)
     fused_ok = False
     try:
         result["fused_kernel_relative_errors"] = check_fused_roundtrip(interpret=False)
@@ -203,10 +206,10 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         if fno_transform_benchmark:
             result["scope"] = result["scope"].replace(
                 "complex, packed-real and split-real spectral GEMMs",
-                "packed-real GEMMs and ortho FFT, backward-normalized FFT or dense DFT",
+                "packed-real GEMMs and backward-normalized cuFFT versus fused inter-block IFFT/GELU/FFT",
             )
             variants = tuple((f"fno_{transform}", 4, 32, False, "canonical_fno", 64)
-                             for transform in ("fft", "fft_backward", "dft"))
+                             for transform in ("fft_backward", "fused"))
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -272,7 +275,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             if fno_gemm_benchmark:
                 configurations = tuple((True, mode, "fft") for mode in ("complex", "packed", "split"))
             if fno_transform_benchmark:
-                configurations = tuple((True, "packed", transform) for transform in ("fft", "fft_backward", "dft"))
+                configurations = tuple((True, "packed", transform) for transform in ("fft_backward", "fused"))
             for folded, gemm, transform in configurations:
                 check_model = model.clone(fno_fold_spatial=folded, fno_spectral_gemm=gemm, fno_transform=transform)
 
@@ -467,7 +470,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         if fno_gemm_benchmark:
             filename = "fno_gemm_fp32_benchmark_h100.json"
         if fno_transform_benchmark:
-            filename = "fno_transform_benchmark_h100.json"
+            filename = "fno_fused_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -609,7 +612,7 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
         if fno_gemm_benchmark:
             suffix = "_fno_gemm_fp32_benchmark_h100"
         if fno_transform_benchmark:
-            suffix = "_fno_transform_benchmark_h100"
+            suffix = "_fno_fused_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"

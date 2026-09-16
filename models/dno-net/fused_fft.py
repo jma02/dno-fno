@@ -115,6 +115,106 @@ def _backward(
 fused_roundtrip.defvjp(_forward, _backward)
 
 
+def _gelu_forward_kernel(
+    zr: jax.Ref, zi: jax.Ref, bias: jax.Ref, yr: jax.Ref, yi: jax.Ref, slope: jax.Ref,
+) -> None:
+    batch, start = pl.program_id(0), pl.program_id(1) * 8
+    n, c = jnp.arange(256)[:, None], start + jnp.arange(8)[None, :]
+    k = jnp.minimum(n, 256 - n)
+    edge = (k == 0) | (k == 128)
+    real = plt.load(zr.at[batch, k, c])
+    imag = plt.load(zi.at[batch, k, c]) * jnp.where(n <= 128, 1.0, -1.0)
+    spatial, _ = _fft(real, jnp.where(edge, 0.0, imag), inverse=True)
+    x = spatial / 256 + plt.load(bias.at[c])
+    tangent = jnp.tanh(0.7978845608028654 * (x + 0.044715 * x**3))
+    activated = 0.5 * x * (1 + tangent)
+    derivative = 0.5 * (1 + tangent) + 0.5 * x * (1 - tangent**2) * 0.7978845608028654 * (1 + 3 * 0.044715 * x**2)
+    out_real, out_imag = _fft(activated, jnp.zeros_like(activated), inverse=False)
+    plt.store(yr.at[batch, n, c], out_real, mask=n <= 128)
+    plt.store(yi.at[batch, n, c], jnp.where(edge, 0.0, out_imag), mask=n <= 128)
+    plt.store(slope.at[batch, n, c], derivative)
+
+
+def _gelu_backward_kernel(
+    gr: jax.Ref, gi: jax.Ref, slope: jax.Ref, dzr: jax.Ref, dzi: jax.Ref, db: jax.Ref,
+) -> None:
+    batch, start = pl.program_id(0), pl.program_id(1) * 8
+    n, c = jnp.arange(256)[:, None], start + jnp.arange(8)[None, :]
+    k = jnp.minimum(n, 256 - n)
+    edge = (k == 0) | (k == 128)
+    real = plt.load(gr.at[batch, k, c]) * jnp.where(edge, 1.0, 0.5)
+    imag = -plt.load(gi.at[batch, k, c]) * jnp.where(edge, 0.0, 0.5) * jnp.where(n <= 128, 1.0, -1.0)
+    adjoint, _ = _fft(real, imag, inverse=True)
+    weighted = adjoint * plt.load(slope.at[batch, n, c])
+    plt.store(db.at[batch, start + jnp.arange(8)], jnp.sum(weighted, axis=0))
+    real, imag = _fft(weighted, jnp.zeros_like(weighted), inverse=False)
+    multiplicity = jnp.where(edge, 1.0, 2.0) / 256
+    plt.store(dzr.at[batch, n, c], real * multiplicity, mask=n <= 128)
+    plt.store(dzi.at[batch, n, c], jnp.where(edge, 0.0, -imag * multiplicity), mask=n <= 128)
+
+
+def _gelu_forward(
+    z: jax.Array, bias: jax.Array, interpret: bool,
+) -> tuple[jax.Array, jax.Array]:
+    spectrum_type = jax.ShapeDtypeStruct(z.shape, jnp.float32)
+    slope_type = jax.ShapeDtypeStruct((z.shape[0], 256, z.shape[2]), jnp.float32)
+    real, imag, slope = pl.pallas_call(
+        _gelu_forward_kernel, out_shape=(spectrum_type, spectrum_type, slope_type),
+        grid=(z.shape[0], z.shape[2] // 8), interpret=interpret,
+        compiler_params=plt.CompilerParams(num_warps=4), name="fused_ifft_gelu_fft_256",
+    )(z.real, z.imag, bias)
+    return jax.lax.complex(real, imag), slope
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def fused_gelu_roundtrip(z: jax.Array, bias: jax.Array, interpret: bool = False) -> jax.Array:
+    """rfft(gelu(irfft(z) + bias)), backward normalization, float32 reverse mode."""
+    return _gelu_forward(z, bias, interpret)[0]
+
+
+def _gelu_backward(interpret: bool, slope: jax.Array, cotangent: jax.Array) -> tuple[jax.Array, jax.Array]:
+    spectrum_type = jax.ShapeDtypeStruct(cotangent.shape, jnp.float32)
+    bias_type = jax.ShapeDtypeStruct((cotangent.shape[0], cotangent.shape[2]), jnp.float32)
+    real, imag, bias = pl.pallas_call(
+        _gelu_backward_kernel, out_shape=(spectrum_type, spectrum_type, bias_type),
+        grid=(cotangent.shape[0], cotangent.shape[2] // 8), interpret=interpret,
+        compiler_params=plt.CompilerParams(num_warps=4), name="fused_ifft_gelu_fft_backward_256",
+    )(cotangent.real, cotangent.imag, slope)
+    return jax.lax.complex(real, imag), bias.sum(axis=0)
+
+
+fused_gelu_roundtrip.defvjp(_gelu_forward, _gelu_backward)
+
+
+def check_fused_gelu_roundtrip(*, interpret: bool) -> dict[str, float]:
+    keys = jax.random.split(jax.random.key(17), 5)
+    z = jax.lax.complex(
+        jax.random.normal(keys[0], (2, 129, 16), dtype=jnp.float32),
+        jax.random.normal(keys[1], (2, 129, 16), dtype=jnp.float32),
+    )
+    bias = jax.random.normal(keys[2], (16,), dtype=jnp.float32)
+    cotangent = jax.lax.complex(
+        jax.random.normal(keys[3], z.shape, dtype=jnp.float32),
+        jax.random.normal(keys[4], z.shape, dtype=jnp.float32),
+    )
+
+    def reference(spectrum: jax.Array, offset: jax.Array) -> jax.Array:
+        spatial = jnp.fft.irfft(spectrum, n=256, axis=1)
+        return jnp.fft.rfft(jax.nn.gelu(spatial + offset), axis=1)
+
+    expected, expected_vjp = jax.vjp(reference, z, bias)
+    actual, actual_vjp = jax.vjp(partial(fused_gelu_roundtrip, interpret=interpret), z, bias)
+    errors = {}
+    for name, left, right in zip(
+        ("forward", "spectrum_gradient", "bias_gradient"),
+        (expected, *expected_vjp(cotangent)), (actual, *actual_vjp(cotangent)), strict=True,
+    ):
+        relative = float(jnp.linalg.norm(left - right) / jnp.linalg.norm(left))
+        assert bool(jnp.all(jnp.isfinite(right))) and relative < 2e-5, (name, relative)
+        errors[name] = relative
+    return errors
+
+
 def check_fused_roundtrip(*, interpret: bool) -> dict[str, float]:
     """Compare outputs and both complex/real cotangents with JAX's FFT rules."""
     keys = jax.random.split(jax.random.key(7), 5)

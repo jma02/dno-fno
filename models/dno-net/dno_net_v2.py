@@ -186,7 +186,10 @@ class CanonicalFNOCorrection(nn.Module):
         batch, size, _ = inputs.shape
         condition = jnp.broadcast_to(depth[:, None, :], (batch, size, 1))
         hidden = nn.Dense(32, name="encoder")(jnp.concatenate((inputs, condition), axis=-1))
-        norm = "backward" if self.transform == "fft_backward" else "ortho"
+        fused = self.transform == "fused" and hidden.dtype == jnp.float32 and size == 256
+        if self.transform == "fused" and not self.fold_spatial:
+            raise ValueError("Inter-block FFT fusion requires folding the spatial branch")
+        norm = "backward" if self.transform in ("fft_backward", "fused") else "ortho"
         if self.transform == "dft":
             angle = 2 * np.pi * np.arange(size)[:, None] * np.arange(size // 2 + 1)[None, :] / size
             basis = np.concatenate((np.cos(angle), -np.sin(angle[:, 1:-1])), axis=1) / size**0.5
@@ -203,7 +206,7 @@ class CanonicalFNOCorrection(nn.Module):
                 spectrum = coefficients[:, :size // 2 + 1] + 1j * jnp.pad(
                     coefficients[:, size // 2 + 1:], ((0, 0), (1, 1), (0, 0)),
                 )
-            else:
+            elif not fused or index == 0:
                 spectrum = jnp.fft.rfft(hidden, axis=1, norm=norm)
             shape = (size // 2 + 1, 32, 32)
             # Global x64 is enabled for the analytic baseline and physics losses.
@@ -233,6 +236,11 @@ class CanonicalFNOCorrection(nn.Module):
                 mixed = jnp.einsum("bki,kio->bko", spectrum, real + 1j * imaginary)
             else:
                 raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
+            if fused and index < 3:
+                from fused_fft import fused_gelu_roundtrip
+
+                spectrum = fused_gelu_roundtrip(mixed, bias, interpret=jax.default_backend() == "cpu")
+                continue
             if self.transform == "dft":
                 coefficients = jnp.concatenate((mixed.real, mixed[:, 1:-1].imag), axis=1)
                 spatial = jnp.einsum(
