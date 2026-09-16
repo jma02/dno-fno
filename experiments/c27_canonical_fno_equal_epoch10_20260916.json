@@ -1,0 +1,63 @@
+{
+  "run_name": "c27_canonical_fno_equal_1epoch_20260916",
+  "status": "submitted epochs3 through10",
+  "source_commit": "5923b2e",
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-piC1eeRTxbzc8BpU4wyH6v",
+  "profile": "sciml-at-ud",
+  "dataset": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+  "gpu": "H100!:1",
+  "batch_size": 4096,
+  "resume_from_epoch": 2,
+  "final_epoch": 10,
+  "architecture": {
+    "blocks": 4,
+    "channels": 32,
+    "learned_grid": 256,
+    "fourier_bins": 129,
+    "decoder_hidden": 64,
+    "fold_spatial": true,
+    "spectral_gemm": "packed",
+    "transform": "fft_backward",
+    "baseline": "full-grid G0+G1",
+    "parameter_dtype": "float32",
+    "parameter_count": 1063296
+  },
+  "optimizer_state": "restore latest checkpoint including AdamW moments and step5762",
+  "schedule_change": {
+    "old_total_steps": 5762,
+    "new_total_steps": 28810,
+    "warmup_steps": 500,
+    "peak_lr": 2e-05,
+    "resumed_lr": 1.8343024181712277e-05,
+    "note": "Extends cosine horizon to10 epochs at preserved optimizer count. Epoch1 used one-epoch schedule, epoch2 two-epoch schedule; this is not an uninterrupted ten-epoch schedule."
+  },
+  "previous_history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.004016411061936785,
+      "val_loss": 0.003158278641425688,
+      "val_l2_loss": 0.002275443508375179,
+      "val_mode_balanced_loss": 0.00013110683231937691,
+      "val_translation_tangent_loss": 9.619413913424759e-06,
+      "val_hadamard_loss": 0.004361478328924495,
+      "mode_balanced_loss": 0.0002009131174295479,
+      "train_l2_loss": 0.002737841918006098,
+      "translation_tangent_loss": 2.286937879441625e-05,
+      "hadamard_loss": 0.004437645106802782
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.0029932386056376725,
+      "val_loss": 0.0028102314871785937,
+      "val_l2_loss": 0.002090953360505867,
+      "val_mode_balanced_loss": 0.00010915992051407615,
+      "val_translation_tangent_loss": 6.4318603588269995e-06,
+      "val_hadamard_loss": 0.00443498766184182,
+      "mode_balanced_loss": 0.00012280638072082706,
+      "train_l2_loss": 0.0021761538774427882,
+      "translation_tangent_loss": 7.742077763490198e-06,
+      "hadamard_loss": 0.004525678718669547
+    }
+  ],
+  "loss_recipe": "Unchanged full C27: relative L2, mode-balanced weight6, Tanaka tangent weight10, Hadamard weight0.01 every16 steps on8 examples. Full equal-family train/validation splits; AdamW2e-5, weight decay1e-4, seed0."
+}
