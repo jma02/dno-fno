@@ -1,0 +1,116 @@
+{
+  "run_name": "fewer_branches_20260916_1545",
+  "data": {
+    "source": "/data/outputs/paper_dataset/arrays",
+    "seed": 42,
+    "stats": {
+      "feature_absmax": [
+        0.1511383354663849,
+        0.09148585051298141
+      ],
+      "target_absmax": 0.11534300446510315
+    },
+    "normalization": "Extrema fitted only on the pilot training subset, shared across variants.",
+    "train_rows": 16384,
+    "validation_rows": 2048,
+    "train_simulations": 5355,
+    "validation_simulations": 826,
+    "domain_length": 6.283185307179586,
+    "prepare_seconds": 39.278038024000004
+  },
+  "jax_version": "0.9.2",
+  "gpu": "NVIDIA H100 80GB HBM3, 81559 MiB",
+  "scope": "Paired batch4096 throughput only: unfolded versus folded spatial linear branch in four canonical FNO blocks, width32, all129 Fourier bins, decoder64. Learned grid256 and full1024 G0+G1 baseline. Resident real data, relative-L2/mode-balanced/Tanaka losses and AdamW; excludes Hadamard, loading and compilation. Three warmups and21 synchronized trials. GPU hard cap180s.",
+  "variants": {
+    "canonical_fno": {
+      "blocks": 4,
+      "latent": 32,
+      "fused": false,
+      "correction_kind": "canonical_fno",
+      "compact_rank": 64,
+      "compact_hidden": 128,
+      "fno_fold_spatial": false,
+      "parameters": 1063296,
+      "step_median_ms": 28.330236000002174,
+      "step_trials_ms": [
+        27.79903399999739,
+        28.33361400000456,
+        28.276191999999867,
+        28.313900000000558,
+        28.41311000000246,
+        28.36835400000126,
+        28.45131499999809,
+        28.42750900000368,
+        28.441549999996596,
+        28.44206900000046,
+        28.11787500000662,
+        28.234554999997385,
+        28.17831199999432,
+        28.21585600000276,
+        28.203187999999102,
+        28.154364000002374,
+        28.330236000002174,
+        28.52281199999851,
+        28.361523999997473,
+        28.349573000006956,
+        28.261947000004284
+      ],
+      "compile_and_benchmark_seconds": 12.820949395,
+      "compiler_buffer_bytes": 5439936896,
+      "batch_size": 4096
+    },
+    "canonical_fno_folded": {
+      "blocks": 4,
+      "latent": 32,
+      "fused": false,
+      "correction_kind": "canonical_fno",
+      "compact_rank": 64,
+      "compact_hidden": 128,
+      "fno_fold_spatial": true,
+      "parameters": 1063296,
+      "step_median_ms": 22.718294999997113,
+      "step_trials_ms": [
+        22.782306999999946,
+        22.68670099999781,
+        22.743736999998987,
+        22.651568999997096,
+        22.655733000000566,
+        22.896291999998652,
+        22.717962000001535,
+        22.74036700000437,
+        22.64692900000398,
+        22.718294999997113,
+        22.74221399999732,
+        22.732148999999424,
+        22.73004799999967,
+        22.68196099999642,
+        22.64852699999409,
+        22.715052000002345,
+        22.698594000004846,
+        22.730588999998247,
+        22.82913300000189,
+        22.770669000003352,
+        22.674470999994867
+      ],
+      "compile_and_benchmark_seconds": 8.385274906,
+      "compiler_buffer_bytes": 4380637320,
+      "batch_size": 4096
+    }
+  },
+  "validation_history": [],
+  "fusion_only": false,
+  "fused_kernel_relative_errors": {
+    "forward": 3.0678671691930504e-07,
+    "spectrum_gradient": 2.996221724060888e-07,
+    "spatial_gradient": 2.651209740633931e-07
+  },
+  "folding_relative_errors": {
+    "prediction": 6.146140659584037e-07,
+    "parameter_gradient": 2.278714884476598e-05,
+    "input_gradient": 2.5142240701825358e-05
+  },
+  "function_wall_seconds": 52.51315493,
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-XlV8KvLXbfgWX8EEP2CqOQ",
+  "source_commit": "721ed1e",
+  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; correctness comparison separately uses nonzero decoder weights and checks predictions plus parameter/input gradients. No learning or accuracy comparison."
+}
