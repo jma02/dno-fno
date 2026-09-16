@@ -221,6 +221,37 @@ def test_compact_correction_invariants_and_initial_gradient() -> None:
         assert jnp.max(jnp.abs(residual(eta, outside_basis))) < 1e-12
 
 
+def test_spectral_mlp_learns_full_grid_correction() -> None:
+    eta, xi, depth = _state(256)
+    model = _model().clone(
+        learned_grid=128, correction_kind="spectral_mlp", spectral_hidden=16,
+        spectral_layers=2, spectral_channels=4, spectral_decoder_hidden=8,
+    )
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = model.init(jax.random.key(41), inputs, depth)
+    assert jnp.max(jnp.abs(_learned_residual(model, variables, eta, xi, depth))) < 1e-14
+    gradients = jax.grad(lambda params: jnp.sum(
+        (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert all(jnp.isfinite(leaf).all() for leaf in jax.tree.leaves(gradients))
+    assert jnp.linalg.norm(gradients["spectral_mlp"]["decoder_out"]["kernel"]) > 0
+    variables = unfreeze(variables)
+    kernel = variables["params"]["spectral_mlp"]["decoder_out"]["kernel"]
+    variables["params"]["spectral_mlp"]["decoder_out"]["kernel"] = 0.1 * jax.random.normal(
+        jax.random.key(42), kernel.shape, dtype=kernel.dtype,
+    )
+    residual = _learned_residual(model, variables, eta, xi, depth)
+    assert residual.shape == xi.shape and jnp.linalg.norm(residual) > 0
+    assert jnp.max(jnp.abs(residual.mean(axis=-1))) < 1e-12
+    high_mode = jnp.sin(48 * 2 * jnp.pi * jnp.arange(256) / 256)[None, :]
+    _, response = jax.jvp(
+        lambda potential: _learned_residual(model, variables, eta, potential, depth),
+        (xi,), (high_mode,),
+    )
+    assert jnp.linalg.norm(response) > 1e-8
+    assert jnp.linalg.norm(jnp.fft.rfft(residual, axis=-1)[:, 33:64]) > 1e-8
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -229,6 +260,7 @@ def main() -> int:
         test_eta_feature_configuration_controls_trunk_shape,
         test_coarse_correction_keeps_output_grid_and_linearity,
         test_compact_correction_invariants_and_initial_gradient,
+        test_spectral_mlp_learns_full_grid_correction,
     )
     for test in tests:
         test()

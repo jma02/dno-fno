@@ -50,6 +50,30 @@ This keeps the branch architecture on the 256-point learned grid, with the
 analytic baseline on the original input grid. Reducing channels and branches
 does not impose the compact correction's fixed Fourier rank.
 
+### Experimental spectral MLP correction
+
+This option implements FFT → deep dense MLP → inverse FFT → pointwise decoder,
+then adds the result to the full-resolution analytic baseline:
+
+```bash
+--model cs_dno --norm scale --cs_correction spectral_mlp --cs_learned_grid 256 \
+  --cs_spectral_hidden 256 --cs_spectral_layers 4 \
+  --cs_spectral_channels 16 --cs_spectral_decoder_hidden 64
+```
+
+The FFT packs all independent real coefficients of both input fields, together
+with log-depth. Four dense layers mix frequencies globally. A dense output layer
+produces 16 complete spectra, inverse FFT returns 16 spatial features, and a
+16→64→1 decoder produces a mean-free correction. Its last layer starts at zero.
+The correction uses the training target's normalized units.
+
+There is no fixed Fourier rank or low-mode cutoff within the learned grid.
+Unlike the original branch model, this option does not enforce linearity in xi,
+self-adjointness, translation equivariance or quadratic order in eta. Keep it
+experimental until training and physical checks support it. Branch and compact
+settings are inactive; omit `--cs_fuse_fft`. Use a fresh run name when switching
+architectures.
+
 ### Experimental compact correction
 
 CS-DNO keeps its branch correction by default. To try the separate compact

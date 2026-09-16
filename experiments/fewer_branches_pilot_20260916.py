@@ -82,7 +82,8 @@ def prepare(run_name: str) -> dict:
 
 
 def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
-              profile_step: bool = False, compact_pilot: bool = False) -> str:
+              profile_step: bool = False, compact_pilot: bool = False,
+              spectral_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -106,7 +107,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from translation_tangent_regularizer import compute_translation_tangent_loss
 
     started = perf_counter()
-    deadline = started + (140 if fusion_only or batch_sweep or compact_pilot else 540)
+    deadline = started + (140 if fusion_only or batch_sweep or compact_pilot or spectral_benchmark else 540)
     jax.config.update("jax_enable_x64", True)
     volume.reload()
     destination = Path("/data/experiments") / run_name
@@ -142,6 +143,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         result["scope"] = "Batch-4096 memory, compiler-cost and GPU-kernel trace of the trained 128-branch fused model. Same losses and optimizer as the pilot; no Hadamard or convergence comparison. GPU hard cap 180s. Compiler costs are estimates, not hardware counters."
     if compact_pilot:
         result["scope"] = "Fresh paired learning pilot: fused 128-branch reference versus compact Fourier ranks 32 and 64, compact hidden width 128. Same 16384/2048 real train/validation subset, normalization, batch-512 updates, sample order, optimizer and losses as the branch pilot. Also benchmark batch 4096 and validate shifted inputs/targets. No Hadamard or long rollouts. GPU hard cap 180s."
+    if spectral_benchmark:
+        result["scope"] = "Throughput only: fused 128-branch reference (shared320) versus FFT/global MLP/IFFT/decoder, hidden256 x4, IFFT channels16, decoder hidden64. Batch512 and4096, resident real pilot data, relative-L2/mode-balanced/Tanaka losses and AdamW. No learning, Hadamard, data loading or convergence claim. GPU hard cap180s."
     print(result["gpu"], flush=True)
     fused_ok = False
     try:
@@ -151,7 +154,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     except Exception as error:
         result["fusion_error"] = repr(error)
         print(f"Fusion unavailable; retaining cuFFT for training: {error}", flush=True)
-        if fusion_only or batch_sweep or compact_pilot:
+        if fusion_only or batch_sweep or compact_pilot or spectral_benchmark:
             raise
 
     compiled = {}
@@ -165,6 +168,11 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             ("compact_reference", 2, 64, True, "branches", 64),
             ("compact_rank32", 2, 64, False, "compact", 32),
             ("compact_rank64", 2, 64, False, "compact", 64),
+        )
+    if spectral_benchmark:
+        variants = (
+            ("spectral_reference", 2, 64, True, "branches", 64),
+            ("spectral_mlp", 2, 64, False, "spectral_mlp", 64),
         )
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
@@ -329,7 +337,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         result["variants"][name] = record
         compiled[name] = [state, executable, evaluate]
         print(f"{name}: {record['step_median_ms']:.3f}ms, params={record['parameters']}", flush=True)
-        if compact_pilot:
+        if compact_pilot or spectral_benchmark:
             large_batch = tuple(array[:4096] for array in datasets["train"])
             large_step = jax.jit(step).lower(state, *large_batch).compile()
             for _ in range(3):
@@ -346,6 +354,12 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                 "compiler_buffer_bytes": memory.argument_size_in_bytes + memory.output_size_in_bytes + memory.temp_size_in_bytes - memory.alias_size_in_bytes,
             }
             print(f"{name}, batch 4096: {statistics.median(timings):.3f}ms", flush=True)
+
+    if spectral_benchmark:
+        result["function_wall_seconds"] = perf_counter() - started
+        (destination / "spectral_benchmark_h100.json").write_text(json.dumps(result, indent=2))
+        volume.commit()
+        return json.dumps(result, indent=2)
 
     if compact_pilot:
         names = tuple(compiled)
@@ -454,19 +468,20 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
     image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
     timeout=180, retries=0, scaledown_window=2,
 )
-def compact_check(run_name: str) -> str:
-    return run_pilot(run_name, fusion_only=False, compact_pilot=True)
+def compact_check(run_name: str, spectral_benchmark: bool = False) -> str:
+    return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
+                     spectral_benchmark=spectral_benchmark)
 
 
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
-         compact_pilot: bool = False) -> None:
+         compact_pilot: bool = False, spectral_benchmark: bool = False) -> None:
     if not prepared:
         print(prepare.remote(run_name))
-    if compact_pilot:
-        result = compact_check.remote(run_name)
-        suffix = "_compact_h100"
+    if compact_pilot or spectral_benchmark:
+        result = compact_check.remote(run_name, spectral_benchmark)
+        suffix = "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"

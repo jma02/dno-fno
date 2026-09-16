@@ -1,7 +1,7 @@
 """Craig-Sulem neural DNO: analytic G0 + G1 plus a learned correction.
 
 Here eta is surface elevation and xi is surface velocity potential.
-Each correction branch applies M[spatial_weights(eta) * M[xi]], where M is
+The default correction branches apply M[spatial_weights(eta) * M[xi]], where M is
 a depth-dependent real Fourier filter. The correction is self-adjoint,
 linear in xi, and starts at order eta^2.
 """
@@ -135,6 +135,44 @@ class CompactCorrection(nn.Module):
         return corrected @ basis.T
 
 
+class SpectralMLPCorrection(nn.Module):
+    """FFT -> global dense MLP -> inverse FFT -> pointwise decoder.
+
+    Uses every independent real Fourier coefficient on the learned grid.
+    Unlike the branch correction, this does not enforce linearity in xi,
+    self-adjointness, translation equivariance or quadratic order in eta.
+    """
+    hidden: int = 256
+    layers: int = 4
+    channels: int = 16
+    decoder_hidden: int = 64
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        batch, size, _ = inputs.shape
+        if size % 2 or min(self.hidden, self.layers, self.channels, self.decoder_hidden) < 1:
+            raise ValueError("Spectral MLP needs an even grid and positive layer dimensions")
+        spectrum = jnp.fft.rfft(inputs, axis=1, norm="ortho")
+        # DC and Nyquist have no imaginary degrees of freedom on an even real grid.
+        hidden = jnp.concatenate((
+            spectrum.real.reshape(batch, -1),
+            spectrum[:, 1:-1].imag.reshape(batch, -1), depth,
+        ), axis=-1)
+        for index in range(self.layers):
+            hidden = nn.gelu(nn.Dense(self.hidden, name=f"hidden_{index}")(hidden))
+        coefficients = nn.Dense(size * self.channels, name="spectrum_out")(hidden)
+        coefficients = coefficients.reshape(batch, size, self.channels)
+        n_freq = size // 2 + 1
+        real = coefficients[:, :n_freq]
+        imaginary = jnp.pad(coefficients[:, n_freq:], ((0, 0), (1, 1), (0, 0)))
+        spatial = jnp.fft.irfft(real + 1j * imaginary, n=size, axis=1, norm="ortho")
+        decoded = nn.gelu(nn.Dense(self.decoder_hidden, name="decoder_hidden")(spatial))
+        correction = nn.Dense(
+            1, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
+        )(decoded)[..., 0]
+        return correction - correction.mean(axis=1, keepdims=True)
+
+
 class CraigSulemDNO(nn.Module):
     """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
     width: int                        # Each shared eta layer has width // 2 channels.
@@ -145,6 +183,10 @@ class CraigSulemDNO(nn.Module):
     correction_kind: str = "branches"  # "compact" opts into a fixed-rank matrix.
     compact_rank: int = 64
     compact_hidden: int = 128
+    spectral_hidden: int = 256
+    spectral_layers: int = 4
+    spectral_channels: int = 16
+    spectral_decoder_hidden: int = 64
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -210,9 +252,9 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        if self.correction_kind not in ("branches", "compact"):
+        if self.correction_kind not in ("branches", "compact", "spectral_mlp"):
             raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
-        if self.correction_kind == "compact" and self.fuse_fft:
+        if self.correction_kind != "branches" and self.fuse_fft:
             raise ValueError("FFT fusion applies only to the branches correction")
         clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
 
@@ -230,10 +272,17 @@ class CraigSulemDNO(nn.Module):
             grid_size = inputs.shape[1]
             eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
             xi_phys = xi_norm * self.xi_scale
-        if self.correction_kind == "compact":
-            correction = CompactCorrection(
-                rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
-            )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
+        if self.correction_kind in ("compact", "spectral_mlp"):
+            if self.correction_kind == "compact":
+                correction = CompactCorrection(
+                    rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
+                )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
+            else:
+                correction = SpectralMLPCorrection(
+                    hidden=self.spectral_hidden, layers=self.spectral_layers,
+                    channels=self.spectral_channels, decoder_hidden=self.spectral_decoder_hidden,
+                    name="spectral_mlp",
+                )(inputs, clipped_log_depth)
             if grid_size != output_grid:
                 correction = fourier_resample_even(correction[..., None], output_grid)[..., 0]
             return (baseline + correction)[..., None]
