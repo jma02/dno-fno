@@ -177,9 +177,9 @@ class SpectralMLPCorrection(nn.Module):
 
 class CanonicalFNOCorrection(nn.Module):
     """Benchmark candidate: four width-32 Fourier blocks retaining every mode."""
-    fold_spatial: bool = False
-    spectral_gemm: str = "complex"
-    transform: str = "fft"
+    fold_spatial: bool = True
+    spectral_gemm: str = "packed"
+    transform: str = "fft_backward"
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
@@ -281,9 +281,9 @@ class CraigSulemDNO(nn.Module):
     spectral_layers: int = 4
     spectral_channels: int = 16
     spectral_decoder_hidden: int = 64
-    fno_fold_spatial: bool = False
-    fno_spectral_gemm: str = "complex"
-    fno_transform: str = "fft"
+    fno_fold_spatial: bool = True
+    fno_spectral_gemm: str = "packed"
+    fno_transform: str = "fft_backward"
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3

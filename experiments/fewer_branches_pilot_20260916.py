@@ -148,14 +148,16 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     if spectral_benchmark:
         result["scope"] = "Throughput only: fused 128-branch reference (shared320) versus FFT/global MLP/IFFT/decoder, hidden256 x4, IFFT channels16, decoder hidden64. Batch512 and4096, resident real pilot data, relative-L2/mode-balanced/Tanaka losses and AdamW. No learning, Hadamard, data loading or convergence claim. GPU hard cap180s."
     print(result["gpu"], flush=True)
-    if fno_transform_benchmark:
+    if fno_transform_benchmark and not profile_step:
         result["fused_gelu_kernel_relative_errors"] = check_fused_gelu_roundtrip(interpret=False)
         print(f"Fused GELU kernel correctness: {result['fused_gelu_kernel_relative_errors']}", flush=True)
     fused_ok = False
     try:
-        result["fused_kernel_relative_errors"] = check_fused_roundtrip(interpret=False)
+        if not (fno_transform_benchmark and profile_step):
+            result["fused_kernel_relative_errors"] = check_fused_roundtrip(interpret=False)
         fused_ok = True
-        print(f"Fused kernel correctness: {result['fused_kernel_relative_errors']}", flush=True)
+        if "fused_kernel_relative_errors" in result:
+            print(f"Fused kernel correctness: {result['fused_kernel_relative_errors']}", flush=True)
     except Exception as error:
         result["fusion_error"] = repr(error)
         print(f"Fusion unavailable; retaining cuFFT for training: {error}", flush=True)
@@ -210,6 +212,9 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             )
             variants = tuple((f"fno_{transform}", 4, 32, False, "canonical_fno", 64)
                              for transform in ("fft_backward", "fft_channels_first", "fused"))
+            if profile_step:
+                variants = variants[:1]
+                result["scope"] = "Inspection only: selected four-block width32 FNO, all129 bins, folded spatial branches, packed real GEMMs, float32 parameters and backward-normalized cuFFT. H100!:1, batch4096, resident real pilot data, ordinary losses and AdamW. Same initial state reused; no loading, compilation or periodic Hadamard in step time. Includes optimized HLO and a three-step GPU trace; no architecture change."
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -264,7 +269,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             )
             return current.apply_gradients(grads=gradients), loss, relative
 
-        if (fno_fold_benchmark or fno_gemm_benchmark) and name == variants[0][0]:
+        if (fno_fold_benchmark or fno_gemm_benchmark) and name == variants[0][0] and not profile_step:
             check_params = jax.tree.map(lambda value: value, params)
             decoder = check_params["canonical_fno"]["decoder_out"]["kernel"]
             check_params["canonical_fno"]["decoder_out"]["kernel"] = 0.1 * jax.random.normal(
@@ -432,10 +437,17 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             import gzip
             from collections import Counter
 
-            trace_dir = destination / f"profile_{name}"
+            if profile_step:
+                (destination / "fno_inspect_optimized_hlo.txt").write_text(executable.as_text())
+                record["compiler_cost_estimates"] = executable.cost_analysis()
+                record["allocator_memory_stats"] = jax.devices()[0].memory_stats()
+                record["input_shapes_dtypes"] = [(array.shape, str(array.dtype)) for array in batch]
+                record["state_step"] = int(state.step)
+            trace_dir = destination / ("fno_inspect" if profile_step else f"profile_{name}")
             with jax.profiler.trace(str(trace_dir)):
-                for _ in range(3):
-                    jax.block_until_ready(executable(state, *batch))
+                for trace_step in range(3):
+                    with jax.profiler.StepTraceAnnotation("training_batch", step_num=trace_step):
+                        jax.block_until_ready(executable(state, *batch))
             trace_path = max(trace_dir.rglob("*.trace.json.gz"), key=lambda path: path.stat().st_mtime)
             with gzip.open(trace_path, "rt") as stream:
                 events = json.load(stream)["traceEvents"]
@@ -475,6 +487,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             filename = "fno_gemm_fp32_benchmark_h100.json"
         if fno_transform_benchmark:
             filename = "fno_layout_benchmark_h100.json"
+            if profile_step:
+                filename = "fno_inspect_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -588,11 +602,11 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
 )
 def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False,
                   fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
-                  fno_transform_benchmark: bool = False) -> str:
+                  fno_transform_benchmark: bool = False, profile_step: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
                      spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark,
                      fno_fold_benchmark=fno_fold_benchmark, fno_gemm_benchmark=fno_gemm_benchmark,
-                     fno_transform_benchmark=fno_transform_benchmark)
+                     fno_transform_benchmark=fno_transform_benchmark, profile_step=profile_step)
 
 
 @app.local_entrypoint()
@@ -608,7 +622,7 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
     if compact_pilot or spectral_benchmark or fno_benchmark:
         result = compact_check.remote(
             run_name, spectral_benchmark or fno_benchmark, fno_benchmark, fno_fold_benchmark,
-            fno_gemm_benchmark, fno_transform_benchmark,
+            fno_gemm_benchmark, fno_transform_benchmark, profile_step,
         )
         suffix = "_fno_benchmark_h100" if fno_benchmark else "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
         if fno_fold_benchmark:
@@ -617,6 +631,8 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
             suffix = "_fno_gemm_fp32_benchmark_h100"
         if fno_transform_benchmark:
             suffix = "_fno_layout_benchmark_h100"
+            if profile_step:
+                suffix = "_fno_inspect_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
