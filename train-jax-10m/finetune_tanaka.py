@@ -65,6 +65,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run_dir", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
+    parser.add_argument("--checkpoint", choices=("best", "final"), default="final")
     parser.add_argument("--dataset", type=Path)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-6)
@@ -72,12 +73,13 @@ def main() -> None:
     parser.add_argument("--translation_tangent_weight", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    args.output_dir = args.output_dir.resolve()
     started = perf_counter()
     if jax.default_backend() != "gpu":
         raise RuntimeError("Fine-tuning requires a GPU")
 
     # Keep the source model and normalization; start a new optimizer and schedule.
-    loaded = load_run(args.run_dir, checkpoint="final")
+    loaded = load_run(args.run_dir, checkpoint=args.checkpoint)
     config = loaded.config
     dataset_path = (args.dataset or Path(config["dataset"])).resolve()
     dataset = load_dataset_arrays(dataset_path)
