@@ -293,6 +293,44 @@ class SelfAdjointFNOCorrection(nn.Module):
         return jnp.fft.irfft(jnp.sum(multiplier * weighted, axis=-1), n=size, axis=1, norm="backward") / 32**0.5
 
 
+class FullSpectrumMLPCorrection(nn.Module):
+    """Learn full-spectrum compression; a surface MLP gates a tied linear xi map.
+
+    The xi operator has rank at most hidden, with a learned Fourier subspace
+    spanning all input frequencies. No hard low-pass or eta-order constraint.
+    """
+    hidden: int = 256
+    layers: int = 4
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        size = inputs.shape[1]
+        if size % 2 or self.hidden < 1 or self.layers < 1:
+            raise ValueError("Full-spectrum MLP requires an even grid and positive dimensions")
+        spectrum = jnp.fft.rfft(inputs, axis=1, norm="ortho")
+        # Orthonormal real coordinates make a tied matrix transpose the true
+        # adjoint, including DC and Nyquist (which have no imaginary component).
+        real = spectrum.real.at[:, 1:-1, :].multiply(2**0.5)
+        coefficients = jnp.concatenate((real, spectrum[:, 1:-1].imag * 2**0.5), axis=1)
+        hidden = jnp.concatenate((coefficients[..., 0], depth), axis=-1)
+        for index in range(self.layers):
+            hidden = nn.gelu(nn.Dense(self.hidden, name=f"hidden_{index}")(hidden))
+        weights = nn.Dense(
+            self.hidden, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
+        )(hidden)
+        projection = self.param(
+            "xi_projection", nn.initializers.lecun_normal(), (size - 1, self.hidden), jnp.float32,
+        ).astype(inputs.dtype)
+        # Exclude DC on both sides: constants are annihilated and output is mean-free.
+        latent = coefficients[:, 1:, 1] @ projection
+        output = (latent * weights) @ projection.T
+        output = jnp.pad(output, ((0, 0), (1, 0)))
+        n_freq = size // 2 + 1
+        real = output[:, :n_freq].at[:, 1:-1].divide(2**0.5)
+        imaginary = jnp.pad(output[:, n_freq:] / 2**0.5, ((0, 0), (1, 1)))
+        return jnp.fft.irfft(real + 1j * imaginary, n=size, axis=1, norm="ortho")
+
+
 class CraigSulemDNO(nn.Module):
     """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
     width: int                        # Each shared eta layer has width // 2 channels.
@@ -375,7 +413,7 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno"):
+        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp"):
             raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
         if self.correction_kind != "branches" and self.fuse_fft:
             raise ValueError("FFT fusion applies only to the branches correction")
@@ -389,6 +427,11 @@ class CraigSulemDNO(nn.Module):
             self._linear_baseline(xi_norm, depth)
             + self._g1_baseline(eta_norm, xi_norm, depth)
         )
+        if self.correction_kind == "full_spectrum_mlp":
+            correction = FullSpectrumMLPCorrection(
+                hidden=self.spectral_hidden, layers=self.spectral_layers, name="full_spectrum_mlp",
+            )(inputs, clipped_log_depth)
+            return (baseline + correction)[..., None]
         output_grid = grid_size
         if self.learned_grid is not None and self.learned_grid != grid_size:
             inputs = fourier_resample_even(inputs, self.learned_grid)

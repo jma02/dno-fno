@@ -346,6 +346,46 @@ def test_symmetric_fno_linearity_adjoint_and_gradients() -> None:
     assert jnp.allclose(derivative, finite_difference, rtol=2e-3, atol=1e-9)
 
 
+def test_full_spectrum_compression_preserves_constraints_and_high_modes() -> None:
+    eta, xi, depth = _state()
+    model = _model().clone(
+        correction_kind="full_spectrum_mlp", spectral_hidden=16,
+        spectral_layers=4, learned_grid=16,
+    )
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = unfreeze(model.init(jax.random.key(101), inputs, depth))
+    trunk = variables["params"]["full_spectrum_mlp"]
+    assert trunk["hidden_0"]["kernel"].shape == (65, 16)
+    assert trunk["xi_projection"].shape == (63, 16)
+    gradient = jax.grad(lambda p: jnp.sum(
+        (model.apply({"params": p}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert jnp.linalg.norm(gradient["full_spectrum_mlp"]["decoder_out"]["kernel"]) > 0
+    head = trunk["decoder_out"]
+    head["kernel"] = 0.1 * jax.random.normal(jax.random.key(102), head["kernel"].shape)
+    x = jnp.arange(64) * (2 * jnp.pi / 64)
+    high = jnp.sin(23 * x)[None, :] + jnp.cos(32 * x)[None, :]
+    probe = jax.random.normal(jax.random.key(103), xi.shape)
+
+    def residual(surface: jax.Array, potential: jax.Array) -> jax.Array:
+        return _learned_residual(model, variables, surface, potential, depth)
+
+    a, b = residual(eta, high), residual(eta, probe)
+    assert jnp.linalg.norm(a) > 1e-7
+    assert jnp.linalg.norm(residual(eta + .02 * high, xi) - residual(eta, xi)) > 1e-7
+    assert jnp.allclose(residual(eta, 2 * high - probe), 2 * a - b, rtol=1e-9, atol=1e-10)
+    assert jnp.allclose(jnp.vdot(probe, a), jnp.vdot(b, high), rtol=1e-9, atol=1e-10)
+    assert jnp.max(jnp.abs(residual(eta, jnp.ones_like(xi)))) < 1e-10
+    assert jnp.max(jnp.abs(a.mean(axis=-1))) < 1e-10
+    _, pullback = jax.vjp(lambda value: residual(eta, value), high)
+    assert jnp.allclose(pullback(probe)[0], b, rtol=1e-9, atol=1e-10)
+    gradient = jax.grad(lambda p: jnp.sum(
+        (model.apply({"params": p}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert all(jnp.isfinite(leaf).all() for leaf in jax.tree.leaves(gradient))
+    assert jnp.linalg.norm(gradient["full_spectrum_mlp"]["xi_projection"]) > 0
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -357,6 +397,7 @@ def main() -> int:
         test_spectral_mlp_learns_full_grid_correction,
         test_canonical_fno_gradient_and_translation,
         test_symmetric_fno_linearity_adjoint_and_gradients,
+        test_full_spectrum_compression_preserves_constraints_and_high_modes,
     )
     for test in tests:
         test()

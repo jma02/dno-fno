@@ -85,7 +85,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
               profile_step: bool = False, compact_pilot: bool = False,
               spectral_benchmark: bool = False, fno_benchmark: bool = False,
               fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
-              fno_transform_benchmark: bool = False, symmetric_benchmark: bool = False) -> str:
+              fno_transform_benchmark: bool = False, symmetric_benchmark: bool = False,
+              full_spectrum_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -102,7 +103,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from flax import serialization
     from flax.training.train_state import TrainState
 
-    from dno_net_v2 import CraigSulemDNO, SelfAdjointFNOCorrection, fourier_resample_even
+    from dno_net_v2 import CraigSulemDNO, FullSpectrumMLPCorrection, SelfAdjointFNOCorrection, fourier_resample_even
     from fused_fft import check_fused_gelu_roundtrip, check_fused_roundtrip
     from losses import relative_l2_loss
     from mode_balanced_regularizer import compute_mode_balanced_loss
@@ -221,6 +222,12 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             ("symmetric_fno_4", 4, 32, False, "symmetric_fno", 64),
         )
         result["scope"] = "One H100, batch4096, resident real pilot data. Current four-block FNO versus four-block surface-only FNO with32 tied real Fourier filters on a linear xi path. Correct adjoint upsampling, all129 bins. No eta-quadratic constraint. Ordinary relative-L2/mode/Tanaka loss, AdamW constant1e-4; no Hadamard, loading or convergence claim. Nonzero learned heads,21 synchronized trials plus alternating retiming."
+        if full_spectrum_benchmark:
+            variants = (
+                ("symmetric_fno_4", 4, 32, False, "symmetric_fno", 64),
+                ("full_spectrum_mlp", 4, 32, False, "full_spectrum_mlp", 64),
+            )
+            result["scope"] = "One H100, batch4096, resident real data. Four-layer coarse symmetric FNO versus full1024 FFT, learned256-dimensional compression, four width256 surface MLP layers, and tied xi projection. Both linear/self-adjoint, no eta-quadratic constraint. Nonzero heads, ordinary relative-L2/mode/Tanaka loss and AdamW1e-4; excludes Hadamard, loading and compilation.21 synchronized trials plus21 alternating retimings."
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -330,7 +337,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             result["optimization_relative_errors"] = errors
             print(f"Optimization output/gradient relative errors: {errors}", flush=True)
 
-        if symmetric_benchmark and correction_kind == "symmetric_fno":
+        if symmetric_benchmark and correction_kind in ("symmetric_fno", "full_spectrum_mlp"):
             probe_fields, probe_depth = batch[0][:2], batch[1][:2]
             potential = jax.random.normal(jax.random.key(91), probe_fields[..., 1].shape, dtype=jnp.float32)
             probe = jax.random.normal(jax.random.key(92), potential.shape, dtype=jnp.float32)
@@ -338,6 +345,10 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             @jax.jit
             def residual(value: jax.Array) -> jax.Array:
                 fields = probe_fields.at[..., 1].set(value)
+                if correction_kind == "full_spectrum_mlp":
+                    return FullSpectrumMLPCorrection().apply(
+                        {"params": params["full_spectrum_mlp"]}, fields, probe_depth,
+                    )
                 coarse = fourier_resample_even(fields, 256)
                 correction = SelfAdjointFNOCorrection(blocks=blocks).apply(
                     {"params": params["symmetric_fno"]}, coarse, probe_depth,
@@ -547,6 +558,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                 filename = "fno_inspect_h100.json"
         if symmetric_benchmark:
             filename = "symmetric_fno_benchmark_h100.json"
+        if full_spectrum_benchmark:
+            filename = "full_spectrum_mlp_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -661,12 +674,12 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
 def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False,
                   fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
                   fno_transform_benchmark: bool = False, profile_step: bool = False,
-                  symmetric_benchmark: bool = False) -> str:
+                  symmetric_benchmark: bool = False, full_spectrum_benchmark: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
                      spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark,
                      fno_fold_benchmark=fno_fold_benchmark, fno_gemm_benchmark=fno_gemm_benchmark,
                      fno_transform_benchmark=fno_transform_benchmark, profile_step=profile_step,
-                     symmetric_benchmark=symmetric_benchmark)
+                     symmetric_benchmark=symmetric_benchmark, full_spectrum_benchmark=full_spectrum_benchmark)
 
 
 @app.local_entrypoint()
@@ -675,7 +688,8 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          compact_pilot: bool = False, spectral_benchmark: bool = False,
          fno_benchmark: bool = False, fno_fold_benchmark: bool = False,
          fno_gemm_benchmark: bool = False, fno_transform_benchmark: bool = False,
-         symmetric_benchmark: bool = False) -> None:
+         symmetric_benchmark: bool = False, full_spectrum_benchmark: bool = False) -> None:
+    symmetric_benchmark = symmetric_benchmark or full_spectrum_benchmark
     fno_gemm_benchmark = fno_gemm_benchmark or fno_transform_benchmark
     fno_benchmark = fno_benchmark or fno_fold_benchmark or fno_gemm_benchmark or symmetric_benchmark
     if not prepared:
@@ -683,7 +697,7 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
     if compact_pilot or spectral_benchmark or fno_benchmark:
         result = compact_check.remote(
             run_name, spectral_benchmark or fno_benchmark, fno_benchmark, fno_fold_benchmark,
-            fno_gemm_benchmark, fno_transform_benchmark, profile_step, symmetric_benchmark,
+            fno_gemm_benchmark, fno_transform_benchmark, profile_step, symmetric_benchmark, full_spectrum_benchmark,
         )
         suffix = "_fno_benchmark_h100" if fno_benchmark else "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
         if fno_fold_benchmark:
@@ -696,6 +710,8 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
                 suffix = "_fno_inspect_h100"
         if symmetric_benchmark:
             suffix = "_symmetric_fno_benchmark_h100"
+        if full_spectrum_benchmark:
+            suffix = "_full_spectrum_mlp_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"
