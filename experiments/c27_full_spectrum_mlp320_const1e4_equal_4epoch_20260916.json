@@ -1,0 +1,38 @@
+{
+  "profile": "sciml-at-ud",
+  "gpu": "H100!:1",
+  "dataset": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+  "batch_size": 4096,
+  "seed": 0,
+  "lr": 0.0001,
+  "lr_schedule": "constant",
+  "weight_decay": 0.0001,
+  "gradient_ema_decay": 0,
+  "correction_kind": "full_spectrum_mlp",
+  "loss_recipe": "Complete C27 including periodic Hadamard; same as prior constrained FNO, no gradient EMA",
+  "run_name": "c27_full_spectrum_mlp320_const1e4_equal_4epoch_20260916",
+  "status": "running four fresh epochs",
+  "source_commit": "6f26c42",
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-UyFnONqMh8myfDrUN96a2m",
+  "epochs": 4,
+  "architecture": {
+    "input_grid": 1024,
+    "output_grid": 1024,
+    "hidden": 320,
+    "layers": 4,
+    "xi_projection": [
+      1023,
+      320
+    ],
+    "parameter_count": 1066240,
+    "linearity_in_xi": true,
+    "self_adjoint": true,
+    "eta_quadratic_constraint": false,
+    "hard_lowpass": false,
+    "maximum_xi_operator_rank": 320
+  },
+  "expected_final_step": 11524,
+  "initialization": "fresh seed0 in separate run directory",
+  "comparison_record": "c27_full_spectrum_mlp_const1e4_equal_1epoch_20260916.json",
+  "constrained_fno_comparison_record": "c27_symmetric_fno4_const1e4_equal_4epoch_20260916.json"
+}
