@@ -307,6 +307,9 @@ class FullSpectrumMLPCorrection(nn.Module):
         size = inputs.shape[1]
         if size % 2 or self.hidden < 1 or self.layers < 1:
             raise ValueError("Full-spectrum MLP requires an even grid and positive dimensions")
+        # Single-pass TF32 rounds xi before projection, measurably degrading
+        # linearity. Three-pass TF32 retains tensor cores with near-float32 accuracy.
+        precision = "TF32_TF32_F32_X3" if inputs.dtype == jnp.float32 and jax.default_backend() == "gpu" else None
         spectrum = jnp.fft.rfft(inputs, axis=1, norm="ortho")
         # Orthonormal real coordinates make a tied matrix transpose the true
         # adjoint, including DC and Nyquist (which have no imaginary component).
@@ -314,16 +317,17 @@ class FullSpectrumMLPCorrection(nn.Module):
         coefficients = jnp.concatenate((real, spectrum[:, 1:-1].imag * 2**0.5), axis=1)
         hidden = jnp.concatenate((coefficients[..., 0], depth), axis=-1)
         for index in range(self.layers):
-            hidden = nn.gelu(nn.Dense(self.hidden, name=f"hidden_{index}")(hidden))
+            hidden = nn.gelu(nn.Dense(self.hidden, precision=precision, name=f"hidden_{index}")(hidden))
         weights = nn.Dense(
             self.hidden, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
+            precision=precision,
         )(hidden)
         projection = self.param(
             "xi_projection", nn.initializers.lecun_normal(), (size - 1, self.hidden), jnp.float32,
         ).astype(inputs.dtype)
         # Exclude DC on both sides: constants are annihilated and output is mean-free.
-        latent = coefficients[:, 1:, 1] @ projection
-        output = (latent * weights) @ projection.T
+        latent = jnp.matmul(coefficients[:, 1:, 1], projection, precision=precision)
+        output = jnp.matmul(latent * weights, projection.T, precision=precision)
         output = jnp.pad(output, ((0, 0), (1, 0)))
         n_freq = size // 2 + 1
         real = output[:, :n_freq].at[:, 1:-1].divide(2**0.5)
