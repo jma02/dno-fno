@@ -304,6 +304,48 @@ def test_canonical_fno_gradient_and_translation() -> None:
                 assert jnp.allclose(original, candidate, rtol=1e-4, atol=1e-7)
 
 
+def test_symmetric_fno_linearity_adjoint_and_gradients() -> None:
+    # Include the coarse Nyquist mode and broadband potentials: smooth-only probes
+    # miss the resampling-adjoint error at the retained band edge.
+    eta, xi, depth = _state()
+    x = jnp.arange(64, dtype=jnp.float64) * (2 * jnp.pi / 64)
+    xi = xi + 0.04 * jnp.cos(16 * x)[None, :]
+    psi = 0.03 * jax.random.normal(jax.random.key(80), xi.shape, dtype=xi.dtype)
+    model = _model().clone(learned_grid=32, correction_kind="symmetric_fno")
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = unfreeze(model.init(jax.random.key(81), inputs, depth))
+    initial_gradient = jax.grad(lambda params: jnp.sum(
+        (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert jnp.linalg.norm(initial_gradient["symmetric_fno"]["conditioner"]["decoder_out"]["kernel"]) > 0
+    head = variables["params"]["symmetric_fno"]["conditioner"]["decoder_out"]
+    head["kernel"] = 0.1 * jax.random.normal(jax.random.key(82), head["kernel"].shape, dtype=jnp.float32)
+
+    def residual(potential: jax.Array) -> jax.Array:
+        return _learned_residual(model, variables, eta, potential, depth)
+
+    result = residual(xi)
+    assert jnp.linalg.norm(result) > 1e-8
+    assert jnp.allclose(residual(2 * xi - psi), 2 * result - residual(psi), rtol=1e-9, atol=1e-11)
+    assert jnp.allclose(jnp.vdot(psi, result), jnp.vdot(residual(psi), xi), rtol=1e-9, atol=1e-11)
+    assert jnp.max(jnp.abs(residual(jnp.ones_like(xi)))) < 1e-11
+    assert jnp.max(jnp.abs(result.mean(axis=-1))) < 1e-11
+    # The third constraint is intentionally absent even at an exactly flat surface.
+    flat = _learned_residual(model, variables, jnp.zeros_like(eta), xi, depth)
+    assert jnp.linalg.norm(flat) > 1e-8
+    weights = variables["params"]["symmetric_fno"]["conditioner"]["decoder_out"]["kernel"]
+    direction = jax.random.normal(jax.random.key(83), weights.shape, dtype=weights.dtype)
+
+    def loss(kernel: jax.Array) -> jax.Array:
+        candidate = unfreeze(variables)
+        candidate["params"]["symmetric_fno"]["conditioner"]["decoder_out"]["kernel"] = kernel
+        return jnp.mean(model.apply(candidate, inputs, depth)**2)
+
+    derivative = jnp.vdot(jax.grad(loss)(weights), direction)
+    finite_difference = (loss(weights + 1e-3 * direction) - loss(weights - 1e-3 * direction)) / 2e-3
+    assert jnp.allclose(derivative, finite_difference, rtol=2e-3, atol=1e-9)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -314,6 +356,7 @@ def main() -> int:
         test_compact_correction_invariants_and_initial_gradient,
         test_spectral_mlp_learns_full_grid_correction,
         test_canonical_fno_gradient_and_translation,
+        test_symmetric_fno_linearity_adjoint_and_gradients,
     )
     for test in tests:
         test()

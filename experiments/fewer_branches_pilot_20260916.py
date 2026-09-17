@@ -85,7 +85,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
               profile_step: bool = False, compact_pilot: bool = False,
               spectral_benchmark: bool = False, fno_benchmark: bool = False,
               fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
-              fno_transform_benchmark: bool = False) -> str:
+              fno_transform_benchmark: bool = False, symmetric_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -102,7 +102,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from flax import serialization
     from flax.training.train_state import TrainState
 
-    from dno_net_v2 import CraigSulemDNO
+    from dno_net_v2 import CraigSulemDNO, SelfAdjointFNOCorrection, fourier_resample_even
     from fused_fft import check_fused_gelu_roundtrip, check_fused_roundtrip
     from losses import relative_l2_loss
     from mode_balanced_regularizer import compute_mode_balanced_loss
@@ -153,7 +153,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         print(f"Fused GELU kernel correctness: {result['fused_gelu_kernel_relative_errors']}", flush=True)
     fused_ok = False
     try:
-        if not (fno_transform_benchmark and profile_step):
+        if not symmetric_benchmark and not (fno_transform_benchmark and profile_step):
             result["fused_kernel_relative_errors"] = check_fused_roundtrip(interpret=False)
         fused_ok = True
         if "fused_kernel_relative_errors" in result:
@@ -215,6 +215,13 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             if profile_step:
                 variants = variants[:1]
                 result["scope"] = "Inspection only: selected four-block width32 FNO, all129 bins, folded spatial branches, packed real GEMMs, float32 parameters and backward-normalized cuFFT. H100!:1, batch4096, resident real pilot data, ordinary losses and AdamW. Same initial state reused; no loading, compilation or periodic Hadamard in step time. Includes optimized HLO and a three-step GPU trace; no architecture change."
+    if symmetric_benchmark:
+        variants = (
+            ("canonical_fno", 4, 32, False, "canonical_fno", 64),
+            ("symmetric_fno_4", 4, 32, False, "symmetric_fno", 64),
+            ("symmetric_fno_2", 2, 32, False, "symmetric_fno", 64),
+        )
+        result["scope"] = "One H100, batch4096, resident real pilot data. Current four-block FNO versus four/two-block surface-only FNO with32 tied real Fourier filters on a linear xi path. Correct adjoint upsampling, all129 bins. No eta-quadratic constraint. Ordinary relative-L2/mode/Tanaka loss, AdamW constant1e-4; no Hadamard, loading or convergence claim. Nonzero learned heads,21 synchronized trials plus alternating retiming."
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -231,7 +238,17 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             fno_transform=name.removeprefix("fno_") if fno_transform_benchmark else "fft",
             eta_scale=float(scales[0]), xi_scale=float(scales[1]), target_scale=target_scale,
         )
+        if symmetric_benchmark:
+            model = model.clone(fno_fold_spatial=True, fno_spectral_gemm="packed", fno_transform="fft_backward")
         params = model.init(key, batch[0][:1], batch[1][:1])["params"]
+        if symmetric_benchmark:
+            # Exercise nonzero corrections and all gradient paths, not just a zero head.
+            trunk = params[correction_kind]
+            if correction_kind == "symmetric_fno":
+                trunk = trunk["conditioner"]
+            head = trunk["decoder_out"]["kernel"]
+            trunk["decoder_out"]["kernel"] = 0.02 * jax.random.normal(key, head.shape, dtype=head.dtype)
+            assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(params))
         if fno_gemm_benchmark:
             assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(params))
             assert model.apply({"params": params}, batch[0][:1], batch[1][:1]).dtype == jnp.float32
@@ -239,7 +256,11 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         schedule = optax.join_schedules(
             (optax.linear_schedule(0, 2e-5, 500), optax.constant_schedule(2e-5)), (500,),
         )
+        if symmetric_benchmark:
+            schedule = optax.constant_schedule(1e-4)
         state = TrainState.create(apply_fn=model.apply, params=params, tx=optax.adamw(schedule, weight_decay=1e-4))
+        if symmetric_benchmark:
+            state = state.replace(step=jnp.asarray(1000))
         if fusion_only or batch_sweep:
             state = jax.device_put(serialization.from_bytes(
                 state, (destination / "128_branches.msgpack").read_bytes(),
@@ -309,6 +330,30 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                         errors[f"{precision}_{configuration[1]}_{configuration[2]}_{label}"] = error
             result["optimization_relative_errors"] = errors
             print(f"Optimization output/gradient relative errors: {errors}", flush=True)
+
+        if symmetric_benchmark and correction_kind == "symmetric_fno":
+            probe_fields, probe_depth = batch[0][:2], batch[1][:2]
+            potential = jax.random.normal(jax.random.key(91), probe_fields[..., 1].shape, dtype=jnp.float32)
+            probe = jax.random.normal(jax.random.key(92), potential.shape, dtype=jnp.float32)
+
+            @jax.jit
+            def residual(value: jax.Array) -> jax.Array:
+                fields = probe_fields.at[..., 1].set(value)
+                coarse = fourier_resample_even(fields, 256)
+                correction = SelfAdjointFNOCorrection(blocks=blocks).apply(
+                    {"params": params["symmetric_fno"]}, coarse, probe_depth,
+                )
+                return fourier_resample_even(correction[..., None], 1024, restriction_adjoint=True)[..., 0]
+
+            left, right = residual(potential), residual(probe)
+            linear_error = jnp.linalg.norm(residual(2 * potential - probe) - (2 * left - right)) / jnp.linalg.norm(2 * left - right)
+            bilinear_error = jnp.abs(jnp.vdot(probe, left) - jnp.vdot(right, potential)) / (jnp.linalg.norm(probe) * jnp.linalg.norm(left))
+            _, pullback = jax.vjp(residual, potential)
+            adjoint_error = jnp.linalg.norm(pullback(probe)[0] - right) / jnp.linalg.norm(right)
+            errors = dict(zip(("linearity", "bilinear", "adjoint_vjp"), map(float, (linear_error, bilinear_error, adjoint_error)), strict=True))
+            assert all(np.isfinite(value) and value < 2e-4 for value in errors.values()), errors
+            result.setdefault("invariants", {})[name] = errors
+            print(f"{name} invariants: {errors}", flush=True)
 
         if batch_sweep:
             rows = np.random.default_rng(123).permutation(metadata["train_rows"])
@@ -478,6 +523,18 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             }
             print(f"{name}, batch 4096: {statistics.median(timings):.3f}ms", flush=True)
 
+    if symmetric_benchmark:
+        paired_trials = {name: [] for name in compiled}
+        for trial in range(21):
+            order = tuple(compiled) if trial % 2 == 0 else tuple(reversed(compiled))
+            for name in order:
+                current, executable, _ = compiled[name]
+                tick = perf_counter()
+                jax.block_until_ready(executable(current, *batch))
+                paired_trials[name].append((perf_counter() - tick) * 1000)
+        for name, trials in paired_trials.items():
+            result["variants"][name]["paired_trials_ms"] = trials
+            result["variants"][name]["paired_median_ms"] = statistics.median(trials)
     if spectral_benchmark:
         result["function_wall_seconds"] = perf_counter() - started
         filename = "fno_benchmark_h100.json" if fno_benchmark else "spectral_benchmark_h100.json"
@@ -489,6 +546,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             filename = "fno_layout_benchmark_h100.json"
             if profile_step:
                 filename = "fno_inspect_h100.json"
+        if symmetric_benchmark:
+            filename = "symmetric_fno_benchmark_h100.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -602,11 +661,13 @@ def batch_size_check(run_name: str, profile_step: bool = False) -> str:
 )
 def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark: bool = False,
                   fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
-                  fno_transform_benchmark: bool = False, profile_step: bool = False) -> str:
+                  fno_transform_benchmark: bool = False, profile_step: bool = False,
+                  symmetric_benchmark: bool = False) -> str:
     return run_pilot(run_name, fusion_only=False, compact_pilot=not spectral_benchmark,
                      spectral_benchmark=spectral_benchmark, fno_benchmark=fno_benchmark,
                      fno_fold_benchmark=fno_fold_benchmark, fno_gemm_benchmark=fno_gemm_benchmark,
-                     fno_transform_benchmark=fno_transform_benchmark, profile_step=profile_step)
+                     fno_transform_benchmark=fno_transform_benchmark, profile_step=profile_step,
+                     symmetric_benchmark=symmetric_benchmark)
 
 
 @app.local_entrypoint()
@@ -614,15 +675,16 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
          compact_pilot: bool = False, spectral_benchmark: bool = False,
          fno_benchmark: bool = False, fno_fold_benchmark: bool = False,
-         fno_gemm_benchmark: bool = False, fno_transform_benchmark: bool = False) -> None:
+         fno_gemm_benchmark: bool = False, fno_transform_benchmark: bool = False,
+         symmetric_benchmark: bool = False) -> None:
     fno_gemm_benchmark = fno_gemm_benchmark or fno_transform_benchmark
-    fno_benchmark = fno_benchmark or fno_fold_benchmark or fno_gemm_benchmark
+    fno_benchmark = fno_benchmark or fno_fold_benchmark or fno_gemm_benchmark or symmetric_benchmark
     if not prepared:
         print(prepare.remote(run_name))
     if compact_pilot or spectral_benchmark or fno_benchmark:
         result = compact_check.remote(
             run_name, spectral_benchmark or fno_benchmark, fno_benchmark, fno_fold_benchmark,
-            fno_gemm_benchmark, fno_transform_benchmark, profile_step,
+            fno_gemm_benchmark, fno_transform_benchmark, profile_step, symmetric_benchmark,
         )
         suffix = "_fno_benchmark_h100" if fno_benchmark else "_spectral_benchmark_h100" if spectral_benchmark else "_compact_h100"
         if fno_fold_benchmark:
@@ -633,6 +695,8 @@ def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
             suffix = "_fno_layout_benchmark_h100"
             if profile_step:
                 suffix = "_fno_inspect_h100"
+        if symmetric_benchmark:
+            suffix = "_symmetric_fno_benchmark_h100"
     elif batch_sweep or profile_step:
         result = batch_size_check.remote(run_name, profile_step)
         suffix = "_profile_h100" if profile_step else "_batch_sweep_h100"

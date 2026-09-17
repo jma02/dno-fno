@@ -13,8 +13,8 @@ import numpy as np
 from flax import linen as nn
 
 
-def fourier_resample_even(field: jnp.ndarray, size: int) -> jnp.ndarray:
-    """Resample axis 1 between even grids, merging/splitting the Nyquist bin."""
+def fourier_resample_even(field: jnp.ndarray, size: int, *, restriction_adjoint: bool = False) -> jnp.ndarray:
+    """Resample axis 1; optional upsampling is the mean-inner-product restriction adjoint."""
     source_size = field.shape[1]
     if source_size == size:
         return field
@@ -24,7 +24,7 @@ def fourier_resample_even(field: jnp.ndarray, size: int) -> jnp.ndarray:
     if size < source_size:
         spectrum = spectrum[:, :size // 2 + 1]
         spectrum = spectrum.at[:, -1].set(2 * spectrum[:, -1].real)
-    else:
+    elif not restriction_adjoint:
         spectrum = spectrum.at[:, -1].multiply(0.5)
     return jnp.fft.irfft(spectrum, n=size, axis=1, norm="forward")
 
@@ -180,6 +180,8 @@ class CanonicalFNOCorrection(nn.Module):
     fold_spatial: bool = True
     spectral_gemm: str = "packed"
     transform: str = "fft_backward"
+    blocks: int = 4
+    output_channels: int = 1
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
@@ -204,7 +206,7 @@ class CanonicalFNOCorrection(nn.Module):
             inverse = (basis * multiplicity[None, :]).T
             # Single-pass TF32 loses too much accuracy over repeated transforms.
             precision = "TF32_TF32_F32_X3" if hidden.dtype == jnp.float32 and jax.default_backend() == "gpu" else None
-        for index in range(4):
+        for index in range(self.blocks):
             if self.transform == "dft":
                 coefficients = jnp.einsum(
                     "bnc,nk->bkc", hidden, jnp.asarray(basis, dtype=hidden.dtype), precision=precision,
@@ -243,7 +245,7 @@ class CanonicalFNOCorrection(nn.Module):
                 mixed = jnp.einsum(equation, spectrum, real + 1j * imaginary)
             else:
                 raise ValueError(f"Unknown FNO spectral GEMM: {self.spectral_gemm!r}")
-            if fused and index < 3:
+            if fused and index < self.blocks - 1:
                 from fused_fft import fused_gelu_roundtrip
 
                 spectrum = fused_gelu_roundtrip(mixed, bias, interpret=jax.default_backend() == "cpu")
@@ -262,9 +264,33 @@ class CanonicalFNOCorrection(nn.Module):
             hidden = hidden.swapaxes(1, 2)
         hidden = nn.gelu(nn.Dense(64, name="decoder_hidden")(hidden))
         correction = nn.Dense(
-            1, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
-        )(hidden)[..., 0]
-        return correction - correction.mean(axis=1, keepdims=True)
+            self.output_channels, use_bias=False, kernel_init=nn.initializers.zeros, name="decoder_out",
+        )(hidden)
+        if self.output_channels == 1:
+            correction = correction[..., 0]
+            return correction - correction.mean(axis=1, keepdims=True)
+        return correction
+
+
+class SelfAdjointFNOCorrection(nn.Module):
+    """Surface-only FNO gates a linear, self-adjoint potential path; no eta-order constraint."""
+    blocks: int = 4
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        size = inputs.shape[1]
+        weights = CanonicalFNOCorrection(
+            blocks=self.blocks, output_channels=32, name="conditioner",
+        )(inputs[..., :1], depth)
+        multiplier = self.param(
+            "filter", nn.initializers.normal(1.0), (size // 2 + 1, 32), jnp.float32,
+        ).astype(inputs.dtype)
+        # A zero DC filter preserves the existing mean-free correction on both sides.
+        multiplier = multiplier.at[0, :].set(0)
+        spectrum = jnp.fft.rfft(inputs[..., 1], axis=1, norm="backward")
+        filtered = jnp.fft.irfft(spectrum[..., None] * multiplier, n=size, axis=1, norm="backward")
+        weighted = jnp.fft.rfft(weights * filtered, axis=1, norm="backward")
+        return jnp.fft.irfft(jnp.sum(multiplier * weighted, axis=-1), n=size, axis=1, norm="backward") / 32**0.5
 
 
 class CraigSulemDNO(nn.Module):
@@ -349,7 +375,7 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno"):
+        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno"):
             raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
         if self.correction_kind != "branches" and self.fuse_fft:
             raise ValueError("FFT fusion applies only to the branches correction")
@@ -369,11 +395,15 @@ class CraigSulemDNO(nn.Module):
             grid_size = inputs.shape[1]
             eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
             xi_phys = xi_norm * self.xi_scale
-        if self.correction_kind in ("compact", "spectral_mlp", "canonical_fno"):
+        if self.correction_kind in ("compact", "spectral_mlp", "canonical_fno", "symmetric_fno"):
             if self.correction_kind == "compact":
                 correction = CompactCorrection(
                     rank=self.compact_rank, hidden=self.compact_hidden, name="compact",
                 )(eta_norm, xi_phys, clipped_log_depth) / self.target_scale
+            elif self.correction_kind == "symmetric_fno":
+                correction = SelfAdjointFNOCorrection(blocks=self.n_blocks, name="symmetric_fno")(
+                    inputs, clipped_log_depth,
+                )
             elif self.correction_kind == "canonical_fno":
                 correction = CanonicalFNOCorrection(
                     fold_spatial=self.fno_fold_spatial, spectral_gemm=self.fno_spectral_gemm,
@@ -386,7 +416,10 @@ class CraigSulemDNO(nn.Module):
                     name="spectral_mlp",
                 )(inputs, clipped_log_depth)
             if grid_size != output_grid:
-                correction = fourier_resample_even(correction[..., None], output_grid)[..., 0]
+                correction = fourier_resample_even(
+                    correction[..., None], output_grid,
+                    restriction_adjoint=self.correction_kind == "symmetric_fno",
+                )[..., 0]
             return (baseline + correction)[..., None]
         if self.fuse_fft and (grid_size != 256 or self.latent % 8):
             raise ValueError("Fused FFT requires a 256-point learned grid and latent divisible by 8")
