@@ -1,0 +1,37 @@
+{
+  "run_name": "c27_full_spectrum_mlp_const1e4_equal_1epoch_20260916",
+  "status": "running one fresh epoch",
+  "source_commit": "26d7c30",
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-bYKMFNlqXN0Of49b7xdoH2",
+  "profile": "sciml-at-ud",
+  "gpu": "H100!:1",
+  "dataset": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+  "batch_size": 4096,
+  "epochs": 1,
+  "seed": 0,
+  "lr": 0.0001,
+  "lr_schedule": "constant",
+  "weight_decay": 0.0001,
+  "gradient_ema_decay": 0,
+  "correction_kind": "full_spectrum_mlp",
+  "architecture": {
+    "input_grid": 1024,
+    "output_grid": 1024,
+    "hidden": 256,
+    "layers": 4,
+    "xi_projection": [
+      1023,
+      256
+    ],
+    "parameter_count": 787456,
+    "linearity_in_xi": true,
+    "self_adjoint": true,
+    "eta_quadratic_constraint": false,
+    "hard_lowpass": false,
+    "maximum_xi_operator_rank": 256
+  },
+  "benchmark": "fewer_branches_20260916_1545_full_spectrum_mlp_benchmark_h100.json",
+  "comparison_record": "c27_symmetric_fno4_const1e4_equal_4epoch_20260916.json",
+  "expected_final_step": 2881,
+  "loss_recipe": "Complete C27 including periodic Hadamard; same as prior constrained FNO, no gradient EMA"
+}
