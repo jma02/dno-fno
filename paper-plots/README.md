@@ -1,5 +1,19 @@
 # C27 / v9 draft paper figures
 
+## Drop into a LaTeX project
+
+Use `c27-v9-latex.zip`: it contains only `draft.tex` and `figures/` with the
+nine plot PDFs. Extract both into your project's root and select `draft.tex`
+as the main document in your editor or Overleaf project. Keep your existing
+`PRIMEarxiv.sty` and `references.bib` in that root. The draft also compiles
+without those files, using a standard article layout and a bibliography note.
+
+`draft.tex` follows the pasted manuscript, inserts all nine figures, and adapts
+the numerical text to the actual preliminary results. Unfinished method
+sections and author notes remain marked. `draft.pdf` is a compiled preview.
+
+## Analysis pack
+
 Nine real-data figures corresponding to the manuscript placeholders, exported
 as PDF and PNG in `figures/`. Open `preview.pdf` to browse them, or `overview.png`
 for a contact sheet. `c27-v9-plot-pack.zip` contains the complete local pack.
