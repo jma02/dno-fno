@@ -219,10 +219,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         variants = (
             ("canonical_fno", 4, 32, False, "canonical_fno", 64),
             ("symmetric_fno_4", 4, 32, False, "symmetric_fno", 64),
-            ("symmetric_fno_3", 3, 32, False, "symmetric_fno", 64),
-            ("symmetric_fno_2", 2, 32, False, "symmetric_fno", 64),
         )
-        result["scope"] = "One H100, batch4096, resident real pilot data. Current four-block FNO versus four/three/two-block surface-only FNO with32 tied real Fourier filters on a linear xi path. Correct adjoint upsampling, all129 bins. No eta-quadratic constraint. Ordinary relative-L2/mode/Tanaka loss, AdamW constant1e-4; no Hadamard, loading or convergence claim. Nonzero learned heads,21 synchronized trials plus alternating retiming."
+        result["scope"] = "One H100, batch4096, resident real pilot data. Current four-block FNO versus four-block surface-only FNO with32 tied real Fourier filters on a linear xi path. Correct adjoint upsampling, all129 bins. No eta-quadratic constraint. Ordinary relative-L2/mode/Tanaka loss, AdamW constant1e-4; no Hadamard, loading or convergence claim. Nonzero learned heads,21 synchronized trials plus alternating retiming."
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
