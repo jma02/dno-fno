@@ -61,6 +61,19 @@ from checkpoint_util import (  # noqa: E402
 )
 
 
+def build_optimizer(
+    lr_schedule: optax.Schedule,
+    weight_decay: float,
+    gradient_ema_decay: float = 0.0,
+) -> optax.GradientTransformation:
+    if not 0.0 <= gradient_ema_decay < 1.0:
+        raise ValueError("gradient_ema_decay must be in [0, 1)")
+    optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay)
+    if gradient_ema_decay > 0.0:
+        optimizer = optax.chain(optax.ema(gradient_ema_decay, debias=True), optimizer)
+    return optimizer
+
+
 def main() -> None:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
@@ -127,6 +140,8 @@ def main() -> None:
         "analytic baseline. 0 preserves the original schedule.",
     )
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--gradient_ema_decay", type=float, default=0.0,
+                        help="Optional bias-corrected gradient EMA before AdamW; 0 disables.")
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
@@ -354,7 +369,9 @@ def main() -> None:
             init_value=args.lr,
             decay_steps=total_steps,
         )
-    optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(lr_schedule, args.weight_decay, args.gradient_ema_decay)
+    if args.gradient_ema_decay > 0.0:
+        print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
     print(f"learning rate: {args.lr_schedule}, first={float(lr_schedule(0)):.8g}, "
           f"last={float(lr_schedule(total_steps - 1)):.8g}")
     training_state = train_state.TrainState.create(

@@ -92,14 +92,25 @@ def training_counter_values(
     context: str,
     announce: bool = False,
 ) -> tuple[int, int]:
-    """Validate replicated TrainState/Adam/schedule counters."""
+    """Validate replicated TrainState/Adam/schedule and optional gradient EMA counters."""
     state_step = read_parameter_update_count(
         cast(jax.Array, state.step),
         counter_name=f"{context} TrainState.step",
     )
+    raw_optimizer_state = state.opt_state
+    if isinstance(raw_optimizer_state[0], optax.EmaState):
+        ema_step = read_parameter_update_count(
+            raw_optimizer_state[0].count,
+            counter_name=f"{context} gradient EMA count",
+        )
+        if ema_step != state_step:
+            raise RuntimeError(
+                f"{context} gradient EMA count={ema_step} differs from state.step={state_step}"
+            )
+        raw_optimizer_state = raw_optimizer_state[1]
     optimizer_state = cast(
         tuple[optax.ScaleByAdamState, object, optax.ScaleByScheduleState],
-        state.opt_state,
+        raw_optimizer_state,
     )
     adam_step = read_parameter_update_count(
         cast(jax.Array, optimizer_state[0].count),
