@@ -25,7 +25,9 @@ Train this optional model with the existing trainer flags:
 --cs_correction symmetric_fno --n_blocks 4 --cs_learned_grid 256
 ```
 
-No training run was launched. The original completed benchmark also measured a two-block alternative (10.0114ms,538880 parameters); the user retained four layers. A later three-block follow-up was cancelled at the user's steering before a completed comparison. The benchmark command now compares only the current FNO and the selected four-layer option:
+A subsequent fresh four-epoch run at constant1e-4 completed: validation relative-L2 was0.000838658 versus0.000843668 for the unconstrained FNO at epoch4 (0.59% lower), while total validation loss was2.66% higher. This is effectively unchanged prediction accuracy in one seed. Full results and checkpoint checks are in [the training record](c27_symmetric_fno4_const1e4_equal_4epoch_20260916.json). The four-epoch run took464.73s including startup, compilation, validation and checkpoints.
+
+The original completed benchmark also measured a two-block alternative (10.0114ms,538880 parameters); the user retained four layers. A later three-block follow-up was cancelled at the user's steering before a completed comparison. The benchmark command now compares only the current FNO and the selected four-layer option:
 
 ```sh
 MODAL_PROFILE=sciml-at-ud modal run experiments/fewer_branches_pilot_20260916.py --prepared --symmetric-benchmark --run-name fewer_branches_20260916_1545
