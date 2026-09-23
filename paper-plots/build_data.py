@@ -1,4 +1,4 @@
-"""Collect real July C27/v9 diagnostics; render separately without rerunning JAX."""
+"""Collect epoch-40 hard-P128 C27 diagnostics; render separately from JAX."""
 
 from __future__ import annotations
 
@@ -18,9 +18,8 @@ sys.path.insert(0, str(ROOT))
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from scipy.signal import find_peaks, resample  # noqa: E402
+from scipy.signal import resample  # noqa: E402
 
-from notes.family_coverage_v5 import payload_start_abs  # noqa: E402
 from scripts.analyze_rollout_translation_decomposition import (  # noqa: E402
     aligned_fields,
     optimal_displacement,
@@ -30,24 +29,16 @@ from solver.solvers.dno_series_jax import build_grid, dno_series_eval  # noqa: E
 
 jax.config.update("jax_enable_x64", True)
 OUT = Path(__file__).resolve().parent
-RUN = ROOT / "outputs/c27_h1_to_l2_full_20260717_212550"
+RUN = ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918"
 LENGTH = 2 * np.pi
-FAMILIES = ("Stokes", "Tanaka", "Random sea", "BF-inspired")
-SOURCE_IDS = ((3, 4), (5, 6, 14), (0, 1), (7, 8, 9))
-REGIMES = (
-    "stokes_deep", "stokes_finite", "tanaka_g0", "tanaka_g1",
-    "random_sea_deep", "random_sea_finite", "bf_g0", "bf_g1", "bf_modal",
-)
-REGIME_FAMILY = (0, 0, 1, 1, 2, 2, 3, 3, 3)
+FAMILIES = ("Stokes", "Tanaka", "JONSWAP/TMA", "Benjamin–Feir")
+FAMILY_IDS = (1, 2, 4, 3)
+REGIMES = ("stokes", "tanaka", "jonswap_tma", "benjamin_feir")
 
 
 def archive_path(regime: str) -> Path:
-    suite = (
-        "eval_final_soliton_spectral_guard_20260719_191228"
-        if regime.startswith("tanaka")
-        else "eval_final_guarded_non_tanaka_suite_n32_20260719_221813"
-    )
-    return RUN / suite / regime / f"{regime}_trajs.npz"
+    gpu = 0 if regime in ("stokes", "tanaka") else 1
+    return RUN / f"eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu{gpu}" / f"{regime}_trajs.npz"
 
 
 def relative_error(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
@@ -81,7 +72,7 @@ def save_data(name: str, values: dict[str, np.ndarray], metadata: dict[str, Any]
 
 
 def collect_rollouts() -> None:
-    """Use the historical panel, with newly CS-evaluated physical energies."""
+    """Use the current TEST panel, with independently CS-evaluated energies."""
     start = time.perf_counter()
     data: dict[str, np.ndarray] = {}
     cases: list[dict[str, Any]] = []
@@ -92,10 +83,10 @@ def collect_rollouts() -> None:
     cs = jax.jit(lambda eta, xi, depth: dno_series_eval(eta, xi, k, depth[:, None], order=6, pad_factor=8))
 
     ham_indices = np.arange(0, 251, 10)
-    for regime, family in zip(REGIMES, REGIME_FAMILY, strict=True):
+    for family, regime in enumerate(REGIMES):
         with np.load(archive_path(regime)) as archive:
             valid = archive["truth_valid"].astype(bool)
-            ids = archive["case_ids"][valid]
+            ids = archive["simulation_ids"][valid]
             depths = archive["depths"][valid].astype(float)
             times = archive["times"].astype(float)
             truth_eta = archive["truth_eta"][:, valid].astype(float)
@@ -146,18 +137,15 @@ def collect_rollouts() -> None:
 
         # Select typical-error examples, subject to physical profile constraints.
         selection: dict[str, int] = {}
-        if regime in ("stokes_deep", "random_sea_finite", "bf_g0"):
-            name = {"stokes_deep": "stokes", "random_sea_finite": "sea", "bf_g0": "bf"}[regime]
+        if regime in ("stokes", "jonswap_tma", "benjamin_feir"):
+            name = {"stokes": "stokes", "jonswap_tma": "sea", "benjamin_feir": "bf"}[regime]
             selection[name] = int(np.argsort(e_eta[-1])[len(ids) // 2])
-        if regime == "tanaka_g0":
-            counts = []
-            for row in truth_eta[0]:
-                peaks, _ = find_peaks(np.tile(row, 3), prominence=0.2 * np.ptp(row), distance=12)
-                counts.append(np.sum((peaks >= 1024) & (peaks < 2048)))
-            counts = np.asarray(counts)
-            candidates = np.flatnonzero(counts == 1)
+        if regime == "tanaka":
+            summary = json.loads(archive_path(regime).with_name(f"{regime}_summary.json").read_text())
+            groups = np.asarray(summary["evaluation_source"]["selected_parameter_group_ids"])[valid]
+            candidates = np.flatnonzero(np.char.find(groups, "_m1_") >= 0)
             selection["tanaka"] = int(candidates[np.argsort(e_eta[-1, candidates])[len(candidates) // 2]])
-            candidates = np.flatnonzero(counts == 2)
+            candidates = np.flatnonzero(np.char.find(groups, "_m2_") >= 0)
             # A resolved interior merger, selected by its crest amplification,
             # independent of the learned model's accuracy.
             amplification = np.max(truth_eta[15:-15], axis=(0, 2)) / np.max(truth_eta[0], axis=-1)
@@ -210,26 +198,18 @@ def collect_snapshots(samples: int) -> None:
     from solver.evals.model_rollout import build_predict_gxi_batched, load_run
 
     start = time.perf_counter()
-    predict = build_predict_gxi_batched(load_run(RUN, checkpoint="final"))
-    dataset = ROOT / "data/combined_dataset_v9.npz"
-    arrays = {}
-    for key in ("eta", "xi", "gxi", "source", "depth", "time"):
-        offset, shape, dtype = payload_start_abs(dataset, f"{key}.npy")
-        arrays[key] = np.memmap(dataset, mode="r", offset=offset, shape=shape, dtype=dtype)
-    # Exact July seed-0 80/10/10 SNAPSHOT split, not a trajectory split.
-    count = len(arrays["source"])
-    permutation = np.random.default_rng(0).permutation(count)
-    holdout = int(0.1 * count)
-    membership = np.zeros(count, dtype=np.int8)
-    membership[permutation[-holdout:]] = 2
-    membership[permutation[-2 * holdout:-holdout]] = 1
-    rng = np.random.default_rng(20260917)
+    loaded = load_run(RUN, checkpoint="best")
+    predict = build_predict_gxi_batched(loaded)
+    dataset = ROOT / loaded.config["dataset"]
+    arrays = {key: np.load(dataset / f"{key}.npy", mmap_mode="r")
+              for key in ("eta", "xi", "gxi", "family_id", "depth", "time", "dataset_split")}
+    rng = np.random.default_rng(20260923)
     data: dict[str, list[np.ndarray]] = {key: [] for key in ("rows", "family", "split", "error", "kh", "h")}
     structures = []
     examples: dict[str, np.ndarray] = {}
-    for family, source_ids in enumerate(SOURCE_IDS):
-        for split in (0, 2):
-            pool = np.flatnonzero(np.isin(arrays["source"], source_ids) & (membership == split))
+    for family, family_id in enumerate(FAMILY_IDS):
+        for split, split_name in ((0, "train"), (2, "test")):
+            pool = np.flatnonzero((arrays["family_id"] == family_id) & (arrays["dataset_split"] == split_name))
             rows = np.sort(rng.choice(pool, samples, replace=False))
             eta = np.asarray(arrays["eta"][rows], dtype=float)
             xi = np.asarray(arrays["xi"][rows], dtype=float)
@@ -287,8 +267,8 @@ def benchmarks() -> None:
     from solver.solvers import time_integrator as ti
 
     start = time.perf_counter()
-    predict = build_predict_gxi_batched(load_run(RUN, checkpoint="final"))
-    with np.load(archive_path("stokes_deep")) as archive:
+    predict = build_predict_gxi_batched(load_run(RUN, checkpoint="best"))
+    with np.load(archive_path("stokes")) as archive:
         eta0 = archive["truth_eta"][0, 0].astype(float)
         xi0 = archive["truth_xi"][0, 0].astype(float)
         depth = float(archive["depths"][0])
@@ -345,7 +325,8 @@ def benchmarks() -> None:
         record["eta_terminal_error"] = float(relative_error(solution[-1], reference[-1])[0])
     save_data("benchmark", {}, {
         "latency": latency, "rollouts": records, "nx_rollout": nx, "dt": dt, "T": final,
-        "depth": depth, "rollout_cutoff_mode": 64, "pad_factor": 8, "precision": "float64",
+        "depth": depth, "rollout_cutoff_mode": 64, "pad_factor": 8,
+        "precision": "FP32 learned inference; FP64 CS and integration",
         "device": str(jax.devices()[0]), "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "seconds": time.perf_counter() - start,
     })

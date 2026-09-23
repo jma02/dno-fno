@@ -1,4 +1,4 @@
-"""Render the nine manuscript placeholders from measured C27/v9 diagnostics."""
+"""Render the nine manuscript placeholders from epoch-40 hard-P128 diagnostics."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ FIGURES = OUT / "figures"
 FIGURES.mkdir(exist_ok=True)
 C27, CS = "#146e9e", "#272b30"
 COLORS = ("#4263a5", "#21918c", "#ce8732", "#9764a5")
-FAMILIES = ("Stokes", "Tanaka", "Random sea", "BF-inspired")
+FAMILIES = ("Stokes", "Tanaka", "JONSWAP/TMA", "Benjamin–Feir")
 LENGTH = 2 * np.pi
 plt.rcParams.update({
     "font.family": "DejaVu Sans", "font.size": 9, "axes.titlesize": 10,
@@ -61,7 +61,7 @@ if __name__ == "__main__":
         snapshot = {key.removeprefix("snapshot_"): archive[key] for key in archive.files if key.startswith("snapshot_")}
         benchmark = json.loads(str(archive["benchmark_metadata"]))
     x = np.arange(1024) / 1024
-    panel_note = "Historical guarded C27 panel · 285 valid references / 288 attempted · N = 1024 · g = 1"
+    panel_note = "Epoch-40 C27 · 128 held-out simulations · no adaptive damping · N = 1024 · g = 1"
 
     fig, axes = plt.subplots(2, 2, figsize=(8.0, 4.7), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.045, 1, 0.955))
@@ -80,8 +80,8 @@ if __name__ == "__main__":
         ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         ax.grid(alpha=0.6)
     finish(fig, "01-wave-regimes",
-           "Four actual v9 training snapshots, chosen at the median sampled C27 error within each family. The peak wavenumber is the strongest nonzero surface Fourier mode; a is half the surface range. Snapshot row IDs are in plot-data.npz. The historical random-sea and BF-inspired generators are not relabeled as the newer JONSWAP/TMA or canonical Benjamin–Feir datasets.",
-           "Actual v9 snapshots · kₚ from the surface spectrum · a = (max η − min η)/2")
+           "Four training snapshots from the equal-family hard-P128 dataset used by the epoch-40 C27 checkpoint, chosen at the median sampled DNO error within each family. The peak wavenumber is the strongest nonzero surface Fourier mode; a is half the surface range. Snapshot row IDs are in plot-data.npz.",
+           "Equal-family hard-P128 training snapshots · kₚ from the surface spectrum · a = (max η − min η)/2")
 
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.9), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.06, 1, 0.94))
@@ -104,13 +104,13 @@ if __name__ == "__main__":
             axes[1].errorbar(family + 0.20 * (depth_bin - 1), median,
                             yerr=[[median - q1], [q3 - median]], color=color, fmt=marker, capsize=3)
         axes[1].plot([], [], color=color, marker=marker, ls="none", label=label)
-    for ax, title in zip(axes, ("(a) Snapshot-split accuracy", "(b) Held-out rows by depth"), strict=True):
+    for ax, title in zip(axes, ("(a) Simulation-split accuracy", "(b) Test rows by depth"), strict=True):
         ax.set(title=title, yscale="log", ylabel=r"Relative DNO error $e_G$", xticks=range(4), xticklabels=FAMILIES, xlim=(-0.5, 3.5))
         ax.grid(axis="y", which="major")
         ax.legend(loc="upper left", fontsize=7)
     finish(fig, "02-dno-class-errors",
-           "Measured C27 relative L2 error against the stored v9 DNO targets: 512 uniformly sampled rows per family per split, with the exact July seed-0 80/10/10 row split reconstructed. Points and bars show medians and interquartile ranges. Right panel uses held-out rows only, grouped by the stated peak-wavenumber depth bins; missing groups contain no sampled rows. This historical snapshot split does not establish trajectory-disjoint generalization. Auxiliary v9 source families are outside these four panels.",
-           "512 rows / family / split · median + interquartile range · row-held-out, not trajectory-held-out")
+           "Measured epoch-40 C27 relative L2 error against the stored hard-P128 DNO targets: 512 uniformly sampled rows per family from each of the saved training and test splits. Complete simulations belong to only one split. Points and bars show medians and interquartile ranges. Right panel uses test rows only, grouped by the stated peak-wavenumber depth bins; missing groups contain no sampled rows. These are sampled errors, not exhaustive dataset statistics.",
+           "512 rows / family / split · median + interquartile range · simulation-disjoint train/test split")
 
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.65), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.075, 1, 0.87))
@@ -124,7 +124,7 @@ if __name__ == "__main__":
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncols=5, frameon=False)
     finish(fig, "03-trajectory-errors",
-           "C27 trajectory errors over 285 historical reference-valid cases: 63 Stokes, 64 Tanaka, 64 random-sea and 94 BF-inspired cases. The black curve and shading are the case-pooled median and interquartile range; thin colored curves are family medians. Times are normalized separately by T=20 for Stokes/sea and T=200 for Tanaka/BF-inspired. Three of 288 reference solves were invalid and are explicitly excluded from accuracy statistics. Saved predictions in all 285 paired cases are finite with positive fluid depth; this is a saved-state check, not a new exhaustive failure audit. No matched vanilla-FNO baseline is available.",
+           "Epoch-40 C27 trajectory errors on 32 parameter-stratified simulations per family from the saved test split (128 total). The black curve and shading are the pooled median and interquartile range; thin colored curves are family medians. Times are normalized separately by T=20 for Stokes/JONSWAP-TMA and T=200 for Tanaka/Benjamin–Feir. All 128 reference solves are valid and saved predictions are finite with positive fluid depth. Learned inference uses FP32 with FP64 physics and integration, without adaptive damping. This is a selected test panel, not the complete test set. No matched vanilla-FNO baseline is included.",
            panel_note + " · T = 20 or 200; normalized time")
 
     fig, axes = plt.subplots(3, 2, figsize=(8.2, 7.1), layout="constrained")
@@ -142,14 +142,14 @@ if __name__ == "__main__":
         for row, values, error, title in ((1, prediction, raw_error, "Unaligned"), (2, aligned, aligned_error, "Translation-aligned")):
             axes[row, col].plot(x, truth, color=CS, lw=1.7, label="CS reference")
             axes[row, col].plot(x, values, color=C27, ls="--", label="C27")
-            axes[row, col].set(title=f"{title} · $t={times[-1]:g}$ · error {error:.2%}", xlabel="$x/L$", ylabel=r"$\eta(x,t)$", xlim=(0, 1))
+            axes[row, col].set(title=f"{title} · $t={times[-1]:g}$ · error {100 * error:.3g}%", xlabel="$x/L$", ylabel=r"$\eta(x,t)$", xlim=(0, 1))
             axes[row, col].ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         for ax in axes[:, col]:
             ax.grid(alpha=0.7)
     fig.legend(*axes[1, 0].get_legend_handles_labels(), loc="upper center", ncols=2, frameon=False)
     finish(fig, "04-traveling-wave-accuracy",
-           "Phase drift and final unaligned/aligned surface profiles for median-terminal-error historical Stokes and single-crest Tanaka cases. Translation minimizes the periodic surface L2 discrepancy by Fourier interpolation. For Stokes the shift is unwrapped modulo one carrier wavelength, resolving the equivalent periodic minimizers. Alignment is diagnostic only; the raw errors are shown as well. Representatives were chosen within their profile class rather than to minimize model error.",
-           "Top: continuous Fourier alignment · middle: raw prediction · bottom: aligned prediction · historical guarded rollouts")
+           "Phase drift and final unaligned/aligned surface profiles for median-terminal-error Stokes and isolated Tanaka cases in the current test panel. Isolated Tanaka cases are identified from their single-wave parameter groups. Translation minimizes the periodic surface L2 discrepancy by Fourier interpolation. For Stokes the shift is unwrapped modulo one carrier wavelength, resolving the equivalent periodic minimizers. Alignment is diagnostic only; the raw errors are shown as well.",
+           "Top: continuous Fourier alignment · middle: raw prediction · bottom: aligned prediction · current TEST panel")
 
     # First strong crest-amplification event, with a fixed coordinate recentering.
     truth = roll["collision_truth_eta"]
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     axes[0].set_ylabel(r"$\eta(x,t)$")
     fig.legend(*axes[0].get_legend_handles_labels(), loc="upper center", ncols=2, frameon=False)
     finish(fig, "05-tanaka-collision",
-           f"Representative two-crest Tanaka interaction, historical tanaka_g0 case {int(roll['collision_case_id'])}, h={float(roll['collision_depth']):.6g}. The displayed event is an early local maximum of crest amplification, not a tracked-crest estimate of collision time. All panels use identical axes and the same fixed spatial recentering around the reference event crest; the learned profiles are not individually aligned. This supplies the draft's interaction illustration without claiming an unverified collision-time statistic.",
+           f"Representative two-wave Tanaka interaction from the current test panel, simulation {int(roll['collision_case_id'])}, h={float(roll['collision_depth']):.6g}. The displayed event is an early local maximum of crest amplification, not a tracked-crest estimate of collision time. All panels use identical axes and the same fixed spatial recentering around the reference event crest; the learned profiles are not individually aligned. This supplies the draft's interaction illustration without claiming an unverified collision-time statistic.",
            f"Tanaka case {int(roll['collision_case_id'])} · fixed recentering of both methods · event selected from reference crest amplification")
 
     fig, axes = plt.subplots(3, 2, figsize=(8.8, 7.3), layout="constrained")
@@ -220,7 +220,7 @@ if __name__ == "__main__":
             axes[2, col].legend(frameon=False, ncols=3)
         axes[2, col].grid(alpha=0.6)
     finish(fig, "06-spectral-transfer",
-           "Quadratic modal-energy evolution in representative historical BF-inspired and random-sea cases. Each column shares one color scale across the two methods, normalized by its joint maximum E*. One-sided Fourier energies include conjugate-mode multiplicities. The BF-inspired carrier and strongest symmetric seeded sideband pair are identified from the initial energy spectrum. Sea bands are fixed at n<0.5np, 0.5np<=n<=1.5np and n>1.5np, excluding the zero mode. Solid/dashed band curves denote CS/C27. These are diagnostics of the old generators, not evidence for all canonical Benjamin–Feir or JONSWAP/TMA regimes.",
+           "Quadratic modal-energy evolution in representative Benjamin–Feir and JONSWAP/TMA test cases. Each column shares one color scale across the two methods, normalized by its joint maximum E*. One-sided Fourier energies include conjugate-mode multiplicities. The Benjamin–Feir carrier and strongest symmetric seeded sideband pair are identified from the initial energy spectrum. Sea bands are fixed at n<0.5np, 0.5np<=n<=1.5np and n>1.5np, excluding the zero mode. Solid/dashed band curves denote CS/C27.",
            "Matched color scales within each column · sea bands: solid CS / dashed C27 · g = 1")
 
     fig = plt.figure(figsize=(9.3, 4.7), layout="constrained")
@@ -242,8 +242,8 @@ if __name__ == "__main__":
         ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         ax.grid(alpha=0.5)
     finish(fig, "07-hamiltonian-drift",
-           "Independent physical Hamiltonian check: order-6 Craig–Sulem with padding factor 8 is freshly evaluated on both the reference and C27 predicted states at 26 saved times per case. It is not the archived learned-DNO energy diagnostic. The pooled panel shows signed median and interquartile range on a symmetric-log scale with linear threshold 1e-8; the four examples use linear signed axes. Saved states have float32 storage, evaluated here in float64. Energy drift is not assumed to equal the CS numerical floor; the underlying arrays are included in plot-data.npz.",
-           "H evaluated with CS-6 at predicted states · 26 times × 285 cases · shaded bands = IQR")
+           "Independent physical Hamiltonian check: order-6 Craig–Sulem with padding factor 8 is freshly evaluated on both the reference and C27 predicted states at 26 saved times per case. It is not the archived learned-DNO energy diagnostic. The pooled panel shows signed median and interquartile range on a symmetric-log scale with linear threshold 1e-8; the four examples use linear signed axes. Saved states and Hamiltonian evaluation use float64. Energy drift is not assumed to equal the CS numerical floor; the underlying arrays are included in plot-data.npz.",
+           "H evaluated with CS-6 at predicted states · 26 times × 128 cases · shaded bands = IQR")
 
     fig, ax = plt.subplots(figsize=(6.8, 4.15), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.07, 1, 0.93))
@@ -261,8 +261,8 @@ if __name__ == "__main__":
     ax.grid(which="major")
     ax.legend(frameon=False, ncols=2, loc="upper left")
     finish(fig, "08-dno-complexity-scaling",
-           "Fresh CPU-only, float64, batch-one DNO latency on an AMD EPYC 9124 host with an eight-logical-CPU affinity. Seven synchronized measurements follow JIT warm-up at each resolution and order. The same historical Stokes initial condition is Fourier-resampled. CS padding is 8. Fitted log-log exponents over N=128..2048 are empirical finite-range summaries, not asymptotic proofs. C27 has no M input, but is slower than the measured CS orders on this CPU; no GPU speedup is claimed.",
-           "AMD EPYC 9124 CPU · 8 logical CPUs · float64 · batch 1 · 7 repeats · JIT excluded")
+           "Fresh CPU-only, batch-one DNO latency on an AMD EPYC 9124 host with an eight-logical-CPU affinity. Learned inference uses FP32; CS and physics use FP64. Seven synchronized measurements follow JIT warm-up at each resolution and order. One current-test Stokes initial condition is Fourier-resampled. CS padding is 8. Fitted log-log exponents over N=128..2048 are empirical finite-range summaries, not asymptotic proofs. C27 has no M input. These CPU measurements do not establish GPU performance.",
+           "AMD EPYC 9124 CPU · 8 logical CPUs · FP32 net / FP64 physics · batch 1 · 7 repeats · JIT excluded")
 
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.8), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.08, 1, 0.92))
@@ -283,7 +283,7 @@ if __name__ == "__main__":
     for ax in axes:
         ax.grid(alpha=0.6)
     finish(fig, "09-runtime-tradeoff",
-           "Fresh short-horizon CPU benchmark on one historical Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon historical evaluation panel.",
+           "Fresh short-horizon CPU benchmark on one current-test Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Learned inference uses FP32 with FP64 CS and integration. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon evaluation panel.",
            "CPU · same GL2 integration path · N = 256 · T = 1 · Δt = 0.01 · 3 repeats · compile time excluded")
 
     readme = (OUT / "README.md").read_text().split("\n## Figure captions")[0]
@@ -301,8 +301,11 @@ if __name__ == "__main__":
     fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.97, wspace=0.08, hspace=0.18)
     fig.savefig(OUT / "overview.png", dpi=150, facecolor="#f3f5f7")
     plt.close(fig)
-    with zipfile.ZipFile(OUT / "c27-v9-plot-pack.zip", "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+    with zipfile.ZipFile(OUT / "c27-hard128-plot-pack.zip", "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(OUT.rglob("*")):
-            if path.is_file() and path.suffix in (".pdf", ".png", ".md", ".npz", ".py"):
-                bundle.write(path, arcname=Path("c27-v9-plot-pack") / path.relative_to(OUT))
-    print("Wrote preview.pdf, overview.png and c27-v9-plot-pack.zip", flush=True)
+            if path.is_file() and path.suffix in (".pdf", ".png", ".md", ".npz", ".py", ".tex"):
+                bundle.write(path, arcname=Path("c27-hard128-plot-pack") / path.relative_to(OUT))
+    with zipfile.ZipFile(OUT / "c27-hard128-latex.zip", "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for path in [OUT / "draft.tex", *(FIGURES / f"{name}.pdf" for name in NAMES)]:
+            bundle.write(path, arcname=path.relative_to(OUT))
+    print("Wrote preview.pdf, overview.png and both hard128 ZIP bundles", flush=True)
