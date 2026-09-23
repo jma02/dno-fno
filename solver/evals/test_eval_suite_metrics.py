@@ -70,24 +70,25 @@ class ComputeMetricsTest(unittest.TestCase):
                 np.testing.assert_array_equal(saved[0][name], saved[1][name])
             self.assertEqual(summaries[1]["model_nonfinite_any_count_truth_valid"], 1)
 
-    def test_evaluation_promotes_float32_inputs_before_model_arithmetic(self) -> None:
+    def test_evaluation_uses_float32_network_and_float64_output(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
         inputs = 0.01 * jax.random.normal(jax.random.PRNGKey(3), (1, 16, 2), dtype=jnp.float32)
         depth = jnp.zeros((1, 1), dtype=jnp.float32)
-        params = jax.tree_util.tree_map(
-            lambda value: value.astype(jnp.float64),
-            model.init(jax.random.PRNGKey(0), inputs, depth)["params"],
-        )
-        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full((4, 2), 0.1, dtype=jnp.float64)
+        params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
+        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full((4, 2), 0.1, dtype=jnp.float32)
         loaded = LoadedRun(
             model, params, {}, {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0},
             "scale", 0,
         )
-        output = build_predict_gxi_batched(loaded)(inputs[..., 0], inputs[..., 1], depth)
+        output = build_predict_gxi_batched(loaded)(
+            inputs[..., 0].astype(jnp.float64),
+            inputs[..., 1].astype(jnp.float64),
+            depth.astype(jnp.float64),
+        )
         self.assertEqual(output.dtype, jnp.float64)
         expected = cast(jax.Array, model.apply(
-            {"params": params}, inputs.astype(jnp.float64), depth.astype(jnp.float64)
-        ))[..., 0]
+            {"params": params}, inputs, depth
+        ))[..., 0].astype(jnp.float64)
         np.testing.assert_allclose(output, expected - expected.mean(axis=-1, keepdims=True), rtol=1e-12, atol=1e-14)
 
     def test_fno_spectral_layer_preserves_evaluation_precision(self) -> None:

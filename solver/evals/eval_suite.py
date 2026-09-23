@@ -352,7 +352,7 @@ def surrogate_rollout_batched(
     cfg: FamilyConfig,
     predict_gxi_batched: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
 ) -> RolloutPayload:
-    """Run the unguarded surrogate with float64 model and integration arithmetic."""
+    """Run the unguarded surrogate with float32 network and float64 integration."""
     dtype = jnp.float64
     _, k_grid_values = build_grid(nx, length)
     k_grid = jnp.asarray(k_grid_values, dtype=dtype)
@@ -788,7 +788,7 @@ def run_family(
     print(f"[{family}] truth wall={float(truth['wall_s']):.1f}s", flush=True)
 
     if pred is None:
-        print(f"[{family}] batched surrogate rollout (float64 model and integration)", flush=True)
+        print(f"[{family}] batched surrogate rollout (float32 network, float64 integration)", flush=True)
         pred = _rollout_ic_chunks(
             ics,
             rollout_batch_size,
@@ -849,7 +849,7 @@ def run_family(
             "truth_wall_s": truth["wall_s"],
             "surrogate_wall_s": pred["wall_s"],
             "truth_protocol": json.loads(protocol_json),
-            "precision": "float64 model, integration, and saved trajectories",
+            "precision": "float32 network, float64 integration and saved trajectories",
             "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         }
     )
