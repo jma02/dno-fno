@@ -80,6 +80,9 @@ def render_rollout_gif(
         truth_xi = pred_xi
         truth_gxi = pred_gxi
 
+    eta_error = np.linalg.norm(pred_eta - truth_eta, axis=-1) / (
+        np.linalg.norm(truth_eta, axis=-1) + 1e-12
+    )
     n_steps = truth_eta.shape[0]
     idx = np.linspace(0, n_steps - 1, min(n_frames, n_steps), dtype=int)
 
@@ -232,7 +235,10 @@ def render_rollout_gif(
         if truth_gxi_line is not None:
             truth_gxi_line.set_ydata(finite_curve(gxi_true))
         pred_gxi_line.set_ydata(finite_curve(gxi_pred))
-        time_text.set_text(f"t = {t[idx[frame_idx]]:.2f}")
+        time_label = f"t = {t[idx[frame_idx]]:.2f}"
+        if has_truth:
+            time_label += f"  |  eta relative L2 = {eta_error[idx[frame_idx]]:.3e}"
+        time_text.set_text(time_label)
         return tuple(
             artist
             for artist in (
