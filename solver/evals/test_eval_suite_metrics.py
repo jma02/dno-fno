@@ -161,6 +161,82 @@ class ComputeMetricsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, f"only {len(expected_rows)}"):
                 _load_paper_dataset_ics(dataset, "tanaka", len(expected_rows) + 1)
 
+    def test_stratified_ics_spread_across_parameter_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = Path(temporary)
+            group_ids = np.repeat([f"g{index:02d}" for index in range(10)], 3)
+            arrays = {
+                "eta": np.arange(30 * 8, dtype=np.float64).reshape(30, 8),
+                "xi": np.zeros((30, 8)),
+                "depth": np.ones(30),
+                "family_id": np.full(30, PhysicalFamilyId.TANAKA),
+                "dataset_split": np.full(30, "test"),
+                "simulation_id": np.arange(30),
+                "frame_index": np.zeros(30, dtype=np.int64),
+                "parameter_group_id": group_ids,
+                "x": np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False),
+            }
+            for name, values in arrays.items():
+                np.save(dataset / f"{name}.npy", values)
+
+            first, _, _, _ = _load_paper_dataset_ics(dataset, "tanaka", 4)
+            self.assertEqual([ic.simulation_id for ic in first], [0, 1, 2, 3])
+
+            spread, source, _, _ = _load_paper_dataset_ics(
+                dataset, "tanaka", 4, "stratified"
+            )
+            self.assertEqual([ic.simulation_id for ic in spread], [4, 10, 19, 25])
+            self.assertEqual(
+                source["selected_parameter_group_ids"],
+                ["g01", "g03", "g06", "g08"],
+            )
+
+            covered, source, _, _ = _load_paper_dataset_ics(
+                dataset, "tanaka", 12, "stratified"
+            )
+            self.assertEqual(
+                [ic.simulation_id for ic in covered[:10]],
+                [0, 3, 7, 10, 13, 16, 19, 22, 25, 28],
+            )
+            self.assertEqual([ic.simulation_id for ic in covered[10:]], [2, 5])
+            self.assertEqual(
+                source["selected_parameter_group_ids"],
+                [f"g{index:02d}" for index in range(10)] + ["g00", "g01"],
+            )
+
+            bf_groups = [
+                f"n_c_{mode:02d}__delta_n_{offset:02d}"
+                for mode in range(4, 21)
+                for offset in range(1, 2 if mode < 6 else 4)
+            ]
+            n_rows = len(bf_groups) * 3
+            arrays.update(
+                eta=np.zeros((n_rows, 8)),
+                xi=np.zeros((n_rows, 8)),
+                depth=np.ones(n_rows),
+                family_id=np.full(n_rows, PhysicalFamilyId.BENJAMIN_FEIR),
+                dataset_split=np.full(n_rows, "test"),
+                simulation_id=np.arange(n_rows),
+                frame_index=np.zeros(n_rows, dtype=np.int64),
+                parameter_group_id=np.repeat(bf_groups, 3),
+            )
+            for name, values in arrays.items():
+                np.save(dataset / f"{name}.npy", values)
+            bf_ics, bf_source, _, _ = _load_paper_dataset_ics(
+                dataset, "benjamin_feir", 32, "stratified"
+            )
+            self.assertEqual(len(bf_ics), 32)
+            self.assertTrue(all(ic.simulation_id % 3 == 1 for ic in bf_ics))
+            selected_groups = cast(list[str], bf_source["selected_parameter_group_ids"])
+            for mode in range(4, 21):
+                prefix = f"n_c_{mode:02d}__delta_n_"
+                selected_offsets = [
+                    group.removeprefix(prefix)
+                    for group in selected_groups
+                    if group.startswith(prefix)
+                ]
+                self.assertEqual(selected_offsets, ["01"] if mode < 6 else ["01", "03"])
+
     def test_truth_cache_uses_simulation_ids_consistently(self) -> None:
         values = np.ones((2, 1, 3), dtype=np.float64)
         truth = {

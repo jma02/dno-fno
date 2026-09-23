@@ -21,7 +21,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -47,6 +47,7 @@ DEFAULT_DATASET = REPO_ROOT / "outputs/paper_dataset/arrays"
 RolloutPayload = dict[str, np.ndarray | float]
 TRUTH_DRIFT_TOL = 1e-3
 TERMINAL_FAILURE_THRESHOLDS = (0.25, 0.5, 0.75, 1.0)
+ICSelection = Literal["first", "stratified"]
 
 
 @dataclass(frozen=True)
@@ -79,8 +80,9 @@ def _load_paper_dataset_ics(
     dataset_path: Path,
     family: str,
     n_ics: int,
+    selection: ICSelection = "first",
 ) -> tuple[list[IC], dict[str, object], int, float]:
-    """Load the first accepted test initial conditions for one family."""
+    """Load accepted test initial conditions for one family."""
     dataset_path = dataset_path.resolve()
     arrays = {
         name: np.load(dataset_path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
@@ -114,6 +116,38 @@ def _load_paper_dataset_ics(
             f"requested {n_ics}"
         )
     selected = candidates[:n_ics]
+    selected_group_ids: list[str] | None = None
+    if selection == "stratified":
+        candidate_group_ids = np.load(
+            dataset_path / "parameter_group_id.npy", mmap_mode="r", allow_pickle=False
+        )[candidates]
+        groups = np.unique(candidate_group_ids)
+        rows_by_group = [candidates[candidate_group_ids == group] for group in groups]
+        group_slots = np.arange(n_ics) % len(groups)
+        if family == "benjamin_feir" and n_ics == 32:
+            carriers = np.asarray([str(group).split("__", 1)[0] for group in groups])
+            carrier_endpoints = []
+            for carrier in np.unique(carriers):
+                indices = np.flatnonzero(carriers == carrier)
+                carrier_endpoints.extend((indices[0], indices[-1]))
+            group_slots = np.unique(carrier_endpoints)
+        elif n_ics < len(groups):
+            group_slots = np.floor((group_slots + 0.5) * len(groups) / n_ics).astype(
+                np.int64
+            )
+        group_counts = np.bincount(group_slots, minlength=len(groups))
+        offsets = np.zeros(len(groups), dtype=np.int64)
+        selected = np.empty(n_ics, dtype=np.int64)
+        for index, group_index in enumerate(group_slots):
+            group_rows = rows_by_group[group_index]
+            midpoint = int(
+                (offsets[group_index] + 0.5)
+                * len(group_rows)
+                / group_counts[group_index]
+            )
+            selected[index] = group_rows[midpoint]
+            offsets[group_index] += 1
+        selected_group_ids = [str(groups[index]) for index in group_slots]
     simulation_ids = arrays["simulation_id"][selected]
     if np.unique(simulation_ids).size != n_ics:
         raise ValueError(
@@ -152,7 +186,10 @@ def _load_paper_dataset_ics(
         "family_id": family_id,
         "dataset_split": DatasetSplit.TEST.value,
         "dataset": str(dataset_path),
+        "ic_selection": selection,
     }
+    if selected_group_ids is not None:
+        source["selected_parameter_group_ids"] = selected_group_ids
     return ics, source, nx, length
 
 
@@ -697,9 +734,12 @@ def run_family(
     checkpoint_source: dict[str, object],
     rollout_batch_size: int | None,
     *,
+    ic_selection: ICSelection = "first",
     pred: RolloutPayload | None = None,
 ) -> dict[str, Any]:
-    ics, source, nx, length = _load_paper_dataset_ics(dataset_path, family, n_ics)
+    ics, source, nx, length = _load_paper_dataset_ics(
+        dataset_path, family, n_ics, ic_selection
+    )
     times_np = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
     protocol_json = _truth_protocol(
         family,
@@ -840,6 +880,12 @@ def main() -> None:
         default=list(FAMILY_CONFIGS),
     )
     parser.add_argument("--n_ics", type=int, default=16)
+    parser.add_argument(
+        "--ic_selection",
+        choices=("first", "stratified"),
+        default="first",
+        help="Select first test ICs or spread them across parameter groups.",
+    )
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--truth_cache", default=None)
     parser.add_argument("--rollout_batch_size", type=int, default=None)
@@ -879,6 +925,7 @@ def main() -> None:
             truth_cache_dir,
             checkpoint_source,
             args.rollout_batch_size,
+            ic_selection=args.ic_selection,
         )
         for family in args.families
     }
