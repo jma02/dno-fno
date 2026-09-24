@@ -85,7 +85,6 @@ if __name__ == "__main__":
         ax.set_title(f"T = {horizon:g}", loc="right", fontsize=9, color="#777f86", pad=12)
 
     fig.suptitle("Single-rollout runtime vs error" if warm else "Batch runtime vs error", y=0.96, fontsize=18, ha="left", x=0.10)
-    fig.text(0.97, 0.937, "Lower and left is better", ha="right", color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural network — {name} model")
