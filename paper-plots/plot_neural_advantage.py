@@ -88,7 +88,7 @@ if __name__ == "__main__":
     fig.text(0.97, 0.937, "Lower and left is better", ha="right", color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
-        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
+        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural network — {name} model")
           for _, name, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
     ], loc="upper left", bbox_to_anchor=(0.09, 0.91), ncols=4, frameon=False, fontsize=10)
