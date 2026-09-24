@@ -40,7 +40,7 @@ if __name__ == "__main__":
         "xtick.color": "#59616a", "ytick.color": "#59616a",
     })
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 8))
-    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.17, top=0.81, hspace=0.37, wspace=0.25)
+    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14, top=0.81, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         with np.load(ROOT / "outputs/cs_order_sweep_20260923" / f"{family}.npz") as data:
             selected = np.argsort(data["orders"])
@@ -93,15 +93,8 @@ if __name__ == "__main__":
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
     ], loc="upper left", bbox_to_anchor=(0.09, 0.91), ncols=4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
-    fig.supxlabel(xlabel, y=0.105, fontsize=11)
+    fig.supxlabel(xlabel, y=0.06, fontsize=11)
     fig.supylabel("Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
-    fig.text(0.10, 0.055, "Errors: 32 test cases per family. Times: one case." if warm else "Times and errors: 32 test cases per family.", fontsize=8.5, color="#59616a")
-    fig.text(0.97, 0.055, "M6 is the reference; dotted lines show its runtime.", ha="right", fontsize=8.5, color="#59616a")
-    note = ("All times exclude compilation, warm-up and transfers." if warm
-            else "Neural times include compilation and transfers. Classical times do not.")
-    if per_step:
-        note += " Timing uses a short rollout; errors use the full horizons above."
-    fig.text(0.10, 0.029, note, fontsize=8.5, color="#59616a")
     OUT.mkdir(exist_ok=True)
     for extension in ("png", "pdf"):
         name = "11-single-rollout-warm" if warm else "10-neural-vs-classical"
