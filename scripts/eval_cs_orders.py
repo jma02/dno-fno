@@ -9,6 +9,8 @@ Each family produces one compact NPZ with per-case errors and synchronized
 full-rollout timings. Compilation, short warm-up, and host transfers are excluded.
 Order M includes G_0 through G_M. All arithmetic is FP64. The default is one
 timed run per order; use --repeats to measure timing variability.
+Use --timing-orders to remeasure selected orders without recomputing errors;
+these measurements are saved separately as FAMILY-timings.npz.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/cs_order_sweep_20260923")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--frames", type=int, default=251, help="Use 5 for a short numerical smoke test.")
+    parser.add_argument("--timing-orders", type=int, nargs="+", choices=range(1, 7))
     args = parser.parse_args()
     if args.repeats < 1 or not 2 <= args.frames <= 251:
         parser.error("repeats must be positive and frames must be between 2 and 251")
@@ -61,14 +64,14 @@ if __name__ == "__main__":
                 xi=jnp.asarray(archive["truth_xi"][0]),
             )
         nx = initial.eta.shape[-1]
-        data: dict[str, list[np.ndarray]] = {
-            key: [] for key in (
-                "orders", "timings_s", "finite", "minimum_depth", "successful",
+        data: dict[str, list[np.ndarray]] = {"orders": [], "timings_s": []}
+        if not args.timing_orders:
+            data.update({key: [] for key in (
+                "finite", "minimum_depth", "successful",
                 *(f"{field}_{metric}" for field in fields for metric in ("rel_l2", "trajectory_error")),
-            )
-        }
+            )})
         metadata = {
-            "family": family, "reference_order": 6, "nx": nx,
+            "family": family, "reference_order": None if args.timing_orders else 6, "nx": nx,
             "length": 2 * np.pi, "gravity": 1.0, "padding": 8,
             "cutoff_mode": 128, "internal_dt": cfg.dt / cfg.substeps,
             "substeps": cfg.substeps, "gl2_iterations": 4, "relaxation": 1.0,
@@ -79,7 +82,7 @@ if __name__ == "__main__":
             "repeats": args.repeats,
         }
         reference: dict[str, np.ndarray] = {}
-        for order in (6, 1, 2, 3, 4, 5):
+        for order in args.timing_orders or (6, 1, 2, 3, 4, 5):
             params = ti.make_solver_params(
                 nx, 2 * np.pi, jnp.asarray(depths)[:, None],
                 dno_order=order, pad_factor=8, filter_fraction=cfg.filter_fraction,
@@ -102,38 +105,40 @@ if __name__ == "__main__":
                 result = jax.block_until_ready(compiled(initial, times))
                 durations.append(time.perf_counter() - started)
                 print(f"{family} M={order}: repeat {repeat + 1}, {durations[-1]:.3f}s", flush=True)
-            values = {field: np.asarray(result[field]) for field in fields}
-            values["xi"] = values["xi"] - values["xi"].mean(axis=-1, keepdims=True)
-            if order == 6:
-                reference = values
-            finite = np.logical_and.reduce([np.isfinite(values[field]).all(axis=(0, 2)) for field in fields])
-            minimum_depth = (values["eta"] + depths[None, :, None]).min(axis=(0, 2))
-            successful = finite & (minimum_depth > 0)
-            for field in fields:
-                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                    difference = values[field] - reference[field]
-                    errors = np.linalg.norm(difference, axis=-1) / np.maximum(
-                        np.linalg.norm(reference[field], axis=-1), 1e-30,
-                    )
-                    trajectory_error = np.sqrt(
-                        np.sum(difference**2, axis=(0, 2))
-                        / np.maximum(np.sum(reference[field]**2, axis=(0, 2)), 1e-30)
-                    )
-                data[f"{field}_rel_l2"].append(errors)
-                data[f"{field}_trajectory_error"].append(trajectory_error)
-                successful &= np.isfinite(errors).all(axis=0) & np.isfinite(trajectory_error)
             data["orders"].append(np.asarray(order))
             data["timings_s"].append(np.asarray(durations))
-            data["finite"].append(finite)
-            data["minimum_depth"].append(minimum_depth)
-            data["successful"].append(successful)
+            if not args.timing_orders:
+                values = {field: np.asarray(result[field]) for field in fields}
+                values["xi"] = values["xi"] - values["xi"].mean(axis=-1, keepdims=True)
+                if order == 6:
+                    reference = values
+                finite = np.logical_and.reduce([np.isfinite(values[field]).all(axis=(0, 2)) for field in fields])
+                minimum_depth = (values["eta"] + depths[None, :, None]).min(axis=(0, 2))
+                successful = finite & (minimum_depth > 0)
+                for field in fields:
+                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                        difference = values[field] - reference[field]
+                        errors = np.linalg.norm(difference, axis=-1) / np.maximum(
+                            np.linalg.norm(reference[field], axis=-1), 1e-30,
+                        )
+                        trajectory_error = np.sqrt(
+                            np.sum(difference**2, axis=(0, 2))
+                            / np.maximum(np.sum(reference[field]**2, axis=(0, 2)), 1e-30)
+                        )
+                    data[f"{field}_rel_l2"].append(errors)
+                    data[f"{field}_trajectory_error"].append(trajectory_error)
+                    successful &= np.isfinite(errors).all(axis=0) & np.isfinite(trajectory_error)
+                data["finite"].append(finite)
+                data["minimum_depth"].append(minimum_depth)
+                data["successful"].append(successful)
+                terminal = data["eta_rel_l2"][-1][-1, successful]
+                quantiles = np.quantile(terminal, [0.5, 0.95]) if terminal.size else np.full(2, np.nan)
+                print(f"{family} M={order}: successful={successful.sum()}/{len(depths)}, eta median/p95={quantiles}", flush=True)
+            suffix = "-timings" if args.timing_orders else ""
             np.savez_compressed(
-                args.output / f"{family}.npz", allow_pickle=False,
+                args.output / f"{family}{suffix}.npz", allow_pickle=False,
                 **{key: np.stack(value) for key, value in data.items()},
                 times=np.asarray(times), depths=depths, simulation_ids=simulation_ids,
                 metadata=np.asarray(json.dumps(metadata)),
             )
-            terminal = data["eta_rel_l2"][-1][-1, successful]
-            quantiles = np.quantile(terminal, [0.5, 0.95]) if terminal.size else np.full(2, np.nan)
-            print(f"{family} M={order}: successful={successful.sum()}/{len(depths)}, eta median/p95={quantiles}", flush=True)
         jax.clear_caches()
