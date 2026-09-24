@@ -31,7 +31,7 @@ VariableState = FrozenVariableDict | dict[str, Any]
 
 def _model(
     *,
-    analytic_baseline: bool = True,
+    baseline_order: int = 1,
     n_polys: int = 3,
     use_first_deriv: bool = True,
     use_second_deriv: bool = True,
@@ -48,7 +48,7 @@ def _model(
         use_half_deriv=use_half_deriv,
         use_hilbert=use_hilbert,
         mult_hidden=16,
-        analytic_baseline=analytic_baseline,
+        baseline_order=baseline_order,
         domain_length=2.0 * pi,
     )
 
@@ -82,9 +82,11 @@ def _learned_residual(
 ) -> jnp.ndarray:
     inputs = jnp.stack((eta, xi), axis=-1)
     output = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
-    if not model.analytic_baseline:
+    if model.baseline_order == -1:
         return output
-    baseline = model._linear_baseline(xi, depth) + model._g1_baseline(eta, xi, depth)
+    baseline = model._linear_baseline(xi, depth)
+    if model.baseline_order == 1:
+        baseline = baseline + model._g1_baseline(eta, xi, depth)
     return output - baseline
 
 
@@ -132,8 +134,8 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for analytic_baseline in (True, False):
-        model = _model(analytic_baseline=analytic_baseline)
+    for baseline_order in (-1, 0, 1):
+        model = _model(baseline_order=baseline_order)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -149,7 +151,7 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
 def test_baseline_free_flat_surface_is_trainable() -> None:
     """The full neural operator can learn nonzero value and first variation at eta=0."""
     eta, xi, depth = _state()
-    model = _model(analytic_baseline=False)
+    model = _model(baseline_order=-1)
     inputs = jnp.stack((jnp.zeros_like(eta), xi), axis=-1)
     variables = model.init(jax.random.PRNGKey(4), inputs, depth)
     assert jnp.all(model.apply(variables, inputs, depth) == 0)
@@ -171,12 +173,35 @@ def test_baseline_free_flat_surface_is_trainable() -> None:
     assert float(jnp.linalg.norm(variation)) > 1e-14
 
 
+def test_g0_only_preserves_flat_surface_and_allows_first_order_correction() -> None:
+    """G0 remains exact at eta=0 while the learned first variation is nonzero."""
+    eta, xi, depth = _state()
+    model = _model(baseline_order=0)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = model.init(jax.random.PRNGKey(5), inputs, depth)
+    assert jnp.array_equal(
+        cast(jax.Array, model.apply(variables, inputs, depth))[..., 0], model._linear_baseline(xi, depth)
+    )
+    active = _activate_residual(variables)
+
+    def residual(surface: jnp.ndarray) -> jnp.ndarray:
+        return _learned_residual(model, active, surface, xi, depth)
+
+    value, variation = jax.jvp(residual, (jnp.zeros_like(eta),), (eta,))
+    assert jnp.max(jnp.abs(value)) < 1e-14
+    assert float(jnp.linalg.norm(variation)) > 1e-14
+    for epsilon in (1e-3, 5e-4):
+        relative = jnp.linalg.norm(residual(epsilon * eta) / epsilon - variation) / jnp.linalg.norm(variation)
+        assert float(relative) < 1e-3
+
+
 def test_eta_feature_configuration_controls_trunk_shape() -> None:
     """Polynomial and derivative switches remain a live exploratory surface."""
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
     configurations = (
-        (_model(analytic_baseline=False), 8),
+        (_model(baseline_order=-1), 8),
+        (_model(baseline_order=0), 7),
         (_model(n_polys=1), 5),
         (_model(n_polys=2, use_second_deriv=False), 5),
         (
@@ -204,6 +229,7 @@ def main() -> int:
         test_order_two_is_quadratic_near_zero,
         test_learned_operator_is_self_adjoint_and_linear,
         test_baseline_free_flat_surface_is_trainable,
+        test_g0_only_preserves_flat_surface_and_allows_first_order_correction,
         test_eta_feature_configuration_controls_trunk_shape,
     )
     for test in tests:

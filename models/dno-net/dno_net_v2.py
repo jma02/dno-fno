@@ -1,10 +1,10 @@
-"""Craig-Sulem neural DNO: analytic G0 + G1 plus a learned correction.
+"""Craig-Sulem neural DNO with a selectable analytic baseline.
 
 Here eta is surface elevation and xi is surface velocity potential.
 Each correction branch applies M[spatial_weights(eta) * M[xi]], where M is
 a depth-dependent real Fourier filter. The correction is self-adjoint,
-linear in xi. With analytic baselines, it starts at order eta^2; without
-them, a constant surface feature allows the network to learn the full DNO.
+linear in xi. It starts at order eta^2 with G0+G1, at order eta with G0
+alone, or uses a constant surface feature to learn the full DNO without a baseline.
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ class CraigSulemBlock(nn.Module):
 
 
 class CraigSulemDNO(nn.Module):
-    """Learn a DNO, optionally retaining the analytic G0 + G1 baseline."""
+    """Learn the remainder above the selected analytic Craig-Sulem order."""
     width: int                        # Each shared eta layer has width // 2 channels.
     n_blocks: int = 4                 # Groups of parallel branches, summed together.
     latent: int = 64                  # Branches per group.
@@ -89,7 +89,7 @@ class CraigSulemDNO(nn.Module):
     use_half_deriv: bool = True       # Fourier multiplier sqrt(abs(k)).
     use_hilbert: bool = True          # Hilbert transform.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
-    analytic_baseline: bool = True
+    baseline_order: int = 1           # -1: none, 0: G0, 1: G0 + G1.
 
     domain_length: float = 2 * jnp.pi
     # Multiply normalized inputs/outputs by these scales to get physical units.
@@ -154,15 +154,14 @@ class CraigSulemDNO(nn.Module):
 
         # Compute the analytic baseline in physical units, then normalize its output.
         baseline = jnp.zeros_like(xi_norm)
-        if self.analytic_baseline:
-            baseline = (
-                self._linear_baseline(xi_norm, depth)
-                + self._g1_baseline(eta_norm, xi_norm, depth)
-            )
+        if self.baseline_order >= 0:
+            baseline = self._linear_baseline(xi_norm, depth)
+        if self.baseline_order == 1:
+            baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
 
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
-        if not self.analytic_baseline:
+        if self.baseline_order == -1:
             features.insert(0, jnp.ones_like(eta_norm))
         k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
             grid_size // 2 + 1, dtype=eta_norm.dtype,
@@ -187,8 +186,10 @@ class CraigSulemDNO(nn.Module):
             eta_features = nn.gelu(
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
             )
-        # z * tanh(z) enforces O(eta^2) only when the constant input is absent.
-        eta_features = eta_features * jnp.tanh(eta_features)
+        # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
+        # For G0+G1, the lift enforces O(eta^2); a constant input removes that constraint.
+        if self.baseline_order != 0:
+            eta_features = eta_features * jnp.tanh(eta_features)
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)

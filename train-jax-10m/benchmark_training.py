@@ -68,7 +68,7 @@ from checkpoint_util import (  # noqa: E402
 def main() -> None:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
-    parser.add_argument("--model", choices=("fno", "cs_dno", "cs_dno_no_baseline"), default="fno")
+    parser.add_argument("--model", choices=("fno", "cs_dno", "cs_dno_g0", "cs_dno_no_baseline"), default="fno")
     parser.add_argument(
         "--cs_n_polys",
         type=int,
@@ -294,7 +294,7 @@ def main() -> None:
     target_absmax = float(cast(float, stats["target_absmax"]))
     target_scale = target_absmax if target_absmax > 0 else 1.0
     # Construct the selected model and initialize its parameters.
-    if args.model in ("cs_dno", "cs_dno_no_baseline"):
+    if args.model in ("cs_dno", "cs_dno_g0", "cs_dno_no_baseline"):
         model = CraigSulemDNO(
             width=args.width,
             n_blocks=args.n_blocks,
@@ -305,7 +305,7 @@ def main() -> None:
             use_half_deriv=args.cs_use_half_deriv,
             use_hilbert=args.cs_use_hilbert,
             mult_hidden=args.cs_mult_hidden,
-            analytic_baseline=args.model == "cs_dno",
+            baseline_order={"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[args.model],
             domain_length=domain_length,
             xi_scale=xi_scale,
             eta_scale=eta_scale,
