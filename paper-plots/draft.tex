@@ -1,7 +1,5 @@
 % Drop this file and the figures/ folder into the root of your LaTeX project.
 % Select draft.tex as the main document. No Python or dataset files are needed.
-% The supplied method sections remain a working draft; only the numerical
-% presentation has been adapted to the epoch-40 C27/hard-P128 figures.
 \documentclass{article}
 \IfFileExists{PRIMEarxiv.sty}{\usepackage{PRIMEarxiv}}{\usepackage[margin=1in]{geometry}}
 \usepackage[utf8]{inputenc}
@@ -53,14 +51,6 @@
 \textcolor{blue}{Abstract to be completed.}
 \end{abstract}
 \keywords{Water waves; Dirichlet--Neumann operator; neural operators}
-
-\noindent\textcolor{blue}{\textbf{Working visualization draft.}
-The figures use the September C27 best-validation checkpoint at epoch 40
-and its equal-family hard-P128 dataset. Trajectories comprise 32
-simulation-held-out test cases per family, without adaptive damping; this
-is not an exhaustive test-set evaluation. A matched vanilla-FNO comparison
-is not yet included. Timing measurements are CPU-only. The method sections below retain
-the supplied manuscript's unfinished derivations and author notes.}
 
 \section{Introduction}
 \label{sec:intro}
@@ -143,8 +133,7 @@ approximate Hamiltonian conservation, structural consistency, and stable
 long-time trajectories. The intended principal comparison is with a vanilla
 FNO trained only with the data-inconsistency loss, for which small one-step
 prediction errors need not imply structure-preserving or stable dynamics.
-\textcolor{blue}{This matched baseline comparison remains to be completed;
-the present figures show C27 and Craig--Sulem results only.}
+\textcolor{blue}{The comparison with a vanilla FNO remains to be completed.}
 Computational cost is examined as a practical consequence of the
 $M$-independent representation, rather than as the principal contribution.
 
@@ -505,43 +494,29 @@ $G_\theta$.
 \textcolor{blue}{Jonathan}
 
 \section{Numerical Experiments}
-In this section, we illustrate the proposed numerical study using the
-epoch-40 C27 checkpoint trained on the equal-family hard-P128 dataset. The
-figures evaluate DNO approximation, structural properties, trajectory
-accuracy, spectral behavior, Hamiltonian drift, and computational cost.
-For this section, $G_\theta(\eta;h)\xi$ denotes the complete deployed
-surrogate, including its analytic Craig--Sulem terms.
-The intended comparison with a vanilla FNO trained only using the
-data-inconsistency loss remains pending; no unmatched model is substituted
-for that baseline. The results below are preliminary illustrations of the
-available C27 evaluation, not the final comprehensive testing protocol.
+We compare the learned DNO with the Craig--Sulem (CS) reference solver.
+Here $G_\theta(\eta;h)\xi$ includes both the analytic terms and the
+learned correction.
 
 \subsection{Numerical Setup and Data Generation}
 \label{sec:DataGen}
 \subsubsection{Wave Regimes}
-The intended numerical study spans traveling, interacting, broadband,
-and modulational dynamics. Its four principal solution classes are:
+We use four wave families:
 \begin{enumerate}
     \item Stokes traveling waves;
     \item Tanaka solitary waves, including isolated and multiple-wave cases;
     \item JONSWAP/TMA irregular waves; and
     \item Benjamin--Feir configurations with a carrier and perturbing sidebands.
 \end{enumerate}
-The dataset used by this checkpoint contains 3,686,400 snapshots from each
-of these four families, for a total of 14,745,600 snapshots. Figure
-\ref{fig:wave-regimes} illustrates one training snapshot per family.
-\textcolor{blue}{The final dataset table should give the parameter ranges,
-numbers of independent initial conditions, retained snapshots, and split
-counts for the finalized data-generation protocol.}
+The dataset contains 3,686,400 snapshots per family, or 14,745,600 in total.
+Figure~\ref{fig:wave-regimes} shows one training snapshot from each family.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{01-wave-regimes.pdf}
-    \caption{Training snapshots from the equal-family hard-P128 dataset.
-    One sample is selected at the median sampled C27 DNO error within each
-    family. The dominant nonzero surface Fourier mode defines $k_p$, and
-    $a=(\max\eta-\min\eta)/2$. Each panel reports $k_ph$, $a/h$, and the
-    saved time.}
+    \caption{Training examples from the four wave families, selected near
+    each family's median sampled DNO error. Here $k_p$ is the dominant
+    nonzero surface wavenumber and $a=(\max\eta-\min\eta)/2$.}
     \label{fig:wave-regimes}
 \end{figure}
 
@@ -551,38 +526,26 @@ $L=2\pi$, $N_x=1024$ grid points, and gravity $g=1$. The reference DNO is
 computed with Craig--Sulem order $M_{\mathrm{ref}}=6$ and padding factor
 eight. Reference and learned trajectories use the same integrating-factor
 Gauss--Legendre scheme, with four fixed-point iterations, time step
-$\Delta t=0.01$, and a hard spectral cutoff at mode 128. No adaptive damping
-or soliton-selective spectral guard is applied.
+$\Delta t=0.01$, and a spectral cutoff at mode 128. No adaptive damping
+is applied.
 
-For one-step DNO evaluation we use the saved simulation-disjoint training,
-validation, and test split. Complete simulations appear in only one subset.
-The subsets contain 11,796,720, 1,474,440, and 1,474,440 snapshots,
-respectively. We independently sample 512 training rows and 512 test rows
-within each family, for 4096 evaluated snapshots; the reported statistics
-are therefore sampled, rather than exhaustive, dataset errors.
+Entire simulations are assigned to training, validation, or test sets,
+containing 11,796,720, 1,474,440, and 1,474,440 snapshots, respectively.
+The one-step accuracy test samples 512 snapshots per family from each of
+the training and test sets.
 
-The trajectory figures use the completed current-test evaluation panel,
-with 32 parameter-stratified initial conditions per family, all drawn from
-the saved test split. All 128 reference trajectories are valid. The horizons
-are $T=20$ for Stokes and JONSWAP/TMA and $T=200$ for Tanaka and
-Benjamin--Feir. Each trajectory saves 251 states, at intervals 0.08 and
-0.8, respectively, corresponding to 8 and 80 internal steps per output.
-\textcolor{blue}{Report the dataset rejection and subsampling rules, and
-extend the final evaluation beyond this selected test panel.}
+Trajectory tests use 32 initial conditions per family from the test set,
+chosen across the sampled parameter ranges. We integrate to $T=20$ for
+Stokes and JONSWAP/TMA and $T=200$ for Tanaka and Benjamin--Feir, saving
+251 equally spaced states per trajectory.
 
 \subsubsection{Implementation Details}
 \label{sec:Implement}
-The figures use the best-validation epoch-40 checkpoint from the September
-C27 hard-P128 run, with 1,342,400 parameters and its saved normalization.
-Learned network inference uses single precision; the analytic physics,
-integrator state, saved trajectory arrays, and independent Hamiltonian
-evaluation use double precision. Fresh DNO and timing measurements use
-the same mixed-precision deployment.
-The timing experiments run on an AMD EPYC 9124 CPU host with an affinity of
-eight logical CPUs; they are not GPU measurements. The complete training
-configuration, loss weights, checkpoint-selection rule, and number of
-independent training runs remain to be added to the final implementation
-paragraph. No new training was performed for this visualization draft.
+The network has 1,342,400 parameters and is selected by validation error
+after 40 training epochs. Network evaluation uses single precision; the
+analytic terms, time integration, and Hamiltonian evaluation use double
+precision. Timing measurements use an AMD EPYC 9124 CPU with eight logical
+CPUs, excluding compilation.
 
 \subsection{Accuracy and Structural Properties of the Learned DNO}
 \label{sec:Accuracy}
@@ -595,25 +558,16 @@ e_G^{(j)}=
      {\|G(\eta^{(j)};h^{(j)})\xi^{(j)}\|_{L^2}}.
 \label{eq:dno-relative-error}
 \end{equation}
-In the present snapshot experiment, the reference values are the stored hard-P128
-DNO targets. Figure~\ref{fig:dno-class-errors} reports classwise medians and
-interquartile ranges and resolves held-out rows by the depth parameter
-$k_ph$. We use the explicit bins $k_ph<\pi/10$,
-$\pi/10\leq k_ph<\pi$, and $k_ph\geq\pi$, with $k_p$ the strongest
-nonzero Fourier mode of the sampled surface.
-The sampled test medians are $7.51\times10^{-6}$ for Stokes,
-$7.48\times10^{-5}$ for Tanaka, $2.53\times10^{-4}$ for JONSWAP/TMA, and
-$8.11\times10^{-6}$ for Benjamin--Feir data. These are sampled statistics
-from simulation-disjoint splits, not full-dataset errors.
+Figure~\ref{fig:dno-class-errors} compares the learned DNO with the stored
+reference targets, grouped by wave family and relative depth $k_ph$.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{02-dno-class-errors.pdf}
-    \caption{Relative $L^2$ DNO errors on sampled hard-P128 rows. Left: training and
-    held-out medians with interquartile bars, using 512 rows per family per
-    split. Right: held-out rows grouped by the stated depth bins. Missing
-    groups contain no sampled rows. The saved simulation-disjoint split is
-    used, so snapshots from one simulation cannot cross subsets.}
+    \caption{Relative $L^2$ DNO errors for 512 sampled snapshots per family
+    per split. Left: training and test medians with interquartile ranges.
+    Right: test errors grouped by $k_ph<\pi/10$,
+    $\pi/10\leq k_ph<\pi$, and $k_ph\geq\pi$; empty groups are omitted.}
     \label{fig:dno-class-errors}
 \end{figure}
 
@@ -631,9 +585,8 @@ We perform 100 independent trials per family. The surface-depth pair and
 two Dirichlet inputs are drawn independently from training snapshots of
 that family; the inputs are centered, and $a,b$ are sampled independently
 from $\mathcal U(-1,1)$. Mean linearity residuals range from
-$3.37\times10^{-6}$ to $1.50\times10^{-4}$ across the four families under
-the deployed mixed-precision evaluation. These empirical residuals should
-not be described as double-precision roundoff.
+$3.37\times10^{-6}$ to $1.50\times10^{-4}$ across the four families with
+single-precision network evaluation.
 
 Because constant Dirichlet data belong to the DNO nullspace, its quadratic
 form is positive semidefinite on the full space. For
@@ -647,12 +600,11 @@ q_\theta(\eta,\widetilde\xi;h)=
 On 100 independently sampled matched training snapshots per family, no
 quadratic form falls below $-\tau$, with $\tau=10^{-10}$. This finite
 sample test is not a proof of positive semidefiniteness of the learned
-operator. \textcolor{blue}{Add the matched vanilla-FNO structural tests
-and the final side-by-side table.}
+operator.
 
 \subsection{Trajectory Accuracy and Long-Time Stability}
 \label{sec:TrajectoryAccuracy}
-For either learned model in the intended comparison, define
+Define the trajectory errors by
 \begin{equation}
 e_\eta(t)=\frac{\|\eta_\theta(t)-\eta_{\mathrm{CS}}(t)\|_{L^2}}
                    {\|\eta_{\mathrm{CS}}(t)\|_{L^2}},\qquad
@@ -672,29 +624,16 @@ with $E_{\xi,\mathrm{traj}}$ defined analogously. The terminal errors are
 $e_\eta(T)$ and $e_\xi(T)$.
 
 \subsubsection{Overall Trajectory Accuracy and Stability}
-Figure~\ref{fig:trajectory-errors} shows C27 errors over
-the 128 reference-valid test cases. Because the horizons differ between families,
-the horizontal coordinate is normalized time $t/T$, rather than a common
-physical time. The pooled median terminal errors are
-$e_\eta(T)=5.59\times10^{-4}$ and $e_\xi(T)=5.43\times10^{-4}$.
-All 128 paired learned trajectories have finite saved states and positive
-saved fluid depth. This saved-state check does not establish absence of
-failures at unsaved internal stages. No reference cases in this panel
-were excluded from the accuracy statistics.
-\textcolor{blue}{The final test should include a matched vanilla FNO,
-additional trajectory-disjoint initial conditions, declared internal failure criteria,
-terminal and trajectory error tails, and completion rates.}
+Figure~\ref{fig:trajectory-errors} summarizes all 128 test trajectories.
+All saved states are finite and have positive fluid depth.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{03-trajectory-errors.pdf}
-    \caption{Relative surface and potential errors for epoch-40
-    C27 rollouts. Black curves and shaded bands give the case-pooled median
-    and interquartile range; colored curves give family medians. There are
-    128 valid reference pairs, 32 per family, drawn from the saved test split.
-    The horizons are $T=20$ for Stokes/JONSWAP-TMA and $T=200$ for
-    Tanaka/Benjamin--Feir, hence the use of normalized time $t/T$.
-    Learned rollouts use no adaptive damping.}
+    \caption{Relative surface and potential errors for 128 test trajectories,
+    32 per family. Black curves and shading show the overall median and
+    interquartile range; colored curves show family medians. Time is
+    normalized by each family's integration horizon $T$.}
     \label{fig:trajectory-errors}
 \end{figure}
 
@@ -714,24 +653,16 @@ e_{\eta,\mathrm{align}}(t)=
 \label{eq:aligned-profile-error}
 \end{equation}
 Figure~\ref{fig:traveling-wave-accuracy} separates phase drift from profile
-distortion for a Stokes and a single-crest Tanaka case. Representatives are
-selected at the median terminal surface error within the corresponding
-test-panel profile class; isolated Tanaka cases are selected from the
-single-wave parameter groups. Alignment is computed by continuous Fourier
-interpolation. For Stokes, equivalent minimizers are resolved modulo one
-carrier wavelength and the displacement is unwrapped in time. Both ordinary
-and aligned errors are shown; alignment is not used to hide raw trajectory
-error.
+distortion for Stokes and single-wave Tanaka cases near their respective
+median terminal errors. Alignment uses Fourier interpolation; Stokes
+displacements are unwrapped modulo one carrier wavelength.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth,height=0.68\textheight,keepaspectratio]{04-traveling-wave-accuracy.pdf}
-    \caption{Translation error and late-time profiles for representative
-    held-out Stokes and isolated Tanaka cases. Top: displacement
-    $\Delta x/L$. Middle: raw CS and C27 profiles. Bottom: profiles after
-    translation alignment. The titles give the terminal unaligned and
-    aligned relative errors. Both cases use FP32 learned inference with
-    FP64 integration and no adaptive damping.}
+    \caption{Traveling Stokes and Tanaka waves. Top: displacement error
+    $\Delta x/L$. Middle: reference and learned profiles. Bottom: profiles
+    after translation alignment. Both unaligned and aligned errors are reported.}
     \label{fig:traveling-wave-accuracy}
 \end{figure}
 
@@ -744,22 +675,17 @@ e_{\mathrm{coll}}=
 {T_{\mathrm{coll},\mathrm{CS}}}.
 \label{eq:collision-time-error}
 \end{equation}
-The current illustration in Figure~\ref{fig:tanaka-collision} instead
-selects an interaction event from a local maximum of reference crest
-amplification. It compares the profiles before, near, and after this event.
-A single fixed spatial recentering is applied to both methods at all three
-times; there is no separate alignment of predicted profiles.
-\textcolor{blue}{Tracked-crest collision times and the associated statistic
-in \eqref{eq:collision-time-error} have not yet been computed.}
+Figure~\ref{fig:tanaka-collision} shows profiles around a local maximum of
+reference crest amplification. Both solutions use the same fixed spatial
+shift. The tracked-crest collision-time error in
+\eqref{eq:collision-time-error} is not measured here.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{05-tanaka-collision.pdf}
-    \caption{A representative two-wave Tanaka interaction from held-out
-    simulation 3698619, with $h=0.039392$. The panels use identical axes and show
-    reference and C27 profiles at $t=14.4$, $17.6$, and $20.8$; each reports
-    the relative surface error. The central event is selected by reference
-    crest amplification, not by a tracked-crest collision-time estimator.}
+    \caption{A two-wave Tanaka interaction at depth $h=0.039392$.
+    Reference and learned profiles are shown on identical axes at
+    $t=14.4$, $17.6$, and $20.8$, with relative surface errors.}
     \label{fig:tanaka-collision}
 \end{figure}
 
@@ -784,25 +710,20 @@ R_{\mathrm{sb}}(t)=
 \frac{\mathcal E_{k_0-q}(t)+\mathcal E_{k_0+q}(t)}{\mathcal E_{k_0}(t)}.
 \label{eq:sideband-ratio}
 \end{equation}
-Figure~\ref{fig:spectral-transfer} supplies a preliminary illustration using
-held-out Benjamin--Feir and JONSWAP/TMA examples. In the Benjamin--Feir case,
-the carrier and strongest symmetric seeded sideband pair are identified
-from the initial energy spectrum. In the JONSWAP/TMA case, band-energy
-fractions use the fixed initial peak mode $n_p$, with low modes
-$0<n<0.5n_p$, peak modes $0.5n_p\leq n\leq1.5n_p$, and high modes
-$n>1.5n_p$. The one-sided spectra include conjugate-mode multiplicities.
-These selected examples complement, rather than replace, the familywise
-error statistics.
+Figure~\ref{fig:spectral-transfer} shows two held-out examples. For
+Benjamin--Feir waves, we use the strongest symmetric sideband pair in the
+initial spectrum. For JONSWAP/TMA, the initial peak mode $n_p$ defines
+low ($0<n<0.5n_p$), peak ($0.5n_p\leq n\leq1.5n_p$), and high
+($n>1.5n_p$) bands. One-sided spectra include both members of each
+conjugate-mode pair.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth,height=0.68\textheight,keepaspectratio]{06-spectral-transfer.pdf}
-    \caption{Quadratic spectral-energy diagnostics for held-out Benjamin--Feir
-    and JONSWAP/TMA examples. The two heatmaps in each column share the same
-    color scale, normalized by their joint maximum $E_*$. Below are the
-    Benjamin--Feir sideband-to-carrier ratio and the JONSWAP/TMA band fractions.
-    For the band curves, solid lines denote CS and dashed lines denote C27.
-    These examples use no adaptive damping.}
+    \caption{Spectral energy for Benjamin--Feir and JONSWAP/TMA waves.
+    Paired heatmaps share a color scale normalized by their joint maximum
+    $E_*$. Below: sideband-to-carrier ratio and band-energy fractions.
+    Solid curves denote the reference; dashed curves denote the learned DNO.}
     \label{fig:spectral-transfer}
 \end{figure}
 
@@ -823,27 +744,17 @@ The signed and absolute relative drifts are
 {|H_{\mathrm{ref}}^\theta(0)|},\qquad e_H(t)=|\delta_H(t)|.
 \label{eq:hamiltonian-drift}
 \end{equation}
-We freshly evaluate CS-6 with padding factor eight on both reference and
-predicted states at 26 saved times per trajectory. This replaces the archived
-learned-DNO energy metric with the physical diagnostic specified above.
-Figure~\ref{fig:hamiltonian-drift} shows the signed pooled median and
-interquartile band, together with the representative cases used elsewhere
-in this draft. The median terminal absolute drift is approximately
-$8.14\times10^{-5}$ for C27 states, compared with $7.36\times10^{-11}$ for
-reference states. Thus these results do not place C27 drift at the reference
-solver floor. The numerical reference and spectral truncation should be
-distinguished from exact continuous Hamiltonian conservation; saved states
-and these Hamiltonian evaluations use double precision.
+We evaluate the sixth-order reference DNO on both solutions at 26 times
+per trajectory. Figure~\ref{fig:hamiltonian-drift} shows the resulting drift,
+which is larger for the learned trajectories than for the reference.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{07-hamiltonian-drift.pdf}
-    \caption{Relative Hamiltonian drift independently evaluated using CS-6
-    on both trajectories, at 26 times for each of 128 reference-valid cases.
-    The pooled panel shows signed medians and interquartile bands on a
-    symmetric-log scale, with linear threshold $10^{-8}$. The four
-    representative panels use linear signed axes. The C27 drift is visibly
-    larger than the reference numerical floor.}
+    \caption{Relative Hamiltonian drift evaluated with the reference DNO.
+    Medians and interquartile ranges over 128 test cases use a symmetric-log
+    scale with linear threshold $10^{-8}$; the four representative cases
+    use linear axes.}
     \label{fig:hamiltonian-drift}
 \end{figure}
 
@@ -862,70 +773,47 @@ C_{\mathrm{FNO}}(N_x)=\mathcal O\!\left(
 L_\theta[CN_x\log N_x+N_xC^2+KC^2]\right).
 \label{eq:fno-complexity}
 \end{equation}
-When $L_\theta,C,K$ are fixed, the FNO evaluation has cost
-$\mathcal O(N_x\log N_x)$ and has no dependence on $M$. This distinction
-does not imply that the learned operator is faster for every resolution,
-truncation order, or hardware configuration. The number of DNO calls in
-a trajectory also depends on the time integrator and its nonlinear iteration
-count. \textcolor{blue}{Specialize the architectural complexity expression
-to the final branch implementation before submission.}
+For fixed $L_\theta,C,K$, the FNO cost is $\mathcal O(N_x\log N_x)$,
+independent of $M$; this alone does not imply a wall-clock speedup.
+\textcolor{blue}{Specialize this expression to the network architecture.}
 
-Figure~\ref{fig:dno-complexity-scaling} measures batch-one DNO evaluation
-latency for $N_x\in\{128,256,512,1024,2048\}$ and CS orders
-$M\in\{2,4,6,8\}$. A current-test Stokes initial condition is Fourier-resampled
-to each grid. All measurements use the same CPU affinity, with FP32 learned
-inference and FP64 physics. Seven device-synchronized measurements follow
-JIT warm-up; compilation is excluded. C27 has no truncation-order input.
-These CPU measurements do not establish GPU performance. Fitted exponents
-summarize this finite resolution range rather than prove asymptotic scaling.
+Figure~\ref{fig:dno-complexity-scaling} times one DNO evaluation for a
+held-out Stokes wave, Fourier-resampled to each grid. Timings exclude
+compilation and use seven synchronized repeats.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.92\linewidth]{08-dno-complexity-scaling.pdf}
-    \caption{Warmed CPU latency for a single DNO evaluation, with batch size
-    one, FP32 learned inference, and FP64 physics. Curves show median times from seven repeats
-    for C27 and CS orders 2, 4, 6, and 8. The legend gives finite-range
-    log--log slopes; a scaled $N_x\log N_x$ curve is included for reference.
-    C27 is independent of $M$; wall-clock performance remains hardware dependent.}
+    \caption{CPU time per DNO evaluation for the learned operator and
+    Craig--Sulem orders 2, 4, 6, and 8. Curves show median times over seven
+    repeats; fitted slopes describe the measured resolution range.
+    A scaled $N_x\log N_x$ curve is shown for comparison.}
     \label{fig:dno-complexity-scaling}
 \end{figure}
 
 \subsubsection{Fixed-Horizon Trajectory Runtime}
-For a separate, short-horizon timing illustration we fix one current-test
-Stokes initial condition, resample it to $N_x=256$, and integrate to $T=1$
-with $\Delta t=0.01$ and a hard cutoff at mode 64. Each method uses the
-same GL2 integration path, with four fixed-point iterations, padding factor
-eight, and 51 saved states. CS DNO actions and C27 are passed through the
-same integrator interface. Three synchronized repetitions follow warm-up,
-and the median wall-clock time is reported.
-
-Figure~\ref{fig:runtime-tradeoff} compares runtimes against CS order and
-surface trajectory error against runtime, with CS-10 as the numerical
-reference. The C27 median is $3.61$ seconds, while CS orders 2, 4, 6, and 8
-take $0.204$, $0.404$, $0.639$, and $0.906$ seconds, respectively. The C27
-surface trajectory error is approximately $8.91\times10^{-7}$ in this
-short benchmark. These CPU measurements are separate from the long-time
-test panel and do not establish a wall-clock advantage for C27 on this CPU.
-They do not characterize GPU latency or throughput.
+For Figure~\ref{fig:runtime-tradeoff}, we integrate one held-out Stokes wave
+at $N_x=256$ to $T=1$, with $\Delta t=0.01$ and a mode-64 cutoff.
+Both methods use the same Gauss--Legendre integrator, four fixed-point
+iterations, padding factor eight, and 51 saved states. Timings are medians
+of three synchronized runs after compilation. The learned DNO is slower
+than the reference series in this CPU experiment.
 
 \begin{figure}[tbp]
     \centering
     \includegraphics[width=0.98\linewidth]{09-runtime-tradeoff.pdf}
-    \caption{Short-horizon CPU runtime and accuracy for one Stokes initial
-    condition, with $N_x=256$, $T=1$, and $\Delta t=0.01$. Left: median
-    trajectory time for CS orders 2 through 10 and the $M$-independent C27
-    time. Right: surface trajectory error against CS-10 versus runtime;
-    the zero CS-10 self-error is omitted from the logarithmic plot. All
-    methods use the same integration path and three warmed timing repeats.}
+    \caption{CPU runtime and accuracy for a Stokes trajectory at
+    $N_x=256$, $T=1$, and $\Delta t=0.01$. Left: runtime versus series order,
+    with the learned DNO shown for comparison. Right: surface trajectory
+    error relative to the order-10 reference versus runtime; its zero
+    self-error is omitted from the logarithmic plot.}
     \label{fig:runtime-tradeoff}
 \end{figure}
 
 \clearpage
 \section{Conclusion and Discussion}
 \paragraph{Limitations}
-\textcolor{blue}{Complete after the final evaluation. The current figures
-use sampled one-step errors, a 32-per-family simulation-held-out trajectory
-panel, no matched vanilla-FNO baseline, and CPU-only timing.}
+\textcolor{blue}{Complete after the remaining comparisons.}
 \paragraph{Future Work}
 
 \section*{Acknowledgments}
