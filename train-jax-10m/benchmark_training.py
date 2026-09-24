@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
+from unittest.mock import patch
 
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
@@ -63,6 +64,20 @@ from checkpoint_util import (  # noqa: E402
     save_checkpoint,
     training_counter_values,
 )
+
+
+@jax.custom_jvp
+def compact_gelu(x: jax.Array) -> jax.Array:
+    return jax.nn.gelu(x)
+
+
+@compact_gelu.defjvp
+def compact_gelu_jvp(primals: tuple[jax.Array], tangents: tuple[jax.Array]) -> tuple[jax.Array, jax.Array]:
+    (x,), (dx,) = primals, tangents
+    coefficient = jnp.asarray(np.sqrt(2 / np.pi), dtype=x.dtype)
+    tangent = jnp.tanh(coefficient * (x + 0.044715 * x**3))
+    slope = 0.5 * (1 + tangent) + 0.5 * x * (1 - tangent) * (1 + tangent) * coefficient * (1 + 3 * 0.044715 * x**2)
+    return compact_gelu(x), dx * slope
 
 
 def main() -> None:
@@ -124,7 +139,7 @@ def main() -> None:
     parser.add_argument("--run_name", default=None)
     parser.add_argument("--benchmark_output", type=Path, required=True, help="Benchmark training updates without saving weights or changing run metadata.")
     parser.add_argument("--benchmark_steps", type=int, default=64)
-    parser.add_argument("--benchmark_variant", choices=("original", "packed", "grouped"), default="original")
+    parser.add_argument("--benchmark_variant", choices=("original", "packed", "grouped", "remat", "remat_cse", "biasfold", "compact_gelu"), default="original")
     # Additional losses; a zero weight disables each one.
     parser.add_argument(
         "--translation_tangent_weight",
@@ -390,18 +405,26 @@ def main() -> None:
                     return jnp.zeros_like(xi_phys)
                 groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
                 weights = eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups], axis=-1)
-                if args.benchmark_variant == "grouped":
+                if args.benchmark_variant in ("grouped", "biasfold"):
                     k = (2 * jnp.pi / domain_length) * jnp.arange(nx // 2 + 1)
                     k, h = jnp.broadcast_arrays(k[None, :], jnp.exp(jnp.minimum(log_depth, jnp.log(5.0))))
                     features = jnp.stack((k, h, jnp.tanh(h * k), k * jnp.tanh(h * k)), axis=-1)
                     multipliers = [group["m_shared"] for group in groups]
-                    hidden = jnp.tanh(
-                        features @ jnp.concatenate([group["hidden"]["kernel"] for group in multipliers], axis=-1)
-                        + jnp.concatenate([group["hidden"]["bias"] for group in multipliers]))
-                    hidden = hidden.reshape(*hidden.shape[:-1], args.n_blocks, args.cs_mult_hidden)
-                    filters = jnp.einsum("bfgh,ghc->bfgc", hidden, jnp.stack([group["out"]["kernel"] for group in multipliers]))
-                    filters = filters + jnp.stack([group["out"]["bias"] for group in multipliers])
-                    filters = filters.reshape(*filters.shape[:2], -1)
+                    if args.benchmark_variant == "biasfold":
+                        features = jnp.concatenate((features, jnp.zeros_like(features[..., :3]), jnp.ones_like(features[..., :1])), axis=-1)
+                        filters = jnp.concatenate([
+                            jnp.tanh(features @ jnp.concatenate((group["hidden"]["kernel"],
+                                jnp.zeros_like(group["hidden"]["kernel"][:3]), group["hidden"]["bias"][None, :]), axis=0))
+                            @ group["out"]["kernel"] + group["out"]["bias"] for group in multipliers
+                        ], axis=-1)
+                    else:
+                        hidden = jnp.tanh(
+                            features @ jnp.concatenate([group["hidden"]["kernel"] for group in multipliers], axis=-1)
+                            + jnp.concatenate([group["hidden"]["bias"] for group in multipliers]))
+                        hidden = hidden.reshape(*hidden.shape[:-1], args.n_blocks, args.cs_mult_hidden)
+                        filters = jnp.einsum("bfgh,ghc->bfgc", hidden, jnp.stack([group["out"]["kernel"] for group in multipliers]))
+                        filters = filters + jnp.stack([group["out"]["bias"] for group in multipliers])
+                        filters = filters.reshape(*filters.shape[:2], -1)
                 else:
                     filters = jnp.concatenate([
                         cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
@@ -413,7 +436,11 @@ def main() -> None:
                 return jnp.fft.irfft(jnp.sum(filters * weighted_hat, axis=-1), n=nx, axis=-1, norm="forward")
             return next_fun(*call_args, **call_kwargs)
 
-        with nn.intercept_methods(intercept):
+        activation = (jax.checkpoint(nn.gelu, prevent_cse=args.benchmark_variant == "remat_cse")
+                      if args.benchmark_variant.startswith("remat") else nn.gelu)
+        if args.benchmark_variant == "compact_gelu":
+            activation = compact_gelu
+        with patch.object(nn, "gelu", activation), nn.intercept_methods(intercept):
             return cast(jax.Array, model.apply(variables, inputs, depth))
 
     # Full-batch losses shared by training and validation.
