@@ -98,7 +98,7 @@ precise percentage of peak efficiency. Together with the tiny grids and the
 kernel trace, it supports targeting FFT execution structure and dispatch
 overhead before further channel reduction.
 
-## Ranked next changes — proposed, not implemented or timed
+## Ranked changes from the initial profile
 
 1. **Pack the correction groups' transforms.** The eight independent groups
    currently execute 24 FFT calls after the shared input transform. Stack their
@@ -115,8 +115,70 @@ overhead before further channel reduction.
 
 These preserve the mathematical model in exact arithmetic, so they do not
 require retraining. Floating-point equivalence and full-rollout accuracy still
-need verification. No speedup for these changes has yet been measured. In
-particular, blindly switching `G1` to FP32 is not justified by this profile.
+need verification. These were hypotheses at the time of the initial profile;
+the following prototype now measures them. Blindly switching `G1` to FP32 is
+not justified by this profile.
+
+## Measured inference prototype
+
+[Timing figure](../outputs/dno_fusion_20260924/forward_fusion.png)
+([PDF](../outputs/dno_fusion_20260924/forward_fusion.pdf)); prototype:
+`scripts/benchmark_dno_fusion.py`. The production model remains unchanged.
+
+The first rearrangement is valid because these groups are **parallel and
+summed**, not sequential layers. With group index `g` and branch index `r`, set
+
+\[
+z_{gr}=m_{gr}\,\mathcal F_x
+\left[a_{gr}\,\mathcal F_x^{-1}(m_{gr}\widehat\xi)\right].
+\]
+
+The existing correction is
+`sum_g irfft(sum_r z_gr)`. It equals `irfft(sum_(g,r) z_gr)` in exact arithmetic.
+Stacking all 32 branch channels lets the earlier transforms run together along
+**the spatial axis only**. Every branch retains its own learned multiplier
+and spatial coefficient, and the original square-root normalization is kept.
+This does not average branches or batch different trajectories.
+
+The new comparison interleaved 600 synchronized, warmed batch-one calls per
+variant, alternating execution order. Compilation and depth-cache construction
+were excluded from latency. All variants use the same 37,632 trained weights,
+the same input, and the original FP64 `G1` precision; no retraining occurred.
+These are within-run comparisons, not comparisons against the earlier 391 µs
+measurement from a separate run.
+
+| Change | Median latency | Interquartile range | Speedup vs original |
+| --- | ---: | ---: | ---: |
+| Original | 426.11 µs | 421.91–431.05 µs | 1.00× |
+| Combine final `G1` inverse transforms only | 411.17 µs | 407.78–416.56 µs | 1.04× |
+| Pack branch transforms only | 262.13 µs | 260.72–265.84 µs | 1.63× |
+| Cache depth multipliers only | 427.65 µs | 424.20–432.36 µs | 1.00× |
+| All three | 234.68 µs | 232.46–239.22 µs | 1.82× |
+
+Packing is the largest demonstrated benefit. Caching alone gave no measurable
+improvement; the combined result does not establish a separate caching speedup
+because compiler interactions make these changes non-additive.
+
+Across 48 saved reference states (four trajectories and three times in each of
+Stokes, Tanaka, JONSWAP/TMA and Benjamin–Feir), the combined variant's maximum
+relative difference from the unchanged predictor was **2.806e-8**, and maximum
+absolute difference was **7.451e-9**. This is an output-equivalence check, not a
+new DNO-accuracy evaluation against the reference solver. Validation used a
+48-state batch; **all latency measurements used batch one**. Long-time rollout
+equivalence has not been tested for this prototype.
+
+The compiler FFT counts are 38 original, 37 with `G1` combination alone,
+17 with packing alone and 16 with all three. A separate 100-call Nsight capture
+of the combined prototype measured **43 kernels and 10 device copies per call**,
+versus 113 kernels and 25 copies in the original model-only profile. This
+confirms a reduction in launches, not merely a FLOP estimate.
+
+Cached multipliers must be rebuilt when checkpoint weights, depth or grid
+change. They are inference constants, not values to reuse through training
+updates. The prototype intercepts the existing Flax computation at tracing
+time; unused original branch FFTs are eliminated by XLA. No production source
+or checkpoint was replaced. Raw timings, HLO and trace are in
+`outputs/dno_fusion_20260924/`.
 
 ## Reproduce
 
