@@ -158,3 +158,11 @@ UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_adva
 The second plot combines the new single-case timings with the existing 32-case
 error statistics; it does not present one case's error as a family median.
 Neither figure changes the manuscript or its ZIP. No data are uploaded.
+
+Completed single-rollout figure: [PNG](figures/11-single-rollout-warm.png) /
+[PDF](figures/11-single-rollout-warm.pdf). On the RTX 6000 Ada, the full neural
+model takes about 15.2 seconds for T=20 and 150.3 seconds for T=200, versus
+48.2 and 480.3 seconds for M6. It beats M3 in both runtime and median final
+surface error on Benjamin–Feir; the small model also beats M2 on Benjamin–Feir
+and Tanaka. M2 is faster and more accurate than the full neural model on
+Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/family.
