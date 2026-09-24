@@ -297,7 +297,26 @@ inverse transform passed that screen (1.63e-7 maximum relative difference),
 but its T200 Benjamin–Feir surface differed by0.1954% from the previous
 implementation, for only about1% additional rollout speed. Figure12 uses
 neither rejected candidate. Production model weights and both trainers are
+unchanged. Rejected trial implementations are retained in git history only.
+
+### Applying the same optimization to the classical solver
+
+The classical recurrence already cached the depth symbol and accumulated
+G0 through GM spectrally before the final inverse transform. Its remaining
+independent transforms are now batched too: one padded inverse transform
+for eta, dx(xi) and G0(xi), and one batch of product transforms per recurrence
+order. Padding8, precision, truncation orders and the time integrator stay
 unchanged.
+
+CPU comparisons against the pre-change implementation passed84 combinations
+of orders0–6, grids64/128, padding1/2/8 and batched/unbatched inputs (maximum
+relative difference7.06e-17). On GPU0, all48 saved states produced bitwise
+identical outputs for every order1–6. In300 interleaved warmed batch-one
+calls, M1 went369.20→204.09 us and M6 went2385.26→1245.55 us; compiler FFT
+counts fell8→5 and48→25. Raw data: `baseline_joint/classical_screen.json`.
+The independent G0+G1 identity test, both dealiasing tests, and23 integrator/
+evaluator tests pass. Full trajectories are measured separately in
+`baseline_joint/classical_rollouts.json`; Figure12 uses those runtimes.
 
 ## Reproduce
 

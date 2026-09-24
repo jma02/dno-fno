@@ -34,7 +34,7 @@ RUNS = {
     "full": ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918",
     "small": ROOT / "outputs/c27_branches16_tanaka_hard128_20260923",
 }
-FUSION_VARIANTS = {"fused": "all", "fused_g1": "batched", "fused_g0g1": "joint"}
+FUSION_VARIANTS = {"fused": "all", "fused_g1": "batched"}
 
 
 if __name__ == "__main__":
