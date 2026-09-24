@@ -30,12 +30,19 @@ FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
+    parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
+    parser.add_argument("--candidate-method", default="fused")
+    parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
     args = parser.parse_args()
-    if (args.candidate_timings or args.no_baseline_timings) and not args.timings:
-        parser.error("neural runtime overlays require --timings")
+    if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
+        parser.error("runtime overlays require --timings")
     warm = json.loads(args.timings.read_text()) if args.timings else None
+    if warm:
+        for path in args.classical_timings or ():
+            for family, result in json.loads(path.read_text())["families"].items():
+                warm["families"][family]["methods"].update(result["methods"])
     candidate = ({"families": {family: result for path in args.candidate_timings
                               for family, result in json.loads(path.read_text())["families"].items()}}
                  if args.candidate_timings else None)
@@ -99,9 +106,15 @@ if __name__ == "__main__":
         for comparison, color, label in overlays:
             if not comparison or family not in comparison["families"]:
                 continue
-            record = comparison["families"][family]["methods"]["fused"]
+            methods = comparison["families"][family]["methods"]
+            record = methods[args.candidate_method if comparison is candidate else "fused"]
             new_seconds = float(np.median(record["seconds"]))
             ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
+            if comparison is candidate and args.candidate_previous_method:
+                previous_seconds = float(np.median(methods[args.candidate_previous_method]["seconds"]))
+                savings = 100 * (1 - new_seconds / previous_seconds)
+                ax.text(0.03, 0.035, f"{new_seconds:.2f} s  (−{savings:.1f}%)",
+                        transform=ax.transAxes, color=color, fontsize=9)
             right = max(right, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
         ax.set_xlim(0, 1.13 * right)

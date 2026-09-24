@@ -27,7 +27,7 @@ from jax.stages import Wrapped  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemBlock, DepthAwareMultiplier  # noqa: E402
 
-VARIANTS = ("original", "g1", "packed", "cached", "all")
+VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "joint")
 
 
 def build_variant(
@@ -37,7 +37,7 @@ def build_variant(
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
     cached = None
-    if variant in ("cached", "all"):
+    if variant in ("cached", "all", "batched", "joint"):
         multiplier = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden)
         # This is a per-checkpoint/grid/depth inference constant, not a training cache.
         cached = jax.jit(lambda d: tuple(multiplier.apply(
@@ -49,7 +49,7 @@ def build_variant(
 
     @jax.jit
     def forward(eta: jax.Array, xi: jax.Array) -> jax.Array:
-        spatial, multipliers = [], []
+        spatial, multipliers, flat_spectrum = [], [], []
 
         def intercept(
             next_fun: Callable[..., Any], call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
@@ -58,7 +58,14 @@ def build_variant(
             module = context.module
             if not include_baselines and context.method_name in ("_linear_baseline", "_g1_baseline"):
                 return jnp.zeros_like(call_args[0])
-            if context.method_name == "_g1_baseline" and variant in ("g1", "all"):
+            if variant == "joint" and context.method_name == "_linear_baseline":
+                xi_norm, log_depth = call_args
+                h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
+                k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1)
+                symbol = k[None, :] * jnp.tanh(h * k[None, :])
+                flat_spectrum.append(symbol * jnp.fft.rfft(xi_norm * model.xi_scale, axis=-1, norm="forward"))
+                return jnp.zeros_like(call_args[0])
+            if context.method_name == "_g1_baseline" and variant in ("g1", "all", "batched", "joint"):
                 eta_norm, xi_norm, log_depth = call_args
                 eta_phys = (eta_norm * model.eta_scale).astype(jnp.float64)
                 xi_phys = (xi_norm * model.xi_scale).astype(jnp.float64)
@@ -66,6 +73,12 @@ def build_variant(
                 k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
                 symbol = k[None, :] * jnp.tanh(h * k[None, :])
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1)
+                if variant in ("batched", "joint"):
+                    operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
+                    fields = jnp.fft.irfft(operators * xi_hat[:, None, :], n=nx, axis=-1)
+                    products_hat = jnp.fft.rfft(eta_phys[:, None, :] * fields, axis=-1)
+                    spectrum = -jnp.sum(operators * products_hat, axis=1)
+                    return (jnp.fft.irfft(spectrum, n=nx, axis=-1) / model.target_scale).astype(xi_norm.dtype)
                 g0_xi = jnp.fft.irfft(symbol * xi_hat, n=nx, axis=-1)
                 dx_xi = jnp.fft.irfft(1j * k[None, :] * xi_hat, n=nx, axis=-1)
                 g0_hat = -symbol * jnp.fft.rfft(eta_phys * g0_xi, axis=-1)
@@ -78,7 +91,7 @@ def build_variant(
                 result = cached[block]
             else:
                 result = next_fun(*call_args, **call_kwargs)
-            if variant in ("packed", "all") and context.method_name == "__call__":
+            if variant in ("packed", "all", "batched", "joint") and context.method_name == "__call__":
                 if isinstance(module, nn.Dense) and module.name == "phi_proj":
                     spatial.append(result)
                 elif is_multiplier:
@@ -93,6 +106,8 @@ def build_variant(
                     filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
                     weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
                     spectrum = jnp.sum(filters * weighted_hat, axis=-1)
+                    if flat_spectrum:
+                        spectrum = spectrum + flat_spectrum[0] * float(model.n_blocks * model.latent) ** 0.5
                     # Original per-group FFT outputs are unused and removed by XLA.
                     return jnp.fft.irfft(spectrum, n=nx, axis=-1, norm="forward")
             return result
@@ -178,10 +193,10 @@ if __name__ == "__main__":
             "samples": len(families), "max_relative_l2": float(relative.max()),
             "max_absolute": float(np.abs(actual - expected).max()),
             "family_max_relative_l2": {family: float(relative[np.asarray(families) == family].max()) for family in set(families)},
+            "passed": bool(np.isfinite(actual).all() and relative.max() <= 1e-5),
         }
-        if not np.isfinite(actual).all() or relative.max() > 1e-5:
-            raise RuntimeError(f"{variant}: forward equivalence failed: {relative.max()}")
-        print(f"{variant}: 48-state max relative difference {relative.max():.3g}", flush=True)
+        print(f"{variant}: 48-state max relative difference {relative.max():.3g}; "
+              f"passed={records[variant]['validation']['passed']}", flush=True)
     report = {"run": str(args.run), "batch_size_timing": 1, "nx": eta.shape[-1],
               "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
               "device": jax.devices()[0].device_kind, "variants": records,
@@ -192,10 +207,11 @@ if __name__ == "__main__":
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = ("Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers", "All three")
+    labels = ("Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
+              "Previous combined", "Batch G₁ FFTs", "Combine G₀ with correction")
     medians = [records[name]["median_us"] for name in VARIANTS]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
-    ax.barh(labels, medians, color=("#909ba3", "#bb5548", "#277da8", "#b98b36", "#589365"))
+    ax.barh(labels, medians, color=("#909ba3", "#bb5548", "#277da8", "#b98b36", "#589365", "#278475", "#8760a4"))
     ax.invert_yaxis()
     ax.set(xlabel="Warmed forward latency (µs); lower is better", xlim=(0, max(medians) * 1.25),
            title=f"Same {report['parameters']:,} weights · one sample · no time integrator")
@@ -203,3 +219,5 @@ if __name__ == "__main__":
         ax.text(value + 3, index, f"{value:.1f} µs", va="center")
     for suffix in ("png", "pdf"):
         fig.savefig(args.output / f"forward_fusion.{suffix}", dpi=180)
+    if any(not records[variant]["validation"]["passed"] for variant in VARIANTS[1:]):
+        raise RuntimeError("Forward equivalence failed; see results.json for the rejected variants.")

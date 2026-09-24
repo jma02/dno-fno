@@ -2,7 +2,7 @@
 
 Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
-The fused method applies all three inference optimizations to --candidate-run.
+The fused methods apply inference FFT optimizations to --candidate-run.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ RUNS = {
     "full": ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918",
     "small": ROOT / "outputs/c27_branches16_tanaka_hard128_20260923",
 }
+FUSION_VARIANTS = {"fused": "all", "fused_g1": "batched", "fused_g0g1": "joint"}
 
 
 if __name__ == "__main__":
@@ -42,7 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", "fused"))
+    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
@@ -52,20 +53,21 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
-    if args.reference not in methods or (set(methods) & {"compact", "fused"} and not args.candidate_run):
-        parser.error("methods must include the reference; compact/fused require --candidate-run")
+    if args.reference not in methods or (set(methods) & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
+        parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
     loaded = {name: load_run(run) for name, run in RUNS.items()
-              if name in methods or (name == "compact" and "fused" in methods)}
+              if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": "synchronized GPU execution; compilation, warm-up and host transfers excluded",
-        "neural_runs": {name: str(RUNS["compact" if name == "fused" else name])
+        "neural_runs": {name: str(RUNS["compact" if name in FUSION_VARIANTS else name])
                         for name in methods if not name.startswith("M")},
+        "fusion_variants": {name: FUSION_VARIANTS[name] for name in methods if name in FUSION_VARIANTS},
         "reference": args.reference,
         "include_model_baselines": not args.without_baselines,
         "families": {},
@@ -81,6 +83,8 @@ if __name__ == "__main__":
             initial = ti.State(jnp.asarray(saved["truth_eta"][0, :1]), jnp.asarray(saved["truth_xi"][0, :1]))
             depth = jnp.asarray(saved["depths"][:1])
             simulation_id = int(saved["simulation_ids"][0])
+            saved_reference = ({key: saved[f"truth_{key}"][:frames, :1] for key in ("eta", "xi", "gxi")}
+                               if "M6" in methods else {})
         records: dict[str, dict[str, Any]] = {}
         report["families"][family] = {
             "simulation_id": simulation_id, "steps": (frames - 1) * cfg.substeps,
@@ -100,9 +104,9 @@ if __name__ == "__main__":
                                    implicit_iterations=4, zero_mean_xi=True)
             else:
                 predict = (cast(Predictor, build_variant(
-                    loaded["compact" if method == "fused" else method], jnp.log(depth), initial.eta.shape[-1],
-                    "all" if method == "fused" else "original", include_baselines=not args.without_baselines,
-                )) if method == "fused" or args.without_baselines
+                    loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
+                    FUSION_VARIANTS.get(method, "original"), include_baselines=not args.without_baselines,
+                )) if method in FUSION_VARIANTS or args.without_baselines
                     else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
                                    predict_gxi=predict)
@@ -141,6 +145,10 @@ if __name__ == "__main__":
                 records[method][f"terminal_{key}_error"] = float(error[-1] / scale[-1])
                 records[method][f"max_{key}_error"] = float((error / scale).max())
                 records[method][f"trajectory_{key}_error"] = float(np.linalg.norm(error) / np.linalg.norm(scale))
+                if method == "M6":
+                    cached = saved_reference[key].reshape(frames, -1)
+                    cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
+                    records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"{family}: saved {args.output}", flush=True)

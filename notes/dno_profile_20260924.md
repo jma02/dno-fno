@@ -268,6 +268,37 @@ using the single-rollout command above with all four families,
 runtime guides for every family; numerical outcomes are recorded here and in
 the raw results, with no explanatory callouts or footer on the figure.
 
+## Analytic FFT follow-up
+
+The retained change batches the two FP64 inverse transforms inside G1 and
+the two transforms of their products with eta. G0 stays in its original
+precision. This reduces the previous fused model from16 to14 compiler FFTs.
+Two600-call interleaved screens on idle GPU0 measured224.18→201.09 us and
+227.05→204.09 us. Full batch-one rollouts gave:
+
+| Family | Previous fused | Batched G1 | Reduction |
+| --- | ---: | ---: | ---: |
+| Stokes | 9.3404 s | 8.8495 s | 5.26% |
+| Tanaka | 93.1609 s | 88.3122 s | 5.20% |
+| Benjamin–Feir | 93.1297 s | 88.2849 s | 5.20% |
+| JONSWAP/TMA | 9.3929 s | 8.8986 s | 5.26% |
+
+Stokes uses three repeats; the other rows use one full trajectory per version.
+All saved eta, xi and Gxi arrays were bitwise identical to the previous fused
+implementation. These are the same checkpoint and full horizons as above.
+Raw reports are `baseline_joint/rollout_stokes.json` and
+`baseline_joint/rollout_remaining.json` under `outputs/dno_fusion_20260924/`.
+Use `--methods fused fused_g1 --reference fused` in the single-rollout timer.
+
+Two more aggressive candidates were rejected. Reusing the FP64 G0 evaluation
+inside G1 in place of the original FP32 G0 changed the48-state forward result
+by up to1.74e-4 relative. Merging FP32 G0 with the learned correction's final
+inverse transform passed that screen (1.63e-7 maximum relative difference),
+but its T200 Benjamin–Feir surface differed by0.1954% from the previous
+implementation, for only about1% additional rollout speed. Figure12 uses
+neither rejected candidate. Production model weights and both trainers are
+unchanged.
+
 ## Reproduce
 
 Use `scripts/profile_dno.py` with `CUDA_VISIBLE_DEVICES=0` and the project
