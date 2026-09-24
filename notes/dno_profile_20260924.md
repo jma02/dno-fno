@@ -202,8 +202,8 @@ cold-process timings. Both trajectories were finite and retained positive
 saved fluid depth. Against the unchanged model, maximum saved-frame relative
 differences were 3.560e-7 for eta, 1.565e-7 for xi, and 4.037e-6 for Gxi;
 terminal eta difference was 2.850e-7. These measure implementation equivalence,
-not accuracy against M6. No T200 timing or long-horizon equivalence claim is
-made, and production inference remains unchanged.
+not accuracy against M6. The additional T200 tests below were completed later;
+production inference remains unchanged.
 
 Raw results: `outputs/dno_fusion_20260924/rollout_timing.json`. Reproduce with:
 
@@ -214,6 +214,59 @@ CUDA_VISIBLE_DEVICES=0 UV_CACHE_DIR=/tmp/codex-uv-cache \
   --methods compact fused --reference compact \
   --output outputs/dno_fusion_20260924/rollout_timing.json
 ```
+
+### Remaining full-model families
+
+Using the same grid, time step, checkpoint and batch-one protocol, three full
+repeats per version gave:
+
+| Family | Horizon | Before FFT changes | After FFT changes | Maximum saved-frame relative eta difference |
+| --- | ---: | ---: | ---: | ---: |
+| JONSWAP/TMA | 20 | 12.3799 s | 9.3523 s | 9.050e-7 |
+| Tanaka | 200 | 123.0641 s | 93.2098 s | 3.300e-5 |
+| Benjamin–Feir | 200 | 123.7326 s | 93.8028 s | 3.934e-4 |
+
+All trajectories were finite with positive saved fluid depth. Differences
+grow over the long horizon: Benjamin–Feir's terminal surface difference is
+0.0393%, and its maximum relative Gxi difference is 1.184e-3. These are not
+bitwise-identical rollouts or a replacement for accuracy testing against M6.
+The model weights were unchanged; "after" means packed FFTs, the combined G1
+inverse transform, and cached fixed-depth multipliers, not further training.
+
+The initial Benjamin–Feir attempt overlapped a newly started GPU0 training
+job; its 149.09/169.79 s fused timings were rejected for performance comparison.
+At the user's relaunch request, only our benchmark was stopped. The table
+uses the fresh isolated-GPU0 rerun; the unrelated GPU1 job was left untouched.
+Raw results are `rollout_remaining_families.json` (JONSWAP/TMA and Tanaka) and
+`rollout_benjamin_feir_retiming.json`, both under
+`outputs/dno_fusion_20260924/`. Figure12 uses these plus the earlier Stokes file;
+the orange lines indicate runtime only, not an unevaluated 32-case error median.
+
+### Full rollouts without model G0+G1
+
+The same checkpoint and integrator were timed after omitting only the model's
+analytic baselines before compilation. Three synchronized full repeats per
+family on GPU0 gave these medians:
+
+| Family | With model G0+G1 | Without model G0+G1 | Baseline-free saved states finite |
+| --- | ---: | ---: | --- |
+| Stokes | 9.4842 s | 7.7456 s | Yes |
+| JONSWAP/TMA | 9.3523 s | 7.6911 s | No |
+| Tanaka | 93.2098 s | 77.0396 s | No |
+| Benjamin–Feir | 93.8028 s | 77.1251 s | No |
+
+All requested steps executed, including after non-finite states appeared.
+This isolates runtime cost, not a usable water-wave model: the integrator's
+own linear-flow/G0 operations remain unchanged. A captured-branch reconstruction
+verified the nonzero learned correction was retained (relative difference
+1.245e-6 for the packed variant); its compiled forward has nine FFTs and no
+baseline FFT scopes. Production inference and weights are unchanged.
+
+Raw results: `outputs/dno_fusion_20260924/rollout_no_baselines.json`. Reproduce
+using the single-rollout command above with all four families,
+`--methods fused --reference fused --without-baselines`. Figure12 includes both
+runtime guides for every family; numerical outcomes are recorded here and in
+the raw results, with no explanatory callouts or footer on the figure.
 
 ## Reproduce
 

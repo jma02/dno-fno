@@ -30,12 +30,20 @@ FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
-    parser.add_argument("--candidate-timings", type=Path, help="Overlay measured fused-model runtime only; requires --timings.")
+    parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
+    parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
     args = parser.parse_args()
-    if args.candidate_timings and not args.timings:
-        parser.error("--candidate-timings requires --timings")
+    if (args.candidate_timings or args.no_baseline_timings) and not args.timings:
+        parser.error("neural runtime overlays require --timings")
     warm = json.loads(args.timings.read_text()) if args.timings else None
-    candidate = json.loads(args.candidate_timings.read_text()) if args.candidate_timings else None
+    candidate = ({"families": {family: result for path in args.candidate_timings
+                              for family, result in json.loads(path.read_text())["families"].items()}}
+                 if args.candidate_timings else None)
+    baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings else None
+    overlays = (
+        (candidate, "#c45b22", "New candidate optimized network"),
+        (baseline_free, "#178178", "New candidate optimized network without G₀+G₁"),
+    )
     per_step = False
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
@@ -44,7 +52,8 @@ if __name__ == "__main__":
         "xtick.color": "#59616a", "ytick.color": "#59616a",
     })
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 8))
-    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14, top=0.81, hspace=0.37, wspace=0.25)
+    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
+                        top=0.78 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         with np.load(ROOT / "outputs/cs_order_sweep_20260923" / f"{family}.npz") as data:
             selected = np.argsort(data["orders"])
@@ -56,7 +65,7 @@ if __name__ == "__main__":
         if warm:
             timing = warm["families"][family]
             per_step = timing["horizon"] != horizon
-            if candidate and per_step:
+            if (candidate or baseline_free) and per_step:
                 parser.error("the candidate overlay requires full-trajectory timings")
             scale = 1000 / timing["steps"] if per_step else 1.0
             seconds = scale * np.asarray([np.median(timing["methods"][f"M{order}"]["seconds"]) for order in orders])
@@ -69,7 +78,7 @@ if __name__ == "__main__":
                 markerfacecolor="white", lw=1.1, zorder=2)
         for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
             offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
-            if candidate and family in candidate["families"] and order == 1:
+            if (candidate or baseline_free) and order == 1:
                 offset = (-22, 5)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8)
@@ -87,22 +96,14 @@ if __name__ == "__main__":
                        s=65, edgecolors="white", linewidths=0.8, zorder=3)
             right = max(right, neural_seconds)
             print(f"{title}, {name}: runtime axis={neural_seconds:.3f}, error={neural_error:.6g}%")
-        if candidate:
-            if family in candidate["families"]:
-                measured = candidate["families"][family]["methods"]["fused"]["seconds"]
-                new_seconds = float(np.median(measured))
-                ax.axvline(new_seconds, color="#c45b22", ls="--", lw=1.6, zorder=2)
-                ax.annotate(f"Optimized 37k: {new_seconds:.2f} s\nRuntime only; accuracy not plotted",
-                            (new_seconds, 0.94), xycoords=ax.get_xaxis_transform(),
-                            xytext=(0.42, 0.94), textcoords="axes fraction", va="top",
-                            fontsize=8.5, color="#a54a19", arrowprops={"arrowstyle": "-", "color": "#c45b22"},
-                            bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5})
-                right = max(right, new_seconds)
-                print(f"{title}, optimized 37k: {new_seconds:.3f}s; measured runtime only, no median-error point")
-            else:
-                ax.text(0.98, 0.97, "Optimized 37k: not yet timed", transform=ax.transAxes,
-                        ha="right", va="top", fontsize=8, color="#777f86",
-                        bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5})
+        for comparison, color, label in overlays:
+            if not comparison or family not in comparison["families"]:
+                continue
+            record = comparison["families"][family]["methods"]["fused"]
+            new_seconds = float(np.median(record["seconds"]))
+            ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
+            right = max(right, new_seconds)
+            print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
         ax.set_xlim(0, 1.13 * right)
         ax.margins(y=0.15)
         ax.set_title(title, loc="left", fontsize=12, pad=12)
@@ -111,19 +112,18 @@ if __name__ == "__main__":
     fig.suptitle("Single-rollout runtime vs error" if warm else "Batch runtime vs error", y=0.96, fontsize=18, ha="left", x=0.10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
-        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural network — {label} model")
-          for _, _, label, color, marker in reversed(RUNS)],
+        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
+          for _, name, _, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-    ], loc="upper left", bbox_to_anchor=(0.09, 0.91), ncols=4, frameon=False, fontsize=10)
+        *[Line2D([], [], color=color, ls="--", lw=1.3, label=label)
+          for comparison, color, label in overlays if comparison],
+    ], loc="upper left", bbox_to_anchor=(0.09, 0.91),
+        ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
     fig.supxlabel(xlabel, y=0.06, fontsize=11)
     fig.supylabel("Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
-    if candidate:
-        fig.text(0.10, 0.015, "Orange dashed line: measured optimized 37k runtime; median of 3 warmed single-rollout runs.\n"
-                 "Existing points retain their 32-case error statistics. No 37k median accuracy or other-regime speed is assumed.",
-                 fontsize=8, color="#59616a")
     OUT.mkdir(exist_ok=True)
     for extension in ("png", "pdf"):
-        name = "12-potential-new-nn" if candidate else "11-single-rollout-warm" if warm else "10-neural-vs-classical"
+        name = "12-potential-new-nn" if candidate or baseline_free else "11-single-rollout-warm" if warm else "10-neural-vs-classical"
         fig.savefig(OUT / f"{name}.{extension}", dpi=180, facecolor="white")
     plt.close(fig)

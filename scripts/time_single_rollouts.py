@@ -44,6 +44,7 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
     parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", "fused"))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
+    parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1:
@@ -53,6 +54,8 @@ if __name__ == "__main__":
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
     if args.reference not in methods or (set(methods) & {"compact", "fused"} and not args.candidate_run):
         parser.error("methods must include the reference; compact/fused require --candidate-run")
+    if args.without_baselines and any(method.startswith("M") for method in methods):
+        parser.error("--without-baselines applies only to neural methods")
     loaded = {name: load_run(run) for name, run in RUNS.items()
               if name in methods or (name == "compact" and "fused" in methods)}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
@@ -64,6 +67,7 @@ if __name__ == "__main__":
         "neural_runs": {name: str(RUNS["compact" if name == "fused" else name])
                         for name in methods if not name.startswith("M")},
         "reference": args.reference,
+        "include_model_baselines": not args.without_baselines,
         "families": {},
     }
     for family in args.families:
@@ -95,8 +99,11 @@ if __name__ == "__main__":
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
                                    implicit_iterations=4, zero_mean_xi=True)
             else:
-                predict = (cast(Predictor, build_variant(loaded["compact"], jnp.log(depth), initial.eta.shape[-1], "all"))
-                           if method == "fused" else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
+                predict = (cast(Predictor, build_variant(
+                    loaded["compact" if method == "fused" else method], jnp.log(depth), initial.eta.shape[-1],
+                    "all" if method == "fused" else "original", include_baselines=not args.without_baselines,
+                )) if method == "fused" or args.without_baselines
+                    else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
                                    predict_gxi=predict)
             runner = jax.jit(function)
@@ -122,7 +129,10 @@ if __name__ == "__main__":
         for method, result in outputs.items():
             eta = np.asarray(result["eta"])
             records[method]["finite"] = all(np.isfinite(np.asarray(result[key])).all().item() for key in ("eta", "xi", "gxi"))
-            records[method]["minimum_depth"] = float((eta + np.asarray(depth)[:, None]).min())
+            records[method]["minimum_depth"] = (float((eta + np.asarray(depth)[:, None]).min())
+                                                 if records[method]["finite"] else None)
+            if args.without_baselines or not records[method]["finite"]:
+                continue
             for key in ("eta", "xi", "gxi"):
                 actual = np.asarray(result[key])
                 reference = np.asarray(outputs[args.reference][key])

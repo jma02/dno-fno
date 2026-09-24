@@ -30,7 +30,9 @@ from dno_net_v2 import CraigSulemBlock, DepthAwareMultiplier  # noqa: E402
 VARIANTS = ("original", "g1", "packed", "cached", "all")
 
 
-def build_variant(loaded: LoadedRun, depth: jax.Array, nx: int, variant: str) -> Wrapped:
+def build_variant(
+    loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
+) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
@@ -54,6 +56,8 @@ def build_variant(loaded: LoadedRun, depth: jax.Array, nx: int, variant: str) ->
             context: nn.module.InterceptorContext,
         ) -> Any:
             module = context.module
+            if not include_baselines and context.method_name in ("_linear_baseline", "_g1_baseline"):
+                return jnp.zeros_like(call_args[0])
             if context.method_name == "_g1_baseline" and variant in ("g1", "all"):
                 eta_norm, xi_norm, log_depth = call_args
                 eta_phys = (eta_norm * model.eta_scale).astype(jnp.float64)

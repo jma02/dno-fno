@@ -171,21 +171,33 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
 A separate copy of figure 11 adds the optimized 37,632-parameter model's
-**measured Stokes runtime of 9.48 s** as an orange vertical line. This is the
-median of three warmed, batch-one T=20 rollouts, excluding compilation, setup,
-warm-up and host transfers. It is faster than the existing M2–M6 Stokes timings,
-but slower than M1. Classical timings come from the earlier benchmark, not a
-fresh simultaneous sweep.
+measured runtimes as orange vertical lines. Each is the median of three
+warmed, batch-one full trajectories: T=20 for Stokes/JONSWAP-TMA and T=200
+for Tanaka/Benjamin–Feir, excluding compilation, setup, warm-up and host
+transfers. Classical timings come from the earlier benchmark, not a fresh
+simultaneous sweep.
 
 The line deliberately has no accuracy coordinate: the original points show
 32-case median errors, which have not been evaluated for this one-epoch 37k
 checkpoint. Its single-case error against the unchanged implementation is not
-an accuracy measurement against M6. The other three families are marked as
-not yet timed for the optimized model; no speedup is extrapolated to them.
-Figure 11, the manuscript and the ZIP are unchanged. Reproduce with:
+an accuracy measurement against M6. All four families have completed timings.
+Both runtime overlays use the same 37k checkpoint with grouped branch FFTs and
+cached depth multipliers. Orange retains the model's G0+G1 terms; teal omits
+them before compilation. The teal runs are **speed-only diagnostics with
+altered dynamics**, not valid water-wave predictions or accuracy results.
+The integrator is unchanged, including its own linear-flow/G0 operations.
+Without the model baselines, Stokes remained finite; JONSWAP/TMA, Tanaka and
+Benjamin–Feir produced non-finite saved states. The full requested step count
+was executed in every case. Figure12 uses the label "New candidate optimized
+network" and has no explanatory callouts or footer; numerical outcomes and
+timings are recorded in `notes/dno_profile_20260924.md` and the raw results.
+This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/dno_fusion_20260924/rollout_timing.json
+  --candidate-timings outputs/dno_fusion_20260924/rollout_timing.json \
+    outputs/dno_fusion_20260924/rollout_remaining_families.json \
+    outputs/dno_fusion_20260924/rollout_benjamin_feir_retiming.json \
+  --no-baseline-timings outputs/dno_fusion_20260924/rollout_no_baselines.json
 ```
