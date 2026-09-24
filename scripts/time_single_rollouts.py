@@ -39,16 +39,24 @@ if __name__ == "__main__":
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
+    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact"))
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1:
         parser.error("steps must be nonnegative and repeats positive")
-    predictors = {name: build_predict_gxi_batched(load_run(run)) for name, run in RUNS.items()}
+    if args.candidate_run:
+        RUNS["compact"] = args.candidate_run.resolve()
+    methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
+    if "M6" not in methods or ("compact" in methods and not args.candidate_run):
+        parser.error("methods must include M6 as reference; compact requires --candidate-run")
+    predictors = {name: build_predict_gxi_batched(load_run(run)) for name, run in RUNS.items() if name in methods}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": "synchronized GPU execution; compilation, warm-up and host transfers excluded",
+        "neural_runs": {name: str(run) for name, run in RUNS.items() if name in methods},
         "families": {},
     }
     for family in args.families:
@@ -68,7 +76,7 @@ if __name__ == "__main__":
             "horizon": float(times[-1]), "saved_frames": frames, "methods": records,
         }
         compiled, outputs = {}, {}
-        for method in ("M6", "M1", "M2", "M3", "M4", "M5", "small", "full"):
+        for method in methods:
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
                 dno_order=int(method[1:]) if method.startswith("M") else 6,
