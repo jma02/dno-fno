@@ -121,3 +121,25 @@ Fresh CPU-only, batch-one DNO latency on an AMD EPYC 9124 host with an eight-log
 ### 09-runtime-tradeoff
 
 Fresh short-horizon CPU benchmark on one current-test Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Learned inference uses FP32 with FP64 CS and integration. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon evaluation panel.
+
+## Additional neural-versus-classical comparison (outside the draft bundle)
+
+[10-neural-vs-classical.png](figures/10-neural-vs-classical.png) and its
+[vector PDF](figures/10-neural-vs-classical.pdf) compare both neural models
+(16 or 320 branches per group) with CS orders 1–6 on the same 128 held-out cases.
+Each point is labeled by the classical order. Horizontal position is classical
+runtime divided by neural runtime; vertical position is classical median
+terminal surface error divided by neural median error. The green upper-right
+region means both recorded runtime and median error favor the neural model.
+The only such point is N16 versus M3 on Benjamin–Feir. M6 is shown at zero
+because it is the error reference, not an exact-solution guarantee.
+
+This is exploratory: classical GPU timings exclude compilation and host
+transfers; archived neural timings include them. Neither the small apparent
+speed advantage nor empty green regions establish matched warmed performance.
+The figure does not replace the separate CPU benchmark or modify the draft ZIP.
+It reads the saved CS sweep NPZs and neural evaluation summaries directly:
+
+```sh
+UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py
+```
