@@ -113,7 +113,7 @@ if __name__ == "__main__":
             if comparison is candidate and args.candidate_previous_method:
                 previous_seconds = float(np.median(methods[args.candidate_previous_method]["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
-                ax.text(0.03, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
+                ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9)
             right = max(right, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")

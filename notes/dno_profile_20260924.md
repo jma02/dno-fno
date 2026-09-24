@@ -318,6 +318,25 @@ The independent G0+G1 identity test, both dealiasing tests, and23 integrator/
 evaluator tests pass. Full trajectories are measured separately in
 `baseline_joint/classical_rollouts.json`; Figure12 uses those runtimes.
 
+The full single-rollout sweep completed for all24 family/order combinations:
+
+| Family | M1 | M2 | M3 | M4 | M5 | M6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Stokes | 4.30 s | 8.52 s | 12.69 s | 16.88 s | 21.09 s | 25.27 s |
+| Tanaka | 42.79 s | 84.70 s | 126.22 s | 167.91 s | 209.71 s | 251.71 s |
+| Benjamin–Feir | 42.78 s | 84.70 s | 126.21 s | 167.89 s | 209.71 s | 251.79 s |
+| JONSWAP/TMA | 4.30 s | 8.51 s | 12.68 s | 16.87 s | 21.07 s | 25.29 s |
+
+Each entry is one warmed full trajectory on uncontended GPU0, with the same
+case and numerical settings used by the prior single-rollout benchmark.
+All saved states are finite with positive fluid depth. The largest M6
+relative difference from the cached reference is4.99e-12 for eta and
+9.94e-12 for Gxi, both on Tanaka. Figure12 retains the prior32-case error
+statistics and original small/full neural points, but replaces every
+classical runtime with this sweep and adds the candidate's measured5.2–5.3%
+incremental runtime savings. The PDF and PNG are regenerated; neither the
+manuscript nor the ZIP is changed.
+
 ## Reproduce
 
 Use `scripts/profile_dno.py` with `CUDA_VISIBLE_DEVICES=0` and the project

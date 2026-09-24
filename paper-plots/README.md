@@ -170,34 +170,46 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 ### 12-potential-new-nn
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
-A separate copy of figure 11 adds the optimized 37,632-parameter model's
-measured runtimes as orange vertical lines. Each is the median of three
-warmed, batch-one full trajectories: T=20 for Stokes/JONSWAP-TMA and T=200
-for Tanaka/Benjamin–Feir, excluding compilation, setup, warm-up and host
-transfers. Classical timings come from the earlier benchmark, not a fresh
-simultaneous sweep.
+A separate copy of figure 11 adds the candidate model's measured runtimes as
+orange vertical lines. The latest update batches the FP64 G1 transforms;
+orange annotations show previous → current runtime and the reduction.
+Stokes uses three repeats; the other families use one full trajectory per
+version. All timings use batch one and the complete T=20 or T=200 horizon,
+excluding compilation, setup, warm-up and host transfers. All saved eta, xi
+and Gxi arrays are bitwise identical to the previous optimized execution.
+
+The classical curve now uses a fresh full M1–M6 sweep with the corresponding
+FFT batching applied to its padded recurrence. The classical implementation
+already cached its depth symbol and combined spectral terms before the final
+inverse transform. Its precision, padding, truncation orders and integrator
+are unchanged. New timings are in
+`outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json`;
+the existing 32-case error statistics and older small/full neural points are
+retained. Each classical timing is one full single rollout.
 
 The line deliberately has no accuracy coordinate: the original points show
 32-case median errors, which have not been evaluated for this one-epoch 37k
 checkpoint. Its single-case error against the unchanged implementation is not
 an accuracy measurement against M6. All four families have completed timings.
-Both runtime overlays use the same 37k checkpoint with grouped branch FFTs and
-cached depth multipliers. Orange retains the model's G0+G1 terms; teal omits
-them before compilation. The teal runs are **speed-only diagnostics with
+Both runtime overlays use the same candidate checkpoint with grouped branch
+FFTs and cached depth multipliers. Orange retains the model's G0+G1 terms;
+teal retains the earlier measurements with both terms omitted before
+compilation. The teal runs are **speed-only diagnostics with
 altered dynamics**, not valid water-wave predictions or accuracy results.
 The integrator is unchanged, including its own linear-flow/G0 operations.
 Without the model baselines, Stokes remained finite; JONSWAP/TMA, Tanaka and
 Benjamin–Feir produced non-finite saved states. The full requested step count
 was executed in every case. Figure12 uses the label "New candidate optimized
-network" and has no explanatory callouts or footer; numerical outcomes and
+network" and has no explanatory footnotes; numerical outcomes and
 timings are recorded in `notes/dno_profile_20260924.md` and the raw results.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/dno_fusion_20260924/rollout_timing.json \
-    outputs/dno_fusion_20260924/rollout_remaining_families.json \
-    outputs/dno_fusion_20260924/rollout_benjamin_feir_retiming.json \
+  --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
+  --candidate-timings outputs/dno_fusion_20260924/baseline_joint/rollout_stokes.json \
+    outputs/dno_fusion_20260924/baseline_joint/rollout_remaining.json \
+  --candidate-method fused_g1 --candidate-previous-method fused \
   --no-baseline-timings outputs/dno_fusion_20260924/rollout_no_baselines.json
 ```
