@@ -171,8 +171,10 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
 A separate copy of figure 11 adds the candidate model's measured runtimes as
-orange vertical lines. The latest update batches the FP64 G1 transforms;
-orange annotations show previous → current runtime and the reduction.
+orange vertical lines. The latest update packs the input spectra and batches
+the surface features, G0 and learned branch inputs, retaining the earlier
+FP64 G1 batching. Orange annotations show previous → current runtime and
+the reduction.
 Stokes uses three repeats; the other families use one full trajectory per
 version. All timings use batch one and the complete T=20 or T=200 horizon,
 excluding compilation, setup, warm-up and host transfers. All saved eta, xi
@@ -208,8 +210,8 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --timings outputs/single_rollout_timing_20260923.json \
   --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
-  --candidate-timings outputs/dno_fusion_20260924/baseline_joint/rollout_stokes.json \
-    outputs/dno_fusion_20260924/baseline_joint/rollout_remaining.json \
-  --candidate-method fused_g1 --candidate-previous-method fused \
+  --candidate-timings outputs/dno_fusion_20260924/network/front_rollout_stokes.json \
+    outputs/dno_fusion_20260924/network/front_rollout_remaining.json \
+  --candidate-method fused_front --candidate-previous-method fused_g1 \
   --no-baseline-timings outputs/dno_fusion_20260924/rollout_no_baselines.json
 ```

@@ -344,7 +344,7 @@ groups independent transforms earlier in the forward pass. First, the four
 surface-feature inverse FFTs (first, second and half derivatives, plus the
 Hilbert transform) are batched. Then one paired forward transform computes
 the normalized surface and physical Dirichlet spectra, and one batched inverse
-transform produces the four surface features, G0, and all32 filtered branch
+transform produces the four surface features, G0, and all 32 filtered branch
 inputs. The FP64 G1 computation is unchanged. G0 is not combined with the
 final learned correction, unlike the previously rejected trial.
 
@@ -352,7 +352,7 @@ The existing benchmark script implements these as `surface` and `front`;
 the rollout timer exposes `fused_surface` and `fused_front`. Both trainers,
 the production model, and all checkpoint weights remain unchanged.
 
-The latest600-call interleaved, warmed batch-one screen on GPU0 gave:
+The latest 600-call interleaved, warmed batch-one screen on GPU0 gave:
 
 | Implementation | Median forward latency | Compiler FFT calls |
 | --- | ---: | ---: |
@@ -360,19 +360,45 @@ The latest600-call interleaved, warmed batch-one screen on GPU0 gave:
 | Also batch surface features | 178.50 us | 11 |
 | Pack the complete input stage | 162.10 us | 8 |
 
-The input-stage version reduces standalone latency by19.6%. Both new variants
-pass the48-state check across all four families, with maximum relative
-difference2.806e-8 from the unchanged production predictor. On Stokes,
-three alternating full single-rollout repeats give8.8729→8.2496 seconds
+The input-stage version reduces standalone latency by 19.6%. Both new variants
+pass the 48-state check across all four families, with maximum relative
+difference 2.806e-8 from the unchanged production predictor. On Stokes,
+three alternating full single-rollout repeats give 8.8729→8.2496 seconds
 (7.0% less time); all saved eta, xi and Gxi values are bitwise identical to
-the previous retained version. Surface batching alone gave8.8624→8.5302 seconds
+the previous retained version. Surface batching alone gave 8.8624→8.5302 seconds
 in its separate three-repeat trial. Remaining full-family results follow below.
 
-The fresh pre-change100-call trace contains40 kernels and9 device copies per
-forward call. Its three dense matrix multiplies account for6.77 us of traced
-GPU work, while FP32 transforms/scaling take29.24 us and FP64 transforms/scaling
-take42.44 us. This supports grouping transforms before reducing channels again.
+All four full-trajectory comparisons completed:
+
+| Family | Previous | Packed input stage | Runtime reduction |
+| --- | ---: | ---: | ---: |
+| Stokes | 8.8729 s | 8.2496 s | 7.0% |
+| Tanaka | 88.3657 s | 82.1713 s | 7.0% |
+| Benjamin–Feir | 88.4216 s | 82.1740 s | 7.1% |
+| JONSWAP/TMA | 8.9033 s | 8.2703 s | 7.1% |
+
+Stokes uses the median of three alternating full runs; other families use one
+full run per version. All saved eta, xi and Gxi values agree exactly, all
+trajectories are finite, and the minimum saved fluid depth is positive
+(0.05002645 over these four cases). Figure12 PNG/PDF now use these timings and
+annotate the incremental reduction from the previous G1-batched version.
+
+The fresh pre-change 100-call trace contains 40 kernels and 9 device copies per
+forward call. Its three dense matrix multiplies account for 6.77 us of traced
+GPU work, while FP32 transforms/scaling take 29.24 us and FP64 transforms/scaling
+take 42.44 us. This supports grouping transforms before reducing channels again.
 Trace timings include profiler overhead; the latency table is uninstrumented.
+
+The final 100-call capture confirms 28 kernels and 4 copies per forward call,
+down from 40 and 9. FP32 FFT/scaling work is now 10.81 us; dense multiplies
+take 6.91 us. The unchanged FP64 G1 transforms/scaling take 42.51 us and now
+account for about half of the traced GPU execution time. Further shrinking
+the dense layers is unlikely to remove the largest remaining cost.
+
+Six additional CPU comparisons activate nonzero branch weights in a small
+model and vary grids 64/128/256, batches 1/3/2, domain lengths 2pi/4.3,
+depths spanning exp(-2) to exp(2), and analytic baselines on/off. The `front`
+and previous `batched` implementations agree bitwise in all six cases.
 
 The classical rollout already passes Fourier-space states directly into
 `_dno_series_hat`, so it has no analogous pair of physical-input FFTs to remove
@@ -384,7 +410,8 @@ classical sweep.
 Raw artifacts are under `outputs/dno_fusion_20260924/network/`: `batched.nsys-rep`,
 `batched.sqlite`, `surface/results.json`, `front/results.json`,
 `rollout_stokes.json`, `front_rollout_stokes.json`, and
-`front_rollout_remaining.json`.
+`front_rollout_remaining.json`. The final trace is
+`front_capture.nsys-rep` / `front_capture.sqlite`.
 
 ## Reproduce
 
