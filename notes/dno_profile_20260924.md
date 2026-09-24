@@ -3,8 +3,9 @@
 The main bottleneck is **many small FFTs and their associated overhead**, not
 the large surface-network matrix multiply. The slowest individual kernels are
 the FP64 FFTs in the analytic `G1` baseline. No model or solver code was changed.
-**This report profiles only our neural model's forward pass, not the time
+**The initial profile covers only our neural model's forward pass, not the time
 integrator or a classical DNO solver.** `G0 + G1` is part of `CraigSulemDNO.__call__`.
+A separate full-rollout follow-up appears near the end of this report.
 
 [Roofline and kernel timeline](../outputs/dno_profile_20260924/roofline.png)
 ([PDF](../outputs/dno_profile_20260924/roofline.pdf)).
@@ -164,8 +165,8 @@ Stokes, Tanaka, JONSWAP/TMA and Benjamin–Feir), the combined variant's maximum
 relative difference from the unchanged predictor was **2.806e-8**, and maximum
 absolute difference was **7.451e-9**. This is an output-equivalence check, not a
 new DNO-accuracy evaluation against the reference solver. Validation used a
-48-state batch; **all latency measurements used batch one**. Long-time rollout
-equivalence has not been tested for this prototype.
+48-state batch; **all latency measurements used batch one**. That forward-only
+experiment did not test trajectory equivalence; see the separate follow-up below.
 
 The compiler FFT counts are 38 original, 37 with `G1` combination alone,
 17 with packing alone and 16 with all three. A separate 100-call Nsight capture
@@ -179,6 +180,40 @@ updates. The prototype intercepts the existing Flax computation at tracing
 time; unused original branch FFTs are eliminated by XLA. No production source
 or checkpoint was replaced. Raw timings, HLO and trace are in
 `outputs/dno_fusion_20260924/`.
+
+## Follow-up: full single-trajectory timing
+
+At the user's subsequent request, the same 37,632-parameter checkpoint was
+tested **inside the unchanged integrator**. One Stokes initial condition
+(simulation 517582), Nx=1024, T=20, dt=0.01, 2,000 internal steps, GL2 with four
+fixed-point iterations, padding factor 8, hard-filter fraction 0.25. GPU0, batch one;
+three synchronized full-length repeats per version in alternating order.
+Compilation, cache setup, warm-up and host transfers were excluded.
+
+| Version | Median full-rollout time | Three runs |
+| --- | ---: | --- |
+| Unchanged model | 12.5265 s | 12.6359, 12.5265, 12.3727 s |
+| All three inference optimizations | 9.4842 s | 9.5380, 9.4842, 9.3468 s |
+
+This is **1.32x end-to-end speedup, or 24.3% less time**, not the 1.82x
+standalone-forward speedup. Full-shape compilation took 3.0347/1.9221 s and
+solver/cache setup took 0.3014/0.5330 s, respectively; these are not complete
+cold-process timings. Both trajectories were finite and retained positive
+saved fluid depth. Against the unchanged model, maximum saved-frame relative
+differences were 3.560e-7 for eta, 1.565e-7 for xi, and 4.037e-6 for Gxi;
+terminal eta difference was 2.850e-7. These measure implementation equivalence,
+not accuracy against M6. No T200 timing or long-horizon equivalence claim is
+made, and production inference remains unchanged.
+
+Raw results: `outputs/dno_fusion_20260924/rollout_timing.json`. Reproduce with:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 UV_CACHE_DIR=/tmp/codex-uv-cache \
+  uv run --no-sync scripts/time_single_rollouts.py --families stokes --repeats 3 \
+  --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
+  --methods compact fused --reference compact \
+  --output outputs/dno_fusion_20260924/rollout_timing.json
+```
 
 ## Reproduce
 

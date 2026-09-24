@@ -2,6 +2,7 @@
 
 Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
+The fused method applies all three inference optimizations to --candidate-run.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 os.environ.setdefault("JAX_PLATFORMS", "cuda")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -24,8 +25,9 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
+from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
-from solver.evals.model_rollout import build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
+from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 
 RUNS = {
@@ -40,7 +42,8 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact"))
+    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", "fused"))
+    parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1:
@@ -48,15 +51,19 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
-    if "M6" not in methods or ("compact" in methods and not args.candidate_run):
-        parser.error("methods must include M6 as reference; compact requires --candidate-run")
-    predictors = {name: build_predict_gxi_batched(load_run(run)) for name, run in RUNS.items() if name in methods}
+    if args.reference not in methods or (set(methods) & {"compact", "fused"} and not args.candidate_run):
+        parser.error("methods must include the reference; compact/fused require --candidate-run")
+    loaded = {name: load_run(run) for name, run in RUNS.items()
+              if name in methods or (name == "compact" and "fused" in methods)}
+    predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": "synchronized GPU execution; compilation, warm-up and host transfers excluded",
-        "neural_runs": {name: str(run) for name, run in RUNS.items() if name in methods},
+        "neural_runs": {name: str(RUNS["compact" if name == "fused" else name])
+                        for name in methods if not name.startswith("M")},
+        "reference": args.reference,
         "families": {},
     }
     for family in args.families:
@@ -77,6 +84,7 @@ if __name__ == "__main__":
         }
         compiled, outputs = {}, {}
         for method in methods:
+            started = time.perf_counter()
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
                 dno_order=int(method[1:]) if method.startswith("M") else 6,
@@ -87,10 +95,13 @@ if __name__ == "__main__":
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
                                    implicit_iterations=4, zero_mean_xi=True)
             else:
+                predict = (cast(Predictor, build_variant(loaded["compact"], jnp.log(depth), initial.eta.shape[-1], "all"))
+                           if method == "fused" else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
-                                   predict_gxi=lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
+                                   predict_gxi=predict)
             runner = jax.jit(function)
             jax.block_until_ready((initial, times, params))
+            setup_seconds = time.perf_counter() - started
             started = time.perf_counter()
             compiled[method] = runner.lower(initial, times).compile()
             compile_seconds = time.perf_counter() - started
@@ -98,7 +109,8 @@ if __name__ == "__main__":
             warm_times = times if args.steps else times[:5]
             started = time.perf_counter()
             jax.block_until_ready(warm(initial, warm_times))
-            records[method] = {"compile_s": compile_seconds, "warmup_s": time.perf_counter() - started, "seconds": []}
+            records[method] = {"setup_s": setup_seconds, "compile_s": compile_seconds,
+                               "warmup_s": time.perf_counter() - started, "seconds": []}
             print(f"{family} {method}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)
         for repeat in range(args.repeats):
             for method in list(compiled)[::1 if repeat % 2 == 0 else -1]:
@@ -107,12 +119,18 @@ if __name__ == "__main__":
                 duration = time.perf_counter() - started
                 records[method]["seconds"].append(duration)
                 print(f"{family} {method}: repeat {repeat + 1}: {duration:.4f}s", flush=True)
-        reference = np.asarray(outputs["M6"]["eta"][-1])
         for method, result in outputs.items():
             eta = np.asarray(result["eta"])
             records[method]["finite"] = all(np.isfinite(np.asarray(result[key])).all().item() for key in ("eta", "xi", "gxi"))
             records[method]["minimum_depth"] = float((eta + np.asarray(depth)[:, None]).min())
-            records[method]["terminal_eta_error"] = float(np.linalg.norm(eta[-1] - reference) / np.linalg.norm(reference))
+            for key in ("eta", "xi", "gxi"):
+                actual = np.asarray(result[key])
+                reference = np.asarray(outputs[args.reference][key])
+                error = np.linalg.norm((actual - reference).reshape(frames, -1), axis=-1)
+                scale = np.linalg.norm(reference.reshape(frames, -1), axis=-1)
+                records[method][f"terminal_{key}_error"] = float(error[-1] / scale[-1])
+                records[method][f"max_{key}_error"] = float((error / scale).max())
+                records[method][f"trajectory_{key}_error"] = float(np.linalg.norm(error) / np.linalg.norm(scale))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"{family}: saved {args.output}", flush=True)
