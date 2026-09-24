@@ -20,8 +20,8 @@ import numpy as np  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper-plots/figures"
 RUNS = (
-    ("c27_tanaka_hard128_full_equal_local_20260918", "full", "#8b5ea8", "s"),
-    ("c27_branches16_tanaka_hard128_20260923", "small", "#087eaa", "o"),
+    ("c27_tanaka_hard128_full_equal_local_20260918", "full", "larger", "#8b5ea8", "s"),
+    ("c27_branches16_tanaka_hard128_20260923", "small", "small", "#087eaa", "o"),
 )
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
@@ -67,7 +67,7 @@ if __name__ == "__main__":
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
         right = float(seconds.max())
-        for run, name, color, marker in RUNS:
+        for run, name, _label, color, marker in RUNS:
             source = next((ROOT / "outputs" / run).glob(
                 f"eval_best_current_test_stratified_n32*/{family}_summary.json"))
             result = json.loads(source.read_text())
@@ -87,8 +87,8 @@ if __name__ == "__main__":
     fig.suptitle("Single-rollout runtime vs error" if warm else "Batch runtime vs error", y=0.96, fontsize=18, ha="left", x=0.10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
-        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural network — {name} model")
-          for _, name, color, marker in reversed(RUNS)],
+        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural network — {label} model")
+          for _, _, label, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
     ], loc="upper left", bbox_to_anchor=(0.09, 0.91), ncols=4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
