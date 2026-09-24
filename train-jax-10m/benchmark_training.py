@@ -12,7 +12,6 @@ from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
-from unittest.mock import patch
 
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
@@ -64,41 +63,6 @@ from checkpoint_util import (  # noqa: E402
     save_checkpoint,
     training_counter_values,
 )
-
-
-@jax.custom_jvp
-def compact_gelu(x: jax.Array) -> jax.Array:
-    return jax.nn.gelu(x)
-
-
-@compact_gelu.defjvp
-def compact_gelu_jvp(primals: tuple[jax.Array], tangents: tuple[jax.Array]) -> tuple[jax.Array, jax.Array]:
-    (x,), (dx,) = primals, tangents
-    coefficient = jnp.asarray(np.sqrt(2 / np.pi), dtype=x.dtype)
-    tangent = jnp.tanh(coefficient * (x + 0.044715 * x**3))
-    slope = 0.5 * (1 + tangent) + 0.5 * x * (1 - tangent) * (1 + tangent) * coefficient * (1 + 3 * 0.044715 * x**2)
-    return compact_gelu(x), dx * slope
-
-
-@jax.custom_vjp
-def bias_gradient_dense(x: jax.Array, kernel: jax.Array, bias: jax.Array) -> jax.Array:
-    return x @ kernel + bias
-
-
-def bias_gradient_dense_forward(x: jax.Array, kernel: jax.Array, bias: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-    return bias_gradient_dense(x, kernel, bias), (x, kernel)
-
-
-def bias_gradient_dense_backward(residual: tuple[jax.Array, jax.Array], dy: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
-    x, kernel = residual
-    features = x.reshape(-1, x.shape[-1])
-    # Four features, three padding channels, and one bias channel.
-    augmented = jnp.concatenate((features, jnp.zeros_like(features[:, :3]), jnp.ones_like(features[:, :1])), axis=-1)
-    gradient = augmented.T @ dy.reshape(-1, dy.shape[-1])
-    return dy @ kernel.T, gradient[:x.shape[-1]], gradient[-1]
-
-
-bias_gradient_dense.defvjp(bias_gradient_dense_forward, bias_gradient_dense_backward)
 
 
 def main() -> None:
@@ -160,11 +124,8 @@ def main() -> None:
     parser.add_argument("--run_name", default=None)
     parser.add_argument("--benchmark_output", type=Path, required=True, help="Benchmark training updates without saving weights or changing run metadata.")
     parser.add_argument("--benchmark_steps", type=int, default=64)
-    parser.add_argument("--benchmark_sync_interval", type=int, default=1)
-    parser.add_argument("--benchmark_variant", choices=("original", "packed", "grouped", "remat", "remat_cse", "biasfold", "compact_gelu", "biasgrad", "dedup"), default="original")
-    parser.add_argument("--benchmark_matmul_precision", choices=("default", "TF32_TF32_F32_X3", "BF16_BF16_F32_X6"), default="default")
-    parser.add_argument("--benchmark_batch_tile", type=int, default=0)
-    parser.add_argument("--benchmark_gradient_tile", type=int, default=0)
+    parser.add_argument("--benchmark_sync_interval", type=int, default=16)
+    parser.add_argument("--benchmark_variant", choices=("original", "packed"), default="original")
     # Additional losses; a zero weight disables each one.
     parser.add_argument(
         "--translation_tangent_weight",
@@ -282,10 +243,8 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
-    if args.benchmark_steps < 1:
-        parser.error("--benchmark_steps must be positive")
-    if args.benchmark_sync_interval < 1:
-        parser.error("--benchmark_sync_interval must be positive")
+    if args.benchmark_steps < 1 or args.benchmark_sync_interval < 1:
+        parser.error("Benchmark step count and synchronization interval must be positive")
     start_time = perf_counter()
 
     training_dtype = jnp.float32
@@ -296,9 +255,6 @@ def main() -> None:
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
     devices = jax.local_devices()
     n_devices = len(devices)
-    for tile in (args.benchmark_batch_tile, args.benchmark_gradient_tile):
-        if tile < 0 or (tile and args.batch_size % (n_devices * tile)):
-            parser.error("Benchmark tile sizes must divide the per-device batch size")
     if args.batch_size % n_devices != 0:
         raise ValueError(
             f"batch_size {args.batch_size} must be divisible by device count {n_devices}"
@@ -429,72 +385,23 @@ def main() -> None:
 
         def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
                       context: nn.module.InterceptorContext) -> Any:
-            if args.benchmark_variant == "biasgrad" and isinstance(context.module, nn.Dense) and context.module.name == "hidden" and context.method_name == "__call__":
-                x = call_args[0]
-                kernel, bias = (context.module.get_variable("params", name) for name in ("kernel", "bias"))
-                dtype = jnp.result_type(x, kernel, bias)
-                return bias_gradient_dense(*(field.astype(dtype) for field in (x, kernel, bias)))
             if isinstance(context.module, CraigSulemBlock) and context.method_name == "__call__":
                 eta_features, xi_phys, log_depth = call_args
                 if context.module.name != f"cs_block_{args.n_blocks - 1}":
                     return jnp.zeros_like(xi_phys)
                 groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
                 weights = eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups], axis=-1)
-                if args.benchmark_variant in ("grouped", "biasfold"):
-                    k = (2 * jnp.pi / domain_length) * jnp.arange(nx // 2 + 1)
-                    k, h = jnp.broadcast_arrays(k[None, :], jnp.exp(jnp.minimum(log_depth, jnp.log(5.0))))
-                    features = jnp.stack((k, h, jnp.tanh(h * k), k * jnp.tanh(h * k)), axis=-1)
-                    multipliers = [group["m_shared"] for group in groups]
-                    if args.benchmark_variant == "biasfold":
-                        features = jnp.concatenate((features, jnp.zeros_like(features[..., :3]), jnp.ones_like(features[..., :1])), axis=-1)
-                        filters = jnp.concatenate([
-                            jnp.tanh(features @ jnp.concatenate((group["hidden"]["kernel"],
-                                jnp.zeros_like(group["hidden"]["kernel"][:3]), group["hidden"]["bias"][None, :]), axis=0))
-                            @ group["out"]["kernel"] + group["out"]["bias"] for group in multipliers
-                        ], axis=-1)
-                    else:
-                        hidden = jnp.tanh(
-                            features @ jnp.concatenate([group["hidden"]["kernel"] for group in multipliers], axis=-1)
-                            + jnp.concatenate([group["hidden"]["bias"] for group in multipliers]))
-                        hidden = hidden.reshape(*hidden.shape[:-1], args.n_blocks, args.cs_mult_hidden)
-                        filters = jnp.einsum("bfgh,ghc->bfgc", hidden, jnp.stack([group["out"]["kernel"] for group in multipliers]))
-                        filters = filters + jnp.stack([group["out"]["bias"] for group in multipliers])
-                        filters = filters.reshape(*filters.shape[:2], -1)
-                else:
-                    def depth_filters(values: jax.Array) -> jax.Array:
-                        return jnp.concatenate([
-                            cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, values, nx // 2 + 1))
-                            for group in groups
-                        ], axis=-1)
-
-                    if args.benchmark_variant == "dedup":
-                        values, inverse, counts = jnp.unique(log_depth[:, 0], return_inverse=True, return_counts=True, size=log_depth.shape[0])
-                        capacity = (5 * log_depth.shape[0] + 7) // 8
-                        filters = jax.lax.cond(
-                            jnp.count_nonzero(counts) <= capacity,
-                            lambda _: depth_filters(values[:capacity, None])[inverse],
-                            lambda _: depth_filters(log_depth), None,
-                        )
-                    else:
-                        filters = depth_filters(log_depth)
+                filters = jnp.concatenate([
+                    cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
+                    for group in groups
+                ], axis=-1)
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
                 filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
                 weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
                 return jnp.fft.irfft(jnp.sum(filters * weighted_hat, axis=-1), n=nx, axis=-1, norm="forward")
             return next_fun(*call_args, **call_kwargs)
 
-        activation = (jax.checkpoint(nn.gelu, prevent_cse=args.benchmark_variant == "remat_cse")
-                      if args.benchmark_variant.startswith("remat") else nn.gelu)
-        if args.benchmark_variant == "compact_gelu":
-            activation = compact_gelu
-        precision = args.benchmark_matmul_precision if inputs.dtype == jnp.float32 else "default"
-        with jax.default_matmul_precision(precision), patch.object(nn, "gelu", activation), nn.intercept_methods(intercept):
-            tile = args.benchmark_batch_tile
-            if tile and inputs.shape[0] > tile:
-                return jax.lax.map(
-                    jax.checkpoint(lambda fields: model.apply(variables, *fields), prevent_cse=False),
-                    (inputs.reshape(-1, tile, *inputs.shape[1:]), depth.reshape(-1, tile, *depth.shape[1:])),
-                ).reshape(inputs.shape[0], inputs.shape[1], 1)
+        with nn.intercept_methods(intercept):
             return cast(jax.Array, model.apply(variables, inputs, depth))
 
     # Full-batch losses shared by training and validation.
@@ -506,7 +413,6 @@ def main() -> None:
         batch_depth: jax.Array,
         tanaka: jax.Array,
         apply_fn: ApplyFn = apply_model,
-        tangent_normalizer: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
@@ -546,13 +452,12 @@ def main() -> None:
                 denominator_eps=args.translation_tangent_denominator_eps,
             )
             # Weight each GPU's contribution by its number of selected nonflat samples.
-            if tangent_normalizer is None:
-                tangent_normalizer = jnp.maximum(jax.lax.psum(local_selected, "batch"), jnp.float32(1.0))
+            global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
             shard_weight = (
                 device_count
                 * local_selected
-                / tangent_normalizer
+                / jnp.maximum(global_selected, jnp.float32(1.0))
             )
             tangent_loss = tangent_loss * shard_weight
         return data_loss, mode_loss, tangent_loss, local_selected / eta.shape[0]
@@ -595,31 +500,13 @@ def main() -> None:
             denominator_eps=args.hadamard_denominator_eps,
         )
 
-    def scheduled_hadamard(
-        current_params: FlatParams, step: jax.Array, rng_key: jax.Array,
-        eta: jax.Array, xi: jax.Array, batch_depth: jax.Array,
-        apply_fn: ApplyFn = apply_model,
-    ) -> tuple[jax.Array, dict[str, jax.Array]]:
-        active = step % args.hadamard_interval == 0
-        rng = jax.random.fold_in(
-            jax.random.fold_in(rng_key, jax.lax.axis_index("batch") * 53 + 127), step,
-        )
-        loss = jax.lax.cond(
-            active,
-            lambda key: hadamard_loss_on_subset(key, current_params, eta, xi, batch_depth, apply_fn),
-            lambda _: jnp.float64(0.0), rng,
-        )
-        weight = args.hadamard_weight * jnp.minimum(jnp.float64(step) / max(args.hadamard_warmup_steps, 1), 1.0)
-        return training_dtype(weight * loss), {"hadamard_active": training_dtype(active), "hadamard_loss": training_dtype(loss)}
-
     def compute_training_loss(
         current_params: FlatParams, step: jax.Array, rng_key: jax.Array,
         eta: jax.Array, xi: jax.Array, gxi: jax.Array, batch_depth: jax.Array,
         tanaka: jax.Array, *, apply_fn: ApplyFn = apply_model,
-        include_hadamard: bool = True, tangent_normalizer: jax.Array | None = None,
     ) -> tuple[jax.Array, dict[str, jax.Array]]:
         data_loss, mode_loss, tangent_loss, tangent_fraction = compute_loss_components(
-            current_params, eta, xi, gxi, batch_depth, tanaka, apply_fn, tangent_normalizer
+            current_params, eta, xi, gxi, batch_depth, tanaka, apply_fn
         )
         physics_loss = jnp.asarray(0.0, dtype=training_dtype)
         metrics: dict[str, jax.Array] = {"train_l2_loss": data_loss}
@@ -635,53 +522,34 @@ def main() -> None:
             physics_loss += args.translation_tangent_weight * tangent_loss
             metrics["translation_tangent_loss"] = tangent_loss
             metrics["translation_tangent_fraction"] = tangent_fraction
-        if args.hadamard_weight > 0.0 and include_hadamard:
-            hadamard_loss, hadamard_metrics = scheduled_hadamard(current_params, step, rng_key, eta, xi, batch_depth, apply_fn)
-            physics_loss += hadamard_loss
-            metrics.update(hadamard_metrics)
+        if args.hadamard_weight > 0.0:
+            # Evaluate Hadamard on a small random subset, only on scheduled steps.
+            hadamard_scheduled = step % args.hadamard_interval == 0
+
+            rng_hadamard = jax.random.fold_in(
+                jax.random.fold_in(rng_key, jax.lax.axis_index("batch") * 53 + 127),
+                step,
+            )
+            hadamard_loss = jax.lax.cond(
+                hadamard_scheduled,
+                lambda rng: hadamard_loss_on_subset(
+                    rng, current_params, eta, xi, batch_depth, apply_fn
+                ),
+                lambda _: jnp.float64(0.0),
+                rng_hadamard,
+            )
+            hadamard_weight = args.hadamard_weight * jnp.minimum(
+                jnp.asarray(step, dtype=jnp.float64)
+                / max(args.hadamard_warmup_steps, 1),
+                1.0,
+            )
+            physics_loss += training_dtype(hadamard_weight * hadamard_loss)
+            metrics.update(
+                hadamard_active=training_dtype(hadamard_scheduled),
+                hadamard_loss=training_dtype(hadamard_loss),
+            )
 
         return data_loss + physics_loss, metrics
-
-    def compute_training_gradients(
-        current_params: FlatParams, step: jax.Array, rng_key: jax.Array,
-        eta: jax.Array, xi: jax.Array, gxi: jax.Array, batch_depth: jax.Array,
-        tanaka: jax.Array, *, apply_fn: ApplyFn = apply_model,
-    ) -> tuple[tuple[jax.Array, dict[str, jax.Array]], FlatParams]:
-        tile = args.benchmark_gradient_tile
-        objective = partial(compute_training_loss, apply_fn=apply_fn)
-        if not tile or eta.shape[0] <= tile or apply_fn is not apply_model:
-            return jax.value_and_grad(objective, has_aux=True)(current_params, step, rng_key, eta, xi, gxi, batch_depth, tanaka)
-        n_tiles = eta.shape[0] // tile
-        normalizer = None
-        if args.translation_tangent_weight > 0.0:
-            _, count = compute_translation_tangent_loss(
-                eta=training_dtype(eta), gxi_prediction=jnp.zeros_like(eta, dtype=training_dtype),
-                gxi_target=jnp.zeros_like(eta, dtype=training_dtype),
-                depth=jnp.exp(jnp.minimum(training_dtype(batch_depth[:, 0]), log_h_max)),
-                k=k_grid_jax, sample_mask=tanaka,
-                smoothing_scale=args.translation_tangent_smoothing_scale,
-                denominator_eps=args.translation_tangent_denominator_eps,
-            )
-            normalizer = jnp.maximum(jax.lax.psum(count, "batch"), 1.0) / n_tiles
-        gradient_fn = jax.value_and_grad(
-            lambda params, *fields: objective(params, step, rng_key, *fields, include_hadamard=False, tangent_normalizer=normalizer),
-            has_aux=True,
-        )
-        fields = tuple(field.reshape(n_tiles, tile, *field.shape[1:]) for field in (eta, xi, gxi, batch_depth, tanaka))
-        initial = gradient_fn(current_params, *(field[0] for field in fields))
-        total, _ = jax.lax.scan(
-            lambda carry, chunk: (jax.tree.map(jnp.add, carry, gradient_fn(current_params, *chunk)), None),
-            initial, tuple(field[1:] for field in fields),
-        )
-        (loss, metrics), grads = jax.tree.map(lambda value: value / n_tiles, total)
-        if args.hadamard_weight > 0.0:
-            (hadamard_loss, hadamard_metrics), hadamard_grads = jax.value_and_grad(partial(scheduled_hadamard, apply_fn=apply_fn), has_aux=True)(
-                current_params, step, rng_key, eta, xi, batch_depth,
-            )
-            loss += hadamard_loss
-            metrics.update(hadamard_metrics)
-            grads = jax.tree.map(jnp.add, grads, hadamard_grads)
-        return (loss, metrics), grads
 
     def train_step(
         current_state: train_state.TrainState,
@@ -693,9 +561,9 @@ def main() -> None:
         tanaka: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
         # Differentiate the total loss, average gradients across GPUs, then update weights.
-        (loss_value, metrics), grads = compute_training_gradients(
-            cast(FlatParams, current_state.params), jnp.asarray(current_state.step), rng_key, eta, xi, gxi, batch_depth, tanaka,
-        )
+        (loss_value, metrics), grads = jax.value_and_grad(
+            compute_training_loss, has_aux=True
+        )(current_state.params, current_state.step, rng_key, eta, xi, gxi, batch_depth, tanaka)
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
         metrics = jax.lax.pmean(metrics, axis_name="batch")
@@ -839,28 +707,27 @@ def main() -> None:
     seed_seq = np.random.SeedSequence(args.seed)
     epoch_seeds = seed_seq.spawn(args.epochs)
     # Hadamard folds this fixed key with the GPU index and restored optimizer step.
-    train_rng = jax.random.PRNGKey(args.seed + 1)
-    validation_rng = jax.random.PRNGKey(args.seed + 2)
+    train_rng = replicate_pytree_from_host(jax.random.PRNGKey(args.seed + 1), replicated)
+    validation_rng = replicate_pytree_from_host(jax.random.PRNGKey(args.seed + 2), replicated)
 
     if args.benchmark_output:
         import ctypes
 
-        stream = prefetch_batches(train_indices, np.random.default_rng(args.seed))
-        batch = jax.block_until_ready(next(stream))
+        benchmark_indices = np.random.default_rng(args.seed).permutation(train_indices)[:(args.benchmark_steps + 1) * args.batch_size]
+        batch = jax.block_until_ready(next(prefetch_batches(benchmark_indices[:args.batch_size], None)))
         validation = []
         if args.benchmark_variant != "original":
-            check_batch = batch
             comparisons = []
             for apply_fn in (cast(ApplyFn, model.apply), apply_model):
-                objective = partial(compute_training_gradients, apply_fn=apply_fn)
+                objective = partial(compute_training_loss, apply_fn=apply_fn)
                 check = jax.jit(shard_map(
                     lambda params, step, key, *fields: jax.lax.pmean(
-                        objective(params, step, key, *fields), "batch"),
+                        jax.value_and_grad(objective, has_aux=True)(params, step, key, *fields), "batch"),
                     mesh=mesh, in_specs=(P(), P(), P(), *((P("batch"),) * 5)),
                     out_specs=(P(), P()), check_rep=False,
                 ))
                 comparisons.append([jax.device_get(check(
-                    training_state.params, jnp.int32(step), train_rng, *check_batch,
+                    training_state.params, jnp.int32(step), train_rng, *batch,
                 )) for step in (args.hadamard_interval * 100, args.hadamard_interval * 100 + 1)])
             for reference, actual in zip(*comparisons, strict=True):
                 (reference_loss, reference_metrics), reference_grads = reference
@@ -887,52 +754,63 @@ def main() -> None:
             started = perf_counter()
             training_state, loss, metrics = executable(training_state, train_rng, *batch)
             loss, metrics = jax.device_get((loss, metrics))
+            jax.block_until_ready(training_state)
             records.append({"seconds": perf_counter() - started, "loss": float(loss),
                             "hadamard": bool(metrics.get("hadamard_active", 0))})
         if driver.cuProfilerStop() != 0:
             raise RuntimeError("CUDA profiler stop failed")
-        pipeline_started = perf_counter()
-        loader_wait = 0.0
-        pending_metrics = []
-        pipeline_losses = []
-        for index in range(args.benchmark_steps):
-            started = perf_counter()
-            batch = next(stream)
-            loader_wait += perf_counter() - started
-            training_state, loss, metrics = executable(training_state, train_rng, *batch)
-            pending_metrics.append((loss, metrics))
-            if len(pending_metrics) == args.benchmark_sync_interval or index + 1 == args.benchmark_steps:
-                received = jax.device_get(pending_metrics)
-                pipeline_losses.extend(float(value) for value, _ in received)
-                pending_metrics.clear()
-        pipeline_s = perf_counter() - pipeline_started
-        if not np.isfinite(pipeline_losses).all() or not all(np.isfinite(record["loss"]) for record in records) or not all(
-            np.isfinite(leaf).all() for leaf in jax.tree.leaves(jax.device_get(training_state))
-        ):
-            raise RuntimeError("Non-finite benchmark training loss or state")
-        assert_pytree_replicated(training_state, name="benchmark final state")
+        pipelines = []
+        intervals = (1, args.benchmark_sync_interval) if args.benchmark_sync_interval > 1 else (1,)
+        for repeat in range(3):
+            for sync_interval in intervals if repeat % 2 == 0 else intervals[::-1]:
+                stream = prefetch_batches(benchmark_indices, None)
+                jax.block_until_ready(next(stream))
+                trial_state = training_state
+                loader_wait = 0.0
+                pending_metrics = []
+                pipeline_losses = []
+                pipeline_started = perf_counter()
+                for index in range(args.benchmark_steps):
+                    started = perf_counter()
+                    batch = next(stream)
+                    loader_wait += perf_counter() - started
+                    trial_state, loss, metrics = executable(trial_state, train_rng, *batch)
+                    pending_metrics.append((loss, metrics))
+                    if len(pending_metrics) == sync_interval or index + 1 == args.benchmark_steps:
+                        pipeline_losses.extend(float(value) for value, _ in jax.device_get(pending_metrics))
+                        pending_metrics.clear()
+                jax.block_until_ready(trial_state)
+                pipeline_s = perf_counter() - pipeline_started
+                if not np.isfinite(pipeline_losses).all() or not all(
+                    np.isfinite(leaf).all() for leaf in jax.tree.leaves(jax.device_get(trial_state))
+                ):
+                    raise RuntimeError("Non-finite benchmark training loss or state")
+                assert_pytree_replicated(trial_state, name="benchmark final state")
+                expected_losses = np.asarray(pipelines[0]["losses"] if pipelines else pipeline_losses)
+                relative_difference = float(np.max(np.abs(pipeline_losses - expected_losses) / np.maximum(np.abs(expected_losses), 1e-30)))
+                pipelines.append({"repeat": repeat, "sync_interval": sync_interval,
+                                  "seconds": pipeline_s, "loader_wait_seconds": loader_wait,
+                                  "losses": pipeline_losses, "max_loss_relative_difference": relative_difference,
+                                  "loss_agreement": bool(np.allclose(pipeline_losses, expected_losses, rtol=1e-5, atol=1e-10))})
+                print(f"Pipeline repeat {repeat + 1}, sync every {sync_interval}: {args.benchmark_steps * args.batch_size / pipeline_s:.0f} samples/s", flush=True)
+        if not all(np.isfinite(record["loss"]) for record in records):
+            raise RuntimeError("Non-finite repeated-batch loss")
         output = args.benchmark_output
         output.parent.mkdir(parents=True, exist_ok=True)
         output.with_suffix(".hlo").write_text(executable.as_text())
-        report = {"variant": args.benchmark_variant,
-                  "matmul_precision": args.benchmark_matmul_precision,
-                  "batch_tile": args.benchmark_batch_tile,
-                  "gradient_tile": args.benchmark_gradient_tile,
-                  "sync_interval": args.benchmark_sync_interval,
+        report = {"variant": args.benchmark_variant, "validation": validation,
                   "validation_batch_size": args.batch_size if validation else 0,
-                  "pipeline_losses": pipeline_losses,
-                  "validation": validation,
                   "devices": [device.device_kind for device in devices], "batch_size": args.batch_size,
                   "hadamard_interval": args.hadamard_interval, "hadamard_microbatch": args.hadamard_microbatch,
-                  "compile_s": compile_s, "steps": records, "pipeline_seconds": pipeline_s,
-                  "loader_wait_seconds": loader_wait, "xla_cost_estimate": executable.cost_analysis(),
-                  "memory": str(executable.memory_analysis())}
+                  "compile_s": compile_s, "steps": records, "pipelines": pipelines,
+                  "xla_cost_estimate": executable.cost_analysis(), "memory": str(executable.memory_analysis())}
         output.write_text(json.dumps(report, indent=2) + "\n")
+        if not all(trial["loss_agreement"] for trial in pipelines):
+            raise RuntimeError("Repeated training loss sequences disagree; see benchmark output")
         for active in (False, True):
             times = [record["seconds"] for record in records if record["hadamard"] == active]
             if times:
                 print(f"Hadamard={active}: median {1000 * np.median(times):.2f} ms/update", flush=True)
-        print(f"Pipeline: {args.benchmark_steps * args.batch_size / pipeline_s:.0f} samples/s; loader wait {loader_wait:.3f}s", flush=True)
         return
 
     # Train on every sample once per epoch, in a newly shuffled order.
