@@ -166,3 +166,26 @@ model takes about 15.2 seconds for T=20 and 150.3 seconds for T=200, versus
 surface error on Benjamin–Feir; the small model also beats M2 on Benjamin–Feir
 and Tanaka. M2 is faster and more accurate than the full neural model on
 Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/family.
+
+### 12-potential-new-nn
+
+[PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
+A separate copy of figure 11 adds the optimized 37,632-parameter model's
+**measured Stokes runtime of 9.48 s** as an orange vertical line. This is the
+median of three warmed, batch-one T=20 rollouts, excluding compilation, setup,
+warm-up and host transfers. It is faster than the existing M2–M6 Stokes timings,
+but slower than M1. Classical timings come from the earlier benchmark, not a
+fresh simultaneous sweep.
+
+The line deliberately has no accuracy coordinate: the original points show
+32-case median errors, which have not been evaluated for this one-epoch 37k
+checkpoint. Its single-case error against the unchanged implementation is not
+an accuracy measurement against M6. The other three families are marked as
+not yet timed for the optimized model; no speedup is extrapolated to them.
+Figure 11, the manuscript and the ZIP are unchanged. Reproduce with:
+
+```sh
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
+  --timings outputs/single_rollout_timing_20260923.json \
+  --candidate-timings outputs/dno_fusion_20260924/rollout_timing.json
+```
