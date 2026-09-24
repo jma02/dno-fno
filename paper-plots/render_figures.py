@@ -1,4 +1,4 @@
-"""Render the nine manuscript placeholders from epoch-40 hard-P128 diagnostics."""
+"""Render the nine manuscript figures from saved diagnostics."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ if __name__ == "__main__":
         snapshot = {key.removeprefix("snapshot_"): archive[key] for key in archive.files if key.startswith("snapshot_")}
         benchmark = json.loads(str(archive["benchmark_metadata"]))
     x = np.arange(1024) / 1024
-    panel_note = "Epoch-40 C27 · 128 held-out simulations · no adaptive damping · N = 1024 · g = 1"
+    panel_note = "Learned DNO · 128 held-out simulations · no adaptive damping · N = 1024 · g = 1"
 
     fig, axes = plt.subplots(2, 2, figsize=(8.0, 4.7), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.045, 1, 0.955))
@@ -80,8 +80,8 @@ if __name__ == "__main__":
         ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         ax.grid(alpha=0.6)
     finish(fig, "01-wave-regimes",
-           "Four training snapshots from the equal-family hard-P128 dataset used by the epoch-40 C27 checkpoint, chosen at the median sampled DNO error within each family. The peak wavenumber is the strongest nonzero surface Fourier mode; a is half the surface range. Snapshot row IDs are in plot-data.npz.",
-           "Equal-family hard-P128 training snapshots · kₚ from the surface spectrum · a = (max η − min η)/2")
+           "Four training snapshots with a spectral cutoff at mode 128, chosen at the median sampled learned-DNO error within each family. The peak wavenumber is the strongest nonzero surface Fourier mode; a is half the surface range. Snapshot row IDs are in plot-data.npz.",
+           "Training snapshots · cutoff at mode 128 · kₚ from the surface spectrum · a = (max η − min η)/2")
 
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.9), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.06, 1, 0.94))
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         ax.grid(axis="y", which="major")
         ax.legend(loc="upper left", fontsize=7)
     finish(fig, "02-dno-class-errors",
-           "Measured epoch-40 C27 relative L2 error against the stored hard-P128 DNO targets: 512 uniformly sampled rows per family from each of the saved training and test splits. Complete simulations belong to only one split. Points and bars show medians and interquartile ranges. Right panel uses test rows only, grouped by the stated peak-wavenumber depth bins; missing groups contain no sampled rows. These are sampled errors, not exhaustive dataset statistics.",
+           "Learned-DNO relative L2 error against the stored DNO targets with a spectral cutoff at mode 128: 512 uniformly sampled rows per family from each of the saved training and test splits. Complete simulations belong to only one split. Points and bars show medians and interquartile ranges. Right panel uses test rows only, grouped by the stated peak-wavenumber depth bins; missing groups contain no sampled rows. These are sampled errors, not exhaustive dataset statistics.",
            "512 rows / family / split · median + interquartile range · simulation-disjoint train/test split")
 
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.65), layout="constrained")
@@ -118,13 +118,13 @@ if __name__ == "__main__":
         for family in range(4):
             selected = roll[f"{field}_error"][1:, roll["family"] == family]
             ax.plot(roll["tau"][1:], np.median(selected, axis=1), color=COLORS[family], lw=1, alpha=0.85, label=FAMILIES[family])
-        median_band(ax, roll["tau"][1:], roll[f"{field}_error"][1:], CS, "Pooled C27")
+        median_band(ax, roll["tau"][1:], roll[f"{field}_error"][1:], CS, "Pooled learned DNO")
         ax.set(title=title, xlabel="Normalized time $t/T$", ylabel="Relative $L^2$ error", yscale="log", xlim=(0, 1))
         ax.grid(axis="y")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncols=5, frameon=False)
     finish(fig, "03-trajectory-errors",
-           "Epoch-40 C27 trajectory errors on 32 parameter-stratified simulations per family from the saved test split (128 total). The black curve and shading are the pooled median and interquartile range; thin colored curves are family medians. Times are normalized separately by T=20 for Stokes/JONSWAP-TMA and T=200 for Tanaka/Benjamin–Feir. All 128 reference solves are valid and saved predictions are finite with positive fluid depth. Learned inference uses FP32 with FP64 physics and integration, without adaptive damping. This is a selected test panel, not the complete test set. No matched vanilla-FNO baseline is included.",
+           "Learned-DNO trajectory errors on 32 parameter-stratified simulations per family from the test split (128 total). The black curve and shading are the pooled median and interquartile range; thin colored curves are family medians. Times are normalized separately by T=20 for Stokes/JONSWAP-TMA and T=200 for Tanaka/Benjamin–Feir. All 128 reference solves are valid and saved predictions are finite with positive fluid depth. Learned inference uses FP32 with FP64 physics and integration, without adaptive damping. This is a selected test panel, not the complete test set. No matched vanilla-FNO baseline is included.",
            panel_note + " · T = 20 or 200; normalized time")
 
     fig, axes = plt.subplots(3, 2, figsize=(8.2, 7.1), layout="constrained")
@@ -137,19 +137,19 @@ if __name__ == "__main__":
         raw_error = np.linalg.norm(prediction - truth) / np.linalg.norm(truth)
         aligned_error = float(roll[f"{name}_aligned_error"][-1])
         axes[0, col].plot(times, roll[f"{name}_shift"] / LENGTH, color=C27)
-        axes[0, col].set(title=f"{'Stokes' if name == 'stokes' else 'Isolated Tanaka'} · case {int(roll[f'{name}_case_id'])}", xlabel="$t$", ylabel=r"Translation $\Delta x/L$")
+        axes[0, col].set(title="Stokes" if name == "stokes" else "Isolated Tanaka", xlabel="$t$", ylabel=r"Translation $\Delta x/L$")
         axes[0, col].ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         for row, values, error, title in ((1, prediction, raw_error, "Unaligned"), (2, aligned, aligned_error, "Translation-aligned")):
             axes[row, col].plot(x, truth, color=CS, lw=1.7, label="CS reference")
-            axes[row, col].plot(x, values, color=C27, ls="--", label="C27")
+            axes[row, col].plot(x, values, color=C27, ls="--", label="Learned DNO")
             axes[row, col].set(title=f"{title} · $t={times[-1]:g}$ · error {100 * error:.3g}%", xlabel="$x/L$", ylabel=r"$\eta(x,t)$", xlim=(0, 1))
             axes[row, col].ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         for ax in axes[:, col]:
             ax.grid(alpha=0.7)
     fig.legend(*axes[1, 0].get_legend_handles_labels(), loc="upper center", ncols=2, frameon=False)
     finish(fig, "04-traveling-wave-accuracy",
-           "Phase drift and final unaligned/aligned surface profiles for median-terminal-error Stokes and isolated Tanaka cases in the current test panel. Isolated Tanaka cases are identified from their single-wave parameter groups. Translation minimizes the periodic surface L2 discrepancy by Fourier interpolation. For Stokes the shift is unwrapped modulo one carrier wavelength, resolving the equivalent periodic minimizers. Alignment is diagnostic only; the raw errors are shown as well.",
-           "Top: continuous Fourier alignment · middle: raw prediction · bottom: aligned prediction · current TEST panel")
+           "Phase drift and final unaligned/aligned surface profiles for median-terminal-error Stokes and isolated Tanaka cases in the held-out test panel. Isolated Tanaka cases are identified from their single-wave parameter groups. Translation minimizes the periodic surface L2 discrepancy by Fourier interpolation. For Stokes the shift is unwrapped modulo one carrier wavelength, resolving the equivalent periodic minimizers. Alignment is diagnostic only; the raw errors are shown as well.",
+           "Top: continuous Fourier alignment · middle: raw prediction · bottom: aligned prediction · held-out test cases")
 
     # First strong crest-amplification event, with a fixed coordinate recentering.
     truth = roll["collision_truth_eta"]
@@ -168,15 +168,15 @@ if __name__ == "__main__":
         predicted = np.roll(pred[index], 512 - center)
         error = np.linalg.norm(actual - predicted) / np.linalg.norm(actual)
         ax.plot(x - 0.5, actual, color=CS, label="CS reference", lw=1.7)
-        ax.plot(x - 0.5, predicted, color=C27, ls="--", label="C27")
+        ax.plot(x - 0.5, predicted, color=C27, ls="--", label="Learned DNO")
         ax.set(title=f"{title} · $t={times[index]:.1f}$", xlabel=r"$(x-x_c)/L$", xlim=(-0.5, 0.5))
         ax.text(0.97, 0.93, rf"$e_\eta$ = {error:.2%}", transform=ax.transAxes, ha="right", va="top", fontsize=8)
         ax.grid(alpha=0.6)
     axes[0].set_ylabel(r"$\eta(x,t)$")
     fig.legend(*axes[0].get_legend_handles_labels(), loc="upper center", ncols=2, frameon=False)
     finish(fig, "05-tanaka-collision",
-           f"Representative two-wave Tanaka interaction from the current test panel, simulation {int(roll['collision_case_id'])}, h={float(roll['collision_depth']):.6g}. The displayed event is an early local maximum of crest amplification, not a tracked-crest estimate of collision time. All panels use identical axes and the same fixed spatial recentering around the reference event crest; the learned profiles are not individually aligned. This supplies the draft's interaction illustration without claiming an unverified collision-time statistic.",
-           f"Tanaka case {int(roll['collision_case_id'])} · fixed recentering of both methods · event selected from reference crest amplification")
+           f"Representative two-wave Tanaka interaction from the held-out test panel, h={float(roll['collision_depth']):.6g}. The displayed event is an early local maximum of crest amplification, not a tracked-crest estimate of collision time. All panels use identical axes and the same fixed spatial recentering around the reference event crest; the learned profiles are not individually aligned. This supplies the draft's interaction illustration without claiming an unverified collision-time statistic.",
+           "Two-wave Tanaka interaction · fixed recentering of both methods · event selected from reference crest amplification")
 
     fig, axes = plt.subplots(3, 2, figsize=(8.8, 7.3), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.04, 1, 0.96))
@@ -192,7 +192,7 @@ if __name__ == "__main__":
         k0 = int(1 + np.argmax(energies[0][0, 1:]))
         limit = min(128, max(24, 4 * k0))
         scale = max(energies[0][:, 1:limit + 1].max(), energies[1][:, 1:limit + 1].max())
-        for row, (energy, label) in enumerate(zip(energies, ("CS reference", "C27"), strict=True)):
+        for row, (energy, label) in enumerate(zip(energies, ("CS reference", "Learned DNO"), strict=True)):
             mesh = axes[row, col].pcolormesh(times, np.arange(1, limit + 1),
                 np.log10(np.maximum(energy[:, 1:limit + 1].T / scale, 1e-8)),
                 vmin=-7, vmax=0, cmap="magma", shading="auto", rasterized=True)
@@ -204,7 +204,7 @@ if __name__ == "__main__":
             # Identify the symmetric seeded pair, not higher harmonics.
             candidates = np.arange(1, k0)
             q = int(candidates[np.argmax(np.minimum(initial[k0 - candidates], initial[k0 + candidates]))])
-            for energy, color, label, style in zip(energies, (CS, C27), ("CS reference", "C27"), ("-", "--"), strict=True):
+            for energy, color, label, style in zip(energies, (CS, C27), ("CS reference", "Learned DNO"), ("-", "--"), strict=True):
                 ratio = (energy[:, k0 - q] + energy[:, k0 + q]) / energy[:, k0]
                 axes[2, col].plot(times, ratio, color=color, label=label, ls=style)
             axes[2, col].set(title=f"Seeded sidebands: $n_0={k0}$, $q={q}$", xlabel="$t$", ylabel=r"$R_{\mathrm{sb}}(t)$")
@@ -220,14 +220,14 @@ if __name__ == "__main__":
             axes[2, col].legend(frameon=False, ncols=3)
         axes[2, col].grid(alpha=0.6)
     finish(fig, "06-spectral-transfer",
-           "Quadratic modal-energy evolution in representative Benjamin–Feir and JONSWAP/TMA test cases. Each column shares one color scale across the two methods, normalized by its joint maximum E*. One-sided Fourier energies include conjugate-mode multiplicities. The Benjamin–Feir carrier and strongest symmetric seeded sideband pair are identified from the initial energy spectrum. Sea bands are fixed at n<0.5np, 0.5np<=n<=1.5np and n>1.5np, excluding the zero mode. Solid/dashed band curves denote CS/C27.",
-           "Matched color scales within each column · sea bands: solid CS / dashed C27 · g = 1")
+           "Quadratic modal-energy evolution in representative Benjamin–Feir and JONSWAP/TMA test cases. Each column shares one color scale across the two methods, normalized by its joint maximum E*. One-sided Fourier energies include conjugate-mode multiplicities. The Benjamin–Feir carrier and strongest symmetric seeded sideband pair are identified from the initial energy spectrum. Sea bands are fixed at n<0.5np, 0.5np<=n<=1.5np and n>1.5np, excluding the zero mode. Solid/dashed band curves denote the Craig–Sulem reference and learned DNO, respectively.",
+           "Matched color scales within each column · sea bands: solid CS / dashed learned DNO · g = 1")
 
     fig = plt.figure(figsize=(9.3, 4.7), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.06, 1, 0.94))
     grid = fig.add_gridspec(2, 4)
     ax = fig.add_subplot(grid[:, :2])
-    median_band(ax, roll["ham_tau"], roll["ham_pred"], C27, "C27 states")
+    median_band(ax, roll["ham_tau"], roll["ham_pred"], C27, "Learned DNO states")
     median_band(ax, roll["ham_tau"], roll["ham_truth"], CS, "CS states")
     ax.set(title="(a) Physical Hamiltonian · pooled", xlabel="Normalized time $t/T$", ylabel=r"Signed drift $\delta_H(t)$", yscale="symlog", xlim=(0, 1))
     ax.set_yscale("symlog", linthresh=1e-8)
@@ -242,7 +242,7 @@ if __name__ == "__main__":
         ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
         ax.grid(alpha=0.5)
     finish(fig, "07-hamiltonian-drift",
-           "Independent physical Hamiltonian check: order-6 Craig–Sulem with padding factor 8 is freshly evaluated on both the reference and C27 predicted states at 26 saved times per case. It is not the archived learned-DNO energy diagnostic. The pooled panel shows signed median and interquartile range on a symmetric-log scale with linear threshold 1e-8; the four examples use linear signed axes. Saved states and Hamiltonian evaluation use float64. Energy drift is not assumed to equal the CS numerical floor; the underlying arrays are included in plot-data.npz.",
+           "Independent physical Hamiltonian check: order-6 Craig–Sulem with padding factor 8 is evaluated on both the reference and learned-DNO predicted states at 26 saved times per case. The pooled panel shows signed median and interquartile range on a symmetric-log scale with linear threshold 1e-8; the four examples use linear signed axes. Saved states and Hamiltonian evaluation use float64. Energy drift is not assumed to equal the CS numerical floor; the underlying arrays are included in plot-data.npz.",
            "H evaluated with CS-6 at predicted states · 26 times × 128 cases · shaded bands = IQR")
 
     fig, ax = plt.subplots(figsize=(6.8, 4.15), layout="constrained")
@@ -253,7 +253,8 @@ if __name__ == "__main__":
         milliseconds = 1000 * np.array([row["seconds"] for row in records])
         slope = np.polyfit(np.log(resolutions), np.log(milliseconds), 1)[0]
         color = C27 if i == 0 else plt.colormaps["copper"](0.15 + 0.19 * i)
-        ax.loglog(resolutions, milliseconds, "o-", color=color, lw=2 if i == 0 else 1.2, label=f"{method}  ($p={slope:.2f}$)")
+        label = "Learned DNO" if method == "C27" else method
+        ax.loglog(resolutions, milliseconds, "o-", color=color, lw=2 if i == 0 else 1.2, label=f"{label}  ($p={slope:.2f}$)")
     reference = resolutions * np.log2(resolutions)
     ax.loglog(resolutions, reference / reference[2] * 0.6, "--", color="#9ca6af", label=r"$N_x\log N_x$ (scaled)")
     ax.set(title="Single DNO evaluation · warmed CPU execution", xlabel="Spatial resolution $N_x$", ylabel="Median latency (ms)", xticks=resolutions)
@@ -261,7 +262,7 @@ if __name__ == "__main__":
     ax.grid(which="major")
     ax.legend(frameon=False, ncols=2, loc="upper left")
     finish(fig, "08-dno-complexity-scaling",
-           "Fresh CPU-only, batch-one DNO latency on an AMD EPYC 9124 host with an eight-logical-CPU affinity. Learned inference uses FP32; CS and physics use FP64. Seven synchronized measurements follow JIT warm-up at each resolution and order. One current-test Stokes initial condition is Fourier-resampled. CS padding is 8. Fitted log-log exponents over N=128..2048 are empirical finite-range summaries, not asymptotic proofs. C27 has no M input. These CPU measurements do not establish GPU performance.",
+           "CPU-only, batch-one DNO latency on an AMD EPYC 9124 host with an eight-logical-CPU affinity. Learned inference uses FP32; CS and physics use FP64. Seven synchronized measurements follow JIT warm-up at each resolution and order. One held-out Stokes initial condition is Fourier-resampled. CS padding is 8. Fitted log-log exponents over N=128..2048 are empirical finite-range summaries, not asymptotic proofs. The learned DNO does not depend on truncation order M. These CPU measurements do not establish GPU performance.",
            "AMD EPYC 9124 CPU · 8 logical CPUs · FP32 net / FP64 physics · batch 1 · 7 repeats · JIT excluded")
 
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.8), layout="constrained")
@@ -269,7 +270,7 @@ if __name__ == "__main__":
     cs_records = sorted([row for row in benchmark["rollouts"] if row["order"]], key=lambda row: row["order"])
     neural = next(row for row in benchmark["rollouts"] if row["method"] == "C27")
     axes[0].plot([row["order"] for row in cs_records], [row["seconds"] for row in cs_records], "o-", color=CS, label="Craig–Sulem")
-    axes[0].axhline(neural["seconds"], color=C27, lw=2, label="C27 (independent of $M$)")
+    axes[0].axhline(neural["seconds"], color=C27, lw=2, label="Learned DNO (independent of $M$)")
     axes[0].set(title="(a) Fixed-horizon runtime", xlabel="Craig–Sulem order $M$", ylabel="Trajectory time (s)", xticks=[2, 4, 6, 8, 10], ylim=(0, neural["seconds"] * 1.17))
     axes[0].legend(frameon=False, loc="upper left")
     for row in benchmark["rollouts"]:
@@ -277,18 +278,22 @@ if __name__ == "__main__":
             continue
         color = C27 if row["method"] == "C27" else CS
         axes[1].loglog(row["seconds"], row["eta_trajectory_error"], "o", color=color, ms=7)
-        axes[1].annotate(row["method"], (row["seconds"], row["eta_trajectory_error"]), xytext=(6, 5), textcoords="offset points", fontsize=8, color=color)
+        label = "Learned DNO" if row["method"] == "C27" else row["method"]
+        axes[1].annotate(label, (row["seconds"], row["eta_trajectory_error"]),
+                         xytext=(-6 if row["method"] == "C27" else 6, 5), ha="right" if row["method"] == "C27" else "left",
+                         textcoords="offset points", fontsize=8, color=color)
     axes[1].set(title="(b) Accuracy–runtime comparison", xlabel="Trajectory time (s)", ylabel=r"$E_{\eta,\mathrm{traj}}$ vs. CS-10")
     axes[1].margins(x=0.28, y=0.2)
     for ax in axes:
         ax.grid(alpha=0.6)
     finish(fig, "09-runtime-tradeoff",
-           "Fresh short-horizon CPU benchmark on one current-test Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Learned inference uses FP32 with FP64 CS and integration. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon evaluation panel.",
+           "Short-horizon CPU benchmark on one held-out Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Learned inference uses FP32 with FP64 CS and integration. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon evaluation panel.",
            "CPU · same GL2 integration path · N = 256 · T = 1 · Δt = 0.01 · 3 repeats · compile time excluded")
 
-    readme = (OUT / "README.md").read_text().split("\n## Figure captions")[0]
+    readme, _, captions = (OUT / "README.md").read_text().partition("\n## Figure captions")
+    _, heading, remaining_sections = captions.partition("\n## ")
     (OUT / "README.md").write_text(readme.rstrip() + "\n\n## Figure captions\n\n" +
-        "\n\n".join(f"### {name}\n\n{text}" for name, text in CAPTIONS.items()) + "\n")
+        "\n\n".join(f"### {name}\n\n{text}" for name, text in CAPTIONS.items()) + "\n" + heading + remaining_sections)
     with PdfWriter() as writer:
         for name in NAMES:
             writer.append(FIGURES / f"{name}.pdf")
