@@ -1,4 +1,4 @@
-"""Experimental copy of the trainer for bounded training-speed benchmarks."""
+"""Experimental trainer with packed execution and optional bounded benchmarks."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ from checkpoint_util import (  # noqa: E402
 def main() -> None:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
-    parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
+    parser.add_argument("--model", choices=("fno", "cs_dno", "cs_dno_no_baseline"), default="fno")
     parser.add_argument(
         "--cs_n_polys",
         type=int,
@@ -122,10 +122,10 @@ def main() -> None:
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
-    parser.add_argument("--benchmark_output", type=Path, required=True, help="Benchmark training updates without saving weights or changing run metadata.")
+    parser.add_argument("--benchmark_output", type=Path, help="Benchmark training updates without saving weights; omit to train and save checkpoints.")
     parser.add_argument("--benchmark_steps", type=int, default=64)
-    parser.add_argument("--benchmark_sync_interval", type=int, default=16)
-    parser.add_argument("--benchmark_variant", choices=("original", "packed"), default="original")
+    parser.add_argument("--metric_interval", type=int, default=16)
+    parser.add_argument("--execution", choices=("original", "packed"), default="packed")
     # Additional losses; a zero weight disables each one.
     parser.add_argument(
         "--translation_tangent_weight",
@@ -243,7 +243,7 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
-    if args.benchmark_steps < 1 or args.benchmark_sync_interval < 1:
+    if args.benchmark_steps < 1 or args.metric_interval < 1:
         parser.error("Benchmark step count and synchronization interval must be positive")
     start_time = perf_counter()
 
@@ -294,7 +294,7 @@ def main() -> None:
     target_absmax = float(cast(float, stats["target_absmax"]))
     target_scale = target_absmax if target_absmax > 0 else 1.0
     # Construct the selected model and initialize its parameters.
-    if args.model == "cs_dno":
+    if args.model in ("cs_dno", "cs_dno_no_baseline"):
         model = CraigSulemDNO(
             width=args.width,
             n_blocks=args.n_blocks,
@@ -305,6 +305,7 @@ def main() -> None:
             use_half_deriv=args.cs_use_half_deriv,
             use_hilbert=args.cs_use_hilbert,
             mult_hidden=args.cs_mult_hidden,
+            analytic_baseline=args.model == "cs_dno",
             domain_length=domain_length,
             xi_scale=xi_scale,
             eta_scale=eta_scale,
@@ -379,7 +380,7 @@ def main() -> None:
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
     def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array) -> jax.Array:
-        if args.benchmark_variant == "original":
+        if args.execution == "original":
             return cast(jax.Array, model.apply(variables, inputs, depth))
         multiplier_model = DepthAwareMultiplier(args.latent, domain_length, 5.0, args.cs_mult_hidden)
 
@@ -716,7 +717,7 @@ def main() -> None:
         benchmark_indices = np.random.default_rng(args.seed).permutation(train_indices)[:(args.benchmark_steps + 1) * args.batch_size]
         batch = jax.block_until_ready(next(prefetch_batches(benchmark_indices[:args.batch_size], None)))
         validation = []
-        if args.benchmark_variant != "original":
+        if args.execution != "original":
             comparisons = []
             for apply_fn in (cast(ApplyFn, model.apply), apply_model):
                 objective = partial(compute_training_loss, apply_fn=apply_fn)
@@ -760,7 +761,7 @@ def main() -> None:
         if driver.cuProfilerStop() != 0:
             raise RuntimeError("CUDA profiler stop failed")
         pipelines = []
-        intervals = (1, args.benchmark_sync_interval) if args.benchmark_sync_interval > 1 else (1,)
+        intervals = (1, args.metric_interval) if args.metric_interval > 1 else (1,)
         for repeat in range(3):
             for sync_interval in intervals if repeat % 2 == 0 else intervals[::-1]:
                 stream = prefetch_batches(benchmark_indices, None)
@@ -798,7 +799,7 @@ def main() -> None:
         output = args.benchmark_output
         output.parent.mkdir(parents=True, exist_ok=True)
         output.with_suffix(".hlo").write_text(executable.as_text())
-        report = {"variant": args.benchmark_variant, "validation": validation,
+        report = {"variant": args.execution, "validation": validation,
                   "validation_batch_size": args.batch_size if validation else 0,
                   "devices": [device.device_kind for device in devices], "batch_size": args.batch_size,
                   "hadamard_interval": args.hadamard_interval, "hadamard_microbatch": args.hadamard_microbatch,
@@ -831,36 +832,41 @@ def main() -> None:
         tangent_loss_sum = tangent_sample_count = 0.0
         hadamard_loss_sum = 0.0
         hadamard_batch_evaluation_count = 0.0
+        pending_train_metrics = []
         train_bar = tqdm(
             prefetch_batches(train_indices, epoch_rng),
             total=train_steps_per_epoch,
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for eta_b, xi_b, gxi_b, depth_b, tanaka_b in train_bar:
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(train_bar, 1):
             batch_size = int(eta_b.shape[0])
-            train_batch_sizes.append(batch_size)
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
                 training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, tanaka_b
             )
-            batch_loss, batch_metrics = jax.device_get((batch_loss, batch_metrics))
-            batch_loss_value = float(batch_loss)
-            batch_losses.append(batch_loss_value)
-            # Skipped Hadamard batches add zero loss and zero to the evaluation count.
-            hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
-            hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
-            # Translation loss is a mean over selected nonflat Tanaka rows only.
-            selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * batch_size
-            tangent_sample_count += selected_count
-            tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
-            # Other losses are batch means; convert them to sums over samples.
-            for name, batch_mean in batch_metrics.items():
-                loss_sums[name] = (
-                    loss_sums.get(name, 0.0) + float(batch_mean) * batch_size
-                )
-            train_bar.set_postfix(loss=batch_loss_value, refresh=False)
+            pending_train_metrics.append((batch_loss, batch_metrics, batch_size))
+            if len(pending_train_metrics) < args.metric_interval and batch_index < train_steps_per_epoch:
+                continue
+            for batch_loss, batch_metrics, buffered_size in jax.device_get(pending_train_metrics):
+                batch_loss_value = float(batch_loss)
+                if not np.isfinite(batch_loss_value):
+                    raise FloatingPointError(f"Non-finite training loss at epoch {epoch}, batch {batch_index}")
+                batch_losses.append(batch_loss_value)
+                train_batch_sizes.append(buffered_size)
+                # Skipped Hadamard batches add zero loss and zero to the evaluation count.
+                hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
+                hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
+                # Translation loss is a mean over selected nonflat Tanaka rows only.
+                selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * buffered_size
+                tangent_sample_count += selected_count
+                tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
+                # Other losses are batch means; convert them to sums over samples.
+                for name, batch_mean in batch_metrics.items():
+                    loss_sums[name] = loss_sums.get(name, 0.0) + float(batch_mean) * buffered_size
+            pending_train_metrics.clear()
+            train_bar.set_postfix(loss=batch_losses[-1], refresh=False)
 
         # Require one optimizer update per batch and matching counters across GPUs.
         epoch_end_step, epoch_end_optimizer_count = training_counter_values(
@@ -907,6 +913,8 @@ def main() -> None:
             + args.mode_balanced_weight * val_mode_loss
             + args.translation_tangent_weight * val_tangent_loss
         )
+        if not np.isfinite((val_loss, val_hadamard_loss)).all():
+            raise FloatingPointError(f"Non-finite validation loss at epoch {epoch}")
         epoch_record = {
             "epoch": epoch,
             "train_loss": train_loss,

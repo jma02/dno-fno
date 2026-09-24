@@ -31,6 +31,7 @@ VariableState = FrozenVariableDict | dict[str, Any]
 
 def _model(
     *,
+    analytic_baseline: bool = True,
     n_polys: int = 3,
     use_first_deriv: bool = True,
     use_second_deriv: bool = True,
@@ -47,6 +48,7 @@ def _model(
         use_half_deriv=use_half_deriv,
         use_hilbert=use_hilbert,
         mult_hidden=16,
+        analytic_baseline=analytic_baseline,
         domain_length=2.0 * pi,
     )
 
@@ -80,6 +82,8 @@ def _learned_residual(
 ) -> jnp.ndarray:
     inputs = jnp.stack((eta, xi), axis=-1)
     output = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
+    if not model.analytic_baseline:
+        return output
     baseline = model._linear_baseline(xi, depth) + model._g1_baseline(eta, xi, depth)
     return output - baseline
 
@@ -117,8 +121,8 @@ def test_order_two_is_quadratic_near_zero() -> None:
     assert float(quotients[2]) < 0.65 * float(quotients[1])
 
 
-def test_order_two_residual_is_self_adjoint() -> None:
-    """Tied real multiplier sandwiches remain self-adjoint after the lift."""
+def test_learned_operator_is_self_adjoint_and_linear() -> None:
+    """Tied real filters preserve both properties with or without a constant input."""
     eta, xi, depth = _state()
     psi = (
         jnp.roll(xi, 9, axis=-1)
@@ -127,16 +131,44 @@ def test_order_two_residual_is_self_adjoint() -> None:
             None, :
         ]
     )
-    model = _model()
     inputs = jnp.stack((eta, xi), axis=-1)
-    variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
+    for analytic_baseline in (True, False):
+        model = _model(analytic_baseline=analytic_baseline)
+        variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
+        residual_xi = _learned_residual(model, variables, eta, xi, depth)
+        residual_psi = _learned_residual(model, variables, eta, psi, depth)
+        lhs = jnp.vdot(psi, residual_xi)
+        rhs = jnp.vdot(residual_psi, xi)
+        scale = jnp.maximum(jnp.maximum(jnp.abs(lhs), jnp.abs(rhs)), 1e-14)
+        assert float(jnp.abs(lhs - rhs) / scale) < 1e-11
+        combined = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+        expected = 0.3 * residual_xi - 0.7 * residual_psi
+        assert float(jnp.linalg.norm(combined - expected) / jnp.linalg.norm(expected)) < 1e-11
 
-    residual_xi = _learned_residual(model, variables, eta, xi, depth)
-    residual_psi = _learned_residual(model, variables, eta, psi, depth)
-    lhs = jnp.vdot(psi, residual_xi)
-    rhs = jnp.vdot(residual_psi, xi)
-    scale = jnp.maximum(jnp.maximum(jnp.abs(lhs), jnp.abs(rhs)), 1e-14)
-    assert float(jnp.abs(lhs - rhs) / scale) < 1e-11
+
+def test_baseline_free_flat_surface_is_trainable() -> None:
+    """The full neural operator can learn nonzero value and first variation at eta=0."""
+    eta, xi, depth = _state()
+    model = _model(analytic_baseline=False)
+    inputs = jnp.stack((jnp.zeros_like(eta), xi), axis=-1)
+    variables = model.init(jax.random.PRNGKey(4), inputs, depth)
+    assert jnp.all(model.apply(variables, inputs, depth) == 0)
+    target = model._linear_baseline(xi, depth)[..., None]
+
+    def flat_loss(params: Any) -> jax.Array:
+        prediction = cast(jax.Array, model.apply({"params": params}, inputs, depth))
+        return jnp.mean((prediction - target) ** 2)
+
+    loss, gradient = jax.value_and_grad(flat_loss)(variables["params"])
+    updated = jax.tree.map(lambda p, g: p - 1e-3 * g, variables["params"], gradient)
+    assert float(flat_loss(updated)) < float(loss)
+    active = _activate_residual(variables)
+    value, variation = jax.jvp(
+        lambda surface: _learned_residual(model, active, surface, xi, depth),
+        (jnp.zeros_like(eta),), (eta,),
+    )
+    assert float(jnp.linalg.norm(value)) > 1e-14
+    assert float(jnp.linalg.norm(variation)) > 1e-14
 
 
 def test_eta_feature_configuration_controls_trunk_shape() -> None:
@@ -144,6 +176,7 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
     configurations = (
+        (_model(analytic_baseline=False), 8),
         (_model(n_polys=1), 5),
         (_model(n_polys=2, use_second_deriv=False), 5),
         (
@@ -169,7 +202,8 @@ def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
-        test_order_two_residual_is_self_adjoint,
+        test_learned_operator_is_self_adjoint_and_linear,
+        test_baseline_free_flat_surface_is_trainable,
         test_eta_feature_configuration_controls_trunk_shape,
     )
     for test in tests:
