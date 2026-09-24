@@ -125,21 +125,36 @@ Fresh short-horizon CPU benchmark on one current-test Stokes initial condition, 
 ## Additional neural-versus-classical comparison (outside the draft bundle)
 
 [10-neural-vs-classical.png](figures/10-neural-vs-classical.png) and its
-[vector PDF](figures/10-neural-vs-classical.pdf) compare both neural models
-(16 or 320 branches per group) with CS orders 1–6 on the same 128 held-out cases.
-Each point is labeled by the classical order. Horizontal position is classical
-runtime divided by neural runtime; vertical position is classical median
-terminal surface error divided by neural median error. The green upper-right
-region means both recorded runtime and median error favor the neural model.
-The only such point is N16 versus M3 on Benjamin–Feir. M6 is shown at zero
-because it is the error reference, not an exact-solution guarantee.
+[vector PDF](figures/10-neural-vs-classical.pdf) show the archived **batch-32**
+runtimes against median terminal surface relative-L2 error (%). Lower and left
+is better. The small neural model uses 16 branches per group (172,608 parameters);
+the full model uses 320 (1,342,400 parameters). All errors use the same 32 test
+cases per wave family. M6 is the reference, so its zero error is omitted from
+the log axis; a dotted line shows its runtime. Axis ranges differ by family.
 
-This is exploratory: classical GPU timings exclude compilation and host
-transfers; archived neural timings include them. Neither the small apparent
-speed advantage nor empty green regions establish matched warmed performance.
-The figure does not replace the separate CPU benchmark or modify the draft ZIP.
-It reads the saved CS sweep NPZs and neural evaluation summaries directly:
+The archived neural timer includes compilation and host transfers; the
+classical timer does not. Figure 10 therefore does not establish execution-only
+speed differences. It is retained separately from the single-rollout benchmark.
+
+The single-rollout benchmark uses the first case in each saved test panel,
+with shape `(1, 1024)`, not a batch time divided by 32. Every method runs the full
+T=20 (Stokes/JONSWAP-TMA) or T=200 (Tanaka/Benjamin–Feir) trajectory, saving the
+same 251 states. It uses the same dt=0.01, four-iteration GL2 integrator, hard
+mode-128 cutoff and CS padding 8. Classical arithmetic and integration are FP64;
+learned inference is FP32. Each whole rollout is compiled explicitly and warmed
+using four output intervals before one synchronized timing measurement. Loading,
+compilation, warm-up, transfers and error calculations are outside that timer.
+These are individual timing samples, not averages across the full test panel.
+
+Render the simple batch plot, or collect and render the single-rollout version
+(`11-single-rollout-warm.png` and `.pdf`) on an idle GPU:
 
 ```sh
 UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py
+UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --timings outputs/single_rollout_timing_20260923.json
 ```
+
+The second plot combines the new single-case timings with the existing 32-case
+error statistics; it does not present one case's error as a family median.
+Neither figure changes the manuscript or its ZIP. No data are uploaded.
