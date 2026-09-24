@@ -25,9 +25,9 @@ from flax.core import Scope  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, DepthAwareMultiplier  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
-VARIANTS = ("original", "g1", "packed", "cached", "all", "batched")
+VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
 
 
 def build_variant(
@@ -37,7 +37,14 @@ def build_variant(
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
     cached = None
-    if variant in ("cached", "all", "batched"):
+    k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
+    surface_ops = jnp.stack([symbol for enabled, symbol in (
+        (model.use_first_deriv, 1j * k),
+        (model.use_second_deriv, -(k ** 2)),
+        (model.use_half_deriv, jnp.sqrt(k)),
+        (model.use_hilbert, -1j * jnp.sign(k)),
+    ) if enabled])
+    if variant in ("cached", "all", "batched", "surface", "front"):
         multiplier = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden)
         # This is a per-checkpoint/grid/depth inference constant, not a training cache.
         cached = jax.jit(lambda d: tuple(multiplier.apply(
@@ -50,15 +57,39 @@ def build_variant(
     @jax.jit
     def forward(eta: jax.Array, xi: jax.Array) -> jax.Array:
         spatial, multipliers = [], []
+        front_fields = None
 
         def intercept(
             next_fun: Callable[..., Any], call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
             context: nn.module.InterceptorContext,
         ) -> Any:
+            nonlocal front_fields
             module = context.module
+            if variant == "front" and isinstance(module, CraigSulemDNO) and context.method_name == "__call__":
+                inputs, log_depth = call_args
+                spectra = jnp.fft.rfft(jnp.stack((inputs[..., 0], inputs[..., 1] * model.xi_scale), axis=1))
+                h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
+                base_k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1)
+                symbol = base_k[None, :] * jnp.tanh(h * base_k[None, :])
+                filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
+                packed_hat = jnp.concatenate((
+                    surface_ops[None, :, :] * spectra[:, :1, :],
+                    (symbol[:, None, :] * spectra[:, 1:, :])[:, :int(include_baselines), :],
+                    filters * spectra[:, 1:, :],
+                ), axis=1)
+                front_fields = jnp.fft.irfft(packed_hat, n=nx, axis=-1)
+            if variant in ("surface", "front") and isinstance(module, nn.Dense) and module.name == "eta_feat_proj":
+                features = call_args[0]
+                eta_norm = features[..., 0]
+                transformed = (front_fields[:, :surface_ops.shape[0], :] if front_fields is not None
+                               else jnp.fft.irfft(surface_ops[None, :, :] * jnp.fft.rfft(eta_norm)[:, None, :], n=nx))
+                call_args = (jnp.concatenate((features[..., :model.n_polys],
+                                             jnp.moveaxis(transformed, 1, -1)), axis=-1),)
             if not include_baselines and context.method_name in ("_linear_baseline", "_g1_baseline"):
                 return jnp.zeros_like(call_args[0])
-            if context.method_name == "_g1_baseline" and variant in ("g1", "all", "batched"):
+            if front_fields is not None and context.method_name == "_linear_baseline":
+                return (front_fields[:, surface_ops.shape[0], :] / model.target_scale).astype(call_args[0].dtype)
+            if context.method_name == "_g1_baseline" and variant in ("g1", "all", "batched", "surface", "front"):
                 eta_norm, xi_norm, log_depth = call_args
                 eta_phys = (eta_norm * model.eta_scale).astype(jnp.float64)
                 xi_phys = (xi_norm * model.xi_scale).astype(jnp.float64)
@@ -66,7 +97,7 @@ def build_variant(
                 k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
                 symbol = k[None, :] * jnp.tanh(h * k[None, :])
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1)
-                if variant == "batched":
+                if variant in ("batched", "surface", "front"):
                     operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
                     fields = jnp.fft.irfft(operators * xi_hat[:, None, :], n=nx, axis=-1)
                     products_hat = jnp.fft.rfft(eta_phys[:, None, :] * fields, axis=-1)
@@ -84,7 +115,7 @@ def build_variant(
                 result = cached[block]
             else:
                 result = next_fun(*call_args, **call_kwargs)
-            if variant in ("packed", "all", "batched") and context.method_name == "__call__":
+            if variant in ("packed", "all", "batched", "surface", "front") and context.method_name == "__call__":
                 if isinstance(module, nn.Dense) and module.name == "phi_proj":
                     spatial.append(result)
                 elif is_multiplier:
@@ -95,8 +126,11 @@ def build_variant(
                         return jnp.zeros_like(xi_phys)
                     weights = jnp.concatenate(spatial, axis=-1)
                     filters = jnp.concatenate(multipliers, axis=-1)
-                    xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
-                    filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
+                    if front_fields is not None:
+                        filtered = jnp.moveaxis(front_fields[:, surface_ops.shape[0] + int(include_baselines):, :], 1, -1)
+                    else:
+                        xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
+                        filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
                     weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
                     spectrum = jnp.sum(filters * weighted_hat, axis=-1)
                     # Original per-group FFT outputs are unused and removed by XLA.
@@ -199,10 +233,10 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     labels = ("Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
-              "Previous combined", "Batch G₁ FFTs")
+              "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs")
     medians = [records[name]["median_us"] for name in VARIANTS]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
-    ax.barh(labels, medians, color=("#909ba3", "#bb5548", "#277da8", "#b98b36", "#589365", "#278475"))
+    ax.barh(labels, medians, color=("#909ba3", "#bb5548", "#277da8", "#b98b36", "#589365", "#278475", "#d66027", "#77539a"))
     ax.invert_yaxis()
     ax.set(xlabel="Warmed forward latency (µs); lower is better", xlim=(0, max(medians) * 1.25),
            title=f"Same {report['parameters']:,} weights · one sample · no time integrator")

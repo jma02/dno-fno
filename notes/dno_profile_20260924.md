@@ -337,6 +337,55 @@ classical runtime with this sweep and adds the candidate's measured5.2–5.3%
 incremental runtime savings. The PDF and PNG are regenerated; neither the
 manuscript nor the ZIP is changed.
 
+## Network input-transform packing
+
+The next network-only change keeps every feature and learned weight, but
+groups independent transforms earlier in the forward pass. First, the four
+surface-feature inverse FFTs (first, second and half derivatives, plus the
+Hilbert transform) are batched. Then one paired forward transform computes
+the normalized surface and physical Dirichlet spectra, and one batched inverse
+transform produces the four surface features, G0, and all32 filtered branch
+inputs. The FP64 G1 computation is unchanged. G0 is not combined with the
+final learned correction, unlike the previously rejected trial.
+
+The existing benchmark script implements these as `surface` and `front`;
+the rollout timer exposes `fused_surface` and `fused_front`. Both trainers,
+the production model, and all checkpoint weights remain unchanged.
+
+The latest600-call interleaved, warmed batch-one screen on GPU0 gave:
+
+| Implementation | Median forward latency | Compiler FFT calls |
+| --- | ---: | ---: |
+| Previous retained G1 batching | 201.67 us | 14 |
+| Also batch surface features | 178.50 us | 11 |
+| Pack the complete input stage | 162.10 us | 8 |
+
+The input-stage version reduces standalone latency by19.6%. Both new variants
+pass the48-state check across all four families, with maximum relative
+difference2.806e-8 from the unchanged production predictor. On Stokes,
+three alternating full single-rollout repeats give8.8729→8.2496 seconds
+(7.0% less time); all saved eta, xi and Gxi values are bitwise identical to
+the previous retained version. Surface batching alone gave8.8624→8.5302 seconds
+in its separate three-repeat trial. Remaining full-family results follow below.
+
+The fresh pre-change100-call trace contains40 kernels and9 device copies per
+forward call. Its three dense matrix multiplies account for6.77 us of traced
+GPU work, while FP32 transforms/scaling take29.24 us and FP64 transforms/scaling
+take42.44 us. This supports grouping transforms before reducing channels again.
+Trace timings include profiler overhead; the latency table is uninstrumented.
+
+The classical rollout already passes Fourier-space states directly into
+`_dno_series_hat`, so it has no analogous pair of physical-input FFTs to remove
+at each step. Its independent padded input transforms were already batched in
+the preceding classical optimization; the new surface features and learned
+branch inputs exist only in the neural model. Figure12 retains that optimized
+classical sweep.
+
+Raw artifacts are under `outputs/dno_fusion_20260924/network/`: `batched.nsys-rep`,
+`batched.sqlite`, `surface/results.json`, `front/results.json`,
+`rollout_stokes.json`, `front_rollout_stokes.json`, and
+`front_rollout_remaining.json`.
+
 ## Reproduce
 
 Use `scripts/profile_dno.py` with `CUDA_VISIBLE_DEVICES=0` and the project
