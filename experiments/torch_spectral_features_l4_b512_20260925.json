@@ -1,0 +1,282 @@
+{
+  "run_name": "torch_spectral_features_l4_b512_20260925",
+  "data_manifest": {
+    "source_volume": "dno-fno-train-data",
+    "source": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+    "seed": 24,
+    "sampling": "Uniform rows without replacement within each original split/family",
+    "family_counts": {
+      "train_1": 1024,
+      "train_2": 1024,
+      "train_3": 1024,
+      "train_4": 1024,
+      "validation_1": 256,
+      "validation_2": 256,
+      "validation_3": 256,
+      "validation_4": 256
+    },
+    "rows": 5120,
+    "train_simulations": 3977,
+    "validation_simulations": 970,
+    "train_validation_simulation_overlap": 0,
+    "arrays": {
+      "eta": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "dtype": "float32",
+        "sha256": "71aae1c2c94df991dd27e31b616a1f14ba661064d628cd7119739233d6bd3ac3"
+      },
+      "xi": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "dtype": "float32",
+        "sha256": "0794bf744e636c92c321dbd899dbb98d32a0bcea2cd139e54f9546170bfeab69"
+      },
+      "gxi": {
+        "shape": [
+          5120,
+          1024
+        ],
+        "dtype": "float32",
+        "sha256": "9c9c827fa6a318cc7bf46b8964ab01e487d3dd8acbb17f334c00d9c6bf162224"
+      },
+      "depth": {
+        "shape": [
+          5120
+        ],
+        "dtype": "float64",
+        "sha256": "ea9ec3566b8879e83e1df951d7f054bca17cd2456e1a1af5d3785690652ba686"
+      },
+      "family_id": {
+        "shape": [
+          5120
+        ],
+        "dtype": "int16",
+        "sha256": "c5f849f3cee7ce1ba34f4e5e426a4b275049c0a76daf897836fa96aec090382f"
+      },
+      "simulation_id": {
+        "shape": [
+          5120
+        ],
+        "dtype": "int64",
+        "sha256": "1dab406987949e2edb1ac97e6a19b5ab3d3c7866f23aba6db3c8ffb37ddaf287"
+      },
+      "dataset_split": {
+        "shape": [
+          5120
+        ],
+        "dtype": "<U10",
+        "sha256": "acae738bc2348ab7466bf4aa08399f61de36db9584602b94caee9462a8dcc4f9"
+      },
+      "x": {
+        "shape": [
+          1024
+        ],
+        "dtype": "float64",
+        "sha256": "ced0654ed6941913bc816e5d6e50f772618899dd4627202abb44fb5db4b79983"
+      },
+      "source_indices": {
+        "shape": [
+          5120
+        ],
+        "dtype": "int64",
+        "sha256": "a7af81feb72a8e28de8286514279806746045d116d601fa4dcc5812e2598dfd3"
+      }
+    }
+  },
+  "variants": {
+    "bf16_spectral_d2": {
+      "source": "/local-data/paper_equal_subset_20260924",
+      "device": "cuda",
+      "torch": "2.14.0+cu130",
+      "seed": 0,
+      "optimizer": "Muon transformer matrices + AdamW remainder",
+      "lr": 1e-05,
+      "gradient_ema_decay": 0.8,
+      "batch_size": 512,
+      "optimizer_steps": 24,
+      "epochs": 3,
+      "steps_per_epoch": 8,
+      "validation_every": 8,
+      "bf16": true,
+      "depth_per_stage": 2,
+      "architecture": "spectral",
+      "feature_scales": [
+        0.009168309159576893,
+        0.000639787467662245,
+        6.442860467359424e-05,
+        0.04620860144495964,
+        0.9633147120475769,
+        0.014789436012506485,
+        0.007697249297052622
+      ],
+      "parameters": 91584,
+      "training_rows": 4096,
+      "training_samples_seen": 12288,
+      "validation_rows": 1024,
+      "scope": "Fresh initialization; 4096 real training rows reshuffled each pass. All 1024 held-out validation rows, in batches of 64, after every 8 updates. Relative-L2 data loss only; spectral variant fits surface-feature RMS scales on training rows. Physical targets; no physics losses.",
+      "history": [
+        {
+          "step": 1,
+          "loss_before_update": 0.003046499565243721,
+          "seconds": 1.0481733739999992
+        },
+        {
+          "step": 2,
+          "loss_before_update": 0.0037094918079674244,
+          "seconds": 0.2414839310000012
+        },
+        {
+          "step": 3,
+          "loss_before_update": 0.0030686529353260994,
+          "seconds": 0.19123913199999976
+        },
+        {
+          "step": 4,
+          "loss_before_update": 0.0035532405599951744,
+          "seconds": 0.1833523509999999
+        },
+        {
+          "step": 5,
+          "loss_before_update": 0.0031313374638557434,
+          "seconds": 0.18277605299999955
+        },
+        {
+          "step": 6,
+          "loss_before_update": 0.002930385759100318,
+          "seconds": 0.18223445599999977
+        },
+        {
+          "step": 7,
+          "loss_before_update": 0.003087331773713231,
+          "seconds": 0.18102111599999837
+        },
+        {
+          "step": 8,
+          "loss_before_update": 0.0029932253528386354,
+          "seconds": 0.18348506499999928
+        },
+        {
+          "step": 9,
+          "loss_before_update": 0.003274002345278859,
+          "seconds": 0.182698349999999
+        },
+        {
+          "step": 10,
+          "loss_before_update": 0.0032554001081734896,
+          "seconds": 0.18064686399999985
+        },
+        {
+          "step": 11,
+          "loss_before_update": 0.003032029839232564,
+          "seconds": 0.18055211999999976
+        },
+        {
+          "step": 12,
+          "loss_before_update": 0.0030499277636408806,
+          "seconds": 0.18068804900000046
+        },
+        {
+          "step": 13,
+          "loss_before_update": 0.002976379357278347,
+          "seconds": 0.18044266100000073
+        },
+        {
+          "step": 14,
+          "loss_before_update": 0.003156178630888462,
+          "seconds": 0.18223591799999994
+        },
+        {
+          "step": 15,
+          "loss_before_update": 0.003232088405638933,
+          "seconds": 0.18196707999999973
+        },
+        {
+          "step": 16,
+          "loss_before_update": 0.003206983208656311,
+          "seconds": 0.18399338400000076
+        },
+        {
+          "step": 17,
+          "loss_before_update": 0.0031946455128490925,
+          "seconds": 0.1848852629999982
+        },
+        {
+          "step": 18,
+          "loss_before_update": 0.0032909498549997807,
+          "seconds": 0.1811835550000005
+        },
+        {
+          "step": 19,
+          "loss_before_update": 0.0032045505940914154,
+          "seconds": 0.18064654800000213
+        },
+        {
+          "step": 20,
+          "loss_before_update": 0.002936694072559476,
+          "seconds": 0.18845819599999913
+        },
+        {
+          "step": 21,
+          "loss_before_update": 0.002930896356701851,
+          "seconds": 0.18053582399999968
+        },
+        {
+          "step": 22,
+          "loss_before_update": 0.002941354177892208,
+          "seconds": 0.18269401699999932
+        },
+        {
+          "step": 23,
+          "loss_before_update": 0.002957350807264447,
+          "seconds": 0.18114008699999928
+        },
+        {
+          "step": 24,
+          "loss_before_update": 0.003404440823942423,
+          "seconds": 0.1841799739999992
+        }
+      ],
+      "validation": [
+        {
+          "step": 0,
+          "relative_l2": 0.0033956617371586617
+        },
+        {
+          "step": 8,
+          "relative_l2": 0.0033412107368349098
+        },
+        {
+          "step": 16,
+          "relative_l2": 0.003286181607109029
+        },
+        {
+          "step": 24,
+          "relative_l2": 0.003228349312848877
+        }
+      ],
+      "training_seconds": 5.310713367999995,
+      "steady_median_ms": 182.23445599999977,
+      "wall_seconds": 7.254549189999999,
+      "finite": true,
+      "checkpoint": "/data/experiments/torch_spectral_features_l4_b512_20260925/torch_spectral_features_l4_b512_20260925_bf16_spectral_d2.pt",
+      "gpu": "NVIDIA L4",
+      "peak_allocated_bytes": 3021895168,
+      "float32_matmul_precision": "highest",
+      "attention_operators": [
+        "ScaledDotProductFlashAttentionBackward0",
+        "aten::_flash_attention_backward",
+        "aten::_flash_attention_forward",
+        "aten::_scaled_dot_product_flash_attention",
+        "aten::_scaled_dot_product_flash_attention_backward",
+        "aten::scaled_dot_product_attention",
+        "autograd::engine::evaluate_function: ScaledDotProductFlashAttentionBackward0"
+      ]
+    }
+  },
+  "function_seconds": 15.639783074
+}
