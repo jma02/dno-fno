@@ -24,6 +24,7 @@ from flax import linen as nn  # noqa: E402
 from flax.core import Scope  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
+from scripts.benchmark_cufftdx import sandwich  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
@@ -34,6 +35,9 @@ def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    cufftdx_g1 = variant == "cufftdx"
+    if cufftdx_g1:
+        variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
     cached = None
@@ -96,6 +100,9 @@ def build_variant(
                 h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max))).astype(jnp.float64)
                 k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
                 symbol = k[None, :] * jnp.tanh(h * k[None, :])
+                if cufftdx_g1:
+                    operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
+                    return (-sandwich(eta_phys, xi_phys, operators).sum(axis=1) / model.target_scale).astype(xi_norm.dtype)
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1)
                 if variant in ("batched", "surface", "front"):
                     operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
@@ -148,8 +155,12 @@ if __name__ == "__main__":
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
-    parser.add_argument("--capture", choices=VARIANTS, help="Capture 100 warmed calls of one variant instead of timing/testing.")
+    parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, "cufftdx"), default=VARIANTS)
+    parser.add_argument("--capture", choices=(*VARIANTS, "cufftdx"), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
+    variants = args.variants
+    if not args.capture and "original" not in variants:
+        parser.error("include original as the numerical reference")
     loaded = load_run(args.run)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
         "eval_best_current_test_stratified_n32*/stokes_trajs.npz"
@@ -160,7 +171,7 @@ if __name__ == "__main__":
         depth = jnp.log(jnp.asarray(saved["depths"][:1], dtype=jnp.float64))
     args.output.mkdir(parents=True, exist_ok=True)
     functions, records = {}, {}
-    for variant in (args.capture,) if args.capture else VARIANTS:
+    for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
         forward = build_variant(loaded, depth, eta.shape[-1], variant)
         executable = forward.lower(eta, xi).compile()
@@ -183,7 +194,7 @@ if __name__ == "__main__":
 
     # Interleave variants to reduce ordering/clock bias; every timed call has batch one.
     for repeat in range(args.repeats):
-        for variant in VARIANTS[::1 if repeat % 2 == 0 else -1]:
+        for variant in variants[::1 if repeat % 2 == 0 else -1]:
             started = time.perf_counter()
             functions[variant](eta, xi).block_until_ready()
             records[variant]["seconds"].append(time.perf_counter() - started)
@@ -210,7 +221,7 @@ if __name__ == "__main__":
     check_depth = jnp.log(jnp.asarray(np.concatenate(validation_depth)))
     original = build_predict_gxi_batched(loaded)
     expected = np.asarray(original(check_eta, check_xi, check_depth))
-    for variant in VARIANTS[1:]:
+    for variant in (name for name in variants if name != "original"):
         candidate = build_variant(loaded, check_depth, eta.shape[-1], variant)
         actual = np.asarray(candidate(check_eta, check_xi))
         relative = np.linalg.norm(actual - expected, axis=-1) / np.linalg.norm(expected, axis=-1)
@@ -232,11 +243,13 @@ if __name__ == "__main__":
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = ("Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
-              "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs")
-    medians = [records[name]["median_us"] for name in VARIANTS]
+    labels = dict(zip((*VARIANTS, "cufftdx"), (
+        "Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
+        "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs", "cuFFTDx G₁",
+    )))
+    medians = [records[name]["median_us"] for name in variants]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
-    ax.barh(labels, medians, color=("#909ba3", "#bb5548", "#277da8", "#b98b36", "#589365", "#278475", "#d66027", "#77539a"))
+    ax.barh([labels[name] for name in variants], medians, color="#278475")
     ax.invert_yaxis()
     ax.set(xlabel="Warmed forward latency (µs); lower is better", xlim=(0, max(medians) * 1.25),
            title=f"Same {report['parameters']:,} weights · one sample · no time integrator")
@@ -244,5 +257,5 @@ if __name__ == "__main__":
         ax.text(value + 3, index, f"{value:.1f} µs", va="center")
     for suffix in ("png", "pdf"):
         fig.savefig(args.output / f"forward_fusion.{suffix}", dpi=180)
-    if any(not records[variant]["validation"]["passed"] for variant in VARIANTS[1:]):
+    if any(not records[variant]["validation"]["passed"] for variant in variants if variant != "original"):
         raise RuntimeError("Forward equivalence failed; see results.json for the rejected variants.")
