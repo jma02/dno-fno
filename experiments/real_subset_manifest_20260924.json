@@ -1,0 +1,92 @@
+{
+  "source_volume": "dno-fno-train-data",
+  "source": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+  "seed": 24,
+  "sampling": "Uniform rows without replacement within each original split/family",
+  "family_counts": {
+    "train_1": 1024,
+    "train_2": 1024,
+    "train_3": 1024,
+    "train_4": 1024,
+    "validation_1": 256,
+    "validation_2": 256,
+    "validation_3": 256,
+    "validation_4": 256
+  },
+  "rows": 5120,
+  "train_simulations": 3977,
+  "validation_simulations": 970,
+  "train_validation_simulation_overlap": 0,
+  "arrays": {
+    "eta": {
+      "shape": [
+        5120,
+        1024
+      ],
+      "dtype": "float32",
+      "sha256": "71aae1c2c94df991dd27e31b616a1f14ba661064d628cd7119739233d6bd3ac3"
+    },
+    "xi": {
+      "shape": [
+        5120,
+        1024
+      ],
+      "dtype": "float32",
+      "sha256": "0794bf744e636c92c321dbd899dbb98d32a0bcea2cd139e54f9546170bfeab69"
+    },
+    "gxi": {
+      "shape": [
+        5120,
+        1024
+      ],
+      "dtype": "float32",
+      "sha256": "9c9c827fa6a318cc7bf46b8964ab01e487d3dd8acbb17f334c00d9c6bf162224"
+    },
+    "depth": {
+      "shape": [
+        5120
+      ],
+      "dtype": "float64",
+      "sha256": "ea9ec3566b8879e83e1df951d7f054bca17cd2456e1a1af5d3785690652ba686"
+    },
+    "family_id": {
+      "shape": [
+        5120
+      ],
+      "dtype": "int16",
+      "sha256": "c5f849f3cee7ce1ba34f4e5e426a4b275049c0a76daf897836fa96aec090382f"
+    },
+    "simulation_id": {
+      "shape": [
+        5120
+      ],
+      "dtype": "int64",
+      "sha256": "1dab406987949e2edb1ac97e6a19b5ab3d3c7866f23aba6db3c8ffb37ddaf287"
+    },
+    "dataset_split": {
+      "shape": [
+        5120
+      ],
+      "dtype": "<U10",
+      "sha256": "acae738bc2348ab7466bf4aa08399f61de36db9584602b94caee9462a8dcc4f9"
+    },
+    "x": {
+      "shape": [
+        1024
+      ],
+      "dtype": "float64",
+      "sha256": "ced0654ed6941913bc816e5d6e50f772618899dd4627202abb44fb5db4b79983"
+    },
+    "source_indices": {
+      "shape": [
+        5120
+      ],
+      "dtype": "int64",
+      "sha256": "a7af81feb72a8e28de8286514279806746045d116d601fa4dcc5812e2598dfd3"
+    }
+  },
+  "local_directory": "/Users/leon/Projects/Scratch/fnotrash/local-data/paper_equal_subset_20260924",
+  "local_bytes": 63263966,
+  "archive_download_bytes": 52097354,
+  "modal_app": "https://modal.com/apps/sciml-at-ud/main/ap-w9hHBHpZSSqZY2VMgj8l1X"
+}
