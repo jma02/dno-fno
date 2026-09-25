@@ -38,6 +38,17 @@ def relative_l2(prediction: Tensor, target: Tensor) -> Tensor:
     return (error.abs().norm(dim=-1) / reference.abs().norm(dim=-1).clamp_min(1e-6)).mean()
 
 
+def build_optimizers(model: DNO, kind: str, lr: float) -> tuple[torch.optim.Optimizer, ...]:
+    if kind == "adamw":
+        return (torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4),)
+    matrices, other = [], []
+    for name, p in model.named_parameters():
+        group = matrices if p.ndim == 2 and name.startswith(("spatial.", "frequency.")) else other
+        group.append(p)
+    return (torch.optim.Muon(matrices, lr=lr, weight_decay=1e-4, adjust_lr_fn="match_rms_adamw"),
+            torch.optim.AdamW(other, lr=lr, weight_decay=1e-4))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True, help="Directory of physical eta/xi/depth/gxi, x, dataset_split .npy files")
@@ -45,6 +56,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
     parser.add_argument("--ema", type=float, default=.9, help="Gradient EMA decay; 0 disables smoothing")
     parser.add_argument("--out", type=Path, default=Path("outputs/torch-attention.pt"))
     args = parser.parse_args()
@@ -56,17 +68,17 @@ def main() -> None:
     validation = DataLoader(Waves(args.data, "validation"), batch_size=args.batch_size)
     x = np.load(args.data / "x.npy")
     model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x))).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizers = build_optimizers(model, args.optimizer, args.lr)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     step = 0
-    print(f"device={args.device} parameters={sum(p.numel() for p in model.parameters())} batch={args.batch_size} lr={args.lr} EMA={args.ema}", flush=True)
+    print(f"device={args.device} parameters={sum(p.numel() for p in model.parameters())} batch={args.batch_size} lr={args.lr} EMA={args.ema} optimizer={args.optimizer}", flush=True)
     for epoch in range(1, args.epochs + 1):
         started = perf_counter()
         model.train()
         total = 0.
         for batch in train:
             eta, xi, depth, target = (v.to(args.device) for v in batch)
-            optimizer.zero_grad(set_to_none=True)
+            model.zero_grad(set_to_none=True)
             loss = relative_l2(model(eta, xi, depth), target)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Nonfinite training loss")
@@ -76,7 +88,8 @@ def main() -> None:
                 for p, average in zip(model.parameters(), averages, strict=True):
                     average.mul_(args.ema).add_(p.grad, alpha=1 - args.ema)
                     p.grad.copy_(average / (1 - args.ema**step))
-            optimizer.step()
+            for optimizer in optimizers:
+                optimizer.step()
             total += loss.item() * len(eta)
         train_seconds = perf_counter() - started
         model.eval()
@@ -87,7 +100,7 @@ def main() -> None:
                 val += relative_l2(model(eta, xi, depth), target).item() * len(eta)
         print(f"epoch={epoch} step={step} train_L2={total / len(train.dataset):.6g} val_L2={val / len(validation.dataset):.6g} train_seconds={train_seconds:.2f}", flush=True)
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+        torch.save({"model": model.state_dict(), "optimizers": [optimizer.state_dict() for optimizer in optimizers],
                     "gradient_ema": averages, "step": step, "epoch": epoch,
                     "n": model.n, "length": model.length, "args": vars(args)}, args.out)
 

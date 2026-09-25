@@ -1,0 +1,295 @@
+{
+  "torch": "2.14.0",
+  "device": "mps",
+  "batch_size": 64,
+  "grid": 1024,
+  "parameters": 975904,
+  "lr": 1e-05,
+  "gradient_ema_decay": 0.8,
+  "seed": 0,
+  "optimizer_steps": 50,
+  "scope": "Fresh initialization, same shuffled128-row manufactured training fixture and separate fixed64-row validation fixture. Relative-L2 only. All50 optimizer updates recorded, no additional warmup updates. Not production accuracy.",
+  "history": [
+    {
+      "step": 1,
+      "loss_before_update": 0.0022661429829895496,
+      "seconds": 1.0690695829689503
+    },
+    {
+      "step": 2,
+      "loss_before_update": 0.002299653831869364,
+      "seconds": 0.4048408749513328
+    },
+    {
+      "step": 3,
+      "loss_before_update": 0.0024244673550128937,
+      "seconds": 0.5440541664138436
+    },
+    {
+      "step": 4,
+      "loss_before_update": 0.0024408374447375536,
+      "seconds": 0.3980142497457564
+    },
+    {
+      "step": 5,
+      "loss_before_update": 0.002296417485922575,
+      "seconds": 0.41013587545603514
+    },
+    {
+      "step": 6,
+      "loss_before_update": 0.002227760385721922,
+      "seconds": 0.3997929999604821
+    },
+    {
+      "step": 7,
+      "loss_before_update": 0.0020242813043296337,
+      "seconds": 0.39240362495183945
+    },
+    {
+      "step": 8,
+      "loss_before_update": 0.002217436907812953,
+      "seconds": 0.40567275043576956
+    },
+    {
+      "step": 9,
+      "loss_before_update": 0.0023052352480590343,
+      "seconds": 0.4179737092927098
+    },
+    {
+      "step": 10,
+      "loss_before_update": 0.0026302477344870567,
+      "seconds": 0.3920633331872523
+    },
+    {
+      "step": 11,
+      "loss_before_update": 0.0028801513835787773,
+      "seconds": 0.393565958365798
+    },
+    {
+      "step": 12,
+      "loss_before_update": 0.002811632351949811,
+      "seconds": 0.3951075840741396
+    },
+    {
+      "step": 13,
+      "loss_before_update": 0.0029189414344727993,
+      "seconds": 0.39583483431488276
+    },
+    {
+      "step": 14,
+      "loss_before_update": 0.0026507186703383923,
+      "seconds": 0.4089754167944193
+    },
+    {
+      "step": 15,
+      "loss_before_update": 0.002451014705002308,
+      "seconds": 0.39995804196223617
+    },
+    {
+      "step": 16,
+      "loss_before_update": 0.0023712394759058952,
+      "seconds": 0.4140951670706272
+    },
+    {
+      "step": 17,
+      "loss_before_update": 0.0022001704201102257,
+      "seconds": 0.39296408277004957
+    },
+    {
+      "step": 18,
+      "loss_before_update": 0.002073099836707115,
+      "seconds": 0.39695462537929416
+    },
+    {
+      "step": 19,
+      "loss_before_update": 0.0021946383640170097,
+      "seconds": 0.3962041246704757
+    },
+    {
+      "step": 20,
+      "loss_before_update": 0.002411932684481144,
+      "seconds": 0.3948470843024552
+    },
+    {
+      "step": 21,
+      "loss_before_update": 0.0026571666821837425,
+      "seconds": 0.40277479169890285
+    },
+    {
+      "step": 22,
+      "loss_before_update": 0.0028967936523258686,
+      "seconds": 0.3899630419909954
+    },
+    {
+      "step": 23,
+      "loss_before_update": 0.003120354376733303,
+      "seconds": 0.39400562504306436
+    },
+    {
+      "step": 24,
+      "loss_before_update": 0.0032040071673691273,
+      "seconds": 0.40796216716989875
+    },
+    {
+      "step": 25,
+      "loss_before_update": 0.003226824104785919,
+      "seconds": 0.39198162499815226
+    },
+    {
+      "step": 26,
+      "loss_before_update": 0.0032206764444708824,
+      "seconds": 0.40006220899522305
+    },
+    {
+      "step": 27,
+      "loss_before_update": 0.0031080208718776703,
+      "seconds": 0.40698262490332127
+    },
+    {
+      "step": 28,
+      "loss_before_update": 0.002821783535182476,
+      "seconds": 0.3859609169885516
+    },
+    {
+      "step": 29,
+      "loss_before_update": 0.0026543056592345238,
+      "seconds": 0.38298266706988215
+    },
+    {
+      "step": 30,
+      "loss_before_update": 0.002405594801530242,
+      "seconds": 0.4080224591307342
+    },
+    {
+      "step": 31,
+      "loss_before_update": 0.0022025136277079582,
+      "seconds": 0.3859693333506584
+    },
+    {
+      "step": 32,
+      "loss_before_update": 0.00210507377050817,
+      "seconds": 0.39203474996611476
+    },
+    {
+      "step": 33,
+      "loss_before_update": 0.0020845173858106136,
+      "seconds": 0.3842574171721935
+    },
+    {
+      "step": 34,
+      "loss_before_update": 0.002122398465871811,
+      "seconds": 0.3910019160248339
+    },
+    {
+      "step": 35,
+      "loss_before_update": 0.002390060108155012,
+      "seconds": 0.39376799995079637
+    },
+    {
+      "step": 36,
+      "loss_before_update": 0.002439734525978565,
+      "seconds": 0.38997058384120464
+    },
+    {
+      "step": 37,
+      "loss_before_update": 0.002754075452685356,
+      "seconds": 0.38491908414289355
+    },
+    {
+      "step": 38,
+      "loss_before_update": 0.0029283962212502956,
+      "seconds": 0.40737691707909107
+    },
+    {
+      "step": 39,
+      "loss_before_update": 0.0030868565663695335,
+      "seconds": 0.4095868752337992
+    },
+    {
+      "step": 40,
+      "loss_before_update": 0.003192631993442774,
+      "seconds": 0.43105779169127345
+    },
+    {
+      "step": 41,
+      "loss_before_update": 0.0031159897334873676,
+      "seconds": 0.4215500419959426
+    },
+    {
+      "step": 42,
+      "loss_before_update": 0.003308929968625307,
+      "seconds": 0.393630915787071
+    },
+    {
+      "step": 43,
+      "loss_before_update": 0.0031487904489040375,
+      "seconds": 0.4090746669098735
+    },
+    {
+      "step": 44,
+      "loss_before_update": 0.002976659219712019,
+      "seconds": 0.43093766598030925
+    },
+    {
+      "step": 45,
+      "loss_before_update": 0.002830745652318001,
+      "seconds": 0.40096399979665875
+    },
+    {
+      "step": 46,
+      "loss_before_update": 0.002679977100342512,
+      "seconds": 0.4221249162219465
+    },
+    {
+      "step": 47,
+      "loss_before_update": 0.0024552294053137302,
+      "seconds": 0.3946594591252506
+    },
+    {
+      "step": 48,
+      "loss_before_update": 0.0023413028102368116,
+      "seconds": 0.3832089579664171
+    },
+    {
+      "step": 49,
+      "loss_before_update": 0.002117721363902092,
+      "seconds": 0.38203724985942245
+    },
+    {
+      "step": 50,
+      "loss_before_update": 0.0021298483479768038,
+      "seconds": 0.39303208282217383
+    }
+  ],
+  "validation": [
+    {
+      "step": 0,
+      "relative_l2": 0.0022518823388963938
+    },
+    {
+      "step": 10,
+      "relative_l2": 0.002790951170027256
+    },
+    {
+      "step": 20,
+      "relative_l2": 0.002646502573043108
+    },
+    {
+      "step": 30,
+      "relative_l2": 0.002168255625292659
+    },
+    {
+      "step": 40,
+      "relative_l2": 0.003217007266357541
+    },
+    {
+      "step": 50,
+      "relative_l2": 0.001996874576434493
+    }
+  ],
+  "training_seconds": 20.794388839975,
+  "steady_median_ms": 395.83483431488276,
+  "wall_seconds": 21.688685500063002,
+  "finite": true,
+  "checkpoint": "/Users/leon/Projects/Scratch/fnotrash/pilot-checkpoints/torch_attention_lr1e5_ema08_50_20260924.pt"
+}

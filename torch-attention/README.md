@@ -12,6 +12,13 @@ weight decay1e-4, one epoch. Training samples reshuffle every epoch; validation
 is fixed. `--device cpu` and `--device cuda` also work. Dependencies are declared
 in the script and installed by uv into an isolated environment.
 
+`--optimizer muon --lr 1e-5 --ema 0.8` uses Muon on the eight attention/MLP
+weight matrices inside the two transformer blocks. Everything else uses AdamW,
+including pointwise encoder/decoder, biases, normalization, position embeddings,
+and Fourier filters. Muon uses `adjust_lr_fn="match_rms_adamw"` with the same
+base learning rate (not identical updates), default momentum0.95 and five
+Newton–Schulz iterations. Gradient EMA is applied before **both** optimizers.
+
 Input directory: `eta.npy`, `xi.npy`, `gxi.npy` with shape `[samples,1024]`,
 positive physical `depth.npy`, periodic grid `x.npy`, and `dataset_split.npy`
 containing `train` / `validation` labels. Inputs/targets are physical values,
