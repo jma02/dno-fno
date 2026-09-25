@@ -99,15 +99,18 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
     if constexpr (shared > 48 * 1024) {
         static auto first = cudaFuncSetAttribute(transform<F>, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
         static auto second = cudaFuncSetAttribute(transform<I>, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
-        static auto third = cudaFuncSetAttribute(sandwich_kernel<F, I>, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
-        if (first != cudaSuccess || second != cudaSuccess || third != cudaSuccess)
+        if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
     if (operation == 2) {
-        int branches = symbols.dimensions()[symbols.dimensions().size() - 2];
-        int blocks = out->element_count() / N;
-        sandwich_kernel<F, I><<<blocks, F::block_dim, shared, stream>>>(
-            a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+        if constexpr (N == 1024) {
+            int branches = symbols.dimensions()[symbols.dimensions().size() - 2];
+            int blocks = out->element_count() / N;
+            sandwich_kernel<F, I><<<blocks, F::block_dim, shared, stream>>>(
+                a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+        } else {
+            return ffi::Error::InvalidArgument("Fused G1 supports the 1024-point model grid only.");
+        }
     } else if (operation == 1) {
         int length = a.dimensions().back();
         transform<I><<<out->element_count() / N, I::block_dim, I::shared_memory_size, stream>>>(

@@ -171,17 +171,28 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
 A separate copy of figure 11 adds the candidate model's measured runtimes as
-orange vertical lines. The latest update packs the input spectra and batches
-the surface features, G0 and learned branch inputs, retaining the earlier
-FP64 G1 batching. Orange annotations show previous → current runtime and
-the reduction.
+orange vertical lines. The latest update fuses each FP64 G1 multiplier/product
+chain using cuFFTDx, retaining the packed input spectra and batched surface
+features, G0 and learned branch inputs. Orange annotations show previous →
+current runtime and the reduction (5.2–5.5%).
 Stokes uses three repeats; the other families use one full trajectory per
 version. All timings use batch one and the complete T=20 or T=200 horizon,
-excluding compilation, setup, warm-up and host transfers. All saved eta, xi
-and Gxi arrays are bitwise identical to the previous optimized execution.
+excluding compilation, setup, warm-up and host transfers. All four trajectories
+remain finite with positive depth. Maximum saved relative surface differences
+from the preceding implementation are 8.33e-8 (Stokes), 8.58e-7 (JONSWAP/TMA),
+4.55e-5 (Tanaka), and 8.77e-4 (Benjamin–Feir); outputs are not bitwise identical.
+The same weights, precision and integrator are retained.
+An independent full Benjamin–Feir repeat against saved M6 data gives terminal
+surface errors 0.9275% before and 0.9742% with cuFFTDx
+(`outputs/cufftdx_20260925/rollout_bf_accuracy.json`). This is one case, not a
+new classwise median; the cuFFTDx path remains an optional inference prototype.
 
 The classical curve now uses a fresh full M1–M6 sweep with the corresponding
-FFT batching applied to its padded recurrence. The classical implementation
+FFT batching applied to its padded recurrence. The cuFFTDx backend was also
+screened on the complete M1–M6 recurrence: it was approximately 7–15% slower at the
+8192-point padded resolution, so the faster existing backend is retained.
+That screen is in `outputs/cufftdx_20260925/classical_screen.json`.
+The classical implementation
 already cached its depth symbol and combined spectral terms before the final
 inverse transform. Its precision, padding, truncation orders and integrator
 are unchanged. New timings are in
@@ -203,15 +214,31 @@ Without the model baselines, Stokes remained finite; JONSWAP/TMA, Tanaka and
 Benjamin–Feir produced non-finite saved states. The full requested step count
 was executed in every case. Figure12 uses the label "New candidate optimized
 network" and has no explanatory footnotes; numerical outcomes and
-timings are recorded in `notes/dno_profile_20260924.md` and the raw results.
+timings are recorded in `experiments/experiments-2026-09-25.md` and the raw results.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --timings outputs/single_rollout_timing_20260923.json \
   --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
-  --candidate-timings outputs/dno_fusion_20260924/network/front_rollout_stokes.json \
-    outputs/dno_fusion_20260924/network/front_rollout_remaining.json \
-  --candidate-method fused_front --candidate-previous-method fused_g1 \
+  --candidate-timings outputs/cufftdx_20260925/rollout_stokes.json \
+    outputs/cufftdx_20260925/rollout_remaining.json \
+  --candidate-method fused_cufftdx --candidate-previous-method fused_front \
   --no-baseline-timings outputs/dno_fusion_20260924/rollout_no_baselines.json
+```
+
+The cuFFTDx prototype is inference-only, outside both production trainers.
+It uses NVIDIA MathDx25.12.1 CUDA12 (cuFFTDx1.6.1), CUDA12.9 and SM89.
+To build locally, unpack the [NVIDIA archive](https://developer.nvidia.com/downloads/compute/cuFFTDx/redist/cuFFTDx/cuda12/nvidia-mathdx-25.12.1-cuda12.tar.gz)
+under `outputs/cufftdx_20260925/`, then run:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/benchmark_cufftdx.py --build
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/benchmark_cufftdx.py --classical
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/benchmark_dno_fusion.py \
+  --variants original front cufftdx --output outputs/cufftdx_20260925/network
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
+  --methods fused_front fused_cufftdx --reference fused_front \
+  --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
+  --output outputs/cufftdx_20260925/rollouts.json
 ```

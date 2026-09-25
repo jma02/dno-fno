@@ -47,6 +47,7 @@ def fft(a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = No
 
 
 def sandwich(eta: jax.Array, xi: jax.Array, symbols: jax.Array) -> jax.Array:
+    """Evaluate L[eta L xi] on the fixed 1024-point model grid."""
     register()
     result = jax.ShapeDtypeStruct((*symbols.shape[:-1], xi.shape[-1]), xi.dtype)
     return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(

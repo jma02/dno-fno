@@ -83,8 +83,7 @@ if __name__ == "__main__":
             initial = ti.State(jnp.asarray(saved["truth_eta"][0, :1]), jnp.asarray(saved["truth_xi"][0, :1]))
             depth = jnp.asarray(saved["depths"][:1])
             simulation_id = int(saved["simulation_ids"][0])
-            saved_reference = ({key: saved[f"truth_{key}"][:frames, :1] for key in ("eta", "xi", "gxi")}
-                               if "M6" in methods else {})
+            saved_reference = {key: saved[f"truth_{key}"][:frames, :1] for key in ("eta", "xi", "gxi")}
         records: dict[str, dict[str, Any]] = {}
         report["families"][family] = {
             "simulation_id": simulation_id, "steps": (frames - 1) * cfg.substeps,
@@ -145,10 +144,10 @@ if __name__ == "__main__":
                 records[method][f"terminal_{key}_error"] = float(error[-1] / scale[-1])
                 records[method][f"max_{key}_error"] = float((error / scale).max())
                 records[method][f"trajectory_{key}_error"] = float(np.linalg.norm(error) / np.linalg.norm(scale))
-                if method == "M6":
-                    cached = saved_reference[key].reshape(frames, -1)
-                    cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
-                    records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
+                cached = saved_reference[key].reshape(frames, -1)
+                cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
+                records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
+                records[method][f"cached_reference_terminal_{key}_error"] = float(cached_error[-1] / np.linalg.norm(cached[-1]))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"{family}: saved {args.output}", flush=True)
