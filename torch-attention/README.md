@@ -19,7 +19,10 @@ and Fourier filters. Muon uses `adjust_lr_fn="match_rms_adamw"` with the same
 base learning rate (not identical updates), default momentum0.95 and five
 Newton–Schulz iterations. Gradient EMA is applied before **both** optimizers.
 
-`--bf16` autocasts the encoder and transformer attention/MLPs to BF16. Master
+`--bf16` autocasts the encoder, attention projections and transformer MLPs to BF16.
+On PyTorch2.14 MPS, training SDPA accepts BF16 inputs but promotes its matrix
+products and softmax to FP32 internally; this is not fully BF16 attention.
+Master
 weights, residual streams, FFTs, the entire final decoder, xi filters, baseline
 addition, loss, gradient EMA and optimizer state retain FP32 (CPU/CUDA baseline
 still uses FP64 internally). Muon's orthogonalization already uses BF16.

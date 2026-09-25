@@ -57,7 +57,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
-    parser.add_argument("--bf16", action="store_true", help="BF16 encoder/attention/MLP compute; FP32 FFTs and decoder")
+    parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
     parser.add_argument("--depth", type=int, default=1, help="Attention blocks per spatial/frequency stage")
     parser.add_argument("--ema", type=float, default=.9, help="Gradient EMA decay; 0 disables smoothing")
     parser.add_argument("--out", type=Path, default=Path("outputs/torch-attention.pt"))

@@ -32,7 +32,7 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         normalized = self.norm1(x)
-        # Explicit SDPA keeps autocast behavior identical in training and evaluation.
+        # Explicit projections avoid MultiheadAttention's inference-only fast path.
         batch, positions, width = x.shape
         heads = self.attention.num_heads
         qkv = F.linear(normalized, self.attention.in_proj_weight, self.attention.in_proj_bias)
