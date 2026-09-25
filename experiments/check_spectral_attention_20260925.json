@@ -1,0 +1,27 @@
+{
+  "invariants": "feature formulas, initial baseline, linearity, self-adjointness, zero flat correction/derivative, constant-xi nullspace passed",
+  "quadratic_ratio": 4.000013013104195,
+  "parameters": 91584,
+  "training_feature_scales": [
+    0.009168309159576893,
+    0.000639787467662245,
+    6.442860467359424e-05,
+    0.04620860144495964,
+    0.9633147120475769,
+    0.01478943508118391,
+    0.0076972488313913345
+  ],
+  "four_example_cpu_smoke_losses": [
+    0.001779944752342999,
+    0.0017795253079384565,
+    0.0017790943384170532
+  ],
+  "final_group_gradient_norms": {
+    "encoder": 2.205225521511259e-06,
+    "frequency": 8.686559222590665e-08,
+    "frequency_in": 1.4035856476755762e-07,
+    "frequency_out": 9.994672275407293e-08,
+    "decoder": 0.00205040000205815,
+    "depth_filters": 3.505651387731681e-06
+  }
+}

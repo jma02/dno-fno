@@ -14,11 +14,12 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "torch-attention"))
 from model import DNO  # noqa: E402
-from train import Waves, build_optimizers, relative_l2  # noqa: E402
+from spectral import SpectralDNO  # noqa: E402
+from train import Waves, build_model, build_optimizers, relative_l2  # noqa: E402
 
 
 @torch.no_grad()
-def evaluate(model: DNO, loader: DataLoader) -> float:
+def evaluate(model: DNO | SpectralDNO, loader: DataLoader) -> float:
     model.eval()
     total = 0.
     device = next(model.parameters()).device
@@ -35,6 +36,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, help="Run complete passes and validate each epoch; otherwise run 50 steps")
     parser.add_argument("--tag", default="torch_attention_real_pilot_20260925")
@@ -53,7 +55,8 @@ def main() -> None:
     steps = args.epochs * len(train) if args.epochs is not None else 50
     validation_every = len(train) if args.epochs is not None else 10
     x = np.load(data / "x.npy")
-    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to(args.device)
+    model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
+                        args.depth, args.bf16).to(args.device)
     optimizers = build_optimizers(model, "muon", 1e-5)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     history, validations = [], []
@@ -103,17 +106,20 @@ def main() -> None:
     torch.save({"model": model.state_dict(), "optimizers": [o.state_dict() for o in optimizers],
                 "gradient_ema": averages, "step": steps, "epochs": args.epochs, "lr": 1e-5, "ema": .8,
                 "seed": 0, "n": model.n, "length": model.length, "depth": args.depth,
-                "bf16": args.bf16, "batch_size": args.batch_size, "data": str(data)}, checkpoint)
+                "bf16": args.bf16, "architecture": args.architecture,
+                "batch_size": args.batch_size, "data": str(data)}, checkpoint)
     result = {
         "source": str(data), "device": args.device, "torch": torch.__version__, "seed": 0,
         "optimizer": "Muon transformer matrices + AdamW remainder", "lr": 1e-5,
         "gradient_ema_decay": .8, "batch_size": args.batch_size, "optimizer_steps": steps,
         "epochs": args.epochs, "steps_per_epoch": len(train), "validation_every": validation_every,
         "bf16": args.bf16, "depth_per_stage": args.depth,
+        "architecture": args.architecture,
+        "feature_scales": model.feature_scales.tolist() if isinstance(model, SpectralDNO) else None,
         "parameters": sum(p.numel() for p in model.parameters()),
         "training_rows": len(train.dataset), "training_samples_seen": samples_seen,
         "validation_rows": len(validation.dataset),
-        "scope": f"Fresh initialization; 4096 real training rows reshuffled each pass. All 1024 held-out validation rows, in batches of 64, after every {validation_every} updates. Relative-L2 data loss only, no normalization or physics losses.",
+        "scope": f"Fresh initialization; 4096 real training rows reshuffled each pass. All 1024 held-out validation rows, in batches of 64, after every {validation_every} updates. Relative-L2 data loss only; spectral variant fits surface-feature RMS scales on training rows. Physical targets; no physics losses.",
         "history": history, "validation": validations,
         "training_seconds": sum(row["seconds"] for row in history),
         "steady_median_ms": 1000 * median(row["seconds"] for row in history[3:]),

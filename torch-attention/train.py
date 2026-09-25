@@ -14,6 +14,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from model import DNO
+from spectral import SpectralDNO, surface_features
 
 
 class Waves(Dataset):
@@ -38,7 +39,20 @@ def relative_l2(prediction: Tensor, target: Tensor) -> Tensor:
     return (error.abs().norm(dim=-1) / reference.abs().norm(dim=-1).clamp_min(1e-6)).mean()
 
 
-def build_optimizers(model: DNO, kind: str, lr: float) -> tuple[torch.optim.Optimizer, ...]:
+@torch.no_grad()
+def build_model(architecture: str, dataset: Dataset, n: int, length: float,
+                depth: int, bf16: bool) -> DNO | SpectralDNO:
+    if architecture == "attention":
+        return DNO(n=n, length=length, depth=depth, bf16=bf16)
+    # Fit seven RMS scales from training data only, without advancing its shuffle generator.
+    sums = torch.zeros(7, dtype=torch.float64)
+    for eta, *_ in DataLoader(dataset, batch_size=256):
+        sums += surface_features(eta, length).double().square().sum((0, 1))
+    scales = (sums / (len(dataset) * n)).sqrt().float().clamp_min(1e-12)
+    return SpectralDNO(n=n, length=length, depth=depth, bf16=bf16, feature_scales=scales)
+
+
+def build_optimizers(model: DNO | SpectralDNO, kind: str, lr: float) -> tuple[torch.optim.Optimizer, ...]:
     if kind == "adamw":
         return (torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4),)
     matrices, other = [], []
@@ -57,6 +71,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
+    parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
     parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
     parser.add_argument("--depth", type=int, default=1, help="Attention blocks per spatial/frequency stage")
     parser.add_argument("--ema", type=float, default=.9, help="Gradient EMA decay; 0 disables smoothing")
@@ -69,11 +84,12 @@ def main() -> None:
                        generator=torch.Generator().manual_seed(0))
     validation = DataLoader(Waves(args.data, "validation"), batch_size=args.batch_size)
     x = np.load(args.data / "x.npy")
-    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to(args.device)
+    model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
+                        args.depth, args.bf16).to(args.device)
     optimizers = build_optimizers(model, args.optimizer, args.lr)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     step = 0
-    print(f"device={args.device} parameters={sum(p.numel() for p in model.parameters())} batch={args.batch_size} lr={args.lr} EMA={args.ema} optimizer={args.optimizer} bf16={args.bf16} depth={args.depth}", flush=True)
+    print(f"device={args.device} architecture={args.architecture} parameters={sum(p.numel() for p in model.parameters())} batch={args.batch_size} lr={args.lr} EMA={args.ema} optimizer={args.optimizer} bf16={args.bf16} depth={args.depth}", flush=True)
     for epoch in range(1, args.epochs + 1):
         started = perf_counter()
         model.train()

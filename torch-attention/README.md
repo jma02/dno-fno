@@ -1,7 +1,7 @@
 # Minimal PyTorch attention DNO
 
-Two Python files, no JAX imports. `model.py` is the model; `train.py` is the loader,
-training loop and checkpoint writer. Run from this directory:
+Three Python files, no JAX imports. `model.py` is the original model, `spectral.py`
+is the optional smaller spectral model, and `train.py` handles training. Run from this directory:
 
 ```sh
 uv run train.py --data /path/to/arrays --device mps
@@ -49,3 +49,31 @@ MPS uses float32 for the analytic baseline because Metal has no float64 support;
 CPU/CUDA evaluate that baseline in float64. FFTs remain native `torch.fft` calls.
 Checkpoints include model, optimizer and gradient EMA state; automatic resume is
 intentionally omitted.
+
+Use the separate spectral option with the current pilot settings:
+
+```sh
+uv run train.py --data /path/to/arrays --device cuda --architecture spectral \
+  --depth 2 --bf16 --batch-size 256 --optimizer muon --lr 1e-5 --ema 0.8
+```
+
+The spectral option fits RMS scales for seven physical surface features on the
+training split only: eta, eta², eta³, first and second derivatives, half derivative,
+and Hilbert transform. Scales are saved as model buffers; this initial pass is
+additional setup work. Physical xi, targets and the analytic baseline stay unchanged.
+
+A bias-free pointwise 7→64→64 encoder feeds FFT → two width-64, four-head
+transformer blocks over all 513 bins → spectral projection → IFFT. Frequency and
+depth features identify the tokens. There is no spatial attention or learned
+absolute spatial position embedding. The encoder also feeds a direct local path,
+`z*tanh(z)`, modulated by `1+tanh(transformer_context)`; a zero-initialized FP32
+64→32 decoder produces the correction gates. This enforces O(eta²) behavior even
+when the transformer has biases. Two blocks give 91,584 parameters.
+
+The constrained head retains 32 paired real Fourier filters, now generated from
+`k, h, tanh(k*h), k*tanh(k*h)` by a small depth-conditioned MLP. They preserve
+linearity in xi and self-adjointness; masking DC also annihilates constant xi.
+This is not a low-rank matrix projection or a literal single FFT/IFFT pair: physical
+feature extraction and the constrained head require additional small FFTs.
+Frequency attention does not enforce exact translation equivariance. BF16 covers
+encoder/transformer matmuls; feature FFTs, decoder, gate products and filters use FP32.

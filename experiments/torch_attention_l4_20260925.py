@@ -19,7 +19,8 @@ image = (modal.Image.debian_slim(python_version="3.12")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="L4:1", cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None) -> dict:
+def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None,
+            architecture: str) -> dict:
     import hashlib
     import subprocess
     import sys
@@ -36,8 +37,9 @@ def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None)
     for name, info in manifest["arrays"].items():
         assert hashlib.sha256((data / f"{name}.npy").read_bytes()).hexdigest() == info["sha256"]
     result = {"run_name": run_name, "data_manifest": manifest, "variants": {}}
-    for name, flags in (("fp32_d1", []), ("bf16_d1", ["--bf16"]),
-                        ("bf16_d2", ["--bf16", "--depth", "2"])):
+    variants = (("bf16_spectral_d2", ["--bf16", "--depth", "2", "--architecture", "spectral"]),) if architecture == "spectral" else (
+        ("fp32_d1", []), ("bf16_d1", ["--bf16"]), ("bf16_d2", ["--bf16", "--depth", "2"]))
+    for name, flags in variants:
         if bf16_only and name == "fp32_d1":
             continue
         if epochs is not None:
@@ -58,8 +60,11 @@ def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None)
 
 @app.local_entrypoint()
 def main(run_name: str = "torch_attention_l4_20260925", batch_size: int = 256,
-         bf16_only: bool = False, epochs: int | None = None) -> None:
-    result = compare.remote(run_name, batch_size, bf16_only, epochs)
+         bf16_only: bool = False, epochs: int | None = None,
+         architecture: str = "attention") -> None:
+    if architecture not in ("attention", "spectral"):
+        raise ValueError("architecture must be attention or spectral")
+    result = compare.remote(run_name, batch_size, bf16_only, epochs, architecture)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
     target = ROOT.parent / "pilot-checkpoints" / run_name
     target.mkdir(parents=True, exist_ok=True)
