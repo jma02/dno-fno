@@ -1,4 +1,4 @@
-"""Fifty fresh Muon/AdamW steps on the downloaded real subset, on Metal or CUDA."""
+"""Fresh Muon/AdamW training on the downloaded real subset, on Metal or CUDA."""
 
 import argparse
 import json
@@ -35,18 +35,23 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--epochs", type=int, help="Run complete passes and validate each epoch; otherwise run 50 steps")
     parser.add_argument("--tag", default="torch_attention_real_pilot_20260925")
     parser.add_argument("--device", choices=("mps", "cuda"), default="mps")
     parser.add_argument("--checkpoint-dir", type=Path, default=ROOT.parent / "pilot-checkpoints")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
+    if args.epochs is not None and args.epochs < 1:
+        parser.error("--epochs must be positive")
     synchronize = torch.mps.synchronize if args.device == "mps" else torch.cuda.synchronize
     torch.manual_seed(0)
     data = ROOT.parent / "local-data/paper_equal_subset_20260924"
     train = DataLoader(Waves(data, "train"), batch_size=args.batch_size, shuffle=True,
                        generator=torch.Generator().manual_seed(0))
     validation = DataLoader(Waves(data, "validation"), batch_size=64)
+    steps = args.epochs * len(train) if args.epochs is not None else 50
+    validation_every = len(train) if args.epochs is not None else 10
     x = np.load(data / "x.npy")
     model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to(args.device)
     optimizers = build_optimizers(model, "muon", 1e-5)
@@ -59,7 +64,7 @@ def main() -> None:
     print("validation", validations[-1], flush=True)
     iterator = iter(train)
     samples_seen = 0
-    for step in range(1, 51):
+    for step in range(1, steps + 1):
         model.train()
         synchronize()
         tick = perf_counter()
@@ -84,7 +89,7 @@ def main() -> None:
         value = loss.item()
         synchronize()
         history.append({"step": step, "loss_before_update": value, "seconds": perf_counter() - tick})
-        if step % 10 == 0:
+        if step % validation_every == 0:
             validations.append({"step": step, "relative_l2": evaluate(model, validation)})
             print("train", history[-1], "validation", validations[-1], flush=True)
     assert all(torch.isfinite(p).all() for p in model.parameters())
@@ -96,18 +101,19 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.checkpoint_dir / f"{args.tag}.pt"
     torch.save({"model": model.state_dict(), "optimizers": [o.state_dict() for o in optimizers],
-                "gradient_ema": averages, "step": 50, "lr": 1e-5, "ema": .8,
+                "gradient_ema": averages, "step": steps, "epochs": args.epochs, "lr": 1e-5, "ema": .8,
                 "seed": 0, "n": model.n, "length": model.length, "depth": args.depth,
                 "bf16": args.bf16, "batch_size": args.batch_size, "data": str(data)}, checkpoint)
     result = {
         "source": str(data), "device": args.device, "torch": torch.__version__, "seed": 0,
         "optimizer": "Muon transformer matrices + AdamW remainder", "lr": 1e-5,
-        "gradient_ema_decay": .8, "batch_size": args.batch_size, "optimizer_steps": 50,
+        "gradient_ema_decay": .8, "batch_size": args.batch_size, "optimizer_steps": steps,
+        "epochs": args.epochs, "steps_per_epoch": len(train), "validation_every": validation_every,
         "bf16": args.bf16, "depth_per_stage": args.depth,
         "parameters": sum(p.numel() for p in model.parameters()),
         "training_rows": len(train.dataset), "training_samples_seen": samples_seen,
         "validation_rows": len(validation.dataset),
-        "scope": "Fresh initialization; 4096 real training rows reshuffled each pass. All 1024 held-out validation rows, in batches of 64, after every 10 updates. Relative-L2 data loss only, no normalization or physics losses.",
+        "scope": f"Fresh initialization; 4096 real training rows reshuffled each pass. All 1024 held-out validation rows, in batches of 64, after every {validation_every} updates. Relative-L2 data loss only, no normalization or physics losses.",
         "history": history, "validation": validations,
         "training_seconds": sum(row["seconds"] for row in history),
         "steady_median_ms": 1000 * median(row["seconds"] for row in history[3:]),

@@ -7,7 +7,7 @@ training loop and checkpoint writer. Run from this directory:
 uv run train.py --data /path/to/arrays --device mps
 ```
 
-Defaults: batch64, constant LR1e-4, bias-corrected gradient EMA0.9 **before** AdamW,
+Defaults: batch256, constant LR1e-4, bias-corrected gradient EMA0.9 **before** AdamW,
 weight decay1e-4, one epoch. Training samples reshuffle every epoch; validation
 is fixed. `--device cpu` and `--device cuda` also work. Dependencies are declared
 in the script and installed by uv into an isolated environment.
