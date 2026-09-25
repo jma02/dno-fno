@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.figure import Figure, SubFigure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.ticker import LogLocator, MaxNLocator, NullLocator  # noqa: E402
 import numpy as np  # noqa: E402
@@ -27,21 +28,7 @@ FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
-    parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
-    parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
-    parser.add_argument("--candidate-method", default="fused")
-    parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
-    parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
-    parser.add_argument("--single-case", action="store_true", help="Plot measured single-case errors against the cached M6 reference, without archived model points.")
-    parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
-    args = parser.parse_args()
-    if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
-        parser.error("runtime overlays require --timings")
-    if args.single_case and not (args.timings and args.candidate_timings and args.candidate_previous_method):
-        parser.error("--single-case requires --timings, --candidate-timings and --candidate-previous-method")
+def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
     warm = json.loads(args.timings.read_text()) if args.timings else {}
     if warm:
         for path in args.classical_timings or ():
@@ -62,7 +49,7 @@ if __name__ == "__main__":
         "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2", "grid.linewidth": 0.6,
         "xtick.color": "#59616a", "ytick.color": "#59616a",
     })
-    fig, axes = plt.subplots(2, 2, figsize=(10.5, 8))
+    axes = fig.subplots(2, 2)
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
                         top=0.78 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
@@ -122,18 +109,10 @@ if __name__ == "__main__":
             methods = comparison["families"][family]["methods"]
             record = methods[args.candidate_method if comparison is candidate else "fused"]
             new_seconds = float(np.median(record["seconds"]))
-            if args.single_case:
-                ax.scatter(new_seconds, 100 * record["cached_reference_terminal_eta_error"],
-                           color=color, marker="D", s=65, edgecolors="white", linewidths=0.8, zorder=4)
-            else:
-                ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
+            ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
             if comparison is candidate and args.candidate_previous_method:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
-                if args.single_case:
-                    ax.scatter(previous_seconds, 100 * previous["cached_reference_terminal_eta_error"],
-                               color="#087eaa", marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
-                    right = max(right, previous_seconds)
                 savings = 100 * (1 - new_seconds / previous_seconds)
                 ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9)
@@ -144,26 +123,67 @@ if __name__ == "__main__":
         ax.set_title(title, loc="left", fontsize=12, pad=12)
         ax.set_title(f"T = {horizon:g}", loc="right", fontsize=9, color="#777f86", pad=12)
 
-    fig.suptitle("Single-rollout runtime vs error" if warm else "Batch runtime vs error", y=0.96, fontsize=18, ha="left", x=0.10)
-    if args.single_case:
+    fig.suptitle(heading or ("Single-rollout runtime vs error" if warm else "Batch runtime vs error"),
+                 y=0.94 if heading else 0.96, fontsize=14 if heading else 18, ha="left", x=0.10)
+    if args.single_case and not heading:
         fig.text(0.10, 0.921, warm["device"], color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
           for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
-        *([Line2D([], [], color="#087eaa", marker="o", ls="none", ms=7, label="Before cuFFTDx")]
-          if args.single_case else []),
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, ls="none" if args.single_case else "--",
-                 marker="D" if args.single_case else None, ms=7, lw=1.3, label=label)
+        *[Line2D([], [], color=color, ls="--", lw=1.3, label=label)
           for comparison, color, label in overlays if comparison],
-    ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case else 0.91),
+    ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
     fig.supxlabel(xlabel, y=0.06, fontsize=11)
     fig.supylabel("Final surface error (%)" if args.single_case else "Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
-    name = ("12-potential-new-nn-modal" if args.single_case else "12-potential-new-nn" if candidate or baseline_free
-            else "11-single-rollout-warm" if warm else "10-neural-vs-classical")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
+    parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
+    parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
+    parser.add_argument("--candidate-method", default="fused")
+    parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
+    parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
+    parser.add_argument("--stack-hardware", action="store_true", help="Stack Modal Blackwell panels above the supplied local Ada panels.")
+    parser.add_argument("--single-case", action="store_true", help="Plot classical single-case errors against cached M6 and candidate timing lines, without archived model points.")
+    parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
+    args = parser.parse_args()
+    if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
+        parser.error("runtime overlays require --timings")
+    if args.single_case and not (args.timings and args.candidate_timings and args.candidate_previous_method):
+        parser.error("--single-case requires --timings, --candidate-timings and --candidate-previous-method")
+    if args.stack_hardware and (args.single_case or not args.timings or not args.candidate_timings):
+        parser.error("--stack-hardware requires local --timings and --candidate-timings without --single-case")
+    if args.stack_hardware:
+        modal = argparse.Namespace(**vars(args))
+        modal.single_case = True
+        modal.timings = ROOT / "outputs/modal_rtx6000_20260925_classical_short/classical_rollouts.json"
+        modal.classical_timings = [
+            ROOT / f"outputs/modal_rtx6000_20260925_classical_{family}/classical_rollouts.json"
+            for family in ("tanaka", "bf")
+        ]
+        modal.candidate_timings = [
+            ROOT / f"outputs/modal_rtx6000_20260925_{run}/rollouts.json"
+            for run in ("tuning", "repeat_stokes")
+        ]
+        modal.candidate_method = "fused_cufftdx"
+        modal.candidate_previous_method = "fused_front"
+        modal.no_baseline_timings = None
+        fig = plt.figure(figsize=(10.5, 16.5))
+        fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
+        blackwell, ada = fig.subfigures(2, 1)
+        draw_comparison(modal, blackwell, "Blackwell · Modal — RTX PRO 6000")
+        draw_comparison(args, ada, "Ada · Local — RTX 6000")
+    else:
+        fig = plt.figure(figsize=(10.5, 8))
+        draw_comparison(args, fig)
+    name = ("12-potential-new-nn-modal" if args.single_case else "12-potential-new-nn" if args.candidate_timings or args.no_baseline_timings
+            else "11-single-rollout-warm" if args.timings else "10-neural-vs-classical")
     stem = OUT / (args.output_name or name)
     stem.parent.mkdir(parents=True, exist_ok=True)
     for extension in ("png", "pdf"):

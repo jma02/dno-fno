@@ -170,8 +170,11 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 ### 12-potential-new-nn
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
-A separate copy of figure 11 adds the candidate model's measured runtimes as
-orange vertical lines. The latest update fuses each FP64 G1 multiplier/product
+Blackwell/Modal panels are on top, with the original Ada/local panels below.
+Both hardware sections show the candidate's measured runtimes as orange
+vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
+The Blackwell measurements are described in the next subsection. The following
+describes the Ada panels, which extend figure 11. The latest update fuses each FP64 G1 multiplier/product
 chain using cuFFTDx, retaining the packed input spectra and batched surface
 features, G0 and learned branch inputs. Orange annotations show previous →
 current runtime and the reduction (5.2–5.5%).
@@ -219,6 +222,7 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
+  --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
   --candidate-timings outputs/cufftdx_20260925/rollout_stokes.json \
@@ -248,18 +252,19 @@ CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
 [PNG](figures/12-potential-new-nn-modal.png) / [PDF](figures/12-potential-new-nn-modal.pdf).
 Personal `jma02` Modal benchmarks on NVIDIA RTX PRO 6000 Blackwell Server Edition,
 CUDA12.9/SM120 and JAX0.9.2. This separate figure contains no local-GPU timings.
-It uses one full trajectory per family, N1024, dt0.01 and four GL2 iterations,
-with final surface errors against the same cached M6 reference. Classical M1
+It uses one full trajectory per family, N1024, dt0.01 and four GL2 iterations.
+Classical errors use the cached M6 reference; the neural candidate is shown
+only as a vertical timing line, with no one-epoch accuracy points. Classical M1
 means G0+G1. The candidate is the one-epoch checkpoint in
 `outputs/c27_w320_b4_h80_tanaka_hard128_20260924`.
 
 Before→cuFFTDx seconds: Stokes13.851→12.630, Tanaka137.045→125.434,
 Benjamin–Feir136.781→125.400, JONSWAP13.752→12.587 (8.3–8.8% reductions).
-Stokes neural points use three-repeat medians; other points use one measurement.
+The Stokes neural timing line uses a three-repeat median; other timings use one measurement.
 Timings exclude compilation/transfers and follow a separate five-frame warm-up;
 the full-executable first use is timed. Stokes repetitions put the classical
 first-call overhead near0.5%. Saved Gxi differs in filtering between the two
-implementations; this figure uses eta only. All plotted trajectories are finite
+implementations; the classical accuracy curve uses eta only. All measured trajectories are finite
 with positive fluid depth. M2 is faster and more accurate than this candidate
 in all four cases; the candidate's Tanaka error is98.866% before and98.866% after cuFFTDx.
 
