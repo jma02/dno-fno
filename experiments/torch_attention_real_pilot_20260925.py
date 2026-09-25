@@ -1,5 +1,6 @@
 """Fifty fresh Muon/AdamW steps on the downloaded real subset, on local Metal."""
 
+import argparse
 import json
 from pathlib import Path
 from statistics import median
@@ -30,13 +31,18 @@ def evaluate(model: DNO, loader: DataLoader) -> float:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--tag", default="torch_attention_real_pilot_20260925")
+    args = parser.parse_args()
     torch.manual_seed(0)
     data = ROOT.parent / "local-data/paper_equal_subset_20260924"
     train = DataLoader(Waves(data, "train"), batch_size=64, shuffle=True,
                        generator=torch.Generator().manual_seed(0))
     validation = DataLoader(Waves(data, "validation"), batch_size=64)
     x = np.load(data / "x.npy")
-    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x))).to("mps")
+    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to("mps")
     optimizers = build_optimizers(model, "muon", 1e-5)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     history, validations = [], []
@@ -71,14 +77,17 @@ def main() -> None:
     assert all(torch.isfinite(a).all() for a in averages)
     assert all(torch.isfinite(v).all() for o in optimizers for s in o.state.values()
                for v in s.values() if isinstance(v, torch.Tensor))
-    checkpoint = ROOT.parent / "pilot-checkpoints/torch_attention_real_muon_lr1e5_ema08_50_20260925.pt"
+    checkpoint = ROOT.parent / "pilot-checkpoints" / f"{args.tag}.pt"
     torch.save({"model": model.state_dict(), "optimizers": [o.state_dict() for o in optimizers],
                 "gradient_ema": averages, "step": 50, "lr": 1e-5, "ema": .8,
-                "seed": 0, "n": model.n, "length": model.length, "data": str(data)}, checkpoint)
+                "seed": 0, "n": model.n, "length": model.length, "depth": args.depth,
+                "bf16": args.bf16, "data": str(data)}, checkpoint)
     result = {
         "source": str(data), "device": "mps", "torch": torch.__version__, "seed": 0,
         "optimizer": "Muon transformer matrices + AdamW remainder", "lr": 1e-5,
         "gradient_ema_decay": .8, "batch_size": 64, "optimizer_steps": 50,
+        "bf16": args.bf16, "depth_per_stage": args.depth,
+        "parameters": sum(p.numel() for p in model.parameters()),
         "training_rows": len(train.dataset), "training_samples_seen": 3200,
         "validation_rows": len(validation.dataset),
         "scope": "Fresh initialization, first3200 unique rows of a shuffled4096-row real training split. All1024 held-out validation rows after every10 updates. Relative-L2 data loss only, no normalization or physics losses.",
@@ -87,7 +96,7 @@ def main() -> None:
         "steady_median_ms": 1000 * median(row["seconds"] for row in history[3:]),
         "wall_seconds": perf_counter() - started, "finite": True, "checkpoint": str(checkpoint),
     }
-    Path(__file__).with_suffix(".json").write_text(json.dumps(result, indent=2) + "\n")
+    (Path(__file__).parent / f"{args.tag}.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({key: value for key, value in result.items() if key != "history"}, indent=2), flush=True)
 
 

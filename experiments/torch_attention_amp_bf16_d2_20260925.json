@@ -1,0 +1,301 @@
+{
+  "source": "/Users/leon/Projects/Scratch/fnotrash/local-data/paper_equal_subset_20260924",
+  "device": "mps",
+  "torch": "2.14.0",
+  "seed": 0,
+  "optimizer": "Muon transformer matrices + AdamW remainder",
+  "lr": 1e-05,
+  "gradient_ema_decay": 0.8,
+  "batch_size": 64,
+  "optimizer_steps": 50,
+  "bf16": true,
+  "depth_per_stage": 2,
+  "parameters": 1635488,
+  "training_rows": 4096,
+  "training_samples_seen": 3200,
+  "validation_rows": 1024,
+  "scope": "Fresh initialization, first3200 unique rows of a shuffled4096-row real training split. All1024 held-out validation rows after every10 updates. Relative-L2 data loss only, no normalization or physics losses.",
+  "history": [
+    {
+      "step": 1,
+      "loss_before_update": 0.00316038285382092,
+      "seconds": 0.978328499943018
+    },
+    {
+      "step": 2,
+      "loss_before_update": 0.002954779425635934,
+      "seconds": 0.7981523750349879
+    },
+    {
+      "step": 3,
+      "loss_before_update": 0.0023440332151949406,
+      "seconds": 0.7544667921029031
+    },
+    {
+      "step": 4,
+      "loss_before_update": 0.002683334518224001,
+      "seconds": 0.7229105001315475
+    },
+    {
+      "step": 5,
+      "loss_before_update": 0.0031594689935445786,
+      "seconds": 0.7343472498469055
+    },
+    {
+      "step": 6,
+      "loss_before_update": 0.003625465091317892,
+      "seconds": 0.7686074580997229
+    },
+    {
+      "step": 7,
+      "loss_before_update": 0.003503065789118409,
+      "seconds": 0.7546254582703114
+    },
+    {
+      "step": 8,
+      "loss_before_update": 0.003526055719703436,
+      "seconds": 0.7276553753763437
+    },
+    {
+      "step": 9,
+      "loss_before_update": 0.003126139286905527,
+      "seconds": 0.7309226249344647
+    },
+    {
+      "step": 10,
+      "loss_before_update": 0.004216636996716261,
+      "seconds": 0.7610329580493271
+    },
+    {
+      "step": 11,
+      "loss_before_update": 0.003974118269979954,
+      "seconds": 0.7809723750688136
+    },
+    {
+      "step": 12,
+      "loss_before_update": 0.003959908615797758,
+      "seconds": 0.7223901250399649
+    },
+    {
+      "step": 13,
+      "loss_before_update": 0.003543859114870429,
+      "seconds": 0.7221083752810955
+    },
+    {
+      "step": 14,
+      "loss_before_update": 0.0035611591301858425,
+      "seconds": 0.7480060830712318
+    },
+    {
+      "step": 15,
+      "loss_before_update": 0.004986205138266087,
+      "seconds": 0.736894250381738
+    },
+    {
+      "step": 16,
+      "loss_before_update": 0.004124804399907589,
+      "seconds": 0.7543540000915527
+    },
+    {
+      "step": 17,
+      "loss_before_update": 0.0034183459356427193,
+      "seconds": 0.7397182919085026
+    },
+    {
+      "step": 18,
+      "loss_before_update": 0.0033900674898177385,
+      "seconds": 0.7279017083346844
+    },
+    {
+      "step": 19,
+      "loss_before_update": 0.0033236260060220957,
+      "seconds": 0.7379394168965518
+    },
+    {
+      "step": 20,
+      "loss_before_update": 0.003728722222149372,
+      "seconds": 0.738810250069946
+    },
+    {
+      "step": 21,
+      "loss_before_update": 0.0026788217946887016,
+      "seconds": 0.7802135841920972
+    },
+    {
+      "step": 22,
+      "loss_before_update": 0.0032788715325295925,
+      "seconds": 0.752331499941647
+    },
+    {
+      "step": 23,
+      "loss_before_update": 0.002435291651636362,
+      "seconds": 0.7618383336812258
+    },
+    {
+      "step": 24,
+      "loss_before_update": 0.0036540436558425426,
+      "seconds": 0.7338714580982924
+    },
+    {
+      "step": 25,
+      "loss_before_update": 0.004249392542988062,
+      "seconds": 0.7353275408968329
+    },
+    {
+      "step": 26,
+      "loss_before_update": 0.004112547729164362,
+      "seconds": 0.7292223325930536
+    },
+    {
+      "step": 27,
+      "loss_before_update": 0.0038556745275855064,
+      "seconds": 0.7307904167100787
+    },
+    {
+      "step": 28,
+      "loss_before_update": 0.003925925120711327,
+      "seconds": 0.7596344999037683
+    },
+    {
+      "step": 29,
+      "loss_before_update": 0.004037204198539257,
+      "seconds": 0.7287688748911023
+    },
+    {
+      "step": 30,
+      "loss_before_update": 0.004813138395547867,
+      "seconds": 0.7508077919483185
+    },
+    {
+      "step": 31,
+      "loss_before_update": 0.003985760733485222,
+      "seconds": 0.8805293748155236
+    },
+    {
+      "step": 32,
+      "loss_before_update": 0.004243236966431141,
+      "seconds": 0.763625499792397
+    },
+    {
+      "step": 33,
+      "loss_before_update": 0.0036413241177797318,
+      "seconds": 0.740898875053972
+    },
+    {
+      "step": 34,
+      "loss_before_update": 0.0035950466990470886,
+      "seconds": 0.7369919591583312
+    },
+    {
+      "step": 35,
+      "loss_before_update": 0.0036321370862424374,
+      "seconds": 0.7935893340036273
+    },
+    {
+      "step": 36,
+      "loss_before_update": 0.0030480429995805025,
+      "seconds": 0.7706870418041945
+    },
+    {
+      "step": 37,
+      "loss_before_update": 0.002562209963798523,
+      "seconds": 0.7607001671567559
+    },
+    {
+      "step": 38,
+      "loss_before_update": 0.002687065862119198,
+      "seconds": 0.76283641718328
+    },
+    {
+      "step": 39,
+      "loss_before_update": 0.0029550748877227306,
+      "seconds": 0.7488713329657912
+    },
+    {
+      "step": 40,
+      "loss_before_update": 0.0039223479107022285,
+      "seconds": 0.7477226252667606
+    },
+    {
+      "step": 41,
+      "loss_before_update": 0.0038088373839855194,
+      "seconds": 0.8385970829986036
+    },
+    {
+      "step": 42,
+      "loss_before_update": 0.004173204302787781,
+      "seconds": 0.7528580827638507
+    },
+    {
+      "step": 43,
+      "loss_before_update": 0.0029909873846918344,
+      "seconds": 0.7359181251376867
+    },
+    {
+      "step": 44,
+      "loss_before_update": 0.0028661852702498436,
+      "seconds": 0.7381544578820467
+    },
+    {
+      "step": 45,
+      "loss_before_update": 0.0038940543308854103,
+      "seconds": 0.734974583145231
+    },
+    {
+      "step": 46,
+      "loss_before_update": 0.0036866660229861736,
+      "seconds": 0.7430205419659615
+    },
+    {
+      "step": 47,
+      "loss_before_update": 0.003545003943145275,
+      "seconds": 0.7728371671400964
+    },
+    {
+      "step": 48,
+      "loss_before_update": 0.0034384087193757296,
+      "seconds": 0.742857875302434
+    },
+    {
+      "step": 49,
+      "loss_before_update": 0.003282683901488781,
+      "seconds": 0.7466977089643478
+    },
+    {
+      "step": 50,
+      "loss_before_update": 0.0038651064969599247,
+      "seconds": 0.7297001658007503
+    }
+  ],
+  "validation": [
+    {
+      "step": 0,
+      "relative_l2": 0.0034007790745818056
+    },
+    {
+      "step": 10,
+      "relative_l2": 0.0033407656374038197
+    },
+    {
+      "step": 20,
+      "relative_l2": 0.0034478846137062646
+    },
+    {
+      "step": 30,
+      "relative_l2": 0.004059786107973196
+    },
+    {
+      "step": 40,
+      "relative_l2": 0.0036732813314301893
+    },
+    {
+      "step": 50,
+      "relative_l2": 0.0037790066126035526
+    }
+  ],
+  "training_seconds": 37.84501891909167,
+  "steady_median_ms": 743.0205419659615,
+  "wall_seconds": 47.438777207862586,
+  "finite": true,
+  "checkpoint": "/Users/leon/Projects/Scratch/fnotrash/pilot-checkpoints/torch_attention_amp_bf16_d2_20260925.pt"
+}

@@ -19,6 +19,14 @@ and Fourier filters. Muon uses `adjust_lr_fn="match_rms_adamw"` with the same
 base learning rate (not identical updates), default momentum0.95 and five
 Newton–Schulz iterations. Gradient EMA is applied before **both** optimizers.
 
+`--bf16` autocasts the encoder and transformer attention/MLPs to BF16. Master
+weights, residual streams, FFTs, the entire final decoder, xi filters, baseline
+addition, loss, gradient EMA and optimizer state retain FP32 (CPU/CUDA baseline
+still uses FP64 internally). Muon's orthogonalization already uses BF16.
+`--depth 2` stacks two blocks in each attention stage, four blocks total;
+default depth1 is compatible with existing checkpoints. Checkpoint arguments
+record depth and precision. No dropout; explicit SDPA is used in train and eval.
+
 Input directory: `eta.npy`, `xi.npy`, `gxi.npy` with shape `[samples,1024]`,
 positive physical `depth.npy`, periodic grid `x.npy`, and `dataset_split.npy`
 containing `train` / `validation` labels. Inputs/targets are physical values,
