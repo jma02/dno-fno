@@ -19,7 +19,7 @@ image = (modal.Image.debian_slim(python_version="3.12")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="L4:1", cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def compare(run_name: str) -> dict:
+def compare(run_name: str, batch_size: int, bf16_only: bool) -> dict:
     import hashlib
     import subprocess
     import sys
@@ -38,11 +38,13 @@ def compare(run_name: str) -> dict:
     result = {"run_name": run_name, "data_manifest": manifest, "variants": {}}
     for name, flags in (("fp32_d1", []), ("bf16_d1", ["--bf16"]),
                         ("bf16_d2", ["--bf16", "--depth", "2"])):
+        if bf16_only and name == "fp32_d1":
+            continue
         tag = f"{run_name}_{name}"
         subprocess.run([
             sys.executable, "/repo/experiments/torch_attention_real_pilot_20260925.py",
             "--device", "cuda", "--tag", tag, "--checkpoint-dir", str(destination),
-            "--output-dir", str(destination), *flags,
+            "--output-dir", str(destination), "--batch-size", str(batch_size), *flags,
         ], check=True)
         result["variants"][name] = json.loads((destination / f"{tag}.json").read_text())
         volume.commit()
@@ -53,8 +55,9 @@ def compare(run_name: str) -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "torch_attention_l4_20260925") -> None:
-    result = compare.remote(run_name)
+def main(run_name: str = "torch_attention_l4_20260925", batch_size: int = 64,
+         bf16_only: bool = False) -> None:
+    result = compare.remote(run_name, batch_size, bf16_only)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
     target = ROOT.parent / "pilot-checkpoints" / run_name
     target.mkdir(parents=True, exist_ok=True)
