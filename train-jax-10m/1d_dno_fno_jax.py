@@ -110,7 +110,7 @@ def main() -> None:
                         help="Optional even grid size for the learned correction; baseline stays full resolution.")
     parser.add_argument("--cs_fuse_fft", action="store_true",
                         help="Use the experimental fused float32 FFT kernel on a 256-point learned grid.")
-    parser.add_argument("--cs_correction", choices=("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp"), default="branches",
+    parser.add_argument("--cs_correction", choices=("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp", "spatial_spectral_attention"), default="branches",
                         help="Learned correction architecture; alternatives to branches are experimental.")
     parser.add_argument("--cs_compact_rank", type=int, default=64,
                         help="Even dimension of the compact correction's real Fourier basis.")
@@ -120,6 +120,9 @@ def main() -> None:
     parser.add_argument("--cs_spectral_layers", type=int, default=4)
     parser.add_argument("--cs_spectral_channels", type=int, default=16)
     parser.add_argument("--cs_spectral_decoder_hidden", type=int, default=64)
+    parser.add_argument("--cs_attention_channels", type=int, default=128)
+    parser.add_argument("--cs_attention_heads", type=int, default=4)
+    parser.add_argument("--cs_attention_window", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument(
         "--epochs",
@@ -325,6 +328,9 @@ def main() -> None:
             spectral_layers=args.cs_spectral_layers,
             spectral_channels=args.cs_spectral_channels,
             spectral_decoder_hidden=args.cs_spectral_decoder_hidden,
+            attention_channels=args.cs_attention_channels,
+            attention_heads=args.cs_attention_heads,
+            attention_window=args.cs_attention_window,
             n_polys=args.cs_n_polys,
             use_first_deriv=args.cs_use_first_deriv,
             use_second_deriv=args.cs_use_second_deriv,

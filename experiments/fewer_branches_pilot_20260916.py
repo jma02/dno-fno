@@ -17,7 +17,7 @@ image = (
 )
 for source in (
     "models/fno-jax/losses.py", "train-jax-10m/mode_balanced_regularizer.py",
-    "train-jax-10m/translation_tangent_regularizer.py",
+    "train-jax-10m/translation_tangent_regularizer.py", "train-jax-10m/hadamard_shape_regularizer.py",
 ):
     image = image.add_local_file(ROOT / source, f"/bench/{Path(source).name}")
 
@@ -86,7 +86,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
               spectral_benchmark: bool = False, fno_benchmark: bool = False,
               fno_fold_benchmark: bool = False, fno_gemm_benchmark: bool = False,
               fno_transform_benchmark: bool = False, symmetric_benchmark: bool = False,
-              full_spectrum_benchmark: bool = False) -> str:
+              full_spectrum_benchmark: bool = False, attention_benchmark: bool = False) -> str:
     import json
     import os
     import statistics
@@ -103,7 +103,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
     from flax import serialization
     from flax.training.train_state import TrainState
 
-    from dno_net_v2 import CraigSulemDNO, FullSpectrumMLPCorrection, SelfAdjointFNOCorrection, fourier_resample_even
+    from dno_net_v2 import CraigSulemDNO, FullSpectrumMLPCorrection, SelfAdjointFNOCorrection, SpatialSpectralAttentionCorrection, fourier_resample_even
     from fused_fft import check_fused_gelu_roundtrip, check_fused_roundtrip
     from losses import relative_l2_loss
     from mode_balanced_regularizer import compute_mode_balanced_loss
@@ -228,6 +228,13 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
                 ("full_spectrum_mlp", 4, 32, False, "full_spectrum_mlp", 64),
             )
             result["scope"] = "One H100, batch4096, resident real data. Four-layer coarse symmetric FNO versus full1024 FFT, learned256-dimensional compression, four width256 surface MLP layers, and tied xi projection. Both linear/self-adjoint, no eta-quadratic constraint. Nonzero heads, ordinary relative-L2/mode/Tanaka loss and AdamW1e-4; excludes Hadamard, loading and compilation.21 synchronized trials plus21 alternating retimings."
+        if attention_benchmark:
+            batch = tuple(array[:64] for array in datasets["train"])
+            variants = (
+                ("full_spectrum_mlp320", 4, 32, False, "full_spectrum_mlp", 64),
+                ("spatial_spectral_attention", 4, 32, False, "spatial_spectral_attention", 64),
+            )
+            result["scope"] = "H100!:1,batch64,resident real pilot data. Width320 full-spectrum MLP versus pointwise MLP128,window64 spatial attention4heads,full513-bin frequency attention,full1024 IFFT and32 tied filters. Both linear/self-adjoint. Bias-corrected gradient EMA0.9 then AdamW1e-4. Nonzero heads;21 alternating ordinary-step timings including relative-L2/mode/Tanaka losses. Separate full Hadamard-step timing for attention,8 samples. Excludes loading/compilation; not a learning comparison."
     for name, blocks, latent, fused, correction_kind, rank in variants:
         if batch_sweep and not fused:
             continue
@@ -246,6 +253,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         )
         if symmetric_benchmark:
             model = model.clone(fno_fold_spatial=True, fno_spectral_gemm="packed", fno_transform="fft_backward")
+        if attention_benchmark:
+            model = model.clone(spectral_hidden=320, learned_grid=None)
         params = model.init(key, batch[0][:1], batch[1][:1])["params"]
         if symmetric_benchmark:
             # Exercise nonzero corrections and all gradient paths, not just a zero head.
@@ -264,7 +273,10 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         )
         if symmetric_benchmark:
             schedule = optax.constant_schedule(1e-4)
-        state = TrainState.create(apply_fn=model.apply, params=params, tx=optax.adamw(schedule, weight_decay=1e-4))
+        optimizer = optax.adamw(schedule, weight_decay=1e-4)
+        if attention_benchmark:
+            optimizer = optax.chain(optax.ema(.9, debias=True), optimizer)
+        state = TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
         if symmetric_benchmark:
             state = state.replace(step=jnp.asarray(1000))
         if fusion_only or batch_sweep:
@@ -337,7 +349,7 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             result["optimization_relative_errors"] = errors
             print(f"Optimization output/gradient relative errors: {errors}", flush=True)
 
-        if symmetric_benchmark and correction_kind in ("symmetric_fno", "full_spectrum_mlp"):
+        if symmetric_benchmark and correction_kind in ("symmetric_fno", "full_spectrum_mlp", "spatial_spectral_attention"):
             probe_fields, probe_depth = batch[0][:2], batch[1][:2]
             potential = jax.random.normal(jax.random.key(91), probe_fields[..., 1].shape, dtype=jnp.float32)
             probe = jax.random.normal(jax.random.key(92), potential.shape, dtype=jnp.float32)
@@ -345,8 +357,12 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             @jax.jit
             def residual(value: jax.Array) -> jax.Array:
                 fields = probe_fields.at[..., 1].set(value)
+                if correction_kind == "spatial_spectral_attention":
+                    return SpatialSpectralAttentionCorrection().apply(
+                        {"params": params[correction_kind]}, fields, probe_depth,
+                    )
                 if correction_kind == "full_spectrum_mlp":
-                    return FullSpectrumMLPCorrection().apply(
+                    return FullSpectrumMLPCorrection(hidden=model.spectral_hidden).apply(
                         {"params": params["full_spectrum_mlp"]}, fields, probe_depth,
                     )
                 coarse = fourier_resample_even(fields, 256)
@@ -487,7 +503,39 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
         compiled[name] = [state, executable, evaluate]
         print(f"{name}: {record['step_median_ms']:.3f}ms, params={record['parameters']}", flush=True)
         if fno_benchmark:
-            record["batch_size"] = 4096
+            record["batch_size"] = int(batch[0].shape[0])
+        if attention_benchmark and correction_kind == "spatial_spectral_attention":
+            from hadamard_shape_regularizer import compute_hadamard_loss
+
+            @jax.jit
+            def hadamard_step(current: TrainState) -> tuple[TrainState, jax.Array]:
+                def loss(parameters: dict) -> jax.Array:
+                    ordinary = objective(parameters, *batch, current.step)[0]
+                    hadamard = compute_hadamard_loss(
+                        rng=jax.random.key(90), apply_fn=model.apply, model_params=parameters,
+                        eta_phys=batch[0][:8, :, 0] * scales[0],
+                        xi_phys=batch[0][:8, :, 1] * scales[1],
+                        batch_depth_local=batch[1][:8].astype(jnp.float64),
+                        norm_inputs_fn=lambda eta, xi: jnp.stack((eta / scales[0], xi / scales[1]), -1),
+                        denorm_targets_fn=lambda output: output * target_scale,
+                        k=k, dtype=jnp.float64,
+                    )
+                    return ordinary + jnp.float32(.01 * hadamard)
+
+                value, gradient = jax.value_and_grad(loss)(current.params)
+                return current.apply_gradients(grads=gradient), value
+
+            for _ in range(3):
+                regularized = jax.block_until_ready(hadamard_step(state))
+            assert all(bool(jnp.isfinite(leaf).all()) for leaf in jax.tree.leaves(regularized))
+            trials = []
+            for _ in range(11):
+                tick = perf_counter()
+                jax.block_until_ready(hadamard_step(state))
+                trials.append((perf_counter() - tick) * 1000)
+            record["hadamard_step_median_ms"] = statistics.median(trials)
+            record["hadamard_step_trials_ms"] = trials
+            print(f"Attention full Hadamard step: {statistics.median(trials):.3f}ms", flush=True)
         if fno_gemm_benchmark:
             import gzip
             from collections import Counter
@@ -560,6 +608,8 @@ def run_pilot(run_name: str, *, fusion_only: bool, batch_sweep: bool = False,
             filename = "symmetric_fno_benchmark_h100.json"
         if full_spectrum_benchmark:
             filename = "full_spectrum_mlp_benchmark_h100.json"
+        if attention_benchmark:
+            filename = "attention_b64_20260924.json"
         (destination / filename).write_text(json.dumps(result, indent=2))
         volume.commit()
         return json.dumps(result, indent=2)
@@ -682,19 +732,32 @@ def compact_check(run_name: str, spectral_benchmark: bool = False, fno_benchmark
                      symmetric_benchmark=symmetric_benchmark, full_spectrum_benchmark=full_spectrum_benchmark)
 
 
+@app.function(
+    image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4, memory=16384,
+    timeout=600, retries=0, scaledown_window=2,
+)
+def attention_check(run_name: str) -> str:
+    return run_pilot(run_name, fusion_only=False, spectral_benchmark=True,
+                     fno_benchmark=True, symmetric_benchmark=True, attention_benchmark=True)
+
+
 @app.local_entrypoint()
 def main(run_name: str = "fewer_branches_20260916", prepared: bool = False,
          fusion_only: bool = False, batch_sweep: bool = False, profile_step: bool = False,
          compact_pilot: bool = False, spectral_benchmark: bool = False,
          fno_benchmark: bool = False, fno_fold_benchmark: bool = False,
          fno_gemm_benchmark: bool = False, fno_transform_benchmark: bool = False,
-         symmetric_benchmark: bool = False, full_spectrum_benchmark: bool = False) -> None:
+         symmetric_benchmark: bool = False, full_spectrum_benchmark: bool = False,
+         attention_benchmark: bool = False) -> None:
     symmetric_benchmark = symmetric_benchmark or full_spectrum_benchmark
     fno_gemm_benchmark = fno_gemm_benchmark or fno_transform_benchmark
     fno_benchmark = fno_benchmark or fno_fold_benchmark or fno_gemm_benchmark or symmetric_benchmark
     if not prepared:
         print(prepare.remote(run_name))
-    if compact_pilot or spectral_benchmark or fno_benchmark:
+    if attention_benchmark:
+        result = attention_check.remote(run_name)
+        suffix = "_attention_b64_20260924"
+    elif compact_pilot or spectral_benchmark or fno_benchmark:
         result = compact_check.remote(
             run_name, spectral_benchmark or fno_benchmark, fno_benchmark, fno_fold_benchmark,
             fno_gemm_benchmark, fno_transform_benchmark, profile_step, symmetric_benchmark, full_spectrum_benchmark,

@@ -335,6 +335,72 @@ class FullSpectrumMLPCorrection(nn.Module):
         return jnp.fft.irfft(real + 1j * imaginary, n=size, axis=1, norm="ortho")
 
 
+class AttentionResidual(nn.Module):
+    heads: int = 4
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        channels = inputs.shape[-1]
+        precision = "TF32_TF32_F32_X3" if inputs.dtype == jnp.float32 and jax.default_backend() == "gpu" else None
+        normalized = nn.LayerNorm(name="attention_norm")(inputs)
+        hidden = inputs + nn.MultiHeadDotProductAttention(
+            num_heads=self.heads, qkv_features=channels, out_features=channels,
+            precision=precision, name="attention",
+        )(normalized, deterministic=True)
+        normalized = nn.LayerNorm(name="mlp_norm")(hidden)
+        mixed = nn.gelu(nn.Dense(2 * channels, precision=precision, name="mlp_in")(normalized))
+        return hidden + nn.Dense(channels, precision=precision, name="mlp_out")(mixed)
+
+
+class SpatialSpectralAttentionCorrection(nn.Module):
+    """Full-grid surface attention generates weights for a tied linear xi path."""
+    channels: int = 128
+    heads: int = 4
+    window: int = 64
+    branches: int = 32
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        batch, size, _ = inputs.shape
+        if (size % 2 or min(self.channels, self.heads, self.window, self.branches) < 1
+                or size % self.window or self.channels % self.heads):
+            raise ValueError("Attention requires an even grid divisible by window, and channels divisible by heads")
+        precision = "TF32_TF32_F32_X3" if inputs.dtype == jnp.float32 and jax.default_backend() == "gpu" else None
+        condition = jnp.broadcast_to(depth[:, None, :], (batch, size, 1))
+        hidden = jnp.concatenate((inputs[..., :1], condition), axis=-1)
+        for index in range(2):
+            hidden = nn.gelu(nn.Dense(self.channels, precision=precision, name=f"encoder_{index}")(hidden))
+        position = self.param("window_position", nn.initializers.normal(0.01),
+                              (self.window, self.channels), jnp.float32)
+        windows = hidden.reshape(batch * (size // self.window), self.window, self.channels)
+        windows = AttentionResidual(heads=self.heads, name="spatial")(
+            windows + position.astype(inputs.dtype),
+        )
+        hidden = windows.reshape(batch, size, self.channels)
+        spectrum = jnp.fft.rfft(hidden, axis=1, norm="ortho")
+        tokens = jnp.concatenate((spectrum.real, spectrum.imag), axis=-1)
+        frequency = self.param("frequency_position", nn.initializers.normal(0.01),
+                               (size // 2 + 1, 2 * self.channels), jnp.float32)
+        tokens = AttentionResidual(heads=self.heads, name="frequency")(
+            tokens + frequency.astype(inputs.dtype),
+        )
+        real, imaginary = jnp.split(tokens, 2, axis=-1)
+        imaginary = imaginary.at[:, 0].set(0).at[:, -1].set(0)
+        spatial = jnp.fft.irfft(real + 1j * imaginary, n=size, axis=1, norm="ortho")
+        hidden = nn.gelu(nn.Dense(self.channels, precision=precision, name="decoder_hidden")(spatial))
+        weights = nn.Dense(
+            self.branches, use_bias=False, kernel_init=nn.initializers.zeros,
+            precision=precision, name="decoder_out",
+        )(hidden)
+        multiplier = self.param("filter", nn.initializers.normal(1.0),
+                                (size // 2 + 1, self.branches), jnp.float32).astype(inputs.dtype)
+        multiplier = multiplier.at[0].set(0)
+        potential = jnp.fft.rfft(inputs[..., 1], axis=1, norm="backward")
+        filtered = jnp.fft.irfft(potential[..., None] * multiplier, n=size, axis=1, norm="backward")
+        weighted = jnp.fft.rfft(weights * filtered, axis=1, norm="backward")
+        return jnp.fft.irfft(jnp.sum(multiplier * weighted, axis=-1), n=size, axis=1, norm="backward") / self.branches**0.5
+
+
 class CraigSulemDNO(nn.Module):
     """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
     width: int                        # Each shared eta layer has width // 2 channels.
@@ -349,6 +415,9 @@ class CraigSulemDNO(nn.Module):
     spectral_layers: int = 4
     spectral_channels: int = 16
     spectral_decoder_hidden: int = 64
+    attention_channels: int = 128
+    attention_heads: int = 4
+    attention_window: int = 64
     fno_fold_spatial: bool = True
     fno_spectral_gemm: str = "packed"
     fno_transform: str = "fft_backward"
@@ -417,7 +486,7 @@ class CraigSulemDNO(nn.Module):
     def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
-        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp"):
+        if self.correction_kind not in ("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp", "spatial_spectral_attention"):
             raise ValueError(f"Unknown correction kind: {self.correction_kind!r}")
         if self.correction_kind != "branches" and self.fuse_fft:
             raise ValueError("FFT fusion applies only to the branches correction")
@@ -431,6 +500,12 @@ class CraigSulemDNO(nn.Module):
             self._linear_baseline(xi_norm, depth)
             + self._g1_baseline(eta_norm, xi_norm, depth)
         )
+        if self.correction_kind == "spatial_spectral_attention":
+            correction = SpatialSpectralAttentionCorrection(
+                channels=self.attention_channels, heads=self.attention_heads,
+                window=self.attention_window, branches=self.latent, name="spatial_spectral_attention",
+            )(inputs, clipped_log_depth)
+            return (baseline + correction)[..., None]
         if self.correction_kind == "full_spectrum_mlp":
             correction = FullSpectrumMLPCorrection(
                 hidden=self.spectral_hidden, layers=self.spectral_layers, name="full_spectrum_mlp",

@@ -386,6 +386,48 @@ def test_full_spectrum_compression_preserves_constraints_and_high_modes() -> Non
     assert jnp.linalg.norm(gradient["full_spectrum_mlp"]["xi_projection"]) > 0
 
 
+def test_attention_correction_constraints_and_full_grid_gradients() -> None:
+    eta, xi, depth = _state()
+    model = _model().clone(
+        correction_kind="spatial_spectral_attention", attention_channels=8,
+        attention_heads=2, attention_window=16, latent=4, learned_grid=16,
+    )
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = unfreeze(model.init(jax.random.key(110), inputs, depth))
+    trunk = variables["params"]["spatial_spectral_attention"]
+    assert trunk["frequency_position"].shape == (33, 16)
+    assert trunk["filter"].shape == (33, 4)
+    assert jnp.max(jnp.abs(_learned_residual(model, variables, eta, xi, depth))) < 1e-12
+    gradient = jax.grad(lambda params: jnp.sum(
+        (model.apply({"params": params}, inputs, depth)[..., 0] - xi)**2
+    ))(variables["params"])
+    assert jnp.linalg.norm(gradient["spatial_spectral_attention"]["decoder_out"]["kernel"]) > 0
+    head = trunk["decoder_out"]
+    head["kernel"] = .02 * jax.random.normal(jax.random.key(111), head["kernel"].shape, dtype=jnp.float32)
+
+    def residual(surface: jax.Array, potential: jax.Array) -> jax.Array:
+        return _learned_residual(model, variables, surface, potential, depth)
+
+    x = jnp.arange(64) * 2 * jnp.pi / 64
+    high = (jnp.sin(23 * x) + jnp.cos(32 * x))[None, :]
+    probe = jax.random.normal(jax.random.key(112), xi.shape)
+    a, b = residual(eta, high), residual(eta, probe)
+    assert jnp.linalg.norm(a) > 1e-7
+    assert jnp.linalg.norm(residual(eta + .02 * high, xi) - residual(eta, xi)) > 1e-7
+    assert jnp.allclose(residual(eta, 2 * high - probe), 2 * a - b, rtol=1e-9, atol=1e-10)
+    assert jnp.allclose(jnp.vdot(probe, a), jnp.vdot(b, high), rtol=1e-9, atol=1e-10)
+    assert jnp.max(jnp.abs(residual(eta, jnp.ones_like(xi)))) < 1e-10
+    assert jnp.max(jnp.abs(a.mean(axis=-1))) < 1e-10
+    _, pullback = jax.vjp(lambda value: residual(eta, value), high)
+    assert jnp.allclose(pullback(probe)[0], b, rtol=1e-9, atol=1e-10)
+    # Check the nonlinear surface path's derivative through both attention blocks and FFTs.
+    direction = .01 * probe
+    value, tangent = jax.jvp(lambda surface: residual(surface, xi), (eta,), (direction,))
+    finite_difference = (residual(eta + 1e-4 * direction, xi) - residual(eta - 1e-4 * direction, xi)) / 2e-4
+    assert jnp.isfinite(value).all()
+    assert jnp.allclose(tangent, finite_difference, rtol=2e-5, atol=1e-8)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_order_two_has_zero_value_and_first_variation,
@@ -398,6 +440,7 @@ def main() -> int:
         test_canonical_fno_gradient_and_translation,
         test_symmetric_fno_linearity_adjoint_and_gradients,
         test_full_spectrum_compression_preserves_constraints_and_high_modes,
+        test_attention_correction_constraints_and_full_grid_gradients,
     )
     for test in tests:
         test()
