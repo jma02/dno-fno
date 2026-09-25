@@ -35,18 +35,22 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
+    parser.add_argument("--single-case", action="store_true", help="Plot measured single-case errors against the cached M6 reference, without archived model points.")
+    parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
     if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
         parser.error("runtime overlays require --timings")
-    warm = json.loads(args.timings.read_text()) if args.timings else None
+    if args.single_case and not (args.timings and args.candidate_timings and args.candidate_previous_method):
+        parser.error("--single-case requires --timings, --candidate-timings and --candidate-previous-method")
+    warm = json.loads(args.timings.read_text()) if args.timings else {}
     if warm:
         for path in args.classical_timings or ():
             for family, result in json.loads(path.read_text())["families"].items():
-                warm["families"][family]["methods"].update(result["methods"])
+                warm["families"].setdefault(family, result)["methods"].update(result["methods"])
     candidate = ({"families": {family: result for path in args.candidate_timings
                               for family, result in json.loads(path.read_text())["families"].items()}}
                  if args.candidate_timings else None)
-    baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings else None
+    baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     overlays = (
         (candidate, "#c45b22", "New candidate optimized network"),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁"),
@@ -62,12 +66,19 @@ if __name__ == "__main__":
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
                         top=0.78 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
-        with np.load(ROOT / "outputs/cs_order_sweep_20260923" / f"{family}.npz") as data:
-            selected = np.argsort(data["orders"])
-            orders = data["orders"][selected]
-            seconds = np.median(data["timings_s"][selected], axis=1)
-            errors = 100 * np.median(data["eta_rel_l2"][selected, -1], axis=1)
-            horizon = float(data["times"][-1])
+        if args.single_case:
+            timing = warm["families"][family]
+            orders = np.arange(1, 7)
+            seconds = np.asarray([np.median(timing["methods"][f"M{order}"]["seconds"]) for order in orders])
+            errors = 100 * np.asarray([timing["methods"][f"M{order}"]["cached_reference_terminal_eta_error"] for order in orders])
+            horizon = timing["horizon"]
+        else:
+            with np.load(ROOT / "outputs/cs_order_sweep_20260923" / f"{family}.npz") as data:
+                selected = np.argsort(data["orders"])
+                orders = data["orders"][selected]
+                seconds = np.median(data["timings_s"][selected], axis=1)
+                errors = 100 * np.median(data["eta_rel_l2"][selected, -1], axis=1)
+                horizon = float(data["times"][-1])
         scale = 1.0
         if warm:
             timing = warm["families"][family]
@@ -91,7 +102,7 @@ if __name__ == "__main__":
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
         right = float(seconds.max())
-        for run, name, _label, color, marker in RUNS:
+        for run, name, _label, color, marker in (() if args.single_case else RUNS):
             source = next((ROOT / "outputs" / run).glob(
                 f"eval_best_current_test_stratified_n32*/{family}_summary.json"))
             result = json.loads(source.read_text())
@@ -109,9 +120,18 @@ if __name__ == "__main__":
             methods = comparison["families"][family]["methods"]
             record = methods[args.candidate_method if comparison is candidate else "fused"]
             new_seconds = float(np.median(record["seconds"]))
-            ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
+            if args.single_case:
+                ax.scatter(new_seconds, 100 * record["cached_reference_terminal_eta_error"],
+                           color=color, marker="D", s=65, edgecolors="white", linewidths=0.8, zorder=4)
+            else:
+                ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
             if comparison is candidate and args.candidate_previous_method:
-                previous_seconds = float(np.median(methods[args.candidate_previous_method]["seconds"]))
+                previous = methods[args.candidate_previous_method]
+                previous_seconds = float(np.median(previous["seconds"]))
+                if args.single_case:
+                    ax.scatter(previous_seconds, 100 * previous["cached_reference_terminal_eta_error"],
+                               color="#087eaa", marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
+                    right = max(right, previous_seconds)
                 savings = 100 * (1 - new_seconds / previous_seconds)
                 ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9)
@@ -123,20 +143,27 @@ if __name__ == "__main__":
         ax.set_title(f"T = {horizon:g}", loc="right", fontsize=9, color="#777f86", pad=12)
 
     fig.suptitle("Single-rollout runtime vs error" if warm else "Batch runtime vs error", y=0.96, fontsize=18, ha="left", x=0.10)
+    if args.single_case:
+        fig.text(0.10, 0.921, warm["device"], color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
-          for _, name, _, color, marker in reversed(RUNS)],
+          for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
+        *([Line2D([], [], color="#087eaa", marker="o", ls="none", ms=7, label="Previous network execution")]
+          if args.single_case else []),
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, ls="--", lw=1.3, label=label)
+        *[Line2D([], [], color=color, ls="none" if args.single_case else "--",
+                 marker="D" if args.single_case else None, ms=7, lw=1.3, label=label)
           for comparison, color, label in overlays if comparison],
-    ], loc="upper left", bbox_to_anchor=(0.09, 0.91),
+    ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case else 0.91),
         ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
     fig.supxlabel(xlabel, y=0.06, fontsize=11)
-    fig.supylabel("Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
-    OUT.mkdir(exist_ok=True)
+    fig.supylabel("Final surface error (%)" if args.single_case else "Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
+    name = ("12-potential-new-nn-modal" if args.single_case else "12-potential-new-nn" if candidate or baseline_free
+            else "11-single-rollout-warm" if warm else "10-neural-vs-classical")
+    stem = OUT / (args.output_name or name)
+    stem.parent.mkdir(parents=True, exist_ok=True)
     for extension in ("png", "pdf"):
-        name = "12-potential-new-nn" if candidate or baseline_free else "11-single-rollout-warm" if warm else "10-neural-vs-classical"
-        fig.savefig(OUT / f"{name}.{extension}", dpi=180, facecolor="white")
+        fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
     plt.close(fig)

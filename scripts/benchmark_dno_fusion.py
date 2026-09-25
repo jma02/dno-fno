@@ -24,22 +24,38 @@ from flax import linen as nn  # noqa: E402
 from flax.core import Scope  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
-from scripts.benchmark_cufftdx import sandwich  # noqa: E402
+from scripts.benchmark_cufftdx import fft, sandwich  # noqa: E402
+from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
+TRIALS = ("cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
+          "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
+          "cufftdx_product_e4", "cufftdx_product_e16")
 
 
 def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
+    fft_ept: int = 8,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
-    cufftdx_g1 = variant == "cufftdx"
+    if variant.endswith(("_e4", "_e16")):
+        variant, _, suffix = variant.rpartition("_e")
+        fft_ept = int(suffix)
+    trial = variant
+    cufftdx_g1 = variant.startswith("cufftdx")
     if cufftdx_g1:
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
+    factors = None
+    if "lowrank" in trial:
+        rank = int(trial.split("lowrank")[1])
+        with np.load(ROOT / "outputs/cufftdx_20260925/lowrank_factors.npz") as saved:
+            factors = (jnp.asarray(saved[f"A{rank}"]), jnp.asarray(saved[f"B{rank}"]))
+    head_kernel = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["phi_proj"]["kernel"]
+                                        for i in range(model.n_blocks)), axis=-1)
     cached = None
     k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
     surface_ops = jnp.stack([symbol for enabled, symbol in (
@@ -62,12 +78,13 @@ def build_variant(
     def forward(eta: jax.Array, xi: jax.Array) -> jax.Array:
         spatial, multipliers = [], []
         front_fields = None
+        dense_weights = None
 
         def intercept(
             next_fun: Callable[..., Any], call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
             context: nn.module.InterceptorContext,
         ) -> Any:
-            nonlocal front_fields
+            nonlocal front_fields, dense_weights
             module = context.module
             if variant == "front" and isinstance(module, CraigSulemDNO) and context.method_name == "__call__":
                 inputs, log_depth = call_args
@@ -89,6 +106,16 @@ def build_variant(
                                else jnp.fft.irfft(surface_ops[None, :, :] * jnp.fft.rfft(eta_norm)[:, None, :], n=nx))
                 call_args = (jnp.concatenate((features[..., :model.n_polys],
                                              jnp.moveaxis(transformed, 1, -1)), axis=-1),)
+                if trial == "cufftdx_dense":
+                    hidden = dense(call_args[0], loaded.params["eta_feat_proj"]["kernel"], "gelu")
+                    hidden = dense(hidden, loaded.params["eta_feat_mix"]["kernel"], "gelu_lift")
+                    dense_weights = dense(hidden, head_kernel)
+                    return jnp.zeros_like(hidden)
+            if isinstance(module, nn.Dense) and module.name == "eta_feat_mix":
+                if trial == "cufftdx_dense":
+                    return jnp.zeros_like(call_args[0])
+                if factors is not None:
+                    return (call_args[0] @ factors[0]) @ factors[1]
             if not include_baselines and context.method_name in ("_linear_baseline", "_g1_baseline"):
                 return jnp.zeros_like(call_args[0])
             if front_fields is not None and context.method_name == "_linear_baseline":
@@ -102,7 +129,9 @@ def build_variant(
                 symbol = k[None, :] * jnp.tanh(h * k[None, :])
                 if cufftdx_g1:
                     operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
-                    return (-sandwich(eta_phys, xi_phys, operators).sum(axis=1) / model.target_scale).astype(xi_norm.dtype)
+                    joint = trial in ("cufftdx_joint", "cufftdx_both")
+                    result = sandwich(eta_phys, xi_phys, operators, joint=joint, ept=fft_ept)
+                    return (-(result if joint else result.sum(axis=1)) / model.target_scale).astype(xi_norm.dtype)
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1)
                 if variant in ("batched", "surface", "front"):
                     operators = jnp.stack((symbol, jnp.broadcast_to(1j * k, symbol.shape)), axis=1)
@@ -120,6 +149,11 @@ def build_variant(
             if is_multiplier and cached is not None:
                 block = int(cast(Scope, module.scope).path[-2].removeprefix("cs_block_"))
                 result = cached[block]
+            elif isinstance(module, nn.Dense) and module.name == "phi_proj" and trial in ("cufftdx_dense", "cufftdx_head"):
+                if dense_weights is None:
+                    dense_weights = dense(call_args[0], head_kernel)
+                block = int(cast(Scope, module.scope).path[-2].removeprefix("cs_block_"))
+                result = dense_weights[..., block * model.latent:(block + 1) * model.latent]
             else:
                 result = next_fun(*call_args, **call_kwargs)
             if variant in ("packed", "all", "batched", "surface", "front") and context.method_name == "__call__":
@@ -138,8 +172,14 @@ def build_variant(
                     else:
                         xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
                         filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
-                    weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
-                    spectrum = jnp.sum(filters * weighted_hat, axis=-1)
+                    if trial in ("cufftdx_product", "cufftdx_both"):
+                        spectra = fft(jnp.moveaxis(filtered, 1, -1), nx,
+                                      b=jnp.moveaxis(weights, 1, -1),
+                                      outer=jnp.moveaxis(filters, 1, -1).astype(jnp.complex64), ept=fft_ept)
+                        spectrum = spectra.sum(axis=1)
+                    else:
+                        weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
+                        spectrum = jnp.sum(filters * weighted_hat, axis=-1)
                     # Original per-group FFT outputs are unused and removed by XLA.
                     return jnp.fft.irfft(spectrum, n=nx, axis=-1, norm="forward")
             return result
@@ -155,8 +195,9 @@ if __name__ == "__main__":
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
-    parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, "cufftdx"), default=VARIANTS)
-    parser.add_argument("--capture", choices=(*VARIANTS, "cufftdx"), help="Capture 100 warmed calls of one variant instead of timing/testing.")
+    parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
+    parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
+    parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
     variants = args.variants
     if not args.capture and "original" not in variants:
@@ -173,7 +214,7 @@ if __name__ == "__main__":
     functions, records = {}, {}
     for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
-        forward = build_variant(loaded, depth, eta.shape[-1], variant)
+        forward = build_variant(loaded, depth, eta.shape[-1], variant, fft_ept=args.ept)
         executable = forward.lower(eta, xi).compile()
         records[variant] = {"setup_compile_s": time.perf_counter() - started, "seconds": [],
                             "xla_cost_estimate": executable.cost_analysis()}
@@ -222,14 +263,15 @@ if __name__ == "__main__":
     original = build_predict_gxi_batched(loaded)
     expected = np.asarray(original(check_eta, check_xi, check_depth))
     for variant in (name for name in variants if name != "original"):
-        candidate = build_variant(loaded, check_depth, eta.shape[-1], variant)
+        candidate = build_variant(loaded, check_depth, eta.shape[-1], variant, fft_ept=args.ept)
         actual = np.asarray(candidate(check_eta, check_xi))
         relative = np.linalg.norm(actual - expected, axis=-1) / np.linalg.norm(expected, axis=-1)
         records[variant]["validation"] = {
             "samples": len(families), "max_relative_l2": float(relative.max()),
             "max_absolute": float(np.abs(actual - expected).max()),
             "family_max_relative_l2": {family: float(relative[np.asarray(families) == family].max()) for family in set(families)},
-            "passed": bool(np.isfinite(actual).all() and relative.max() <= 1e-5),
+            "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
+                       if "lowrank" not in variant else None),
         }
         print(f"{variant}: 48-state max relative difference {relative.max():.3g}; "
               f"passed={records[variant]['validation']['passed']}", flush=True)
@@ -243,19 +285,25 @@ if __name__ == "__main__":
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = dict(zip((*VARIANTS, "cufftdx"), (
+    labels: dict[str, str] = dict(zip((*VARIANTS, "cufftdx"), (
         "Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
         "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs", "cuFFTDx G₁",
     )))
+    labels.update(cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
+                  cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
+                  cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",
+                  cufftdx_lowrank32="Rank-32 surface mixing")
+    labels.update({name: f"{labels[name.rpartition('_e')[0]]} · EPT {name.rpartition('_e')[2]}"
+                   for name in TRIALS if name.endswith(("_e4", "_e16"))})
     medians = [records[name]["median_us"] for name in variants]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
     ax.barh([labels[name] for name in variants], medians, color="#278475")
     ax.invert_yaxis()
     ax.set(xlabel="Warmed forward latency (µs); lower is better", xlim=(0, max(medians) * 1.25),
-           title=f"Same {report['parameters']:,} weights · one sample · no time integrator")
+           title="Neural forward-pass candidates · one sample · no time integrator")
     for index, value in enumerate(medians):
         ax.text(value + 3, index, f"{value:.1f} µs", va="center")
     for suffix in ("png", "pdf"):
         fig.savefig(args.output / f"forward_fusion.{suffix}", dpi=180)
-    if any(not records[variant]["validation"]["passed"] for variant in variants if variant != "original"):
+    if any(records[variant]["validation"]["passed"] is False for variant in variants if variant != "original"):
         raise RuntimeError("Forward equivalence failed; see results.json for the rejected variants.")

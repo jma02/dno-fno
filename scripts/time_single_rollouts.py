@@ -34,7 +34,14 @@ RUNS = {
     "full": ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918",
     "small": ROOT / "outputs/c27_branches16_tanaka_hard128_20260923",
 }
-FUSION_VARIANTS = {"fused": "all", "fused_g1": "batched", "fused_surface": "surface", "fused_front": "front", "fused_cufftdx": "cufftdx"}
+FUSION_VARIANTS = {
+    "fused": "all", "fused_g1": "batched", "fused_surface": "surface", "fused_front": "front",
+    "fused_cufftdx": "cufftdx", "fused_joint": "cufftdx_joint", "fused_product": "cufftdx_product",
+    "fused_both": "cufftdx_both", "fused_dense": "cufftdx_dense", "fused_head": "cufftdx_head",
+    "fused_rank16": "cufftdx_lowrank16", "fused_rank32": "cufftdx_lowrank32",
+    "fused_e4": "cufftdx_e4", "fused_e16": "cufftdx_e16",
+    "fused_product_e4": "cufftdx_product_e4", "fused_product_e16": "cufftdx_product_e16",
+}
 
 
 if __name__ == "__main__":
@@ -42,6 +49,7 @@ if __name__ == "__main__":
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
     parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
@@ -63,6 +71,7 @@ if __name__ == "__main__":
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
+        "fft_ept": args.ept,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": "synchronized GPU execution; compilation, warm-up and host transfers excluded",
         "neural_runs": {name: str(RUNS["compact" if name in FUSION_VARIANTS else name])
@@ -105,6 +114,7 @@ if __name__ == "__main__":
                 predict = (cast(Predictor, build_variant(
                     loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
                     FUSION_VARIANTS.get(method, "original"), include_baselines=not args.without_baselines,
+                    fft_ept=args.ept,
                 )) if method in FUSION_VARIANTS or args.without_baselines
                     else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
