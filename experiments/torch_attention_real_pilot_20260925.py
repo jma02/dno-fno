@@ -1,4 +1,4 @@
-"""Fifty fresh Muon/AdamW steps on the downloaded real subset, on local Metal."""
+"""Fifty fresh Muon/AdamW steps on the downloaded real subset, on Metal or CUDA."""
 
 import argparse
 import json
@@ -21,8 +21,9 @@ from train import Waves, build_optimizers, relative_l2  # noqa: E402
 def evaluate(model: DNO, loader: DataLoader) -> float:
     model.eval()
     total = 0.
+    device = next(model.parameters()).device
     for batch in loader:
-        eta, xi, depth, target = (v.to("mps") for v in batch)
+        eta, xi, depth, target = (v.to(device) for v in batch)
         total += relative_l2(model(eta, xi, depth), target).item() * len(eta)
     value = total / len(loader.dataset)
     if not np.isfinite(value):
@@ -35,26 +36,32 @@ def main() -> None:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--depth", type=int, default=1)
     parser.add_argument("--tag", default="torch_attention_real_pilot_20260925")
+    parser.add_argument("--device", choices=("mps", "cuda"), default="mps")
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT.parent / "pilot-checkpoints")
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
+    synchronize = torch.mps.synchronize if args.device == "mps" else torch.cuda.synchronize
     torch.manual_seed(0)
     data = ROOT.parent / "local-data/paper_equal_subset_20260924"
     train = DataLoader(Waves(data, "train"), batch_size=64, shuffle=True,
                        generator=torch.Generator().manual_seed(0))
     validation = DataLoader(Waves(data, "validation"), batch_size=64)
     x = np.load(data / "x.npy")
-    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to("mps")
+    model = DNO(n=len(x), length=float((x[1] - x[0]) * len(x)), depth=args.depth, bf16=args.bf16).to(args.device)
     optimizers = build_optimizers(model, "muon", 1e-5)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     history, validations = [], []
+    if args.device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     started = perf_counter()
     validations.append({"step": 0, "relative_l2": evaluate(model, validation)})
     print("validation", validations[-1], flush=True)
     iterator = iter(train)
     for step in range(1, 51):
         model.train()
-        torch.mps.synchronize()
+        synchronize()
         tick = perf_counter()
-        eta, xi, depth, target = (v.to("mps") for v in next(iterator))
+        eta, xi, depth, target = (v.to(args.device) for v in next(iterator))
         model.zero_grad(set_to_none=True)
         loss = relative_l2(model(eta, xi, depth), target)
         if not torch.isfinite(loss):
@@ -67,7 +74,7 @@ def main() -> None:
         for optimizer in optimizers:
             optimizer.step()
         value = loss.item()
-        torch.mps.synchronize()
+        synchronize()
         history.append({"step": step, "loss_before_update": value, "seconds": perf_counter() - tick})
         if step % 10 == 0:
             validations.append({"step": step, "relative_l2": evaluate(model, validation)})
@@ -77,13 +84,15 @@ def main() -> None:
     assert all(torch.isfinite(a).all() for a in averages)
     assert all(torch.isfinite(v).all() for o in optimizers for s in o.state.values()
                for v in s.values() if isinstance(v, torch.Tensor))
-    checkpoint = ROOT.parent / "pilot-checkpoints" / f"{args.tag}.pt"
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = args.checkpoint_dir / f"{args.tag}.pt"
     torch.save({"model": model.state_dict(), "optimizers": [o.state_dict() for o in optimizers],
                 "gradient_ema": averages, "step": 50, "lr": 1e-5, "ema": .8,
                 "seed": 0, "n": model.n, "length": model.length, "depth": args.depth,
                 "bf16": args.bf16, "data": str(data)}, checkpoint)
     result = {
-        "source": str(data), "device": "mps", "torch": torch.__version__, "seed": 0,
+        "source": str(data), "device": args.device, "torch": torch.__version__, "seed": 0,
         "optimizer": "Muon transformer matrices + AdamW remainder", "lr": 1e-5,
         "gradient_ema_decay": .8, "batch_size": 64, "optimizer_steps": 50,
         "bf16": args.bf16, "depth_per_stage": args.depth,
@@ -96,7 +105,19 @@ def main() -> None:
         "steady_median_ms": 1000 * median(row["seconds"] for row in history[3:]),
         "wall_seconds": perf_counter() - started, "finite": True, "checkpoint": str(checkpoint),
     }
-    (Path(__file__).parent / f"{args.tag}.json").write_text(json.dumps(result, indent=2) + "\n")
+    if args.device == "cuda":
+        result["gpu"] = torch.cuda.get_device_name()
+        result["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+        result["float32_matmul_precision"] = torch.get_float32_matmul_precision()
+        # Inspect backend selection after timing; this takes no optimizer update.
+        model.train()
+        model.zero_grad(set_to_none=True)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            relative_l2(model(eta, xi, depth), target).backward()
+            synchronize()
+        result["attention_operators"] = sorted({event.key for event in profile.key_averages()
+                                                if "attention" in event.key.lower()})
+    (args.output_dir / f"{args.tag}.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({key: value for key, value in result.items() if key != "history"}, indent=2), flush=True)
 
 
