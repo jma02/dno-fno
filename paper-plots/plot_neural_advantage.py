@@ -98,6 +98,8 @@ if __name__ == "__main__":
             offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
                 offset = (-22, 5)
+            if args.single_case and family == "benjamin_feir" and order == 2:
+                offset = (-20, -14)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
@@ -149,7 +151,7 @@ if __name__ == "__main__":
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
           for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
-        *([Line2D([], [], color="#087eaa", marker="o", ls="none", ms=7, label="Previous network execution")]
+        *([Line2D([], [], color="#087eaa", marker="o", ls="none", ms=7, label="Before cuFFTDx")]
           if args.single_case else []),
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
         *[Line2D([], [], color=color, ls="none" if args.single_case else "--",

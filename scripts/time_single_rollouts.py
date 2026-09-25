@@ -73,7 +73,8 @@ if __name__ == "__main__":
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept,
         "precision": "FP64 classical/integration; FP32 learned inference",
-        "timing": "synchronized GPU execution; compilation, warm-up and host transfers excluded",
+        "timing": (f"synchronized GPU execution after {'same-executable' if args.steps else 'separate five-frame'} "
+                   "warm-up; compilation and host transfers excluded"),
         "neural_runs": {name: str(RUNS["compact" if name in FUSION_VARIANTS else name])
                         for name in methods if not name.startswith("M")},
         "fusion_variants": {name: FUSION_VARIANTS[name] for name in methods if name in FUSION_VARIANTS},

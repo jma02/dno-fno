@@ -1,4 +1,4 @@
-"""Benchmark-only FFT rearrangements using unchanged trained model parameters."""
+"""Benchmark-only inference kernels and explicitly named low-rank model trials."""
 
 from __future__ import annotations
 

@@ -242,3 +242,45 @@ CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
   --output outputs/cufftdx_20260925/rollouts.json
 ```
+
+### 12-potential-new-nn-modal
+
+[PNG](figures/12-potential-new-nn-modal.png) / [PDF](figures/12-potential-new-nn-modal.pdf).
+Personal `jma02` Modal benchmarks on NVIDIA RTX PRO 6000 Blackwell Server Edition,
+CUDA12.9/SM120 and JAX0.9.2. This separate figure contains no local-GPU timings.
+It uses one full trajectory per family, N1024, dt0.01 and four GL2 iterations,
+with final surface errors against the same cached M6 reference. Classical M1
+means G0+G1. The candidate is the one-epoch checkpoint in
+`outputs/c27_w320_b4_h80_tanaka_hard128_20260924`.
+
+Before→cuFFTDx seconds: Stokes13.851→12.630, Tanaka137.045→125.434,
+Benjamin–Feir136.781→125.400, JONSWAP13.752→12.587 (8.3–8.8% reductions).
+Stokes neural points use three-repeat medians; other points use one measurement.
+Timings exclude compilation/transfers and follow a separate five-frame warm-up;
+the full-executable first use is timed. Stokes repetitions put the classical
+first-call overhead near0.5%. Saved Gxi differs in filtering between the two
+implementations; this figure uses eta only. All plotted trajectories are finite
+with positive fluid depth. M2 is faster and more accurate than this candidate
+in all four cases; the candidate's Tanaka error is98.866% before and98.866% after cuFFTDx.
+
+Additional joint-G1/product fusions were slower; dense fusion failed the fixed
+forward-equivalence tolerance. EPT4 and calibrated low-rank mixing brought no
+consistent additional rollout benefit. Rank16 also increased BF surface error
+from0.811% to6.534%, so no fine-tuning or production replacement was made.
+The classical shared product/rFFT fusion was slower at every order; its faster
+existing batched backend is used in the figure. Reproduce the plot with:
+
+```sh
+UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
+  --single-case \
+  --timings outputs/modal_rtx6000_20260925_classical_short/classical_rollouts.json \
+  --classical-timings outputs/modal_rtx6000_20260925_classical_tanaka/classical_rollouts.json \
+    outputs/modal_rtx6000_20260925_classical_bf/classical_rollouts.json \
+  --candidate-timings outputs/modal_rtx6000_20260925_tuning/rollouts.json \
+    outputs/modal_rtx6000_20260925_repeat_stokes/rollouts.json \
+  --candidate-method fused_cufftdx --candidate-previous-method fused_front
+```
+
+`scripts/modal_benchmark.py` runs explicit commands in the personal account,
+uploads only selected code/checkpoint/reference cases, and downloads result
+files under a fresh `--output` directory. No manuscript or notes are uploaded.
