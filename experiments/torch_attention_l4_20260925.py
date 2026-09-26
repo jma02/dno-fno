@@ -22,7 +22,7 @@ image = (modal.Image.debian_slim(python_version="3.12")
 @app.function(image=image, volumes={"/data": volume}, gpu={"L4": "L4:1", "H100": "H100!:1"}[GPU], cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
 def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None,
-            architecture: str, expected_gpu: str) -> dict:
+            architecture: str, expected_gpu: str, fast_step: bool) -> dict:
     import hashlib
     import subprocess
     import sys
@@ -31,6 +31,8 @@ def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None,
     import torch
 
     started = perf_counter()
+    if fast_step:
+        os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/torch-inductor-cache")
     gpu_name = torch.cuda.get_device_name()
     assert (gpu_name == "NVIDIA L4" if expected_gpu == "L4" else "H100" in gpu_name), gpu_name
     destination = Path("/data/experiments") / run_name
@@ -43,6 +45,8 @@ def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None,
     variants = (("bf16_spectral_d2", ["--bf16", "--depth", "2", "--architecture", "spectral"]),) if architecture == "spectral" else (
         ("fp32_d1", []), ("bf16_d1", ["--bf16"]), ("bf16_d2", ["--bf16", "--depth", "2"]))
     for name, flags in variants:
+        if fast_step:
+            flags += ["--fast-step"]
         if bf16_only and name == "fp32_d1":
             continue
         if epochs is not None:
@@ -64,10 +68,10 @@ def compare(run_name: str, batch_size: int, bf16_only: bool, epochs: int | None,
 @app.local_entrypoint()
 def main(run_name: str = "torch_attention_l4_20260925", batch_size: int = 256,
          bf16_only: bool = False, epochs: int | None = None,
-         architecture: str = "attention") -> None:
+         architecture: str = "attention", fast_step: bool = False) -> None:
     if architecture not in ("attention", "spectral"):
         raise ValueError("architecture must be attention or spectral")
-    result = compare.remote(run_name, batch_size, bf16_only, epochs, architecture, GPU)
+    result = compare.remote(run_name, batch_size, bf16_only, epochs, architecture, GPU, fast_step)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
     target = ROOT.parent / "pilot-checkpoints" / run_name
     target.mkdir(parents=True, exist_ok=True)

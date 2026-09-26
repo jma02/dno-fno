@@ -77,3 +77,13 @@ This is not a low-rank matrix projection or a literal single FFT/IFFT pair: phys
 feature extraction and the constrained head require additional small FFTs.
 Frequency attention does not enforce exact translation equivariance. BF16 covers
 encoder/transformer matmuls; feature FFTs, decoder, gate products and filters use FP32.
+
+Add `--fast-step` on CUDA to fetch entire batches together, compile/fuse the model,
+and replay forward, backward, gradient EMA and optimizer updates with a CUDA graph.
+It keeps the same samples, shuffle order, batch size, model and optimizer settings.
+Compilation/capture adds one-time setup work; capture warmup restores the original
+parameters, EMA and optimizer state before the first actual update. Partial final
+batches use eager execution with the same optimizer state and step counter.
+Validation remains eager, with bulk data loading. Checkpoints keep the same model
+keys and record the fast-step setting; floating-point fusion can cause small
+numerical differences. The original execution path remains the default.

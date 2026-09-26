@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "torch-attention"))
 from model import DNO  # noqa: E402
 from spectral import SpectralDNO  # noqa: E402
-from train import Waves, build_model, build_optimizers, relative_l2  # noqa: E402
+from train import CudaStep, Waves, build_model, build_optimizers, make_loader, relative_l2  # noqa: E402
 
 
 @torch.no_grad()
@@ -37,6 +37,7 @@ def main() -> None:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--depth", type=int, default=1)
     parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
+    parser.add_argument("--fast-step", action="store_true")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, help="Run complete passes and validate each epoch; otherwise run 50 steps")
     parser.add_argument("--tag", default="torch_attention_real_pilot_20260925")
@@ -46,12 +47,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.epochs is not None and args.epochs < 1:
         parser.error("--epochs must be positive")
+    if args.fast_step and args.device != "cuda":
+        parser.error("--fast-step requires CUDA")
     synchronize = torch.mps.synchronize if args.device == "mps" else torch.cuda.synchronize
     torch.manual_seed(0)
     data = ROOT.parent / "local-data/paper_equal_subset_20260924"
-    train = DataLoader(Waves(data, "train"), batch_size=args.batch_size, shuffle=True,
-                       generator=torch.Generator().manual_seed(0))
-    validation = DataLoader(Waves(data, "validation"), batch_size=64)
+    train = make_loader(Waves(data, "train"), args.batch_size, shuffle=True,
+                        generator=torch.Generator().manual_seed(0), bulk=args.fast_step)
+    validation = make_loader(Waves(data, "validation"), 64, bulk=args.fast_step)
     steps = args.epochs * len(train) if args.epochs is not None else 50
     validation_every = len(train) if args.epochs is not None else 10
     x = np.load(data / "x.npy")
@@ -67,6 +70,7 @@ def main() -> None:
     print("validation", validations[-1], flush=True)
     iterator = iter(train)
     samples_seen = 0
+    fast_step = None
     for step in range(1, steps + 1):
         model.train()
         synchronize()
@@ -76,19 +80,26 @@ def main() -> None:
         except StopIteration:
             iterator = iter(train)
             batch = next(iterator)
-        eta, xi, depth, target = (v.to(args.device) for v in batch)
-        samples_seen += len(eta)
-        model.zero_grad(set_to_none=True)
-        loss = relative_l2(model(eta, xi, depth), target)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Nonfinite training loss")
-        loss.backward()
-        with torch.no_grad():
-            for p, average in zip(model.parameters(), averages, strict=True):
-                average.mul_(.8).add_(p.grad, alpha=.2)
-                p.grad.copy_(average / (1 - .8**step))
-        for optimizer in optimizers:
-            optimizer.step()
+        samples_seen += len(batch[0])
+        if args.fast_step:
+            if fast_step is None:
+                fast_step = CudaStep(model, optimizers, averages, batch, .8)
+            loss = fast_step(batch)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite training loss")
+        else:
+            eta, xi, depth, target = (v.to(args.device) for v in batch)
+            model.zero_grad(set_to_none=True)
+            loss = relative_l2(model(eta, xi, depth), target)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite training loss")
+            loss.backward()
+            with torch.no_grad():
+                for p, average in zip(model.parameters(), averages, strict=True):
+                    average.mul_(.8).add_(p.grad, alpha=.2)
+                    p.grad.copy_(average / (1 - .8**step))
+            for optimizer in optimizers:
+                optimizer.step()
         value = loss.item()
         synchronize()
         history.append({"step": step, "loss_before_update": value, "seconds": perf_counter() - tick})
@@ -107,6 +118,7 @@ def main() -> None:
                 "gradient_ema": averages, "step": steps, "epochs": args.epochs, "lr": 1e-5, "ema": .8,
                 "seed": 0, "n": model.n, "length": model.length, "depth": args.depth,
                 "bf16": args.bf16, "architecture": args.architecture,
+                "fast_step": args.fast_step,
                 "batch_size": args.batch_size, "data": str(data)}, checkpoint)
     result = {
         "source": str(data), "device": args.device, "torch": torch.__version__, "seed": 0,
@@ -115,6 +127,7 @@ def main() -> None:
         "epochs": args.epochs, "steps_per_epoch": len(train), "validation_every": validation_every,
         "bf16": args.bf16, "depth_per_stage": args.depth,
         "architecture": args.architecture,
+        "fast_step": args.fast_step,
         "feature_scales": model.feature_scales.tolist() if isinstance(model, SpectralDNO) else None,
         "parameters": sum(p.numel() for p in model.parameters()),
         "training_rows": len(train.dataset), "training_samples_seen": samples_seen,
@@ -128,9 +141,11 @@ def main() -> None:
     if args.device == "cuda":
         result["gpu"] = torch.cuda.get_device_name()
         result["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+        result["peak_reserved_bytes"] = torch.cuda.max_memory_reserved()
         result["float32_matmul_precision"] = torch.get_float32_matmul_precision()
         # Inspect backend selection after timing; this takes no optimizer update.
         model.train()
+        eta, xi, depth, target = (v.to(args.device) for v in batch)
         model.zero_grad(set_to_none=True)
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
             relative_l2(model(eta, xi, depth), target).backward()
