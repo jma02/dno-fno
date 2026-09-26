@@ -120,3 +120,13 @@ A matched batch256 H100 trial improved amortized training from 7.39 to 7.01 ms
 (5.4% higher throughput), with essentially identical validation after 80 updates.
 Cold autotuning took about 67 seconds, separate from batch timing. Measurements
 use the cached real subset and do not establish full-volume I/O performance.
+
+Set `--width 256` to widen the encoder and transformer while keeping four heads
+and 32 correction branches. With `--architecture spectral --depth 2`, this has
+1,394,880 parameters. Width must be a positive multiple of four; omitting it
+preserves spectral width64 or original attention width128. The width is recorded
+in checkpoint arguments. Wider weights require a fresh model rather than loading
+a width64 state dict. On one H100 at batch256 with the fast/tuned/grouped settings,
+width256 measured17.48ms per training batch versus7.06ms at width64; compilation
+was separate (106s for width256). This short benchmark checked finite updates,
+not validation accuracy.

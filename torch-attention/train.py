@@ -108,16 +108,18 @@ def relative_l2(prediction: Tensor, target: Tensor) -> Tensor:
 
 @torch.no_grad()
 def build_model(architecture: str, dataset: Dataset, n: int, length: float,
-                depth: int, bf16: bool) -> DNO | SpectralDNO:
+                depth: int, bf16: bool, width: int | None = None) -> DNO | SpectralDNO:
+    if width is None:
+        width = 128 if architecture == "attention" else 64
     if architecture == "attention":
-        return DNO(n=n, length=length, depth=depth, bf16=bf16)
+        return DNO(n=n, width=width, length=length, depth=depth, bf16=bf16)
     # Fit seven RMS scales from training data only, without advancing its shuffle generator.
     sums = torch.zeros(7, dtype=torch.float64)
     loader = make_loader(dataset, 256, bulk=True) if isinstance(dataset, Waves) else DataLoader(dataset, batch_size=256)
     for eta, *_ in loader:
         sums += surface_features(eta, length).double().square().sum((0, 1))
     scales = (sums / (len(dataset) * n)).sqrt().float().clamp_min(1e-12)
-    return SpectralDNO(n=n, length=length, depth=depth, bf16=bf16, feature_scales=scales)
+    return SpectralDNO(n=n, width=width, length=length, depth=depth, bf16=bf16, feature_scales=scales)
 
 
 class GroupedMuon(torch.optim.Muon):
@@ -267,12 +269,15 @@ def main() -> None:
     parser.add_argument("--autotune", action="store_true", help="With --fast-step, benchmark GEMM kernels at compile time; adds one-time setup")
     parser.add_argument("--prefetch", action="store_true", help="With --fast-step, fetch/pin on a CPU thread and transfer on a separate CUDA stream")
     parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
+    parser.add_argument("--width", type=int, help="Encoder/transformer width, divisible by four; defaults: spectral64, attention128")
     parser.add_argument("--depth", type=int, default=1, help="Attention blocks per spatial/frequency stage")
     parser.add_argument("--ema", type=float, default=.9, help="Gradient EMA decay; 0 disables smoothing")
     parser.add_argument("--out", type=Path, default=Path("outputs/torch-attention.pt"))
     args = parser.parse_args()
     if not 0 <= args.ema < 1:
         parser.error("--ema must be in [0,1)")
+    if args.width is not None and (args.width <= 0 or args.width % 4):
+        parser.error("--width must be a positive multiple of four")
     if args.fast_step and args.device != "cuda":
         parser.error("--fast-step requires --device cuda")
     if args.autotune and not args.fast_step:
@@ -291,7 +296,7 @@ def main() -> None:
                              bulk=args.fast_step, pin_memory=args.prefetch)
     x = np.load(data / "x.npy")
     model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
-                        args.depth, args.bf16).to(args.device)
+                        args.depth, args.bf16, width=args.width).to(args.device)
     optimizers = build_optimizers(model, args.optimizer, args.lr)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     step = 0
