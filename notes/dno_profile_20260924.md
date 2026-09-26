@@ -615,5 +615,33 @@ Raw results: `outputs/modal_a100_20260925/{native.json,hardware/,stokes_rollouts
 Blackwell full-rollout comparator: `outputs/modal_rtx6000_20260925_repeat_stokes/rollouts.json`.
 Reused existing scripts with `DNO_MODAL_GPU=A100` and cuFFTDx `--sm 80`;
 no training or production dependency changes. The Modal app completed and
-released its GPU. Figure12 now includes these measured A100 Stokes results
-below Blackwell and Ada: one M2 accuracy point and a candidate timing line.
+released its GPU. These initial Stokes measurements motivated the complete
+four-family comparison below.
+
+### A100 full four-family panel — September 25
+
+Completed three full single-rollout repeats for classical M1–M6 and the
+unchanged candidate in every family: 84 timings total. Three personal Modal
+A100 jobs ran concurrently on separate GPUs, with one rollout per GPU at a
+time. Stokes/JONSWAP use T20 and2000 steps; Tanaka/Benjamin–Feir use T200 and
+20000 steps. All retain N1024, dt0.01, four GL2 iterations, FP64 classical
+arithmetic/integration, FP32 learned inference, and the shared optimized
+baseline implementation. Timings exclude compilation and transfers.
+
+| Family | M1 | M2 | M3 | M4 | M5 | M6 | Candidate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Stokes | 2.0415 | 3.6303 | 5.2251 | 6.9552 | 8.5531 | 10.1694 | 5.9464 |
+| Tanaka | 20.6404 | 36.5594 | 53.3955 | 73.6432 | 89.5786 | 104.3034 | 66.0836 |
+| Benjamin–Feir | 20.4769 | 36.5521 | 52.3885 | 69.6011 | 85.7606 | 101.8188 | 59.0919 |
+| JONSWAP/TMA | 2.0413 | 3.6383 | 5.2347 | 6.9715 | 8.5646 | 10.1669 | 5.9514 |
+
+Entries are median seconds. The candidate's A100 runtime lies between M3 and
+M4 in every family. All returned trajectories are finite with positive fluid
+depth; M6's maximum relative surface discrepancy against cached M6 is
+4.991e-12 across the four families. Figure12 now contains complete four-family
+blocks for Blackwell, Ada and A100. Classical errors use cached M6; the
+candidate remains a vertical timing line, without an accuracy point.
+
+Raw results: `outputs/modal_a100_20260925_{short,tanaka,bf}_full/rollouts.json`.
+The short file contains Stokes and JONSWAP/TMA. All three Modal apps stopped
+with zero tasks. No training, local GPU work or production-code changes.

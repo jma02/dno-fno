@@ -170,8 +170,8 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 ### 12-potential-new-nn
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
-Blackwell/Modal panels are on top, with the original Ada/local panels below.
-Both hardware sections show the candidate's measured runtimes as orange
+Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
+All three hardware sections show the candidate's measured runtimes as orange
 vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
 The Blackwell measurements are described in the next subsection. The following
 describes the Ada panels, which extend figure 11. The latest update fuses each FP64 G1 multiplier/product
@@ -218,10 +218,12 @@ Benjamin–Feir produced non-finite saved states. The full requested step count
 was executed in every case. Figure12 uses the label "New candidate optimized
 network" and has no explanatory footnotes; numerical outcomes and
 timings are recorded in `experiments/experiments-2026-09-25.md` and the raw results.
-The stacked figure now adds an A100 Stokes panel below Blackwell and Ada, using
-`outputs/modal_a100_20260925/stokes_rollouts.json`: M2 at3.6477 s and the candidate
-timing line at5.9798 s (medians of three full rollouts). Its M2 error uses the
-cached M6 reference; no unmeasured A100 orders, families or M6 runtime are drawn.
+The A100 section covers all four families, with classical M1–M6 and the
+candidate each timed over three complete batch-one rollouts. Its curves use
+the classical errors against cached M6; the candidate remains a timing line.
+Inputs are `outputs/modal_a100_20260925_{short,tanaka,bf}_full/rollouts.json`;
+the short-family file contains both Stokes and JONSWAP/TMA. These replace the
+earlier Stokes-only A100 panel.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
