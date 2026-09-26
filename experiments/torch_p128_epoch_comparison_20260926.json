@@ -1,0 +1,35 @@
+{
+  "checkpoint_verified": true,
+  "finite_tensor_count": 161,
+  "cumulative_step": 138243,
+  "epoch": 3,
+  "max_mode": 128,
+  "cpu_reload_max_outband_relative_norm": 1.2576683161569235e-07,
+  "before_projection": 0.00036036369240484103,
+  "after_projection_before_training": 0.00025643831098864147,
+  "after_one_epoch": 0.00013012547331736754,
+  "training_reduction_percent": 49.25661738462658,
+  "total_reduction_percent": 63.89051503801845,
+  "per_family": {
+    "stokes": {
+      "before_training": 5.198608443173831e-05,
+      "after_training": 2.720438525032273e-05,
+      "reduction_percent": 47.66987060538448
+    },
+    "tanaka": {
+      "before_training": 0.0001941407495205498,
+      "after_training": 0.00014220811063919944,
+      "reduction_percent": 26.74999401702284
+    },
+    "benjamin_feir": {
+      "before_training": 8.651250101290423e-05,
+      "after_training": 5.347200521579285e-05,
+      "reduction_percent": 38.19158550529368
+    },
+    "jonswap_tma": {
+      "before_training": 0.0006931360958831942,
+      "after_training": 0.0002976285610288395,
+      "reduction_percent": 57.06058841884419
+    }
+  }
+}
