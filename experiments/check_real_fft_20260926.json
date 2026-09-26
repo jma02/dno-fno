@@ -1,0 +1,8 @@
+{
+  "fft_gradient_max_abs_difference": 2.1316282072803006e-14,
+  "full_model_outputs_identical": true,
+  "full_model_gradient_max_abs_difference": 3.552713678800501e-15,
+  "fft_cases": 30,
+  "dtype": "float64",
+  "nonzero_correction_head": true
+}

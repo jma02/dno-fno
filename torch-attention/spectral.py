@@ -6,6 +6,7 @@ import torch
 from torch import Tensor, nn
 
 from model import AttentionBlock, baseline
+from real_fft import irfft, rfft
 
 
 def surface_features(eta: Tensor, length: float) -> Tensor:
@@ -48,7 +49,7 @@ class SpectralDNO(nn.Module):
             local = self.encoder(features)
         # Keep each FFT's spatial axis contiguous; GEMMs still use channels last.
         fft_input = local.transpose(1, 2).float() if self.bf16 else local.transpose(1, 2)
-        spectrum = torch.fft.rfft(fft_input.contiguous(), norm="ortho").transpose(1, 2)
+        spectrum = rfft(fft_input.contiguous(), norm="ortho").transpose(1, 2)
         with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
             tokens = self.frequency_in(torch.cat((spectrum.real, spectrum.imag, token_condition), -1))
             tokens = self.frequency(tokens)
@@ -56,7 +57,7 @@ class SpectralDNO(nn.Module):
         coefficients = coefficients.float() if self.bf16 else coefficients
         real, imag = coefficients.chunk(2, -1)
         packed = torch.stack((real.transpose(1, 2), imag.transpose(1, 2)), -1)
-        context = torch.fft.irfft(torch.view_as_complex(packed), n=self.n, norm="ortho").transpose(1, 2)
+        context = irfft(torch.view_as_complex(packed), n=self.n, norm="ortho").transpose(1, 2)
         with torch.autocast(eta.device.type, enabled=False):
             # The local path is O(eta^2); bounded attention modulation cannot remove it.
             local = local.float() if self.bf16 else local
@@ -66,10 +67,10 @@ class SpectralDNO(nn.Module):
             # Real views let Inductor fuse multiplier/reduction kernels instead of
             # materializing separate complex multiplies and conjugate gradients.
             spectrum_xi = torch.view_as_real(torch.fft.rfft(xi))[:, None]
-            filtered = torch.fft.irfft(torch.view_as_complex(spectrum_xi * filters[..., None]), n=self.n)
-            weighted = torch.fft.rfft(weights.transpose(1, 2) * filtered)
+            filtered = irfft(torch.view_as_complex(spectrum_xi * filters[..., None]), n=self.n)
+            weighted = rfft(weights.transpose(1, 2) * filtered)
             output = (torch.view_as_real(weighted) * filters[..., None]).sum(1)
-            return torch.fft.irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
+            return irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
 
     def forward(self, eta: Tensor, xi: Tensor, depth: Tensor) -> Tensor:
         return baseline(eta, xi, depth, self.length) + self.correction(eta, xi, depth)

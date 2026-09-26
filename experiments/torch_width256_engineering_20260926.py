@@ -23,13 +23,57 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
     from time import perf_counter
 
     import torch
+    import spectral
+    import real_fft
     from torch.profiler import ProfilerActivity, profile, record_function
     from spectral import SpectralDNO
     from train import CudaStep, Waves, build_optimizers, make_loader, relative_l2
 
     torch.backends.cuda.enable_cudnn_sdp(variant != "flash")
+    spectral.rfft = real_fft.rfft if variant in ("real_fft", "packed", "real_fft_repeat") else torch.fft.rfft
+    spectral.irfft = real_fft.irfft if variant in ("real_fft", "packed", "real_fft_repeat") else torch.fft.irfft
+
+    class PackedSpectralDNO(SpectralDNO):
+        def correction(self, eta: torch.Tensor, xi: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
+            import math
+            from torch.nn import functional as F
+
+            features = spectral.surface_features(eta, self.length) / self.feature_scales
+            k, h = torch.broadcast_tensors(self.k[None, :], depth.reshape(-1, 1).clamp(max=5))
+            tanh_kh = torch.tanh(k * h)
+            filter_features = torch.stack((k, h, tanh_kh, k * tanh_kh), -1)
+            condition = torch.stack((k / self.k[-1], h / 5, tanh_kh, k / self.k[-1] * tanh_kh), -1)
+            with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
+                local = self.encoder(features)
+            spectrum = real_fft.rfft(local.transpose(1, 2).float().contiguous(), norm="ortho").transpose(1, 2)
+            width = local.shape[-1]
+            # Keep real/imaginary pairs together and reorder the small weight
+            # matrix, rather than constructing two complex activation gradients.
+            packed = torch.view_as_real(spectrum).flatten(-2)
+            weight = self.frequency_in.weight
+            weight = torch.cat((weight[:, :2 * width].reshape(width, 2, width)
+                                .transpose(1, 2).reshape(width, 2 * width), weight[:, 2 * width:]), -1)
+            with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
+                tokens = F.linear(torch.cat((packed, condition), -1), weight, self.frequency_in.bias)
+                tokens = self.frequency(tokens)
+                weight_out = self.frequency_out.weight.reshape(2, width, width).transpose(0, 1).reshape(2 * width, width)
+                bias_out = self.frequency_out.bias.reshape(2, width).T.reshape(2 * width)
+                coefficients = F.linear(tokens, weight_out, bias_out).float()
+            packed = coefficients.reshape(*coefficients.shape[:-1], width, 2).transpose(1, 2).contiguous()
+            context = real_fft.irfft(torch.view_as_complex(packed), n=self.n, norm="ortho").transpose(1, 2)
+            with torch.autocast(eta.device.type, enabled=False):
+                local = local.float()
+                weights = self.decoder(local * local.tanh() * (1 + context.tanh()))
+                filters = (self.depth_filters(filter_features) * (self.k != 0)[None, :, None]).transpose(1, 2).contiguous()
+                spectrum_xi = torch.view_as_real(torch.fft.rfft(xi))[:, None]
+                filtered = real_fft.irfft(torch.view_as_complex(spectrum_xi * filters[..., None]), n=self.n)
+                weighted = real_fft.rfft(weights.transpose(1, 2) * filtered)
+                output = (torch.view_as_real(weighted) * filters[..., None]).sum(1)
+                return real_fft.irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
+
     torch.manual_seed(0)
-    model = SpectralDNO(n=checkpoint["n"], length=checkpoint["length"], width=256,
+    cls = PackedSpectralDNO if variant == "packed" else SpectralDNO
+    model = cls(n=checkpoint["n"], length=checkpoint["length"], width=256,
                         branches=32, heads=4, depth=2, bf16=True,
                         feature_scales=checkpoint["model"]["feature_scales"]).cuda()
     model.load_state_dict(checkpoint["model"])
