@@ -1,0 +1,37 @@
+{
+  "setup_seconds": 10.384161727999999,
+  "cpu_threads": 4,
+  "local_disk_free_bytes": 9223372036848799744,
+  "results": [
+    {
+      "mode": "scattered_32",
+      "samples": 32,
+      "seconds": 72.85361661499999,
+      "samples_per_second": 0.4392369450799708
+    },
+    {
+      "mode": "madvise_random_32",
+      "samples": 32,
+      "seconds": 9.081065345000013,
+      "samples_per_second": 3.5238156300261654
+    },
+    {
+      "mode": "four_threads_32",
+      "samples": 32,
+      "seconds": 3.4194798669999926,
+      "samples_per_second": 9.3581483864897
+    },
+    {
+      "mode": "contiguous_8192",
+      "samples": 8192,
+      "seconds": 0.19473567099998945,
+      "samples_per_second": 42067.28001055566
+    },
+    {
+      "mode": "repeat_contiguous_8192",
+      "samples": 8192,
+      "seconds": 0.06231912499998771,
+      "samples_per_second": 131452.42331309395
+    }
+  ]
+}

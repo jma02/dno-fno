@@ -1,0 +1,11 @@
+{
+  "copy_seconds": 0.024591708555817604,
+  "reuse_seconds": 0.00022783316671848297,
+  "bytes_staged": 63169280,
+  "file_hashes_exact": true,
+  "shuffle_and_tails_exact": true,
+  "cache_reused_without_rewrite": true,
+  "truncated_file_recovered": true,
+  "source_unmodified": true,
+  "bulk_feature_scales_exact": true
+}

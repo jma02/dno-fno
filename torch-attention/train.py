@@ -8,7 +8,10 @@ import argparse
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 import math
+import json
 from pathlib import Path
+import shutil
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import numpy as np
@@ -34,6 +37,39 @@ class Waves(Dataset):
         shape = (len(index), -1) if isinstance(index, list) else (-1,)
         eta, xi, depth, target = (torch.as_tensor(np.array(a[self.rows[index]], copy=True), dtype=torch.float32).reshape(shape) for a in self.arrays)
         return eta, xi - xi.mean(-1, keepdim=True), depth, target
+
+
+def cache_data(source: Path, destination: Path) -> Path:
+    """Stage immutable arrays with sequential reads; reuse only a matching cache."""
+    names = tuple(f"{name}.npy" for name in ("eta", "xi", "depth", "gxi", "x", "dataset_split"))
+    signature = {"source": str(source.resolve()), "files": {
+        name: {"bytes": (source / name).stat().st_size, "mtime_ns": (source / name).stat().st_mtime_ns}
+        for name in names}}
+    destination.mkdir(parents=True, exist_ok=True)
+    manifest = destination / "cache_manifest.json"
+    if manifest.exists() and json.loads(manifest.read_text()) == signature:
+        if all((destination / name).is_file() and (destination / name).stat().st_size == info["bytes"]
+               for name, info in signature["files"].items()):
+            return destination
+    if source.resolve() == destination.resolve():
+        raise ValueError("Data cache must be separate from the source arrays")
+    # Remove the completion marker before any replacement; interrupted copies
+    # cannot be mistaken for a complete cache. Source files are never modified.
+    manifest.unlink(missing_ok=True)
+    with TemporaryDirectory(prefix="stage-", dir=destination) as temporary:
+        staging = Path(temporary)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            copies = [executor.submit(shutil.copyfile, source / name, staging / name) for name in names]
+            for future in copies:
+                future.result()
+        for name in names:
+            if (staging / name).stat().st_size != signature["files"][name]["bytes"]:
+                raise OSError(f"Incomplete data cache copy: {name}")
+            (staging / name).replace(destination / name)
+        marker = staging / "cache_manifest.json"
+        marker.write_text(json.dumps(signature, indent=2) + "\n")
+        marker.replace(manifest)
+    return destination
 
 
 def make_loader(dataset: Waves, batch_size: int, *, shuffle: bool = False,
@@ -77,7 +113,8 @@ def build_model(architecture: str, dataset: Dataset, n: int, length: float,
         return DNO(n=n, length=length, depth=depth, bf16=bf16)
     # Fit seven RMS scales from training data only, without advancing its shuffle generator.
     sums = torch.zeros(7, dtype=torch.float64)
-    for eta, *_ in DataLoader(dataset, batch_size=256):
+    loader = make_loader(dataset, 256, bulk=True) if isinstance(dataset, Waves) else DataLoader(dataset, batch_size=256)
+    for eta, *_ in loader:
         sums += surface_features(eta, length).double().square().sum((0, 1))
     scales = (sums / (len(dataset) * n)).sqrt().float().clamp_min(1e-12)
     return SpectralDNO(n=n, length=length, depth=depth, bf16=bf16, feature_scales=scales)
@@ -179,6 +216,7 @@ class CudaStep:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True, help="Directory of physical eta/xi/depth/gxi, x, dataset_split .npy files")
+    parser.add_argument("--cache-data", type=Path, help="Stage required arrays here before training; use local ephemeral storage, not another remote-volume path")
     parser.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=1)
@@ -198,12 +236,17 @@ def main() -> None:
         parser.error("--fast-step requires --device cuda")
     if args.prefetch and not args.fast_step:
         parser.error("--prefetch requires --fast-step")
+    data = args.data
+    if args.cache_data is not None:
+        started = perf_counter()
+        data = cache_data(data, args.cache_data)
+        print(f"data_cache={data} cache_seconds={perf_counter() - started:.2f}", flush=True)
     torch.manual_seed(0)
-    train = make_loader(Waves(args.data, "train"), args.batch_size, shuffle=True,
+    train = make_loader(Waves(data, "train"), args.batch_size, shuffle=True,
                         generator=torch.Generator().manual_seed(0), bulk=args.fast_step, pin_memory=args.prefetch)
-    validation = make_loader(Waves(args.data, "validation"), args.batch_size,
+    validation = make_loader(Waves(data, "validation"), args.batch_size,
                              bulk=args.fast_step, pin_memory=args.prefetch)
-    x = np.load(args.data / "x.npy")
+    x = np.load(data / "x.npy")
     model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
                         args.depth, args.bf16).to(args.device)
     optimizers = build_optimizers(model, args.optimizer, args.lr)

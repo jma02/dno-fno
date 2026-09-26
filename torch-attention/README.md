@@ -98,6 +98,15 @@ reads need separate measurement; cached-subset timings do not establish epoch I/
 The pilot reports amortized batch time over synchronized groups, with compile
 and validation time separate, so queue submission time is not mistaken for GPU time.
 
+For a large dataset on a remote filesystem, `--cache-data /tmp/dno-arrays` stages
+the six required arrays into local ephemeral storage before fitting scales or
+training. Copies read files sequentially; batches still use the original global
+shuffle and splits. The cache needs room for all six arrays. A completion manifest
+checks source paths, sizes and modification times before reuse; incomplete files
+are recopied. Staging time is reported separately. This is optional, and a full
+production-dataset staging run has not yet been timed. Feature-scale fitting also
+uses bulk batch reads, but remains an initial pass over the training split.
+
 The spectral model uses contiguous spatial axes for learned FFTs and real/imaginary
 views for filter products and reductions, allowing fusion of their intermediates.
 These layout changes preserve the architecture, FP32 FFTs/head and checkpoint keys.
