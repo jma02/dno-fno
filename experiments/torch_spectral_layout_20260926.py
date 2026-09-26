@@ -32,7 +32,7 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
     from time import perf_counter
 
     import torch
-    from torch.profiler import ProfilerActivity, profile
+    from torch.profiler import ProfilerActivity, profile, record_function
 
     from spectral import SpectralDNO
     from spectral_reference import SpectralDNO as Reference
@@ -102,14 +102,21 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
         end.synchronize()
         device_ms.append(begin.elapsed_time(end))
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
-        for _ in range(3):
-            fast.graph.replay()
-            torch.cuda.synchronize()
+        # The first replay may begin before CUPTI finishes enabling activities.
+        for index in range(4):
+            with record_function(f"profile_step_{index}"):
+                fast.graph.replay()
+                torch.cuda.synchronize()
     trace_path = output / f"{variant}_trace.json"
     trace.export_chrome_trace(str(trace_path))
     kernels = defaultdict(lambda: [0, 0.])
-    for event in json.loads(trace_path.read_text())["traceEvents"]:
-        if event.get("cat") == "kernel" and event.get("ph") == "X":
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    windows = [(event["ts"], event["ts"] + event["dur"]) for event in events
+               if event.get("name") in ("profile_step_1", "profile_step_2", "profile_step_3")
+               and event.get("cat") == "user_annotation" and event.get("ph") == "X"]
+    for event in events:
+        if (event.get("cat") == "kernel" and event.get("ph") == "X"
+                and any(start <= event["ts"] < end for start, end in windows)):
             kernels[event["name"]][0] += 1
             kernels[event["name"]][1] += event["dur"]
     with gzip.open(output / f"{variant}_trace.json.gz", "wb") as compressed:
@@ -122,6 +129,7 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
               "peak_allocated_bytes": allocated, "peak_reserved_bytes": reserved,
               "compile_capture_seconds": setup, "step_seconds": times, "losses": losses,
               "validation_relative_l2": total / len(validation.dataset),
+              "profile_complete": len(windows) == 3 and bool(kernels) and all(count % 3 == 0 for count, _ in kernels.values()),
               "kernels_per_step": sum(row["calls_per_step"] for row in rows),
               "summed_kernel_ms": sum(row["ms_per_step"] for row in rows), "kernels": rows}
     return result, initial
