@@ -3,11 +3,13 @@
 Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
 The fused methods apply inference FFT optimizations to --candidate-run.
+Spectral variants reduce adapter round trips; M2_packed shares padded FFT batching.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from functools import partial
 import json
 import os
@@ -15,6 +17,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any, cast
+from unittest.mock import patch
 
 os.environ.setdefault("JAX_PLATFORMS", "cuda")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -26,6 +29,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
+from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
@@ -42,6 +46,8 @@ FUSION_VARIANTS = {
     "fused_e4": "cufftdx_e4", "fused_e16": "cufftdx_e16",
     "fused_product_e4": "cufftdx_product_e4", "fused_product_e16": "cufftdx_product_e16",
 }
+FUSION_VARIANTS.update({f"{name}_spectral": variant for name, variant in tuple(FUSION_VARIANTS.items())})
+FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packing in ("inputs", "all")})
 
 
 if __name__ == "__main__":
@@ -51,8 +57,9 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
+    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "M2_packed", "small", "full", "compact", *FUSION_VARIANTS))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
+    parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
@@ -104,7 +111,7 @@ if __name__ == "__main__":
             started = time.perf_counter()
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
-                dno_order=int(method[1:]) if method.startswith("M") else 6,
+                dno_order=int(method.split("_")[0][1:]) if method.startswith("M") else 6,
                 pad_factor=8, filter_fraction=cfg.filter_fraction,
             )
             if method.startswith("M"):
@@ -124,9 +131,19 @@ if __name__ == "__main__":
             jax.block_until_ready((initial, times, params))
             setup_seconds = time.perf_counter() - started
             started = time.perf_counter()
-            compiled[method] = runner.lower(initial, times).compile()
-            compile_seconds = time.perf_counter() - started
-            warm = compiled[method] if args.steps else runner.lower(initial, times[:5]).compile()
+            rhs_patch = nullcontext()
+            if method == "M2_packed":
+                rhs_patch = patch.object(ti, "gauss_legendre_2_if_step", partial(
+                    ti.gauss_legendre_2_if_step, rhs=partial(
+                        rhs_nonlinear_if_spectral, predict_gxi=None, pack_ffts="all")))
+            elif "_spectral" in method:
+                packing = method.rsplit("_", 1)[-1]
+                rhs_patch = patch("solver.evals.model_rollout._rhs_nonlinear_if_surrogate", partial(
+                    rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none"))
+            with rhs_patch:
+                compiled[method] = runner.lower(initial, times).compile()
+                compile_seconds = time.perf_counter() - started
+                warm = compiled[method] if args.steps else runner.lower(initial, times[:5]).compile()
             warm_times = times if args.steps else times[:5]
             started = time.perf_counter()
             jax.block_until_ready(warm(initial, warm_times))
@@ -135,6 +152,8 @@ if __name__ == "__main__":
             print(f"{family} {method}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)
         for repeat in range(args.repeats):
             for method in list(compiled)[::1 if repeat % 2 == 0 else -1]:
+                if args.reference_once and repeat > 0 and method == args.reference:
+                    continue
                 started = time.perf_counter()
                 outputs[method] = jax.block_until_ready(compiled[method](initial, times))
                 duration = time.perf_counter() - started
