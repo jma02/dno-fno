@@ -37,6 +37,7 @@ def main() -> None:
     model = SpectralDNO(n=checkpoint["n"], length=checkpoint["length"],
                         width=config["width"], depth=config["depth"], heads=config.get("heads", 4),
                         branches=config.get("branches", 32), bf16=config["bf16"],
+                        max_mode=config.get("max_mode"),
                         feature_scales=checkpoint["model"]["feature_scales"])
     model.load_state_dict(checkpoint["model"])
     model.to(args.device).eval()

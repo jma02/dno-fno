@@ -17,13 +17,14 @@ app = modal.App("dno-spectral-width256-full-epoch")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=8,
               memory=32768, timeout=3600, retries=0, scaledown_window=2)
-def run(run_name: str, resume_run: str = "") -> dict:
+def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
     import math
     import os
     import sys
     from statistics import median
     from time import perf_counter
 
+    import numpy as np
     import torch
 
     sys.path.insert(0, "/repo/torch-attention")
@@ -47,6 +48,8 @@ def run(run_name: str, resume_run: str = "") -> dict:
                       "/data/experiments/torch_spectral_fast_h100_20260925/"
                       "torch_spectral_fast_h100_20260925_bf16_spectral_d2.pt")
     reference = torch.load(reference_path, map_location="cpu", weights_only=True)
+    previous_max_mode = reference["args"].get("max_mode") if resume_run else None
+    cutoff = previous_max_mode if max_mode < 0 else max_mode
     start_epoch = int(reference["epoch"]) if resume_run else 0
     start_step = int(reference["step"]) if resume_run else 0
     start_examples = int(reference["examples_seen"]) if resume_run else 0
@@ -73,7 +76,7 @@ def run(run_name: str, resume_run: str = "") -> dict:
     torch.manual_seed(0)
     model = SpectralDNO(n=reference["n"], length=reference["length"], width=256,
                         branches=32, heads=4, depth=2, bf16=True,
-                        feature_scales=reference["model"]["feature_scales"]).cuda()
+                        feature_scales=reference["model"]["feature_scales"], max_mode=cutoff).cuda()
     optimizers = build_optimizers(model, "muon-grouped", 1e-5)
     if resume_run:
         model.load_state_dict(reference["model"])
@@ -100,7 +103,7 @@ def run(run_name: str, resume_run: str = "") -> dict:
     report = {"run_name": run_name, "source": str(source), "gpu": torch.cuda.get_device_name(),
               "training_rows": len(train_data), "validation_rows": len(val_data),
               "expected_steps": len(loader), "batch_size": 256, "width": 256, "depth": 2,
-              "heads": 4, "branches": 32, "parameters": sum(p.numel() for p in model.parameters()),
+              "heads": 4, "branches": 32, "max_mode": cutoff, "previous_max_mode": previous_max_mode, "parameters": sum(p.numel() for p in model.parameters()),
               "lr": 1e-5, "gradient_ema": .8, "optimizer": "grouped Muon transformer + AdamW remainder",
               "weight_decay": 1e-4, "bf16": True, "loader_workers": 4, "seed": 0,
               "initialization": (f"Resume {reference_path}; model, optimizers, EMA and counters restored" if resume_run else
@@ -117,12 +120,25 @@ def run(run_name: str, resume_run: str = "") -> dict:
         model.eval()
         total = torch.zeros((), dtype=torch.float64, device="cuda")
         base_total = torch.zeros_like(total)
+        family_ids = torch.as_tensor(np.load(Path(data.arrays[0].filename).parent / "family_id.npy",
+                                             mmap_mode="r")[data.rows].astype(np.int64), device="cuda")
+        family_total = torch.zeros(5, dtype=torch.float64, device="cuda")
+        family_count = torch.bincount(family_ids, minlength=5)
+        max_outband_fraction = torch.zeros((), device="cuda")
         count = 0
         evaluation = make_loader(data, 256, bulk=True)
         for index, batch in enumerate(cpu_batches(evaluation, workers=4), start=1):
             device = tuple(value.cuda() for value in batch)
             prediction = model(*device[:3])
-            total.add_(relative_l2(prediction, device[3]), alpha=len(device[0]))
+            predicted_spectrum = torch.fft.rfft(prediction)
+            error = torch.fft.rfft(prediction - device[3]).abs().norm(dim=-1)
+            error /= torch.fft.rfft(device[3]).abs().norm(dim=-1).clamp_min(1e-6)
+            total.add_(error.double().sum())
+            family_total.scatter_add_(0, family_ids[count:count + len(error)], error.double())
+            if model.max_mode is not None:
+                leakage = predicted_spectrum[:, model.max_mode + 1:].abs().norm(dim=-1)
+                leakage /= predicted_spectrum.abs().norm(dim=-1).clamp_min(1e-6)
+                max_outband_fraction = torch.maximum(max_outband_fraction, leakage.max())
             if analytic:
                 base = baseline(*device[:3], model.length)
                 base_total.add_(relative_l2(base, device[3]), alpha=len(device[0]))
@@ -136,9 +152,19 @@ def run(run_name: str, resume_run: str = "") -> dict:
         result = {"examples": count, "relative_l2": value, "seconds": perf_counter() - tick}
         if analytic:
             result["analytic_baseline_relative_l2"] = base_total.item() / count
+        names = ("stokes", "tanaka", "benjamin_feir", "jonswap_tma")
+        result["per_family"] = {name: {"examples": int(family_count[i].item()),
+                                       "relative_l2": (family_total[i] / family_count[i]).item()}
+                                for i, name in enumerate(names, start=1) if family_count[i].item()}
+        if model.max_mode is not None:
+            result["max_outband_relative_norm"] = max_outband_fraction.item()
+            assert result["max_outband_relative_norm"] < 1e-6
         return result
 
     report["initial_subset_validation"] = evaluate(Waves(Path("/subset"), "validation"))
+    if cutoff != previous_max_mode:
+        report["initial_full_validation"] = evaluate(val_data)
+        print("INITIAL_FULL_VALIDATION " + json.dumps(report["initial_full_validation"]), flush=True)
     model.train()
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     volume.commit()
@@ -152,7 +178,7 @@ def run(run_name: str, resume_run: str = "") -> dict:
                     "epoch": start_epoch + int(complete), "epoch_complete": complete, "epoch_step": step,
                     "n": model.n, "length": model.length,
                     "args": {k: report[k] for k in ("width", "depth", "heads", "branches", "bf16", "lr",
-                                                   "gradient_ema", "batch_size", "loader_workers", "seed")},
+                                                   "gradient_ema", "batch_size", "loader_workers", "seed", "max_mode")},
                     "architecture": "spectral", "source": str(source),
                     "epoch_start_sampler_state": epoch_start_sampler_state,
                     **({"sampler_state_after_epoch": generator.get_state()} if complete else {}),
@@ -235,6 +261,7 @@ def run(run_name: str, resume_run: str = "") -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "torch_spectral_width256_full_epoch_20260926", resume_run: str = "") -> None:
-    result = run.remote(run_name, resume_run)
+def main(run_name: str = "torch_spectral_width256_full_epoch_20260926", resume_run: str = "",
+         max_mode: int = -1) -> None:
+    result = run.remote(run_name, resume_run, max_mode)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")

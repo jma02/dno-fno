@@ -78,6 +78,14 @@ feature extraction and the constrained head require additional small FFTs.
 Frequency attention does not enforce exact translation equivariance. BF16 covers
 encoder/transformer matmuls; feature FFTs, decoder, gate products and filters use FP32.
 
+The optional `SpectralDNO(max_mode=128)` applies `P G(eta) P`: xi and the final
+output retain modes 0 through 128 inclusive on the unchanged 1024-point grid.
+The frequency transformer still processes all 513 bins. This matches the paper
+labels' output band and preserves self-adjointness, linearity and near-flat scaling.
+The full-epoch Modal runner accepts `--max-mode 128`; checkpoint `args.max_mode`
+records the setting and the rollout runner restores it. An omitted cutoff keeps
+legacy behavior, or inherits the resumed checkpoint's cutoff in the full-epoch runner.
+
 ### Rollouts
 
 `rollout.py` ports the existing fixed-iteration, two-stage Gauss–Legendre

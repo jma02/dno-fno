@@ -22,11 +22,15 @@ def surface_features(eta: Tensor, length: float) -> Tensor:
 class SpectralDNO(nn.Module):
     def __init__(self, n: int = 1024, width: int = 64, branches: int = 32,
                  heads: int = 4, length: float = 2 * math.pi, depth: int = 2,
-                 bf16: bool = False, feature_scales: Tensor | None = None) -> None:
+                 bf16: bool = False, feature_scales: Tensor | None = None,
+                 max_mode: int | None = None) -> None:
         super().__init__()
         if depth < 1:
             raise ValueError("depth must be positive")
+        if max_mode is not None and not 0 <= max_mode <= n // 2:
+            raise ValueError("max_mode must be between zero and the Nyquist mode")
         self.n, self.length, self.depth, self.bf16 = n, length, depth, bf16
+        self.max_mode = max_mode
         self.register_buffer("feature_scales", torch.ones(7) if feature_scales is None else feature_scales)
         self.register_buffer("k", torch.arange(n // 2 + 1) * (2 * math.pi / length))
         self.encoder = nn.Sequential(nn.Linear(7, width, bias=False), nn.GELU(),
@@ -81,5 +85,13 @@ class SpectralDNO(nn.Module):
             output = (torch.view_as_real(weighted) * filters[..., None]).sum(1)
             return irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
 
+    def project(self, value: Tensor) -> Tensor:
+        if self.max_mode is None:
+            return value
+        mask = torch.arange(self.n // 2 + 1, device=value.device) <= self.max_mode
+        return irfft(rfft(value) * mask, n=self.n)
+
     def forward(self, eta: Tensor, xi: Tensor, depth: Tensor) -> Tensor:
-        return baseline(eta, xi, depth, self.length) + self.correction(eta, xi, depth)
+        # P G(eta) P preserves linearity and self-adjointness in xi.
+        xi = self.project(xi)
+        return self.project(baseline(eta, xi, depth, self.length) + self.correction(eta, xi, depth))
