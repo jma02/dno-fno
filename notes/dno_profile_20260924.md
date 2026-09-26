@@ -645,3 +645,82 @@ candidate remains a vertical timing line, without an accuracy point.
 Raw results: `outputs/modal_a100_20260925_{short,tanaka,bf}_full/rollouts.json`.
 The short file contains Stokes and JONSWAP/TMA. All three Modal apps stopped
 with zero tasks. No training, local GPU work or production-code changes.
+
+### Spectral adapter and FFT-packing search — September 25
+
+The major remaining cost was not the learned branches: the neural rollout
+adapter repeatedly converted fields between physical and Fourier space.
+`scripts/benchmark_surrogate_rhs.py` now mirrors the classical spectral RHS,
+retaining the same learned predictor, FP64 integration, two-times nonlinear
+grid, filtering, Nyquist handling and four GL2 iterations. Its `all` packing
+mode batches two inverse FFTs for the network inputs and three inverse FFTs
+for the padded nonlinear terms. M2 receives the same nonlinear batching.
+The adapter reduces FFT calls from approximately21 to4 per RHS evaluation;
+this count excludes FFTs inside the network and step-boundary transforms.
+
+Five-repeat Stokes screens,320 actual steps, median seconds:
+
+| Hardware | Previous M2 | Packed M2 | Spectral + packed neural | Speedup over packed M2 |
+| --- | ---: | ---: | ---: | ---: |
+| Ada | 1.353607 | 1.214538 | 0.531959 | 2.283x |
+| Blackwell | 1.665180 | 1.477257 | 0.732492 | 2.017x |
+| A100 | 0.594482 | 0.526033 | 0.488130 | 1.078x |
+
+These short runs select settings, not Figure12 runtimes. The plain spectral
+adapter alone nearly tied M2 on A100; batching the remaining FFT calls closed
+that gap. Actual-checkpoint RHS checks cover48 states from all four families,
+filtered and unfiltered: maximum relative discrepancy2.22e-12. All four16-step
+trajectory checks pass, with maximum surface discrepancy2.74e-15. Synthetic
+Fourier-edge/Nyquist checks pass. Packing adds no observed discrepancy; the
+shared classical packed RHS is bitwise identical on48 states with ramp on/off.
+
+Rejected whole learned-branch sandwich fusion, EPT4/8/16, joint G1 and dense
+combinations. Pure branch fusion passes48-state checks (about2.9e-8 maximum
+relative forward difference), but adds no material integrated speedup on
+any GPU. Fused dense/activation composition fails the1e-5 forward-equivalence
+threshold at1.22e-5. Trial wiring was removed; pre-existing CUDA prototype
+files were left untouched. No rank reduction, precision change or retraining.
+
+Raw search data: `outputs/knob_search_20260925/{ada_kernels,ada_forward}/`,
+`ada_steps.json`, `ada_packing.json`, and
+`{blackwell,a100}_{screen,packing}/steps.json` under the same directory.
+
+Full single-rollout validation uses three repeats for each optimized method
+and one old-neural control per family:84 full timings across three GPUs.
+Entries below are median seconds; all four families retain their complete
+T20/200 horizons, N1024, dt0.01 and model G0+G1 terms.
+
+| Hardware | Family | New neural | Packed M2 | Speedup over packed M2 |
+| --- | --- | ---: | ---: | ---: |
+| Ada | Stokes | 3.3045 | 7.5900 | 2.297x |
+| Ada | Tanaka | 32.9617 | 76.0299 | 2.307x |
+| Ada | Benjamin–Feir | 32.9994 | 76.0820 | 2.306x |
+| Ada | JONSWAP/TMA | 3.3145 | 7.6079 | 2.295x |
+| Blackwell | Stokes | 4.6630 | 9.5350 | 2.045x |
+| Blackwell | Tanaka | 46.3671 | 95.2873 | 2.055x |
+| Blackwell | Benjamin–Feir | 46.3739 | 95.2980 | 2.055x |
+| Blackwell | JONSWAP/TMA | 4.6708 | 9.5354 | 2.041x |
+| A100 | Stokes | 3.0387 | 3.2732 | 1.077x |
+| A100 | Tanaka | 30.0608 | 32.3962 | 1.078x |
+| A100 | Benjamin–Feir | 29.7409 | 32.2572 | 1.085x |
+| A100 | JONSWAP/TMA | 3.0453 | 3.2358 | 1.063x |
+
+All36 returned method/family records are finite with positive fluid depth.
+Long trajectories are not bitwise identical: the maximum relative surface
+change against the old neural execution is9.14e-4 on Ada/A100 and3.94e-4 on
+Blackwell, both in Benjamin–Feir. Its cached-M6 terminal surface error changes
+from0.974247% to1.050564% on Ada/A100 and0.810612% to0.840767% on Blackwell.
+Thus these are execution-speed gains with unchanged weights and arithmetic
+precision, not a claim of improved learned accuracy.
+
+**Keep** the spectral adapter and all-FFT packing; **reject** the extra
+learned-branch/dense variants. The shared nonlinear packing is measured in M2,
+not withheld from the comparator. Figure12 now shows these full measured
+candidate timing lines and new M2 runtimes; its other classical measurements
+and accuracy coordinates are unchanged. The obsolete baseline-free overlay
+is removed. No training or production trainer edits; the accepted path is
+selected with `fused_cufftdx_spectral_all` and `M2_packed` in the benchmark.
+
+Full results: `outputs/knob_search_20260925/ada_full.json`,
+`blackwell_full/rollouts.json` and `a100_full/rollouts.json` under that directory.
+All personal Modal apps stopped; local GPU0 finished, and GPU1 was untouched.

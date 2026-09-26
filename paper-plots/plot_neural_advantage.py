@@ -36,7 +36,10 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 warm["families"].setdefault(family, result)["methods"].update(result["methods"])
     candidate = ({"families": {family: result for path in args.candidate_timings
                               for family, result in json.loads(path.read_text())["families"].items()}}
-                 if args.candidate_timings else None)
+                 if args.candidate_timings else {})
+    if args.stack_hardware:
+        for family, result in candidate["families"].items():
+            warm["families"][family]["methods"]["M2"]["seconds"] = result["methods"]["M2_packed"]["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     overlays = (
         (candidate, "#c45b22", "New candidate optimized network"),
@@ -84,9 +87,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
             offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
-                offset = (-22, 5)
-            if args.single_case and family == "benjamin_feir" and order == 2:
-                offset = (-20, -14)
+                offset = (6, 5)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
@@ -167,21 +168,18 @@ if __name__ == "__main__":
             ROOT / f"outputs/modal_rtx6000_20260925_classical_{family}/classical_rollouts.json"
             for family in ("tanaka", "bf")
         ]
-        modal.candidate_timings = [
-            ROOT / f"outputs/modal_rtx6000_20260925_{run}/rollouts.json"
-            for run in ("tuning", "repeat_stokes")
-        ]
-        modal.candidate_method = "fused_cufftdx"
-        modal.candidate_previous_method = "fused_front"
-        modal.no_baseline_timings = None
         a100 = argparse.Namespace(**vars(modal))
         a100.timings = ROOT / "outputs/modal_a100_20260925_short_full/rollouts.json"
         a100.classical_timings = [
             ROOT / f"outputs/modal_a100_20260925_{family}_full/rollouts.json"
             for family in ("tanaka", "bf")
         ]
-        a100.candidate_timings = [a100.timings, *a100.classical_timings]
-        a100.candidate_previous_method = None
+        for config, result in ((modal, "blackwell_full/rollouts.json"),
+                               (args, "ada_full.json"), (a100, "a100_full/rollouts.json")):
+            config.candidate_timings = [ROOT / "outputs/knob_search_20260925" / result]
+            config.candidate_method = "fused_cufftdx_spectral_all"
+            config.candidate_previous_method = "fused_cufftdx"
+            config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)

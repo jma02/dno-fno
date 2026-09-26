@@ -173,57 +173,33 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
 All three hardware sections show the candidate's measured runtimes as orange
 vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
-The Blackwell measurements are described in the next subsection. The following
-describes the Ada panels, which extend figure 11. The latest update fuses each FP64 G1 multiplier/product
-chain using cuFFTDx, retaining the packed input spectra and batched surface
-features, G0 and learned branch inputs. Orange annotations show previous →
-current runtime and the reduction (5.2–5.5%).
-Stokes uses three repeats; the other families use one full trajectory per
-version. All timings use batch one and the complete T=20 or T=200 horizon,
-excluding compilation, setup, warm-up and host transfers. All four trajectories
-remain finite with positive depth. Maximum saved relative surface differences
-from the preceding implementation are 8.33e-8 (Stokes), 8.58e-7 (JONSWAP/TMA),
-4.55e-5 (Tanaka), and 8.77e-4 (Benjamin–Feir); outputs are not bitwise identical.
-The same weights, precision and integrator are retained.
-An independent full Benjamin–Feir repeat against saved M6 data gives terminal
-surface errors 0.9275% before and 0.9742% with cuFFTDx
-(`outputs/cufftdx_20260925/rollout_bf_accuracy.json`). This is one case, not a
-new classwise median; the cuFFTDx path remains an optional inference prototype.
+The latest candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx
+G1 kernel, cached depth multipliers and packed network branches. A spectral
+adapter removes repeated physical/Fourier round trips; it batches the two
+model-input inverse FFTs and the three padded nonlinear inverse FFTs.
+The latter optimization is also applied to M2. Equations, precision, padding,
+time step and four GL2 iterations remain unchanged; no training is performed.
 
-The classical curve now uses a fresh full M1–M6 sweep with the corresponding
-FFT batching applied to its padded recurrence. The cuFFTDx backend was also
-screened on the complete M1–M6 recurrence: it was approximately 7–15% slower at the
-8192-point padded resolution, so the faster existing backend is retained.
-That screen is in `outputs/cufftdx_20260925/classical_screen.json`.
-The classical implementation
-already cached its depth symbol and combined spectral terms before the final
-inverse transform. Its precision, padding, truncation orders and integrator
-are unchanged. New timings are in
-`outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json`;
-the existing 32-case error statistics and older small/full neural points are
-retained. Each classical timing is one full single rollout.
+Each optimized neural/M2 timing is the median of three full batch-one
+rollouts. The previous neural path runs once per family as a numerical
+control; orange annotations compare that measured control with the new median.
+Horizons are T=20 for Stokes/JONSWAP and T=200 for Tanaka/Benjamin–Feir.
+Compilation, setup, warm-up and host transfers are excluded.
 
-The line deliberately has no accuracy coordinate: the original points show
-32-case median errors, which have not been evaluated for this one-epoch 37k
-checkpoint. Its single-case error against the unchanged implementation is not
-an accuracy measurement against M6. All four families have completed timings.
-Both runtime overlays use the same candidate checkpoint with grouped branch
-FFTs and cached depth multipliers. Orange retains the model's G0+G1 terms;
-teal retains the earlier measurements with both terms omitted before
-compilation. The teal runs are **speed-only diagnostics with
-altered dynamics**, not valid water-wave predictions or accuracy results.
-The integrator is unchanged, including its own linear-flow/G0 operations.
-Without the model baselines, Stokes remained finite; JONSWAP/TMA, Tanaka and
-Benjamin–Feir produced non-finite saved states. The full requested step count
-was executed in every case. Figure12 uses the label "New candidate optimized
-network" and has no explanatory footnotes; numerical outcomes and
-timings are recorded in `experiments/experiments-2026-09-25.md` and the raw results.
-The A100 section covers all four families, with classical M1–M6 and the
-candidate each timed over three complete batch-one rollouts. Its curves use
-the classical errors against cached M6; the candidate remains a timing line.
-Inputs are `outputs/modal_a100_20260925_{short,tanaka,bf}_full/rollouts.json`;
-the short-family file contains both Stokes and JONSWAP/TMA. These replace the
-earlier Stokes-only A100 panel.
+New measurements are in `outputs/knob_search_20260925/ada_full.json`,
+`outputs/knob_search_20260925/blackwell_full/rollouts.json` and
+`outputs/knob_search_20260925/a100_full/rollouts.json`. The plotted M2 timing
+uses `M2_packed`; the candidate uses `fused_cufftdx_spectral_all`.
+Other classical runtimes and all existing accuracy statistics remain unchanged:
+Ada uses the earlier 32-case median errors, while the Modal panels use their
+single-case errors against cached M6. The older Ada small/full neural points
+are retained. The previous without-G0+G1 timing overlay is removed because
+it was not remeasured with this adapter.
+
+The accepted implementation is isolated in `scripts/benchmark_surrogate_rhs.py`
+and selected by the rollout timer; production trainers and checkpoints are
+untouched. Search results, numerical checks and merge decisions are recorded
+in `notes/dno_profile_20260924.md` and `experiments/experiments-2026-09-25.md`.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
@@ -231,10 +207,18 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
-  --candidate-timings outputs/cufftdx_20260925/rollout_stokes.json \
-    outputs/cufftdx_20260925/rollout_remaining.json \
-  --candidate-method fused_cufftdx --candidate-previous-method fused_front \
-  --no-baseline-timings outputs/dno_fusion_20260924/rollout_no_baselines.json
+  --candidate-timings outputs/knob_search_20260925/ada_full.json \
+  --candidate-method fused_cufftdx_spectral_all --candidate-previous-method fused_cufftdx
+```
+
+Reproduce the local full-rollout measurements on a free GPU with:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
+  --methods M2_packed fused_cufftdx fused_cufftdx_spectral_all \
+  --reference fused_cufftdx --reference-once --repeats 3 \
+  --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
+  --output outputs/knob_search_20260925/ada_full.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
