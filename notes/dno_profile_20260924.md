@@ -435,3 +435,99 @@ comparison trace. Then
 the summary and figure. All raw measurements, HLO and traces are under
 `outputs/dno_profile_20260924/`. Profiler versions: Systems 2025.1.3,
 Compute 2025.2.1. Scoped Ruff and Pyright checks passed.
+
+## Why the Modal Blackwell run is slower — September 25
+
+The measured penalty has two components: **slower 1024-point FP64 cuFFT
+kernels**, especially in the neural rollout adapter, and **higher host
+submission/synchronization overhead**. It is not primarily the learned dense
+layers or FP32 FFTs. Swapping cuFFT versions in both directions does not remove
+the difference.
+
+Three agents split the Ada GPU0 measurements, personal-account Modal Blackwell
+measurements, and independent trace/source review. The common diagnostic uses
+the same checkpoint and first Stokes state, batch one, N=1024, FP64 integration,
+FP32 learned inference, dt=0.01 and four GL2 iterations. It times 16 actual
+steps after warming the exact executable, plus standalone and dependent-loop
+forward calls. These short diagnostics explain execution costs; they are not
+replacement full-trajectory timings for Figure12. No training was run.
+
+Clean neural step time is 3.975 ms on Ada versus 6.160 ms on Blackwell. The
+corresponding M2 times are 4.327 versus 5.356 ms. In the GPU traces, the neural
+step breaks down as follows (FFT categories include their scaling kernels):
+
+| Traced time per neural step | Ada (ms) | Blackwell (ms) |
+| --- | ---: | ---: |
+| Ordinary FP64 FFTs/scaling | 2.626 | 4.266 |
+| Fused cuFFTDx G1 | 0.267 | 0.309 |
+| Remaining GPU work | 0.707 | 0.733 |
+| Gaps between GPU operations | 0.495 | 1.058 |
+| First-to-last GPU-operation span | 4.095 | 6.366 |
+
+Ordinary FP64 FFTs account for **72.2% of the traced span increase**, gaps for
+**24.8%**, and everything else for 3.0%. These shares describe the traces, not
+an exact partition of uninstrumented wall time. Trace overhead is similar in
+the two 16-step runs (about 3–4%). The operation counts agree between GPUs.
+
+The repeated FP64 complex FFT of length 1024 takes 10.150 us on Ada versus
+19.014 us on Blackwell, across 2144 calls in each trace. The real forward and
+inverse transforms of the same length similarly rise from 9.324/9.514 us to
+17.470/17.929 us. Those three transform types alone explain 66.8% of the traced
+increase. FP32 FFT/scaling work is almost unchanged (0.104 versus 0.107 ms per
+step); dense work is 0.134 versus 0.139 ms. The neural adapter executes many
+more of the affected small FP64 transforms than the classical spectral path,
+explaining why the neural rollout suffers the larger cross-machine penalty.
+
+The host-side penalty is independently visible in a one-kernel control: its
+GPU execution takes 1.093 us on Ada and 1.073 us on Blackwell, while the
+synchronized call takes 62.00 versus 157.06 us. A standalone neural forward
+has only 60.91 versus 66.92 us of traced GPU work, despite clean synchronized
+latencies of 157.14 versus 275.27 us. This identifies host/driver dispatch and
+synchronization as a substantial separate cost; it does not distinguish
+gVisor overhead from host CPU or driver effects.
+
+### Controls
+
+- Active SM clocks were stable at 2670 MHz on Ada and 2287 MHz on Blackwell in
+  the paired trace. Power was approximately 65–85 W of 300 W and 89–107 W of 600 W,
+  respectively. Neither was sitting at its idle clock during measurement.
+  Blackwell's lower clock is consistent with the roughly15% G1/2048-point FFT
+  penalty, but does not explain the nearly90% 1024-point FFT penalty alone.
+- **cuFFT version swap:** on the same Modal GPU/container, 11.4.1.4 versus
+  11.3.3.83 gives neural step times 6.08515 versus 6.08441 ms and M2 times 5.24037
+  versus 5.23495 ms. The 1024-point FP64 kernel remains 18.505 versus 18.488 us.
+  Conversely, loading 11.4.1.4 on Ada leaves that kernel at 10.154 us and the
+  neural step at 3.965 ms. Actual loaded library paths were read from the
+  benchmark process, not inferred from package metadata. The initial Ada
+  `ada_cufft114` attempt still loaded the old library and is not a valid control;
+  use `ada_cufft114_loaded`.
+- **CUDA graph loop setting:** adding `+WHILE` with loop unrolling disabled
+  changes neural step time by less than 0.2% on either GPU. Ordinary FFT thunks
+  are not supported by XLA command-buffer conversion, so the setting cannot
+  capture a complete FFT-containing loop. Existing traces confirm that cuFFT
+  kernels remain outside graphs. This negative result does not rule out
+  dispatch overhead. [XLA conversion implementation](https://github.com/openxla/xla/blob/main/xla/backends/gpu/runtime/command_buffer_conversion_pass.cc).
+- All diagnostic outputs are finite. The optimized forward differs from the
+  production predictor by 1.81e-9 relative on the shared input. No model weights,
+  solver equations, precision, production dependencies, or GPU clock settings
+  were changed. GPU1 was untouched. Every diagnostic Modal app finished.
+
+The remaining unisolated detail is why the Blackwell/driver execution of these
+specific FP64 kernels takes more cycles; this experiment does not attribute it
+to a particular GPU instruction or claim that all Blackwell FP64 arithmetic
+is slower. The actionable target is the small FP64 transform path and its
+repeated launches, not shrinking the learned network further. No new speedup
+was accepted, so Figure12 remains unchanged.
+
+Reproduce the common diagnostic with
+`CUDA_VISIBLE_DEVICES=0 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync scripts/profile_dno.py --hardware-diagnosis --repeats 200 --output outputs/hardware_diagnosis_20260925/ada_default`.
+Use a fresh output directory for a repeat. Saved `hardware.json` contains clean
+timings and operating samples; `hardware_trace.json` contains kernel counts,
+durations and gaps, with the raw JAX trace alongside it.
+
+Raw results:
+
+- `outputs/hardware_diagnosis_20260925/{ada_default,ada_while,ada_cufft114_loaded}/`
+- `outputs/modal_rtx6000_20260925_hardware/{default,while}/`
+- `outputs/modal_rtx6000_20260925_cufft_control/{default,old_cufft}/`
+- `outputs/modal_rtx6000_20260925_environment/environment.json`

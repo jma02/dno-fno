@@ -44,7 +44,7 @@ def benchmark(payload: bytes, command: str, result_dir: str) -> tuple[int, dict[
     completed = subprocess.run(shlex.split(command), cwd="/repo", check=False)
     results = Path("/repo") / result_dir
     files = {str(path.relative_to(results)): path.read_bytes() for path in results.rglob("*")
-             if path.is_file() and path.suffix in (".json", ".npz", ".png", ".pdf", ".hlo", ".log")}
+             if path.is_file() and path.suffix in (".json", ".npz", ".png", ".pdf", ".hlo", ".log", ".gz", ".pb")}
     return completed.returncode, files
 
 
@@ -54,7 +54,7 @@ def main(command: str, result_dir: str = "outputs/modal_result", output: str = "
     destination.mkdir(parents=True, exist_ok=False)
     code = (
         "scripts/benchmark_cufftdx.py", "scripts/cufftdx_fft.cu", "scripts/benchmark_dno_fusion.py",
-        "scripts/benchmark_dno_dense.py", "scripts/time_single_rollouts.py",
+        "scripts/benchmark_dno_dense.py", "scripts/time_single_rollouts.py", "scripts/profile_dno.py",
         "models/dno-net/dno_net_v2.py", "models/fno-jax/fno1d.py",
         "solver/__init__.py", "solver/solvers/__init__.py", "solver/solvers/dno_series_jax.py",
         "solver/solvers/time_integrator.py", "solver/evals/__init__.py", "solver/evals/model_rollout.py",

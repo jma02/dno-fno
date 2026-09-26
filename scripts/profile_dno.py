@@ -9,11 +9,15 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_right
 from collections import defaultdict
+from contextlib import suppress
 import ctypes
+import gzip
+import importlib.metadata
 import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import time
 from typing import Any
@@ -109,6 +113,7 @@ if __name__ == "__main__":
     parser.add_argument("--capture", type=int, default=0, help="Capture this many warmed calls instead of benchmarking.")
     parser.add_argument("--repeats", type=int, default=200)
     parser.add_argument("--analyze", action="store_true", help="Summarize existing SQLite traces and draw an estimated roofline (no GPU work).")
+    parser.add_argument("--hardware-diagnosis", action="store_true", help="Compare dispatch, dependent execution, and 16 real GL2 steps with an annotated GPU trace.")
     args = parser.parse_args()
     if args.capture < 0 or args.repeats < 1:
         parser.error("capture must be nonnegative and repeats positive")
@@ -177,6 +182,147 @@ if __name__ == "__main__":
         eta = jnp.asarray(saved["truth_eta"][0, :1], dtype=jnp.float64)
         xi = jnp.asarray(saved["truth_xi"][0, :1], dtype=jnp.float64)
         depth = jnp.log(jnp.asarray(saved["depths"][:1], dtype=jnp.float64))
+    if args.hardware_diagnosis:
+        from scripts.benchmark_dno_fusion import build_variant
+        from solver.evals.model_rollout import rollout_surrogate
+        from solver.solvers import time_integrator as ti
+
+        hardware_forward = build_variant(loaded, depth, eta.shape[-1], "cufftdx")
+
+        @jax.jit
+        def dependent(e: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+            def body(_: int, state: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
+                q = hardware_forward(*state)
+                return e + 1e-5 * q, x + 1e-5 * q
+            return jax.lax.fori_loop(0, 64, body, (e, x))
+
+        params = ti.make_solver_params(1024, 2 * np.pi, jnp.exp(depth)[:, None],
+                                      dno_order=2, pad_factor=8, filter_fraction=0.25)
+        times = jnp.arange(3, dtype=jnp.float64) * 0.08
+        functions = {
+            "elementwise_single": (jax.jit(lambda e, x: e * 1.000001 + x * 1e-7), 1, "call"),
+            "elementwise_loop64": (jax.jit(lambda e, x: jax.lax.fori_loop(
+                0, 64, lambda _, s: s * 1.000001 + x * 1e-7, e)), 64, "iteration"),
+            "forward_single": (hardware_forward, 1, "forward"),
+            "forward_loop64": (dependent, 64, "forward"),
+            "neural_gl2_16_steps": (jax.jit(lambda e, x: rollout_surrogate(
+                ti.State(e, x), times, params, lambda a, b: hardware_forward(a, b), substeps=8)), 16, "step"),
+            "classical_M2_gl2_16_steps": (jax.jit(lambda e, x: ti.rollout(
+                ti.State(e, x), times, params, save_gxi=True, substeps_per_interval=8,
+                method="gl2_if", implicit_iterations=4, zero_mean_xi=True)), 16, "step"),
+        }
+        args.output.mkdir(parents=True, exist_ok=True)
+        records, compiled = {}, {}
+        for name, (function, units, unit) in functions.items():
+            started = time.perf_counter()
+            compiled[name] = function.lower(eta, xi).compile()
+            records[name] = {"compile_s": time.perf_counter() - started, "units": units,
+                             "unit": unit, "seconds": []}
+            for _ in range(5):
+                jax.block_until_ready(compiled[name](eta, xi))
+            print(f"{name}: compiled and warmed", flush=True)
+            (args.output / f"{name}.hlo").write_text(compiled[name].as_text())
+        expected = build_predict_gxi_batched(loaded)(eta, xi, depth)
+        actual = compiled["forward_single"](eta, xi)
+        relative_error = float(jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected))
+        if relative_error > 1e-5 or not bool(jnp.isfinite(actual).all()):
+            raise RuntimeError(f"Forward numerical difference {relative_error}")
+        fields = "timestamp,index,name,pstate,clocks.current.sm,clocks.current.graphics,clocks.current.memory,power.draw,power.limit,utilization.gpu,utilization.memory,temperature.gpu"
+        monitor = subprocess.Popen(["nvidia-smi", "-i", os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0],
+                                    f"--query-gpu={fields}", "--format=csv,noheader,nounits", "--loop-ms=100"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            for repeat in range(args.repeats):
+                names = tuple(compiled)[::1 if repeat % 2 == 0 else -1]
+                for name in names:
+                    if not name.endswith("single") and repeat >= max(3, args.repeats // 20):
+                        continue
+                    started = time.perf_counter()
+                    result = jax.block_until_ready(compiled[name](eta, xi))
+                    records[name]["seconds"].append(time.perf_counter() - started)
+                    if not all(np.isfinite(np.asarray(leaf)).all() for leaf in jax.tree.leaves(result)):
+                        raise RuntimeError(f"Nonfinite {name} output")
+            with jax.profiler.trace(str(args.output / "trace")):
+                for name, executable in compiled.items():
+                    calls = 20 if name.endswith("single") else 1
+                    records[name]["traced_calls"] = calls
+                    with jax.profiler.TraceAnnotation(name):
+                        for _ in range(calls):
+                            jax.block_until_ready(executable(eta, xi))
+        finally:
+            monitor.terminate()
+            telemetry, telemetry_error = monitor.communicate(timeout=10)
+        for name, record in records.items():
+            record["median_us"] = float(np.median(record["seconds"]) * 1e6)
+            record["median_us_per_unit"] = record["median_us"] / record["units"]
+            print(f"{name}: {record['median_us_per_unit']:.3f} us/{record['unit']}", flush=True)
+        packages = {}
+        for package in ("jax", "jaxlib", "jax-cuda12-plugin", "jax-cuda12-pjrt", "flax", "numpy", "triton",
+                        "nvidia-cuda-runtime-cu12", "nvidia-cufft-cu12", "nvidia-cublas-cu12", "nvidia-cuda-cupti-cu12"):
+            packages[package] = "not installed"
+            with suppress(importlib.metadata.PackageNotFoundError):
+                packages[package] = importlib.metadata.version(package)
+        report = {"device": jax.devices()[0].device_kind, "run": str(args.run), "checkpoint_epoch": loaded.epoch,
+                  "batch_size": 1, "nx": 1024, "short_steps": 16, "dt": 0.01, "gl2_iterations": 4,
+                  "forward_relative_error": relative_error, "packages": packages, "timings": records,
+                  "loaded_cuda_libraries": sorted({line.split()[-1] for line in Path("/proc/self/maps").read_text().splitlines()
+                                                   if "/libcu" in line}),
+                  "cpu": json.loads(subprocess.check_output(["lscpu", "-J"], text=True)),
+                  "environment": {key: os.environ.get(key) for key in (
+                      "XLA_FLAGS", "JAX_PLATFORMS", "CUDA_VISIBLE_DEVICES", "XLA_PYTHON_CLIENT_PREALLOCATE",
+                      "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NVIDIA_TF32_OVERRIDE", "LD_LIBRARY_PATH")},
+                  "gpu_telemetry_fields": fields.split(","),
+                  "gpu_telemetry": [line.split(", ") for line in telemetry.splitlines()],
+                  "gpu_telemetry_error": telemetry_error,
+                  "scope": "Standalone and synthetic dependent forwards plus 16 actual GL2 steps; not full-rollout timings."}
+        (args.output / "hardware.json").write_text(json.dumps(report, indent=2) + "\n")
+        trace_path = next((args.output / "trace").rglob("*.trace.json.gz"))
+        with gzip.open(trace_path, "rt") as stream:
+            events = json.load(stream)["traceEvents"]
+        processes = {e["pid"]: e.get("args", {}).get("name", "") for e in events if e.get("name") == "process_name"}
+        threads = {(e["pid"], e["tid"]): e.get("args", {}).get("name", "")
+                   for e in events if e.get("name") == "thread_name"}
+        gpu_events = [e for e in events if e.get("ph") == "X" and "GPU" in processes.get(e["pid"], "")
+                      and "Stream" in threads.get((e["pid"], e["tid"]), "")]
+        scopes = [e for e in events if e.get("ph") == "X" and e.get("name") in compiled]
+        summary = {"gpu_events": len(gpu_events), "processes": processes, "threads": list(threads.values()), "scopes": {}}
+        for scope in scopes:
+            name, start, end = scope["name"], scope["ts"], scope["ts"] + scope["dur"]
+            selected = sorted((e for e in gpu_events if start <= e["ts"] < end), key=lambda e: e["ts"])
+            categories, kernels = defaultdict(lambda: [0, 0.0]), defaultdict(lambda: [0, 0.0])
+            busy, previous_end = 0.0, start
+            for event in selected:
+                kernel, duration = event["name"], event["dur"]
+                kind = "Other kernels"
+                if "sandwich_kernel" in kernel:
+                    kind = "FP64 cuFFTDx G1"
+                elif "fft" in kernel.lower() or "scal_kernel" in kernel:
+                    kind = "FP64 FFTs" if "double" in kernel else "FP32 FFTs"
+                elif "gemm" in kernel or "matmul" in kernel:
+                    kind = "Dense GEMMs"
+                elif "Memcpy" in kernel:
+                    kind = "Device copies"
+                categories[kind][0] += 1
+                categories[kind][1] += duration
+                kernels[kernel][0] += 1
+                kernels[kernel][1] += duration
+                busy += max(0.0, event["ts"] + duration - max(event["ts"], previous_end))
+                previous_end = max(previous_end, event["ts"] + duration)
+            span = previous_end - selected[0]["ts"] if selected else 0.0
+            kernel_names = list(kernels)
+            api = defaultdict(lambda: [0, 0.0])
+            for event in events:
+                if event.get("ph") == "X" and start <= event["ts"] < end and event["name"].startswith(("cu", "cuda")):
+                    api[event["name"]][0] += 1
+                    api[event["name"]][1] += event["dur"]
+            summary["scopes"][name] = {"host_scope_us": scope["dur"], "gpu_span_us": span,
+                                        "gpu_busy_us": busy, "gpu_gap_us": span - busy,
+                                        "categories_count_us": dict(categories), "kernels_count_us": dict(kernels),
+                                        "cuda_api_count_us": dict(api), "kernel_names": kernel_names,
+                                        "events_us_kernel": [[e["ts"] - start, e["dur"], kernel_names.index(e["name"])] for e in selected]}
+        (args.output / "hardware_trace.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"Saved {len(gpu_events)} GPU events in {len(scopes)} annotated workloads", flush=True)
+        raise SystemExit(0)
     predict = build_predict_gxi_batched(loaded)
     # Rollouts hold depth fixed: its multiplier MLPs can be constant-folded.
     function = jax.jit((lambda eta, xi: predict(eta, xi, depth)) if args.depth_mode == "fixed" else predict)
