@@ -813,3 +813,94 @@ Some A100 short-family repeats fluctuate: Stokes M6 ranges 6.8390–8.8988 s
 2.0067–2.7375 s. All repeats are retained; no selective reruns or small-difference
 speed claims. The long-family measurements are stable and show the same
 A100/M2 ordering. No new training or production changes were made.
+
+## Sharing the solver M1 baseline — September 26
+
+The baseline-only candidate is slower than classical M1, motivating a direct
+replacement rather than estimating the saving by subtracting separate rollout
+times. `shared_m1_spectral_all` uses `_dno_series_hat(order=1, pad_factor=2)`
+on the integrator's FP64 spectra, then adds the unchanged learned correction.
+Only the correction passes through model normalization and depth conditioning.
+The baseline uses actual depth rather than the model's cap, padded products,
+and FP64 inputs. This changes the discrete DNO; it is not merely kernel fusion.
+The original baseline_order=1 surface features and checkpoint are unchanged.
+All changes are confined to benchmark scripts, not training or production code.
+
+The 48-state validation spans four families and depths 0.0126–46.93. Composite
+predictions agree with independently evaluated M1 plus correction to 1.56e-13
+relative. With zero correction, the RHS (including ramp checks) and short GL2
+trajectory reproduce classical M1 bitwise. Saved Gxi is verified to contain
+the complete composite, not M1 alone; as before, neural saved Gxi is unfiltered
+while classical saved Gxi is filtered, so trajectory comparisons use eta/xi.
+Correction extraction changes summation rounding by at most 4.67e-8 relative
+to the full DNO. Family-pooled new-versus-old DNO differences range from
+1.55e-5 to 1.21e-4. Raw checks: `outputs/shared_m1_20260926/checks.json`.
+
+Full tests compare M1, M2, the previous candidate and the shared-baseline
+candidate with three complete batch-one repeats each, plus one M6 reference
+trajectory per family. They retain N=1024, dt=0.01, four GL2 iterations and
+T=20/200. Raw results are `outputs/shared_m1_20260926/ada_full.json` and
+`{a100,blackwell}/rollouts.json` under that directory. No training is performed.
+
+The separate baseline-only rollout is not an additive cost decomposition.
+CPU-only lowering of the old and shared spectral RHS finds eight versus ten
+live FFT operations and one versus zero cuFFTDx sandwich calls. The front
+FP32 inverse-FFT batch shrinks only from37 to36 channels. The shared path
+replaces the sandwich with a padded FP64 inverse batch of3×2048 and a forward
+batch of2×2048. It retains a separate3×2048 inverse batch for the nonlinear
+water-wave RHS; the xi derivative occurs in both batches. No duplicate complete
+baseline is present. These are compiler-IR observations, not measured GPU
+launch counts or an attribution of elapsed time to individual operations.
+The initial sandboxed CPU restore stalled; an isolated unsandboxed CPU retry
+completed without GPU use.
+
+After the Ada full sweep finished, a separate fixed-state RHS diagnostic on
+GPU0 used300 alternating warmed calls: median240.07→257.82 microseconds
+(+7.4%). A separate20-call-per-method trace measured33→38 GPU kernels and
+4→5 device copies per call. Old FP64 FFT/scaling plus cuFFTDx work totaled
+89.87 microseconds, versus102.79 microseconds of FP64 FFT/scaling in the
+replacement. Neural FP32 FFT and GEMM costs were essentially unchanged.
+Total traced GPU busy time increased148.94→161.20 microseconds. Thus padded
+transforms explain the added device work in this trace; the profile is not
+used as a substitute for full-rollout times. Evidence:
+`outputs/shared_m1_20260926/profile/results.json` and the adjacent raw trace.
+
+### Full-rollout result: retain the fused baseline
+
+All 156 full-rollout timings are complete. All 60 returned method/family
+outputs are finite with positive depth; the largest M6 surface discrepancy
+from the cached reference is 5.08e-12 relative. Median batch-one seconds:
+
+| GPU | Family | Fused candidate | Shared solver M1 candidate | Change |
+| --- | --- | ---: | ---: | ---: |
+| Ada | Stokes | 3.3059 | 3.6567 | +10.61% |
+| Ada | Tanaka | 32.9320 | 36.2907 | +10.20% |
+| Ada | Benjamin–Feir | 32.9254 | 36.2977 | +10.24% |
+| Ada | JONSWAP/TMA | 3.3106 | 3.6630 | +10.64% |
+| Blackwell | Stokes | 4.5631 | 5.1688 | +13.27% |
+| Blackwell | Tanaka | 45.3951 | 51.0719 | +12.51% |
+| Blackwell | Benjamin–Feir | 45.3877 | 51.0657 | +12.51% |
+| Blackwell | JONSWAP/TMA | 4.5625 | 5.1592 | +13.08% |
+| A100 | Stokes | 3.3665 | 3.9252 | +16.59% |
+| A100 | Tanaka | 33.0728 | 38.3421 | +15.93% |
+| A100 | Benjamin–Feir | 31.7440 | 37.0417 | +16.69% |
+| A100 | JONSWAP/TMA | 3.2021 | 3.7568 | +17.32% |
+
+Reject the direct replacement as a speed optimization: it is slower in all
+12 comparisons. Retain the original fused candidate as the default and the
+shared variant only as a benchmark option. The earlier saving estimated by
+subtracting separate baseline-only runtimes did not hold for the combined
+network execution. Compare paired measurements here, not absolute cloud
+runtimes across separate allocations.
+
+The single Benjamin–Feir case's terminal surface error improves from
+1.0506% to 0.7850% on Ada, 0.8408% to 0.7856% on Blackwell, and 1.0691% to
+0.7848% on A100. Other changes are small. These are timing-checkpoint results,
+not trained-model aggregate accuracy; Figure12 retains timing-only candidate
+lines. No training or production changes were made.
+
+The final Figure12 audit checks all 12 candidate line pairs and slowdown
+annotations, all 72 classical coordinates, and unchanged classical error
+sources. M1/M2 use this experiment's medians; M3–M6 retain the preceding
+three-repeat measurements rather than using this experiment's single M6
+accuracy run. All jobs completed; GPU1 was untouched.

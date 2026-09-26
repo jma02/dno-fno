@@ -184,31 +184,41 @@ for dealiasing at every order. On 48 states across all six orders, the maximum
 `outputs/fair_classical_20260925/padding_check.json`. This does not change the
 separate 2× padding in the nonlinear water-wave RHS.
 
-The teal line measures the candidate's G0+G1 implementation with the learned
-correction disabled. It is not classical M1: it retains the candidate's input
-normalization, depth clipping, precision and unpadded G1 products. The orange line is the full
-candidate; neither line assigns an accuracy coordinate. Plain panel annotations
-give the candidate and M2 times. The obsolete without-G0+G1 overlay is removed.
+The teal line tests replacing the model-local baseline with the solver's
+actual-depth FP64, padded M1 implementation, keeping the learned correction
+and checkpoint unchanged. This is the complete candidate, not a baseline-only
+rollout. The orange line retains the previous model-local baseline. Neither
+line assigns an accuracy coordinate. Annotations show orange→teal full-rollout
+times and signed percentage change; a positive value means slower execution.
 
-Every new timing is the median of three full batch-one rollouts, including
-M1–M6, the candidate and the G0+G1-only control. Horizons are T=20 for
+Each baseline-replacement comparison uses three full batch-one rollouts of
+M1, M2, the previous candidate and the shared-baseline candidate, plus one M6
+trajectory for accuracy checks. Horizons are T=20 for
 Stokes/JONSWAP and T=200 for Tanaka/Benjamin–Feir, with dt=0.01 and four GL2
 iterations. Compilation, setup, warm-up and host transfers are excluded.
-No weights, numerical precision or integration settings change; no training
-is performed.
+The checkpoint, learned-branch precision and integration settings are unchanged;
+no training is performed.
 
-New measurements are under `outputs/fair_classical_20260925/`: `ada_full.json`
-and `{blackwell,a100}_{short,tanaka,bf}/rollouts.json`. All classical runtime
-coordinates come from these files. Ada retains the earlier 32-case median
-errors and small/full neural points; the Modal panels use the new single-case
-errors against cached M6. The candidate method is `fused_cufftdx_spectral_all`
-and its analytic-only control is `baseline-only`.
+Replacement measurements are under `outputs/shared_m1_20260926/`:
+`ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`. They provide
+both candidate lines and fresh M1/M2 runtime medians. M3–M6 retain the preceding
+three-repeat medians from `outputs/fair_classical_20260925/`, including the
+M6 runtime reference. Classical error coordinates are unchanged: Ada retains
+the earlier 32-case medians and small/full neural points; the Modal panels use
+single-case errors against cached M6. The orange and teal methods are
+`fused_cufftdx_spectral_all` and `shared_m1_spectral_all`, respectively.
 
-The candidate takes 18.04–18.62% less time than M2 on Ada, 10.13–10.46% less
-on Blackwell, and 33.21–43.45% more on A100. These complete reduced-padding
-measurements supersede the earlier all-three-GPU speedup claim.
+The replacement changes the discrete baseline rather than merely its execution:
+actual depth replaces clipped depth, padded products replace model-grid products,
+and the baseline no longer passes through model input normalization. Across48
+saved states, independent M1-plus-correction checks agree to1.56e-13 relative,
+and zero correction reproduces classical M1. See `checks.json` in the new
+measurement directory. Full-rollout accuracy is recorded alongside timing.
 
-The accepted implementation is isolated in `scripts/benchmark_surrogate_rhs.py`
+The shared-baseline candidate is slower in all twelve comparisons:
+10.2–10.6% on Ada, 12.5–13.3% on Blackwell and 15.9–17.3% on A100.
+The original fused candidate remains the default; the shared variant is retained
+only as a benchmark option. Both are isolated in `scripts/benchmark_surrogate_rhs.py`
 and selected by the rollout timer; production trainers and checkpoints are
 untouched. Search results, numerical checks and merge decisions are recorded
 in `notes/dno_profile_20260924.md` and the September 25–26 logs under `experiments/`.
@@ -218,17 +228,17 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/fair_classical_20260925/ada_full.json
+  --candidate-timings outputs/shared_m1_20260926/ada_full.json
 ```
 
 Reproduce the local full-rollout measurements on a free GPU with:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
-  --methods M1 M2 M3 M4 M5 M6 fused_cufftdx_spectral_all baseline-only \
-  --reference M6 --repeats 3 --pad-factor 2 \
+  --methods M1 M2 M6 fused_cufftdx_spectral_all shared_m1_spectral_all \
+  --reference M6 --reference-once --repeats 3 --pad-factor 2 \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
-  --output outputs/fair_classical_20260925/ada_full.json
+  --output outputs/shared_m1_20260926/ada_full.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
