@@ -5,9 +5,11 @@
 """Minimal shuffled training, validation, and gradient EMA before AdamW."""
 
 import argparse
+from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 import math
+import mmap
 import json
 from pathlib import Path
 import shutil
@@ -82,9 +84,40 @@ def make_loader(dataset: Waves, batch_size: int, *, shuffle: bool = False,
                       sampler=BatchSampler(sampler, batch_size, drop_last=False))
 
 
-def prefetch_batches(loader: DataLoader) -> Iterator[tuple[Tensor, ...]]:
+def cpu_batches(loader: DataLoader, workers: int = 0) -> Iterator[tuple[Tensor, ...]]:
+    """Fetch bulk batches concurrently, yielding the sampler's exact order."""
+    if workers <= 1:
+        yield from loader
+        return
+    # Match the base-seed draw performed by the pinned PyTorch 2.14 DataLoader
+    # iterator before it consumes the sampler (which shares this generator).
+    torch.empty((), dtype=torch.int64).random_(generator=loader.generator)
+    for array in loader.dataset.arrays:
+        array._mmap.madvise(mmap.MADV_RANDOM)
+    indices = iter(loader.sampler)
+    pin = loader.pin_memory and torch.cuda.is_available()
+
+    def fetch(index: list[int]) -> tuple[Tensor, ...]:
+        batch = loader.dataset[index]
+        return tuple(value.pin_memory() for value in batch) if pin else batch
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batch-read") as pool:
+        pending = deque()
+        for _ in range(workers):
+            index = next(indices, None)
+            if index is not None:
+                pending.append(pool.submit(fetch, index))
+        while pending:
+            batch = pending.popleft().result()
+            index = next(indices, None)
+            if index is not None:
+                pending.append(pool.submit(fetch, index))
+            yield batch
+
+
+def prefetch_batches(loader: DataLoader, workers: int = 0) -> Iterator[tuple[Tensor, ...]]:
     """Fetch/pin one CPU batch ahead and overlap CUDA copies with queued compute."""
-    iterator = iter(loader)
+    iterator = iter(cpu_batches(loader, workers))
     transfer = torch.cuda.Stream()
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-prefetch") as executor:
         pending = executor.submit(next, iterator, None)
@@ -267,6 +300,7 @@ def main() -> None:
     parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
     parser.add_argument("--fast-step", action="store_true", help="Compile and CUDA-graph training with bulk batch fetch; preserves model and optimizer settings")
     parser.add_argument("--autotune", action="store_true", help="With --fast-step, benchmark GEMM kernels at compile time; adds one-time setup")
+    parser.add_argument("--loader-workers", type=int, default=0, help="With --fast-step, fetch bulk batches on this many CPU threads; four is a useful starting point")
     parser.add_argument("--prefetch", action="store_true", help="With --fast-step, fetch/pin on a CPU thread and transfer on a separate CUDA stream")
     parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
     parser.add_argument("--width", type=int, help="Encoder/transformer width, divisible by four; defaults: spectral64, attention128")
@@ -280,6 +314,8 @@ def main() -> None:
         parser.error("--width must be a positive multiple of four")
     if args.fast_step and args.device != "cuda":
         parser.error("--fast-step requires --device cuda")
+    if args.loader_workers < 0 or (args.loader_workers and not args.fast_step):
+        parser.error("--loader-workers must be nonnegative and requires --fast-step")
     if args.autotune and not args.fast_step:
         parser.error("--autotune requires --fast-step")
     if args.prefetch and not args.fast_step:
@@ -297,6 +333,8 @@ def main() -> None:
     x = np.load(data / "x.npy")
     model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
                         args.depth, args.bf16, width=args.width).to(args.device)
+    if args.loader_workers > 1:
+        torch.set_num_threads(1)  # Avoid nested OpenMP pools inside reader threads.
     optimizers = build_optimizers(model, args.optimizer, args.lr)
     averages = [torch.zeros_like(p) for p in model.parameters()]
     step = 0
@@ -306,7 +344,8 @@ def main() -> None:
         started = perf_counter()
         model.train()
         total = torch.zeros((), dtype=torch.float64, device=args.device) if args.fast_step else 0.
-        for batch in prefetch_batches(train) if args.prefetch else train:
+        batches = prefetch_batches(train, args.loader_workers) if args.prefetch else cpu_batches(train, args.loader_workers)
+        for batch in batches:
             if args.fast_step:
                 if fast_step is None:
                     fast_step = CudaStep(model, optimizers, averages, batch, args.ema, step, autotune=args.autotune)

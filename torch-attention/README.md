@@ -103,8 +103,7 @@ the six required arrays into local ephemeral storage before fitting scales or
 training. Copies read files sequentially; batches still use the original global
 shuffle and splits. The cache needs room for all six arrays. A completion manifest
 checks source paths, sizes and modification times before reuse; incomplete files
-are recopied. Staging time is reported separately. This is optional, and a full
-production-dataset staging run has not yet been timed. Feature-scale fitting also
+are recopied. Staging time is reported separately. This is optional; the CPU-only production benchmark below measures its cost. Feature-scale fitting also
 uses bulk batch reads, but remains an initial pass over the training split.
 
 The spectral model uses contiguous spatial axes for learned FFTs and real/imaginary
@@ -130,3 +129,25 @@ a width64 state dict. On one H100 at batch256 with the fast/tuned/grouped settin
 width256 measured17.48ms per training batch versus7.06ms at width64; compilation
 was separate (106s for width256). This short benchmark checked finite updates,
 not validation accuracy.
+
+For parallel production reads, add `--loader-workers 4` alongside `--fast-step`.
+This uses four bounded reader threads, preserves the exact sampler order/RNG state
+and partial batches, and avoids nested CPU math thread pools. It can be combined
+with `--prefetch` for pinned memory and asynchronous CUDA transfers; validation
+continues to use its original loader. The default remains zero extra readers.
+
+CPU-only tests on the full production training split measured warm loading at
+1.09ms/batch with four threads versus1.60–1.66ms with one reader. Four separate
+loader processes were slower at7.18ms. Fresh-worker access to256 globally shuffled
+batches took49–53 seconds, mostly startup; these are not cache-flushed measurements.
+On another65536 unseen examples, the integrated four-thread loader waited0.135s
+in total while a CPU sleep simulated17.48ms of GPU work per batch. This is a loader
+check, not a measured GPU training speedup. Exact sample order, tensors, generator
+state and one-row tails were checked over multiple epochs.
+
+Copying all181.9GB of required arrays to local SSD took54s after the initial read
+probe. The warmed remote volume was faster than the local copy in that trial,
+so local staging remains optional. Source files are never modified. Cache behavior
+and startup costs can vary by worker; the short test does not establish full-epoch
+I/O. Detailed results are in `experiments/torch_production_*cpu_20260926.json` and
+`experiments/check_production_loader_cpu_20260926.json`.

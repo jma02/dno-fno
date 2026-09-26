@@ -1,0 +1,29 @@
+[
+  {
+    "rows": 513,
+    "workers": 4,
+    "explicit_generator": true,
+    "epochs": 2,
+    "all_tensors_exact": true,
+    "rng_state_exact": true,
+    "partial_batch_preserved": true
+  },
+  {
+    "rows": 1025,
+    "workers": 16,
+    "explicit_generator": true,
+    "epochs": 2,
+    "all_tensors_exact": true,
+    "rng_state_exact": true,
+    "partial_batch_preserved": true
+  },
+  {
+    "rows": 513,
+    "workers": 4,
+    "explicit_generator": false,
+    "epochs": 2,
+    "all_tensors_exact": true,
+    "rng_state_exact": true,
+    "partial_batch_preserved": true
+  }
+]

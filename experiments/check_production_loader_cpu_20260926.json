@@ -1,0 +1,32 @@
+{
+  "gpu": null,
+  "cpu": 8,
+  "batch_size": 256,
+  "workers": 4,
+  "setup_seconds": 1.3850039880000002,
+  "results": [
+    {
+      "segment": 0,
+      "seconds": 49.444733642,
+      "batch_ms": 193.1434907890625,
+      "first_batch_seconds": 31.155734118999998,
+      "total_wait_seconds": 48.41372953399999,
+      "requested_compute_ms": 0.0,
+      "simulated_compute_seconds": 0.0,
+      "samples_per_second": 1325.4394385963794,
+      "first_last_exact": true
+    },
+    {
+      "segment": 1,
+      "seconds": 4.780856184000001,
+      "batch_ms": 18.675219468750004,
+      "first_batch_seconds": 0.006288855999997622,
+      "total_wait_seconds": 0.1346286189999759,
+      "requested_compute_ms": 17.482,
+      "simulated_compute_seconds": 4.6351021959999485,
+      "samples_per_second": 13708.004900738923,
+      "first_last_exact": true
+    }
+  ],
+  "function_seconds": 55.612990463
+}
