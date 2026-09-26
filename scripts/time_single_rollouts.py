@@ -48,6 +48,7 @@ FUSION_VARIANTS = {
 }
 FUSION_VARIANTS.update({f"{name}_spectral": variant for name, variant in tuple(FUSION_VARIANTS.items())})
 FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packing in ("inputs", "all")})
+FUSION_VARIANTS["fused_front_spectral_all"] = "front"
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 
