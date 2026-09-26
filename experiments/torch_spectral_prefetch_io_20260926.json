@@ -1,0 +1,11 @@
+{
+  "status": "timed_out",
+  "function_timeout_seconds": 180,
+  "training_rows": 11796720,
+  "setup_seconds": 18.64,
+  "requested_samples_per_pass": 8192,
+  "completed_passes": 0,
+  "completed_batches": null,
+  "app_url": "https://modal.com/apps/zhaleon/main/ap-Nw4nhIpfY7Qed4T0tQ24Wi",
+  "note": "Recorded from CLI output after timeout. Metadata opened successfully; first random-read pass did not finish. No per-batch progress was logged, so steady-state throughput cannot be inferred."
+}

@@ -5,6 +5,9 @@
 """Minimal shuffled training, validation, and gradient EMA before AdamW."""
 
 import argparse
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+import math
 from pathlib import Path
 from time import perf_counter
 
@@ -34,12 +37,30 @@ class Waves(Dataset):
 
 
 def make_loader(dataset: Waves, batch_size: int, *, shuffle: bool = False,
-                generator: torch.Generator | None = None, bulk: bool = False) -> DataLoader:
+                generator: torch.Generator | None = None, bulk: bool = False,
+                pin_memory: bool = False) -> DataLoader:
     if not bulk:
-        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, generator=generator)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, generator=generator, pin_memory=pin_memory)
     sampler = RandomSampler(dataset, generator=generator) if shuffle else SequentialSampler(dataset)
-    return DataLoader(dataset, batch_size=None, generator=generator,
+    return DataLoader(dataset, batch_size=None, generator=generator, pin_memory=pin_memory,
                       sampler=BatchSampler(sampler, batch_size, drop_last=False))
+
+
+def prefetch_batches(loader: DataLoader) -> Iterator[tuple[Tensor, ...]]:
+    """Fetch/pin one CPU batch ahead and overlap CUDA copies with queued compute."""
+    iterator = iter(loader)
+    transfer = torch.cuda.Stream()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-prefetch") as executor:
+        pending = executor.submit(next, iterator, None)
+        while (batch := pending.result()) is not None:
+            pending = executor.submit(next, iterator, None)
+            with torch.cuda.stream(transfer):
+                device_batch = tuple(value.to("cuda", non_blocking=True) for value in batch)
+            consumer = torch.cuda.current_stream()
+            consumer.wait_stream(transfer)
+            for value in device_batch:
+                value.record_stream(consumer)
+            yield device_batch
 
 
 def relative_l2(prediction: Tensor, target: Tensor) -> Tensor:
@@ -150,7 +171,7 @@ class CudaStep:
             torch.cuda.current_stream().wait_stream(self.stream)
             return loss
         for buffer, value in zip(self.inputs, batch, strict=True):
-            buffer.copy_(value)
+            buffer.copy_(value, non_blocking=True)
         self.graph.replay()
         return self.loss
 
@@ -165,6 +186,7 @@ def main() -> None:
     parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
     parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
     parser.add_argument("--fast-step", action="store_true", help="Compile and CUDA-graph training with bulk batch fetch; preserves model and optimizer settings")
+    parser.add_argument("--prefetch", action="store_true", help="With --fast-step, fetch/pin on a CPU thread and transfer on a separate CUDA stream")
     parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
     parser.add_argument("--depth", type=int, default=1, help="Attention blocks per spatial/frequency stage")
     parser.add_argument("--ema", type=float, default=.9, help="Gradient EMA decay; 0 disables smoothing")
@@ -174,10 +196,13 @@ def main() -> None:
         parser.error("--ema must be in [0,1)")
     if args.fast_step and args.device != "cuda":
         parser.error("--fast-step requires --device cuda")
+    if args.prefetch and not args.fast_step:
+        parser.error("--prefetch requires --fast-step")
     torch.manual_seed(0)
     train = make_loader(Waves(args.data, "train"), args.batch_size, shuffle=True,
-                        generator=torch.Generator().manual_seed(0), bulk=args.fast_step)
-    validation = make_loader(Waves(args.data, "validation"), args.batch_size, bulk=args.fast_step)
+                        generator=torch.Generator().manual_seed(0), bulk=args.fast_step, pin_memory=args.prefetch)
+    validation = make_loader(Waves(args.data, "validation"), args.batch_size,
+                             bulk=args.fast_step, pin_memory=args.prefetch)
     x = np.load(args.data / "x.npy")
     model = build_model(args.architecture, train.dataset, len(x), float((x[1] - x[0]) * len(x)),
                         args.depth, args.bf16).to(args.device)
@@ -189,16 +214,18 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         started = perf_counter()
         model.train()
-        total = 0.
-        for batch in train:
+        total = torch.zeros((), dtype=torch.float64, device=args.device) if args.fast_step else 0.
+        for batch in prefetch_batches(train) if args.prefetch else train:
             if args.fast_step:
                 if fast_step is None:
                     fast_step = CudaStep(model, optimizers, averages, batch, args.ema, step)
                 loss = fast_step(batch)
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Nonfinite training loss")
                 step += 1
-                total += loss.item() * len(batch[0])
+                total.add_(loss.detach(), alpha=len(batch[0]))
+                # Reading every loss would serialize loading/copies with GPU work.
+                # Bound queued work and detect nonfinite training within 32 updates.
+                if step % 32 == 0 and not math.isfinite(total.item()):
+                    raise FloatingPointError("Nonfinite training loss")
                 continue
             eta, xi, depth, target = (v.to(args.device) for v in batch)
             model.zero_grad(set_to_none=True)
@@ -214,13 +241,23 @@ def main() -> None:
             for optimizer in optimizers:
                 optimizer.step()
             total += loss.item() * len(eta)
+        if args.fast_step:
+            total = total.item()
+            if not math.isfinite(total):
+                raise FloatingPointError("Nonfinite training loss")
         train_seconds = perf_counter() - started
         model.eval()
-        val = 0.
+        val = torch.zeros((), dtype=torch.float64, device=args.device) if args.fast_step else 0.
         with torch.no_grad():
-            for batch in validation:
+            for batch in prefetch_batches(validation) if args.prefetch else validation:
                 eta, xi, depth, target = (v.to(args.device) for v in batch)
-                val += relative_l2(model(eta, xi, depth), target).item() * len(eta)
+                loss = relative_l2(model(eta, xi, depth), target)
+                if args.fast_step:
+                    val.add_(loss, alpha=len(eta))
+                else:
+                    val += loss.item() * len(eta)
+        if args.fast_step:
+            val = val.item()
         print(f"epoch={epoch} step={step} train_L2={total / len(train.dataset):.6g} val_L2={val / len(validation.dataset):.6g} train_seconds={train_seconds:.2f}", flush=True)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model": model.state_dict(), "optimizers": [optimizer.state_dict() for optimizer in optimizers],

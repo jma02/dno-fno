@@ -88,6 +88,16 @@ Validation remains eager, with bulk data loading. Checkpoints keep the same mode
 keys and record the fast-step setting; floating-point fusion can cause small
 numerical differences. The original execution path remains the default.
 
+Fast training queues GPU work and reads accumulated loss every 32 updates and at
+epoch end, rather than synchronizing after each batch. Nonfinite training is
+therefore detected within 32 updates. Add `--prefetch` to prepare/pin the next
+CPU batch on a background thread and transfer it on a separate CUDA stream.
+This preserves shuffling and partial batches. Prefetch is optional: the cached
+subset benchmark was faster with queued execution alone. Full-volume cold random
+reads need separate measurement; cached-subset timings do not establish epoch I/O.
+The pilot reports amortized batch time over synchronized groups, with compile
+and validation time separate, so queue submission time is not mistaken for GPU time.
+
 The spectral model uses contiguous spatial axes for learned FFTs and real/imaginary
 views for filter products and reductions, allowing fusion of their intermediates.
 These layout changes preserve the architecture, FP32 FFTs/head and checkpoint keys.
