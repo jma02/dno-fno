@@ -78,6 +78,45 @@ feature extraction and the constrained head require additional small FFTs.
 Frequency attention does not enforce exact translation equivariance. BF16 covers
 encoder/transformer matmuls; feature FFTs, decoder, gate products and filters use FP32.
 
+### Rollouts
+
+`rollout.py` ports the existing fixed-iteration, two-stage Gauss–Legendre
+integrating-factor solver to PyTorch. It retains Nyquist removal, two-times
+dealiasing, hard Fourier filtering and zero-mean xi. Integration uses float64
+on CPU/CUDA; the checkpoint keeps its trained BF16/FP32 model precision.
+The runner needs only PyTorch and NumPy, with no JAX or ONNX conversion:
+
+```bash
+uv run torch-attention/rollout_eval.py \
+  --checkpoint ../pilot-checkpoints/torch_spectral_width256_full_epoch_20260926.pt \
+  --input path/to/stokes_truth_cache.npz \
+  --out outputs/torch_stokes_trajs.npz --device cpu
+```
+
+Use `--device cuda` on a GPU. `--frames 3` limits the run to a short prefix.
+Input can be an existing eval-suite `*_truth_cache.npz` or `*_trajs.npz`;
+the runner reuses its initial fields, saved times, depths and integration
+protocol. `--substeps` and `--filter-fraction` can explicitly override the
+protocol. With truth present, output includes the `truth_*`, `pred_*` and
+per-frame spatial `rel_l2_*` arrays consumed by
+`solver/evals/animate_trajs.py`. These are rollout metrics, not the training
+rFFT-bin loss. The full production failure/energy metric suite is not duplicated.
+
+For an unscored rollout, input may instead contain `eta` and `xi` of shape
+`(batch,n)`, `depths` of shape `(batch,)`, and a strictly increasing `times`
+vector. Optional `length` must match the checkpoint; optional `simulation_ids`
+are preserved. Without a saved protocol, defaults are eight substeps, four
+implicit iterations and filter fraction 0.25. Output records the actual settings
+and flags nonfinite trajectories. It requires a new output path and never
+overwrites a checkpoint or input. Outputs without truth cannot use the
+truth-comparison animation directly.
+
+CPU parity checks against the original JAX solver with the same analytic
+G0+G1 predictor agree within 1.12e-16 across nine grid/filter/substep cases.
+This verifies the integrator port, not learned-model rollout accuracy.
+
+### Training execution
+
 Add `--fast-step` on CUDA to fetch entire batches together, compile/fuse the model and updates,
 and replay forward, backward, gradient EMA and optimizer updates with a CUDA graph.
 It keeps the same samples, shuffle order, batch size, model and optimizer settings.
