@@ -904,3 +904,38 @@ annotations, all 72 classical coordinates, and unchanged classical error
 sources. M1/M2 use this experiment's medians; M3–M6 retain the preceding
 three-repeat measurements rather than using this experiment's single M6
 accuracy run. All jobs completed; GPU1 was untouched.
+
+## A100 baseline FFT backend — September 26
+
+Compared the existing packed cuFFT `front` implementation against cuFFTDx
+inside the current spectral/all-packed adapter. The one-line timer selector
+`fused_front_spectral_all` changes only the G1 execution backend. Both retain
+the model-local unpadded 1024-point FP64 baseline, depth clipping, normalization,
+G0, learned branches and checkpoint. This is not the shared-solver M1 trial.
+
+On a personal Modal A100-SXM4-40GB, 52 full batch-one timings cover three
+repeats each of both candidates and M1/M2, plus one M6 reference per family.
+N1024, dt0.01, four GL2 iterations and full T20/200 are unchanged; classical
+padding is2. Median rollout seconds:
+
+| Family | cuFFTDx G1 | cuFFT G1 | cuFFT slowdown | M2 |
+| --- | ---: | ---: | ---: | ---: |
+| Stokes | 2.9756 | 3.5626 | 19.73% | 2.2216 |
+| Tanaka | 29.5806 | 35.3613 | 19.54% | 22.2025 |
+| Benjamin–Feir | 29.5520 | 35.3438 | 19.60% | 22.1498 |
+| JONSWAP/TMA | 3.0023 | 3.5643 | 18.72% | 2.2216 |
+
+Both forward variants pass the48-state comparison against the production
+predictor with maximum relative difference2.81e-8. All20 rollout outputs are
+finite with positive depth; maximum cached-M6 surface discrepancy is5.08e-12.
+Long trajectories are not bitwise equivalent: the BF terminal surface error
+against M6 is1.0691% with cuFFTDx versus0.9575% with cuFFT. This is one timing
+checkpoint/case, not a trained-model aggregate accuracy comparison.
+
+The separate200-repeat model-only screen gives258.35 microseconds for cuFFTDx
+and325.37 for cuFFT; those host-synchronized latencies are not used to infer
+rollout speed. Raw measurements and forward HLO are under
+`outputs/a100_g1_backend_20260926/`. Reject the cuFFT replacement as a speed
+optimization; keep cuFFTDx and leave Figure12 unchanged. No training,
+production edits, spectral-interface implementation or local GPU use occurred.
+The Modal app completed and stopped after returning results.
