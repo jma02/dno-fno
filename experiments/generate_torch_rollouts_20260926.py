@@ -1,4 +1,4 @@
-"""Prepare four held-out snapshots, compute references, and render model rollouts."""
+"""Screen held-out snapshots, compute references, and render worst model rollouts."""
 
 import argparse
 import json
@@ -18,6 +18,8 @@ def main() -> None:
     parser.add_argument("stage", choices=("prepare", "reference", "render"))
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--reference-output", type=Path, default=OUTPUT)
+    parser.add_argument("--per-family", type=int, default=1)
+    parser.add_argument("--worst", type=int, default=0)
     args = parser.parse_args()
     output = args.output
     sys.path.insert(0, str(ROOT))
@@ -26,15 +28,20 @@ def main() -> None:
         source = ROOT.parent / "local-data/paper_equal_subset_20260924"
         arrays = {k: np.load(source / f"{k}.npy") for k in
                   ("eta", "xi", "depth", "family_id", "dataset_split", "simulation_id", "source_indices", "x")}
-        rows = [int(np.flatnonzero((arrays["dataset_split"] == "validation") & (arrays["family_id"] == f))[0])
-                for f in range(1, 5)]
+        rows = []
+        for family in range(1, 5):
+            candidates = np.flatnonzero((arrays["dataset_split"] == "validation") & (arrays["family_id"] == family))
+            _, positions = np.unique(arrays["simulation_id"][candidates], return_index=True)
+            if not 0 < args.per_family <= len(positions):
+                raise ValueError("Insufficient distinct validation simulations")
+            rows.extend(candidates[np.sort(positions)[:args.per_family]].tolist())
         length = float((arrays["x"][1] - arrays["x"][0]) * len(arrays["x"]))
         np.savez(output / "initial_conditions.npz", eta=arrays["eta"][rows], xi=arrays["xi"][rows],
                  depths=arrays["depth"][rows], simulation_ids=arrays["simulation_id"][rows],
                  times=np.linspace(0., 4., 51), length=length)
-        manifest = {"source": str(source), "selection": "First local validation row in each family; no accuracy-based selection",
+        manifest = {"source": str(source), "selection": f"First {args.per_family} distinct validation simulations per family in the local random subset; ranked after rollout",
                     "initial_state": "Held-out snapshots, not necessarily frame zero; reset autonomous dynamics clock to zero",
-                    "families": list(FAMILIES), "local_rows": rows,
+                    "families": [FAMILIES[int(arrays["family_id"][i]) - 1] for i in rows], "local_rows": rows,
                     "source_rows": arrays["source_indices"][rows].tolist(),
                     "simulation_ids": arrays["simulation_id"][rows].tolist(),
                     "depths": arrays["depth"][rows].tolist(), "length": length,
@@ -55,7 +62,7 @@ def main() -> None:
                                        jnp.asarray(data["depths"])[:, None], dno_order=6,
                                        pad_factor=8, filter_fraction=.25)
         started = perf_counter()
-        print("Computing float64 order-6 reference, four trajectories", flush=True)
+        print(f"Computing float64 order-6 reference, {len(data['eta'])} trajectories", flush=True)
         result = ti.rollout(ti.State(jnp.asarray(data["eta"], dtype=jnp.float64),
                                     jnp.asarray(data["xi"], dtype=jnp.float64)),
                             jnp.asarray(data["times"]), params, save_gxi=True,
@@ -94,24 +101,36 @@ def main() -> None:
                             **{k: arrays[k] for k in ("rel_l2_eta", "rel_l2_xi", "rel_l2_gxi", "truth_valid")})
         x = np.arange(pred["eta"].shape[-1]) * manifest["length"] / pred["eta"].shape[-1]
         rows = []
-        fig, axes = plt.subplots(4, 2, figsize=(12, 11), constrained_layout=True)
-        for i, family in enumerate(FAMILIES):
+        for i, family in enumerate(manifest["families"]):
             finite = all(np.isfinite(pred[k][:, i]).all() for k in pred)
             row = {"family": family, "simulation_id": manifest["simulation_ids"][i], "depth": manifest["depths"][i],
                    "model_finite": finite, "reference_valid": bool(arrays["truth_valid"][i]),
                    "final_relative_l2": {k: float(arrays[f"rel_l2_{k}"][-1, i]) for k in pred},
                    "max_reference_energy_drift": float(np.nanmax(np.abs(arrays["energy_drift_truth"][:, i])))}
             rows.append(row)
+        valid_indices = np.flatnonzero(arrays["truth_valid"]).tolist()
+        ranked = sorted(valid_indices, key=lambda i: rows[i]["final_relative_l2"]["eta"]
+                        if rows[i]["model_finite"] else float("inf"), reverse=True)
+        selected = ranked[:args.worst] if args.worst else list(range(len(rows)))
+        if not selected:
+            raise ValueError("No valid references to rank")
+        fig, axes = plt.subplots(len(selected), 2, figsize=(12, 2.8 * len(selected)),
+                                 squeeze=False, constrained_layout=True)
+        for rank, i in enumerate(selected):
+            row = rows[i]
+            family = row["family"]
+            name = f"worst_{rank + 1:02d}_{family}_sim{row['simulation_id']}" if args.worst else family
+            row["plot"] = name + ".gif"
             payload = {"x": x, "t": times, **{f"pred_{k}": v[:, i] for k, v in pred.items()},
                        **{f"truth_{k}": v[:, i] for k, v in truth.items()}}
-            np.savez_compressed(output / f"{family}_comparison.npz", **payload)
-            render_rollout_gif(payload, output / f"{family}.gif",
+            np.savez_compressed(output / f"{name}_comparison.npz", **payload)
+            render_rollout_gif(payload, output / f"{name}.gif",
                                title=f"{family} | epoch {epoch} | simulation {row['simulation_id']} | h={row['depth']:.4g}",
                                fps=12, n_frames=51, dpi=75)
-            ax, error = axes[i]
+            ax, error = axes[rank]
             ax.plot(x, truth["eta"][-1, i], label="Order-6 reference", color="black", linewidth=1.3)
             ax.plot(x, pred["eta"][-1, i], label=f"Epoch-{epoch} model", linestyle="--", linewidth=1.)
-            ax.set_title(f"{family}: surface at t=4, h={row['depth']:.4g}")
+            ax.set_title(f"#{rank + 1} {family}, sim {row['simulation_id']}: t=4, L2={row['final_relative_l2']['eta']:.3%}")
             ax.set_ylabel("eta")
             ax.grid(alpha=.2)
             for k in ("eta", "xi", "gxi"):
@@ -119,7 +138,7 @@ def main() -> None:
             error.set_title(f"Relative L2; reference valid: {row['reference_valid']}")
             error.set_xlabel("Simulated time")
             error.grid(alpha=.2)
-            if i == 0:
+            if rank == 0:
                 ax.legend(fontsize=8)
                 error.legend(fontsize=8)
             print(json.dumps(row), flush=True)
@@ -128,7 +147,9 @@ def main() -> None:
         report = {"manifest": manifest, "model_rollout": model_metadata,
                   "reference": json.loads((args.reference_output / "reference_timing.json").read_text()),
                   "trajectories": rows, "evaluation": metrics,
-                  "scope": "Four validation snapshots, short horizon; not the full production test suite"}
+                  "ranked_indices": ranked, "plotted_indices": selected,
+                  "ranking_metric": "Final surface relative L2 at t=4; nonfinite models first; invalid references excluded",
+                  "scope": f"Worst within {len(rows)} validation snapshots, short horizon; not the full production test suite"}
         (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
         (ROOT / "experiments" / f"{output.name}.json").write_text(json.dumps(report, indent=2) + "\n")
 
