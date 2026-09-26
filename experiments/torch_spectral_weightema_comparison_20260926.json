@@ -1,0 +1,39 @@
+{
+  "verified_checkpoint": true,
+  "ema_export_exactly_matches_saved_shadow": true,
+  "all_states_finite": true,
+  "inference_reload_four_family_smoke": "passed",
+  "epoch3_relative_l2": 0.00013012547331736754,
+  "epoch4_raw_relative_l2": 0.00010845255197480691,
+  "epoch4_weight_ema_relative_l2": 8.12487786577769e-05,
+  "weight_ema_reduction_percent": 25.083571406737693,
+  "total_reduction_from_epoch3_percent": 37.56120413132605,
+  "production_best_to_ema_error_ratio": 3.928881308806205,
+  "per_family": {
+    "stokes": {
+      "raw": 1.8722036048398554e-05,
+      "ema": 1.0043953668612764e-05,
+      "reduction_percent": 46.352236249048865
+    },
+    "tanaka": {
+      "raw": 0.00013427711953630295,
+      "ema": 5.9264958398870174e-05,
+      "reduction_percent": 55.86369546537122
+    },
+    "benjamin_feir": {
+      "raw": 3.073200177695127e-05,
+      "ema": 1.7789465740217736e-05,
+      "reduction_percent": 42.114197866669144
+    },
+    "jonswap_tma": {
+      "raw": 0.0002500887879782614,
+      "ema": 0.0002379044638798355,
+      "reduction_percent": 4.8719993394845895
+    }
+  },
+  "steady_window_median_batch_ms": {
+    "before_ema": 14.437227769531269,
+    "during_ema": 14.454763439452956,
+    "scope": "Within-run 512-update windows excluding initial loading, checkpoint windows, transition and tail; descriptive, not controlled microbenchmark"
+  }
+}
