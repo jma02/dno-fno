@@ -17,15 +17,15 @@ app = modal.App("torch-epoch1-rollouts")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="L4", cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def run() -> bytes:
+def run(checkpoint_run: str, output_name: str) -> bytes:
     import sys
 
     sys.path.insert(0, "/repo/torch-attention")
     from rollout_eval import main
 
-    output = Path("/data/experiments/torch_epoch1_rollouts_20260926/predictions.npz")
+    output = Path("/data/experiments") / output_name / "predictions.npz"
     sys.argv = ["rollout_eval.py", "--checkpoint",
-                "/data/experiments/torch_spectral_width256_full_epoch_20260926/checkpoint.pt",
+                f"/data/experiments/{checkpoint_run}/checkpoint.pt",
                 "--input", "/input.npz", "--out", str(output), "--device", "cuda", "--substeps", "8"]
     main()
     volume.commit()
@@ -33,8 +33,17 @@ def run() -> bytes:
 
 
 @app.local_entrypoint()
-def main() -> None:
-    result = run.remote()
-    with (OUTPUT / "predictions.npz").open("xb") as handle:
+def main(checkpoint_run: str = "torch_spectral_width256_full_epoch_20260926",
+         output_name: str = "torch_epoch1_rollouts_20260926") -> None:
+    import shutil
+
+    destination = ROOT / "outputs" / output_name
+    if (destination / "predictions.npz").exists():
+        raise FileExistsError(destination / "predictions.npz")
+    destination.mkdir(parents=True, exist_ok=True)
+    if destination != OUTPUT:
+        shutil.copyfile(OUTPUT / "initial_conditions.npz", destination / "initial_conditions.npz")
+    result = run.remote(checkpoint_run, output_name)
+    with (destination / "predictions.npz").open("xb") as handle:
         handle.write(result)
-    print(f"Saved {OUTPUT / 'predictions.npz'}")
+    print(f"Saved {destination / 'predictions.npz'}")
