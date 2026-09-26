@@ -575,3 +575,44 @@ The isolated Modal environment is selectable with `DNO_MODAL_CUDA13=1`;
 is `scripts/benchmark_cufft_library.py --library /absolute/libcufft.so --output results.json`.
 Raw results: `outputs/modal_rtx6000_20260925_cuda131/` (three native JSONs,
 CUDA12/CUDA13 timing reports, HLO and traces). The Modal app completed normally.
+
+### A100 comparison — September 25
+
+Ran the existing native FFT benchmark, shared inference/16-step diagnostic,
+and three alternating full Stokes rollouts per method on a Modal
+**A100-SXM4-40GB**. The CUDA12 image, JAX0.9.2, cuFFT11.4.1.4 and driver580.95.05
+match the Blackwell CUDA12 comparison. Only the cuFFTDx binary is rebuilt for
+SM80; weights, precision, equations and benchmark inputs are unchanged.
+
+| Measurement | RTX PRO6000 Blackwell | A100 |
+| --- | ---: | ---: |
+| Native FP64 complex FFT1024, batch1 | 18.568 us | 5.372 us |
+| Native FP64 real forward FFT1024, batch1 | 16.892 us | 3.828 us |
+| Native FP64 real inverse FFT1024, batch1 | 17.328 us | 3.892 us |
+| Native FP32 real forward FFT1024, batch32 | 2.027 us | 2.984 us |
+| Dependent network forward,64-call diagnostic | 96.574 us | 93.566 us |
+| Neural GL2 step,16-step diagnostic | 6.1135 ms | 3.0477 ms |
+| M2 GL2 step,16-step diagnostic | 5.2667 ms | 1.8947 ms |
+| Full Stokes neural rollout, median of3 | 12.6299 s | 5.9798 s |
+| Full Stokes M2 rollout, median of3 | 10.7075 s | 3.6477 s |
+
+Full rollouts use the same Stokes case517582, T20,2000 steps, dt0.01,
+batch1, four GL2 iterations and warm-up protocol. A100 gives a2.11x neural
+speedup and2.94x M2 speedup against the repeated Blackwell Stokes measurements;
+M2 is1.64x faster than the neural model on A100. These are measured full
+trajectories, not scaled short-step estimates. The standalone synchronized
+forward remains host-sensitive (321.01 us on A100 versus275.76 us on Blackwell).
+
+All13 native correctness cases pass. The shared optimized forward equals the
+production forward on this A100 input. Full trajectories remain finite with
+positive depth. Terminal surface errors against cached M6 are1.07998e-4 for
+neural and1.31888e-6 for M2; corresponding Blackwell values are1.08046e-4 and
+1.31888e-6. A100's profiler substantially perturbs the short-step run
+(traced span6.97 ms/step versus clean3.05 ms/step), so its traced gap shares
+must not be interpreted as clean execution overhead.
+
+Raw results: `outputs/modal_a100_20260925/{native.json,hardware/,stokes_rollouts.json}`.
+Blackwell full-rollout comparator: `outputs/modal_rtx6000_20260925_repeat_stokes/rollouts.json`.
+Reused existing scripts with `DNO_MODAL_GPU=A100` and cuFFTDx `--sm 80`;
+no code, training, production dependency or Figure12 changes. The Modal app
+completed and released its GPU.
