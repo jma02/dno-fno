@@ -114,7 +114,7 @@ def main() -> None:
         selected = ranked[:args.worst] if args.worst else list(range(len(rows)))
         if not selected:
             raise ValueError("No valid references to rank")
-        fig, axes = plt.subplots(len(selected), 2, figsize=(12, 2.8 * len(selected)),
+        fig, axes = plt.subplots(len(selected), 3, figsize=(16, 2.8 * len(selected)),
                                  squeeze=False, constrained_layout=True)
         for rank, i in enumerate(selected):
             row = rows[i]
@@ -127,15 +127,21 @@ def main() -> None:
             render_rollout_gif(payload, output / f"{name}.gif",
                                title=f"{family} | epoch {epoch} | simulation {row['simulation_id']} | h={row['depth']:.4g}",
                                fps=12, n_frames=51, dpi=75)
-            ax, error = axes[rank]
+            ax, residual, error = axes[rank]
             ax.plot(x, truth["eta"][-1, i], label="Order-6 reference", color="black", linewidth=1.3)
             ax.plot(x, pred["eta"][-1, i], label=f"Epoch-{epoch} model", linestyle="--", linewidth=1.)
             ax.set_title(f"#{rank + 1} {family}, sim {row['simulation_id']}: t=4, L2={row['final_relative_l2']['eta']:.3%}")
             ax.set_ylabel("eta")
             ax.grid(alpha=.2)
+            scale = np.sqrt(np.mean(truth["eta"][-1, i] ** 2)) + 1e-12
+            residual.plot(x, 100 * (pred["eta"][-1, i] - truth["eta"][-1, i]) / scale, color="tab:red")
+            residual.axhline(0, color="black", linewidth=.6)
+            residual.set_title("Surface difference at t=4")
+            residual.set_ylabel("Error / reference RMS (%)")
+            residual.grid(alpha=.2)
             for k in ("eta", "xi", "gxi"):
-                error.semilogy(times, np.maximum(arrays[f"rel_l2_{k}"][:, i], 1e-12), label=k)
-            error.set_title(f"Relative L2; reference valid: {row['reference_valid']}")
+                error.semilogy(times[1:], np.maximum(arrays[f"rel_l2_{k}"][1:, i], 1e-12), label=k)
+            error.set_title("Relative L2 (t>0)")
             error.set_xlabel("Simulated time")
             error.grid(alpha=.2)
             if rank == 0:
