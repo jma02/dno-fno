@@ -1,0 +1,11 @@
+{
+  "decays_checked": [
+    0.0,
+    0.9,
+    0.999
+  ],
+  "closed_form_average": "passed",
+  "online_training_unchanged": "passed",
+  "fixed_buffers_and_no_aliasing": "passed",
+  "averaged_model_linearity_self_adjointness_flat_correction": "passed"
+}

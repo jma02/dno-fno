@@ -17,7 +17,8 @@ app = modal.App("dno-spectral-width256-full-epoch")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=8,
               memory=32768, timeout=3600, retries=0, scaledown_window=2)
-def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
+def run(run_name: str, resume_run: str = "", max_mode: int = -1,
+        weight_ema_decay: float = 0., weight_ema_start: float = .8) -> dict:
     import math
     import os
     import sys
@@ -31,6 +32,10 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
     from model import baseline
     from spectral import SpectralDNO
     from train import CudaStep, Waves, build_optimizers, cpu_batches, make_loader, relative_l2
+    from weight_ema import WeightEMA
+
+    if not 0 <= weight_ema_decay < 1 or not 0 <= weight_ema_start < 1:
+        raise ValueError("Weight EMA decay/start must be in [0,1)")
 
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/data/torch-inductor-cache"
     torch.set_num_threads(1)
@@ -44,6 +49,8 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
     val_data = Waves(source, "validation")
     generator = torch.Generator().manual_seed(0)
     loader = make_loader(train_data, 256, shuffle=True, generator=generator, bulk=True)
+    weight_ema = None
+    weight_ema_start_index = math.floor(weight_ema_start * len(loader))
     reference_path = (f"/data/experiments/{resume_run}/checkpoint.pt" if resume_run else
                       "/data/experiments/torch_spectral_fast_h100_20260925/"
                       "torch_spectral_fast_h100_20260925_bf16_spectral_d2.pt")
@@ -112,6 +119,8 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
               "loss": "Mean per-example unweighted rFFT-bin relative L2; no physics regularizers",
               "sampling": f"Globally shuffled epoch{start_epoch + 1}; tail retained; continuous seed0 DataLoader sequence",
               "data_setup_seconds": setup_seconds, "compile_capture_seconds": compile_seconds,
+              "weight_ema_decay": weight_ema_decay, "weight_ema_start_fraction": weight_ema_start,
+              "weight_ema_first_update": weight_ema_start_index + 1 if weight_ema_decay else None,
               "progress": []}
 
     @torch.no_grad()
@@ -180,6 +189,10 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
                     "args": {k: report[k] for k in ("width", "depth", "heads", "branches", "bf16", "lr",
                                                    "gradient_ema", "batch_size", "loader_workers", "seed", "max_mode")},
                     "architecture": "spectral", "source": str(source),
+                    **({"weight_ema": {"model": weight_ema.state_dict(), "decay": weight_ema.decay,
+                                       "updates": weight_ema.updates,
+                                       "first_epoch_update": weight_ema_start_index + 1}}
+                       if weight_ema is not None else {}),
                     "epoch_start_sampler_state": epoch_start_sampler_state,
                     **({"sampler_state_after_epoch": generator.get_state()} if complete else {}),
                     "sampler_recovery": "At epoch boundary use sampler_state_after_epoch; mid-epoch recovery needs epoch_start_sampler_state and epoch_step"}, temporary)
@@ -204,7 +217,12 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
         if sample_event:
             begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             begin.record()
+        if weight_ema_decay and index == weight_ema_start_index:
+            weight_ema = WeightEMA(model, weight_ema_decay)
+            print(f"WEIGHT_EMA_START epoch_update={index + 1} decay={weight_ema_decay}", flush=True)
         loss = fast(batch)
+        if weight_ema is not None:
+            weight_ema.update()
         losses[index].copy_(loss.detach())
         total.add_(loss.detach(), alpha=len(batch[0]))
         if sample_event:
@@ -253,6 +271,24 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
     volume.commit()
     print("TRAIN_FINISHED " + json.dumps({k: v for k, v in report.items() if k not in ("losses", "progress")}), flush=True)
     report["full_validation"] = evaluate(val_data, analytic=True)
+    if weight_ema is not None:
+        assert weight_ema.updates == len(loader) - weight_ema_start_index
+        assert all(torch.isfinite(value).all().item() for value in weight_ema.averages)
+        raw_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+        model.load_state_dict(weight_ema.state_dict())
+        report["weight_ema_updates"] = weight_ema.updates
+        report["weight_ema_full_validation"] = evaluate(val_data)
+        report["weight_ema_relative_improvement_percent"] = 100 * (
+            1 - report["weight_ema_full_validation"]["relative_l2"] / report["full_validation"]["relative_l2"])
+        # Inference artifact deliberately has no optimizer state: optimizers
+        # and gradient EMA belong to the ordinary weights in checkpoint.pt.
+        torch.save({"model": model.state_dict(), "n": model.n, "length": model.length,
+                    "epoch": start_epoch + 1, "step": start_step + step,
+                    "architecture": "spectral", "source": str(source), "inference_only": True,
+                    "args": {k: report[k] for k in ("width", "depth", "heads", "branches", "bf16", "max_mode")},
+                    "weight_ema_decay": weight_ema.decay, "weight_ema_updates": weight_ema.updates},
+                   output / "checkpoint_weight_ema.pt")
+        model.load_state_dict(raw_state)
     report["function_seconds"] = perf_counter() - started
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     volume.commit()
@@ -262,6 +298,6 @@ def run(run_name: str, resume_run: str = "", max_mode: int = -1) -> dict:
 
 @app.local_entrypoint()
 def main(run_name: str = "torch_spectral_width256_full_epoch_20260926", resume_run: str = "",
-         max_mode: int = -1) -> None:
-    result = run.remote(run_name, resume_run, max_mode)
+         max_mode: int = -1, weight_ema_decay: float = 0., weight_ema_start: float = .8) -> None:
+    result = run.remote(run_name, resume_run, max_mode, weight_ema_decay, weight_ema_start)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
