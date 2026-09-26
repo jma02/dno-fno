@@ -3,7 +3,7 @@
 Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
 The fused methods apply inference FFT optimizations to --candidate-run.
-Spectral variants reduce adapter round trips; M2_packed shares padded FFT batching.
+Spectral variants reduce adapter round trips; every classical order shares padded FFT batching.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ FUSION_VARIANTS = {
 }
 FUSION_VARIANTS.update({f"{name}_spectral": variant for name, variant in tuple(FUSION_VARIANTS.items())})
 FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packing in ("inputs", "all")})
+FUSION_VARIANTS["baseline-only"] = "cufftdx"
 
 
 if __name__ == "__main__":
@@ -56,15 +57,16 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
+    parser.add_argument("--pad-factor", type=int, default=8, help="Classical DNO padding factor; model baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "M2_packed", "small", "full", "compact", *FUSION_VARIANTS))
+    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
-    if args.steps < 0 or args.repeats < 1:
-        parser.error("steps must be nonnegative and repeats positive")
+    if args.steps < 0 or args.repeats < 1 or args.pad_factor < 1:
+        parser.error("steps must be nonnegative; repeats and pad-factor must be positive")
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
@@ -72,13 +74,15 @@ if __name__ == "__main__":
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
+    if args.without_baselines and "baseline-only" in methods:
+        parser.error("baseline-only requires the model G0+G1 baselines")
     loaded = {name: load_run(run) for name, run in RUNS.items()
               if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
-        "fft_ept": args.ept,
+        "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": (f"synchronized GPU execution after {'same-executable' if args.steps else 'separate five-frame'} "
                    "warm-up; compilation and host transfers excluded"),
@@ -111,8 +115,8 @@ if __name__ == "__main__":
             started = time.perf_counter()
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
-                dno_order=int(method.split("_")[0][1:]) if method.startswith("M") else 6,
-                pad_factor=8, filter_fraction=cfg.filter_fraction,
+                dno_order=int(method[1:]) if method.startswith("M") else 6,
+                pad_factor=args.pad_factor if method.startswith("M") else 8, filter_fraction=cfg.filter_fraction,
             )
             if method.startswith("M"):
                 function = partial(ti.rollout, params=params, save_gxi=True,
@@ -122,7 +126,7 @@ if __name__ == "__main__":
                 predict = (cast(Predictor, build_variant(
                     loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
                     FUSION_VARIANTS.get(method, "original"), include_baselines=not args.without_baselines,
-                    fft_ept=args.ept,
+                    include_correction=method != "baseline-only", fft_ept=args.ept,
                 )) if method in FUSION_VARIANTS or args.without_baselines
                     else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
@@ -132,12 +136,12 @@ if __name__ == "__main__":
             setup_seconds = time.perf_counter() - started
             started = time.perf_counter()
             rhs_patch = nullcontext()
-            if method == "M2_packed":
+            if method.startswith("M"):
                 rhs_patch = patch.object(ti, "gauss_legendre_2_if_step", partial(
                     ti.gauss_legendre_2_if_step, rhs=partial(
                         rhs_nonlinear_if_spectral, predict_gxi=None, pack_ffts="all")))
-            elif "_spectral" in method:
-                packing = method.rsplit("_", 1)[-1]
+            elif "_spectral" in method or method == "baseline-only":
+                packing = "all" if method == "baseline-only" else method.rsplit("_", 1)[-1]
                 rhs_patch = patch("solver.evals.model_rollout._rhs_nonlinear_if_surrogate", partial(
                     rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none"))
             with rhs_patch:

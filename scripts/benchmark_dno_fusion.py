@@ -37,7 +37,7 @@ TRIALS = ("cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftd
 
 def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
-    fft_ept: int = 8,
+    include_correction: bool = True, fft_ept: int = 8,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
     if variant.endswith(("_e4", "_e16")):
@@ -64,7 +64,7 @@ def build_variant(
         (model.use_half_deriv, jnp.sqrt(k)),
         (model.use_hilbert, -1j * jnp.sign(k)),
     ) if enabled])
-    if variant in ("cached", "all", "batched", "surface", "front"):
+    if include_correction and variant in ("cached", "all", "batched", "surface", "front"):
         multiplier = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden)
         # This is a per-checkpoint/grid/depth inference constant, not a training cache.
         cached = jax.jit(lambda d: tuple(multiplier.apply(
@@ -86,20 +86,24 @@ def build_variant(
         ) -> Any:
             nonlocal front_fields, dense_weights
             module = context.module
+            if not include_correction and isinstance(module, CraigSulemBlock) and context.method_name == "__call__":
+                return jnp.zeros_like(call_args[1])
             if variant == "front" and isinstance(module, CraigSulemDNO) and context.method_name == "__call__":
                 inputs, log_depth = call_args
-                spectra = jnp.fft.rfft(jnp.stack((inputs[..., 0], inputs[..., 1] * model.xi_scale), axis=1))
+                input_fields = (jnp.stack((inputs[..., 0], inputs[..., 1] * model.xi_scale), axis=1)
+                                if include_correction else (inputs[..., 1] * model.xi_scale)[:, None, :])
+                spectra = jnp.fft.rfft(input_fields)
                 h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
                 base_k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1)
                 symbol = base_k[None, :] * jnp.tanh(h * base_k[None, :])
-                filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
-                packed_hat = jnp.concatenate((
-                    surface_ops[None, :, :] * spectra[:, :1, :],
-                    (symbol[:, None, :] * spectra[:, 1:, :])[:, :int(include_baselines), :],
-                    filters * spectra[:, 1:, :],
-                ), axis=1)
+                packed_hat = (symbol[:, None, :] * spectra[:, -1:, :])[:, :int(include_baselines), :]
+                if include_correction:
+                    filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
+                    packed_hat = jnp.concatenate((
+                        surface_ops[None, :, :] * spectra[:, :1, :], packed_hat, filters * spectra[:, 1:, :],
+                    ), axis=1)
                 front_fields = jnp.fft.irfft(packed_hat, n=nx, axis=-1)
-            if variant in ("surface", "front") and isinstance(module, nn.Dense) and module.name == "eta_feat_proj":
+            if include_correction and variant in ("surface", "front") and isinstance(module, nn.Dense) and module.name == "eta_feat_proj":
                 features = call_args[0]
                 eta_norm = features[..., 0]
                 transformed = (front_fields[:, :surface_ops.shape[0], :] if front_fields is not None
@@ -119,7 +123,8 @@ def build_variant(
             if not include_baselines and context.method_name in ("_linear_baseline", "_g1_baseline"):
                 return jnp.zeros_like(call_args[0])
             if front_fields is not None and context.method_name == "_linear_baseline":
-                return (front_fields[:, surface_ops.shape[0], :] / model.target_scale).astype(call_args[0].dtype)
+                return (front_fields[:, surface_ops.shape[0] if include_correction else 0, :]
+                        / model.target_scale).astype(call_args[0].dtype)
             if context.method_name == "_g1_baseline" and variant in ("g1", "all", "batched", "surface", "front"):
                 eta_norm, xi_norm, log_depth = call_args
                 eta_phys = (eta_norm * model.eta_scale).astype(jnp.float64)
