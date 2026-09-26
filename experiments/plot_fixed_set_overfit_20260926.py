@@ -1,5 +1,6 @@
 """Plot measured fixed-set error and held-out error from the overfit diagnostic."""
 
+import argparse
 import json
 from pathlib import Path
 
@@ -12,11 +13,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    name = "torch_fixed_set_overfit_20260926"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-name", default="torch_fixed_set_overfit_20260926")
+    args = parser.parse_args()
+    name = args.run_name
     report = json.loads((ROOT / "experiments" / f"{name}.json").read_text())
     output = ROOT / "outputs" / name
     output.mkdir(parents=True, exist_ok=True)
     trajectory = [{"step": 0, **report["initial"]}, *report["progress"]]
+    boundary = 0
+    previous = None
+    if report.get("resume_run"):
+        previous = json.loads((ROOT / "experiments" / f"{report['resume_run']}.json").read_text())
+        boundary = previous["completed_steps"]
+        trajectory = [{"step": 0, **previous["initial"]}, *previous["progress"],
+                      *[{**row, "step": row["step"] + boundary} for row in report["progress"]]]
     steps = [row["step"] for row in trajectory]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
     for split, label in (("train", "Fixed training set (256)"), ("validation", "Held-out set (256)")):
@@ -27,9 +38,12 @@ def main() -> None:
                          marker=".", label=label)
     for ax, title in zip(axes, ("Mean per-example operator error", "Fixed-training error by wave family"), strict=True):
         ax.set(title=title, xlabel="Additional updates on the same batch", ylabel="Relative L2")
+        if boundary:
+            ax.axvline(boundary, color="gray", linestyle=":", label=f"LR → {report['lr']:g}")
         ax.legend(fontsize=8)
         ax.grid(alpha=.2)
-    fig.suptitle("Epoch-2 checkpoint → fixed-set overfit; LR 1e-5, gradient EMA 0.8")
+    rates = f"{previous['lr']:g} → {report['lr']:g}" if previous else f"{report['lr']:g}"
+    fig.suptitle(f"Epoch-2 checkpoint → fixed-set overfit; LR {rates}, gradient EMA 0.8; BF16 unchanged")
     fig.savefig(output / "trajectory.png", dpi=160)
     plt.close(fig)
     initial = np.array(report["initial"]["train"]["per_example"])

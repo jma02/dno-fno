@@ -17,7 +17,7 @@ app = modal.App("torch-fixed-set-overfit")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4,
               memory=16384, timeout=900, retries=0, scaledown_window=2)
-def run(run_name: str, steps: int) -> dict:
+def run(run_name: str, steps: int, lr: float, resume_run: str) -> dict:
     import os
     import sys
     from time import perf_counter
@@ -56,15 +56,24 @@ def run(run_name: str, steps: int) -> dict:
                              "simulation_ids": simulations[rows].tolist()}
     assert not set(selections["train"]["simulation_ids"]) & set(selections["validation"]["simulation_ids"])
     reference_path = "/data/experiments/torch_spectral_width256_epoch2_20260926/checkpoint.pt"
-    reference = torch.load(reference_path, map_location="cpu", weights_only=True)
-    model = SpectralDNO(n=reference["n"], length=reference["length"], width=256,
+    metadata = torch.load(reference_path, map_location="cpu", weights_only=True)
+    reference = metadata
+    previous = None
+    if resume_run:
+        reference_path = f"/data/experiments/{resume_run}/final_checkpoint.pt"
+        reference = torch.load(reference_path, map_location="cpu", weights_only=True)
+        previous = json.loads((Path(reference_path).parent / "results.json").read_text())
+        assert previous["selections"] == selections
+        assert previous["bf16"] and previous["gradient_ema"] == .8
+    model = SpectralDNO(n=metadata["n"], length=metadata["length"], width=256,
                         branches=32, heads=4, depth=2, bf16=True,
                         feature_scales=reference["model"]["feature_scales"]).cuda()
     model.load_state_dict(reference["model"])
-    optimizers = build_optimizers(model, "muon-grouped", 1e-5)
+    optimizers = build_optimizers(model, "muon-grouped", lr)
     for optimizer, saved in zip(optimizers, reference["optimizers"], strict=True):
         optimizer.load_state_dict(saved)
-        assert all(group["lr"] == 1e-5 for group in optimizer.param_groups)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
     averages = [v.cuda().clone() for v in reference["gradient_ema"]]
     tick = perf_counter()
     fast = CudaStep(model, optimizers, averages, batches["train"], .8,
@@ -97,14 +106,21 @@ def run(run_name: str, steps: int) -> dict:
 
     initial = evaluate()
     target = min(initial["train"]["mean"] / 10, .00036036369240484103 / 10)
+    if previous:
+        target = previous["target"]
+        for split in batches:
+            np.testing.assert_allclose(initial[split]["per_example"],
+                                       previous["progress"][-1][split]["per_example"], rtol=1e-5, atol=1e-9)
     report = {"run_name": run_name, "reference_checkpoint": reference_path,
               "gpu": torch.cuda.get_device_name(), "selection_seed": 926, "selections": selections,
               "parameters": sum(p.numel() for p in model.parameters()), "batch_size": 256,
-              "width": 256, "depth": 2, "branches": 32, "bf16": True, "lr": 1e-5,
+              "width": 256, "depth": 2, "branches": 32, "bf16": True, "lr": lr, "resume_run": resume_run,
               "gradient_ema": .8, "optimizer": "grouped Muon + AdamW; full state resumed",
               "weight_decay": 1e-4, "initial": initial, "target": target,
               "compile_seconds": compile_seconds, "max_steps": steps, "progress": []}
-    print("INITIAL " + json.dumps({k: v for k, v in report.items() if k != "selections"}), flush=True)
+    print("INITIAL " + json.dumps({k: v for k, v in report.items() if k not in ("selections", "initial")}
+          | {"initial": {split: {k: v for k, v in values.items() if k != "per_example"}
+                         for split, values in initial.items()}}), flush=True)
     losses = torch.empty(steps, device="cuda")
     completed = 0
     update_seconds = 0.
@@ -151,6 +167,7 @@ def run(run_name: str, steps: int) -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "torch_fixed_set_overfit_20260926", steps: int = 20000) -> None:
-    result = run.remote(run_name, steps)
+def main(run_name: str = "torch_fixed_set_overfit_20260926", steps: int = 20000,
+         lr: float = 1e-5, resume_run: str = "") -> None:
+    result = run.remote(run_name, steps, lr, resume_run)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
