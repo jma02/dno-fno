@@ -29,7 +29,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
-from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral  # noqa: E402
+from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
@@ -49,6 +49,7 @@ FUSION_VARIANTS = {
 FUSION_VARIANTS.update({f"{name}_spectral": variant for name, variant in tuple(FUSION_VARIANTS.items())})
 FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packing in ("inputs", "all")})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
+FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 
 
 if __name__ == "__main__":
@@ -57,7 +58,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
-    parser.add_argument("--pad-factor", type=int, default=8, help="Classical DNO padding factor; model baselines are unchanged.")
+    parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
     parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
@@ -74,8 +75,8 @@ if __name__ == "__main__":
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
-    if args.without_baselines and "baseline-only" in methods:
-        parser.error("baseline-only requires the model G0+G1 baselines")
+    if args.without_baselines and set(methods) & {"baseline-only", "shared_m1_spectral_all"}:
+        parser.error("baseline-only and shared_m1_spectral_all require analytic baselines")
     loaded = {name: load_run(run) for name, run in RUNS.items()
               if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
@@ -113,10 +114,12 @@ if __name__ == "__main__":
         compiled, outputs = {}, {}
         for method in methods:
             started = time.perf_counter()
+            shared_baseline = method == "shared_m1_spectral_all"
+            correction = None
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
-                dno_order=int(method[1:]) if method.startswith("M") else 6,
-                pad_factor=args.pad_factor if method.startswith("M") else 8, filter_fraction=cfg.filter_fraction,
+                dno_order=int(method[1:]) if method.startswith("M") else 1 if shared_baseline else 6,
+                pad_factor=args.pad_factor, filter_fraction=cfg.filter_fraction,
             )
             if method.startswith("M"):
                 function = partial(ti.rollout, params=params, save_gxi=True,
@@ -125,10 +128,18 @@ if __name__ == "__main__":
             else:
                 predict = (cast(Predictor, build_variant(
                     loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
-                    FUSION_VARIANTS.get(method, "original"), include_baselines=not args.without_baselines,
+                    FUSION_VARIANTS.get(method, "original"), include_baselines=not (args.without_baselines or shared_baseline),
                     include_correction=method != "baseline-only", fft_ept=args.ept,
                 )) if method in FUSION_VARIANTS or args.without_baselines
                     else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
+                if shared_baseline:
+                    correction = predict
+                    predict = partial(
+                        lambda eta, xi, p, r: jnp.fft.irfft(shared_m1_hat(
+                            jnp.fft.rfft(eta).at[..., p.nx // 2].set(0),
+                            jnp.fft.rfft(xi).at[..., p.nx // 2].set(0), p, r,
+                        ), n=p.nx), p=params, r=correction,
+                    )
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
                                    predict_gxi=predict)
             runner = jax.jit(function)
@@ -143,7 +154,8 @@ if __name__ == "__main__":
             elif "_spectral" in method or method == "baseline-only":
                 packing = "all" if method == "baseline-only" else method.rsplit("_", 1)[-1]
                 rhs_patch = patch("solver.evals.model_rollout._rhs_nonlinear_if_surrogate", partial(
-                    rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none"))
+                    rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none",
+                    predict_correction=correction if shared_baseline else None))
             with rhs_patch:
                 compiled[method] = runner.lower(initial, times).compile()
                 compile_seconds = time.perf_counter() - started

@@ -10,6 +10,24 @@ from solver.solvers import time_integrator as ti
 from solver.solvers.dno_series_jax import _dno_series_hat
 
 
+def shared_m1_hat(
+    eta_hat: jax.Array, xi_hat: jax.Array, params: ti.SolverParams,
+    predict_correction: Predictor,
+) -> jax.Array:
+    """Add the unchanged learned correction to the solver's physical-depth M1."""
+    nx = params.nx
+    modes = slice(0, nx // 2 + 1)
+    baseline = _dno_series_hat(
+        eta_hat, xi_hat, params.k[modes], params.g0[..., modes],
+        nx=nx, order=1, pad_factor=params.pad_factor,
+    )
+    eta, xi = jnp.moveaxis(jnp.fft.irfft(
+        jnp.stack((eta_hat, xi_hat), axis=-2), n=nx, axis=-1,
+    ), -2, 0)
+    correction = jnp.fft.rfft(predict_correction(eta, xi), axis=-1)
+    return (baseline + correction).at[..., nx // 2].set(0)
+
+
 def rhs_nonlinear_if_spectral(
     state_hat: ti.SpectralState,
     time_value: float | jax.Array,
@@ -17,6 +35,7 @@ def rhs_nonlinear_if_spectral(
     predict_gxi: Predictor | None,
     *,
     pack_ffts: Literal["none", "inputs", "all"] = "none",
+    predict_correction: Predictor | None = None,
 ) -> ti.SpectralState:
     physical_hat = ti.apply_linear_flow_hat(state_hat, time_value, params)
     nx = params.nx
@@ -24,7 +43,9 @@ def rhs_nonlinear_if_spectral(
     eta_hat = physical_hat.eta_hat[..., positive_modes]
     xi_hat = physical_hat.xi_hat[..., positive_modes]
     k = params.k[positive_modes]
-    if predict_gxi is None:
+    if predict_correction is not None:
+        gxi_hat = shared_m1_hat(eta_hat, xi_hat, params, predict_correction)
+    elif predict_gxi is None:
         gxi_hat = _dno_series_hat(
             eta_hat, xi_hat, k, params.g0[..., positive_modes],
             nx=nx, order=params.dno_order, pad_factor=params.pad_factor,
@@ -60,6 +81,6 @@ def rhs_nonlinear_if_spectral(
     )
     if params.filter_fraction < 1.0:
         nonlinear_hat = ti._lowpass_hat(nonlinear_hat, params)
-    if predict_gxi is None:
+    if predict_gxi is None or predict_correction is not None:
         nonlinear_hat = ti._tree_scale(nonlinear_hat, ti.nonlinear_ramp_factor(time_value, params))
     return ti.apply_linear_flow_hat(nonlinear_hat, -time_value, params)
