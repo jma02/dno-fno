@@ -93,6 +93,7 @@ class CudaStep:
                     group["capturable"] = True
                 for state in optimizer.state.values():
                     state["step"] = state["step"].cuda()
+        self.compiled_updates = torch.compile(self.apply_updates, options={"triton.cudagraphs": False})
         # Stable gradient buffers allow a partial last batch to use eager execution
         # without changing the addresses retained by the full-batch CUDA graph.
         for p in self.parameters:
@@ -123,20 +124,23 @@ class CudaStep:
         torch.cuda.synchronize()
 
     def update(self, batch: tuple[Tensor, ...]) -> Tensor:
-        self.model.zero_grad(set_to_none=False)
+        torch._foreach_zero_([p.grad for p in self.parameters])
         forward = self.compiled if batch[0].shape == self.inputs[0].shape else self.model
         loss = relative_l2(forward(*batch[:3]), batch[3])
         loss.backward()
-        with torch.no_grad():
-            self.counter.add_(1)
-            correction = (1 - self.ema**self.counter).float()
-            gradients = [p.grad for p in self.parameters]
-            torch._foreach_mul_(self.averages, self.ema)
-            torch._foreach_add_(self.averages, gradients, alpha=1 - self.ema)
-            torch._foreach_copy_(gradients, torch._foreach_div(self.averages, correction))
+        self.compiled_updates()
+        return loss
+
+    @torch.no_grad()
+    def apply_updates(self) -> None:
+        self.counter.add_(1)
+        correction = (1 - self.ema**self.counter).float()
+        gradients = [p.grad for p in self.parameters]
+        torch._foreach_mul_(self.averages, self.ema)
+        torch._foreach_add_(self.averages, gradients, alpha=1 - self.ema)
+        torch._foreach_copy_(gradients, torch._foreach_div(self.averages, correction))
         for optimizer in self.optimizers:
             optimizer.step()
-        return loss
 
     def __call__(self, batch: tuple[Tensor, ...]) -> Tensor:
         if batch[0].shape != self.inputs[0].shape:

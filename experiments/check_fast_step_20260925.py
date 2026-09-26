@@ -102,9 +102,9 @@ def check() -> dict:
 
 
 @app.local_entrypoint()
-def main() -> None:
+def main(run_name: str = "check_fast_step_20260925") -> None:
     result = check.remote()
-    Path(__file__).with_suffix(".json").write_text(json.dumps(result, indent=2) + "\n")
+    (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
 
 
 if __name__ == "__main__":

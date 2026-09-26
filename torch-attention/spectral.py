@@ -46,23 +46,30 @@ class SpectralDNO(nn.Module):
                                        k / self.k[-1] * tanh_kh), -1)
         with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
             local = self.encoder(features)
-        local = local.float() if self.bf16 else local
-        spectrum = torch.fft.rfft(local, dim=1, norm="ortho")
+        # Keep each FFT's spatial axis contiguous; GEMMs still use channels last.
+        fft_input = local.transpose(1, 2).float() if self.bf16 else local.transpose(1, 2)
+        spectrum = torch.fft.rfft(fft_input.contiguous(), norm="ortho").transpose(1, 2)
         with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
             tokens = self.frequency_in(torch.cat((spectrum.real, spectrum.imag, token_condition), -1))
             tokens = self.frequency(tokens)
             coefficients = self.frequency_out(tokens)
         coefficients = coefficients.float() if self.bf16 else coefficients
         real, imag = coefficients.chunk(2, -1)
-        context = torch.fft.irfft(torch.complex(real, imag), n=self.n, dim=1, norm="ortho")
+        packed = torch.stack((real.transpose(1, 2), imag.transpose(1, 2)), -1)
+        context = torch.fft.irfft(torch.view_as_complex(packed), n=self.n, norm="ortho").transpose(1, 2)
         with torch.autocast(eta.device.type, enabled=False):
             # The local path is O(eta^2); bounded attention modulation cannot remove it.
+            local = local.float() if self.bf16 else local
             anchored = local * local.tanh()
             weights = self.decoder(anchored * (1 + context.tanh()))
-            filters = self.depth_filters(filter_features) * (self.k != 0)[None, :, None]
-            filtered = torch.fft.irfft(torch.fft.rfft(xi, dim=1)[..., None] * filters, n=self.n, dim=1)
-            weighted = torch.fft.rfft(weights * filtered, dim=1)
-            return torch.fft.irfft((weighted * filters).sum(-1), n=self.n, dim=1) / math.sqrt(filters.shape[-1])
+            filters = (self.depth_filters(filter_features) * (self.k != 0)[None, :, None]).transpose(1, 2).contiguous()
+            # Real views let Inductor fuse multiplier/reduction kernels instead of
+            # materializing separate complex multiplies and conjugate gradients.
+            spectrum_xi = torch.view_as_real(torch.fft.rfft(xi))[:, None]
+            filtered = torch.fft.irfft(torch.view_as_complex(spectrum_xi * filters[..., None]), n=self.n)
+            weighted = torch.fft.rfft(weights.transpose(1, 2) * filtered)
+            output = (torch.view_as_real(weighted) * filters[..., None]).sum(1)
+            return torch.fft.irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
 
     def forward(self, eta: Tensor, xi: Tensor, depth: Tensor) -> Tensor:
         return baseline(eta, xi, depth, self.length) + self.correction(eta, xi, depth)
