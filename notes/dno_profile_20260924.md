@@ -441,8 +441,9 @@ Compute 2025.2.1. Scoped Ruff and Pyright checks passed.
 The measured penalty has two components: **slower 1024-point FP64 cuFFT
 kernels**, especially in the neural rollout adapter, and **higher host
 submission/synchronization overhead**. It is not primarily the learned dense
-layers or FP32 FFTs. Swapping cuFFT versions in both directions does not remove
-the difference.
+layers or FP32 FFTs. Swapping the two CUDA12 cuFFT versions in both directions
+does not remove the difference. The later CUDA13.1 test below also finds no gain
+for these workloads.
 
 Three agents split the Ada GPU0 measurements, personal-account Modal Blackwell
 measurements, and independent trace/source review. The common diagnostic uses
@@ -531,3 +532,46 @@ Raw results:
 - `outputs/modal_rtx6000_20260925_hardware/{default,while}/`
 - `outputs/modal_rtx6000_20260925_cufft_control/{default,old_cufft}/`
 - `outputs/modal_rtx6000_20260925_environment/environment.json`
+
+### CUDA13.1 cuFFT follow-up — September 25
+
+NVIDIA's [CUDA13.1 release notes](https://docs.nvidia.com/cuda/archive/13.1.0/cuda-toolkit-release-notes/index.html#cufft-release-13-1)
+advertise Blackwell improvements for power-of-two FFT sizes, including FP64.
+Tested cuFFT11.4.1.4 versus **12.1.0.31**, in separate processes on the same
+Modal RTX PRO6000 and driver580.95.05. Explicit library paths and
+`cufftGetVersion` confirm the native versions; JAX process mappings confirm
+`libcufft.so.11` versus `libcufft.so.12`. No SONAME substitutions were used.
+
+The native test bypasses JAX, using driver-API allocations/events and CUDA
+graphs of256 FFT executions, seven repeats after0.2s warm-up per case. An
+old/new/old sequence gives essentially unchanged performance:
+
+| Workload | CUDA12 cuFFT | CUDA13.1 cuFFT |
+| --- | ---: | ---: |
+| FP64 complex FFT1024, batch1 | 18.589 us | 18.631 us |
+| FP64 real forward FFT1024, batch1 | 16.902 us | 16.892 us |
+| FP64 real inverse FFT1024, batch1 | 17.312 us | 17.322 us |
+| FP64 real inverse FFT2048, batch1 | 21.013 us | 21.024 us |
+| Neural GL2 step, warmed16-step diagnostic | 6.1135 ms | 6.1023 ms |
+| Classical M2 GL2 step, same diagnostic | 5.2667 ms | 5.2684 ms |
+
+The repeated old-library complex FFT1024 measures18.568 us. Batches2/4 show
+the same lack of improvement. All13 native cases pass random-input numerical
+checks: maximum relative error3.46e-16 in FP64 and1.83e-7 in the FP32 control.
+Zero timing inputs avoid destructive C2R input changes during graph replay.
+
+Integrated tests use separate CUDA12/CUDA13 JAX0.9.2 environments, the same
+checkpoint/input, unchanged precision and cuFFTDx G1 kernel. Other CUDA
+dependencies necessarily differ in that comparison; the direct cuFFT test
+isolates the FFT path. Active clocks stay2340–2347 MHz. Both neural forwards
+differ from production by1.81e-9 relative, and all diagnostic outputs are finite.
+Traced FP64 FFT/scaling work is likewise unchanged:4.164 versus4.165 ms/step.
+
+**Decision: no speedup accepted.** Do not replace Figure12 with extrapolated
+short-step timings or run full trajectories merely to chase a0.18% difference.
+Production dependencies, trainers, checkpoints and local GPU jobs are untouched.
+The isolated Modal environment is selectable with `DNO_MODAL_CUDA13=1`;
+`/opt/cuda13/bin/python` selects its CUDA13 JAX backend. The native benchmark
+is `scripts/benchmark_cufft_library.py --library /absolute/libcufft.so --output results.json`.
+Raw results: `outputs/modal_rtx6000_20260925_cuda131/` (three native JSONs,
+CUDA12/CUDA13 timing reports, HLO and traces). The Modal app completed normally.

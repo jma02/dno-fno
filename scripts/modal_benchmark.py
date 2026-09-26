@@ -32,6 +32,14 @@ image = (
           "OPENBLAS_NUM_THREADS": "1", "MPLBACKEND": "Agg"})
     .workdir("/repo")
 )
+if os.environ.get("DNO_MODAL_CUDA13") == "1":
+    image = image.run_commands(
+        "python -m venv /opt/cuda13",
+        "/opt/cuda13/bin/pip install 'jax[cuda13]==0.9.2' flax==0.12.6 optax==0.2.5 "
+        "orbax-checkpoint==0.11.33 numpy==2.4.2 scipy matplotlib tqdm "
+        "nvidia-cufft==12.1.0.31 nvidia-nvjitlink==13.1.80 nvidia-cuda-nvcc==13.1.80 "
+        "nvidia-cuda-nvrtc==13.1.80 nvidia-cuda-runtime==13.1.80 nvidia-cuda-cupti==13.1.75",
+    )
 app = modal.App("dno-kernel-benchmarks", include_source=False)
 
 

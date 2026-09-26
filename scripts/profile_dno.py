@@ -258,7 +258,9 @@ if __name__ == "__main__":
             print(f"{name}: {record['median_us_per_unit']:.3f} us/{record['unit']}", flush=True)
         packages = {}
         for package in ("jax", "jaxlib", "jax-cuda12-plugin", "jax-cuda12-pjrt", "flax", "numpy", "triton",
-                        "nvidia-cuda-runtime-cu12", "nvidia-cufft-cu12", "nvidia-cublas-cu12", "nvidia-cuda-cupti-cu12"):
+                        "nvidia-cuda-runtime-cu12", "nvidia-cufft-cu12", "nvidia-cublas-cu12", "nvidia-cuda-cupti-cu12",
+                        "jax-cuda13-plugin", "jax-cuda13-pjrt", "nvidia-cufft", "nvidia-nvjitlink",
+                        "nvidia-cuda-runtime", "nvidia-cuda-nvcc", "nvidia-cublas", "nvidia-cuda-cupti"):
             packages[package] = "not installed"
             with suppress(importlib.metadata.PackageNotFoundError):
                 packages[package] = importlib.metadata.version(package)
