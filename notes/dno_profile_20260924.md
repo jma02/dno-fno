@@ -614,5 +614,6 @@ must not be interpreted as clean execution overhead.
 Raw results: `outputs/modal_a100_20260925/{native.json,hardware/,stokes_rollouts.json}`.
 Blackwell full-rollout comparator: `outputs/modal_rtx6000_20260925_repeat_stokes/rollouts.json`.
 Reused existing scripts with `DNO_MODAL_GPU=A100` and cuFFTDx `--sm 80`;
-no code, training, production dependency or Figure12 changes. The Modal app
-completed and released its GPU.
+no training or production dependency changes. The Modal app completed and
+released its GPU. Figure12 now includes these measured A100 Stokes results
+below Blackwell and Ada: one M2 accuracy point and a candidate timing line.

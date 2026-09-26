@@ -49,13 +49,16 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2", "grid.linewidth": 0.6,
         "xtick.color": "#59616a", "ytick.color": "#59616a",
     })
-    axes = fig.subplots(2, 2)
+    families = tuple(item for item in FAMILIES if not args.single_case or item[0] in warm["families"])
+    single_panel = len(families) == 1
+    axes = fig.subplots(1 if single_panel else 2, 1 if single_panel else 2, squeeze=False)
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
                         top=0.78 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
-    for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
+    has_m6 = False
+    for ax, (family, title) in zip(axes.flat, families, strict=True):
         if args.single_case:
             timing = warm["families"][family]
-            orders = np.arange(1, 7)
+            orders = np.asarray([order for order in range(1, 7) if f"M{order}" in timing["methods"]])
             seconds = np.asarray([np.median(timing["methods"][f"M{order}"]["seconds"]) for order in orders])
             errors = 100 * np.asarray([timing["methods"][f"M{order}"]["cached_reference_terminal_eta_error"] for order in orders])
             horizon = timing["horizon"]
@@ -79,9 +82,10 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         ax.yaxis.set_major_locator(LogLocator(numticks=5))
         ax.yaxis.set_minor_locator(NullLocator())
         ax.grid(axis="y", zorder=0)
-        ax.plot(seconds[:-1], errors[:-1], "o-", color="#606970", ms=4,
+        shown = orders != 6
+        ax.plot(seconds[shown], errors[shown], "o-", color="#606970", ms=4,
                 markerfacecolor="white", lw=1.1, zorder=2)
-        for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
+        for order, x, y in zip(orders[shown], seconds[shown], errors[shown], strict=True):
             offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
                 offset = (-22, 5)
@@ -89,7 +93,9 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 offset = (-20, -14)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8)
-        ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
+        if 6 in orders:
+            has_m6 = True
+            ax.axvline(seconds[orders == 6][0], color="#aab2b9", ls=":", lw=1.2, zorder=1)
         right = float(seconds.max())
         for run, name, _label, color, marker in (() if args.single_case else RUNS):
             source = next((ROOT / "outputs" / run).glob(
@@ -131,7 +137,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
           for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
-        Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
+        *([Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time")] if has_m6 else []),
         *[Line2D([], [], color=color, ls="--", lw=1.3, label=label)
           for comparison, color, label in overlays if comparison],
     ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
@@ -149,14 +155,14 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
-    parser.add_argument("--stack-hardware", action="store_true", help="Stack Modal Blackwell panels above the supplied local Ada panels.")
+    parser.add_argument("--stack-hardware", action="store_true", help="Stack Blackwell, Ada, and the measured A100 Stokes comparison.")
     parser.add_argument("--single-case", action="store_true", help="Plot classical single-case errors against cached M6 and candidate timing lines, without archived model points.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
     if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
         parser.error("runtime overlays require --timings")
-    if args.single_case and not (args.timings and args.candidate_timings and args.candidate_previous_method):
-        parser.error("--single-case requires --timings, --candidate-timings and --candidate-previous-method")
+    if args.single_case and not (args.timings and args.candidate_timings):
+        parser.error("--single-case requires --timings and --candidate-timings")
     if args.stack_hardware and (args.single_case or not args.timings or not args.candidate_timings):
         parser.error("--stack-hardware requires local --timings and --candidate-timings without --single-case")
     if args.stack_hardware:
@@ -174,11 +180,18 @@ if __name__ == "__main__":
         modal.candidate_method = "fused_cufftdx"
         modal.candidate_previous_method = "fused_front"
         modal.no_baseline_timings = None
-        fig = plt.figure(figsize=(10.5, 16.5))
+        a100 = argparse.Namespace(**vars(modal))
+        a100.timings = ROOT / "outputs/modal_a100_20260925/stokes_rollouts.json"
+        a100.classical_timings = None
+        a100.candidate_timings = [a100.timings]
+        a100.candidate_previous_method = None
+        fig = plt.figure(figsize=(10.5, 21.5))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
-        blackwell, ada = fig.subfigures(2, 1)
+        blackwell, ada, ampere = fig.subfigures(3, 1, height_ratios=(8.25, 8.25, 5))
         draw_comparison(modal, blackwell, "Blackwell · Modal — RTX PRO 6000")
         draw_comparison(args, ada, "Ada · Local — RTX 6000")
+        draw_comparison(a100, ampere, "A100 · Modal — A100-SXM4-40GB")
+        ampere.axes[0].set_ylim(blackwell.axes[0].get_ylim())
     else:
         fig = plt.figure(figsize=(10.5, 8))
         draw_comparison(args, fig)

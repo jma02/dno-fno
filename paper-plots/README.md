@@ -218,6 +218,10 @@ Benjamin–Feir produced non-finite saved states. The full requested step count
 was executed in every case. Figure12 uses the label "New candidate optimized
 network" and has no explanatory footnotes; numerical outcomes and
 timings are recorded in `experiments/experiments-2026-09-25.md` and the raw results.
+The stacked figure now adds an A100 Stokes panel below Blackwell and Ada, using
+`outputs/modal_a100_20260925/stokes_rollouts.json`: M2 at3.6477 s and the candidate
+timing line at5.9798 s (medians of three full rollouts). Its M2 error uses the
+cached M6 reference; no unmeasured A100 orders, families or M6 runtime are drawn.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
