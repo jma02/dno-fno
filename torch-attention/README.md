@@ -110,6 +110,18 @@ The spectral model uses contiguous spatial axes for learned FFTs and real/imagin
 views for filter products and reductions, allowing fusion of their intermediates.
 These layout changes preserve the architecture, FP32 FFTs/head and checkpoint keys.
 
+Learned transforms use real-FFT adjoints with DC/Nyquist weighting instead of
+materializing a full complex inverse in backward. FFT normalization is explicit
+real arithmetic so the compiler can fuse it with neighboring operations.
+Fourier projections keep real/imaginary activation pairs together and permute
+the small projection weights, preserving existing checkpoint parameter order.
+These operations are mathematically equivalent; BF16 accumulation order changes.
+On one H100 at width 256 / batch 256, a paired 48-update trial reduced amortized
+training from 17.24 to 14.30 ms per batch (21% higher throughput). Held-out 1024-row
+subset relative L2 was .00033847/.00033865. This uses preloaded CPU batches and
+excludes compilation, validation and full-volume loading; it is not a new full
+epoch result. See `experiments/torch_width256_engineering_final_20260926.json`.
+
 For the measured H100 matrix optimizations, use `--fast-step --autotune --optimizer muon-grouped` with the spectral pilot settings above. Autotuning
 benchmarks GEMM kernels during compilation; grouped Muon batches equal-shaped
 Newton–Schulz matrix products using the same update equations and checkpoint
