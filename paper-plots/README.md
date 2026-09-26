@@ -184,12 +184,10 @@ for dealiasing at every order. On 48 states across all six orders, the maximum
 `outputs/fair_classical_20260925/padding_check.json`. This does not change the
 separate 2× padding in the nonlinear water-wave RHS.
 
-The teal line tests replacing the model-local baseline with the solver's
-actual-depth FP64, padded M1 implementation, keeping the learned correction
-and checkpoint unchanged. This is the complete candidate, not a baseline-only
-rollout. The orange line retains the previous model-local baseline. Neither
-line assigns an accuracy coordinate. Annotations show orange→teal full-rollout
-times and signed percentage change; a positive value means slower execution.
+The orange line shows the retained fused candidate. The rejected shared-M1
+candidate line and its slowdown annotations have been removed; its measured
+results remain in the experiment records below. No candidate accuracy
+coordinate is assigned.
 
 Each baseline-replacement comparison uses three full batch-one rollouts of
 M1, M2, the previous candidate and the shared-baseline candidate, plus one M6
@@ -201,11 +199,11 @@ no training is performed.
 
 Replacement measurements are under `outputs/shared_m1_20260926/`:
 `ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`. They provide
-both candidate lines and fresh M1/M2 runtime medians. M3–M6 retain the preceding
+the retained candidate line and fresh M1/M2 runtime medians. M3–M6 retain the preceding
 three-repeat medians from `outputs/fair_classical_20260925/`, including the
 M6 runtime reference. Classical error coordinates are unchanged: Ada retains
 the earlier 32-case medians and small/full neural points; the Modal panels use
-single-case errors against cached M6. The orange and teal methods are
+single-case errors against cached M6. The retained and rejected methods are
 `fused_cufftdx_spectral_all` and `shared_m1_spectral_all`, respectively.
 
 The replacement changes the discrete baseline rather than merely its execution:

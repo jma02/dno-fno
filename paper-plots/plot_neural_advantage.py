@@ -45,7 +45,6 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     overlays = (
         (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
-        (candidate if args.stack_hardware else None, "#178178", "New candidate — shared solver baseline", "shared_m1_spectral_all", "-.", 1.0),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
     )
     per_step = False
@@ -114,13 +113,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
             ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
-            if args.stack_hardware and method == "shared_m1_spectral_all":
-                previous_seconds = float(np.median(methods[args.candidate_method]["seconds"]))
-                change = 100 * (new_seconds / previous_seconds - 1)
-                ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s ({change:+.1f}%)",
-                        transform=ax.transAxes, color=color, fontsize=9,
-                        bbox={"facecolor": "white", "edgecolor": "none", "pad": 1})
-            elif comparison is candidate and method == args.candidate_method and args.candidate_previous_method:
+            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
