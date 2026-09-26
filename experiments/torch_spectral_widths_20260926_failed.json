@@ -1,0 +1,38 @@
+{
+  "status": "failed at width80 compiled backward warmup; no valid width80 timing",
+  "error": "CUDA illegal memory access; asynchronous reporting means failing kernel not established",
+  "results": [
+    {
+      "width": 64,
+      "heads": 4,
+      "head_dim": 16,
+      "parameters": 91584,
+      "amortized_step_ms": 7.010217687499876,
+      "samples_per_second": 36518.12417415811,
+      "epoch_seconds": [
+        0.15586536800000061,
+        0.11268501800000053,
+        0.11220534099999924,
+        0.11235969799999879,
+        0.1118366759999958,
+        0.11221165999999982,
+        0.11238575999999512,
+        0.11199872299999925,
+        0.11162498799999554
+      ],
+      "compile_capture_seconds": 39.558979389,
+      "device_step_ms": 6.692124938964843,
+      "device_samples_ms": [
+        6.695396423339844,
+        6.700049591064453,
+        6.692124938964843,
+        6.684540557861328,
+        6.687876892089844
+      ],
+      "last_training_relative_l2": 0.0021970707457512617,
+      "peak_allocated_bytes": 1168132096,
+      "checked_training_steps": 144,
+      "finite_updates": true
+    }
+  ]
+}
