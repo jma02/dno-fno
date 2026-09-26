@@ -17,7 +17,7 @@ app = modal.App("dno-spectral-width256-full-epoch")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=8,
               memory=32768, timeout=3600, retries=0, scaledown_window=2)
-def run(run_name: str) -> dict:
+def run(run_name: str, resume_run: str = "") -> dict:
     import math
     import os
     import sys
@@ -41,30 +41,73 @@ def run(run_name: str) -> dict:
     tick = perf_counter()
     train_data = Waves(source, "train")
     val_data = Waves(source, "validation")
-    loader = make_loader(train_data, 256, shuffle=True, generator=torch.Generator().manual_seed(0), bulk=True)
+    generator = torch.Generator().manual_seed(0)
+    loader = make_loader(train_data, 256, shuffle=True, generator=generator, bulk=True)
+    reference_path = (f"/data/experiments/{resume_run}/checkpoint.pt" if resume_run else
+                      "/data/experiments/torch_spectral_fast_h100_20260925/"
+                      "torch_spectral_fast_h100_20260925_bf16_spectral_d2.pt")
+    reference = torch.load(reference_path, map_location="cpu", weights_only=True)
+    start_epoch = int(reference["epoch"]) if resume_run else 0
+    start_step = int(reference["step"]) if resume_run else 0
+    start_examples = int(reference["examples_seen"]) if resume_run else 0
+    if resume_run:
+        if (start_step != start_epoch * len(loader) or start_examples != start_epoch * len(train_data)
+                or reference.get("epoch_complete") is False):
+            raise ValueError("This runner resumes completed epochs only")
+        assert reference["source"] == str(source) and reference["architecture"] == "spectral"
+        for key, value in {"width": 256, "depth": 2, "heads": 4, "branches": 32,
+                           "bf16": True, "lr": 1e-5, "gradient_ema": .8, "batch_size": 256, "seed": 0}.items():
+            assert reference["args"][key] == value, (key, reference["args"][key])
+        if "sampler_state_after_epoch" in reference:
+            generator.set_state(reference["sampler_state_after_epoch"])
+        else:
+            # Recreate each prior DataLoader base-seed draw and exhaust its
+            # sampler, including RandomSampler's final zero-length randperm.
+            # This advances exactly as a completed epoch, without reading data.
+            for _ in range(start_epoch):
+                torch.empty((), dtype=torch.int64).random_(generator=generator)
+                for _batch in loader.sampler:
+                    pass
+    epoch_start_sampler_state = generator.get_state().clone()
     setup_seconds = perf_counter() - tick
-    reference = torch.load("/data/experiments/torch_spectral_fast_h100_20260925/"
-                           "torch_spectral_fast_h100_20260925_bf16_spectral_d2.pt",
-                           map_location="cpu", weights_only=True)
     torch.manual_seed(0)
     model = SpectralDNO(n=reference["n"], length=reference["length"], width=256,
                         branches=32, heads=4, depth=2, bf16=True,
                         feature_scales=reference["model"]["feature_scales"]).cuda()
     optimizers = build_optimizers(model, "muon-grouped", 1e-5)
-    averages = [torch.zeros_like(p) for p in model.parameters()]
+    if resume_run:
+        model.load_state_dict(reference["model"])
+        for optimizer, saved in zip(optimizers, reference["optimizers"], strict=True):
+            optimizer.load_state_dict(saved)
+        averages = [value.cuda().clone() for value in reference["gradient_ema"]]
+        assert all(group["lr"] == 1e-5 for optimizer in optimizers for group in optimizer.param_groups)
+    else:
+        averages = [torch.zeros_like(p) for p in model.parameters()]
     warmup = Waves(Path("/subset"), "train")[list(range(256))]
     tick = perf_counter()
-    fast = CudaStep(model, optimizers, averages, warmup, .8, autotune=True)
+    fast = CudaStep(model, optimizers, averages, warmup, .8, step=start_step, autotune=True)
     compile_seconds = perf_counter() - tick
+    assert fast.counter.item() == start_step
+    if resume_run:
+        assert all(torch.equal(value.cpu(), reference["model"][name]) for name, value in model.state_dict().items())
+        assert all(torch.equal(a.cpu(), b) for a, b in zip(averages, reference["gradient_ema"], strict=True))
+        for optimizer, saved in zip(optimizers, reference["optimizers"], strict=True):
+            current = optimizer.state_dict()["state"]
+            for key, state in saved["state"].items():
+                for name, value in state.items():
+                    if isinstance(value, torch.Tensor):
+                        assert torch.equal(current[key][name].cpu(), value.cpu())
     report = {"run_name": run_name, "source": str(source), "gpu": torch.cuda.get_device_name(),
               "training_rows": len(train_data), "validation_rows": len(val_data),
               "expected_steps": len(loader), "batch_size": 256, "width": 256, "depth": 2,
               "heads": 4, "branches": 32, "parameters": sum(p.numel() for p in model.parameters()),
               "lr": 1e-5, "gradient_ema": .8, "optimizer": "grouped Muon transformer + AdamW remainder",
               "weight_decay": 1e-4, "bf16": True, "loader_workers": 4, "seed": 0,
-              "initialization": "Fresh seed0; unchanged physical feature scales from prior4096 training-only rows",
+              "initialization": (f"Resume {reference_path}; model, optimizers, EMA and counters restored" if resume_run else
+                                 "Fresh seed0; unchanged physical feature scales from prior4096 training-only rows"),
+              "resume_run": resume_run, "start_epoch": start_epoch, "start_step": start_step,
               "loss": "Mean per-example unweighted rFFT-bin relative L2; no physics regularizers",
-              "sampling": "One full globally shuffled training epoch; tail retained; DataLoader generator seed0",
+              "sampling": f"Globally shuffled epoch{start_epoch + 1}; tail retained; continuous seed0 DataLoader sequence",
               "data_setup_seconds": setup_seconds, "compile_capture_seconds": compile_seconds,
               "progress": []}
 
@@ -105,12 +148,15 @@ def run(run_name: str) -> dict:
         target = output / "checkpoint.pt"
         temporary = output / "checkpoint.tmp"
         torch.save({"model": model.state_dict(), "optimizers": [o.state_dict() for o in optimizers],
-                    "gradient_ema": averages, "step": step, "examples_seen": examples,
-                    "epoch": 1 if complete else 0, "n": model.n, "length": model.length,
+                    "gradient_ema": averages, "step": start_step + step, "examples_seen": start_examples + examples,
+                    "epoch": start_epoch + int(complete), "epoch_complete": complete, "epoch_step": step,
+                    "n": model.n, "length": model.length,
                     "args": {k: report[k] for k in ("width", "depth", "heads", "branches", "bf16", "lr",
                                                    "gradient_ema", "batch_size", "loader_workers", "seed")},
                     "architecture": "spectral", "source": str(source),
-                    "sampler_recovery": "Recreate seed0 bulk DataLoader and skip step batches in its sampler, preserving base-seed draw"}, temporary)
+                    "epoch_start_sampler_state": epoch_start_sampler_state,
+                    **({"sampler_state_after_epoch": generator.get_state()} if complete else {}),
+                    "sampler_recovery": "At epoch boundary use sampler_state_after_epoch; mid-epoch recovery needs epoch_start_sampler_state and epoch_step"}, temporary)
         temporary.replace(target)
         volume.commit()
 
@@ -146,7 +192,7 @@ def run(run_name: str) -> dict:
         if step == 1 or step % 512 == 0 or step == len(loader):
             torch.cuda.synchronize()
             recent = losses[max(0, step - 512):step].mean().item()
-            progress = {"step": step, "examples": examples, "last_loss": loss.item(),
+            progress = {"step": step, "cumulative_step": start_step + step, "examples": examples, "last_loss": loss.item(),
                         "recent_mean_loss": recent, "mean_train_loss": total.item() / examples,
                         "training_wall_seconds": perf_counter() - training_started,
                         "window_seconds": perf_counter() - window_start,
@@ -163,11 +209,13 @@ def run(run_name: str) -> dict:
     torch.cuda.synchronize()
     training_seconds = perf_counter() - training_started
     assert examples == len(train_data)
-    assert fast.counter.item() == step == len(loader)
+    assert fast.counter.item() == start_step + step and step == len(loader)
+    assert all(state["step"].item() == start_step + step for state in optimizers[-1].state.values())
     assert torch.isfinite(losses).all().item()
     assert all(torch.isfinite(p).all().item() for p in model.parameters())
     assert all(torch.isfinite(a).all().item() for a in averages)
-    report.update(completed_epochs=1, completed_steps=step, examples_seen=examples,
+    report.update(completed_epochs=start_epoch + 1, completed_steps=start_step + step,
+                  epoch_steps=step, examples_seen=start_examples + examples, epoch_examples=examples,
                   train_relative_l2=total.item() / examples,
                   training_wall_seconds=training_seconds, checkpoint_seconds=checkpoint_seconds,
                   training_seconds_excluding_checkpoints=training_seconds - checkpoint_seconds,
@@ -187,6 +235,6 @@ def run(run_name: str) -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "torch_spectral_width256_full_epoch_20260926") -> None:
-    result = run.remote(run_name)
+def main(run_name: str = "torch_spectral_width256_full_epoch_20260926", resume_run: str = "") -> None:
+    result = run.remote(run_name, resume_run)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
