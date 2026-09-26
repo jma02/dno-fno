@@ -37,13 +37,11 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     candidate = ({"families": {family: result for path in args.candidate_timings
                               for family, result in json.loads(path.read_text())["families"].items()}}
                  if args.candidate_timings else {})
-    if args.stack_hardware:
-        for family, result in candidate["families"].items():
-            warm["families"][family]["methods"]["M2"]["seconds"] = result["methods"]["M2_packed"]["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     overlays = (
-        (candidate, "#c45b22", "New candidate optimized network"),
-        (baseline_free, "#178178", "New candidate optimized network without G₀+G₁"),
+        (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
+        (candidate if args.stack_hardware else None, "#178178", "G₀+G₁ only — candidate implementation", "baseline-only", "-.", 1.0),
+        (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
     )
     per_step = False
     plt.rcParams.update({
@@ -87,7 +85,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
             offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
-                offset = (6, 5)
+                offset = (-22, 5)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
@@ -104,14 +102,17 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                        s=65, edgecolors="white", linewidths=0.8, zorder=3)
             right = max(right, neural_seconds)
             print(f"{title}, {name}: runtime axis={neural_seconds:.3f}, error={neural_error:.6g}%")
-        for comparison, color, label in overlays:
+        for comparison, color, label, method, style, width in overlays:
             if not comparison or family not in comparison["families"]:
                 continue
             methods = comparison["families"][family]["methods"]
-            record = methods[args.candidate_method if comparison is candidate else "fused"]
+            record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
-            ax.axvline(new_seconds, color=color, ls="--", lw=1.3, zorder=1)
-            if comparison is candidate and args.candidate_previous_method:
+            ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
+            if comparison is candidate and method == args.candidate_method and args.stack_hardware:
+                ax.text(0.50, 0.035, f"NN {new_seconds:.2f} s · M2 {seconds[1]:.2f} s",
+                        transform=ax.transAxes, color=color, fontsize=9)
+            elif comparison is candidate and method == args.candidate_method and args.candidate_previous_method:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
@@ -133,8 +134,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
           for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, ls="--", lw=1.3, label=label)
-          for comparison, color, label in overlays if comparison],
+        *[Line2D([], [], color=color, ls=style, lw=width, label=label)
+          for comparison, color, label, _method, style, width in overlays if comparison],
     ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
@@ -163,22 +164,18 @@ if __name__ == "__main__":
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
-        modal.timings = ROOT / "outputs/modal_rtx6000_20260925_classical_short/classical_rollouts.json"
-        modal.classical_timings = [
-            ROOT / f"outputs/modal_rtx6000_20260925_classical_{family}/classical_rollouts.json"
-            for family in ("tanaka", "bf")
-        ]
         a100 = argparse.Namespace(**vars(modal))
-        a100.timings = ROOT / "outputs/modal_a100_20260925_short_full/rollouts.json"
-        a100.classical_timings = [
-            ROOT / f"outputs/modal_a100_20260925_{family}_full/rollouts.json"
-            for family in ("tanaka", "bf")
-        ]
-        for config, result in ((modal, "blackwell_full/rollouts.json"),
-                               (args, "ada_full.json"), (a100, "a100_full/rollouts.json")):
-            config.candidate_timings = [ROOT / "outputs/knob_search_20260925" / result]
+        for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
+            paths = ([ROOT / "outputs/fair_classical_20260925/ada_full.json"] if hardware == "ada" else [
+                ROOT / f"outputs/fair_classical_20260925/{hardware}_{family}/rollouts.json"
+                for family in ("short", "tanaka", "bf")
+            ])
+            if config.single_case:
+                config.timings = paths[0]
+            config.classical_timings = paths
+            config.candidate_timings = paths
             config.candidate_method = "fused_cufftdx_spectral_all"
-            config.candidate_previous_method = "fused_cufftdx"
+            config.candidate_previous_method = None
             config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)

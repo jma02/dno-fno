@@ -724,3 +724,92 @@ selected with `fused_cufftdx_spectral_all` and `M2_packed` in the benchmark.
 Full results: `outputs/knob_search_20260925/ada_full.json`,
 `blackwell_full/rollouts.json` and `a100_full/rollouts.json` under that directory.
 All personal Modal apps stopped; local GPU0 finished, and GPU1 was untouched.
+
+## Correcting the classical comparison — September 26
+
+The preceding comparison updated only M2's shared nonlinear FFT packing;
+M1 and the other classical orders retained older timings. It also retained
+8× classical padding, whereas the candidate's G1 operates on the unpadded
+1024-point model grid. Thus the apparent candidate win over M1 did not compare
+identical G0+G1 implementations, and the earlier three-GPU speedup numbers
+must not be read as comparisons against the reduced-padding classical solver.
+
+### Padding and execution controls
+
+In `_dno_series_hat`, every multiplication is binary and its result is
+projected back to base modes before further products. With zero Nyquist mode,
+each factor has support through K=N/2−1; its product has support through 2K,
+which fits on a 2N grid. This remains true at every recurrence order because
+of the intermediate projections. Therefore pad2 suffices for this implemented
+recurrence; pad8 is redundant. The standard 3/2 rule also suffices for the
+retained modes ([spectral-method notes](https://kth-nek5000.github.io/kthNekBook/_md/spectral/pseudo.html)).
+This argument does not apply to evaluating an unprojected high-degree product
+in one operation. The separate 2× padding of the nonlinear Zakharov RHS is
+unchanged.
+
+CPU checks on 48 saved states across all four families and M1–M6 give a
+maximum pad2/pad8 relative difference of 7.74344e-12. Four near-Nyquist stress
+cases agree to 1.84e-17; simply removing padding gives up to 6.81% error.
+Random binary products agree to 5.43e-16 with 3/2 or 2× padding, while unpadded
+products differ by 58.79%. Evidence is in
+`outputs/fair_classical_20260925/padding_check.json`.
+
+Every ordinary M1–M6 benchmark now uses the shared packed spectral RHS;
+`--pad-factor 2` selects the reduced DNO padding. Packed/unpacked classical
+RHS outputs are bitwise equal for all six orders across four family states
+and two filter choices. The production solver defaults and trainers remain
+unchanged.
+
+The new `baseline-only` control uses the candidate's own normalization,
+depth clipping, G0 arithmetic and cuFFTDx G1, with its learned correction
+disabled. It is not interchangeable with classical M1, which uses the actual
+depth, FP64 inputs and padded products. The control is bitwise identical to
+the candidate with zeroed correction parameters on 48 states; compiled HLO
+contains no neural GEMMs or surface/head projections. Its teal line and the
+full candidate's orange line show runtime only, not accuracy points.
+
+Full measurements use three single-rollout repeats for all eight methods,
+N=1024, dt=0.01, four GL2 iterations, and the original T=20/200 horizons.
+Compilation, setup, warm-up and transfers are excluded. Raw files are
+`outputs/fair_classical_20260925/ada_full.json` and
+`{blackwell,a100}_{short,tanaka,bf}/rollouts.json` under that directory.
+The Blackwell long groups were restarted before completion with a 3600-second
+function limit: the full three-repeat sweeps exceeded the previous 1800-second
+limit. No completed result files were deleted.
+
+### Completed full-rollout comparison
+
+All 288 recorded full-rollout timings are complete (three repeats for eight
+methods, four families and three GPUs). The 96 returned method/family outputs
+are finite with positive depth. The largest M6 surface discrepancy from the
+cached pad8 reference is 5.08e-12 relative. Figure12 now uses the new times for
+every classical order and both candidate controls.
+
+Median seconds per complete batch-one rollout:
+
+| GPU | Family | Classical M1 | Classical M2 | Candidate | Candidate G0+G1 only |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ada | Stokes | 2.2152 | 4.0475 | 3.3119 | 2.7109 |
+| Ada | Tanaka | 22.1440 | 40.5050 | 32.9625 | 26.9964 |
+| Ada | Benjamin–Feir | 22.1476 | 40.4702 | 32.9832 | 27.0004 |
+| Ada | JONSWAP/TMA | 2.2171 | 4.0476 | 3.3175 | 2.7143 |
+| Blackwell | Stokes | 2.8577 | 5.1439 | 4.6212 | 3.8389 |
+| Blackwell | Tanaka | 28.5624 | 51.4613 | 46.1134 | 38.2823 |
+| Blackwell | Benjamin–Feir | 28.7831 | 51.5973 | 46.3711 | 38.4221 |
+| Blackwell | JONSWAP/TMA | 2.8527 | 5.1441 | 4.6059 | 3.8176 |
+| A100 | Stokes | 1.4878 | 2.2774 | 3.2668 | 2.3944 |
+| A100 | Tanaka | 12.9420 | 22.5851 | 30.1196 | 20.0544 |
+| A100 | Benjamin–Feir | 13.0310 | 22.7947 | 30.3640 | 20.1040 |
+| A100 | JONSWAP/TMA | 1.4838 | 2.3262 | 3.1538 | 2.2390 |
+
+The candidate takes 18.04–18.62% less time than M2 on Ada and 10.13–10.46%
+less on Blackwell, but 33.21–43.45% more on A100. This supersedes the earlier
+all-three-GPU win: reducing redundant classical padding improves M2 enough
+to reverse the A100 comparison. Classical M1 and the candidate's analytic-only
+control are faster than the full candidate in every panel.
+
+Some A100 short-family repeats fluctuate: Stokes M6 ranges 6.8390–8.8988 s
+(median 7.9417 s), Stokes candidate 3.2455–3.5751 s, and JONSWAP analytic-only
+2.0067–2.7375 s. All repeats are retained; no selective reruns or small-difference
+speed claims. The long-family measurements are stable and show the same
+A100/M2 ordering. No new training or production changes were made.

@@ -173,52 +173,62 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
 All three hardware sections show the candidate's measured runtimes as orange
 vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
-The latest candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx
-G1 kernel, cached depth multipliers and packed network branches. A spectral
-adapter removes repeated physical/Fourier round trips; it batches the two
-model-input inverse FFTs and the three padded nonlinear inverse FFTs.
-The latter optimization is also applied to M2. Equations, precision, padding,
-time step and four GL2 iterations remain unchanged; no training is performed.
+The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 kernel,
+cached depth multipliers and packed network branches. Its spectral adapter
+removes repeated physical/Fourier round trips and batches independent inverse
+FFTs. Every classical order M1–M6 now receives the shared nonlinear FFT packing.
+Classical DNO products use 2× padding instead of 8×: the implementation projects
+each binary product back to the base modes before reuse, so 2× is sufficient
+for dealiasing at every order. On 48 states across all six orders, the maximum
+2×/8× relative difference is 7.75e-12; see
+`outputs/fair_classical_20260925/padding_check.json`. This does not change the
+separate 2× padding in the nonlinear water-wave RHS.
 
-Each optimized neural/M2 timing is the median of three full batch-one
-rollouts. The previous neural path runs once per family as a numerical
-control; orange annotations compare that measured control with the new median.
-Horizons are T=20 for Stokes/JONSWAP and T=200 for Tanaka/Benjamin–Feir.
-Compilation, setup, warm-up and host transfers are excluded.
+The teal line measures the candidate's G0+G1 implementation with the learned
+correction disabled. It is not classical M1: it retains the candidate's input
+normalization, depth clipping, precision and unpadded G1 products. The orange line is the full
+candidate; neither line assigns an accuracy coordinate. Plain panel annotations
+give the candidate and M2 times. The obsolete without-G0+G1 overlay is removed.
 
-New measurements are in `outputs/knob_search_20260925/ada_full.json`,
-`outputs/knob_search_20260925/blackwell_full/rollouts.json` and
-`outputs/knob_search_20260925/a100_full/rollouts.json`. The plotted M2 timing
-uses `M2_packed`; the candidate uses `fused_cufftdx_spectral_all`.
-Other classical runtimes and all existing accuracy statistics remain unchanged:
-Ada uses the earlier 32-case median errors, while the Modal panels use their
-single-case errors against cached M6. The older Ada small/full neural points
-are retained. The previous without-G0+G1 timing overlay is removed because
-it was not remeasured with this adapter.
+Every new timing is the median of three full batch-one rollouts, including
+M1–M6, the candidate and the G0+G1-only control. Horizons are T=20 for
+Stokes/JONSWAP and T=200 for Tanaka/Benjamin–Feir, with dt=0.01 and four GL2
+iterations. Compilation, setup, warm-up and host transfers are excluded.
+No weights, numerical precision or integration settings change; no training
+is performed.
+
+New measurements are under `outputs/fair_classical_20260925/`: `ada_full.json`
+and `{blackwell,a100}_{short,tanaka,bf}/rollouts.json`. All classical runtime
+coordinates come from these files. Ada retains the earlier 32-case median
+errors and small/full neural points; the Modal panels use the new single-case
+errors against cached M6. The candidate method is `fused_cufftdx_spectral_all`
+and its analytic-only control is `baseline-only`.
+
+The candidate takes 18.04–18.62% less time than M2 on Ada, 10.13–10.46% less
+on Blackwell, and 33.21–43.45% more on A100. These complete reduced-padding
+measurements supersede the earlier all-three-GPU speedup claim.
 
 The accepted implementation is isolated in `scripts/benchmark_surrogate_rhs.py`
 and selected by the rollout timer; production trainers and checkpoints are
 untouched. Search results, numerical checks and merge decisions are recorded
-in `notes/dno_profile_20260924.md` and `experiments/experiments-2026-09-25.md`.
+in `notes/dno_profile_20260924.md` and the September 25–26 logs under `experiments/`.
 This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --classical-timings outputs/dno_fusion_20260924/baseline_joint/classical_rollouts.json \
-  --candidate-timings outputs/knob_search_20260925/ada_full.json \
-  --candidate-method fused_cufftdx_spectral_all --candidate-previous-method fused_cufftdx
+  --candidate-timings outputs/fair_classical_20260925/ada_full.json
 ```
 
 Reproduce the local full-rollout measurements on a free GPU with:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
-  --methods M2_packed fused_cufftdx fused_cufftdx_spectral_all \
-  --reference fused_cufftdx --reference-once --repeats 3 \
+  --methods M1 M2 M3 M4 M5 M6 fused_cufftdx_spectral_all baseline-only \
+  --reference M6 --repeats 3 --pad-factor 2 \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
-  --output outputs/knob_search_20260925/ada_full.json
+  --output outputs/fair_classical_20260925/ada_full.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
