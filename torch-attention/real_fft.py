@@ -1,6 +1,7 @@
 """Real FFT adjoints without a full complex inverse transform in backward."""
 
 from typing import Any
+import math
 
 import torch
 from torch import Tensor
@@ -10,7 +11,9 @@ class _RFFT(torch.autograd.Function):
     @staticmethod
     def forward(ctx: Any, x: Tensor, n: int, norm: str) -> Tensor:
         ctx.n, ctx.norm = n, norm
-        return torch.fft.rfft(x, n=n, norm=norm)
+        spectrum = torch.fft.rfft(x, n=n)
+        scale = {"backward": 1., "forward": 1 / n, "ortho": 1 / math.sqrt(n)}[norm]
+        return torch.view_as_complex(torch.view_as_real(spectrum) * scale)
 
     @staticmethod
     def backward(ctx: Any, gradient: Tensor) -> tuple[Tensor, None, None]:
@@ -18,23 +21,26 @@ class _RFFT(torch.autograd.Function):
         endpoint = (k == 0) | ((ctx.n % 2 == 0) & (k == ctx.n // 2))
         scale = torch.where(endpoint, 1., .5).to(gradient.real.dtype)
         packed = torch.view_as_real(gradient) * scale[:, None]
-        norm = {"backward": "forward", "forward": "backward", "ortho": "ortho"}[ctx.norm]
-        return torch.fft.irfft(torch.view_as_complex(packed), n=ctx.n, norm=norm), None, None
+        result = torch.fft.irfft(torch.view_as_complex(packed), n=ctx.n, norm="forward")
+        factor = {"backward": 1., "forward": 1 / ctx.n, "ortho": 1 / math.sqrt(ctx.n)}[ctx.norm]
+        return result * factor, None, None
 
 
 class _IRFFT(torch.autograd.Function):
     @staticmethod
     def forward(ctx: Any, x: Tensor, n: int, norm: str) -> Tensor:
         ctx.n, ctx.norm = n, norm
-        return torch.fft.irfft(x, n=n, norm=norm)
+        result = torch.fft.irfft(x, n=n, norm="forward")
+        factor = {"backward": 1 / n, "forward": 1., "ortho": 1 / math.sqrt(n)}[norm]
+        return result * factor
 
     @staticmethod
     def backward(ctx: Any, gradient: Tensor) -> tuple[Tensor, None, None]:
-        norm = {"backward": "forward", "forward": "backward", "ortho": "ortho"}[ctx.norm]
-        transformed = torch.fft.rfft(gradient.contiguous(), n=ctx.n, norm=norm)
+        transformed = torch.fft.rfft(gradient.contiguous(), n=ctx.n)
         k = torch.arange(ctx.n // 2 + 1, device=gradient.device)
         endpoint = (k == 0) | ((ctx.n % 2 == 0) & (k == ctx.n // 2))
-        scale = torch.where(endpoint, 1., 2.).to(gradient.dtype)
+        factor = {"backward": 1 / ctx.n, "forward": 1., "ortho": 1 / math.sqrt(ctx.n)}[ctx.norm]
+        scale = torch.where(endpoint, 1., 2.).to(gradient.dtype) * factor
         return torch.view_as_complex(torch.view_as_real(transformed) * scale[:, None]), None, None
 
 

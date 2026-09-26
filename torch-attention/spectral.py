@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from model import AttentionBlock, baseline
 from real_fft import irfft, rfft
@@ -50,13 +51,21 @@ class SpectralDNO(nn.Module):
         # Keep each FFT's spatial axis contiguous; GEMMs still use channels last.
         fft_input = local.transpose(1, 2).float() if self.bf16 else local.transpose(1, 2)
         spectrum = rfft(fft_input.contiguous(), norm="ortho").transpose(1, 2)
+        width = local.shape[-1]
+        # Interleave complex activation pairs; permute the small weights instead
+        # of constructing separate real/imaginary activation gradients.
+        packed = torch.view_as_real(spectrum).flatten(-2)
+        weight = self.frequency_in.weight
+        weight = torch.cat((weight[:, :2 * width].reshape(width, 2, width)
+                            .transpose(1, 2).reshape(width, 2 * width), weight[:, 2 * width:]), -1)
         with torch.autocast(eta.device.type, dtype=torch.bfloat16, enabled=self.bf16):
-            tokens = self.frequency_in(torch.cat((spectrum.real, spectrum.imag, token_condition), -1))
+            tokens = F.linear(torch.cat((packed, token_condition), -1), weight, self.frequency_in.bias)
             tokens = self.frequency(tokens)
-            coefficients = self.frequency_out(tokens)
+            weight_out = self.frequency_out.weight.reshape(2, width, width).transpose(0, 1).reshape(2 * width, width)
+            bias_out = self.frequency_out.bias.reshape(2, width).T.reshape(2 * width)
+            coefficients = F.linear(tokens, weight_out, bias_out)
         coefficients = coefficients.float() if self.bf16 else coefficients
-        real, imag = coefficients.chunk(2, -1)
-        packed = torch.stack((real.transpose(1, 2), imag.transpose(1, 2)), -1)
+        packed = coefficients.reshape(*coefficients.shape[:-1], width, 2).transpose(1, 2).contiguous()
         context = irfft(torch.view_as_complex(packed), n=self.n, norm="ortho").transpose(1, 2)
         with torch.autocast(eta.device.type, enabled=False):
             # The local path is O(eta^2); bounded attention modulation cannot remove it.

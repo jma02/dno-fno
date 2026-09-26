@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 import sys
+import subprocess
+import types
 
 import torch
 
@@ -47,5 +49,20 @@ report = {"fft_gradient_max_abs_difference": max(errors), "full_model_outputs_id
           "full_model_gradient_max_abs_difference": max((a - b).abs().max().item()
                                                         for a, b in zip(*gradients, strict=True)),
           "fft_cases": len(errors), "dtype": "float64", "nonzero_correction_head": True}
+reference_module = types.ModuleType("spectral_original")
+exec(compile(subprocess.check_output(["git", "show", "7d673f6:torch-attention/spectral.py"],
+                                    cwd=Path(__file__).resolve().parents[1]), "spectral_original.py", "exec"),
+     reference_module.__dict__)
+reference = reference_module.SpectralDNO(n=32, width=16, heads=4, depth=2, branches=4).double()
+reference.load_state_dict(model.state_dict())
+actual, expected = model(*inputs), reference(*inputs)
+torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+a = torch.autograd.grad(actual, tuple(inputs) + tuple(model.parameters()), probe)
+b = torch.autograd.grad(expected, tuple(inputs) + tuple(reference.parameters()), probe)
+for first, second in zip(a, b, strict=True):
+    torch.testing.assert_close(first, second, rtol=1e-10, atol=1e-12)
+report["original_model_output_max_difference"] = (actual - expected).abs().max().item()
+report["original_model_gradient_max_difference"] = max((first - second).abs().max().item()
+                                                       for first, second in zip(a, b, strict=True))
 Path(__file__).with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
 print(json.dumps(report))

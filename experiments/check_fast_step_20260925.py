@@ -16,7 +16,7 @@ app = modal.App("dno-fast-step-check")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def check(tune_matrices: bool = False) -> dict:
+def check(tune_matrices: bool = False, width: int = 64) -> dict:
     import copy
     import os
     import sys
@@ -29,14 +29,15 @@ def check(tune_matrices: bool = False) -> dict:
     from train import CudaStep, Waves, build_optimizers, relative_l2
 
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/data/torch-inductor-cache"
-    checkpoint = torch.load("/data/experiments/torch_spectral_features_h100_b256_20260925/"
-                            "torch_spectral_features_h100_b256_20260925_bf16_spectral_d2.pt",
-                            map_location="cuda", weights_only=True)
+    checkpoint_path = ("/data/experiments/torch_spectral_width256_full_epoch_20260926/checkpoint.pt"
+                       if width == 256 else "/data/experiments/torch_spectral_features_h100_b256_20260925/"
+                       "torch_spectral_features_h100_b256_20260925_bf16_spectral_d2.pt")
+    checkpoint = torch.load(checkpoint_path, map_location="cuda", weights_only=True)
     batch = next(iter(DataLoader(Waves(Path("/subset"), "train"), batch_size=256)))
     report = {}
     for resumed in (False, True):
         torch.manual_seed(0)
-        model = SpectralDNO(n=checkpoint["n"], length=checkpoint["length"], depth=2, bf16=True,
+        model = SpectralDNO(n=checkpoint["n"], length=checkpoint["length"], width=width, depth=2, bf16=True,
                             feature_scales=checkpoint["model"]["feature_scales"]).cuda()
         if resumed:
             model.load_state_dict(checkpoint["model"])
@@ -102,8 +103,8 @@ def check(tune_matrices: bool = False) -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "check_fast_step_20260925", tune_matrices: bool = False) -> None:
-    result = check.remote(tune_matrices)
+def main(run_name: str = "check_fast_step_20260925", tune_matrices: bool = False, width: int = 64) -> None:
+    result = check.remote(tune_matrices, width)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
 
 

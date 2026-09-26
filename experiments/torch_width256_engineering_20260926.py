@@ -6,11 +6,21 @@ from pathlib import Path
 import modal
 
 ROOT = Path(__file__).resolve().parents[1]
+reference_path = Path("/tmp/fnotrash-real-fft-reference")
+if modal.is_local():
+    import subprocess
+
+    reference_path.mkdir(exist_ok=True)
+    (reference_path / "real_fft_reference.py").write_bytes(subprocess.check_output(
+        ["git", "show", "62ee731:torch-attention/real_fft.py"], cwd=ROOT))
+    (reference_path / "spectral_original.py").write_bytes(subprocess.check_output(
+        ["git", "show", "7d673f6:torch-attention/spectral.py"], cwd=ROOT))
 volume = modal.Volume.from_name("dno-fno-train-data")
 image = (modal.Image.debian_slim(python_version="3.12")
          .pip_install("torch==2.14.0", "numpy==2.4.2")
          .env({"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
          .add_local_dir(ROOT / "torch-attention", "/repo/torch-attention")
+         .add_local_dir(reference_path, "/reference")
          .add_local_dir(ROOT.parent / "local-data/paper_equal_subset_20260924", "/subset"))
 app = modal.App("dno-width256-engineering")
 
@@ -25,13 +35,17 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
     import torch
     import spectral
     import real_fft
+    import real_fft_reference
+    from spectral_original import SpectralDNO as OriginalSpectralDNO
     from torch.profiler import ProfilerActivity, profile, record_function
     from spectral import SpectralDNO
     from train import CudaStep, Waves, build_optimizers, make_loader, relative_l2
 
     torch.backends.cuda.enable_cudnn_sdp(variant != "flash")
-    spectral.rfft = real_fft.rfft if variant in ("real_fft", "packed", "real_fft_repeat") else torch.fft.rfft
-    spectral.irfft = real_fft.irfft if variant in ("real_fft", "packed", "real_fft_repeat") else torch.fft.irfft
+    fft = real_fft_reference if variant.startswith("real_fft_v1") else real_fft
+    use_real = variant in ("real_fft", "packed", "real_fft_repeat", "fft_norm", "final") or variant.startswith("real_fft_v1")
+    spectral.rfft = fft.rfft if use_real else torch.fft.rfft
+    spectral.irfft = fft.irfft if use_real else torch.fft.irfft
 
     class PackedSpectralDNO(SpectralDNO):
         def correction(self, eta: torch.Tensor, xi: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
@@ -72,7 +86,7 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
                 return real_fft.irfft(torch.view_as_complex(output), n=self.n) / math.sqrt(filters.shape[1])
 
     torch.manual_seed(0)
-    cls = PackedSpectralDNO if variant == "packed" else SpectralDNO
+    cls = OriginalSpectralDNO if variant.startswith("original") else PackedSpectralDNO if variant == "packed" else SpectralDNO
     model = cls(n=checkpoint["n"], length=checkpoint["length"], width=256,
                         branches=32, heads=4, depth=2, bf16=True,
                         feature_scales=checkpoint["model"]["feature_scales"]).cuda()
@@ -147,7 +161,7 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
         for e in selected:
             kernels[e["name"]][0] += 1
             kernels[e["name"]][1] += e["dur"]
-    assert len(set(counts)) == 1 and counts[0] > 0
+    profile_complete = len(set(counts)) == 1 and counts[0] > 0
     rows = sorted(({"name": k, "calls_per_step": v[0] / 3, "ms_per_step": v[1] / 3000}
                    for k, v in kernels.items()), key=lambda r: r["ms_per_step"], reverse=True)
     with gzip.open(output / f"{variant}_trace.json.gz", "wb") as compressed:
@@ -159,6 +173,7 @@ def benchmark(variant: str, checkpoint: dict, output: Path) -> tuple[dict, dict]
               "peak_allocated_bytes": torch.cuda.max_memory_allocated(), "losses": losses.cpu().tolist(),
               "validation_relative_l2": total / len(validation.dataset),
               "checked_updates": 48, "kernels_per_step": counts[0],
+              "profile_equal_kernel_counts": profile_complete, "profile_kernel_counts": counts,
               "summed_kernel_ms": sum(r["ms_per_step"] for r in rows), "kernels": rows}
     return result, state
 
@@ -174,6 +189,7 @@ def run(run_name: str, variants: tuple[str, ...]) -> dict:
     import torch
 
     sys.path.insert(0, "/repo/torch-attention")
+    sys.path.insert(0, "/reference")
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = "/data/torch-inductor-cache"
     torch.set_num_threads(1)
     tick = perf_counter()
