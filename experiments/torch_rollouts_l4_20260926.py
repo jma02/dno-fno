@@ -1,5 +1,6 @@
-"""Screen saved model rollouts on one L4."""
+"""Screen saved model rollouts; ROLLOUT_GPU defaults to one L4."""
 
+import os
 from pathlib import Path
 
 import modal
@@ -14,7 +15,7 @@ image = (modal.Image.debian_slim(python_version="3.12")
 app = modal.App("torch-epoch1-rollouts")
 
 
-@app.function(image=image, volumes={"/data": volume}, gpu="L4", cpu=4,
+@app.function(image=image, volumes={"/data": volume}, gpu=os.environ.get("ROLLOUT_GPU", "L4"), cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
 def run(checkpoint_run: str, output_name: str, input_bytes: bytes) -> bytes:
     import sys

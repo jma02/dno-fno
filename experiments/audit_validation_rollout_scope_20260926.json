@@ -1,0 +1,50 @@
+{
+  "source": "/data/outputs/paper_dataset_full_equal_20260916/arrays",
+  "files": {
+    "dataset_split.npy": 589824128,
+    "depth.npy": 117964928,
+    "eta.npy": 60397977728,
+    "family_id.npy": 29491328,
+    "frame_index.npy": 58982528,
+    "gxi.npy": 60397977728,
+    "parameter_group_id.npy": 1887436928,
+    "simulation_id.npy": 117964928,
+    "stats.json": 341,
+    "time.npy": 117964928,
+    "transfer_manifest.json": 1542,
+    "x.npy": 8320,
+    "xi.npy": 60397977728
+  },
+  "validation_rows": 1474440,
+  "families": {
+    "stokes": {
+      "rows": 368640,
+      "unique_simulations": 368640,
+      "rows_per_simulation_min": 1,
+      "rows_per_simulation_median": 1.0,
+      "rows_per_simulation_max": 1
+    },
+    "tanaka": {
+      "rows": 368600,
+      "unique_simulations": 1843,
+      "rows_per_simulation_min": 200,
+      "rows_per_simulation_median": 200.0,
+      "rows_per_simulation_max": 200
+    },
+    "benjamin_feir": {
+      "rows": 368600,
+      "unique_simulations": 1843,
+      "rows_per_simulation_min": 200,
+      "rows_per_simulation_median": 200.0,
+      "rows_per_simulation_max": 200
+    },
+    "jonswap_tma": {
+      "rows": 368600,
+      "unique_simulations": 1843,
+      "rows_per_simulation_min": 200,
+      "rows_per_simulation_median": 200.0,
+      "rows_per_simulation_max": 200
+    }
+  },
+  "seconds": 1.558633324
+}
