@@ -5,7 +5,7 @@
 """Minimal shuffled training, validation, and gradient EMA before AdamW."""
 
 import argparse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 import math
 import json
@@ -120,6 +120,43 @@ def build_model(architecture: str, dataset: Dataset, n: int, length: float,
     return SpectralDNO(n=n, length=length, depth=depth, bf16=bf16, feature_scales=scales)
 
 
+class GroupedMuon(torch.optim.Muon):
+    """PyTorch 2.14 Muon with equal-shaped orthogonalizations batched together."""
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], Tensor] | None = None) -> Tensor | None:
+        from torch.optim._muon import _adjust_lr
+
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            parameters, gradients, buffers = [], [], []
+            self._init_group(group, parameters, gradients, buffers)
+            buckets = {}
+            for parameter, gradient, buffer in zip(parameters, gradients, buffers, strict=True):
+                buffer.lerp_(gradient, 1 - group["momentum"])
+                update = gradient.lerp(buffer, group["momentum"]) if group["nesterov"] else buffer
+                if update.shape[0] > update.shape[1]:
+                    update = update.T
+                buckets.setdefault(tuple(update.shape), []).append((parameter, update))
+            for entries in buckets.values():
+                x = torch.stack([update for _, update in entries]).bfloat16()
+                x.div_(x.norm(dim=(-2, -1), keepdim=True).clamp_min(group["eps"]))
+                a, b, c = group["ns_coefficients"]
+                for _ in range(group["ns_steps"]):
+                    gram = x @ x.mT
+                    polynomial = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                    x = torch.baddbmm(x, polynomial, x, beta=a)
+                for index, (parameter, _) in enumerate(entries):
+                    update = x[index].T if parameter.shape[0] > parameter.shape[1] else x[index]
+                    parameter.mul_(1 - group["lr"] * group["weight_decay"])
+                    parameter.add_(update, alpha=-_adjust_lr(group["lr"], group["adjust_lr_fn"], parameter.shape))
+
+        return loss
+
+
 def build_optimizers(model: DNO | SpectralDNO, kind: str, lr: float) -> tuple[torch.optim.Optimizer, ...]:
     if kind == "adamw":
         return (torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4),)
@@ -127,7 +164,8 @@ def build_optimizers(model: DNO | SpectralDNO, kind: str, lr: float) -> tuple[to
     for name, p in model.named_parameters():
         group = matrices if p.ndim == 2 and name.startswith(("spatial.", "frequency.")) else other
         group.append(p)
-    return (torch.optim.Muon(matrices, lr=lr, weight_decay=1e-4, adjust_lr_fn="match_rms_adamw"),
+    muon = GroupedMuon if kind == "muon-grouped" else torch.optim.Muon
+    return (muon(matrices, lr=lr, weight_decay=1e-4, adjust_lr_fn="match_rms_adamw"),
             torch.optim.AdamW(other, lr=lr, weight_decay=1e-4))
 
 
@@ -135,11 +173,13 @@ class CudaStep:
     """Replay forward/backward/EMA/optimizer work; warmup never advances training."""
 
     def __init__(self, model: DNO | SpectralDNO, optimizers: tuple[torch.optim.Optimizer, ...],
-                 averages: list[Tensor], batch: tuple[Tensor, ...], ema: float, step: int = 0) -> None:
+                 averages: list[Tensor], batch: tuple[Tensor, ...], ema: float, step: int = 0,
+                 autotune: bool = False) -> None:
         self.model, self.optimizers, self.averages, self.ema = model, optimizers, averages, ema
         self.parameters = list(model.parameters())
         self.inputs = tuple(value.to("cuda").clone() for value in batch)
-        self.compiled = torch.compile(model, fullgraph=True, options={"triton.cudagraphs": False})
+        self.compiled = torch.compile(model, fullgraph=True,
+                                      options={"triton.cudagraphs": False, "max_autotune_gemm": autotune})
         self.counter = torch.tensor(float(step), dtype=torch.float64, device="cuda")
         saved_model = {name: value.clone() for name, value in model.state_dict().items()}
         saved_averages = [value.clone() for value in averages]
@@ -221,9 +261,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
+    parser.add_argument("--optimizer", choices=("adamw", "muon", "muon-grouped"), default="adamw")
     parser.add_argument("--architecture", choices=("attention", "spectral"), default="attention")
     parser.add_argument("--fast-step", action="store_true", help="Compile and CUDA-graph training with bulk batch fetch; preserves model and optimizer settings")
+    parser.add_argument("--autotune", action="store_true", help="With --fast-step, benchmark GEMM kernels at compile time; adds one-time setup")
     parser.add_argument("--prefetch", action="store_true", help="With --fast-step, fetch/pin on a CPU thread and transfer on a separate CUDA stream")
     parser.add_argument("--bf16", action="store_true", help="BF16 encoder/projections/MLPs; FP32 FFTs and decoder (MPS attention core upcasts)")
     parser.add_argument("--depth", type=int, default=1, help="Attention blocks per spatial/frequency stage")
@@ -234,6 +275,8 @@ def main() -> None:
         parser.error("--ema must be in [0,1)")
     if args.fast_step and args.device != "cuda":
         parser.error("--fast-step requires --device cuda")
+    if args.autotune and not args.fast_step:
+        parser.error("--autotune requires --fast-step")
     if args.prefetch and not args.fast_step:
         parser.error("--prefetch requires --fast-step")
     data = args.data
@@ -261,7 +304,7 @@ def main() -> None:
         for batch in prefetch_batches(train) if args.prefetch else train:
             if args.fast_step:
                 if fast_step is None:
-                    fast_step = CudaStep(model, optimizers, averages, batch, args.ema, step)
+                    fast_step = CudaStep(model, optimizers, averages, batch, args.ema, step, autotune=args.autotune)
                 loss = fast_step(batch)
                 step += 1
                 total.add_(loss.detach(), alpha=len(batch[0]))

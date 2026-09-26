@@ -16,7 +16,7 @@ app = modal.App("dno-fast-step-check")
 
 @app.function(image=image, volumes={"/data": volume}, gpu="H100!:1", cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def check() -> dict:
+def check(tune_matrices: bool = False) -> dict:
     import copy
     import os
     import sys
@@ -41,7 +41,7 @@ def check() -> dict:
         if resumed:
             model.load_state_dict(checkpoint["model"])
         reference = copy.deepcopy(model)
-        optimizers = build_optimizers(model, "muon", 1e-5)
+        optimizers = build_optimizers(model, "muon-grouped" if tune_matrices else "muon", 1e-5)
         reference_optimizers = build_optimizers(reference, "muon", 1e-5)
         if resumed:
             for group in (optimizers, reference_optimizers):
@@ -50,7 +50,7 @@ def check() -> dict:
         averages = [a.clone() for a in checkpoint["gradient_ema"]] if resumed else [torch.zeros_like(p) for p in model.parameters()]
         reference_averages = [a.clone() for a in averages]
         start = checkpoint["step"] if resumed else 0
-        fast = CudaStep(model, optimizers, averages, batch, .8, start)
+        fast = CudaStep(model, optimizers, averages, batch, .8, start, autotune=tune_matrices)
         assert fast.counter.item() == start
         for p, q in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(p, q, rtol=0, atol=0)
@@ -102,8 +102,8 @@ def check() -> dict:
 
 
 @app.local_entrypoint()
-def main(run_name: str = "check_fast_step_20260925") -> None:
-    result = check.remote()
+def main(run_name: str = "check_fast_step_20260925", tune_matrices: bool = False) -> None:
+    result = check.remote(tune_matrices)
     (ROOT / "experiments" / f"{run_name}.json").write_text(json.dumps(result, indent=2) + "\n")
 
 

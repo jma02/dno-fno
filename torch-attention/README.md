@@ -110,3 +110,13 @@ uses bulk batch reads, but remains an initial pass over the training split.
 The spectral model uses contiguous spatial axes for learned FFTs and real/imaginary
 views for filter products and reductions, allowing fusion of their intermediates.
 These layout changes preserve the architecture, FP32 FFTs/head and checkpoint keys.
+
+For the measured H100 matrix optimizations, use `--fast-step --autotune --optimizer muon-grouped` with the spectral pilot settings above. Autotuning
+benchmarks GEMM kernels during compilation; grouped Muon batches equal-shaped
+Newton–Schulz matrix products using the same update equations and checkpoint
+state format. It uses PyTorch 2.14 optimizer internals and can differ in BF16
+rounding. Both are optional; neither changes model capacity or precision policy.
+A matched batch256 H100 trial improved amortized training from 7.39 to 7.01 ms
+(5.4% higher throughput), with essentially identical validation after 80 updates.
+Cold autotuning took about 67 seconds, separate from batch timing. Measurements
+use the cached real subset and do not establish full-volume I/O performance.
