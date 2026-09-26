@@ -100,6 +100,7 @@ def main() -> None:
     output["model_nonfinite_any"] = nonfinite
     metadata = {"checkpoint": str(args.checkpoint.resolve()), "epoch": checkpoint.get("epoch"),
                 "device": args.device, "integration_dtype": "float64", "model_bf16": model.bf16,
+                "model_max_mode": model.max_mode,
                 "substeps": substeps, "implicit_iterations": iterations, "filter_fraction": fraction,
                 "length": model.length, "seconds": seconds, "frames": len(times), "initial_conditions": len(eta),
                 "nonfinite_trajectories": int(nonfinite.sum()), "input": str(args.input.resolve())}
