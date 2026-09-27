@@ -229,6 +229,12 @@ if __name__ == "__main__":
             config.candidate_method = ("fourier_transforms_e16_spectral_all" if hardware == "ada"
                                        else "fourier_transforms_spectral_all")
             config.candidate_previous_method = "fourier_input_spectral_all"
+            if hardware != "a100":
+                config.candidate_previous_method = config.candidate_method
+                config.candidate_method = ("fourier_tuned_16_16_16_16_mask_spectral_all" if hardware == "ada"
+                                           else "fourier_tuned_8_8_16_8_mask_spectral_all")
+                config.candidate_timings += [ROOT / "outputs/fourier_ept_20260926" / (
+                    "ada_mask_full.json" if hardware == "ada" else "blackwell_full/rollouts.json")]
             config.no_baseline_timings = None
         a100.timings = a100.candidate_timings[0]
         a100.classical_timings = None

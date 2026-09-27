@@ -196,11 +196,26 @@ is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
-The candidate lines now use `fourier_transforms_e16_spectral_all` on Ada and
-`fourier_transforms_spectral_all` on Blackwell/A100. These replace the network's
+The latest Ada line uses `fourier_tuned_16_16_16_16_mask_spectral_all`: the
+same FFT settings with an elementwise output mask replacing two endpoint
+updates. Blackwell uses `fourier_tuned_8_8_16_8_mask_spectral_all`, additionally
+setting the packed-field inverse FFT to 16 elements per thread. Their new
+annotations compare against the preceding candidate in the same three-repeat,
+four-family runs, saved under `outputs/fourier_ept_20260926/ada_mask_full.json`
+and `blackwell_full/rollouts.json`. Classical times, trained-model accuracies
+and the entire A100 row are unchanged. The A100 trial's 0.10–0.24% runtime
+reduction was not adopted because of the added long-rollout numerical changes.
+The retained gains are 0.31–0.40% on Ada and 0.57–0.65% on Blackwell. Ada's
+saved eta/xi/Gxi outputs are identical to its paired control; Blackwell's
+largest terminal eta change is 0.01416%. Complete trials and decisions are
+recorded in `notes/dno_profile_20260924.md`.
+
+The preceding FFT round used `fourier_transforms_e16_spectral_all` on Ada and
+`fourier_transforms_spectral_all` on Blackwell/A100; A100 retains this version.
+These replace the network's
 FP64 G1 input forward FFT and packed FP32 field inverse FFT with cuFFTDx;
 the original FP32 input forward FFT, weights and G0/G1 formulation are retained.
-Ada uses 16 elements per thread; Blackwell/A100 use 8. Annotations compare
+Ada used 16 elements per thread; Blackwell/A100 used 8. Annotations compared
 three-repeat full-rollout medians against `fourier_input_spectral_all` in the
 same run, alongside fresh M2 timings. Measurements are under
 `outputs/fourier_ffts_20260926/`: `ada_full.json`,
@@ -209,7 +224,7 @@ The separate `a100_full/` run used an A100 PCIe and is not mixed into the SXM4
 panel. The broader FP32 input-FFT replacement
 failed accuracy checks; extra product fusion was not selected. The preceding
 input-inverse optimization remains recorded under `outputs/fourier_reuse_20260926/`.
-Across the four families, the new combination reduces rollout time by
+Across the four families, that round reduced rollout time by
 7.78–7.85% on Ada, 13.41–13.54% on Blackwell, and 13.77–13.96% on A100 SXM4.
 It takes 40.76–41.31%, 39.52–40.18%, and 12.29–14.07% less time than fresh M2,
 respectively. These are runtime-only candidate lines; observed rounding-sensitive

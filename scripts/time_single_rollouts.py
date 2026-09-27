@@ -28,7 +28,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
+from scripts.benchmark_dno_fusion import TUNED_TRIALS, build_variant  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
@@ -56,6 +56,7 @@ FUSION_VARIANTS["fourier_input_spectral_all"] = "fourier_input"
 FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_g1fft", "fourier_fields", "fourier_product", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
     "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
+    *TUNED_TRIALS,
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"

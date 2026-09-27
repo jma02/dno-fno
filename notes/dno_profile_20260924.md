@@ -1252,3 +1252,87 @@ Final Ada confirmation ran 23:01–23:12, Blackwell 23:01–23:17, and A100 SXM4
 23:16–23:26. Cloud apps stopped; local GPU0 finished, Sam's GPU1 untouched.
 No training, production or CUDA source changes. Figure13 retains its earlier
 measured profiles; this round does not provide new roofline counters.
+
+## Per-transform EPT and output masking — September 26
+
+The four cuFFTDx calls have different workloads: FP64 input inverse (two
+blocks), FP64 G1 input forward (one), FP32 packed-field inverse (36), and
+FP64 G1 sandwich (two). A single elements-per-thread setting need not be
+optimal for all four. Screened eight one-coordinate alternatives around the
+previous device-specific winner, plus an elementwise DC/Nyquist output mask
+in place of the network's two endpoint scatters. The normalized FP32 input
+RFFT, learned-product FFT, weights and precisions remain unchanged.
+
+Only the existing inference benchmark scripts change. Names
+`fourier_tuned_A_B_C_D[_mask]` specify EPT in the four-call order above.
+All nine alternatives pass the unchanged 48-state/mixed/flat/zero-input
+checks on all three GPUs; the largest discrepancy is 2.81e-7. Mask-only
+forwards match the control exactly. In Ada's standalone wrapper HLO,
+masking reduces fusion kernels from 15 to 13 while retaining the same
+five ordinary FFTs and four cuFFTDx calls. These compiler counts are not
+hardware-counter measurements or a full-rollout speedup by themselves.
+
+Initial selection uses ten methods with three full Stokes repeats each
+on each GPU (90 timings). Ada then compares control, mask-only and
+mask-plus-G1-sandwich-EPT8 with five repeats; A100 compares control,
+field-EPT16 and input-plus-field-EPT16 with five; Blackwell compares control,
+field-EPT16 and field-EPT16-plus-mask with three. The broader search is not
+an exhaustive 81-combination sweep. Raw results are under
+`outputs/fourier_ept_20260926/`.
+
+Classical recurrence scatters already fuse into padding/symbol operations;
+they do not have the network's two-update/full-spectrum-copy pattern.
+Classical execution and the shared RHS are untouched, and their prior
+Figure12 measurements are retained. A separate shared step-boundary `myfft`
+mask remains untested and would need to be applied to both methods.
+
+Final independent comparisons use full T20/200 single rollouts, three
+interleaved repeats, N1024, dt0.01, four GL2 iterations and pad2. Compilation,
+warm-up and transfers are excluded. Same checkpoint throughout:
+
+| GPU / decision | Family | Control (s) | Trial (s) | Less runtime |
+| --- | --- | ---: | ---: | ---: |
+| Ada / keep mask only | Stokes | 2.395055 | 2.385524 | 0.398% |
+| Ada / keep mask only | Tanaka | 23.717043 | 23.643100 | 0.312% |
+| Ada / keep mask only | Benjamin–Feir | 23.716426 | 23.631605 | 0.358% |
+| Ada / keep mask only | JONSWAP/TMA | 2.396270 | 2.387231 | 0.377% |
+| Blackwell / keep fields16 + mask | Stokes | 3.073621 | 3.056022 | 0.573% |
+| Blackwell / keep fields16 + mask | Tanaka | 30.376637 | 30.199088 | 0.584% |
+| Blackwell / keep fields16 + mask | Benjamin–Feir | 30.374430 | 30.178122 | 0.646% |
+| Blackwell / keep fields16 + mask | JONSWAP/TMA | 3.075188 | 3.055806 | 0.630% |
+| A100 SXM4 / reject fields16 | Stokes | 1.998756 | 1.995011 | 0.187% |
+| A100 SXM4 / reject fields16 | Tanaka | 19.739345 | 19.713457 | 0.131% |
+| A100 SXM4 / reject fields16 | Benjamin–Feir | 19.726326 | 19.678923 | 0.240% |
+| A100 SXM4 / reject fields16 | JONSWAP/TMA | 1.998902 | 1.996847 | 0.103% |
+
+Ada keeps EPT16 for every call and uses only the output mask:
+`fourier_tuned_16_16_16_16_mask_spectral_all`. All saved eta, xi and Gxi
+match the paired control exactly in all four families. Blackwell selects
+`fourier_tuned_8_8_16_8_mask_spectral_all`. Its maximum terminal eta change
+is 0.01416% (BF); BF cached-M6 eta error changes 0.840606→0.841566%.
+The selected Ada/Blackwell methods improve all 24 paired timing comparisons,
+although some short-family repeat ranges overlap. All 16 accepted-comparison
+outputs are finite with positive depth. These are small incremental runtime
+gains, not accuracy improvements.
+
+Reject the Ada sandwich-EPT8 combination despite passing forward checks:
+its 0.407–0.432% full-rollout gain is close to mask-only, but BF terminal eta
+changes 0.32019%, with cached-M6 error 0.802435→1.070086%. Also reject the
+A100 field-EPT16 variant: all 12 paired timings improve, but the 0.10–0.24%
+gain is marginal alongside a 0.11968% BF endpoint change and cached-M6 error
+0.838917→0.937592%. These are engineering tradeoff decisions, not failed or
+relaxed forward tolerances. The previous A100 implementation is retained.
+
+Raw final files: `ada_mask_full.json` (accepted), `ada_full.json` (rejected
+EPT8 combination), `blackwell_full/rollouts.json` (accepted), and
+`a100_full/rollouts.json` (rejected) under the directory above. Their 96
+full-rollout timings and 32 outputs are retained, including rejected trials;
+together with selection this round contains 225 full-rollout timings.
+Figure12 changes only eight Ada/Blackwell candidate lines and incremental
+savings. All classical coordinates, trained-model accuracies, EMA overlays
+and the entire A100 row stay unchanged.
+
+Ada combined confirmation ran 23:41–23:47; mask-only ran 23:47–23:54.
+Blackwell final ran 23:44–23:52; A100 final ran 23:44–23:50. All Modal apps
+stopped and local GPU0 finished; Sam's GPU1 jobs were untouched. No training,
+production or CUDA source changes; no new source files or helper functions.

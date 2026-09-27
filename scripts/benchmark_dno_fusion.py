@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 import ctypes
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -30,13 +31,15 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
+TUNED_TRIALS = tuple("fourier_tuned_" + "_".join(map(str, epts)) + suffix
+                     for epts in product((4, 8, 16), repeat=4) for suffix in ("", "_mask"))
 TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
           "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
-          "cufftdx_product_e4", "cufftdx_product_e16")
+          "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
 
 
 def build_variant(
@@ -47,6 +50,13 @@ def build_variant(
     if variant.endswith(("_e4", "_e16")):
         variant, _, suffix = variant.rpartition("_e")
         fft_ept = int(suffix)
+    mask_output = variant.endswith("_mask")
+    variant = variant.removesuffix("_mask")
+    # Input inverse, G1 input forward, packed-field inverse, G1 sandwich.
+    input_ept, g1_input_ept, field_ept, sandwich_ept = (fft_ept,) * 4
+    if variant.startswith("fourier_tuned_"):
+        input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
+        variant = "fourier_transforms"
     trial = variant
     spectral_io = variant.startswith("fourier")
     cufftdx_g1 = variant.startswith("cufftdx")
@@ -98,7 +108,7 @@ def build_variant(
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
-                physical = (fft(inputs, nx, inverse=True, ept=fft_ept) if trial not in ("fourier_round", "fourier_reuse")
+                physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
                             else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
                 normalized = physical / scales[None, :, None]
                 eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
@@ -109,12 +119,12 @@ def build_variant(
                 g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
                              else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
                 if trial in ("fourier_g1fft", "fourier_allfft", "fourier_kernels", "fourier_transforms"):
-                    g1_xi_hat = fft(xi_phys.astype(jnp.float64), nx, ept=fft_ept)
+                    g1_xi_hat = fft(xi_phys.astype(jnp.float64), nx, ept=g1_input_ept)
             field_spectra = jnp.concatenate((
                 surface_ops[None, :, :] * eta_norm_hat[:, None, :],
                 filters * xi_phys_hat[:, None, :],
             ), axis=1)
-            fields = (fft(field_spectra, nx, inverse=True, ept=fft_ept)
+            fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
                       if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
                       else jnp.fft.irfft(field_spectra, n=nx))
             features = jnp.concatenate((
@@ -134,9 +144,11 @@ def build_variant(
             g1_hat = -sandwich(
                 (eta_norm * model.eta_scale).astype(jnp.float64),
                 g1_xi_hat, operators,
-                spectral=True, ept=fft_ept,
+                spectral=True, ept=sandwich_ept,
             ).sum(axis=1)
             result = output_scale * (g0 * xi_phys_hat + g1_hat + correction_hat)
+            if mask_output:
+                return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
             return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
 
         return forward_hat
@@ -268,7 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
-    parser.add_argument("--reference", choices=("original", "cufftdx", "fourier_round", "fourier_input"), default="original")
+    parser.add_argument("--reference", choices=(*VARIANTS, *TRIALS), default="original")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
@@ -402,6 +414,7 @@ if __name__ == "__main__":
                   cufftdx_lowrank32="Rank-32 surface mixing")
     labels.update({name: f"{labels[name.rpartition('_e')[0]]} · EPT {name.rpartition('_e')[2]}"
                    for name in TRIALS if name.endswith(("_e4", "_e16"))})
+    labels.update({name: "FFT EPTs " + name.removeprefix("fourier_tuned_").replace("_", "/") for name in TUNED_TRIALS})
     medians = [records[name]["median_us"] for name in variants]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
     ax.barh([labels[name] for name in variants], medians, color="#278475")
