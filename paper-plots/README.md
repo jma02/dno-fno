@@ -196,22 +196,28 @@ is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
-The latest Ada line uses `fourier_tuned_16_16_16_16_mask_spectral_all`: the
-same FFT settings with an elementwise output mask replacing two endpoint
-updates. Blackwell uses `fourier_tuned_8_8_16_8_mask_spectral_all`, additionally
-setting the packed-field inverse FFT to 16 elements per thread. Their new
-annotations compare against the preceding candidate in the same three-repeat,
-four-family runs, saved under `outputs/fourier_ept_20260926/ada_mask_full.json`
-and `blackwell_full/rollouts.json`. Classical times, trained-model accuracies
-and the entire A100 row are unchanged. The A100 trial's 0.10–0.24% runtime
-reduction was not adopted because of the added long-rollout numerical changes.
-The retained gains are 0.31–0.40% on Ada and 0.57–0.65% on Blackwell. Ada's
-saved eta/xi/Gxi outputs are identical to its paired control; Blackwell's
-largest terminal eta change is 0.01416%. Complete trials and decisions are
-recorded in `notes/dno_profile_20260924.md`.
+The A100 panel now uses `fourier_fused_fields_spectral_all_boundaries`,
+with EPT8 throughout, and includes measured M1–M6 timings in all four families.
+It forms the learned surface/branch multipliers inside their inverse FFT
+and packs eta/xi timestep-boundary transforms. The latter also applies to
+every classical order. Input-normalization fusion was tested but excluded
+because it did not improve runtime consistently across the GPUs.
+Annotations compare the candidate against `fourier_transforms_spectral_all`
+in the same three-repeat, four-family benchmark, not against the earlier
+device-specific settings. Sources are under `outputs/portable_fusion_20260927/`:
+`ada_full.json`, `blackwell_full/rollouts.json`, and
+`a100_full_sxm/rollouts.json`. A100 classical M1–M6 use one fresh full-rollout
+measurement each from `a100_full_sxm/classical.json`; M2 uses the three-repeat
+packed median from the paired run. Ada and Blackwell panels retain their
+preceding measurements while their new all-order classical sweeps finish.
+The common bundle reduces full-rollout runtime by 1.47–1.57% on Ada,
+1.64–1.80% on Blackwell, and 3.47–4.19% on A100. Saved neural eta/xi/Gxi
+outputs are identical to the paired control in every family on every GPU.
+Trained-model accuracy references and EMA overlays are retained. Trial
+details and decisions are in `experiments/experiments-2026-09-27.md`.
 
 The preceding FFT round used `fourier_transforms_e16_spectral_all` on Ada and
-`fourier_transforms_spectral_all` on Blackwell/A100; A100 retains this version.
+`fourier_transforms_spectral_all` on Blackwell/A100.
 These replace the network's
 FP64 G1 input forward FFT and packed FP32 field inverse FFT with cuFFTDx;
 the original FP32 input forward FFT, weights and G0/G1 formulation are retained.

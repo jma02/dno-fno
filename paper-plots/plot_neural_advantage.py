@@ -34,14 +34,18 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         for path in args.classical_timings or ():
             for family, result in json.loads(path.read_text())["families"].items():
                 warm["families"].setdefault(family, result)["methods"].update(result["methods"])
+        for result in warm["families"].values():
+            result["methods"] = {name.removesuffix("_boundaries"): record
+                                 for name, record in result["methods"].items()}
     candidate = {"families": {}} if args.candidate_timings else {}
     for path in args.candidate_timings or ():
         for family, result in json.loads(path.read_text())["families"].items():
             candidate["families"].setdefault(family, result)["methods"].update(result["methods"])
     if args.stack_hardware:
         for family, result in candidate["families"].items():
-            for method in ("M1", "M2"):
-                warm["families"][family]["methods"][method]["seconds"] = result["methods"][method]["seconds"]
+            for method, record in result["methods"].items():
+                if method.removesuffix("_boundaries") in ("M1", "M2"):
+                    warm["families"][family]["methods"][method.removesuffix("_boundaries")]["seconds"] = record["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     spectral = {}
     for path in args.spectral_timings or ():
@@ -214,30 +218,32 @@ if __name__ == "__main__":
         modal.single_case = True
         a100 = argparse.Namespace(**vars(modal))
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
-            paths = ([ROOT / "outputs/fair_classical_20260925/ada_full.json"] if hardware == "ada" else [
-                ROOT / f"outputs/fair_classical_20260925/{hardware}_{family}/rollouts.json"
-                for family in ("short", "tanaka", "bf")
-            ])
-            if config.single_case:
-                config.timings = paths[0]
-            config.classical_timings = paths
-            config.candidate_timings = [ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json"]
-            config.candidate_timings += [ROOT / "outputs/fourier_ffts_20260926" / {
-                "ada": "ada_full.json", "blackwell": "blackwell_full/rollouts.json",
-                "a100": "a100_sxm_full/rollouts.json",
-            }[hardware]]
-            config.candidate_method = ("fourier_transforms_e16_spectral_all" if hardware == "ada"
-                                       else "fourier_transforms_spectral_all")
-            config.candidate_previous_method = "fourier_input_spectral_all"
-            if hardware != "a100":
-                config.candidate_previous_method = config.candidate_method
+            if hardware == "a100":
+                config.timings = ROOT / "outputs/portable_fusion_20260927/a100_full_sxm/classical.json"
+                config.classical_timings = None
+                config.candidate_timings = [ROOT / "outputs/portable_fusion_20260927/a100_full_sxm/rollouts.json"]
+                config.candidate_method = "fourier_fused_fields_spectral_all_boundaries"
+                config.candidate_previous_method = "fourier_transforms_spectral_all"
+            else:
+                paths = ([ROOT / "outputs/fair_classical_20260925/ada_full.json"] if hardware == "ada" else [
+                    ROOT / f"outputs/fair_classical_20260925/blackwell_{family}/rollouts.json"
+                    for family in ("short", "tanaka", "bf")
+                ])
+                if config.single_case:
+                    config.timings = paths[0]
+                config.classical_timings = paths
+                config.candidate_timings = [
+                    ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json",
+                    ROOT / "outputs/fourier_ffts_20260926" / (
+                        "ada_full.json" if hardware == "ada" else "blackwell_full/rollouts.json"),
+                    ROOT / "outputs/fourier_ept_20260926" / (
+                        "ada_mask_full.json" if hardware == "ada" else "blackwell_full/rollouts.json"),
+                ]
                 config.candidate_method = ("fourier_tuned_16_16_16_16_mask_spectral_all" if hardware == "ada"
                                            else "fourier_tuned_8_8_16_8_mask_spectral_all")
-                config.candidate_timings += [ROOT / "outputs/fourier_ept_20260926" / (
-                    "ada_mask_full.json" if hardware == "ada" else "blackwell_full/rollouts.json")]
+                config.candidate_previous_method = ("fourier_transforms_e16_spectral_all" if hardware == "ada"
+                                                    else "fourier_transforms_spectral_all")
             config.no_baseline_timings = None
-        a100.timings = a100.candidate_timings[0]
-        a100.classical_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)
