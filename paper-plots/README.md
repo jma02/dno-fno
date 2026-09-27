@@ -173,7 +173,7 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
 All three hardware sections show the candidate's measured runtimes as orange
 vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
-The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 kernel,
+The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 evaluation,
 cached depth multipliers and packed network branches. Its spectral adapter
 removes repeated physical/Fourier round trips and batches independent inverse
 FFTs. Every classical order M1–M6 now receives the shared nonlinear FFT packing.
@@ -189,6 +189,16 @@ candidate line and its slowdown annotations have been removed; its measured
 results remain in the experiment records below. No candidate accuracy
 coordinate is assigned.
 
+The A100 line uses the Fourier-output candidate `fourier_round_spectral_all`
+from `outputs/fourier_io_20260926/a100_full/rollouts.json`. Its annotations compare
+three-repeat full-rollout medians against `fused_cufftdx_spectral_all` in the same
+run. The candidate preserves physical-space FP32 input rounding, returns the
+learned correction and G0 directly in Fourier space, and uses a spectral-output
+cuFFTDx G1 kernel. Ada and Blackwell are unchanged. This A100 allocation is the
+80GB SXM4 variant, so the entire A100 row uses only this run: three repeats for
+M1/M2 and both candidates, and one M6 reference rollout per family. Unmeasured
+M3–M5 are omitted; earlier 40GB A100 timings are not mixed into the new row.
+
 Each baseline-replacement comparison uses three full batch-one rollouts of
 M1, M2, the previous candidate and the shared-baseline candidate, plus one M6
 trajectory for accuracy checks. Horizons are T=20 for
@@ -199,9 +209,9 @@ no training is performed.
 
 Replacement measurements are under `outputs/shared_m1_20260926/`:
 `ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`. They provide
-the retained candidate line and fresh M1/M2 runtime medians. M3–M6 retain the preceding
+the Ada/Blackwell candidate lines and M1/M2 runtime medians. Their M3–M6 retain the preceding
 three-repeat medians from `outputs/fair_classical_20260925/`, including the
-M6 runtime reference. Classical error coordinates are unchanged: Ada retains
+M6 runtime reference. Ada/Blackwell classical error coordinates are unchanged: Ada retains
 the earlier 32-case medians and small/full neural points; the Modal panels use
 single-case errors against cached M6. The retained and rejected methods are
 `fused_cufftdx_spectral_all` and `shared_m1_spectral_all`, respectively.

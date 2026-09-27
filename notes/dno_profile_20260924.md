@@ -939,3 +939,73 @@ rollout speed. Raw measurements and forward HLO are under
 optimization; keep cuFFTDx and leave Figure12 unchanged. No training,
 production edits, spectral-interface implementation or local GPU use occurred.
 The Modal app completed and stopped after returning results.
+
+## Native Fourier-input/output inference — September 26
+
+The integrator already stores unnormalized Fourier coefficients. The
+benchmark-only `fourier_round_spectral_all` predictor accepts those coefficients
+and returns the DNO spectrum directly. G0 is a spectral multiplication; the
+learned correction stays spectral after its final branch reduction. A new
+cuFFTDx G1 operation accepts spectral xi and returns spectral terms, reducing
+each fused term from four transforms to two: inverse FFT, multiplication by
+eta, forward FFT. Saved Gxi uses this same predictor through a physical-output
+wrapper. The physical-space surface features, nonlinearities and branch
+products remain unchanged, as do the checkpoint, clipped depth, unpadded model
+grid and FP64-G1/FP32-learned precision choices. This is not the rejected
+shared-classical-M1 baseline replacement.
+
+The first all-spectral input-normalization attempt differed by1.82e-4 over48
+states, exceeding the unchanged1e-5 threshold. Preserving eta rounding alone
+did not resolve it. The accepted input path retains both original physical
+FP32 input roundings before normalization and transformation. It therefore
+does not remove every input-side FFT. All24 native-kernel checks passed,
+including batches1/2 and explicit Nyquist content; the spectral G1 kernel
+agrees with direct JAX and the old kernel's roundtrip to6.31e-16 relative.
+
+In the second allocation, both the existing cuFFTDx control and the
+rounding-preserving candidate differed from the unfused predictor by1.32e-5.
+That failed comparison is retained under
+`outputs/fourier_io_20260926/a100_refined/`; its cause is unresolved. The final
+test explicitly uses the current cuFFTDx candidate as its reference, retaining
+the1e-5 threshold, and passes with maximum per-state relative difference
+2.71e-7 across48 states. Additional pooled-norm flat and mixed-input comparisons
+pass, and zero xi gives exact zero. Numerical linearity residuals are reported
+for both implementations. These checks establish agreement with the current
+optimized candidate, not new agreement with the unfused predictor.
+
+Full-rollout results use a personal Modal A100-SXM4-80GB and the same N1024,
+batch1, dt0.01, four GL2 iterations, classical padding2 and T20/200 protocol.
+The physical-wrapper standalone timing includes conversions absent from the
+native spectral rollout and is not used to infer its speed. Raw results:
+`outputs/fourier_io_20260926/a100_full/`. No training or production changes.
+
+All52 full timings and20 method/family outputs completed. Median seconds
+from three repeats, with one M6 accuracy reference per family:
+
+| Family | Previous candidate | Fourier-I/O candidate | Runtime reduction | M2 |
+| --- | ---: | ---: | ---: | ---: |
+| Stokes | 3.0486 | 2.4362 | 20.09% | 2.2708 |
+| Tanaka | 30.2265 | 24.0925 | 20.29% | 22.7126 |
+| Benjamin–Feir | 30.2481 | 24.0818 | 20.39% | 22.7256 |
+| JONSWAP/TMA | 3.0505 | 2.4448 | 19.86% | 2.2841 |
+
+Every new-candidate repeat is faster than every corresponding old-candidate
+repeat. The new candidate remains5.97–7.28% slower than paired M2 on this GPU.
+All20 returned outputs are finite with positive depth; maximum cached-M6
+surface discrepancy is5.08e-12. Forward max relative discrepancy is2.71e-7;
+mixed-input and flat pooled discrepancies are1.76e-7 and1.82e-7. The normalized
+linearity residual is9.28e-6 for both candidate and reference.
+
+Terminal surface errors against M6 change from0.0108065% to0.0107626% for
+Stokes,98.8651% to98.8658% for Tanaka,1.06909% to1.05842% for Benjamin–Feir,
+and2.89507% to2.89498% for JONSWAP/TMA. This timing checkpoint is unchanged;
+these single cases are not trained-model aggregate accuracy. The operation
+reordering is not bitwise trajectory-equivalent.
+
+KEEP the native Fourier-I/O variant as the measured A100 inference improvement,
+remaining benchmark-only. Figure12 uses an explicitly labeled80GB A100 row,
+with fresh M1/M2 points and the single M6 runtime reference. M3–M5 were not
+measured on80GB and are omitted; previous40GB timings are not mixed into this
+row. Ada and Blackwell remain unchanged. Future Modal comparisons should
+request the intended A100 memory variant explicitly. The app completed and
+stopped; no local GPU use or retraining occurred.

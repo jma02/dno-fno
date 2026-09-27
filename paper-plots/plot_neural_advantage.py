@@ -60,7 +60,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
             timing = warm["families"][family]
-            orders = np.arange(1, 7)
+            orders = np.asarray(sorted(int(name[1:]) for name in timing["methods"] if name.startswith("M")))
             seconds = np.asarray([np.median(timing["methods"][f"M{order}"]["seconds"]) for order in orders])
             errors = 100 * np.asarray([timing["methods"][f"M{order}"]["cached_reference_terminal_eta_error"] for order in orders])
             horizon = timing["horizon"]
@@ -179,12 +179,17 @@ if __name__ == "__main__":
             config.candidate_method = "fused_cufftdx_spectral_all"
             config.candidate_previous_method = None
             config.no_baseline_timings = None
+        a100.candidate_timings = [ROOT / "outputs/fourier_io_20260926/a100_full/rollouts.json"]
+        a100.timings = a100.candidate_timings[0]
+        a100.classical_timings = None
+        a100.candidate_method = "fourier_round_spectral_all"
+        a100.candidate_previous_method = "fused_cufftdx_spectral_all"
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)
         draw_comparison(modal, blackwell, "Blackwell · Modal — RTX PRO 6000")
         draw_comparison(args, ada, "Ada · Local — RTX 6000")
-        draw_comparison(a100, ampere, "A100 · Modal — A100-SXM4-40GB")
+        draw_comparison(a100, ampere, "A100 · Modal — A100-SXM4-80GB")
     else:
         fig = plt.figure(figsize=(10.5, 8))
         draw_comparison(args, fig)

@@ -249,12 +249,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
+    parser.add_argument("--reference", choices=("original", "cufftdx"), default="original")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
     variants = args.variants
-    if not args.capture and "original" not in variants:
-        parser.error("include original as the numerical reference")
+    if not args.capture and args.reference not in variants:
+        parser.error("include the numerical reference in variants")
     loaded = load_run(args.run)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
         "eval_best_current_test_stratified_n32*/stokes_trajs.npz"
@@ -294,7 +295,7 @@ if __name__ == "__main__":
             started = time.perf_counter()
             functions[variant](eta, xi).block_until_ready()
             records[variant]["seconds"].append(time.perf_counter() - started)
-    reference = np.asarray(functions["original"](eta, xi))
+    reference = np.asarray(functions[args.reference](eta, xi))
     for variant, record in records.items():
         actual = np.asarray(functions[variant](eta, xi))
         record.update(median_us=float(np.median(record["seconds"]) * 1e6),
@@ -315,9 +316,9 @@ if __name__ == "__main__":
             families.extend([family] * 12)
     check_eta, check_xi = map(jnp.asarray, (np.concatenate(validation_eta), np.concatenate(validation_xi)))
     check_depth = jnp.log(jnp.asarray(np.concatenate(validation_depth)))
-    original = build_predict_gxi_batched(loaded)
-    expected = np.asarray(original(check_eta, check_xi, check_depth))
-    for variant in (name for name in variants if name != "original"):
+    reference_predict = build_variant(loaded, check_depth, eta.shape[-1], args.reference, fft_ept=args.ept)
+    expected = np.asarray(reference_predict(check_eta, check_xi))
+    for variant in (name for name in variants if name != args.reference):
         candidate = build_variant(loaded, check_depth, eta.shape[-1], variant, fft_ept=args.ept)
         if variant in ("fourier", "fourier_round"):
             candidate = jax.jit(lambda e, x, fn=candidate: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
@@ -334,19 +335,27 @@ if __name__ == "__main__":
             other_xi = jnp.roll(check_xi, 1, axis=0)
             other = np.asarray(candidate(check_eta, other_xi))
             mixed = np.asarray(candidate(check_eta, 0.3 * check_xi - 0.7 * other_xi))
-            linear_error = float(np.linalg.norm(mixed - (0.3 * actual - 0.7 * other)) / np.linalg.norm(mixed))
+            denominator = 0.3 * np.linalg.norm(actual) + 0.7 * np.linalg.norm(other)
+            linear_error = float(np.linalg.norm(mixed - (0.3 * actual - 0.7 * other)) / denominator)
+            other_reference = np.asarray(reference_predict(check_eta, other_xi))
+            mixed_reference = np.asarray(reference_predict(check_eta, 0.3 * check_xi - 0.7 * other_xi))
+            reference_linear_error = float(np.linalg.norm(mixed_reference - (0.3 * expected - 0.7 * other_reference)) /
+                                          (0.3 * np.linalg.norm(expected) + 0.7 * np.linalg.norm(other_reference)))
+            mixed_error = float(np.linalg.norm(mixed - mixed_reference) / np.linalg.norm(mixed_reference))
             flat = np.asarray(candidate(jnp.zeros_like(check_eta), check_xi))
-            flat_reference = np.asarray(original(jnp.zeros_like(check_eta), check_xi, check_depth))
+            flat_reference = np.asarray(reference_predict(jnp.zeros_like(check_eta), check_xi))
             flat_error = float(np.linalg.norm(flat - flat_reference) / np.linalg.norm(flat_reference))
             zero_error = float(np.abs(np.asarray(candidate(check_eta, jnp.zeros_like(check_xi)))).max())
             records[variant]["validation"].update(linearity_relative_l2=linear_error,
-                                                  flat_relative_l2=flat_error, zero_xi_max_absolute=zero_error)
-            records[variant]["validation"]["passed"] &= linear_error <= 1e-5 and flat_error <= 1e-5 and zero_error == 0
+                                                  reference_linearity_relative_l2=reference_linear_error,
+                                                  mixed_relative_l2=mixed_error, flat_relative_l2=flat_error,
+                                                  zero_xi_max_absolute=zero_error)
+            records[variant]["validation"]["passed"] &= mixed_error <= 1e-5 and flat_error <= 1e-5 and zero_error == 0
         print(f"{variant}: 48-state max relative difference {relative.max():.3g}; "
               f"passed={records[variant]['validation']['passed']}", flush=True)
     report = {"run": str(args.run), "batch_size_timing": 1, "nx": eta.shape[-1],
               "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
-              "device": jax.devices()[0].device_kind, "variants": records,
+              "device": jax.devices()[0].device_kind, "reference": args.reference, "variants": records,
               "scope": "Model-only inference prototypes; production model and checkpoints unchanged."}
     (args.output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -375,5 +384,5 @@ if __name__ == "__main__":
         ax.text(value + 3, index, f"{value:.1f} µs", va="center")
     for suffix in ("png", "pdf"):
         fig.savefig(args.output / f"forward_fusion.{suffix}", dpi=180)
-    if any(records[variant]["validation"]["passed"] is False for variant in variants if variant != "original"):
+    if any(records[variant]["validation"]["passed"] is False for variant in variants if variant != args.reference):
         raise RuntimeError("Forward equivalence failed; see results.json for the rejected variants.")
