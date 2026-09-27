@@ -30,7 +30,7 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
-TRIALS = ("fourier", "fourier_round", "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
+TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input", "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16")
 
@@ -44,7 +44,7 @@ def build_variant(
         variant, _, suffix = variant.rpartition("_e")
         fft_ept = int(suffix)
     trial = variant
-    spectral_io = variant in ("fourier", "fourier_round")
+    spectral_io = variant.startswith("fourier")
     cufftdx_g1 = variant.startswith("cufftdx")
     if cufftdx_g1 or spectral_io:
         variant = "front"
@@ -92,12 +92,15 @@ def build_variant(
             eta_norm_hat = jnp.fft.rfft(eta_norm)
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
-            if trial == "fourier_round":
-                physical = jnp.fft.irfft(jnp.stack((eta_hat, xi_hat), axis=1), n=nx).astype(jnp.float32)
+            if trial != "fourier":
+                inputs = jnp.stack((eta_hat, xi_hat), axis=1)
+                physical = (fft(inputs, nx, inverse=True, ept=fft_ept) if trial == "fourier_input"
+                            else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
                 normalized = physical / scales[None, :, None]
                 eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
                 eta_norm_hat, xi_phys_hat = jnp.moveaxis(jnp.fft.rfft(jnp.stack((eta_norm, xi_phys), axis=1)), 1, 0)
-                g1_xi_hat = jnp.fft.rfft(xi_phys.astype(jnp.float64))
+                g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
+                             else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
             fields = jnp.fft.irfft(jnp.concatenate((
                 surface_ops[None, :, :] * eta_norm_hat[:, None, :],
                 filters * xi_phys_hat[:, None, :],
@@ -249,7 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
-    parser.add_argument("--reference", choices=("original", "cufftdx"), default="original")
+    parser.add_argument("--reference", choices=("original", "cufftdx", "fourier_round"), default="original")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
@@ -269,7 +272,7 @@ if __name__ == "__main__":
     for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
         forward = build_variant(loaded, depth, eta.shape[-1], variant, fft_ept=args.ept)
-        if variant in ("fourier", "fourier_round"):
+        if variant.startswith("fourier"):
             forward = jax.jit(lambda e, x, fn=forward: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         executable = forward.lower(eta, xi).compile()
         records[variant] = {"setup_compile_s": time.perf_counter() - started, "seconds": [],
@@ -317,10 +320,13 @@ if __name__ == "__main__":
     check_eta, check_xi = map(jnp.asarray, (np.concatenate(validation_eta), np.concatenate(validation_xi)))
     check_depth = jnp.log(jnp.asarray(np.concatenate(validation_depth)))
     reference_predict = build_variant(loaded, check_depth, eta.shape[-1], args.reference, fft_ept=args.ept)
+    if args.reference.startswith("fourier"):
+        reference_predict = jax.jit(lambda e, x, fn=reference_predict: jnp.fft.irfft(
+            fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
     expected = np.asarray(reference_predict(check_eta, check_xi))
     for variant in (name for name in variants if name != args.reference):
         candidate = build_variant(loaded, check_depth, eta.shape[-1], variant, fft_ept=args.ept)
-        if variant in ("fourier", "fourier_round"):
+        if variant.startswith("fourier"):
             candidate = jax.jit(lambda e, x, fn=candidate: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         actual = np.asarray(candidate(check_eta, check_xi))
         relative = np.linalg.norm(actual - expected, axis=-1) / np.linalg.norm(expected, axis=-1)
@@ -331,7 +337,7 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
-        if variant in ("fourier", "fourier_round"):
+        if variant.startswith("fourier"):
             other_xi = jnp.roll(check_xi, 1, axis=0)
             other = np.asarray(candidate(check_eta, other_xi))
             mixed = np.asarray(candidate(check_eta, 0.3 * check_xi - 0.7 * other_xi))
@@ -368,6 +374,8 @@ if __name__ == "__main__":
         "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs", "cuFFTDx G₁",
     )))
     labels.update(fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
+                  fourier_reuse="Reuse FP32 input spectrum for G₁",
+                  fourier_input="cuFFTDx FP64 input inverse FFT",
                   cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",

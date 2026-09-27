@@ -106,9 +106,18 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         color="#606970", fontsize=8)
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
         right = float(seconds.max())
-        for run, name, _label, color, marker in (() if args.single_case else RUNS):
+        for run, name, _label, color, marker in RUNS:
             source = next((ROOT / "outputs" / run).glob(
                 f"eval_best_current_test_stratified_n32*/{family}_summary.json"))
+            if args.single_case:
+                with np.load(source.with_name(f"{family}_trajs.npz")) as saved:
+                    selected = np.flatnonzero(saved["simulation_ids"] == warm["families"][family]["simulation_id"])
+                    if len(selected) != 1 or saved["times"][-1] != horizon:
+                        parser.error(f"{source}: saved accuracy case or horizon does not match")
+                    neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
+                ax.axhline(neural_error, color=color, ls="--", lw=1.0, zorder=1)
+                print(f"{title}, {name}: saved final surface error={neural_error:.6g}%")
+                continue
             result = json.loads(source.read_text())
             neural_seconds = result["surrogate_wall_s"]
             if warm:
@@ -162,8 +171,10 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         fig.text(0.10, 0.921, warm["device"], color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
-        *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=f"Neural — {name}")
-          for _, name, _, color, marker in (() if args.single_case else reversed(RUNS))],
+        *[Line2D([], [], color=color, marker=None if args.single_case else marker,
+                  ls="--" if args.single_case else "none", lw=1.0, ms=7,
+                  label=f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
+          for _, name, _, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
         *[Line2D([], [], color=color, ls=style, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
@@ -187,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
     parser.add_argument("--spectral-timings", type=Path, nargs="+", help="Overlay spectral weight-EMA timings on matching Figure 12 hardware; show errors only on single-case panels.")
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
-    parser.add_argument("--single-case", action="store_true", help="Plot classical single-case errors against cached M6 and candidate timing lines, without archived model points.")
+    parser.add_argument("--single-case", action="store_true", help="Plot single-case errors, saved trained-model accuracy references, and candidate timing lines.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
     if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
@@ -211,8 +222,11 @@ if __name__ == "__main__":
                 config.timings = paths[0]
             config.classical_timings = paths
             config.candidate_timings = [ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json"]
-            config.candidate_method = "fourier_round_spectral_all"
-            config.candidate_previous_method = "fused_cufftdx_spectral_all"
+            config.candidate_timings += ([ROOT / f"outputs/fourier_reuse_20260926/ada_{part}.json"
+                                          for part in ("stokes", "rest")] if hardware == "ada" else [
+                ROOT / f"outputs/fourier_reuse_20260926/{hardware}/rollouts.json"])
+            config.candidate_method = "fourier_input_spectral_all"
+            config.candidate_previous_method = "fourier_round_spectral_all"
             config.no_baseline_timings = None
         a100.timings = a100.candidate_timings[0]
         a100.classical_timings = None

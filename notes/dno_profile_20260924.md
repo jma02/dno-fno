@@ -1114,3 +1114,54 @@ and [Ada whitepaper](https://images.nvidia.com/aem-dam/en-zz/Solutions/technolog
 Ada/Blackwell scalar FP64 reference ceilings use FP32/64. Replay/cache behavior
 follows the [Nsight Compute guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/).
 KEEP measured profiling/analysis and Figure13; Ada counters remain incomplete.
+
+## FP64 input inverse FFT — September 26
+
+The next profile-guided trial replaces only the native Fourier candidate's
+batch-two, 1024-point FP64 input inverse FFT with the existing cuFFTDx kernel.
+`fourier_input` retains the subsequent FP32 rounding, normalization, separate
+FP64 G1 xi transform, learned weights, G0/G1 and spectral output. No training,
+production edits or new CUDA kernels. Raw: `outputs/fourier_reuse_20260926/`.
+
+First, `fourier_reuse` tried promoting the learned branch's FP32 xi spectrum
+instead of computing G1's separate FP64 transform. Ada forward latency fell
+188.59→175.96 microseconds, but the 48-state maximum discrepancy was 4.05e-4,
+above the unchanged 1e-5 threshold. REJECT; no full rollouts or plot coordinates.
+
+The FP64 backend replacement passes all three 48-state checks, with maximum
+relative discrepancy 9.35e-16; mixed inputs, flat surfaces and zero xi also
+pass. Both cloud builds pass all 24 native checks. Full batch-one rollouts use
+the same candidate checkpoint, N1024, dt0.01, four GL2 iterations, padding2,
+and T20/200. Three interleaved repeats of each method exclude compilation,
+warm-up and transfers. All 72 timings completed, all 24 outputs are finite
+with positive depth, and every new repeat beats every old repeat in its family.
+
+| GPU | Family | Previous (s) | Input cuFFTDx (s) | Reduction |
+| --- | --- | ---: | ---: | ---: |
+| Ada | Stokes | 2.74307 | 2.63164 | 4.06% |
+| Ada | Tanaka | 26.83531 | 25.69058 | 4.27% |
+| Ada | Benjamin–Feir | 26.85620 | 25.78721 | 3.98% |
+| Ada | JONSWAP/TMA | 2.71207 | 2.60358 | 4.00% |
+| Blackwell | Stokes | 3.84705 | 3.57837 | 6.98% |
+| Blackwell | Tanaka | 38.04039 | 35.38005 | 6.99% |
+| Blackwell | Benjamin–Feir | 38.00026 | 35.38024 | 6.89% |
+| Blackwell | JONSWAP/TMA | 3.84568 | 3.57811 | 6.96% |
+| A100 80GB | Stokes | 2.39962 | 2.28496 | 4.78% |
+| A100 80GB | Tanaka | 23.68440 | 22.55491 | 4.77% |
+| A100 80GB | Benjamin–Feir | 23.67864 | 22.55297 | 4.75% |
+| A100 80GB | JONSWAP/TMA | 2.40451 | 2.28724 | 4.88% |
+
+Long trajectories are not bitwise identical. Maximum terminal eta difference
+from the control is 1.36e-4 on Ada, 6.54e-5 on Blackwell and 4.99e-4 on A100.
+For BF, cached-M6 terminal eta errors change from 1.05243→1.05371% on Ada,
+0.955744→0.955664% on Blackwell and 1.05842→1.01498% on A100. The candidate
+remains a runtime-only line, not an accuracy point.
+
+KEEP the benchmark-only FP64 input backend. Figure12 uses these new medians
+and incremental savings, retaining trained-model accuracies and all three
+hardware rows' spectral-EMA overlays. Classical timings are unchanged: its
+spectral path has no corresponding unpadded eta/xi input reconstruction.
+Its padded 2048-point inverse FFTs are different operations; earlier rejected
+cuFFTDx tests used padding8 and do not settle their current backend choice.
+Ada ran on GPU0 only; Sam's GPU1 jobs were untouched. Cloud apps completed
+and stopped. No failed checks were relaxed or slow repeats discarded.

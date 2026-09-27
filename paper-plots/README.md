@@ -196,19 +196,29 @@ is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
-All three candidate lines use the Fourier-output candidate `fourier_round_spectral_all`
-from `outputs/fourier_io_20260926/{ada,blackwell,a100}_full/rollouts.json`. Their annotations compare
-three-repeat full-rollout medians against `fused_cufftdx_spectral_all` in the same
-run. The candidate preserves physical-space FP32 input rounding, returns the
+All three candidate lines now use `fourier_input_spectral_all`: the existing
+FP64 cuFFTDx kernel replaces the network's batch-two input inverse FFT, with
+input rounding, normalization, G0/G1 and learned weights unchanged. Their
+annotations compare three-repeat full-rollout medians against
+`fourier_round_spectral_all` in the same run. Measurements are under
+`outputs/fourier_reuse_20260926/`: `ada_stokes.json`, `ada_rest.json`, and
+`{blackwell,a100}/rollouts.json`. The FP32 spectrum-reuse trial in the same
+directory failed accuracy checks and is not plotted.
+
+The preceding Fourier-I/O round is saved in
+`outputs/fourier_io_20260926/{ada,blackwell,a100}_full/rollouts.json`.
+That candidate preserves physical-space FP32 input rounding, returns the
 learned correction and G0 directly in Fourier space, and uses a spectral-output
 cuFFTDx G1 kernel. Runtime decreases by 18.85–19.24% on Ada, 16.28–16.90% on
-Blackwell, and 19.86–20.39% on A100. The A100 allocation is the
-80GB SXM4 variant, so the entire A100 row uses only this run: three repeats for
-M1/M2 and both candidates, and one M6 reference rollout per family. Unmeasured
+Blackwell, and 19.86–20.39% on A100 versus `fused_cufftdx_spectral_all`.
+The A100 allocation is the 80GB SXM4 variant; the classical series uses that
+run's three repeats for M1/M2 and one M6 reference rollout per family. Unmeasured
 M3–M5 are omitted; earlier 40GB A100 timings are not mixed into the new row.
 
-Ada and Blackwell M1/M2 medians are updated from their paired runs; M3–M6 retain
-the preceding three-repeat measurements on the same respective hardware.
+Ada and Blackwell M1/M2 medians retain their preceding Fourier-I/O paired runs;
+M3–M6 retain the earlier three-repeat measurements on the same hardware.
+This input-FFT trial does not rerun classical timings: the spectral classical
+solver has no corresponding unpadded eta/xi input reconstruction.
 
 Each Fourier-I/O comparison uses three full batch-one rollouts of
 M1, M2, the previous candidate and the Fourier-output candidate, plus one M6
@@ -224,7 +234,11 @@ Ada/Blackwell M3–M6 retain the preceding
 three-repeat medians from `outputs/fair_classical_20260925/`, including the
 M6 runtime reference. Ada/Blackwell classical error coordinates are unchanged: Ada retains
 the earlier 32-case medians and small/full neural points; the Modal panels use
-single-case errors against cached M6. The retained and rejected methods are
+single-case errors against cached M6. Blue/purple horizontal lines on the cloud
+panels restore the trained small/full models' saved final errors for the same
+simulation IDs and horizons. They are accuracy-only references from the existing
+Ada evaluations, not new cloud measurements; no cloud runtime is assigned.
+The retained and rejected methods are
 `fused_cufftdx_spectral_all` and `shared_m1_spectral_all`, respectively.
 
 The replacement changes the discrete baseline rather than merely its execution:

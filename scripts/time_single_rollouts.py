@@ -51,6 +51,8 @@ FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packi
 FUSION_VARIANTS["fused_front_spectral_all"] = "front"
 FUSION_VARIANTS["fourier_spectral_all"] = "fourier"
 FUSION_VARIANTS["fourier_round_spectral_all"] = "fourier_round"
+FUSION_VARIANTS["fourier_reuse_spectral_all"] = "fourier_reuse"
+FUSION_VARIANTS["fourier_input_spectral_all"] = "fourier_input"
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 
@@ -78,7 +80,8 @@ if __name__ == "__main__":
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
-    if args.without_baselines and set(methods) & {"baseline-only", "shared_m1_spectral_all", "fourier_spectral_all", "fourier_round_spectral_all"}:
+    if args.without_baselines and (set(methods) & {"baseline-only", "shared_m1_spectral_all"}
+                                   or any(method.startswith("fourier_") for method in methods)):
         parser.error("baseline-only, shared_m1_spectral_all and Fourier-I/O methods require analytic baselines")
     loaded = {name: load_run(run) for name, run in RUNS.items()
               if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
