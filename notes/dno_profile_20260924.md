@@ -1336,3 +1336,13 @@ Ada combined confirmation ran 23:41–23:47; mask-only ran 23:47–23:54.
 Blackwell final ran 23:44–23:52; A100 final ran 23:44–23:50. All Modal apps
 stopped and local GPU0 finished; Sam's GPU1 jobs were untouched. No training,
 production or CUDA source changes; no new source files or helper functions.
+
+### Deferred: fixed-timestep accuracy–runtime comparison
+
+The September 27 classical-only audit keeps M6 as the reference and does not
+search truncation order or timestep. A later experiment may select a fixed
+timestep and implicit-iteration count for each method on validation trajectories,
+then freeze those settings for the final runtime/error comparison. This is
+offline configuration selection, not adaptive timestepping during a rollout.
+The present work only tunes classical padding, recurrence execution, FFT backend,
+and numerical precision, leaving the training run untouched.

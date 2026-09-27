@@ -185,9 +185,13 @@ def rollout_if_trial(
     eta = jnp.concatenate((initial.eta[None], eta))
     xi = jnp.concatenate((initial.xi[None], xi))
     if predict_gxi is None:
-        gxi = jax.vmap(lambda e, x: ti.dno_series_eval(
-            e, x, params.k, params.depth, params.dno_order, pad_factor=params.pad_factor,
-        ))(eta, xi)
+        if predict_hat is None:
+            gxi = jax.vmap(lambda e, x: ti.dno_series_eval(
+                e, x, params.k, params.depth, params.dno_order, pad_factor=params.pad_factor,
+            ))(eta, xi)
+        else:
+            spectra = jnp.fft.rfft(jnp.stack((eta, xi), axis=-2), axis=-1).at[..., params.nx // 2].set(0)
+            gxi = jnp.fft.irfft(predict_hat(spectra[..., 0, :], spectra[..., 1, :]), n=params.nx)
         if params.filter_fraction < 1.0:
             gxi = ti.apply_lowpass(gxi, params.k, params.filter_fraction)
     else:

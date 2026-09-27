@@ -376,11 +376,21 @@ ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         return fp64 ? launch<1024, double, 8>(stream, a, b, symbols, out, operation, multiply)
                     : launch<1024, float, 8>(stream, a, b, symbols, out, operation, multiply);
     }
+    if (size == 2048) {
+        if (ept == 4)
+            return fp64 ? launch<2048, double, 4>(stream, a, b, symbols, out, operation, multiply)
+                        : launch<2048, float, 4>(stream, a, b, symbols, out, operation, multiply);
+        if (ept == 16)
+            return fp64 ? launch<2048, double, 16>(stream, a, b, symbols, out, operation, multiply)
+                        : launch<2048, float, 16>(stream, a, b, symbols, out, operation, multiply);
+        return fp64 ? launch<2048, double, 8>(stream, a, b, symbols, out, operation, multiply)
+                    : launch<2048, float, 8>(stream, a, b, symbols, out, operation, multiply);
+    }
     if (size == 8192) {
         return fp64 ? launch<8192, double, 8>(stream, a, b, symbols, out, operation, multiply)
                     : launch<8192, float, 8>(stream, a, b, symbols, out, operation, multiply);
     }
-    return ffi::Error::InvalidArgument("Benchmark supports FFT lengths 1024 and 8192.");
+    return ffi::Error::InvalidArgument("Benchmark supports FFT lengths 1024, 2048 and 8192.");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
