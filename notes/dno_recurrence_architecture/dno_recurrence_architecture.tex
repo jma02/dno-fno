@@ -146,6 +146,12 @@ separate approximation.
 \clearpage
 \section{The resulting architectural motivation}
 
+The Craig--Sulem recurrence combines Fourier multipliers with multiplication
+by powers of the surface elevation. We retain these two ingredients in our
+branches: we learn the Fourier multipliers and learn the spatial
+multiplication coefficients as functions of explicit powers of $\eta$,
+augmented by derivatives and transforms of the surface.
+
 Before network input/output normalization, the model has the form
 \begin{equation}
 \begin{split}
@@ -159,9 +165,39 @@ Before network input/output normalization, the model has the form
 \end{equation}
 Here $B$ is the number of branches, $m_b(k,h)$ is a learned real, even Fourier
 symbol, and $a_b[\eta](x)$ is a learned real spatial field computed from
-surface features. The brackets emphasize that $a_b$ may depend on derivatives
-and transforms of $\eta$, not only on its value at $x$. Neither $m_b$ nor
-$a_b$ depends on $\xi$.
+the surface features specified below. The brackets emphasize that $a_b$
+depends on derivatives and transforms of $\eta$ as well as its value at $x$.
+Neither $m_b$ nor $a_b$ depends on $\xi$.
+
+\paragraph{Explicit powers in the surface network.}
+Let $\widetilde\eta=\eta/s_\eta$, where $s_\eta>0$ is the fixed training-set
+normalization scale. The implementation constructs $\widetilde\eta^p$ for
+$p=1,\ldots,P$, with $P$ set by \texttt{cs\_n\_polys}. The current C27
+configuration uses $P=3$ and enables all four derivative/transform channels,
+giving the seven-channel input
+\begin{equation}
+  E_0[\eta](x)=
+  \left[\widetilde\eta,\widetilde\eta^2,\widetilde\eta^3,
+  \partial_x\widetilde\eta,\partial_x^2\widetilde\eta,
+  |D|^{1/2}\widetilde\eta,\mathcal H\widetilde\eta\right]^{\!\top}(x).
+  \label{eq:surface-features}
+\end{equation}
+Here $|D|^{1/2}$ and the Hilbert transform $\mathcal H$ have Fourier symbols
+$|k|^{1/2}$ and $-\mathrm i\,\operatorname{sgn}(k)$, respectively. Two shared,
+bias-free pointwise dense layers with GELU activations map these inputs to a
+latent vector $z_\theta[\eta](x)$, with 320 channels in C27. A bias-free
+linear head for each branch produces
+\begin{equation}
+  a_b[\eta](x)=w_b^\top\!\left[
+    z_\theta[\eta](x)\odot\tanh\!\left(z_\theta[\eta](x)\right)\right],
+  \label{eq:spatial-coefficients}
+\end{equation}
+where $\odot$ denotes componentwise multiplication. Thus the spatial
+coefficients are explicitly learned functions of the first three surface
+powers and the auxiliary channels. The polynomial inputs supply coordinates
+motivated by the recurrence; nonlinear mixing allows dependence beyond cubic
+order. The separate bias-free construction and nonlinear lift enforce the
+small-amplitude order described next.
 
 For fixed $\eta$ and $h$, each branch is linear in $\xi$ and self-adjoint:
 \begin{equation}
@@ -170,8 +206,10 @@ For fixed $\eta$ and $h$, each branch is linear in $\xi$ and self-adjoint:
 \end{equation}
 The current surface network also ensures
 $a_b[\varepsilon\eta]=O(\varepsilon^2)$ as $\varepsilon\to0$:
-its bias-free features vanish at zero, and its final nonlinear lift is
-$z\tanh z=O(z^2)$. The learned correction therefore starts at second order,
+with the normalization scale held fixed,
+$z_\theta[\varepsilon\eta]=O(\varepsilon)$, and the lift in
+\eqref{eq:spatial-coefficients} satisfies $z\tanh z=O(z^2)$.
+The learned correction therefore starts at second order,
 leaving the analytic zeroth- and first-order terms unchanged.
 
 \paragraph{Signed weights are intentional.}
@@ -204,10 +242,15 @@ formulas, not an exact continuum evaluation for every depth and discretization.
 \paragraph{Suggested manuscript wording.}
 We retain the analytic $G_0+G_1$ baseline and approximate the higher-order
 correction using signed, self-adjoint branches composed of Fourier filters
-and surface-dependent multiplication. These are the operations appearing in
-the Craig--Sulem recurrence; an exact polarization identity motivates tying
-the inner and outer filters. The finite branch sum is a structured
-approximation to the remaining, generally nested terms.
+and surface-dependent multiplication. The Craig--Sulem recurrence motivates
+both ingredients: we learn the Fourier multipliers and learn the spatial
+multiplication coefficients from the normalized surface powers
+$\widetilde\eta$, $\widetilde\eta^2$, and $\widetilde\eta^3$, together with
+derivative and transform channels. An exact polarization identity motivates
+tying the inner and outer filters, while a separate bias-free network and
+quadratic lift ensure that the learned correction begins at second order.
+The finite branch sum is a structured approximation to the remaining,
+generally nested terms.
 
 \clearpage
 \appendix

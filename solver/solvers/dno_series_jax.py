@@ -90,14 +90,15 @@ def _dno_series_hat(
         coefficients = jnp.fft.rfft(a * b, axis=-1)[..., : nx // 2 + 1]
         return pad_factor * coefficients.at[..., nx // 2].set(0)
 
-    eta_padded = pad(eta_hat)
+    gm_hats = [g0 * xi_hat]
+    eta_padded, xi_x, g0_padded = jnp.moveaxis(
+        pad(jnp.stack((eta_hat, 1j * k * xi_hat, gm_hats[0]), axis=-2)), -2, 0,
+    )
     eta_powers = [eta_padded, eta_padded]
     for m in range(2, order + 1):
         eta_powers.append(pad(product_hat(eta_padded, eta_powers[m - 1]) / m))
 
-    xi_x = pad(1j * k * xi_hat)
-    gm_hats = [g0 * xi_hat]
-    gm_padded = [pad(gm_hats[0])]
+    gm_padded = [g0_padded]
     for m in range(1, order + 1):
         if m % 2 == 0:
             r = m // 2
@@ -126,12 +127,10 @@ def _dno_series_hat(
             products.append((eta_powers[1], gm_padded[2 * (r - 1)]))
             symbols.append(g0)
 
-        gm_hat = -sum(
-            (
-                symbol * product_hat(*product)
-                for symbol, product in zip(symbols, products, strict=True)
-            ),
-            start=jnp.zeros_like(gm_hats[0]),
+        left, right = zip(*products)
+        product_hats = product_hat(jnp.stack(left, axis=-2), jnp.stack(right, axis=-2))
+        gm_hat = -jnp.sum(
+            jnp.stack(jnp.broadcast_arrays(*symbols), axis=-2) * product_hats, axis=-2,
         )
         gm_hats.append(gm_hat)
         if m < order:

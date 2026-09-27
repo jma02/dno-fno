@@ -56,6 +56,7 @@ _BASE_ROLLOUT_NUMERICS = RolloutNumerics(
 PAPER_ROLLOUT_NUMERICS: dict[TrajectoryFamily, RolloutNumerics] = {
     "tanaka": _BASE_ROLLOUT_NUMERICS._replace(
         integration_dno_order=6,
+        maximum_wavenumber=128.0,
         internal_hamiltonian_drift_threshold=None,
     ),
     "benjamin_feir": _BASE_ROLLOUT_NUMERICS,

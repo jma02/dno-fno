@@ -6,7 +6,8 @@
 For fixed $(\eta,h)$, the DNO is linear and self-adjoint in $\xi$ and is
 positive semidefinite modulo constant potentials.  Its dependence on $\eta$
 is analytic near the flat surface, and the Craig--Sulem coefficients alternate
-Fourier multipliers with pointwise multiplication by surface fields.  CS-DNO
+Fourier multipliers with pointwise multiplication by powers of the surface
+elevation. CS-DNO
 imposes linearity and self-adjointness, fixes the first two Taylor
 coefficients, and restricts the learned remainder to second and higher order:
 \begin{equation}
@@ -49,19 +50,31 @@ $O(\eta)$.
 
 \subsection{Surface features and depth-aware multipliers}
 
-The surface is represented by the fixed feature stack
+The Craig--Sulem recurrence motivates two learned ingredients: Fourier
+multipliers and spatial multiplication coefficients computed from surface
+powers.
+Let $\widetilde\eta=\eta/s_\eta$, where $s_\eta>0$ is the fixed training-set
+normalization scale. The C27 configuration uses \texttt{cs\_n\_polys=3}, so
+the polynomial inputs are explicitly $\widetilde\eta$,
+$\widetilde\eta^2$, and $\widetilde\eta^3$. Together with all four enabled
+derivative/transform channels, these give the feature stack
 \begin{equation}
   E_0(\eta)=
-  \left[\eta,\eta^2,\eta^3,\partial_x\eta,
-  \partial_x^2\eta,|D|^{1/2}\eta,\mathcal H\eta\right].
+  \left[\widetilde\eta,\widetilde\eta^2,\widetilde\eta^3,
+  \partial_x\widetilde\eta,\partial_x^2\widetilde\eta,
+  |D|^{1/2}\widetilde\eta,\mathcal H\widetilde\eta\right].
   \label{eq:eta-features}
 \end{equation}
 Here $|D|^{1/2}$ and $\mathcal H$ are the Fourier multipliers with symbols
 $|k|^{1/2}$ and $-\mathrm i\,\operatorname{sgn}(k)$, respectively.
-A shared pointwise multilayer perceptron maps these channels to 320 latent
-features. Polynomial channels expose the analyticity orders directly, while
+A shared pointwise multilayer perceptron with two bias-free dense layers and
+GELU activations maps these channels to 320 latent features.
+Polynomial channels expose the surface powers used by the recurrence, while
 slope, curvature, half-derivative, and Hilbert-transform channels expose
 geometric and phase information that a pointwise polynomial cannot recover.
+Nonlinear mixing allows the learned spatial coefficients to depend on orders
+beyond degree three; the separate lift below enforces their second-order
+vanishing at the flat surface.
 There are no learned spatial convolutions in this trunk; nonlocal coupling is
 introduced by Fourier multipliers.
 

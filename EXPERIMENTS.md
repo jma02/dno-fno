@@ -33,84 +33,88 @@ could not be recovered at all are in
 
 ## Dated logs
 
-74 files, 1123 rows.
+78 files, 1221 rows.
 
 | Date | Rows | File | Size |
 | --- | --- | --- | --- |
-| 2026-09-26 | 44 | [`experiments/experiments-2026-09-26.md`](experiments/experiments-2026-09-26.md) | 70 KB |
-| 2026-09-25 | 16 | [`experiments/experiments-2026-09-25.md`](experiments/experiments-2026-09-25.md) | 33 KB |
-| 2026-09-24 | 8 | [`experiments/experiments-2026-09-24.md`](experiments/experiments-2026-09-24.md) | 13 KB |
-| 2026-09-16 | 35 | [`experiments/experiments-2026-09-16.md`](experiments/experiments-2026-09-16.md) | 65 KB |
-| 2026-09-15 | 13 | [`experiments/experiments-2026-09-15.md`](experiments/experiments-2026-09-15.md) | 20 KB |
-| 2026-09-14 | 28 | [`experiments/experiments-2026-09-14.md`](experiments/experiments-2026-09-14.md) | 64 KB |
-| 2026-09-13 | 9 | [`experiments/experiments-2026-09-13.md`](experiments/experiments-2026-09-13.md) | 118 KB |
-| 2026-09-12 | 6 | [`experiments/experiments-2026-09-12.md`](experiments/experiments-2026-09-12.md) | 25 KB |
+| 2026-09-26 | 51 | [`experiments/experiments-2026-09-26.md`](experiments/experiments-2026-09-26.md) | 80 KB |
+| 2026-09-25 | 35 | [`experiments/experiments-2026-09-25.md`](experiments/experiments-2026-09-25.md) | 59 KB |
+| 2026-09-24 | 27 | [`experiments/experiments-2026-09-24.md`](experiments/experiments-2026-09-24.md) | 44 KB |
+| 2026-09-23 | 9 | [`experiments/experiments-2026-09-23.md`](experiments/experiments-2026-09-23.md) | 16 KB |
+| 2026-09-22 | 4 | [`experiments/experiments-2026-09-22.md`](experiments/experiments-2026-09-22.md) | 4 KB |
+| 2026-09-18 | 2 | [`experiments/experiments-2026-09-18.md`](experiments/experiments-2026-09-18.md) | 2 KB |
+| 2026-09-17 | 6 | [`experiments/experiments-2026-09-17.md`](experiments/experiments-2026-09-17.md) | 13 KB |
+| 2026-09-16 | 39 | [`experiments/experiments-2026-09-16.md`](experiments/experiments-2026-09-16.md) | 69 KB |
+| 2026-09-15 | 13 | [`experiments/experiments-2026-09-15.md`](experiments/experiments-2026-09-15.md) | 19 KB |
+| 2026-09-14 | 28 | [`experiments/experiments-2026-09-14.md`](experiments/experiments-2026-09-14.md) | 61 KB |
+| 2026-09-13 | 31 | [`experiments/experiments-2026-09-13.md`](experiments/experiments-2026-09-13.md) | 118 KB |
+| 2026-09-12 | 6 | [`experiments/experiments-2026-09-12.md`](experiments/experiments-2026-09-12.md) | 24 KB |
 | 2026-09-11 | 1 | [`experiments/experiments-2026-09-11.md`](experiments/experiments-2026-09-11.md) | 2 KB |
-| 2026-09-10 | 22 | [`experiments/experiments-2026-09-10.md`](experiments/experiments-2026-09-10.md) | 36 KB |
+| 2026-09-10 | 22 | [`experiments/experiments-2026-09-10.md`](experiments/experiments-2026-09-10.md) | 35 KB |
 | 2026-09-09 | 25 | [`experiments/experiments-2026-09-09.md`](experiments/experiments-2026-09-09.md) | 28 KB |
 | 2026-09-08 | 17 | [`experiments/experiments-2026-09-08.md`](experiments/experiments-2026-09-08.md) | 17 KB |
 | 2026-09-06 | 3 | [`experiments/experiments-2026-09-06.md`](experiments/experiments-2026-09-06.md) | 4 KB |
 | 2026-09-05 | 9 | [`experiments/experiments-2026-09-05.md`](experiments/experiments-2026-09-05.md) | 12 KB |
 | 2026-09-04 | 2 | [`experiments/experiments-2026-09-04.md`](experiments/experiments-2026-09-04.md) | 3 KB |
 | 2026-09-02 | 3 | [`experiments/experiments-2026-09-02.md`](experiments/experiments-2026-09-02.md) | 4 KB |
-| 2026-08-20 | 10 | [`experiments/experiments-2026-08-20.md`](experiments/experiments-2026-08-20.md) | 18 KB |
+| 2026-08-20 | 10 | [`experiments/experiments-2026-08-20.md`](experiments/experiments-2026-08-20.md) | 19 KB |
 | 2026-08-19 | 1 | [`experiments/experiments-2026-08-19.md`](experiments/experiments-2026-08-19.md) | 1 KB |
-| 2026-08-18 | 2 | [`experiments/experiments-2026-08-18.md`](experiments/experiments-2026-08-18.md) | 2 KB |
-| 2026-08-17 | 2 | [`experiments/experiments-2026-08-17.md`](experiments/experiments-2026-08-17.md) | 2 KB |
-| 2026-08-13 | 94 | [`experiments/experiments-2026-08-13.md`](experiments/experiments-2026-08-13.md) | 135 KB |
+| 2026-08-18 | 2 | [`experiments/experiments-2026-08-18.md`](experiments/experiments-2026-08-18.md) | 3 KB |
+| 2026-08-17 | 2 | [`experiments/experiments-2026-08-17.md`](experiments/experiments-2026-08-17.md) | 3 KB |
+| 2026-08-13 | 94 | [`experiments/experiments-2026-08-13.md`](experiments/experiments-2026-08-13.md) | 136 KB |
 | 2026-08-12 | 96 | [`experiments/experiments-2026-08-12.md`](experiments/experiments-2026-08-12.md) | 126 KB |
-| 2026-08-11 | 107 | [`experiments/experiments-2026-08-11.md`](experiments/experiments-2026-08-11.md) | 138 KB |
-| 2026-08-10 | 79 | [`experiments/experiments-2026-08-10.md`](experiments/experiments-2026-08-10.md) | 112 KB |
+| 2026-08-11 | 107 | [`experiments/experiments-2026-08-11.md`](experiments/experiments-2026-08-11.md) | 139 KB |
+| 2026-08-10 | 79 | [`experiments/experiments-2026-08-10.md`](experiments/experiments-2026-08-10.md) | 113 KB |
 | 2026-08-09 | 121 | [`experiments/experiments-2026-08-09.md`](experiments/experiments-2026-08-09.md) | 193 KB |
 | 2026-08-08 | 1 | [`experiments/experiments-2026-08-08.md`](experiments/experiments-2026-08-08.md) | 1 KB |
-| 2026-08-07 | 1 | [`experiments/experiments-2026-08-07.md`](experiments/experiments-2026-08-07.md) | 1 KB |
+| 2026-08-07 | 1 | [`experiments/experiments-2026-08-07.md`](experiments/experiments-2026-08-07.md) | 2 KB |
 | 2026-08-06 | 2 | [`experiments/experiments-2026-08-06.md`](experiments/experiments-2026-08-06.md) | 3 KB |
-| 2026-08-05 | 1 | [`experiments/experiments-2026-08-05.md`](experiments/experiments-2026-08-05.md) | 1 KB |
+| 2026-08-05 | 1 | [`experiments/experiments-2026-08-05.md`](experiments/experiments-2026-08-05.md) | 2 KB |
 | 2026-08-04 | 4 | [`experiments/experiments-2026-08-04.md`](experiments/experiments-2026-08-04.md) | 7 KB |
 | 2026-08-02 | 36 | [`experiments/experiments-2026-08-02.md`](experiments/experiments-2026-08-02.md) | 65 KB |
-| 2026-08-01 | 14 | [`experiments/experiments-2026-08-01.md`](experiments/experiments-2026-08-01.md) | 29 KB |
-| 2026-07-31 | 23 | [`experiments/experiments-2026-07-31.md`](experiments/experiments-2026-07-31.md) | 47 KB |
-| 2026-07-30 | 6 | [`experiments/experiments-2026-07-30.md`](experiments/experiments-2026-07-30.md) | 16 KB |
+| 2026-08-01 | 14 | [`experiments/experiments-2026-08-01.md`](experiments/experiments-2026-08-01.md) | 30 KB |
+| 2026-07-31 | 23 | [`experiments/experiments-2026-07-31.md`](experiments/experiments-2026-07-31.md) | 48 KB |
+| 2026-07-30 | 6 | [`experiments/experiments-2026-07-30.md`](experiments/experiments-2026-07-30.md) | 17 KB |
 | 2026-07-29 | 1 | [`experiments/experiments-2026-07-29.md`](experiments/experiments-2026-07-29.md) | 2 KB |
-| 2026-07-28 | 14 | [`experiments/experiments-2026-07-28.md`](experiments/experiments-2026-07-28.md) | 26 KB |
+| 2026-07-28 | 14 | [`experiments/experiments-2026-07-28.md`](experiments/experiments-2026-07-28.md) | 27 KB |
 | 2026-07-27 | 6 | [`experiments/experiments-2026-07-27.md`](experiments/experiments-2026-07-27.md) | 11 KB |
 | 2026-07-26 | 16 | [`experiments/experiments-2026-07-26.md`](experiments/experiments-2026-07-26.md) | 37 KB |
 | 2026-07-25 | 47 | [`experiments/experiments-2026-07-25.md`](experiments/experiments-2026-07-25.md) | 86 KB |
 | 2026-07-24 | 3 | [`experiments/experiments-2026-07-24.md`](experiments/experiments-2026-07-24.md) | 7 KB |
-| 2026-07-23 | 9 | [`experiments/experiments-2026-07-23.md`](experiments/experiments-2026-07-23.md) | 23 KB |
+| 2026-07-23 | 9 | [`experiments/experiments-2026-07-23.md`](experiments/experiments-2026-07-23.md) | 24 KB |
 | 2026-07-22 | 5 | [`experiments/experiments-2026-07-22.md`](experiments/experiments-2026-07-22.md) | 12 KB |
-| 2026-07-21 | 3 | [`experiments/experiments-2026-07-21.md`](experiments/experiments-2026-07-21.md) | 7 KB |
+| 2026-07-21 | 3 | [`experiments/experiments-2026-07-21.md`](experiments/experiments-2026-07-21.md) | 8 KB |
 | 2026-07-20 | 5 | [`experiments/experiments-2026-07-20.md`](experiments/experiments-2026-07-20.md) | 11 KB |
 | 2026-07-19 | 3 | [`experiments/experiments-2026-07-19.md`](experiments/experiments-2026-07-19.md) | 6 KB |
-| 2026-07-17 | 14 | [`experiments/experiments-2026-07-17.md`](experiments/experiments-2026-07-17.md) | 30 KB |
-| 2026-07-16 | 16 | [`experiments/experiments-2026-07-16.md`](experiments/experiments-2026-07-16.md) | 28 KB |
+| 2026-07-17 | 14 | [`experiments/experiments-2026-07-17.md`](experiments/experiments-2026-07-17.md) | 31 KB |
+| 2026-07-16 | 16 | [`experiments/experiments-2026-07-16.md`](experiments/experiments-2026-07-16.md) | 29 KB |
 | 2026-07-15 | 15 | [`experiments/experiments-2026-07-15.md`](experiments/experiments-2026-07-15.md) | 41 KB |
-| 2026-07-14 | 8 | [`experiments/experiments-2026-07-14.md`](experiments/experiments-2026-07-14.md) | 16 KB |
+| 2026-07-14 | 8 | [`experiments/experiments-2026-07-14.md`](experiments/experiments-2026-07-14.md) | 17 KB |
 | 2026-07-13 | 11 | [`experiments/experiments-2026-07-13.md`](experiments/experiments-2026-07-13.md) | 22 KB |
 | 2026-07-12 | 7 | [`experiments/experiments-2026-07-12.md`](experiments/experiments-2026-07-12.md) | 15 KB |
-| 2026-07-11 | 2 | [`experiments/experiments-2026-07-11.md`](experiments/experiments-2026-07-11.md) | 3 KB |
+| 2026-07-11 | 2 | [`experiments/experiments-2026-07-11.md`](experiments/experiments-2026-07-11.md) | 4 KB |
 | 2026-07-10 | 7 | [`experiments/experiments-2026-07-10.md`](experiments/experiments-2026-07-10.md) | 13 KB |
-| 2026-07-09 | 23 | [`experiments/experiments-2026-07-09.md`](experiments/experiments-2026-07-09.md) | 40 KB |
+| 2026-07-09 | 23 | [`experiments/experiments-2026-07-09.md`](experiments/experiments-2026-07-09.md) | 41 KB |
 | 2026-07-08 | 9 | [`experiments/experiments-2026-07-08.md`](experiments/experiments-2026-07-08.md) | 18 KB |
 | 2026-07-07 | 7 | [`experiments/experiments-2026-07-07.md`](experiments/experiments-2026-07-07.md) | 13 KB |
 | 2026-07-06 | 9 | [`experiments/experiments-2026-07-06.md`](experiments/experiments-2026-07-06.md) | 15 KB |
 | 2026-07-04 | 2 | [`experiments/experiments-2026-07-04.md`](experiments/experiments-2026-07-04.md) | 4 KB |
-| 2026-07-01 | 5 | [`experiments/experiments-2026-07-01.md`](experiments/experiments-2026-07-01.md) | 7 KB |
-| 2026-06-29 | 1 | [`experiments/experiments-2026-06-29.md`](experiments/experiments-2026-06-29.md) | 1 KB |
-| 2026-06-25 | 1 | [`experiments/experiments-2026-06-25.md`](experiments/experiments-2026-06-25.md) | 1 KB |
+| 2026-07-01 | 5 | [`experiments/experiments-2026-07-01.md`](experiments/experiments-2026-07-01.md) | 8 KB |
+| 2026-06-29 | 1 | [`experiments/experiments-2026-06-29.md`](experiments/experiments-2026-06-29.md) | 2 KB |
+| 2026-06-25 | 1 | [`experiments/experiments-2026-06-25.md`](experiments/experiments-2026-06-25.md) | 2 KB |
 | 2026-06-24 | 7 | [`experiments/experiments-2026-06-24.md`](experiments/experiments-2026-06-24.md) | 10 KB |
-| 2026-06-22 | 2 | [`experiments/experiments-2026-06-22.md`](experiments/experiments-2026-06-22.md) | 2 KB |
-| 2026-06-18 | 3 | [`experiments/experiments-2026-06-18.md`](experiments/experiments-2026-06-18.md) | 3 KB |
+| 2026-06-22 | 2 | [`experiments/experiments-2026-06-22.md`](experiments/experiments-2026-06-22.md) | 3 KB |
+| 2026-06-18 | 3 | [`experiments/experiments-2026-06-18.md`](experiments/experiments-2026-06-18.md) | 4 KB |
 | 2026-06-16 | 1 | [`experiments/experiments-2026-06-16.md`](experiments/experiments-2026-06-16.md) | 1 KB |
 | 2026-06-11 | 1 | [`experiments/experiments-2026-06-11.md`](experiments/experiments-2026-06-11.md) | 1 KB |
-| 2026-06-10 | 1 | [`experiments/experiments-2026-06-10.md`](experiments/experiments-2026-06-10.md) | 0 KB |
+| 2026-06-10 | 1 | [`experiments/experiments-2026-06-10.md`](experiments/experiments-2026-06-10.md) | 1 KB |
 | 2026-06-09 | 3 | [`experiments/experiments-2026-06-09.md`](experiments/experiments-2026-06-09.md) | 3 KB |
-| 2026-06-05 | 4 | [`experiments/experiments-2026-06-05.md`](experiments/experiments-2026-06-05.md) | 4 KB |
-| 2026-06-04 | 4 | [`experiments/experiments-2026-06-04.md`](experiments/experiments-2026-06-04.md) | 4 KB |
-| 2026-05-03 | 3 | [`experiments/experiments-2026-05-03.md`](experiments/experiments-2026-05-03.md) | 2 KB |
+| 2026-06-05 | 4 | [`experiments/experiments-2026-06-05.md`](experiments/experiments-2026-06-05.md) | 5 KB |
+| 2026-06-04 | 4 | [`experiments/experiments-2026-06-04.md`](experiments/experiments-2026-06-04.md) | 5 KB |
+| 2026-05-03 | 3 | [`experiments/experiments-2026-05-03.md`](experiments/experiments-2026-05-03.md) | 3 KB |
 | 2026-05-02 | 3 | [`experiments/experiments-2026-05-02.md`](experiments/experiments-2026-05-02.md) | 3 KB |
 | 2026-03-31 | 4 | [`experiments/experiments-2026-03-31.md`](experiments/experiments-2026-03-31.md) | 3 KB |
-| undated | 3 | [`experiments/experiments-unknown-date.md`](experiments/experiments-unknown-date.md) | 2 KB |
+| undated | 3 | [`experiments/experiments-unknown-date.md`](experiments/experiments-unknown-date.md) | 3 KB |
 
 ## Notes-with-no-extractable-experiments (backfill scan reported)
 

@@ -1,9 +1,10 @@
-"""Craig-Sulem neural DNO: analytic G0 + G1 plus a learned correction.
+"""Craig-Sulem neural DNO with a selectable analytic baseline.
 
 Here eta is surface elevation and xi is surface velocity potential.
 The default correction branches apply M[spatial_weights(eta) * M[xi]], where M is
 a depth-dependent real Fourier filter. The correction is self-adjoint,
-linear in xi, and starts at order eta^2.
+linear in xi. It starts at order eta^2 with G0+G1, at order eta with G0
+alone, or uses a constant surface feature to learn the full DNO without a baseline.
 """
 from __future__ import annotations
 
@@ -69,7 +70,7 @@ class CraigSulemBlock(nn.Module):
     ) -> jnp.ndarray:
         grid_size = eta_features.shape[1]
 
-        # Start with zero spatial weights, so the initial model is just G0 + G1.
+        # Initialize the learned contribution to zero.
         spatial_weights = nn.Dense(
             self.n_branches, name="phi_proj",
             kernel_init=nn.initializers.zeros, use_bias=False,
@@ -402,7 +403,7 @@ class SpatialSpectralAttentionCorrection(nn.Module):
 
 
 class CraigSulemDNO(nn.Module):
-    """Compute G0(xi) + G1(eta, xi) + learned_correction(eta, xi, depth)."""
+    """Learn the remainder above the selected analytic Craig-Sulem order."""
     width: int                        # Each shared eta layer has width // 2 channels.
     n_blocks: int = 4                 # Groups of parallel branches, summed together.
     latent: int = 64                  # Branches per group.
@@ -429,6 +430,7 @@ class CraigSulemDNO(nn.Module):
     use_half_deriv: bool = True       # Fourier multiplier sqrt(abs(k)).
     use_hilbert: bool = True          # Hilbert transform.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
+    baseline_order: int = 1           # -1: none, 0: G0, 1: G0 + G1.
 
     domain_length: float = 2 * jnp.pi
     # Multiply normalized inputs/outputs by these scales to get physical units.
@@ -496,10 +498,11 @@ class CraigSulemDNO(nn.Module):
         xi_phys = xi_norm * self.xi_scale
 
         # Compute the analytic baseline in physical units, then normalize its output.
-        baseline = (
-            self._linear_baseline(xi_norm, depth)
-            + self._g1_baseline(eta_norm, xi_norm, depth)
-        )
+        baseline = jnp.zeros_like(xi_norm)
+        if self.baseline_order >= 0:
+            baseline = self._linear_baseline(xi_norm, depth)
+        if self.baseline_order == 1:
+            baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
         if self.correction_kind == "spatial_spectral_attention":
             correction = SpatialSpectralAttentionCorrection(
                 channels=self.attention_channels, heads=self.attention_heads,
@@ -548,6 +551,8 @@ class CraigSulemDNO(nn.Module):
 
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
+        if self.baseline_order == -1:
+            features.insert(0, jnp.ones_like(eta_norm))
         k_arr = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
             grid_size // 2 + 1, dtype=eta_norm.dtype,
         )
@@ -566,13 +571,15 @@ class CraigSulemDNO(nn.Module):
                 ))
         eta_features = jnp.stack(features, axis=-1)
 
-        # No biases: zero eta must produce zero features.
+        # With no constant input, zero eta gives zero features.
         for name in ("eta_feat_proj", "eta_feat_mix"):
             eta_features = nn.gelu(
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
             )
-        # Near zero, z * tanh(z) behaves like z^2: the correction starts at eta^2.
-        eta_features = eta_features * jnp.tanh(eta_features)
+        # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
+        # For G0+G1, the lift enforces O(eta^2); a constant input removes that constraint.
+        if self.baseline_order != 0:
+            eta_features = eta_features * jnp.tanh(eta_features)
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)

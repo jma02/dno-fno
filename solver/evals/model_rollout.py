@@ -77,10 +77,10 @@ def load_run(
         orbax_checkpointer=ocp.PyTreeCheckpointer(),
     )
     params = jax.tree_util.tree_map(
-        lambda value: jnp.asarray(value, dtype=jnp.float64), restored["params"]
+        lambda value: jnp.asarray(value, dtype=jnp.float32), restored["params"]
     )
 
-    if model_name == "cs_dno":
+    if model_name in ("cs_dno", "cs_dno_g0", "cs_dno_no_baseline"):
         model = CraigSulemDNO(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),
@@ -102,6 +102,7 @@ def load_run(
             use_half_deriv=bool(config["cs_use_half_deriv"]),
             use_hilbert=bool(config["cs_use_hilbert"]),
             mult_hidden=int(config["cs_mult_hidden"]),
+            baseline_order={"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name],
             domain_length=float(config["domain_length"]),
             xi_scale=float(config["xi_scale"]),
             eta_scale=float(config["eta_scale"]),
@@ -135,7 +136,7 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
     ``eta`` and ``xi`` have shape ``(batch, nx)``. ``log_depth`` has shape
     ``(batch,)`` or ``(batch, 1)``. The returned field is mean-free per sample.
     """
-    model_dtype = jnp.float64
+    model_dtype = jnp.float32
     feature_min = target_min = 0.0
     if loaded.norm_mode == "scale":
         feature_scale = jnp.asarray(
@@ -174,7 +175,8 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
             denormalized = output[..., 0] * target_scale
         else:
             denormalized = ((output[..., 0] + 1.0) * 0.5) * target_scale + target_min
-        return denormalized - denormalized.mean(axis=-1, keepdims=True)
+        gxi = denormalized.astype(eta.dtype)
+        return gxi - gxi.mean(axis=-1, keepdims=True)
 
     return predict
 
@@ -213,7 +215,7 @@ def rollout_surrogate(
     *,
     substeps: int = 8,
 ) -> dict[str, jnp.ndarray]:
-    """Integrate a surrogate DNO action in float64 with hard-filtered GL2."""
+    """Integrate a surrogate DNO action with float64 state and hard-filtered GL2."""
     state = ti.State(
         eta=jnp.asarray(initial.eta, dtype=jnp.float64),
         xi=jnp.asarray(initial.xi, dtype=jnp.float64),

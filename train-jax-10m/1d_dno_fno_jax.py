@@ -131,6 +131,10 @@ def main() -> None:
         help="Final epoch number and learning-rate schedule length. "
         "Keep the same value when resuming; completed epochs are not repeated.",
     )
+    parser.add_argument(
+        "--stop_after_epoch", type=int, default=0,
+        help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
+    )
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--lr_schedule", choices=("cosine", "constant"), default="cosine",
                         help="Constant keeps --lr fixed and ignores --lr_warmup_steps.")
@@ -719,6 +723,8 @@ def main() -> None:
     # Train on every sample once per epoch, in a newly shuffled order.
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="Epochs", leave=False)
     for epoch in epoch_bar:
+        if args.stop_after_epoch and epoch > args.stop_after_epoch:
+            break
         if 0 < args.early_stopping_patience <= epoch - 1 - best_epoch:
             break
         epoch_start_step, epoch_start_optimizer_count = training_counter_values(

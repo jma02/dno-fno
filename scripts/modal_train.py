@@ -327,6 +327,9 @@ def download_run(run_name: str, target_dir: str = "outputs") -> None:
         rel = entry.path[len(prefix) :].lstrip("/")
         local = out / rel
         local.parent.mkdir(parents=True, exist_ok=True)
+        if entry.type.name == "DIRECTORY":
+            local.mkdir(exist_ok=True)
+            continue
         size_gb = (entry.size or 0) / 1e9
         print(f"  {entry.path}  ({size_gb:.3f} GB) -> {local}")
         with open(local, "wb") as f:

@@ -91,7 +91,7 @@
       }
     }
   ],
-  "seconds": 5.933006541803479,
+  "seconds": 4.947749166749418,
   "rest_state_and_zero_mean_passed": true,
   "single_time_passed": true,
   "operator": "identical float64 analytic G0+G1 in both frameworks; no learned-model accuracy claim"
