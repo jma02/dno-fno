@@ -1009,3 +1009,108 @@ measured on80GB and are omitted; previous40GB timings are not mixed into this
 row. Ada and Blackwell remain unchanged. Future Modal comparisons should
 request the intended A100 memory variant explicitly. The app completed and
 stopped; no local GPU use or retraining occurred.
+
+## Fourier-I/O on Ada and Blackwell — September 26
+
+Test whether the A100 improvement transfers to different FFT/launch-cost
+regimes. The same checkpoint and native spectral predictor were compared with
+the preceding cuFFTDx candidate on local NVIDIA RTX 6000 Ada Generation and
+personal Modal NVIDIA RTX PRO 6000 Blackwell Server Edition. Each GPU completed
+52 full batch-one timings and 20 method/family outputs: three repeats of
+M1/M2/old/new plus one M6 reference per family, with unchanged N1024, dt0.01,
+four GL2 iterations, padding2 and T20/200. Raw results:
+`outputs/fourier_io_20260926/{ada,blackwell}_full/`.
+
+| GPU | Family | Previous candidate (s) | Fourier-I/O candidate (s) | Reduction | M2 (s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ada | Stokes | 3.3305 | 2.7027 | 18.85% | 4.0400 |
+| Ada | Tanaka | 33.2527 | 26.8563 | 19.24% | 40.4794 |
+| Ada | Benjamin–Feir | 33.2466 | 26.8504 | 19.24% | 40.4964 |
+| Ada | JONSWAP/TMA | 3.3435 | 2.7123 | 18.88% | 4.0531 |
+| Blackwell | Stokes | 4.6275 | 3.8742 | 16.28% | 5.1547 |
+| Blackwell | Tanaka | 46.1090 | 38.3365 | 16.86% | 51.5008 |
+| Blackwell | Benjamin–Feir | 46.0721 | 38.2877 | 16.90% | 51.4931 |
+| Blackwell | JONSWAP/TMA | 4.6347 | 3.8701 | 16.50% | 5.1616 |
+
+New-candidate runtime is 33.08–33.70% below paired M2 on Ada and 24.84–25.65%
+below M2 on Blackwell. All 40 outputs are finite with positive depth; maximum
+cached-M6 surface discrepancy is 5.08e-12. Each GPU passes 24 native checks,
+including spectral G1 endpoint tests, and the 48-state comparison against the
+current optimized candidate: maximum relative DNO differences 2.71e-7 on Ada
+and 2.72e-7 on Blackwell. Zero xi gives exact zero.
+
+These checks do not establish identical rollout accuracy. Benjamin–Feir
+terminal surface error changes from 1.05056% to 1.05243% on Ada and from
+0.84077% to 0.94704% on Blackwell. The latter trajectory error changes from
+0.39649% to 0.41007%. These are single-case errors of unchanged timing weights,
+not aggregate accuracy of the paper model. Keep the benchmark-only execution
+improvement while retaining these observed rounding-sensitive differences.
+
+Blackwell ran 20:58–21:25 (00:27); Ada ran 21:09–21:30 (00:21), after GPU0 became
+idle. Sam's jobs and GPU1 were untouched. No retraining or production edits.
+Figure12 was rendered and visually checked at 21:31: all twelve candidate lines
+and savings updated, existing PyTorch overlays preserved, fresh M1/M2 times
+used on every GPU. Ada/Blackwell retain preceding same-device M3–M6 timings;
+A10080GB retains only its fresh M1/M2/M6 results. Ruff/Pyright pass.
+
+## Three-GPU forward rooflines — September 26
+
+[Figure13 PNG](../paper-plots/figures/13-model-roofline.png) /
+[PDF](../paper-plots/figures/13-model-roofline.pdf). This profiles native batch-one
+N1024 model forwards, not the integrator: the Fourier candidate, its previous
+physical-I/O implementation, and the trained small/full models. No training or
+production changes. Raw data: `outputs/model_roofline_20260926/`.
+
+Clean synchronized latency uses 400 calls after compilation and 50 warm-ups;
+20 separate JAX-traced calls provide the lower panels. All twelve forward
+checks pass, with maximum relative discrepancy 1.21e-7. Clean medians in µs:
+
+| Forward | A100 80GB | Blackwell | Ada |
+| --- | ---: | ---: | ---: |
+| Fourier candidate | 398.18 | 254.24 | 160.26 |
+| Previous candidate | 333.48 | 204.26 | 154.68 |
+| Small | 907.13 | 668.80 | 465.42 |
+| Full | 1038.24 | 740.11 | 504.54 |
+
+The native interfaces differ: the previous standalone forward excludes the
+integrator's spectral adapters. Its lower standalone latency therefore does
+not contradict the full-rollout improvements in Figure12.
+
+Eight successful Nsight Compute captures on A100/Blackwell contain 527 kernels.
+For each precision independently, Figure13 plots summed FLOPs divided by summed
+DRAM bytes, versus summed FLOPs divided by summed kernel time, selecting kernels
+with positive work in that precision. Scalar add/multiply count once, FMA twice;
+the TF32 counter already counts operations. These are not three additive shares
+of whole-pass throughput: mixed kernels can participate in multiple groups.
+Integer and transcendental instructions are not included in the FLOP totals.
+
+Counters use kernel replay with cache/clock control disabled, not compiler
+traffic estimates or unprofiled whole-pass timing. Initial application replay
+failed because independently compiled JAX kernel sets differed. Kernel replay
+worked; initial A100 Fourier and Blackwell full pre-capture crashes succeeded
+on fresh retries with unchanged settings. Failed logs remain in the original
+directories; successful reports are in `a100_counters_retry/`,
+`a100_fourier_retry/`, and `blackwell_full_retry/` as applicable. CSVs are also
+placed beside their models' clean measurements for the analyzer. Independent
+compilations can have different kernel counts; replay and trace are separate.
+
+Ada clean timings and traces completed on GPU0. Hardware-counter capture is
+blocked by `ERR_NVGPUCTRPERM` (`RmProfilingAdminOnly: 1`); its upper panel has no
+estimated replacement points. Administrator-run collection remains necessary.
+Sam's GPU1 jobs were untouched. Cloud profiling ran 21:13–21:29 with retries;
+local profiling completed 21:30–21:31. All profiling jobs have exited.
+
+TF32 Tensor Core operations are already present. The Fourier candidate's FP64
+FFT/G1 component is 20.95µs on A100 (23.2% of traced GPU busy time), 53.21µs on
+Blackwell (62.5%), and 36.05µs on Ada (51.9%). Dense GEMMs are not its largest
+component. Low roofline points alone do not establish a memory bottleneck:
+launch overhead, limited parallelism, and uncounted work also matter.
+
+The sloped ceiling is bandwidth times arithmetic intensity; the horizontal
+ceiling is the corresponding published compute peak. Reference values come
+from NVIDIA's [A100 specifications](https://www.nvidia.com/en-us/data-center/a100/),
+[RTX PRO 6000 Server specifications](https://www.nvidia.com/en-us/data-center/rtx-pro-6000-blackwell-server-edition/),
+and [Ada whitepaper](https://images.nvidia.com/aem-dam/en-zz/Solutions/technologies/NVIDIA-ADA-GPU-PROVIZ-Architecture-Whitepaper_1.1.pdf).
+Ada/Blackwell scalar FP64 reference ceilings use FP32/64. Replay/cache behavior
+follows the [Nsight Compute guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/).
+KEEP measured profiling/analysis and Figure13; Ada counters remain incomplete.

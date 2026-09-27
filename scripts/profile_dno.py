@@ -7,16 +7,15 @@ nsys --capture-range=cudaProfilerApi (ncu: --profile-from-start off).
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_right
 from collections import defaultdict
 from contextlib import suppress
+import csv
 import ctypes
 import gzip
 import importlib.metadata
 import json
 import os
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import time
@@ -31,78 +30,59 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
+from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
 from solver.evals.model_rollout import build_predict_gxi_batched, load_run  # noqa: E402
 
 
-def summarize_trace(path: Path) -> dict[str, Any]:
-    """Summarize single-stream GPU events, assigning calls by CUDA launch/NVTX correlation."""
-    with sqlite3.connect(path) as connection:
-        calls = connection.execute("""
-            SELECT n.start,n.end,n.globalTid FROM NVTX_EVENTS n
-            JOIN StringIds s ON n.textId=s.id WHERE s.value LIKE 'XlaModule:%'
-            ORDER BY n.start
-        """).fetchall()
-        events = connection.execute("""
-            SELECT k.start,k.end,s.value,r.start,r.globalTid,k.gridX*k.gridY*k.gridZ
-            FROM CUPTI_ACTIVITY_KIND_KERNEL k JOIN StringIds s ON k.demangledName=s.id
-            JOIN CUPTI_ACTIVITY_KIND_RUNTIME r ON k.correlationId=r.correlationId
-            UNION ALL
-            SELECT k.start,k.end,'Device copy',r.start,r.globalTid,0
-            FROM CUPTI_ACTIVITY_KIND_MEMCPY k JOIN CUPTI_ACTIVITY_KIND_RUNTIME r
-            ON k.correlationId=r.correlationId ORDER BY 1
-        """).fetchall()
-        gpu = connection.execute("""
-            SELECT name,smCount,l2CacheSize,memoryBandwidth FROM TARGET_INFO_GPU WHERE id=0
-        """).fetchone()
-        streams = connection.execute("SELECT COUNT(DISTINCT streamId) FROM CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
-    if streams != 1:
-        raise ValueError("This diagnostic assumes one compute stream; summed times would double-count overlap.")
-    starts = [call[0] for call in calls]
-    by_call: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
-    categories: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
-    kernels: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, float("inf"), 0.0])
-    for start, end, name, launch, thread, blocks in events:
-        index = bisect_right(starts, launch) - 1
-        if index < 0 or launch > calls[index][1] or thread != calls[index][2]:
-            raise ValueError("GPU event has no enclosing profiled call")
-        category = "Other kernels"
-        if "fft" in name or "scal_kernel" in name:
-            category = "FP64 FFTs + scaling" if "double" in name else "FP32 FFTs + scaling"
-        elif "gemm" in name:
-            category = "Dense matrix multiplies"
-        elif name == "Device copy":
-            category = "Device copies"
-        by_call[index].append((start, end, category))
-        categories[category][0] += 1
-        categories[category][1] += (end - start) / 1000
-        kernels[name][0] += 1
-        kernels[name][1] += (end - start) / 1000
-        kernels[name][2] = min(kernels[name][2], blocks)
-        kernels[name][3] = max(kernels[name][3], blocks)
-    spans, busy = [], []
-    for intervals in by_call.values():
-        spans.append((intervals[-1][1] - intervals[0][0]) / 1000)
-        covered, previous_end = 0, intervals[0][0]
-        for start, end, _ in intervals:
-            covered += max(0, end - max(start, previous_end))
-            previous_end = max(previous_end, end)
-        busy.append(covered / 1000)
-    representative = int(np.argsort(spans)[len(spans) // 2])
-    origin = by_call[representative][0][0]
-    return {
-        "calls": len(calls), "gpu": dict(zip(("name", "sms", "l2_bytes", "bandwidth_bytes_s"), gpu)),
-        "trace_span_median_us": float(np.median(spans)),
-        "trace_busy_median_us": float(np.median(busy)),
-        "trace_gap_median_us": float(np.median(np.asarray(spans) - busy)),
-        "categories": {name: {"count_per_call": count / len(calls), "us_per_call": duration / len(calls)}
-                       for name, (count, duration) in categories.items()},
-        "kernels": {name: {"count_per_call": count / len(calls), "us_per_call": duration / len(calls),
-                            "mean_us": duration / count, "min_blocks": low, "max_blocks": high}
-                    for name, (count, duration, low, high) in kernels.items()},
-        "timeline": [[(start - origin) / 1000, (end - start) / 1000, category]
-                     for start, end, category in by_call[representative]],
-        "caveat": "Kernel/copy times are traced GPU execution; trace gaps include profiler overhead, not just application overhead.",
+def summarize_jax_trace(path: Path, names: set[str]) -> dict[str, Any]:
+    """Summarize GPU events inside synchronized, named JAX workloads."""
+    with gzip.open(path, "rt") as stream:
+        events = json.load(stream)["traceEvents"]
+    processes = {e["pid"]: e.get("args", {}).get("name", "") for e in events if e.get("name") == "process_name"}
+    threads = {(e["pid"], e["tid"]): e.get("args", {}).get("name", "")
+               for e in events if e.get("name") == "thread_name"}
+    gpu_events = [e for e in events if e.get("ph") == "X" and "GPU" in processes.get(e["pid"], "")
+                  and "Stream" in threads.get((e["pid"], e["tid"]), "")]
+    scopes = [e for e in events if e.get("ph") == "X" and e.get("name") in names]
+    summary: dict[str, Any] = {
+        "gpu_events": len(gpu_events), "processes": processes, "threads": list(threads.values()), "scopes": {},
     }
+    for scope in scopes:
+        name, start, end = scope["name"], scope["ts"], scope["ts"] + scope["dur"]
+        selected = sorted((e for e in gpu_events if start <= e["ts"] < end), key=lambda e: e["ts"])
+        categories, kernels = defaultdict(lambda: [0, 0.0]), defaultdict(lambda: [0, 0.0])
+        busy, previous_end = 0.0, start
+        for event in selected:
+            kernel, duration = event["name"], event["dur"]
+            kind = "Other kernels"
+            if "sandwich_kernel" in kernel:
+                kind = "FP64 cuFFTDx G1"
+            elif "fft" in kernel.lower() or "scal_kernel" in kernel:
+                kind = "FP64 FFTs" if "double" in kernel else "FP32 FFTs"
+            elif "gemm" in kernel or "matmul" in kernel:
+                kind = "Dense GEMMs"
+            elif "Memcpy" in kernel:
+                kind = "Device copies"
+            categories[kind][0] += 1
+            categories[kind][1] += duration
+            kernels[kernel][0] += 1
+            kernels[kernel][1] += duration
+            busy += max(0.0, event["ts"] + duration - max(event["ts"], previous_end))
+            previous_end = max(previous_end, event["ts"] + duration)
+        span = previous_end - selected[0]["ts"] if selected else 0.0
+        kernel_names = list(kernels)
+        api = defaultdict(lambda: [0, 0.0])
+        for event in events:
+            if event.get("ph") == "X" and start <= event["ts"] < end and event["name"].startswith(("cu", "cuda")):
+                api[event["name"]][0] += 1
+                api[event["name"]][1] += event["dur"]
+        summary["scopes"][name] = {
+            "host_scope_us": scope["dur"], "gpu_span_us": span, "gpu_busy_us": busy, "gpu_gap_us": span - busy,
+            "categories_count_us": dict(categories), "kernels_count_us": dict(kernels),
+            "cuda_api_count_us": dict(api), "kernel_names": kernel_names,
+            "events_us_kernel": [[e["ts"] - start, e["dur"], kernel_names.index(e["name"])] for e in selected],
+        }
+    return summary
 
 
 if __name__ == "__main__":
@@ -110,69 +90,174 @@ if __name__ == "__main__":
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_profile_20260924")
     parser.add_argument("--depth-mode", choices=("fixed", "dynamic"), default="fixed")
+    parser.add_argument("--variant", choices=("original", "cufftdx", "fourier_round"), default="original")
     parser.add_argument("--capture", type=int, default=0, help="Capture this many warmed calls instead of benchmarking.")
+    parser.add_argument("--trace", type=int, default=0, help="Trace this many native forwards after clean timing.")
     parser.add_argument("--repeats", type=int, default=200)
-    parser.add_argument("--analyze", action="store_true", help="Summarize existing SQLite traces and draw an estimated roofline (no GPU work).")
+    parser.add_argument("--analyze", action="store_true", help="Plot measured rooflines and forward traces from the hardware/model result tree (no GPU work).")
     parser.add_argument("--hardware-diagnosis", action="store_true", help="Compare dispatch, dependent execution, and 16 real GL2 steps with an annotated GPU trace.")
     args = parser.parse_args()
-    if args.capture < 0 or args.repeats < 1:
-        parser.error("capture must be nonnegative and repeats positive")
+    if args.capture < 0 or args.trace < 0 or args.repeats < 1:
+        parser.error("capture and trace must be nonnegative and repeats positive")
+    if args.capture and args.trace:
+        parser.error("capture and trace must run separately")
+    if args.variant != "original" and args.depth_mode != "fixed":
+        parser.error("optimized variants require fixed depth")
     if args.analyze:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
 
-        forward = summarize_trace(args.output / "forward.sqlite")
-        comparison = summarize_trace(args.output / "branches16/forward.sqlite")
-        benchmarks = [json.loads(path.read_text()) for path in
-                      (args.output / "fixed.json", args.output / "branches16/fixed.json")]
-        analysis = {"forward": forward, "branches16_forward": comparison}
+        models = dict(zip(("candidate_fourier", "candidate_previous", "small", "full"),
+                          (("Fourier candidate", "o"), ("Previous candidate", "s"),
+                           ("Neural — small", "^"), ("Neural — full", "D"))))
+        hardware = {
+            "a100": ("A100 80 GB", (19.5, 9.7, 156.0), 2039),
+            "blackwell": ("RTX PRO 6000 Blackwell", (120.0, 120.0 / 64, 234.0), 1597),
+            "ada": ("RTX 6000 Ada", (91.1, 91.1 / 64, 182.1), 960),
+        }
+        precision_colors = dict(zip(("Scalar FP32", "Scalar FP64", "TF32 tensor"),
+                                    ("#277da8", "#bb5548", "#589365")))
+        categories = dict(zip(("FP64 cuFFTDx G1", "FP64 FFTs", "FP32 FFTs", "Dense GEMMs", "Other kernels", "Device copies"),
+                              ("#c78450", "#bb5548", "#277da8", "#589365", "#909ba3", "#b9a336")))
+        analysis = {
+            "scope": "Native batch-one forward passes; no time integration.",
+            "roofline_definition": "Each precision independently aggregates kernels with positive work: sum(FLOPs)/sum(DRAM bytes), sum(FLOPs)/sum(kernel seconds). Mixed kernels may appear in multiple groups; groups are not additive.",
+            "ceilings": "Published dense peak references, not measured sustained performance. Ada/Blackwell scalar FP64 is derived as FP32/64.",
+            "work_definition": "Executed scalar add+multiply+2*FMA instructions; tensor counter already counts operations. Transcendentals and integer instructions are excluded.",
+            "counter_collection": "Nsight Compute kernel replay; cache-control none; clock-control none. Traffic and duration are replay measurements, not exact unprofiled whole-pass traffic. Clean forward latency and JAX kernel traces are separate measurements.",
+            "interpretation": "Distance below a roof alone does not identify a whole-pass memory bottleneck; launch overhead and uncounted transcendental work also matter.",
+            "hardware": {},
+        }
+        fig, axes = plt.subplots(2, 3, figsize=(17, 9), gridspec_kw={"height_ratios": (3, 2)})
+        fig.subplots_adjust(left=0.10, right=0.985, top=0.80, bottom=0.15, hspace=0.55, wspace=0.40)
+        intensity = np.logspace(-2, 7, 400)
+        measured_intensities = []
+        for column, (gpu, (gpu_label, peaks, bandwidth)) in enumerate(hardware.items()):
+            roof, breakdown = axes[:, column]
+            gpu_report: dict[str, Any] = {"label": gpu_label, "peak_tflops": dict(zip(precision_colors, peaks)),
+                                        "bandwidth_gbytes_s": bandwidth, "models": {}}
+            analysis["hardware"][gpu] = gpu_report
+            permission_denied = any("ERR_NVGPUCTRPERM" in path.read_text()
+                                    for path in (args.output / gpu).glob("*/counter_capture.log"))
+            points = 0
+            for precision, peak in zip(precision_colors, peaks):
+                roof.loglog(intensity, np.minimum(peak, bandwidth * intensity / 1000),
+                            color=precision_colors[precision], linewidth=1.1, alpha=0.65)
+            for index, (model, (label, marker)) in enumerate(models.items()):
+                directory = args.output / gpu / model
+                if not (directory / "fixed.json").exists():
+                    gpu_report["models"][model] = {"status": "forward measurements unavailable"}
+                    continue
+                timing = json.loads((directory / "fixed.json").read_text())
+                record: dict[str, Any] = {
+                    "label": label, "device": timing["device"], "variant": timing["variant"],
+                    "input_space": timing["input_space"], "output_space": timing["output_space"],
+                    "clean_forward_median_us": timing["median_us"], "validation_relative_error": timing["wrapper_relative_error"],
+                    "counters_status": "unavailable", "kernels": [], "precision_groups": {},
+                }
+                gpu_report["models"][model] = record
+                trace_path = directory / "forward_trace.json"
+                if trace_path.exists():
+                    trace = json.loads(trace_path.read_text())
+                    scope, calls = trace["scopes"]["forward"], trace["traced_calls"]
+                    record["traced_gpu_busy_us"] = scope["gpu_busy_us"] / calls
+                    record["traced_categories"] = {
+                        name: {"count_per_call": count / calls, "us_per_call": duration / calls}
+                        for name, (count, duration) in scope["categories_count_us"].items()
+                    }
+                    left = 0.0
+                    for name, color in categories.items():
+                        duration = record["traced_categories"].get(name, {}).get("us_per_call", 0.0)
+                        breakdown.barh(index, duration, left=left, color=color, height=0.60)
+                        left += duration
+                csv_path = directory / "counters.csv"
+                if not csv_path.exists():
+                    record["counters_reason"] = ("GPU counter access denied (ERR_NVGPUCTRPERM); administrator permission required."
+                                                 if permission_denied else "No hardware-counter CSV; no estimated traffic substituted.")
+                    continue
+                lines = csv_path.read_text().splitlines()
+                header = next((i for i, line in enumerate(lines) if line.startswith('"ID",')), None)
+                if header is None:
+                    record["counters_reason"] = "Counter collection did not produce a metric table."
+                    continue
+                launches: dict[str, Any] = {}
+                rows = csv.DictReader(lines[header:])
+                units = next(rows)
+                metric_names = ("gpu__time_duration.sum", "lts__t_bytes.sum", "sm__ops_path_tensor_src_tf32_dst_fp32.sum",
+                                *(f"smsp__sass_thread_inst_executed_op_{op}_pred_on.sum"
+                                  for op in ("fadd", "fmul", "ffma", "dadd", "dmul", "dfma")),
+                                *(name for name in ("dram__bytes.sum", "dram__bytes_read.sum", "dram__bytes_write.sum") if name in units))
+                for row in rows:
+                    launches[row["ID"]] = {"name": row["Kernel Name"], "metrics": {
+                        name: {"value": float(row[name].replace(",", "")), "unit": units[name]}
+                        for name in metric_names
+                    }}
+                for identifier, kernel in launches.items():
+                    values = {name: item["value"] for name, item in kernel["metrics"].items()}
+                    duration = kernel["metrics"]["gpu__time_duration.sum"]
+                    seconds = duration["value"] * {"s": 1, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}[duration["unit"]]
+                    traffic = values["dram__bytes.sum"] if "dram__bytes.sum" in values else values["dram__bytes_read.sum"] + values["dram__bytes_write.sum"]
+                    work = {}
+                    for precision, prefix in (("Scalar FP32", "f"), ("Scalar FP64", "d")):
+                        work[precision] = sum(factor * values[f"smsp__sass_thread_inst_executed_op_{prefix}{op}_pred_on.sum"]
+                                              for op, factor in (("add", 1), ("mul", 1), ("fma", 2)))
+                    work["TF32 tensor"] = values["sm__ops_path_tensor_src_tf32_dst_fp32.sum"]
+                    record["kernels"].append(dict(kernel, id=identifier, duration_s=seconds, dram_bytes=traffic,
+                                                   l2_bytes=values["lts__t_bytes.sum"], flops=work))
+                record["counters_status"] = "available" if launches else "empty"
+                record["kernel_count"] = len(launches)
+                for precision, color in precision_colors.items():
+                    selected = [k for k in record["kernels"] if k["flops"][precision] > 0]
+                    work = sum(k["flops"][precision] for k in selected)
+                    traffic = sum(k["dram_bytes"] for k in selected)
+                    seconds = sum(k["duration_s"] for k in selected)
+                    group: dict[str, Any] = {"kernel_count": len(selected), "flops": work, "dram_bytes": traffic,
+                                             "l2_bytes": sum(k["l2_bytes"] for k in selected), "duration_s": seconds}
+                    record["precision_groups"][precision] = group
+                    if not work or not traffic or not seconds:
+                        group["omitted_reason"] = "No positive work, DRAM bytes, or kernel duration; intensity is undefined."
+                        continue
+                    group.update(intensity_flop_per_dram_byte=work / traffic, tflops=work / seconds / 1e12)
+                    roof.scatter(work / traffic, work / seconds / 1e12, marker=marker, s=65,
+                                 facecolors="none" if marker == "s" else color,
+                                 edgecolors=color if marker == "s" else "white",
+                                 linewidths=1.3 if marker == "s" else 0.5, zorder=3)
+                    measured_intensities.append(work / traffic)
+                    points += 1
+            roof.set(title=gpu_label, xlabel="FLOP / DRAM byte", ylabel="TFLOP/s", xlim=(1e-2, 1e7), ylim=(1e-4, 400))
+            roof.grid(alpha=0.16, which="major")
+            if not points:
+                roof.text(0.5, 0.35, "Hardware counters unavailable" + ("\nPermission denied" if permission_denied else ""), transform=roof.transAxes,
+                          ha="center", va="center", fontsize=12, bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.9})
+            breakdown.set(yticks=range(len(models)), yticklabels=[v[0] for v in models.values()],
+                          xlabel="Traced GPU time per forward (µs)", ylim=(len(models) - 0.4, -0.6))
+            breakdown.grid(axis="x", alpha=0.16)
+            breakdown.set_axisbelow(True)
+            for ax in (roof, breakdown):
+                ax.spines[["top", "right"]].set_visible(False)
+        left_limit = 10 ** np.floor(np.log10(min([0.1, *measured_intensities])))
+        right_limit = 10 ** np.ceil(np.log10(max([1000, *measured_intensities])))
+        for roof in axes[0]:
+            roof.set_xlim(left_limit, right_limit)
+        maximum_time = max(sum(c["us_per_call"] for c in model.get("traced_categories", {}).values())
+                           for gpu in analysis["hardware"].values() for model in gpu["models"].values())
+        for breakdown in axes[1]:
+            breakdown.set_xlim(0, 1.05 * maximum_time)
+        fig.suptitle("Model forward-pass rooflines", fontsize=23, y=0.98)
+        fig.legend(handles=[Line2D([], [], color=color, label=name, linewidth=2) for name, color in precision_colors.items()],
+                   loc="upper center", bbox_to_anchor=(0.5, 0.935), ncol=3, frameon=False)
+        fig.legend(handles=[Line2D([], [], color="#555555", marker=marker, linestyle="none", label=label,
+                                   markerfacecolor="none" if marker == "s" else "#555555")
+                            for label, marker in models.values()], loc="upper center", bbox_to_anchor=(0.5, 0.89), ncol=4, frameon=False)
+        fig.legend(handles=[Patch(color=color, label=name) for name, color in categories.items()],
+                   loc="lower center", bbox_to_anchor=(0.5, 0.025), ncol=3, frameon=False)
         (args.output / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
-        colors = dict(zip(("FP32 FFTs + scaling", "FP64 FFTs + scaling", "Other kernels",
-                           "Dense matrix multiplies", "Device copies"),
-                          ("#277da8", "#bb5548", "#909ba3", "#589365", "#b98b36")))
-        fig = plt.figure(figsize=(12, 7), layout="constrained")
-        grid = fig.add_gridspec(2, 2, height_ratios=(3, 1))
-        breakdown = fig.add_subplot(grid[0, 0])
-        roofline = fig.add_subplot(grid[0, 1])
-        timeline = fig.add_subplot(grid[1, :])
-        groups = sorted(forward["categories"], key=lambda key: forward["categories"][key]["us_per_call"], reverse=True)
-        values = [forward["categories"][key]["us_per_call"] for key in groups]
-        breakdown.barh(groups, values, color=[colors[key] for key in groups])
-        breakdown.invert_yaxis()
-        breakdown.set(xlabel="GPU execution per forward pass (µs)", xlim=(0, max(values) * 1.35),
-                      title="Measured: FFT work dominates GPU time")
-        for index, value in enumerate(values):
-            breakdown.text(value + 1, index, f"{value:.1f} µs", va="center", fontsize=10)
-        intensity = np.logspace(-1, 3, 300)
-        bandwidth = forward["gpu"]["bandwidth_bytes_s"]
-        # NVIDIA's published CUDA-core FP32 peak; not a mixed-precision/tensor-core roof.
-        roofline.loglog(intensity, np.minimum(91.1e12, bandwidth * intensity) / 1e12,
-                       color="#444444", label="FP32 / DRAM reference ceiling")
-        for benchmark, color, offset in zip(benchmarks, ("#277da8", "#589365"), ((8, -16), (8, 8))):
-            cost = benchmark["xla_cost_estimate"]
-            x = cost["flops"] / cost["bytes accessed"]
-            y = cost["flops"] / benchmark["median_us"] / 1e6
-            roofline.scatter(x, y, color=color, s=65, zorder=3)
-            roofline.annotate(f"{benchmark['parameters']:,} parameters\n{benchmark['median_us']:.0f} µs",
-                             (x, y), xytext=offset, textcoords="offset points", fontsize=9)
-        roofline.set(xlabel="Estimated intensity (XLA FLOP / compiler-counted byte)",
-                     ylabel="Estimated work / measured time (TFLOP/s)", ylim=(0.05, 200),
-                     title="Estimated roofline — hardware counters unavailable")
-        roofline.legend(loc="upper left", fontsize=8, frameon=False)
-        roofline.grid(alpha=0.2, which="both")
-        for start, duration, category in forward["timeline"]:
-            timeline.broken_barh([(start, duration)], (0, 1), facecolors=colors[category])
-        timeline.set(ylim=(0, 1), yticks=[], xlabel="Time from first GPU operation (µs)",
-                     title="One profiled forward pass: white gaps have no captured GPU work")
-        timeline.set_xlim(0, forward["timeline"][-1][0] + forward["timeline"][-1][1])
-        fig.suptitle("DNO forward pass · one sample · 1,024 grid points · RTX 6000 Ada", fontsize=15)
-        fig.supxlabel("Roofline uses static estimates, not measured DRAM traffic. Mixed precision; FP32 ceiling is a reference only.\n"
-                      "Kernel traces include profiler overhead; clean forward latency is measured separately.", fontsize=9)
         for suffix in ("png", "pdf"):
-            fig.savefig(args.output / f"roofline.{suffix}", dpi=180)
-        print(json.dumps({key: {field: value for field, value in result.items() if field not in ("kernels", "timeline")}
-                          for key, result in analysis.items()}, indent=2))
+            fig.savefig(ROOT / "paper-plots/figures" / f"13-model-roofline.{suffix}", dpi=180)
+        print(f"Saved measured forward analysis to {args.output / 'analysis.json'}", flush=True)
         raise SystemExit(0)
     loaded = load_run(args.run)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
@@ -183,7 +268,6 @@ if __name__ == "__main__":
         xi = jnp.asarray(saved["truth_xi"][0, :1], dtype=jnp.float64)
         depth = jnp.log(jnp.asarray(saved["depths"][:1], dtype=jnp.float64))
     if args.hardware_diagnosis:
-        from scripts.benchmark_dno_fusion import build_variant
         from solver.evals.model_rollout import rollout_surrogate
         from solver.solvers import time_integrator as ti
 
@@ -279,56 +363,18 @@ if __name__ == "__main__":
                   "scope": "Standalone and synthetic dependent forwards plus 16 actual GL2 steps; not full-rollout timings."}
         (args.output / "hardware.json").write_text(json.dumps(report, indent=2) + "\n")
         trace_path = next((args.output / "trace").rglob("*.trace.json.gz"))
-        with gzip.open(trace_path, "rt") as stream:
-            events = json.load(stream)["traceEvents"]
-        processes = {e["pid"]: e.get("args", {}).get("name", "") for e in events if e.get("name") == "process_name"}
-        threads = {(e["pid"], e["tid"]): e.get("args", {}).get("name", "")
-                   for e in events if e.get("name") == "thread_name"}
-        gpu_events = [e for e in events if e.get("ph") == "X" and "GPU" in processes.get(e["pid"], "")
-                      and "Stream" in threads.get((e["pid"], e["tid"]), "")]
-        scopes = [e for e in events if e.get("ph") == "X" and e.get("name") in compiled]
-        summary = {"gpu_events": len(gpu_events), "processes": processes, "threads": list(threads.values()), "scopes": {}}
-        for scope in scopes:
-            name, start, end = scope["name"], scope["ts"], scope["ts"] + scope["dur"]
-            selected = sorted((e for e in gpu_events if start <= e["ts"] < end), key=lambda e: e["ts"])
-            categories, kernels = defaultdict(lambda: [0, 0.0]), defaultdict(lambda: [0, 0.0])
-            busy, previous_end = 0.0, start
-            for event in selected:
-                kernel, duration = event["name"], event["dur"]
-                kind = "Other kernels"
-                if "sandwich_kernel" in kernel:
-                    kind = "FP64 cuFFTDx G1"
-                elif "fft" in kernel.lower() or "scal_kernel" in kernel:
-                    kind = "FP64 FFTs" if "double" in kernel else "FP32 FFTs"
-                elif "gemm" in kernel or "matmul" in kernel:
-                    kind = "Dense GEMMs"
-                elif "Memcpy" in kernel:
-                    kind = "Device copies"
-                categories[kind][0] += 1
-                categories[kind][1] += duration
-                kernels[kernel][0] += 1
-                kernels[kernel][1] += duration
-                busy += max(0.0, event["ts"] + duration - max(event["ts"], previous_end))
-                previous_end = max(previous_end, event["ts"] + duration)
-            span = previous_end - selected[0]["ts"] if selected else 0.0
-            kernel_names = list(kernels)
-            api = defaultdict(lambda: [0, 0.0])
-            for event in events:
-                if event.get("ph") == "X" and start <= event["ts"] < end and event["name"].startswith(("cu", "cuda")):
-                    api[event["name"]][0] += 1
-                    api[event["name"]][1] += event["dur"]
-            summary["scopes"][name] = {"host_scope_us": scope["dur"], "gpu_span_us": span,
-                                        "gpu_busy_us": busy, "gpu_gap_us": span - busy,
-                                        "categories_count_us": dict(categories), "kernels_count_us": dict(kernels),
-                                        "cuda_api_count_us": dict(api), "kernel_names": kernel_names,
-                                        "events_us_kernel": [[e["ts"] - start, e["dur"], kernel_names.index(e["name"])] for e in selected]}
+        summary = summarize_jax_trace(trace_path, set(compiled))
         (args.output / "hardware_trace.json").write_text(json.dumps(summary, indent=2) + "\n")
-        print(f"Saved {len(gpu_events)} GPU events in {len(scopes)} annotated workloads", flush=True)
+        print(f"Saved {summary['gpu_events']} GPU events in {len(summary['scopes'])} annotated workloads", flush=True)
         raise SystemExit(0)
     predict = build_predict_gxi_batched(loaded)
     # Rollouts hold depth fixed: its multiplier MLPs can be constant-folded.
     function = jax.jit((lambda eta, xi: predict(eta, xi, depth)) if args.depth_mode == "fixed" else predict)
     inputs = (eta, xi) if args.depth_mode == "fixed" else (eta, xi, depth)
+    if args.variant != "original":
+        function = build_variant(loaded, depth, eta.shape[-1], args.variant)
+        if args.variant == "fourier_round":
+            inputs = (jnp.fft.rfft(eta), jnp.fft.rfft(xi))
     label = args.depth_mode
     jax.block_until_ready(inputs)
     started = time.perf_counter()
@@ -337,7 +383,11 @@ if __name__ == "__main__":
     for _ in range(50):
         jax.block_until_ready(executable(*inputs))
     actual = jax.block_until_ready(executable(*inputs))
-    reference = predict(eta, xi, depth).block_until_ready()
+    if args.variant == "fourier_round":
+        actual = jnp.fft.irfft(actual, n=eta.shape[-1])
+        reference = build_variant(loaded, depth, eta.shape[-1], "cufftdx")(eta, xi).block_until_ready()
+    else:
+        reference = predict(eta, xi, depth).block_until_ready()
     relative_error = float(jnp.linalg.norm(actual - reference) / jnp.linalg.norm(reference))
     if not all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(actual)) or relative_error > 1e-5:
         raise RuntimeError(f"Profile wrapper changed the prediction: relative error {relative_error}")
@@ -363,6 +413,9 @@ if __name__ == "__main__":
             "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
             "device": jax.devices()[0].device_kind, "jax_version": jax.__version__,
             "batch_size": 1, "nx": eta.shape[-1], "depth_mode": args.depth_mode,
+            "variant": args.variant,
+            "input_space": "unnormalized rFFT" if args.variant == "fourier_round" else "physical",
+            "output_space": "unnormalized rFFT" if args.variant == "fourier_round" else "physical",
             "workload": "one DNO forward pass; no time integrator",
             "compile_s": compile_s, "seconds": durations,
             "median_us": float(np.median(durations) * 1e6),
@@ -376,3 +429,11 @@ if __name__ == "__main__":
         (args.output / f"{label}.json").write_text(json.dumps(report, indent=2) + "\n")
         (args.output / f"{label}.hlo").write_text(executable.as_text())
         print(json.dumps({key: value for key, value in report.items() if key != "seconds"}, indent=2), flush=True)
+        if args.trace:
+            with jax.profiler.trace(str(args.output / "trace")):
+                with jax.profiler.TraceAnnotation("forward"):
+                    for _ in range(args.trace):
+                        jax.block_until_ready(executable(*inputs))
+            summary = summarize_jax_trace(next((args.output / "trace").rglob("*.trace.json.gz")), {"forward"})
+            summary.update(variant=args.variant, traced_calls=args.trace)
+            (args.output / "forward_trace.json").write_text(json.dumps(summary, indent=2) + "\n")

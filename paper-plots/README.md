@@ -189,27 +189,31 @@ candidate line and its slowdown annotations have been removed; its measured
 results remain in the experiment records below. No candidate accuracy
 coordinate is assigned.
 
-The A100 line uses the Fourier-output candidate `fourier_round_spectral_all`
-from `outputs/fourier_io_20260926/a100_full/rollouts.json`. Its annotations compare
+All three candidate lines use the Fourier-output candidate `fourier_round_spectral_all`
+from `outputs/fourier_io_20260926/{ada,blackwell,a100}_full/rollouts.json`. Their annotations compare
 three-repeat full-rollout medians against `fused_cufftdx_spectral_all` in the same
 run. The candidate preserves physical-space FP32 input rounding, returns the
 learned correction and G0 directly in Fourier space, and uses a spectral-output
-cuFFTDx G1 kernel. Ada and Blackwell are unchanged. This A100 allocation is the
+cuFFTDx G1 kernel. Runtime decreases by 18.85–19.24% on Ada, 16.28–16.90% on
+Blackwell, and 19.86–20.39% on A100. The A100 allocation is the
 80GB SXM4 variant, so the entire A100 row uses only this run: three repeats for
 M1/M2 and both candidates, and one M6 reference rollout per family. Unmeasured
 M3–M5 are omitted; earlier 40GB A100 timings are not mixed into the new row.
 
-Each baseline-replacement comparison uses three full batch-one rollouts of
-M1, M2, the previous candidate and the shared-baseline candidate, plus one M6
+Ada and Blackwell M1/M2 medians are updated from their paired runs; M3–M6 retain
+the preceding three-repeat measurements on the same respective hardware.
+
+Each Fourier-I/O comparison uses three full batch-one rollouts of
+M1, M2, the previous candidate and the Fourier-output candidate, plus one M6
 trajectory for accuracy checks. Horizons are T=20 for
 Stokes/JONSWAP and T=200 for Tanaka/Benjamin–Feir, with dt=0.01 and four GL2
 iterations. Compilation, setup, warm-up and host transfers are excluded.
 The checkpoint, learned-branch precision and integration settings are unchanged;
 no training is performed.
 
-Replacement measurements are under `outputs/shared_m1_20260926/`:
-`ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`. They provide
-the Ada/Blackwell candidate lines and M1/M2 runtime medians. Their M3–M6 retain the preceding
+Historical baseline-replacement measurements remain under `outputs/shared_m1_20260926/`:
+`ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`; they are no longer plotted.
+Ada/Blackwell M3–M6 retain the preceding
 three-repeat medians from `outputs/fair_classical_20260925/`, including the
 M6 runtime reference. Ada/Blackwell classical error coordinates are unchanged: Ada retains
 the earlier 32-case medians and small/full neural points; the Modal panels use
@@ -236,17 +240,19 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/shared_m1_20260926/ada_full.json
+  --candidate-timings outputs/fourier_io_20260926/ada_full/rollouts.json \
+  --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
+    outputs/torch_ema_20260926/a100_80gb_timing/timings.json
 ```
 
 Reproduce the local full-rollout measurements on a free GPU with:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
-  --methods M1 M2 M6 fused_cufftdx_spectral_all shared_m1_spectral_all \
+  --methods M1 M2 M6 fused_cufftdx_spectral_all fourier_round_spectral_all \
   --reference M6 --reference-once --repeats 3 --pad-factor 2 \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
-  --output outputs/shared_m1_20260926/ada_full.json
+  --output outputs/fourier_io_20260926/ada_full/rollouts.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
@@ -307,3 +313,18 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 `scripts/modal_benchmark.py` runs explicit commands in the personal account,
 uploads only selected code/checkpoint/reference cases, and downloads result
 files under a fresh `--output` directory. No manuscript or notes are uploaded.
+
+### 13-model-roofline
+
+[PNG](figures/13-model-roofline.png) / [PDF](figures/13-model-roofline.pdf).
+Native batch-one, 1,024-point forward passes for the Fourier candidate, previous
+candidate, and trained small/full models on A100 80 GB, RTX PRO 6000 Blackwell,
+and RTX 6000 Ada. Roofline points use measured scalar FP32, scalar FP64, and
+TF32 tensor work separately, with published peak reference ceilings; each
+precision independently aggregates its participating kernels. Nsight Compute
+kernel replay supplies FLOPs, DRAM/L2 traffic, and duration for eight A100/Blackwell
+captures. Ada counter access is denied (`ERR_NVGPUCTRPERM`); its measured kernel
+profile is shown without substituting estimated roofline points. Lower panels
+show separate JAX-traced kernel times; clean forward latencies, replay settings,
+and raw per-kernel metrics are in `outputs/model_roofline_20260926/analysis.json`.
+Rebuild with `uv run --no-sync scripts/profile_dno.py --analyze --output outputs/model_roofline_20260926`.

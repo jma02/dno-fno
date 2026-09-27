@@ -52,7 +52,7 @@ def benchmark(payload: bytes, command: str, result_dir: str) -> tuple[int, dict[
     completed = subprocess.run(shlex.split(command), cwd="/repo", check=False)
     results = Path("/repo") / result_dir
     files = {str(path.relative_to(results)): path.read_bytes() for path in results.rglob("*")
-             if path.is_file() and path.suffix in (".json", ".npz", ".png", ".pdf", ".hlo", ".log", ".gz", ".pb")}
+             if path.is_file() and path.suffix in (".json", ".npz", ".png", ".pdf", ".hlo", ".log", ".gz", ".pb", ".csv", ".ncu-rep")}
     return completed.returncode, files
 
 

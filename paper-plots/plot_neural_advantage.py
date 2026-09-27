@@ -210,16 +210,12 @@ if __name__ == "__main__":
             if config.single_case:
                 config.timings = paths[0]
             config.classical_timings = paths
-            config.candidate_timings = [ROOT / "outputs/shared_m1_20260926" /
-                                        ("ada_full.json" if hardware == "ada" else f"{hardware}/rollouts.json")]
-            config.candidate_method = "fused_cufftdx_spectral_all"
-            config.candidate_previous_method = None
+            config.candidate_timings = [ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json"]
+            config.candidate_method = "fourier_round_spectral_all"
+            config.candidate_previous_method = "fused_cufftdx_spectral_all"
             config.no_baseline_timings = None
-        a100.candidate_timings = [ROOT / "outputs/fourier_io_20260926/a100_full/rollouts.json"]
         a100.timings = a100.candidate_timings[0]
         a100.classical_timings = None
-        a100.candidate_method = "fourier_round_spectral_all"
-        a100.candidate_previous_method = "fused_cufftdx_spectral_all"
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)
