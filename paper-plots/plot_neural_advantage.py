@@ -43,6 +43,18 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             for method in ("M1", "M2"):
                 warm["families"][family]["methods"][method]["seconds"] = result["methods"][method]["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
+    spectral = {}
+    for path in args.spectral_timings or ():
+        result = json.loads(path.read_text())
+        if result["device"] != warm["device"]:
+            continue
+        if result["batch_size"] != 1:
+            parser.error(f"{path}: spectral overlays require batch-one timings")
+        for family, timing in result["families"].items():
+            reference = warm["families"][family]
+            if any(timing[key] != reference[key] for key in ("horizon", "simulation_id")):
+                parser.error(f"{path}: {family} spectral trajectory does not match the classical comparison")
+            spectral[family] = timing["methods"]["spectral_ema"]
     overlays = (
         (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
@@ -121,6 +133,24 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         transform=ax.transAxes, color=color, fontsize=9)
             right = max(right, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
+        if family in spectral:
+            record = spectral[family]
+            spectral_seconds = float(np.median(record["seconds"]))
+            if not np.isfinite(spectral_seconds) or spectral_seconds <= 0:
+                parser.error(f"{family}: spectral runtime must be finite and positive")
+            spectral_error = record["cached_reference_terminal_eta_error"]
+            finite = record["finite"] and spectral_error is not None and np.isfinite(spectral_error)
+            ax.axvline(spectral_seconds, color="#7444a5", ls="-.", lw=1.3, zorder=1)
+            if args.single_case and spectral_error is not None and finite:
+                ax.scatter(spectral_seconds, 100 * spectral_error, color="#7444a5", marker="D",
+                           s=65, edgecolors="white", linewidths=0.8, zorder=3)
+            elif not finite:
+                ax.plot(spectral_seconds, 0.92, marker="x", color="#7444a5", ms=7,
+                        transform=ax.get_xaxis_transform(), zorder=3)
+                ax.annotate("failed", (spectral_seconds, 0.92), xycoords=ax.get_xaxis_transform(),
+                            xytext=(6, -3), textcoords="offset points", color="#7444a5", fontsize=8)
+            right = max(right, spectral_seconds)
+            print(f"{title}, Spectral DNO weight EMA: {spectral_seconds:.3f}s; finite={finite}; error={spectral_error}")
         ax.set_xlim(0, 1.13 * right)
         ax.margins(y=0.15)
         ax.set_title(title, loc="left", fontsize=12, pad=12)
@@ -137,6 +167,9 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
         *[Line2D([], [], color=color, ls=style, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
+        *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="-.", ms=6, lw=1.3,
+                  label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
+                  "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
     ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
@@ -152,6 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
+    parser.add_argument("--spectral-timings", type=Path, nargs="+", help="Overlay spectral weight-EMA timings on matching Figure 12 hardware; show errors only on single-case panels.")
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
     parser.add_argument("--single-case", action="store_true", help="Plot classical single-case errors against cached M6 and candidate timing lines, without archived model points.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
@@ -162,6 +196,8 @@ if __name__ == "__main__":
         parser.error("--single-case requires --timings and --candidate-timings")
     if args.stack_hardware and (args.single_case or not args.timings or not args.candidate_timings):
         parser.error("--stack-hardware requires local --timings and --candidate-timings without --single-case")
+    if args.spectral_timings and not (args.single_case or args.stack_hardware):
+        parser.error("--spectral-timings requires --single-case or --stack-hardware")
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
