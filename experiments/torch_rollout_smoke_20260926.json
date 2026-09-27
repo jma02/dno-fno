@@ -1,0 +1,40 @@
+{
+  "real_checkpoint_smoke": {
+    "checkpoint": "/Users/leon/Projects/Scratch/fnotrash/pilot-checkpoints/torch_spectral_width256_full_epoch_20260926.pt",
+    "epoch": 1,
+    "device": "cpu",
+    "integration_dtype": "float64",
+    "model_bf16": true,
+    "substeps": 1,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "length": 6.283185307179586,
+    "seconds": 6.25664187502116,
+    "frames": 3,
+    "initial_conditions": 2,
+    "nonfinite_trajectories": 0,
+    "input": "/private/tmp/torch-rollout-real-smoke-input.npz"
+  },
+  "truth_cache_roundtrip": {
+    "checkpoint": "/Users/leon/Projects/Scratch/fnotrash/pilot-checkpoints/torch_spectral_width256_full_epoch_20260926.pt",
+    "epoch": 1,
+    "device": "cpu",
+    "integration_dtype": "float64",
+    "model_bf16": true,
+    "substeps": 1,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "length": 6.283185307179586,
+    "seconds": 3.230416249949485,
+    "frames": 2,
+    "initial_conditions": 2,
+    "nonfinite_trajectories": 0,
+    "input": "/private/tmp/torch-rollout-cache-fixture.npz"
+  },
+  "roundtrip_max_relative_l2": {
+    "eta": 0.0,
+    "xi": 0.0,
+    "gxi": 0.0
+  },
+  "note": "Roundtrip fixture is previous model output, not independent truth; checks file compatibility and protocol reuse only."
+}

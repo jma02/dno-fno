@@ -1,0 +1,28 @@
+{
+  "small_model_invariants": [
+    {
+      "n": 32,
+      "cutoff": 8,
+      "length": 6.283185307179586,
+      "max_output_leakage": 3.552713678800501e-15,
+      "self_adjoint_absolute_error": 3.552713678800501e-15
+    },
+    {
+      "n": 64,
+      "cutoff": 12,
+      "length": 4.0,
+      "max_output_leakage": 2.480199473327442e-14,
+      "self_adjoint_absolute_error": 2.842170943040401e-14
+    }
+  ],
+  "production_checkpoint_bf16_max_outband_relative_norm": 1.198770576138486e-07,
+  "checks": [
+    "P G P forward and gradients",
+    "xi linearity",
+    "self-adjointness",
+    "constant-xi nullspace",
+    "zero flat correction and surface derivative",
+    "strict legacy checkpoint loading",
+    "real BF16 checkpoint finite band-limited output"
+  ]
+}

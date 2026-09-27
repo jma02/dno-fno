@@ -1,0 +1,52 @@
+{
+  "source": "/Users/leon/Projects/Scratch/fnotrash/local-data/paper_equal_subset_20260924",
+  "scope": "Existing models trained only on the synthetic fixture, evaluated without retraining on1024 real held-out rows; not production full-validation results. Error is mean per-sample unweighted-rFFT relative L2.",
+  "rows": 1024,
+  "results": {
+    "baseline_cpu64": {
+      "mean_relative_l2": 0.003395661750446413,
+      "median_relative_l2": 0.0019982056600614286,
+      "p95_relative_l2": 0.013552908460713756,
+      "by_family": {
+        "stokes": 0.001069883943908891,
+        "tanaka": 0.007355403422249933,
+        "benjamin_feir": 0.0028410051059945002,
+        "jonswap_tma": 0.002316354529632327
+      }
+    },
+    "baseline_mps32": {
+      "mean_relative_l2": 0.003400779195505203,
+      "median_relative_l2": 0.0020017947816440606,
+      "p95_relative_l2": 0.013555224961125587,
+      "by_family": {
+        "stokes": 0.0010720486514674778,
+        "tanaka": 0.007372660141434881,
+        "benjamin_feir": 0.002841377200705151,
+        "jonswap_tma": 0.0023170307884133037
+      }
+    },
+    "adamw": {
+      "mean_relative_l2": 0.0035372608469723043,
+      "median_relative_l2": 0.0021617410878874035,
+      "p95_relative_l2": 0.014078126547707914,
+      "by_family": {
+        "stokes": 0.0010544747927606576,
+        "tanaka": 0.008034601970517467,
+        "benjamin_feir": 0.0027251031145182182,
+        "jonswap_tma": 0.002334863510092874
+      }
+    },
+    "muon": {
+      "mean_relative_l2": 0.0036659945659450843,
+      "median_relative_l2": 0.002209449259143747,
+      "p95_relative_l2": 0.014281014218863186,
+      "by_family": {
+        "stokes": 0.001066076689866496,
+        "tanaka": 0.008534307527492992,
+        "benjamin_feir": 0.002696216841244855,
+        "jonswap_tma": 0.0023673772051759946
+      }
+    }
+  },
+  "mps_vs_cpu_baseline_difference_mean": 7.876689727513329e-05
+}

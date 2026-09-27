@@ -1,0 +1,480 @@
+{
+  "timestamp_utc": "2026-09-16T19:04:29.221817+00:00",
+  "gpu": "NVIDIA H100 80GB HBM3, 580.95.05, 81559 MiB, 700.00 W",
+  "jax_version": "0.9.2",
+  "dtype": "float32",
+  "jax_enable_x64": true,
+  "matmul_precision": null,
+  "batch": 512,
+  "grid": 1024,
+  "input_width": 320,
+  "output_width_per_block": 320,
+  "blocks": 8,
+  "seed": 42,
+  "warmups_per_variant": 3,
+  "paired_trials": 31,
+  "scope": "Projections only. Outputs and gradients w.r.t. shared features and all eight weights; no FFT, optimizer, data loading, or checkpointing.",
+  "packed_layout": "Concatenate original weight leaves inside JIT; return eight output arrays as in the original model.",
+  "forward": {
+    "separate_median_ms": 6.443785000000091,
+    "packed_median_ms": 7.171605999999997,
+    "speedup": 0.89851352681674,
+    "paired_speedup_median": 0.8969480122870154,
+    "separate_ms": [
+      6.4621360000014505,
+      6.443785000000091,
+      6.520339999999791,
+      6.471361999999203,
+      6.4875000000004235,
+      6.499506000000821,
+      6.419515999999348,
+      6.468335000000991,
+      6.504975000000357,
+      6.462643000000767,
+      6.642163000000423,
+      6.431307999999802,
+      6.411052000000694,
+      6.350707999999372,
+      6.4069970000009135,
+      6.463831000001363,
+      6.5677559999990365,
+      6.429898999998684,
+      6.381460000000061,
+      6.418687000000034,
+      6.661127000000988,
+      6.478999000000485,
+      6.351290000001342,
+      6.404320999999769,
+      6.414555999999294,
+      6.43499399999925,
+      6.6265550000004225,
+      6.556886000000262,
+      6.378969000000012,
+      6.4393759999994415,
+      6.33895200000012
+    ],
+    "packed_ms": [
+      7.171605999999997,
+      7.163486999999691,
+      7.311246000000438,
+      7.414868999999769,
+      7.130877999999896,
+      7.101950000000912,
+      7.137153999998702,
+      7.349632000000383,
+      7.171363999999514,
+      7.343030000001249,
+      7.197043000001457,
+      7.286471000000461,
+      7.169751999999363,
+      7.213462999999365,
+      7.08642000000026,
+      7.265589000001071,
+      7.102347000000009,
+      7.243405999998842,
+      7.339598999999808,
+      7.357352999999733,
+      7.362923000000521,
+      7.17974800000043,
+      7.1701930000003244,
+      7.193797999999418,
+      7.151536000000291,
+      7.076126999999488,
+      7.130935999999366,
+      7.096149000000551,
+      7.1508989999991,
+      7.1235969999996485,
+      7.29512000000021
+    ],
+    "worst_relative_l2": 0.0,
+    "worst_absolute_error": 0.0,
+    "comparisons": [
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "compile_seconds": [
+      1.2873860820000003,
+      1.6572173219999993
+    ],
+    "compiler_stats": [
+      {
+        "cost_analysis": {
+          "optimal_seconds": -8.0,
+          "bytes accessed0{}": -8.0,
+          "utilization5{}": 1.0,
+          "utilization2{}": 1.0,
+          "utilization3{}": 1.0,
+          "bytes accessed1{}": -8.0,
+          "bytes accessedout{}": 56.0,
+          "flops": -8.0,
+          "utilization6{}": 1.0,
+          "bytes accessed": 56.0,
+          "utilization0{}": 26.0,
+          "utilization4{}": 1.0,
+          "utilization1{}": 9.0,
+          "utilization7{}": 1.0
+        },
+        "memory_analysis": "CompiledMemoryStats(generated_code_size_in_bytes=0, argument_size_in_bytes=674365440, output_size_in_bytes=5368709184, alias_size_in_bytes=0, temp_size_in_bytes=33556480, host_generated_code_size_in_bytes=0, host_argument_size_in_bytes=0, host_output_size_in_bytes=0, host_alias_size_in_bytes=0, host_temp_size_in_bytes=0)",
+        "gemm_hlo": [
+          "%custom-call.7 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_7_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.7\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.6 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_6_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.6\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.5 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_5_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.5\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.4 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_4_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.4\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.3 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_3_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.3\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.2 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_2_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.2\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.0 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_1_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.0\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.1 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.27.0, %weights_0_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate)/dot_general\" scheduling_name=\"custom-call.1\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}"
+        ]
+      },
+      {
+        "cost_analysis": {
+          "bytes accessed4{}": 409600.0,
+          "bytes accessed6{}": 409600.0,
+          "utilization2{}": 3.0,
+          "bytes accessed7{}": 409600.0,
+          "bytes accessedout{1}": 671088640.0,
+          "bytes accessedout{7}": 671088640.0,
+          "bytes accessedout{3}": 671088640.0,
+          "bytes accessedout{5}": 671088640.0,
+          "utilization7{}": 3.0,
+          "utilization0{}": 14.0,
+          "bytes accessedout{}": 5371985920.0,
+          "utilization6{}": 3.0,
+          "utilization3{}": 3.0,
+          "utilization5{}": 3.0,
+          "utilization4{}": 3.0,
+          "bytes accessedout{4}": 671088640.0,
+          "bytes accessedout{6}": 671088640.0,
+          "bytes accessed0{}": 5369118720.0,
+          "bytes accessed": 10743971840.0,
+          "flops": -1.0,
+          "bytes accessedout{0}": 671088640.0,
+          "bytes accessed2{}": 409600.0,
+          "bytes accessedout{2}": 671088640.0,
+          "bytes accessed5{}": 409600.0,
+          "bytes accessed3{}": 409600.0,
+          "optimal_seconds": -1.0,
+          "utilization1{}": 4.0,
+          "bytes accessed1{}": 409599.0
+        },
+        "memory_analysis": "CompiledMemoryStats(generated_code_size_in_bytes=8712, argument_size_in_bytes=674365440, output_size_in_bytes=5368709184, alias_size_in_bytes=0, temp_size_in_bytes=5368709632, host_generated_code_size_in_bytes=0, host_argument_size_in_bytes=0, host_output_size_in_bytes=0, host_alias_size_in_bytes=0, host_temp_size_in_bytes=0)",
+        "gemm_hlo": [
+          "%custom-call.1 = (f32[524288,2560]{1,0}, s8[33554432]{0}) custom-call(%bitcast.6.0, %wrapped_concatenate), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(packed)/dot_general\" scheduling_name=\"custom-call.1\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"819200\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}"
+        ]
+      }
+    ]
+  },
+  "forward_backward": {
+    "separate_median_ms": 19.854401999999993,
+    "packed_median_ms": 18.24002500000077,
+    "speedup": 1.0885073896553954,
+    "paired_speedup_median": 1.0884728677326405,
+    "separate_ms": [
+      19.82523000000036,
+      20.180889999998897,
+      19.974057000000656,
+      19.53427100000127,
+      19.76205899999961,
+      19.74906000000054,
+      19.836413000000164,
+      19.545661000000436,
+      19.47827799999935,
+      19.854401999999993,
+      19.68337100000106,
+      20.011443999999656,
+      19.801426000000788,
+      19.82399899999976,
+      19.690406000000493,
+      19.59421399999961,
+      19.856115000001395,
+      19.738846999999282,
+      19.92369099999891,
+      21.862978999999783,
+      23.411247999998608,
+      21.534432999999353,
+      21.188157000000984,
+      19.99022000000039,
+      20.102144000000877,
+      19.83225699999913,
+      20.270684999999844,
+      19.572536000000085,
+      20.053737999997878,
+      20.00004299999958,
+      20.030729999998442
+    ],
+    "packed_ms": [
+      18.21451899999893,
+      18.214788999999953,
+      18.714781999999985,
+      18.164059000000066,
+      18.188471000000206,
+      18.205650000000517,
+      18.003928000000613,
+      17.78133599999876,
+      18.293603000000047,
+      18.11554899999912,
+      18.089738000000466,
+      18.3274830000002,
+      18.176852999999937,
+      18.210831000001093,
+      18.04174500000144,
+      18.20854800000049,
+      18.397455000000562,
+      18.134441000000834,
+      18.24002500000077,
+      18.686248000001626,
+      21.879021000000165,
+      20.682523999999702,
+      19.468795999999955,
+      18.856900999999482,
+      18.32527700000064,
+      18.130477000001477,
+      18.59720200000048,
+      18.30565799999917,
+      18.501627999999215,
+      18.257949999998857,
+      18.3622810000017
+    ],
+    "worst_relative_l2": 0.0002770154387690127,
+    "worst_absolute_error": 0.96435546875,
+    "comparisons": [
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        5.446700470201904e-06,
+        0.00010204315185546875,
+        1.0
+      ],
+      [
+        0.0002756666799541563,
+        0.927734375,
+        1.0
+      ],
+      [
+        0.0002758654300123453,
+        0.907470703125,
+        1.0
+      ],
+      [
+        0.00027583722840063274,
+        0.96435546875,
+        1.0
+      ],
+      [
+        0.00027569278609007597,
+        0.906982421875,
+        1.0
+      ],
+      [
+        0.0002770154387690127,
+        0.859619140625,
+        1.0
+      ],
+      [
+        0.00027595795108936727,
+        0.9119873046875,
+        1.0
+      ],
+      [
+        0.0002763557422440499,
+        0.89794921875,
+        1.0
+      ],
+      [
+        0.00027562963077798486,
+        0.908447265625,
+        1.0
+      ]
+    ],
+    "compile_seconds": [
+      1.492367402000001,
+      3.6912214199999998
+    ],
+    "compiler_stats": [
+      {
+        "cost_analysis": {
+          "utilization9{}": 1.0,
+          "bytes accessed7{}": 671088640.0,
+          "utilization11{}": 1.0,
+          "utilization4{}": 2.0,
+          "utilization14{}": 1.0,
+          "bytes accessed": 6039797760.0,
+          "utilization6{}": 2.0,
+          "bytes accessed5{}": 671088640.0,
+          "bytes accessed3{}": 671088640.0,
+          "utilization3{}": 2.0,
+          "optimal_seconds": -24.0,
+          "utilization10{}": 1.0,
+          "bytes accessed1{}": 671088640.0,
+          "utilization1{}": 26.0,
+          "flops": 1174405120.0,
+          "bytes accessedout{}": 671088768.0,
+          "utilization12{}": 1.0,
+          "utilization7{}": 2.0,
+          "bytes accessed6{}": 671088640.0,
+          "utilization5{}": 2.0,
+          "bytes accessed4{}": 671088640.0,
+          "utilization8{}": 1.0,
+          "utilization16{}": 1.0,
+          "utilization13{}": 1.0,
+          "utilization15{}": 1.0,
+          "bytes accessed2{}": 671088640.0,
+          "utilization2{}": 2.0,
+          "bytes accessed0{}": 671088640.0,
+          "utilization0{}": 76.0
+        },
+        "memory_analysis": "CompiledMemoryStats(generated_code_size_in_bytes=4208, argument_size_in_bytes=6043074560, output_size_in_bytes=6043074696, alias_size_in_bytes=0, temp_size_in_bytes=4731181056, host_generated_code_size_in_bytes=0, host_argument_size_in_bytes=0, host_output_size_in_bytes=0, host_alias_size_in_bytes=0, host_temp_size_in_bytes=0)",
+        "gemm_hlo": [
+          "%custom-call.1 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_0_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.1\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.0 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_1_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.0\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.2 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_2_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.2\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.3 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_3_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.3\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.4 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_4_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.4\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.5 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_5_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.5\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.6 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_6_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.6\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.7 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %weights_7_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/jvp()/dot_general\" scheduling_name=\"custom-call.7\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.23 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.145.0, %weights_0_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.23\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.22 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.144.0, %weights_1_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.22\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.21 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.143.0, %weights_2_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.21\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.20 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.142.0, %weights_3_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.20\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.19 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.141.0, %weights_4_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.19\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.18 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.140.0, %weights_5_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.18\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.16 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.138.0, %weights_7_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.16\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.17 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.139.0, %weights_6_.1), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.17\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"102400\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.8 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.195.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.8\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.9 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.197.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.9\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.10 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.199.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.10\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.11 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.201.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.11\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.12 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.203.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.12\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.13 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.205.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.13\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.14 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.207.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.14\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.15 = (f32[320,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.116.0, %bitcast.209.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(separate_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.15\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"167772160\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}"
+        ]
+      },
+      {
+        "cost_analysis": {
+          "utilization3{}": 4.0,
+          "utilization16{}": 1.0,
+          "utilization15{}": 1.0,
+          "bytes accessed1{}": 671498240.0,
+          "utilization7{}": 4.0,
+          "utilization12{}": 1.0,
+          "bytes accessedout{2}": 671088640.0,
+          "utilization8{}": 1.0,
+          "bytes accessedout{6}": 671088640.0,
+          "utilization2{}": 4.0,
+          "utilization14{}": 1.0,
+          "utilization11{}": 1.0,
+          "optimal_seconds": -3.0,
+          "bytes accessed7{}": 671498240.0,
+          "utilization4{}": 4.0,
+          "bytes accessed5{}": 671498240.0,
+          "bytes accessed2{}": 671498240.0,
+          "flops": -3.0,
+          "bytes accessedout{1}": 671088640.0,
+          "utilization0{}": 30.0,
+          "bytes accessedout{5}": 671088640.0,
+          "bytes accessed0{}": 6043484160.0,
+          "utilization9{}": 1.0,
+          "bytes accessedout{0}": 671088640.0,
+          "utilization6{}": 4.0,
+          "bytes accessed": 21487943680.0,
+          "utilization10{}": 1.0,
+          "bytes accessedout{4}": 671088640.0,
+          "bytes accessed4{}": 671498240.0,
+          "utilization5{}": 4.0,
+          "bytes accessed6{}": 671498240.0,
+          "bytes accessedout{3}": 671088640.0,
+          "utilization1{}": 7.0,
+          "bytes accessedout{}": 10743971840.0,
+          "utilization13{}": 1.0,
+          "bytes accessed3{}": 671498240.0,
+          "bytes accessedout{7}": 671088640.0
+        },
+        "memory_analysis": "CompiledMemoryStats(generated_code_size_in_bytes=27040, argument_size_in_bytes=6043074560, output_size_in_bytes=6043074696, alias_size_in_bytes=0, temp_size_in_bytes=5368710144, host_generated_code_size_in_bytes=0, host_argument_size_in_bytes=0, host_output_size_in_bytes=0, host_alias_size_in_bytes=0, host_temp_size_in_bytes=0)",
+        "gemm_hlo": [
+          "%custom-call.0 = (f32[320,2560]{1,0}, s8[33554432]{0}) custom-call(%bitcast.19.0, %bitcast.30.0), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(packed_training)/transpose(jvp())/transpose\" scheduling_name=\"custom-call.0\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"0\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"1342177280\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.2 = (f32[524288,320]{1,0}, s8[33554432]{0}) custom-call(%bitcast.22.0, %wrapped_concatenate), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(packed_training)/transpose(jvp())/dot_general\" scheduling_name=\"custom-call.2\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"1342177280\",\"rhs_stride\":\"819200\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}",
+          "%custom-call.1 = (f32[524288,2560]{1,0}, s8[33554432]{0}) custom-call(%bitcast.19.0, %wrapped_concatenate), custom_call_target=\"__cublas$gemm\", metadata={op_name=\"jit(packed_training)/jvp()/dot_general\" scheduling_name=\"custom-call.1\" stack_frame_id=10}, backend_config={\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"selected_algorithm\":\"-1\",\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"167772160\",\"rhs_stride\":\"819200\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":false,\"autotune_workspace_size\":\"0\"},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}"
+        ]
+      }
+    ]
+  },
+  "function_wall_seconds": 13.939930484
+}

@@ -1,0 +1,10 @@
+{
+  "pool_size": 64,
+  "horizon": 4,
+  "epoch1_mean_final_surface_l2": 0.0014908401536246744,
+  "epoch2_mean_final_surface_l2": 0.0014427793351907982,
+  "epoch1_median_final_surface_l2": 0.0003243393279315637,
+  "epoch2_median_final_surface_l2": 0.00036375027208241354,
+  "improved_cases": 19,
+  "worst_case_reduction_percent": 22.32662292311539
+}

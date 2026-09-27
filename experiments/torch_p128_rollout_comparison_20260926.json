@@ -1,0 +1,444 @@
+{
+  "scope": "Same64 validation snapshots,16 per family, final surface relative L2 at t4",
+  "checkpoints": {
+    "epoch2": {
+      "mean": 0.0014427793351907982,
+      "median": 0.00036375027208241354,
+      "worst": 0.011083834816344127,
+      "p90": 0.004223274068684271,
+      "worst_simulation_id": 3724338,
+      "families": {
+        "jonswap_tma": {
+          "mean": 0.004512885790402758,
+          "worst": 0.011083834816344127
+        },
+        "stokes": {
+          "mean": 0.00042550238318917903,
+          "worst": 0.003903408924753599
+        },
+        "tanaka": {
+          "mean": 0.0003609122715660906,
+          "worst": 0.0010152666615521229
+        },
+        "benjamin_feir": {
+          "mean": 0.0004718168956051655,
+          "worst": 0.0014299138452677936
+        }
+      }
+    },
+    "p128_epoch3": {
+      "mean": 0.0005970998200631714,
+      "median": 0.00022679021178462352,
+      "worst": 0.006367816711150601,
+      "p90": 0.001386423707849635,
+      "worst_simulation_id": 3723968,
+      "families": {
+        "jonswap_tma": {
+          "mean": 0.001675368190257977,
+          "worst": 0.006367816711150601
+        },
+        "stokes": {
+          "mean": 0.00013165608941606306,
+          "worst": 0.0013832303218584455
+        },
+        "tanaka": {
+          "mean": 0.00030187879858764783,
+          "worst": 0.0008027030800439562
+        },
+        "benjamin_feir": {
+          "mean": 0.00027949620199099745,
+          "worst": 0.0010442880892630889
+        }
+      }
+    }
+  },
+  "improved_cases": 58,
+  "mean_reduction_percent": 58.61461240126449,
+  "worst_reduction_percent": 42.54861411539016,
+  "per_case": [
+    {
+      "simulation_id": 15152,
+      "family": "stokes",
+      "epoch2": 0.0001343300704132948,
+      "p128_epoch3": 4.004422387309507e-05
+    },
+    {
+      "simulation_id": 27691,
+      "family": "stokes",
+      "epoch2": 8.364430453790263e-05,
+      "p128_epoch3": 1.269950629439672e-05
+    },
+    {
+      "simulation_id": 41096,
+      "family": "stokes",
+      "epoch2": 0.00010966745551343535,
+      "p128_epoch3": 5.104051057346964e-05
+    },
+    {
+      "simulation_id": 82811,
+      "family": "stokes",
+      "epoch2": 1.665211248388205e-05,
+      "p128_epoch3": 3.487371521226582e-06
+    },
+    {
+      "simulation_id": 90542,
+      "family": "stokes",
+      "epoch2": 5.8406196526201775e-05,
+      "p128_epoch3": 1.3275583142433434e-05
+    },
+    {
+      "simulation_id": 92590,
+      "family": "stokes",
+      "epoch2": 8.540687343323417e-05,
+      "p128_epoch3": 2.3439553752742324e-05
+    },
+    {
+      "simulation_id": 104099,
+      "family": "stokes",
+      "epoch2": 1.652370750243652e-05,
+      "p128_epoch3": 5.253819616736305e-06
+    },
+    {
+      "simulation_id": 106512,
+      "family": "stokes",
+      "epoch2": 5.520401073300464e-05,
+      "p128_epoch3": 6.977795446943799e-06
+    },
+    {
+      "simulation_id": 117180,
+      "family": "stokes",
+      "epoch2": 0.00012597217505830045,
+      "p128_epoch3": 2.553941213346338e-05
+    },
+    {
+      "simulation_id": 129082,
+      "family": "stokes",
+      "epoch2": 0.00011129489278682431,
+      "p128_epoch3": 1.4738494251489974e-05
+    },
+    {
+      "simulation_id": 149202,
+      "family": "stokes",
+      "epoch2": 0.00012331923136987388,
+      "p128_epoch3": 1.0986947181889295e-05
+    },
+    {
+      "simulation_id": 169317,
+      "family": "stokes",
+      "epoch2": 0.0001669446727847339,
+      "p128_epoch3": 4.949672408479314e-05
+    },
+    {
+      "simulation_id": 191628,
+      "family": "stokes",
+      "epoch2": 0.00011211270588342352,
+      "p128_epoch3": 3.1423999353961055e-05
+    },
+    {
+      "simulation_id": 210098,
+      "family": "stokes",
+      "epoch2": 4.143240932890641e-05,
+      "p128_epoch3": 2.5064724379083686e-06
+    },
+    {
+      "simulation_id": 238263,
+      "family": "stokes",
+      "epoch2": 0.003903408924753599,
+      "p128_epoch3": 0.0013832303218584455
+    },
+    {
+      "simulation_id": 252626,
+      "family": "stokes",
+      "epoch2": 0.0016637183879178105,
+      "p128_epoch3": 0.00043235669513401416
+    },
+    {
+      "simulation_id": 3686532,
+      "family": "tanaka",
+      "epoch2": 0.0010152666615521229,
+      "p128_epoch3": 0.0007927085793915796
+    },
+    {
+      "simulation_id": 3686552,
+      "family": "tanaka",
+      "epoch2": 0.0004504227092240224,
+      "p128_epoch3": 0.0006128032150518327
+    },
+    {
+      "simulation_id": 3686627,
+      "family": "tanaka",
+      "epoch2": 0.00021702635489217415,
+      "p128_epoch3": 0.0002539449707591517
+    },
+    {
+      "simulation_id": 3686673,
+      "family": "tanaka",
+      "epoch2": 0.00028328180442306107,
+      "p128_epoch3": 0.0001513565743143545
+    },
+    {
+      "simulation_id": 3686695,
+      "family": "tanaka",
+      "epoch2": 0.00027636729370057354,
+      "p128_epoch3": 0.0003497116656039956
+    },
+    {
+      "simulation_id": 3686725,
+      "family": "tanaka",
+      "epoch2": 0.00012574144144665117,
+      "p128_epoch3": 5.1785048778790516e-05
+    },
+    {
+      "simulation_id": 3686732,
+      "family": "tanaka",
+      "epoch2": 0.0003850993800650068,
+      "p128_epoch3": 0.000311377919831786
+    },
+    {
+      "simulation_id": 3686748,
+      "family": "tanaka",
+      "epoch2": 0.00018829792418572762,
+      "p128_epoch3": 8.122614553838081e-05
+    },
+    {
+      "simulation_id": 3686751,
+      "family": "tanaka",
+      "epoch2": 0.0004590476502697515,
+      "p128_epoch3": 0.0008027030800439562
+    },
+    {
+      "simulation_id": 3686753,
+      "family": "tanaka",
+      "epoch2": 0.0007125296072472961,
+      "p128_epoch3": 0.0007174770916872484
+    },
+    {
+      "simulation_id": 3686822,
+      "family": "tanaka",
+      "epoch2": 8.585645756084644e-05,
+      "p128_epoch3": 2.8611349962178175e-05
+    },
+    {
+      "simulation_id": 3686893,
+      "family": "tanaka",
+      "epoch2": 0.0002504893938678313,
+      "p128_epoch3": 0.00022405836020279507
+    },
+    {
+      "simulation_id": 3687196,
+      "family": "tanaka",
+      "epoch2": 0.0004246911411216959,
+      "p128_epoch3": 5.085468331960572e-05
+    },
+    {
+      "simulation_id": 3687222,
+      "family": "tanaka",
+      "epoch2": 0.00036884652855428014,
+      "p128_epoch3": 4.8268151681438025e-05
+    },
+    {
+      "simulation_id": 3687355,
+      "family": "tanaka",
+      "epoch2": 0.000245173183811406,
+      "p128_epoch3": 0.0002879944935098985
+    },
+    {
+      "simulation_id": 3687573,
+      "family": "tanaka",
+      "epoch2": 0.0002864588131350031,
+      "p128_epoch3": 6.517944772537343e-05
+    },
+    {
+      "simulation_id": 3704836,
+      "family": "benjamin_feir",
+      "epoch2": 0.0005064178291423417,
+      "p128_epoch3": 0.00028754308038318255
+    },
+    {
+      "simulation_id": 3705506,
+      "family": "benjamin_feir",
+      "epoch2": 0.0002826688923383526,
+      "p128_epoch3": 0.0001324454170501126
+    },
+    {
+      "simulation_id": 3705537,
+      "family": "benjamin_feir",
+      "epoch2": 0.0007350863096330613,
+      "p128_epoch3": 0.00048488102649382053
+    },
+    {
+      "simulation_id": 3705603,
+      "family": "benjamin_feir",
+      "epoch2": 0.0014299138452677936,
+      "p128_epoch3": 0.0010442880892630889
+    },
+    {
+      "simulation_id": 3705712,
+      "family": "benjamin_feir",
+      "epoch2": 0.00017858967985866683,
+      "p128_epoch3": 7.872554843501838e-05
+    },
+    {
+      "simulation_id": 3705848,
+      "family": "benjamin_feir",
+      "epoch2": 0.00038196453141068785,
+      "p128_epoch3": 0.00020574891714824904
+    },
+    {
+      "simulation_id": 3706080,
+      "family": "benjamin_feir",
+      "epoch2": 0.0002383973391120902,
+      "p128_epoch3": 9.499952475547955e-05
+    },
+    {
+      "simulation_id": 3706100,
+      "family": "benjamin_feir",
+      "epoch2": 0.000264747217937722,
+      "p128_epoch3": 0.0001302224340476773
+    },
+    {
+      "simulation_id": 3706153,
+      "family": "benjamin_feir",
+      "epoch2": 0.0005410206136731338,
+      "p128_epoch3": 0.0002637811046931014
+    },
+    {
+      "simulation_id": 3706187,
+      "family": "benjamin_feir",
+      "epoch2": 0.0008892246266841006,
+      "p128_epoch3": 0.0005763697554857171
+    },
+    {
+      "simulation_id": 3706207,
+      "family": "benjamin_feir",
+      "epoch2": 0.00032136982197754273,
+      "p128_epoch3": 0.00016082224303868103
+    },
+    {
+      "simulation_id": 3706231,
+      "family": "benjamin_feir",
+      "epoch2": 0.0005954697108690683,
+      "p128_epoch3": 0.00039541119341669973
+    },
+    {
+      "simulation_id": 3706249,
+      "family": "benjamin_feir",
+      "epoch2": 0.00022819827814986893,
+      "p128_epoch3": 0.00012016919063156966
+    },
+    {
+      "simulation_id": 3706255,
+      "family": "benjamin_feir",
+      "epoch2": 0.0004029950859299069,
+      "p128_epoch3": 0.00022952206336645197
+    },
+    {
+      "simulation_id": 3706308,
+      "family": "benjamin_feir",
+      "epoch2": 0.00035865401561054695,
+      "p128_epoch3": 0.0001765633635649709
+    },
+    {
+      "simulation_id": 3706376,
+      "family": "benjamin_feir",
+      "epoch2": 0.0001943525320877637,
+      "p128_epoch3": 9.044628008213834e-05
+    },
+    {
+      "simulation_id": 3723325,
+      "family": "jonswap_tma",
+      "epoch2": 0.0043389516023888,
+      "p128_epoch3": 0.0013884777651272755
+    },
+    {
+      "simulation_id": 3723466,
+      "family": "jonswap_tma",
+      "epoch2": 0.0008984718243114643,
+      "p128_epoch3": 0.00033146415467781153
+    },
+    {
+      "simulation_id": 3723512,
+      "family": "jonswap_tma",
+      "epoch2": 0.0009437278060354983,
+      "p128_epoch3": 0.0003853284684738101
+    },
+    {
+      "simulation_id": 3723640,
+      "family": "jonswap_tma",
+      "epoch2": 0.0023082400558277613,
+      "p128_epoch3": 0.0007143675386260317
+    },
+    {
+      "simulation_id": 3723703,
+      "family": "jonswap_tma",
+      "epoch2": 0.005181600948616857,
+      "p128_epoch3": 0.001921719831120799
+    },
+    {
+      "simulation_id": 3723742,
+      "family": "jonswap_tma",
+      "epoch2": 0.0021966295348615815,
+      "p128_epoch3": 0.0008909104164270085
+    },
+    {
+      "simulation_id": 3723797,
+      "family": "jonswap_tma",
+      "epoch2": 0.0034569860682891027,
+      "p128_epoch3": 0.001182897035339141
+    },
+    {
+      "simulation_id": 3723860,
+      "family": "jonswap_tma",
+      "epoch2": 0.0020100849750772616,
+      "p128_epoch3": 0.0007742701788863769
+    },
+    {
+      "simulation_id": 3723887,
+      "family": "jonswap_tma",
+      "epoch2": 0.00026616601145800807,
+      "p128_epoch3": 0.00020281948435401176
+    },
+    {
+      "simulation_id": 3723889,
+      "family": "jonswap_tma",
+      "epoch2": 0.0035146903014259784,
+      "p128_epoch3": 0.0011849355534940599
+    },
+    {
+      "simulation_id": 3723899,
+      "family": "jonswap_tma",
+      "epoch2": 0.009404124325668449,
+      "p128_epoch3": 0.0026170327905599682
+    },
+    {
+      "simulation_id": 3723968,
+      "family": "jonswap_tma",
+      "epoch2": 0.009292169375523804,
+      "p128_epoch3": 0.006367816711150601
+    },
+    {
+      "simulation_id": 3724164,
+      "family": "jonswap_tma",
+      "epoch2": 0.005791235740921273,
+      "p128_epoch3": 0.004172850619679925
+    },
+    {
+      "simulation_id": 3724294,
+      "family": "jonswap_tma",
+      "epoch2": 0.003953359823373698,
+      "p128_epoch3": 0.0007310074326880791
+    },
+    {
+      "simulation_id": 3724323,
+      "family": "jonswap_tma",
+      "epoch2": 0.007565899436320461,
+      "p128_epoch3": 0.001387792301845859
+    },
+    {
+      "simulation_id": 3724338,
+      "family": "jonswap_tma",
+      "epoch2": 0.011083834816344127,
+      "p128_epoch3": 0.0025522007616768727
+    }
+  ]
+}

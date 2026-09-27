@@ -1,0 +1,16 @@
+{
+  "fresh": {
+    "max_loss_difference": 4.656612873077393e-10,
+    "final_prediction_relative_difference": 2.0152219448732467e-08,
+    "final_step": 5,
+    "warmup_state_unchanged": true,
+    "full_tail_full_and_validation_passed": true
+  },
+  "resumed": {
+    "max_loss_difference": 1.3426324585452676e-07,
+    "final_prediction_relative_difference": 1.1836269550258294e-05,
+    "final_step": 46086,
+    "warmup_state_unchanged": true,
+    "full_tail_full_and_validation_passed": true
+  }
+}

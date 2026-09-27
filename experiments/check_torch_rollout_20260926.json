@@ -1,0 +1,98 @@
+{
+  "cases": [
+    {
+      "n": 16,
+      "filter_fraction": 1.0,
+      "substeps": 1,
+      "max_abs_difference": {
+        "eta": 1.3010426069826053e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 5.312590645178972e-18
+      }
+    },
+    {
+      "n": 16,
+      "filter_fraction": 0.6666666666666666,
+      "substeps": 2,
+      "max_abs_difference": {
+        "eta": 2.168404344971009e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 4.553649124439119e-18
+      }
+    },
+    {
+      "n": 16,
+      "filter_fraction": 0.25,
+      "substeps": 8,
+      "max_abs_difference": {
+        "eta": 2.6020852139652106e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 4.553649124439119e-18
+      }
+    },
+    {
+      "n": 32,
+      "filter_fraction": 1.0,
+      "substeps": 1,
+      "max_abs_difference": {
+        "eta": 2.6020852139652106e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 1.1275702593849246e-17
+      }
+    },
+    {
+      "n": 32,
+      "filter_fraction": 0.6666666666666666,
+      "substeps": 2,
+      "max_abs_difference": {
+        "eta": 2.6020852139652106e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 1.6263032587282567e-17
+      }
+    },
+    {
+      "n": 32,
+      "filter_fraction": 0.25,
+      "substeps": 8,
+      "max_abs_difference": {
+        "eta": 6.071532165918825e-18,
+        "xi": 1.1102230246251565e-16,
+        "gxi": 1.2576745200831851e-17
+      }
+    },
+    {
+      "n": 64,
+      "filter_fraction": 1.0,
+      "substeps": 1,
+      "max_abs_difference": {
+        "eta": 3.469446951953614e-18,
+        "xi": 4.336808689942018e-18,
+        "gxi": 4.9276988739466177e-17
+      }
+    },
+    {
+      "n": 64,
+      "filter_fraction": 0.6666666666666666,
+      "substeps": 2,
+      "max_abs_difference": {
+        "eta": 6.5052130349130266e-18,
+        "xi": 4.553649124439119e-18,
+        "gxi": 3.599551212651875e-17
+      }
+    },
+    {
+      "n": 64,
+      "filter_fraction": 0.25,
+      "substeps": 8,
+      "max_abs_difference": {
+        "eta": 1.3877787807814457e-17,
+        "xi": 1.0408340855860843e-17,
+        "gxi": 3.859759734048396e-17
+      }
+    }
+  ],
+  "seconds": 4.947749166749418,
+  "rest_state_and_zero_mean_passed": true,
+  "single_time_passed": true,
+  "operator": "identical float64 analytic G0+G1 in both frameworks; no learned-model accuracy claim"
+}

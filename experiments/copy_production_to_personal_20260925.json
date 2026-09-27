@@ -1,0 +1,73 @@
+{
+  "source_workspace": "sciml-at-ud",
+  "destination_workspace": "zhaleon",
+  "volume": "dno-fno-train-data",
+  "dataset": "outputs/paper_dataset_full_equal_20260916/arrays",
+  "files": [
+    {
+      "file": "stats.json",
+      "bytes": 341,
+      "seconds": 2.54540227
+    },
+    {
+      "file": "x.npy",
+      "bytes": 8320,
+      "seconds": 1.22594905
+    },
+    {
+      "file": "family_id.npy",
+      "bytes": 29491328,
+      "seconds": 1.7390264689999997
+    },
+    {
+      "file": "frame_index.npy",
+      "bytes": 58982528,
+      "seconds": 2.370836971000001
+    },
+    {
+      "file": "depth.npy",
+      "bytes": 117964928,
+      "seconds": 2.5227222979999997
+    },
+    {
+      "file": "simulation_id.npy",
+      "bytes": 117964928,
+      "seconds": 4.296068363
+    },
+    {
+      "file": "time.npy",
+      "bytes": 117964928,
+      "seconds": 2.130866501
+    },
+    {
+      "file": "dataset_split.npy",
+      "bytes": 589824128,
+      "seconds": 5.8390720179999995
+    },
+    {
+      "file": "parameter_group_id.npy",
+      "bytes": 1887436928,
+      "seconds": 9.562398209999998
+    },
+    {
+      "file": "eta.npy",
+      "bytes": 60397977728,
+      "seconds": 90.501909093
+    },
+    {
+      "file": "gxi.npy",
+      "bytes": 60397977728,
+      "seconds": 93.087049763
+    },
+    {
+      "file": "xi.npy",
+      "bytes": 60397977728,
+      "seconds": 94.654869959
+    }
+  ],
+  "verification": "Modal SDK SHA256/MD5 upload checks; destination file sizes checked",
+  "seconds": 310.48793760399997,
+  "total_bytes": 184113571541,
+  "personal_profile_inventory_verified": true,
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-hBdNZe4BbXDLEFO3gE5cGZ"
+}

@@ -1,0 +1,50 @@
+{
+  "h100": {
+    "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt",
+    "epoch": 3,
+    "device": "cuda",
+    "integration_dtype": "float64",
+    "model_bf16": true,
+    "model_max_mode": 128,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "substeps": 8,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "length": 6.283185307179586,
+    "seconds": 17.376704178999997,
+    "frames": 51,
+    "initial_conditions": 64,
+    "nonfinite_trajectories": 0,
+    "input": "/tmp/input.npz"
+  },
+  "l4": {
+    "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt",
+    "epoch": 3,
+    "device": "cuda",
+    "integration_dtype": "float64",
+    "model_bf16": true,
+    "model_max_mode": 128,
+    "substeps": 8,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "length": 6.283185307179586,
+    "seconds": 80.976167661,
+    "frames": 51,
+    "initial_conditions": 64,
+    "nonfinite_trajectories": 0,
+    "input": "/tmp/input.npz"
+  },
+  "speedup": 4.660041790828257,
+  "h100_final_surface_relative_l2": {
+    "mean": 0.0005971148381490591,
+    "max": 0.006368697399897499
+  },
+  "same_ids_times_depths": true,
+  "all_finite": true,
+  "extrapolated_integration_seconds": {
+    "512": 139.01363343199998,
+    "1024": 278.02726686399996,
+    "2048": 556.0545337279999
+  },
+  "scope": "Measured batch64; larger counts extrapolated at identical batch size, excluding reference generation, startup, I/O and rendering."
+}

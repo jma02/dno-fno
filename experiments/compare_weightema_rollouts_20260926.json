@@ -1,0 +1,157 @@
+{
+  "scope": "Same64 validation cases/16 per family, t=4, original order6/pad8 reference; all model rollouts on H100",
+  "models": {
+    "epoch3": {
+      "metadata": {
+        "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt",
+        "epoch": 3,
+        "device": "cuda",
+        "integration_dtype": "float64",
+        "model_bf16": true,
+        "model_max_mode": 128,
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "substeps": 8,
+        "implicit_iterations": 4,
+        "filter_fraction": 0.25,
+        "length": 6.283185307179586,
+        "seconds": 17.376704178999997,
+        "frames": 51,
+        "initial_conditions": 64,
+        "nonfinite_trajectories": 0,
+        "input": "/tmp/input.npz"
+      },
+      "final_surface_relative_l2": {
+        "mean": 0.0005971148381366477,
+        "median": 0.0002268118558268049,
+        "p90": 0.0013860695830401615,
+        "max": 0.006368697399809954
+      },
+      "family_mean_surface_l2": {
+        "benjamin_feir": 0.0002794924401488176,
+        "jonswap_tma": 0.0016753975088009945,
+        "stokes": 0.00013164551119638972,
+        "tanaka": 0.00030192389240038883
+      }
+    },
+    "epoch4_raw": {
+      "metadata": {
+        "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_p128_epoch4_weightema_20260926/checkpoint.pt",
+        "epoch": 4,
+        "device": "cuda",
+        "integration_dtype": "float64",
+        "model_bf16": true,
+        "model_max_mode": 128,
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "substeps": 8,
+        "implicit_iterations": 4,
+        "filter_fraction": 0.25,
+        "length": 6.283185307179586,
+        "seconds": 14.009424091,
+        "frames": 51,
+        "initial_conditions": 64,
+        "nonfinite_trajectories": 0,
+        "input": "/tmp/input.npz"
+      },
+      "final_surface_relative_l2": {
+        "mean": 0.0005098054400612092,
+        "median": 0.00019194618942834117,
+        "p90": 0.0012909631121009587,
+        "max": 0.005866230333150361
+      },
+      "family_mean_surface_l2": {
+        "benjamin_feir": 0.0001295334706896212,
+        "jonswap_tma": 0.0014979887359975019,
+        "stokes": 0.0001458066417963409,
+        "tanaka": 0.0002658929117613724
+      }
+    },
+    "epoch4_ema": {
+      "metadata": {
+        "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_p128_epoch4_weightema_20260926/checkpoint_weight_ema.pt",
+        "epoch": 4,
+        "device": "cuda",
+        "integration_dtype": "float64",
+        "model_bf16": true,
+        "model_max_mode": 128,
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "substeps": 8,
+        "implicit_iterations": 4,
+        "filter_fraction": 0.25,
+        "length": 6.283185307179586,
+        "seconds": 18.243019048,
+        "frames": 51,
+        "initial_conditions": 64,
+        "nonfinite_trajectories": 0,
+        "input": "/tmp/input.npz"
+      },
+      "final_surface_relative_l2": {
+        "mean": 0.0004017422692668356,
+        "median": 4.5744489656381944e-05,
+        "p90": 0.0010962136922698456,
+        "max": 0.00553554838165554
+      },
+      "family_mean_surface_l2": {
+        "benjamin_feir": 6.322192933952776e-05,
+        "jonswap_tma": 0.0014167616108587166,
+        "stokes": 6.757181029309314e-05,
+        "tanaka": 5.941372657600519e-05
+      }
+    }
+  },
+  "paired_ema_comparisons": {
+    "epoch3": {
+      "cases_improved": 55,
+      "mean_reduction_percent": 32.71942956224137,
+      "worst_reduction_percent": 13.081937574538793
+    },
+    "epoch4_raw": {
+      "cases_improved": 62,
+      "mean_reduction_percent": 21.19694344207058,
+      "worst_reduction_percent": 5.637043428487976
+    }
+  },
+  "ema_worst_six": [
+    {
+      "simulation_id": 3723968,
+      "family": "jonswap_tma",
+      "epoch3": 0.006368697399809954,
+      "epoch4_raw": 0.005866230333150361,
+      "epoch4_ema": 0.00553554838165554
+    },
+    {
+      "simulation_id": 3724164,
+      "family": "jonswap_tma",
+      "epoch3": 0.004173086403712158,
+      "epoch4_raw": 0.003992092357862327,
+      "epoch4_ema": 0.004044311156460399
+    },
+    {
+      "simulation_id": 3724338,
+      "family": "jonswap_tma",
+      "epoch3": 0.0025518090041657462,
+      "epoch4_raw": 0.002683211428298514,
+      "epoch4_ema": 0.002649898469318459
+    },
+    {
+      "simulation_id": 3723899,
+      "family": "jonswap_tma",
+      "epoch3": 0.002617732093849441,
+      "epoch4_raw": 0.0019291518748746626,
+      "epoch4_ema": 0.0017890809943314162
+    },
+    {
+      "simulation_id": 3724323,
+      "family": "jonswap_tma",
+      "epoch3": 0.0013872811339830694,
+      "epoch4_raw": 0.00161099911440946,
+      "epoch4_ema": 0.0015773347977301561
+    },
+    {
+      "simulation_id": 3723703,
+      "family": "jonswap_tma",
+      "epoch3": 0.001921728888930513,
+      "epoch4_raw": 0.001335864295356938,
+      "epoch4_ema": 0.0012017894091332683
+    }
+  ]
+}

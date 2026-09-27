@@ -1,0 +1,167 @@
+{
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "batch_size": 256,
+  "matrices": [
+    {
+      "name": "encoder_7_64",
+      "M": 262144,
+      "K": 7,
+      "N": 64,
+      "dtype": "torch.bfloat16",
+      "occurrences": 1,
+      "forward_backward_ms": 0.06108160018920898,
+      "useful_TFLOP_s": 7.690729230158427
+    },
+    {
+      "name": "encoder_64_64",
+      "M": 262144,
+      "K": 64,
+      "N": 64,
+      "dtype": "torch.bfloat16",
+      "occurrences": 1,
+      "forward_backward_ms": 0.14429759979248047,
+      "useful_TFLOP_s": 44.646972321543245
+    },
+    {
+      "name": "frequency_in",
+      "M": 131328,
+      "K": 132,
+      "N": 64,
+      "dtype": "torch.bfloat16",
+      "occurrences": 1,
+      "forward_backward_ms": 0.20096321105957032,
+      "useful_TFLOP_s": 33.12424014774913
+    },
+    {
+      "name": "qkv",
+      "M": 131328,
+      "K": 64,
+      "N": 192,
+      "dtype": "torch.bfloat16",
+      "occurrences": 2,
+      "forward_backward_ms": 0.13631999492645264,
+      "useful_TFLOP_s": 71.02810405196927
+    },
+    {
+      "name": "attention_out",
+      "M": 131328,
+      "K": 64,
+      "N": 64,
+      "dtype": "torch.bfloat16",
+      "occurrences": 2,
+      "forward_backward_ms": 0.08980159759521485,
+      "useful_TFLOP_s": 35.94052905994159
+    },
+    {
+      "name": "mlp_up",
+      "M": 131328,
+      "K": 64,
+      "N": 128,
+      "dtype": "torch.bfloat16",
+      "occurrences": 2,
+      "forward_backward_ms": 0.13035839796066284,
+      "useful_TFLOP_s": 49.51759117159357
+    },
+    {
+      "name": "mlp_down",
+      "M": 131328,
+      "K": 128,
+      "N": 64,
+      "dtype": "torch.bfloat16",
+      "occurrences": 2,
+      "forward_backward_ms": 0.13604799509048462,
+      "useful_TFLOP_s": 47.44674003984255
+    },
+    {
+      "name": "decoder",
+      "M": 262144,
+      "K": 64,
+      "N": 32,
+      "dtype": "torch.float32",
+      "occurrences": 1,
+      "forward_backward_ms": 0.27704639434814454,
+      "useful_TFLOP_s": 11.627025428643964
+    },
+    {
+      "name": "depth_in",
+      "M": 131328,
+      "K": 4,
+      "N": 32,
+      "dtype": "torch.float32",
+      "occurrences": 1,
+      "forward_backward_ms": 0.0625823974609375,
+      "useful_TFLOP_s": 1.0744225010230655
+    },
+    {
+      "name": "depth_out",
+      "M": 131328,
+      "K": 32,
+      "N": 32,
+      "dtype": "torch.float32",
+      "occurrences": 1,
+      "forward_backward_ms": 0.11353600025177002,
+      "useful_TFLOP_s": 7.10681396394727
+    },
+    {
+      "name": "frequency_out",
+      "M": 131328,
+      "K": 64,
+      "N": 128,
+      "dtype": "torch.bfloat16",
+      "occurrences": 1,
+      "forward_backward_ms": 0.1291103959083557,
+      "useful_TFLOP_s": 49.996236248720585
+    }
+  ],
+  "attention": [
+    {
+      "backend": "SDPBackend.CUDNN_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 16,
+      "forward_backward_ms": 1.0542336463928224,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 0.0
+    },
+    {
+      "backend": "SDPBackend.CUDNN_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 32,
+      "forward_backward_ms": 1.2843040466308593,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 6.101270173530793e-06
+    },
+    {
+      "backend": "SDPBackend.CUDNN_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 64,
+      "forward_backward_ms": 1.4286463737487793,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 6.480560841737315e-06
+    },
+    {
+      "backend": "SDPBackend.FLASH_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 16,
+      "forward_backward_ms": 1.0502976417541503,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 7.011185971350642e-06
+    },
+    {
+      "backend": "SDPBackend.FLASH_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 32,
+      "forward_backward_ms": 1.2776191711425782,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 6.232462965272134e-06
+    },
+    {
+      "backend": "SDPBackend.FLASH_ATTENTION",
+      "head_dim": 16,
+      "padded_dim": 64,
+      "forward_backward_ms": 1.4216416358947754,
+      "output_relative_difference": 0.0,
+      "gradient_relative_difference": 6.794725322833983e-06
+    }
+  ],
+  "function_seconds": 38.894678886
+}

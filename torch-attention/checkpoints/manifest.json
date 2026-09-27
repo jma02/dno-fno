@@ -1,0 +1,34 @@
+{
+  "modal_profile": "zhaleon",
+  "modal_volume": "dno-fno-train-data",
+  "validation_examples": 1474440,
+  "checkpoints": {
+    "epoch3.pt": {
+      "sha256": "04b88a84aa78602c9450d3fd114b0713ef04397e446a249104164c3c027c4833",
+      "bytes": 18190004,
+      "epoch": 3,
+      "step": 138243,
+      "inference_only": false,
+      "modal_path": "/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt",
+      "validation_mean_relative_l2": 0.0001301254733174
+    },
+    "epoch4.pt": {
+      "sha256": "e32cb262b5fb8d46702bc9364a8f0ba012d2190db3b70cacd3f21809885ac53c",
+      "bytes": 23783385,
+      "epoch": 4,
+      "step": 184324,
+      "inference_only": false,
+      "modal_path": "/experiments/torch_spectral_p128_epoch4_weightema_20260926/checkpoint.pt",
+      "validation_mean_relative_l2": 0.0001084525519748
+    },
+    "epoch4_ema.pt": {
+      "sha256": "aa385c1c94643bde20fe0f7c9b9a1761576b41d1cec5135b4650b24c9302d4a6",
+      "bytes": 5596046,
+      "epoch": 4,
+      "step": 184324,
+      "inference_only": true,
+      "modal_path": "/experiments/torch_spectral_p128_epoch4_weightema_20260926/checkpoint_weight_ema.pt",
+      "validation_mean_relative_l2": 8.12487786578e-05
+    }
+  }
+}

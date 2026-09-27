@@ -1,0 +1,144 @@
+{
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "batch_size": 256,
+  "depth": 2,
+  "branches": 32,
+  "bf16": true,
+  "autotune": true,
+  "optimizer": "grouped Muon + AdamW",
+  "lr": 1e-05,
+  "gradient_ema": 0.8,
+  "initialization": "fresh seed0; checkpoint used only for grid and training feature scales",
+  "timing": "8 shuffled cached-subset epochs after one warmup epoch; excludes compile and validation",
+  "results": [
+    {
+      "width": 64,
+      "heads": 4,
+      "head_dim": 16,
+      "parameters": 91584,
+      "amortized_step_ms": 7.030188218749956,
+      "samples_per_second": 36414.38778512812,
+      "epoch_seconds": [
+        0.13581614299999956,
+        0.11253835299999793,
+        0.11266405099999943,
+        0.11262048899999755,
+        0.11363642199999902,
+        0.1121289609999998,
+        0.11212264999999988,
+        0.11206978699999937,
+        0.11208337900000132
+      ],
+      "compile_capture_seconds": 12.600724422999999,
+      "device_step_ms": 6.691166687011719,
+      "device_samples_ms": [
+        6.700982666015625,
+        6.698265838623047,
+        6.687113952636719,
+        6.689006042480469,
+        6.691166687011719
+      ],
+      "last_training_relative_l2": 0.0021970532834529877,
+      "peak_allocated_bytes": 1168132096,
+      "checked_training_steps": 144,
+      "finite_updates": true
+    },
+    {
+      "width": 96,
+      "heads": 4,
+      "head_dim": 24,
+      "parameters": 201280,
+      "amortized_step_ms": 9.156327570312595,
+      "samples_per_second": 27958.80750597264,
+      "epoch_seconds": [
+        0.1504453639999923,
+        0.14687564000000464,
+        0.1467700879999967,
+        0.14622468400000344,
+        0.14608817900000304,
+        0.1458343769999999,
+        0.14674207400000228,
+        0.14661078499999292,
+        0.1468641020000092
+      ],
+      "compile_capture_seconds": 90.00040508800001,
+      "device_step_ms": 8.857481384277344,
+      "device_samples_ms": [
+        8.858990478515626,
+        8.855606079101562,
+        8.8606689453125,
+        8.854563140869141,
+        8.857481384277344
+      ],
+      "last_training_relative_l2": 0.0021317764185369015,
+      "peak_allocated_bytes": 1850236928,
+      "checked_training_steps": 144,
+      "finite_updates": true
+    },
+    {
+      "width": 128,
+      "heads": 4,
+      "head_dim": 32,
+      "parameters": 353984,
+      "amortized_step_ms": 10.551606601562735,
+      "samples_per_second": 24261.708161303643,
+      "epoch_seconds": [
+        0.17130973599998356,
+        0.1681233190000171,
+        0.1692188210000154,
+        0.1690324710000084,
+        0.1683215379999865,
+        0.16894116799997505,
+        0.16893277700000908,
+        0.16931923900000356,
+        0.16871631200001502
+      ],
+      "compile_capture_seconds": 85.351837163,
+      "device_step_ms": 10.222742462158203,
+      "device_samples_ms": [
+        10.224407958984376,
+        10.2218017578125,
+        10.22129135131836,
+        10.222742462158203,
+        10.222917175292968
+      ],
+      "last_training_relative_l2": 0.002039010636508465,
+      "peak_allocated_bytes": 2332890112,
+      "checked_training_steps": 144,
+      "finite_updates": true
+    },
+    {
+      "width": 64,
+      "heads": 4,
+      "head_dim": 16,
+      "parameters": 91584,
+      "amortized_step_ms": 7.029486195312407,
+      "samples_per_second": 36418.02443124689,
+      "epoch_seconds": [
+        0.1163217760000066,
+        0.11334818200000996,
+        0.11284342499999411,
+        0.1124297869999964,
+        0.11180426999999327,
+        0.11244567099998903,
+        0.11268762800000331,
+        0.11202550699999847,
+        0.1121897630000035
+      ],
+      "compile_capture_seconds": 3.760105550999981,
+      "device_step_ms": 6.691216278076172,
+      "device_samples_ms": [
+        6.70279541015625,
+        6.691216278076172,
+        6.689268493652344,
+        6.686567687988282,
+        6.692485046386719
+      ],
+      "last_training_relative_l2": 0.002197079360485077,
+      "peak_allocated_bytes": 1168329216,
+      "checked_training_steps": 144,
+      "finite_updates": true
+    }
+  ],
+  "function_seconds": 211.78285151100002
+}

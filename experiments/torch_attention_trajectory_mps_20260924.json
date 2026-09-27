@@ -1,0 +1,155 @@
+{
+  "torch": "2.14.0",
+  "device": "mps",
+  "batch_size": 64,
+  "grid": 1024,
+  "parameters": 975904,
+  "warmup_steps": 3,
+  "timed_steps": 20,
+  "scope": "Shuffled synthetic fixture, includes CPU batch loading and MPS transfer, forward, relative-L2 loss, backward, gradient EMA0.9, AdamW1e-4, host synchronization. Excludes startup/warmup, validation and checkpointing.",
+  "seconds": 8.519041710533202,
+  "mean_ms": 425.9520855266601,
+  "median_ms": 426.47675005719066,
+  "step_seconds": [
+    0.46990570798516273,
+    0.43088795943185687,
+    0.4202075842767954,
+    0.4307082500308752,
+    0.4329800410196185,
+    0.4248387501575053,
+    0.4270322499796748,
+    0.41787433391436934,
+    0.4049850832670927,
+    0.40899433428421617,
+    0.40493587497621775,
+    0.4260746669024229,
+    0.43296700017526746,
+    0.43482229113578796,
+    0.43703299993649125,
+    0.4109829165972769,
+    0.42098566703498363,
+    0.4268788332119584,
+    0.42396058328449726,
+    0.4319865829311311
+  ],
+  "samples_per_second": 150.2516413809043,
+  "finite": true,
+  "losses": [
+    {
+      "optimizer_step": 1,
+      "timed_step": null,
+      "loss_before_update": 0.0022661429829895496
+    },
+    {
+      "optimizer_step": 2,
+      "timed_step": null,
+      "loss_before_update": 0.00916101410984993
+    },
+    {
+      "optimizer_step": 3,
+      "timed_step": null,
+      "loss_before_update": 0.006892210338264704
+    },
+    {
+      "optimizer_step": 4,
+      "timed_step": 1,
+      "loss_before_update": 0.002802623901516199
+    },
+    {
+      "optimizer_step": 5,
+      "timed_step": 2,
+      "loss_before_update": 0.004214383661746979
+    },
+    {
+      "optimizer_step": 6,
+      "timed_step": 3,
+      "loss_before_update": 0.007525836117565632
+    },
+    {
+      "optimizer_step": 7,
+      "timed_step": 4,
+      "loss_before_update": 0.008928366005420685
+    },
+    {
+      "optimizer_step": 8,
+      "timed_step": 5,
+      "loss_before_update": 0.008292345330119133
+    },
+    {
+      "optimizer_step": 9,
+      "timed_step": 6,
+      "loss_before_update": 0.005971623118966818
+    },
+    {
+      "optimizer_step": 10,
+      "timed_step": 7,
+      "loss_before_update": 0.00350706884637475
+    },
+    {
+      "optimizer_step": 11,
+      "timed_step": 8,
+      "loss_before_update": 0.00548478402197361
+    },
+    {
+      "optimizer_step": 12,
+      "timed_step": 9,
+      "loss_before_update": 0.010749613866209984
+    },
+    {
+      "optimizer_step": 13,
+      "timed_step": 10,
+      "loss_before_update": 0.015453390777111053
+    },
+    {
+      "optimizer_step": 14,
+      "timed_step": 11,
+      "loss_before_update": 0.0185382142663002
+    },
+    {
+      "optimizer_step": 15,
+      "timed_step": 12,
+      "loss_before_update": 0.019113250076770782
+    },
+    {
+      "optimizer_step": 16,
+      "timed_step": 13,
+      "loss_before_update": 0.017792005091905594
+    },
+    {
+      "optimizer_step": 17,
+      "timed_step": 14,
+      "loss_before_update": 0.014961693435907364
+    },
+    {
+      "optimizer_step": 18,
+      "timed_step": 15,
+      "loss_before_update": 0.011144988238811493
+    },
+    {
+      "optimizer_step": 19,
+      "timed_step": 16,
+      "loss_before_update": 0.00752311060205102
+    },
+    {
+      "optimizer_step": 20,
+      "timed_step": 17,
+      "loss_before_update": 0.005793232005089521
+    },
+    {
+      "optimizer_step": 21,
+      "timed_step": 18,
+      "loss_before_update": 0.00765090249478817
+    },
+    {
+      "optimizer_step": 22,
+      "timed_step": 19,
+      "loss_before_update": 0.010953261516988277
+    },
+    {
+      "optimizer_step": 23,
+      "timed_step": 20,
+      "loss_before_update": 0.013665581122040749
+    }
+  ],
+  "note": "Fresh same-seed rerun; 3 warmup optimizer updates then 20 timed optimizer updates. Per-batch loss before each update, shuffled manufactured data."
+}

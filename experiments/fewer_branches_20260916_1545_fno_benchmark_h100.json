@@ -1,0 +1,110 @@
+{
+  "run_name": "fewer_branches_20260916_1545",
+  "data": {
+    "source": "/data/outputs/paper_dataset/arrays",
+    "seed": 42,
+    "stats": {
+      "feature_absmax": [
+        0.1511383354663849,
+        0.09148585051298141
+      ],
+      "target_absmax": 0.11534300446510315
+    },
+    "normalization": "Extrema fitted only on the pilot training subset, shared across variants.",
+    "train_rows": 16384,
+    "validation_rows": 2048,
+    "train_simulations": 5355,
+    "validation_simulations": 826,
+    "domain_length": 6.283185307179586,
+    "prepare_seconds": 39.278038024000004
+  },
+  "jax_version": "0.9.2",
+  "gpu": "NVIDIA H100 80GB HBM3, 81559 MiB",
+  "scope": "Paired batch4096 throughput only: spectral MLP versus four canonical FNO blocks, width32, all129 Fourier bins, decoder64. Learned grid256 and full1024 G0+G1 baseline. Resident real data, relative-L2/mode-balanced/Tanaka losses and AdamW; excludes Hadamard, loading and compilation. Three warmups and21 synchronized trials. GPU hard cap180s.",
+  "variants": {
+    "spectral_mlp": {
+      "blocks": 2,
+      "latent": 64,
+      "fused": false,
+      "correction_kind": "spectral_mlp",
+      "compact_rank": 64,
+      "compact_hidden": 128,
+      "parameters": 1382784,
+      "step_median_ms": 5.028822999996407,
+      "step_trials_ms": [
+        4.800381000002574,
+        5.07360900000009,
+        5.056008000003942,
+        5.052178999996215,
+        5.045647000002873,
+        5.079805999997689,
+        5.041812999998285,
+        5.002481000005332,
+        5.0488400000006095,
+        5.0613590000025965,
+        5.085711999996079,
+        5.016318000002684,
+        4.962130000002674,
+        5.028822999996407,
+        4.990187000004198,
+        4.935771000006639,
+        5.029671000002622,
+        5.023877999995818,
+        4.9555330000004005,
+        4.893447000000606,
+        4.920261999998843
+      ],
+      "compile_and_benchmark_seconds": 14.597421645,
+      "compiler_buffer_bytes": 1186797248,
+      "batch_size": 4096
+    },
+    "canonical_fno": {
+      "blocks": 4,
+      "latent": 32,
+      "fused": false,
+      "correction_kind": "canonical_fno",
+      "compact_rank": 64,
+      "compact_hidden": 128,
+      "parameters": 1063296,
+      "step_median_ms": 27.444088999999394,
+      "step_trials_ms": [
+        27.239402000006407,
+        27.2869060000005,
+        27.423097000003338,
+        27.51405600000112,
+        27.546297000000664,
+        27.473381000000074,
+        27.567981000004238,
+        27.477388000001213,
+        27.490532999998152,
+        27.422798999999998,
+        27.523635000001434,
+        27.423302000002536,
+        27.307357999994508,
+        27.21819199999942,
+        27.369962999998165,
+        27.513943000002428,
+        27.444088999999394,
+        27.482353999999987,
+        27.455410000001734,
+        27.159087000001136,
+        27.410036000006244
+      ],
+      "compile_and_benchmark_seconds": 12.346030389,
+      "compiler_buffer_bytes": 5305616768,
+      "batch_size": 4096
+    }
+  },
+  "validation_history": [],
+  "fusion_only": false,
+  "fused_kernel_relative_errors": {
+    "forward": 3.0678671691930504e-07,
+    "spectrum_gradient": 2.996221724060888e-07,
+    "spatial_gradient": 2.651209740633931e-07
+  },
+  "function_wall_seconds": 52.674473884,
+  "app_url": "https://modal.com/apps/sciml-at-ud/main/ap-shwEDkHEefDyKhZpMOSmbi",
+  "source_commit": "512629b",
+  "timing_state": "Same fresh zero-residual state reused for each synchronized trial; ordinary pilot objective and AdamW executable, no learning or accuracy comparison.",
+  "precision_correction": "Later audit found implicit float64 custom FNO spectral parameters under global jax_enable_x64=True, promoting learned activations and FFTs to float64/complex128. These timings are valid for that implementation, but not a matched-precision comparison to the float32 spectral MLP. Corrected in source commit 6f4afd7."
+}

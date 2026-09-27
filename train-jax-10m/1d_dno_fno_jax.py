@@ -61,6 +61,19 @@ from checkpoint_util import (  # noqa: E402
 )
 
 
+def build_optimizer(
+    lr_schedule: optax.Schedule,
+    weight_decay: float,
+    gradient_ema_decay: float = 0.0,
+) -> optax.GradientTransformation:
+    if not 0.0 <= gradient_ema_decay < 1.0:
+        raise ValueError("gradient_ema_decay must be in [0, 1)")
+    optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay)
+    if gradient_ema_decay > 0.0:
+        optimizer = optax.chain(optax.ema(gradient_ema_decay, debias=True), optimizer)
+    return optimizer
+
+
 def main() -> None:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate.")
@@ -93,6 +106,23 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
+    parser.add_argument("--cs_learned_grid", type=int, default=None,
+                        help="Optional even grid size for the learned correction; baseline stays full resolution.")
+    parser.add_argument("--cs_fuse_fft", action="store_true",
+                        help="Use the experimental fused float32 FFT kernel on a 256-point learned grid.")
+    parser.add_argument("--cs_correction", choices=("branches", "compact", "spectral_mlp", "canonical_fno", "symmetric_fno", "full_spectrum_mlp", "spatial_spectral_attention"), default="branches",
+                        help="Learned correction architecture; alternatives to branches are experimental.")
+    parser.add_argument("--cs_compact_rank", type=int, default=64,
+                        help="Even dimension of the compact correction's real Fourier basis.")
+    parser.add_argument("--cs_compact_hidden", type=int, default=128,
+                        help="Width of the compact correction's per-example conditioning network.")
+    parser.add_argument("--cs_spectral_hidden", type=int, default=256)
+    parser.add_argument("--cs_spectral_layers", type=int, default=4)
+    parser.add_argument("--cs_spectral_channels", type=int, default=16)
+    parser.add_argument("--cs_spectral_decoder_hidden", type=int, default=64)
+    parser.add_argument("--cs_attention_channels", type=int, default=128)
+    parser.add_argument("--cs_attention_heads", type=int, default=4)
+    parser.add_argument("--cs_attention_window", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument(
         "--epochs",
@@ -106,6 +136,8 @@ def main() -> None:
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
     )
     parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr_schedule", choices=("cosine", "constant"), default="cosine",
+                        help="Constant keeps --lr fixed and ignores --lr_warmup_steps.")
     parser.add_argument(
         "--lr_warmup_steps",
         type=int,
@@ -115,6 +147,8 @@ def main() -> None:
         "analytic baseline. 0 preserves the original schedule.",
     )
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--gradient_ema_decay", type=float, default=0.0,
+                        help="Optional bias-corrected gradient EMA before AdamW; 0 disables.")
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
@@ -289,6 +323,18 @@ def main() -> None:
             width=args.width,
             n_blocks=args.n_blocks,
             latent=args.latent,
+            learned_grid=args.cs_learned_grid,
+            fuse_fft=args.cs_fuse_fft,
+            correction_kind=args.cs_correction,
+            compact_rank=args.cs_compact_rank,
+            compact_hidden=args.cs_compact_hidden,
+            spectral_hidden=args.cs_spectral_hidden,
+            spectral_layers=args.cs_spectral_layers,
+            spectral_channels=args.cs_spectral_channels,
+            spectral_decoder_hidden=args.cs_spectral_decoder_hidden,
+            attention_channels=args.cs_attention_channels,
+            attention_heads=args.cs_attention_heads,
+            attention_window=args.cs_attention_window,
             n_polys=args.cs_n_polys,
             use_first_deriv=args.cs_use_first_deriv,
             use_second_deriv=args.cs_use_second_deriv,
@@ -318,7 +364,9 @@ def main() -> None:
 
     # Set the learning-rate schedule and initialize AdamW's update state.
     total_steps = args.epochs * train_steps_per_epoch
-    if args.lr_warmup_steps > 0:
+    if args.lr_schedule == "constant":
+        lr_schedule = optax.constant_schedule(args.lr)
+    elif args.lr_warmup_steps > 0:
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=args.lr,
@@ -331,7 +379,11 @@ def main() -> None:
             init_value=args.lr,
             decay_steps=total_steps,
         )
-    optimizer = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(lr_schedule, args.weight_decay, args.gradient_ema_decay)
+    if args.gradient_ema_decay > 0.0:
+        print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
+    print(f"learning rate: {args.lr_schedule}, first={float(lr_schedule(0)):.8g}, "
+          f"last={float(lr_schedule(total_steps - 1)):.8g}")
     training_state = train_state.TrainState.create(
         apply_fn=model.apply, params=params, tx=optimizer
     )

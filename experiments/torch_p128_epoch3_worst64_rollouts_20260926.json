@@ -1,0 +1,1437 @@
+{
+  "manifest": {
+    "source": "/Users/leon/Projects/Scratch/fnotrash/local-data/paper_equal_subset_20260924",
+    "selection": "First 16 distinct validation simulations per family in the local random subset; ranked after rollout",
+    "initial_state": "Held-out snapshots, not necessarily frame zero; reset autonomous dynamics clock to zero",
+    "families": [
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "stokes",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "tanaka",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "benjamin_feir",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma",
+      "jonswap_tma"
+    ],
+    "local_rows": [
+      3,
+      8,
+      9,
+      21,
+      25,
+      29,
+      30,
+      32,
+      36,
+      40,
+      49,
+      60,
+      66,
+      70,
+      78,
+      81,
+      1285,
+      1287,
+      1294,
+      1299,
+      1302,
+      1305,
+      1308,
+      1310,
+      1311,
+      1313,
+      1316,
+      1319,
+      1339,
+      1342,
+      1350,
+      1365,
+      2560,
+      2599,
+      2602,
+      2608,
+      2619,
+      2632,
+      2647,
+      2649,
+      2652,
+      2656,
+      2659,
+      2660,
+      2662,
+      2663,
+      2665,
+      2669,
+      3845,
+      3853,
+      3855,
+      3862,
+      3868,
+      3873,
+      3876,
+      3877,
+      3879,
+      3880,
+      3882,
+      3887,
+      3899,
+      3906,
+      3907,
+      3909
+    ],
+    "source_rows": [
+      15152,
+      27691,
+      41096,
+      82811,
+      90542,
+      92590,
+      104099,
+      106512,
+      117180,
+      129082,
+      149202,
+      169317,
+      191628,
+      210098,
+      238263,
+      252626,
+      3712875,
+      3716876,
+      3731949,
+      3741022,
+      3745407,
+      3751452,
+      3752958,
+      3756079,
+      3756608,
+      3757003,
+      3770871,
+      3785011,
+      3845771,
+      3850896,
+      3877462,
+      3921139,
+      7373652,
+      7507735,
+      7513805,
+      7527156,
+      7548924,
+      7576144,
+      7622453,
+      7626508,
+      7637169,
+      7643990,
+      7647991,
+      7652624,
+      7656396,
+      7657550,
+      7668016,
+      7681691,
+      11071553,
+      11099651,
+      11108917,
+      11134494,
+      11147045,
+      11154923,
+      11165973,
+      11178453,
+      11183947,
+      11184294,
+      11186210,
+      11200166,
+      11239296,
+      11265339,
+      11271137,
+      11274067
+    ],
+    "simulation_ids": [
+      15152,
+      27691,
+      41096,
+      82811,
+      90542,
+      92590,
+      104099,
+      106512,
+      117180,
+      129082,
+      149202,
+      169317,
+      191628,
+      210098,
+      238263,
+      252626,
+      3686532,
+      3686552,
+      3686627,
+      3686673,
+      3686695,
+      3686725,
+      3686732,
+      3686748,
+      3686751,
+      3686753,
+      3686822,
+      3686893,
+      3687196,
+      3687222,
+      3687355,
+      3687573,
+      3704836,
+      3705506,
+      3705537,
+      3705603,
+      3705712,
+      3705848,
+      3706080,
+      3706100,
+      3706153,
+      3706187,
+      3706207,
+      3706231,
+      3706249,
+      3706255,
+      3706308,
+      3706376,
+      3723325,
+      3723466,
+      3723512,
+      3723640,
+      3723703,
+      3723742,
+      3723797,
+      3723860,
+      3723887,
+      3723889,
+      3723899,
+      3723968,
+      3724164,
+      3724294,
+      3724323,
+      3724338
+    ],
+    "depths": [
+      0.02814765596996211,
+      0.19527192813940625,
+      0.027112920466723037,
+      0.25850036140139376,
+      0.041847146137045016,
+      0.04181670089435009,
+      0.1892710255361872,
+      0.22510168971391448,
+      0.03547781958427714,
+      0.17796198381260595,
+      0.09043317264622389,
+      0.030893962695843515,
+      0.03692947660410701,
+      0.15490861013198112,
+      0.03692187235178464,
+      0.03372659378425294,
+      0.04149405729954391,
+      0.2289054738667782,
+      0.050047614361680245,
+      0.33126524154386816,
+      0.27741339064201526,
+      0.20594076580507714,
+      0.24173077485140734,
+      0.04305701656589667,
+      0.20069179127870415,
+      0.047027236631062556,
+      0.2746874288678027,
+      0.3158673803634482,
+      0.08266037005418041,
+      0.1720165982338229,
+      0.33665682951231124,
+      0.026271732977786497,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      0.021015332668180942,
+      0.02437607445176619,
+      0.04439112076894744,
+      0.05087017578955464,
+      0.04753991234518582,
+      0.044562525871150824,
+      0.04795274514121478,
+      0.03993788109319143,
+      0.0208944649751557,
+      0.031736222407959536,
+      0.03916203633039114,
+      0.059022488929525316,
+      0.058731149343586884,
+      0.012100474349891208,
+      0.011656940059149497,
+      0.011694484678565228
+    ],
+    "length": 6.283185307179586,
+    "tmax": 4.0,
+    "saved_dt": 0.08,
+    "substeps": 8,
+    "internal_dt": 0.01,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt"
+  },
+  "model_rollout": {
+    "checkpoint": "/__modal/volumes/vo-avkFPgxt7ZlXXBPp9jMYez/experiments/torch_spectral_width256_p128_epoch3_20260926/checkpoint.pt",
+    "epoch": 3,
+    "device": "cuda",
+    "integration_dtype": "float64",
+    "model_bf16": true,
+    "model_max_mode": 128,
+    "substeps": 8,
+    "implicit_iterations": 4,
+    "filter_fraction": 0.25,
+    "length": 6.283185307179586,
+    "seconds": 80.976167661,
+    "frames": 51,
+    "initial_conditions": 64,
+    "nonfinite_trajectories": 0,
+    "input": "/tmp/input.npz"
+  },
+  "reference": {
+    "seconds": 146.9945399579592,
+    "backend": "cpu",
+    "dno_order": 6,
+    "pad_factor": 8
+  },
+  "trajectories": [
+    {
+      "family": "stokes",
+      "simulation_id": 15152,
+      "depth": 0.02814765596996211,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 4.004422387309507e-05,
+        "xi": 3.2132614891351435e-05,
+        "gxi": 8.195189072282878e-05
+      },
+      "max_reference_energy_drift": 8.581949808606205e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 27691,
+      "depth": 0.19527192813940625,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 1.269950629439672e-05,
+        "xi": 1.6099321575928964e-05,
+        "gxi": 1.855774020014637e-05
+      },
+      "max_reference_energy_drift": 1.064885625949875e-13
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 41096,
+      "depth": 0.027112920466723037,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 5.104051057346964e-05,
+        "xi": 3.389651282613723e-05,
+        "gxi": 7.594074524111649e-05
+      },
+      "max_reference_energy_drift": 8.007084220225654e-15
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 82811,
+      "depth": 0.25850036140139376,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 3.487371521226582e-06,
+        "xi": 3.860080511768872e-06,
+        "gxi": 5.572345251356637e-06
+      },
+      "max_reference_energy_drift": 6.67150080033556e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 90542,
+      "depth": 0.041847146137045016,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 1.3275583142433434e-05,
+        "xi": 1.085468300462118e-05,
+        "gxi": 2.5705901036075455e-05
+      },
+      "max_reference_energy_drift": 1.1514417533647305e-13
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 92590,
+      "depth": 0.04181670089435009,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 2.3439553752742324e-05,
+        "xi": 1.6486223003714854e-05,
+        "gxi": 1.9692272714643905e-05
+      },
+      "max_reference_energy_drift": 2.3466071518210668e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 104099,
+      "depth": 0.1892710255361872,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 5.253819616736305e-06,
+        "xi": 6.2656347270487544e-06,
+        "gxi": 7.718899635150488e-06
+      },
+      "max_reference_energy_drift": 4.0957863860347975e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 106512,
+      "depth": 0.22510168971391448,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 6.977795446943799e-06,
+        "xi": 6.680787240052084e-06,
+        "gxi": 9.297973320254339e-06
+      },
+      "max_reference_energy_drift": 8.747282208978531e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 117180,
+      "depth": 0.03547781958427714,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 2.553941213346338e-05,
+        "xi": 2.7352717482454117e-05,
+        "gxi": 5.2533360513235035e-05
+      },
+      "max_reference_energy_drift": 7.223250341938786e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 129082,
+      "depth": 0.17796198381260595,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 1.4738494251489974e-05,
+        "xi": 1.4962093974845028e-05,
+        "gxi": 1.5716724054871337e-05
+      },
+      "max_reference_energy_drift": 3.301087676354804e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 149202,
+      "depth": 0.09043317264622389,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 1.0986947181889295e-05,
+        "xi": 9.672577161010204e-06,
+        "gxi": 1.3111949090933e-05
+      },
+      "max_reference_energy_drift": 3.0780095005100476e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 169317,
+      "depth": 0.030893962695843515,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 4.949672408479314e-05,
+        "xi": 2.4829456200506048e-05,
+        "gxi": 6.527354679757153e-05
+      },
+      "max_reference_energy_drift": 5.319383046899017e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 191628,
+      "depth": 0.03692947660410701,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 3.1423999353961055e-05,
+        "xi": 1.939742212866352e-05,
+        "gxi": 4.0893553998697174e-05
+      },
+      "max_reference_energy_drift": 5.759778671167802e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 210098,
+      "depth": 0.15490861013198112,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 2.5064724379083686e-06,
+        "xi": 2.4107736116370564e-06,
+        "gxi": 4.07435434900346e-06
+      },
+      "max_reference_energy_drift": 4.791263897225504e-14
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 238263,
+      "depth": 0.03692187235178464,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0013832303218584455,
+        "xi": 0.001460934447424379,
+        "gxi": 0.0018996030175091566
+      },
+      "max_reference_energy_drift": 6.825587446280731e-08
+    },
+    {
+      "family": "stokes",
+      "simulation_id": 252626,
+      "depth": 0.03372659378425294,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00043235669513401416,
+        "xi": 0.0004198171419169178,
+        "gxi": 0.0005128390632495105
+      },
+      "max_reference_energy_drift": 8.556796672760218e-10
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686532,
+      "depth": 0.04149405729954391,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0007927085793915796,
+        "xi": 0.000139574539732595,
+        "gxi": 0.0018835531017511392
+      },
+      "max_reference_energy_drift": 1.970201675082995e-11
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686552,
+      "depth": 0.2289054738667782,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0006128032150518327,
+        "xi": 0.0002374668446479599,
+        "gxi": 0.0017670868040189549
+      },
+      "max_reference_energy_drift": 1.1187442251830949e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686627,
+      "depth": 0.050047614361680245,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0002539449707591517,
+        "xi": 0.00023836487203590607,
+        "gxi": 0.0010887301587197674
+      },
+      "max_reference_energy_drift": 1.3386053668885002e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686673,
+      "depth": 0.33126524154386816,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0001513565743143545,
+        "xi": 8.832954999003375e-05,
+        "gxi": 0.0005266571921018162
+      },
+      "max_reference_energy_drift": 2.3080578635669615e-11
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686695,
+      "depth": 0.27741339064201526,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0003497116656039956,
+        "xi": 0.0001537634873678333,
+        "gxi": 0.0010281775112205233
+      },
+      "max_reference_energy_drift": 3.161101512616444e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686725,
+      "depth": 0.20594076580507714,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 5.1785048778790516e-05,
+        "xi": 3.7400601126433625e-05,
+        "gxi": 0.0002885012623584462
+      },
+      "max_reference_energy_drift": 5.5706475541953365e-11
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686732,
+      "depth": 0.24173077485140734,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.000311377919831786,
+        "xi": 0.00012488154334229203,
+        "gxi": 0.0012029541653157461
+      },
+      "max_reference_energy_drift": 8.241332866725647e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686748,
+      "depth": 0.04305701656589667,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 8.122614553838081e-05,
+        "xi": 4.480173161562542e-05,
+        "gxi": 0.00023746923893187838
+      },
+      "max_reference_energy_drift": 2.1388267852921314e-13
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686751,
+      "depth": 0.20069179127870415,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0008027030800439562,
+        "xi": 0.00028555273306660997,
+        "gxi": 0.0022432565971126253
+      },
+      "max_reference_energy_drift": 1.3151295991136523e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686753,
+      "depth": 0.047027236631062556,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0007174770916872484,
+        "xi": 0.00012474231964901272,
+        "gxi": 0.001799551900459714
+      },
+      "max_reference_energy_drift": 3.576334610407235e-11
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686822,
+      "depth": 0.2746874288678027,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 2.8611349962178175e-05,
+        "xi": 5.4164947756770564e-05,
+        "gxi": 0.00015333356561869955
+      },
+      "max_reference_energy_drift": 7.366290918081062e-12
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3686893,
+      "depth": 0.3158673803634482,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00022405836020279507,
+        "xi": 0.00010378807379033543,
+        "gxi": 0.0006782164785922025
+      },
+      "max_reference_energy_drift": 1.7980673368035894e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3687196,
+      "depth": 0.08266037005418041,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 5.085468331960572e-05,
+        "xi": 1.7767043258794656e-05,
+        "gxi": 0.0001472513401471736
+      },
+      "max_reference_energy_drift": 6.087054445011513e-12
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3687222,
+      "depth": 0.1720165982338229,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 4.8268151681438025e-05,
+        "xi": 3.0935324252539696e-05,
+        "gxi": 0.0001784725904199199
+      },
+      "max_reference_energy_drift": 9.083876721204598e-12
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3687355,
+      "depth": 0.33665682951231124,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0002879944935098985,
+        "xi": 0.0001525498807911051,
+        "gxi": 0.0009388423253420462
+      },
+      "max_reference_energy_drift": 4.892837317952112e-09
+    },
+    {
+      "family": "tanaka",
+      "simulation_id": 3687573,
+      "depth": 0.026271732977786497,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 6.517944772537343e-05,
+        "xi": 1.5969751652344603e-05,
+        "gxi": 0.00016247763289955244
+      },
+      "max_reference_energy_drift": 2.647421776528031e-12
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3704836,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00028754308038318255,
+        "xi": 0.00027170529135497364,
+        "gxi": 0.000276692475168071
+      },
+      "max_reference_energy_drift": 2.790777489775451e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3705506,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0001324454170501126,
+        "xi": 0.00012952147730868605,
+        "gxi": 0.0001315713178165308
+      },
+      "max_reference_energy_drift": 7.498803519368101e-11
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3705537,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00048488102649382053,
+        "xi": 0.00044958805485434866,
+        "gxi": 0.0004781073435394612
+      },
+      "max_reference_energy_drift": 7.60219933071687e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3705603,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0010442880892630889,
+        "xi": 0.0009742013338719168,
+        "gxi": 0.0010675393407409146
+      },
+      "max_reference_energy_drift": 1.9374770690190086e-08
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3705712,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 7.872554843501838e-05,
+        "xi": 8.594616080571474e-05,
+        "gxi": 8.650534402981267e-05
+      },
+      "max_reference_energy_drift": 3.398073638507265e-13
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3705848,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00020574891714824904,
+        "xi": 0.0002438010946651047,
+        "gxi": 0.00025281914991451867
+      },
+      "max_reference_energy_drift": 1.1451632433711462e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706080,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 9.499952475547955e-05,
+        "xi": 0.00010127375574636788,
+        "gxi": 0.00010400547008745585
+      },
+      "max_reference_energy_drift": 3.3991447745208135e-12
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706100,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0001302224340476773,
+        "xi": 0.00012622816712519824,
+        "gxi": 0.000127093046853056
+      },
+      "max_reference_energy_drift": 6.792651424246143e-12
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706153,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0002637811046931014,
+        "xi": 0.00027977121781688194,
+        "gxi": 0.000286507266165644
+      },
+      "max_reference_energy_drift": 7.994482284371506e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706187,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0005763697554857171,
+        "xi": 0.0005690606779214695,
+        "gxi": 0.0006201366529046074
+      },
+      "max_reference_energy_drift": 2.7742708605615033e-09
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706207,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00016082224303868103,
+        "xi": 0.00016747637546214928,
+        "gxi": 0.0001709305783355537
+      },
+      "max_reference_energy_drift": 1.6079079503150097e-11
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706231,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00039541119341669973,
+        "xi": 0.00039346640273670204,
+        "gxi": 0.0004283549752918404
+      },
+      "max_reference_energy_drift": 8.835782556775448e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706249,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00012016919063156966,
+        "xi": 0.00011753441437458687,
+        "gxi": 0.00011917016368210213
+      },
+      "max_reference_energy_drift": 6.276920792606075e-12
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706255,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00022952206336645197,
+        "xi": 0.00023294080982591962,
+        "gxi": 0.0002472734144357822
+      },
+      "max_reference_energy_drift": 1.3901378902810776e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706308,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0001765633635649709,
+        "xi": 0.00018588237425022706,
+        "gxi": 0.00021412403058271136
+      },
+      "max_reference_energy_drift": 1.6276764761443396e-10
+    },
+    {
+      "family": "benjamin_feir",
+      "simulation_id": 3706376,
+      "depth": 5.0,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 9.044628008213834e-05,
+        "xi": 0.00010140216205259124,
+        "gxi": 0.00010525169804220187
+      },
+      "max_reference_energy_drift": 4.121984886080051e-12
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723325,
+      "depth": 0.021015332668180942,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0013884777651272755,
+        "xi": 0.0005036214448701934,
+        "gxi": 0.001995848991265866
+      },
+      "max_reference_energy_drift": 2.086832728489327e-09,
+      "plot": "worst_06_jonswap_tma_sim3723325.gif"
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723466,
+      "depth": 0.02437607445176619,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00033146415467781153,
+        "xi": 0.0005140677374591304,
+        "gxi": 0.00043694907353602385
+      },
+      "max_reference_energy_drift": 2.230731548628726e-11
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723512,
+      "depth": 0.04439112076894744,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0003853284684738101,
+        "xi": 0.0002789011266780303,
+        "gxi": 0.0005692080557586468
+      },
+      "max_reference_energy_drift": 2.4158993281993904e-10
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723640,
+      "depth": 0.05087017578955464,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0007143675386260317,
+        "xi": 0.0006553106319455986,
+        "gxi": 0.0009966630492941654
+      },
+      "max_reference_energy_drift": 7.400354776599873e-09
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723703,
+      "depth": 0.04753991234518582,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.001921719831120799,
+        "xi": 0.0019107731657342548,
+        "gxi": 0.0024983556510425305
+      },
+      "max_reference_energy_drift": 3.0589884403959946e-08,
+      "plot": "worst_05_jonswap_tma_sim3723703.gif"
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723742,
+      "depth": 0.044562525871150824,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0008909104164270085,
+        "xi": 0.0009602182031110318,
+        "gxi": 0.0014799191758956237
+      },
+      "max_reference_energy_drift": 7.945078189655681e-08
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723797,
+      "depth": 0.04795274514121478,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.001182897035339141,
+        "xi": 0.0008707963183823741,
+        "gxi": 0.0016028761992451658
+      },
+      "max_reference_energy_drift": 4.9999793932227165e-08
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723860,
+      "depth": 0.03993788109319143,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0007742701788863769,
+        "xi": 0.0005790359187161373,
+        "gxi": 0.0009342003407841754
+      },
+      "max_reference_energy_drift": 1.294307935214097e-09
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723887,
+      "depth": 0.0208944649751557,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.00020281948435401176,
+        "xi": 0.00014299926463445505,
+        "gxi": 0.00033013606068431746
+      },
+      "max_reference_energy_drift": 1.4501932197870902e-13
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723889,
+      "depth": 0.031736222407959536,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0011849355534940599,
+        "xi": 0.0009312527333821529,
+        "gxi": 0.0017021886316156967
+      },
+      "max_reference_energy_drift": 4.586223652742327e-09
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723899,
+      "depth": 0.03916203633039114,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0026170327905599682,
+        "xi": 0.002066233623175366,
+        "gxi": 0.003522382157097952
+      },
+      "max_reference_energy_drift": 1.6647367709790923e-07,
+      "plot": "worst_03_jonswap_tma_sim3723899.gif"
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3723968,
+      "depth": 0.059022488929525316,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.006367816711150601,
+        "xi": 0.004902621175243512,
+        "gxi": 0.010785090816993739
+      },
+      "max_reference_energy_drift": 2.0932220509794642e-07,
+      "plot": "worst_01_jonswap_tma_sim3723968.gif"
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3724164,
+      "depth": 0.058731149343586884,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.004172850619679925,
+        "xi": 0.00421552273385865,
+        "gxi": 0.0063670180645640975
+      },
+      "max_reference_energy_drift": 1.2739020815234631e-08,
+      "plot": "worst_02_jonswap_tma_sim3724164.gif"
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3724294,
+      "depth": 0.012100474349891208,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0007310074326880791,
+        "xi": 0.0002260679607740305,
+        "gxi": 0.0016050698032980422
+      },
+      "max_reference_energy_drift": 7.741330360702274e-11
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3724323,
+      "depth": 0.011656940059149497,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.001387792301845859,
+        "xi": 0.00033422138705347363,
+        "gxi": 0.0025255985899630246
+      },
+      "max_reference_energy_drift": 1.914967860945048e-10
+    },
+    {
+      "family": "jonswap_tma",
+      "simulation_id": 3724338,
+      "depth": 0.011694484678565228,
+      "model_finite": true,
+      "reference_valid": true,
+      "final_relative_l2": {
+        "eta": 0.0025522007616768727,
+        "xi": 0.0007338406328800343,
+        "gxi": 0.004999652081266742
+      },
+      "max_reference_energy_drift": 2.6250437663084264e-09,
+      "plot": "worst_04_jonswap_tma_sim3724338.gif"
+    }
+  ],
+  "evaluation": {
+    "n_t": 51,
+    "n_ics_attempted": 64,
+    "n_truth_valid": 64,
+    "n_truth_invalid": 0,
+    "truth_valid_rate_attempted": 1.0,
+    "truth_invalid_rate_attempted": 0.0,
+    "n_model_finite_truth_valid": 64,
+    "truth_valid_ics": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63
+    ],
+    "truth_invalid_ics": [],
+    "truth_invalid_reasons": [],
+    "truth_invalid_reason_counts": {
+      "nonfinite_eta": 0,
+      "nonfinite_xi": 0,
+      "nonfinite_gxi": 0,
+      "energy_drift_gt_tol": 0
+    },
+    "truth_drift_tol": 0.001,
+    "model_nonfinite_any_ics": [],
+    "model_nonfinite_any_ics_truth_valid": [],
+    "model_nonfinite_any_count_attempted": 0,
+    "model_nonfinite_any_rate_attempted": 0.0,
+    "model_nonfinite_any_count_truth_valid": 0,
+    "model_nonfinite_any_rate_truth_valid": 0.0,
+    "model_nonfinite_reason_counts_truth_valid": {
+      "nonfinite_eta": 0,
+      "nonfinite_xi": 0,
+      "nonfinite_gxi": 0
+    },
+    "terminal_eta_failure_count_tau_0p25": 0,
+    "terminal_eta_failure_rate_tau_0p25": 0.0,
+    "terminal_eta_failure_count_tau_0p5": 0,
+    "terminal_eta_failure_rate_tau_0p5": 0.0,
+    "terminal_eta_failure_count_tau_0p75": 0,
+    "terminal_eta_failure_rate_tau_0p75": 0.0,
+    "terminal_eta_failure_count_tau_1": 0,
+    "terminal_eta_failure_rate_tau_1": 0.0,
+    "terminal_eta_failure_definition": "truth-valid IC; final eta relative L2 > tau, or any nonfinite value in predicted eta/xi/gxi at any saved frame",
+    "metric_frame_index_t10p": 5,
+    "metric_time_t10p": 0.4,
+    "rel_l2_eta_n_conditional_finite_t10p": 64,
+    "rel_l2_eta_mean_conditional_finite_t10p": 0.00011835921671253999,
+    "rel_l2_eta_median_conditional_finite_t10p": 3.2432814948522e-05,
+    "rel_l2_eta_p95_conditional_finite_t10p": 0.0005379515316222307,
+    "rel_l2_xi_n_conditional_finite_t10p": 64,
+    "rel_l2_xi_mean_conditional_finite_t10p": 6.808595621941375e-05,
+    "rel_l2_xi_median_conditional_finite_t10p": 1.408610828404649e-05,
+    "rel_l2_xi_p95_conditional_finite_t10p": 0.0001889776247550035,
+    "rel_l2_gxi_n_conditional_finite_t10p": 64,
+    "rel_l2_gxi_mean_conditional_finite_t10p": 0.0002843139448318482,
+    "rel_l2_gxi_median_conditional_finite_t10p": 6.888511572521145e-05,
+    "rel_l2_gxi_p95_conditional_finite_t10p": 0.0009973930305659958,
+    "metric_frame_index_t50p": 25,
+    "metric_time_t50p": 2.0,
+    "rel_l2_eta_n_conditional_finite_t50p": 64,
+    "rel_l2_eta_mean_conditional_finite_t50p": 0.0003721921562018191,
+    "rel_l2_eta_median_conditional_finite_t50p": 0.00012342670814008996,
+    "rel_l2_eta_p95_conditional_finite_t50p": 0.0015209763505882516,
+    "rel_l2_xi_n_conditional_finite_t50p": 64,
+    "rel_l2_xi_mean_conditional_finite_t50p": 0.0002428569552472892,
+    "rel_l2_xi_median_conditional_finite_t50p": 7.385870461226325e-05,
+    "rel_l2_xi_p95_conditional_finite_t50p": 0.0007873476301303677,
+    "rel_l2_gxi_n_conditional_finite_t50p": 64,
+    "rel_l2_gxi_mean_conditional_finite_t50p": 0.0006529411623299689,
+    "rel_l2_gxi_median_conditional_finite_t50p": 0.00019330831341892726,
+    "rel_l2_gxi_p95_conditional_finite_t50p": 0.002265183779629768,
+    "metric_frame_index_tfinal": 50,
+    "metric_time_tfinal": 4.0,
+    "rel_l2_eta_n_conditional_finite_tfinal": 64,
+    "rel_l2_eta_mean_conditional_finite_tfinal": 0.0005970998200631714,
+    "rel_l2_eta_median_conditional_finite_tfinal": 0.00022679021178462352,
+    "rel_l2_eta_p95_conditional_finite_tfinal": 0.0024576286220934582,
+    "rel_l2_xi_n_conditional_finite_tfinal": 64,
+    "rel_l2_xi_mean_conditional_finite_tfinal": 0.00044079671187232023,
+    "rel_l2_xi_median_conditional_finite_tfinal": 0.00014777457271278007,
+    "rel_l2_xi_p95_conditional_finite_tfinal": 0.001843297357987771,
+    "rel_l2_gxi_n_conditional_finite_tfinal": 64,
+    "rel_l2_gxi_mean_conditional_finite_tfinal": 0.0010037539720717317,
+    "rel_l2_gxi_median_conditional_finite_tfinal": 0.00030931866152138183,
+    "rel_l2_gxi_p95_conditional_finite_tfinal": 0.0033728646220277073,
+    "hamiltonian_drift_pred_n_conditional_finite_tfinal": 64,
+    "hamiltonian_drift_pred_median_abs_conditional_finite_tfinal": 1.7572755571423577e-05,
+    "hamiltonian_drift_pred_p95_abs_conditional_finite_tfinal": 0.0002984252421421732,
+    "hamiltonian_drift_pred_reference": "predicted Hamiltonian at t=0",
+    "energy_error_pred_vs_truth_n_conditional_finite_tfinal": 64,
+    "energy_error_pred_vs_truth_median_abs_conditional_finite_tfinal": 2.1302396467004e-05,
+    "energy_error_pred_vs_truth_p95_abs_conditional_finite_tfinal": 0.0002976757198233327
+  },
+  "ranked_indices": [
+    59,
+    60,
+    58,
+    63,
+    52,
+    48,
+    62,
+    14,
+    57,
+    54,
+    35,
+    53,
+    24,
+    16,
+    55,
+    61,
+    25,
+    51,
+    17,
+    41,
+    34,
+    15,
+    43,
+    50,
+    20,
+    49,
+    22,
+    30,
+    32,
+    40,
+    18,
+    45,
+    27,
+    37,
+    56,
+    46,
+    42,
+    19,
+    33,
+    39,
+    44,
+    38,
+    47,
+    23,
+    36,
+    31,
+    21,
+    2,
+    28,
+    11,
+    29,
+    0,
+    12,
+    26,
+    8,
+    5,
+    9,
+    4,
+    1,
+    10,
+    7,
+    6,
+    3,
+    13
+  ],
+  "plotted_indices": [
+    59,
+    60,
+    58,
+    63,
+    52,
+    48
+  ],
+  "ranking_metric": "Final surface relative L2 at t=4; nonfinite models first; invalid references excluded",
+  "scope": "Worst within 64 validation snapshots, short horizon; not the full production test suite"
+}

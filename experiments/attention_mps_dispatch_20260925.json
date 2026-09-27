@@ -1,0 +1,486 @@
+{
+  "torch.float32": [
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._safe_softmax.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._softmax_backward_data.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    }
+  ],
+  "torch.bfloat16": [
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._safe_softmax.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.bfloat16"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._softmax_backward_data.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            32,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten.bmm.default",
+      "inputs": [
+        {
+          "shape": [
+            256,
+            1024,
+            1024
+          ],
+          "dtype": "torch.float32"
+        },
+        {
+          "shape": [
+            256,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    },
+    {
+      "op": "aten._to_copy.default",
+      "inputs": [
+        {
+          "shape": [
+            64,
+            4,
+            1024,
+            32
+          ],
+          "dtype": "torch.float32"
+        }
+      ]
+    }
+  ]
+}
