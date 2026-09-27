@@ -17,7 +17,8 @@ app = modal.App("torch-epoch1-rollouts")
 
 @app.function(image=image, volumes={"/data": volume}, gpu=os.environ.get("ROLLOUT_GPU", "L4"), cpu=4,
               memory=16384, timeout=600, retries=0, scaledown_window=2)
-def run(checkpoint_run: str, output_name: str, input_bytes: bytes) -> bytes:
+def run(checkpoint_run: str, output_name: str, input_bytes: bytes,
+        checkpoint_file: str = "checkpoint.pt") -> bytes:
     import sys
 
     sys.path.insert(0, "/repo/torch-attention")
@@ -26,7 +27,7 @@ def run(checkpoint_run: str, output_name: str, input_bytes: bytes) -> bytes:
     Path("/tmp/input.npz").write_bytes(input_bytes)
     output = Path("/data/experiments") / output_name / "predictions.npz"
     sys.argv = ["rollout_eval.py", "--checkpoint",
-                f"/data/experiments/{checkpoint_run}/checkpoint.pt",
+                f"/data/experiments/{checkpoint_run}/{checkpoint_file}",
                 "--input", "/tmp/input.npz", "--out", str(output), "--device", "cuda", "--substeps", "8"]
     main()
     volume.commit()
@@ -36,7 +37,8 @@ def run(checkpoint_run: str, output_name: str, input_bytes: bytes) -> bytes:
 @app.local_entrypoint()
 def main(checkpoint_run: str = "torch_spectral_width256_full_epoch_20260926",
          output_name: str = "torch_epoch1_rollouts_20260926",
-         input_file: str = str(OUTPUT / "initial_conditions.npz")) -> None:
+         input_file: str = str(OUTPUT / "initial_conditions.npz"),
+         checkpoint_file: str = "checkpoint.pt") -> None:
     import shutil
 
     destination = ROOT / "outputs" / output_name
@@ -45,7 +47,7 @@ def main(checkpoint_run: str = "torch_spectral_width256_full_epoch_20260926",
     destination.mkdir(parents=True, exist_ok=True)
     if Path(input_file).resolve() != (destination / "initial_conditions.npz").resolve():
         shutil.copyfile(input_file, destination / "initial_conditions.npz")
-    result = run.remote(checkpoint_run, output_name, Path(input_file).read_bytes())
+    result = run.remote(checkpoint_run, output_name, Path(input_file).read_bytes(), checkpoint_file)
     with (destination / "predictions.npz").open("xb") as handle:
         handle.write(result)
     print(f"Saved {destination / 'predictions.npz'}")

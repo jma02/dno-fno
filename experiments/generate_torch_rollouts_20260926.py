@@ -20,6 +20,7 @@ def main() -> None:
     parser.add_argument("--reference-output", type=Path, default=OUTPUT)
     parser.add_argument("--per-family", type=int, default=1)
     parser.add_argument("--worst", type=int, default=0)
+    parser.add_argument("--model-label", default="")
     args = parser.parse_args()
     output = args.output
     sys.path.insert(0, str(ROOT))
@@ -87,6 +88,7 @@ def main() -> None:
             predicted = dict(source)
         model_metadata = json.loads(str(predicted["rollout_metadata_json"]))
         epoch = model_metadata["epoch"]
+        model_label = args.model_label or f"Epoch-{epoch} model"
         manifest["checkpoint"] = model_metadata["checkpoint"]
         with np.load(args.reference_output / "reference.npz") as source:
             reference = dict(source)
@@ -125,11 +127,11 @@ def main() -> None:
                        **{f"truth_{k}": v[:, i] for k, v in truth.items()}}
             np.savez_compressed(output / f"{name}_comparison.npz", **payload)
             render_rollout_gif(payload, output / f"{name}.gif",
-                               title=f"{family} | epoch {epoch} | simulation {row['simulation_id']} | h={row['depth']:.4g}",
+                               title=f"{family} | {model_label} | simulation {row['simulation_id']} | h={row['depth']:.4g}",
                                fps=12, n_frames=51, dpi=75)
             ax, residual, error = axes[rank]
             ax.plot(x, truth["eta"][-1, i], label="Order-6 reference", color="black", linewidth=1.3)
-            ax.plot(x, pred["eta"][-1, i], label=f"Epoch-{epoch} model", linestyle="--", linewidth=1.)
+            ax.plot(x, pred["eta"][-1, i], label=model_label, linestyle="--", linewidth=1.)
             ax.set_title(f"#{rank + 1} {family}, sim {row['simulation_id']}: t=4, L2={row['final_relative_l2']['eta']:.3%}")
             ax.set_ylabel("eta")
             ax.grid(alpha=.2)
