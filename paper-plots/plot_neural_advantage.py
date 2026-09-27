@@ -35,7 +35,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             for family, result in json.loads(path.read_text())["families"].items():
                 warm["families"].setdefault(family, result)["methods"].update(result["methods"])
         for result in warm["families"].values():
-            result["methods"] = {name.removesuffix("_boundaries"): record
+            result["methods"] = {name.removesuffix("_stages").removesuffix("_boundaries"): record
                                  for name, record in result["methods"].items()}
     candidate = {"families": {}} if args.candidate_timings else {}
     for path in args.candidate_timings or ():
@@ -44,8 +44,9 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     if args.stack_hardware:
         for family, result in candidate["families"].items():
             for method, record in result["methods"].items():
-                if method.removesuffix("_boundaries") in ("M1", "M2"):
-                    warm["families"][family]["methods"][method.removesuffix("_boundaries")]["seconds"] = record["seconds"]
+                classical = method.removesuffix("_stages").removesuffix("_boundaries")
+                if classical in ("M1", "M2"):
+                    warm["families"][family]["methods"][classical]["seconds"] = record["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     spectral = {}
     for path in args.spectral_timings or ():
@@ -103,11 +104,12 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         ax.plot(seconds[:-1], errors[:-1], "o-", color="#606970", ms=4,
                 markerfacecolor="white", lw=1.1, zorder=2)
         for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
-            offset = (8, 9) if family == "benjamin_feir" and order == 3 else (6, 3)
+            offset = ((6, -8) if args.single_case else (8, 9)) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
-                offset = (-22, 5)
+                offset = (0, 10)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
-                        color="#606970", fontsize=8)
+                        color="#606970", fontsize=8,
+                        bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
         right = float(seconds.max())
         for run, name, _label, color, marker in RUNS:
@@ -143,7 +145,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
                 ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
-                        transform=ax.transAxes, color=color, fontsize=9)
+                        transform=ax.transAxes, color=color, fontsize=9,
+                        bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
             right = max(right, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
         if family in spectral:
@@ -218,31 +221,20 @@ if __name__ == "__main__":
         modal.single_case = True
         a100 = argparse.Namespace(**vars(modal))
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
-            if hardware == "a100":
-                config.timings = ROOT / "outputs/portable_fusion_20260927/a100_full_sxm/classical.json"
-                config.classical_timings = None
-                config.candidate_timings = [ROOT / "outputs/portable_fusion_20260927/a100_full_sxm/rollouts.json"]
-                config.candidate_method = "fourier_fused_fields_spectral_all_boundaries"
-                config.candidate_previous_method = "fourier_transforms_spectral_all"
-            else:
-                paths = ([ROOT / "outputs/fair_classical_20260925/ada_full.json"] if hardware == "ada" else [
-                    ROOT / f"outputs/fair_classical_20260925/blackwell_{family}/rollouts.json"
-                    for family in ("short", "tanaka", "bf")
-                ])
-                if config.single_case:
-                    config.timings = paths[0]
-                config.classical_timings = paths
-                config.candidate_timings = [
-                    ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json",
-                    ROOT / "outputs/fourier_ffts_20260926" / (
-                        "ada_full.json" if hardware == "ada" else "blackwell_full/rollouts.json"),
-                    ROOT / "outputs/fourier_ept_20260926" / (
-                        "ada_mask_full.json" if hardware == "ada" else "blackwell_full/rollouts.json"),
-                ]
-                config.candidate_method = ("fourier_tuned_16_16_16_16_mask_spectral_all" if hardware == "ada"
-                                           else "fourier_tuned_8_8_16_8_mask_spectral_all")
-                config.candidate_previous_method = ("fourier_transforms_e16_spectral_all" if hardware == "ada"
-                                                    else "fourier_transforms_spectral_all")
+            directory = ROOT / "outputs/roofline_push_20260927"
+            classical = directory / {
+                "ada": "ada_classical.json", "blackwell": "blackwell_classical/classical.json",
+                "a100": "a100_classical_sxm/classical.json",
+            }[hardware]
+            if config.single_case:
+                config.timings = classical
+            config.classical_timings = [classical]
+            config.candidate_timings = [directory / {
+                "ada": "ada_full.json", "blackwell": "blackwell_full_combined/rollouts.json",
+                "a100": "a100_full_sxm/rollouts.json",
+            }[hardware]]
+            config.candidate_method = "fourier_fused_fields_overlap_spectral_all_boundaries_stages"
+            config.candidate_previous_method = "fourier_fused_fields_spectral_all_boundaries"
             config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)

@@ -196,25 +196,32 @@ is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
-The A100 panel now uses `fourier_fused_fields_spectral_all_boundaries`,
-with EPT8 throughout, and includes measured M1–M6 timings in all four families.
-It forms the learned surface/branch multipliers inside their inverse FFT
-and packs eta/xi timestep-boundary transforms. The latter also applies to
-every classical order. Input-normalization fusion was tested but excluded
-because it did not improve runtime consistently across the GPUs.
-Annotations compare the candidate against `fourier_transforms_spectral_all`
-in the same three-repeat, four-family benchmark, not against the earlier
-device-specific settings. Sources are under `outputs/portable_fusion_20260927/`:
-`ada_full.json`, `blackwell_full/rollouts.json`, and
-`a100_full_sxm/rollouts.json`. A100 classical M1–M6 use one fresh full-rollout
-measurement each from `a100_full_sxm/classical.json`; M2 uses the three-repeat
-packed median from the paired run. Ada and Blackwell panels retain their
-preceding measurements while their new all-order classical sweeps finish.
-The common bundle reduces full-rollout runtime by 1.47–1.57% on Ada,
-1.64–1.80% on Blackwell, and 3.47–4.19% on A100. Saved neural eta/xi/Gxi
-outputs are identical to the paired control in every family on every GPU.
+All three hardware panels use the same
+`fourier_fused_fields_overlap_spectral_all_boundaries_stages` candidate,
+with EPT8 throughout. It pairs the two independent GL2 stage evaluations
+within each iteration of one trajectory and overlaps G1 with the learned
+correction using a compiler-managed GPU stream. Stage pairing and boundary
+FFT packing also apply to every classical order M1–M6. FP64 integration/G1,
+FP32 learned inference, weights, dt and iteration count are unchanged.
+G1 input-preparation fusion was tested but excluded for lack of a speed gain.
+
+Annotations compare against `fourier_fused_fields_spectral_all_boundaries`
+in the same three-repeat, four-family full-rollout benchmark. Sources under
+`outputs/roofline_push_20260927/` are `ada_full.json`,
+`blackwell_full_combined/rollouts.json`, and `a100_full_sxm/rollouts.json`.
+Classical M1–M6 use fresh full-rollout measurements from `ada_classical.json`,
+`blackwell_classical/classical.json`, and `a100_classical_sxm/classical.json`;
+M2 uses the three-repeat median from the paired neural comparison, with its
+accuracy still taken from the classical M6 reference. Ada timings run on GPU1.
+Across the four families, the common candidate uses 38.3–38.7% less time on Ada,
+36.3–36.4% on Blackwell, and 41.0–41.8% on A100 than its paired control.
+It uses 29.4–30.5%, 25.4–26.7%, and 4.8–6.5% less time than optimized M2,
+respectively. A100 saved trajectories are unchanged. Stage pairing on Ada and
+Blackwell changes long Benjamin–Feir trajectories by up to 0.26% and 0.34%
+across eta/xi/Gxi; both have smaller final surface errors against M6 in this case.
 Trained-model accuracy references and EMA overlays are retained. Trial
-details and decisions are in `experiments/experiments-2026-09-27.md`.
+details, numerical comparisons and decisions are in
+`experiments/experiments-2026-09-27.md`.
 
 The preceding FFT round used `fourier_transforms_e16_spectral_all` on Ada and
 `fourier_transforms_spectral_all` on Blackwell/A100.
@@ -246,11 +253,11 @@ Blackwell, and 19.86–20.39% on A100 versus `fused_cufftdx_spectral_all`.
 The A100 allocation is the 80GB SXM4 variant; the classical series retains that
 run's three repeats for M1 and one M6 reference rollout per family, with M2
 refreshed by the latest paired comparison. Unmeasured
-M3–M5 are omitted; earlier 40GB A100 timings are not mixed into the new row.
+M3–M5 were omitted in that round; earlier 40GB A100 timings were not mixed into it.
 
-Ada and Blackwell M1 medians retain their preceding Fourier-I/O paired runs;
-M3–M6 retain the earlier three-repeat measurements on the same hardware.
-M2 is remeasured with the old and new candidates on each GPU. Classical math
+In that round, Ada and Blackwell M1 medians retained their preceding Fourier-I/O paired runs;
+M3–M6 retained the earlier three-repeat measurements on the same hardware.
+M2 was remeasured with the old and new candidates on each GPU. Classical math
 and the shared nonlinear RHS are unchanged; these replacements concern the
 network's unpadded, normalized inputs and learned fields, absent from the
 spectral classical recurrence.
@@ -265,7 +272,7 @@ no training is performed.
 
 Historical baseline-replacement measurements remain under `outputs/shared_m1_20260926/`:
 `ada_full.json`, `blackwell/rollouts.json` and `a100/rollouts.json`; they are no longer plotted.
-Ada/Blackwell M3–M6 retain the preceding
+Those Ada/Blackwell M3–M6 measurements retained the preceding
 three-repeat medians from `outputs/fair_classical_20260925/`, including the
 M6 runtime reference. Ada/Blackwell classical error coordinates are unchanged: Ada retains
 the earlier 32-case medians and small/full neural points; the Modal panels use
@@ -296,7 +303,7 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/fourier_io_20260926/ada_full/rollouts.json \
+  --candidate-timings outputs/roofline_push_20260927/ada_full.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json
@@ -315,11 +322,14 @@ CUDA_VISIBLE_DEVICES=0 NCCL_P2P_LEVEL=PHB uv run --isolated --no-project --pytho
 Reproduce the local full-rollout measurements on a free GPU with:
 
 ```sh
-CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py \
-  --methods M1 M2 M6 fused_cufftdx_spectral_all fourier_round_spectral_all \
-  --reference M6 --reference-once --repeats 3 --pad-factor 2 \
+CUDA_VISIBLE_DEVICES=1 XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+  uv run --no-sync scripts/time_single_rollouts.py \
+  --methods fourier_fused_fields_spectral_all_boundaries \
+    fourier_fused_fields_spectral_all_boundaries_stages \
+    fourier_fused_fields_overlap_spectral_all_boundaries_stages M2_boundaries_stages \
+  --reference fourier_fused_fields_spectral_all_boundaries --repeats 3 --pad-factor 2 \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
-  --output outputs/fourier_io_20260926/ada_full/rollouts.json
+  --output outputs/roofline_push_20260927/ada_full.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
