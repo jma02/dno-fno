@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 
 Predictor = Callable[[Tensor, Tensor], Tensor]
+PreparedRollout = Callable[[Tensor, Tensor, Tensor], dict[str, Tensor]]
 
 
 def _fft(field: Tensor) -> Tensor:
@@ -22,14 +23,14 @@ def _resample(field: Tensor, n: int) -> Tensor:
 
 
 @torch.inference_mode()
-def rollout(eta: Tensor, xi: Tensor, times: Tensor, depth: Tensor, length: float,
-            predict_gxi: Predictor, *, substeps: int = 8, iterations: int = 4,
-            filter_fraction: float = .25, gravity: float = 1.) -> dict[str, Tensor]:
-    """Roll out (batch,n) fields; return (time,batch,n) eta/xi/gxi on device.
+def prepare_rollout(eta: Tensor, xi: Tensor, depth: Tensor, length: float,
+                    predict_gxi: Predictor, *, substeps: int = 8, iterations: int = 4,
+                    filter_fraction: float = .25, gravity: float = 1.,
+                    cuda_graph: bool = True) -> PreparedRollout:
+    """Prepare a reusable runner for fixed shape, device, depth, and predictor.
 
-    The predictor consumes physical eta/xi and returns physical G(eta)xi.
-    Integration is float64 on CPU/CUDA; predictor precision is independent.
-    Nonfinite evolved states are retained so instability remains measurable.
+    CUDA warmup/capture happens here, outside calls to the returned runner.
+    The runner is not reentrant; returned trajectories own their saved states.
     """
     if eta.device.type not in ("cpu", "cuda"):
         raise ValueError("Float64 rollout requires CPU or CUDA")
@@ -40,9 +41,7 @@ def rollout(eta: Tensor, xi: Tensor, times: Tensor, depth: Tensor, length: float
     if substeps < 1 or iterations < 1 or not 0 < filter_fraction <= 1:
         raise ValueError("Positive substeps/iterations and 0<filter_fraction<=1 required")
     device = eta.device
-    eta, xi, times, depth = (v.to(device=device, dtype=torch.float64) for v in (eta, xi, times, depth))
-    if times.ndim != 1 or not times.numel() or not torch.isfinite(times).all() or not (times.diff() > 0).all():
-        raise ValueError("times must be a finite, nonempty, strictly increasing vector")
+    eta, xi, depth = (v.to(device=device, dtype=torch.float64) for v in (eta, xi, depth))
     if depth.numel() not in (1, eta.shape[0]) or not torch.isfinite(depth).all() or not (depth > 0).all():
         raise ValueError("depth must contain one positive finite value per sample, or a scalar")
     if not torch.isfinite(eta).all() or not torch.isfinite(xi).all():
@@ -53,7 +52,6 @@ def rollout(eta: Tensor, xi: Tensor, times: Tensor, depth: Tensor, length: float
     g0 = k * torch.tanh(depth.reshape(-1, 1) * k)
     omega = (gravity * g0).sqrt()
     mask = k.abs() <= filter_fraction * k.abs().max()
-    xi = xi - xi.mean(-1, keepdim=True)
 
     def linear(state: Tensor, tau: Tensor) -> Tensor:
         a, b = state.unbind(0)
@@ -79,22 +77,74 @@ def rollout(eta: Tensor, xi: Tensor, times: Tensor, depth: Tensor, length: float
     sqrt3 = math.sqrt(3)
     c1, c2 = .5 - sqrt3 / 6, .5 + sqrt3 / 6
     a12, a21 = .25 - sqrt3 / 6, .25 + sqrt3 / 6
-    saved = [torch.stack((eta, xi, predict_gxi(eta, xi).double()))]
-    for index in range(times.numel() - 1):
-        dt = (times[index + 1] - times[index]) / substeps
-        for substep in range(substeps):
-            t = times[index] + substep * dt
-            v0 = linear(_fft(torch.stack((eta, xi))), -t)
-            stage1, stage2 = v0, v0
-            for _ in range(iterations):
-                f1, f2 = rhs(stage1, t + c1 * dt), rhs(stage2, t + c2 * dt)
-                stage1, stage2 = v0 + dt * (.25 * f1 + a12 * f2), v0 + dt * (a21 * f1 + .25 * f2)
+
+    def step(a: Tensor, b: Tensor, t: Tensor, dt: Tensor) -> tuple[Tensor, Tensor]:
+        v0 = linear(_fft(torch.stack((a, b))), -t)
+        stage1, stage2 = v0, v0
+        for _ in range(iterations):
             f1, f2 = rhs(stage1, t + c1 * dt), rhs(stage2, t + c2 * dt)
-            next_hat = linear(v0 + .5 * dt * (f1 + f2), t + dt)
-            if filter_fraction < 1:
-                next_hat = next_hat * mask
-            eta, xi = torch.fft.ifft(next_hat).real.unbind(0)
-            xi = xi - xi.mean(-1, keepdim=True)
-        saved.append(torch.stack((eta, xi, predict_gxi(eta, xi).double())))
-    trajectory = torch.stack(saved)
-    return {"times": times, "eta": trajectory[:, 0], "xi": trajectory[:, 1], "gxi": trajectory[:, 2]}
+            stage1, stage2 = v0 + dt * (.25 * f1 + a12 * f2), v0 + dt * (a21 * f1 + .25 * f2)
+        f1, f2 = rhs(stage1, t + c1 * dt), rhs(stage2, t + c2 * dt)
+        next_hat = linear(v0 + .5 * dt * (f1 + f2), t + dt)
+        if filter_fraction < 1:
+            next_hat = next_hat * mask
+        a, b = torch.fft.ifft(next_hat).real.unbind(0)
+        return a, b - b.mean(-1, keepdim=True)
+
+    graph = None
+    static_eta, static_xi = eta, xi
+    static_t, static_dt = eta.new_zeros(()), eta.new_zeros(())
+    if cuda_graph and device.type == "cuda":
+        static_eta, static_xi = eta.clone(), xi - xi.mean(-1, keepdim=True)
+        stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                step(static_eta, static_xi, static_t, static_dt)
+        torch.cuda.current_stream(device).wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            next_eta, next_xi = step(static_eta, static_xi, static_t, static_dt)
+            static_eta.copy_(next_eta)
+            static_xi.copy_(next_xi)
+        torch.cuda.current_stream(device).wait_stream(stream)
+        static_eta.copy_(eta)
+        static_xi.copy_(xi - xi.mean(-1, keepdim=True))
+
+    @torch.inference_mode()
+    def run(eta: Tensor, xi: Tensor, times: Tensor) -> dict[str, Tensor]:
+        eta, xi, times = (v.to(device=device, dtype=torch.float64) for v in (eta, xi, times))
+        if times.ndim != 1 or not times.numel() or not torch.isfinite(times).all() or not (times.diff() > 0).all():
+            raise ValueError("times must be a finite, nonempty, strictly increasing vector")
+        xi = xi - xi.mean(-1, keepdim=True)
+        if graph is not None:
+            static_eta.copy_(eta)
+            static_xi.copy_(xi)
+            eta, xi = static_eta, static_xi
+        saved = [torch.stack((eta, xi, predict_gxi(eta, xi).double()))]
+        for index in range(times.numel() - 1):
+            dt = (times[index + 1] - times[index]) / substeps
+            for substep in range(substeps):
+                t = times[index] + substep * dt
+                if graph is None:
+                    eta, xi = step(eta, xi, t, dt)
+                else:
+                    static_t.copy_(t)
+                    static_dt.copy_(dt)
+                    graph.replay()
+            saved.append(torch.stack((eta, xi, predict_gxi(eta, xi).double())))
+        trajectory = torch.stack(saved)
+        return {"times": times, "eta": trajectory[:, 0], "xi": trajectory[:, 1], "gxi": trajectory[:, 2]}
+
+    return run
+
+
+@torch.inference_mode()
+def rollout(eta: Tensor, xi: Tensor, times: Tensor, depth: Tensor, length: float,
+            predict_gxi: Predictor, *, substeps: int = 8, iterations: int = 4,
+            filter_fraction: float = .25, gravity: float = 1.) -> dict[str, Tensor]:
+    """Roll out float64 fields eagerly, retaining nonfinite evolved states."""
+    run = prepare_rollout(eta, xi, depth, length, predict_gxi, substeps=substeps,
+                          iterations=iterations, filter_fraction=filter_fraction,
+                          gravity=gravity, cuda_graph=False)
+    return run(eta, xi, times)
