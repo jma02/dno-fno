@@ -1,0 +1,30 @@
+{
+  "source_files": [
+    "experiments/torch_spectral_width256_full_epoch_20260926.json",
+    "experiments/torch_spectral_width256_epoch2_20260926.json",
+    "experiments/torch_spectral_width256_p128_epoch3_20260926.json",
+    "experiments/torch_spectral_p128_epoch4_weightema_20260926.json"
+  ],
+  "epochs": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "training_epoch_mean_relative_l2": [
+    0.0005347007244072468,
+    0.0003664177535881584,
+    0.00014253529333187304,
+    0.00011617448543007032
+  ],
+  "validation_endpoint_relative_l2": [
+    0.0003943378991912969,
+    0.00036036369240484103,
+    0.00013012547331736754,
+    0.00010845255197480691
+  ],
+  "epoch2_projected_before_epoch3_relative_l2": 0.00025643831098864147,
+  "epoch4_weight_ema_validation_relative_l2": 8.12487786577769e-05,
+  "validation_examples": 1474440,
+  "scope": "Recorded four-epoch history; epoch3 adds projection, epoch4 adds shadow weight EMA; no extrapolated epochs"
+}
