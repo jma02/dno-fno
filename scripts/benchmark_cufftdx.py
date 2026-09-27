@@ -39,16 +39,33 @@ def register() -> ctypes.CDLL:
 
 def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
-    outer: jax.Array | None = None, ept: int = 8,
+    outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
 ) -> jax.Array:
+    """Optionally fuse inverse casting and [reciprocal eta/xi scales, xi scale]."""
     register()
     fp64 = a.dtype in (jnp.float64, jnp.complex128)
     dtype = (jnp.float64 if fp64 else jnp.float32) if inverse else (jnp.complex128 if fp64 else jnp.complex64)
+    if normalization is not None:
+        dtype = jnp.float32
     result = jax.ShapeDtypeStruct((*a.shape[:-1], n if inverse else n // 2 + 1), dtype)
     return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
-        a, a if b is None else b, a if outer is None else outer,
-        size=np.int64(n), operation=np.int64(4 if outer is not None else inverse),
+        a, normalization if normalization is not None else a if b is None else b, a if outer is None else outer,
+        size=np.int64(n), operation=np.int64(8 if normalization is not None else 4 if outer is not None else inverse),
         multiply=b is not None, ept=np.int64(ept),
+    )
+
+
+def field_irfft(
+    inputs_hat: jax.Array, surface_ops: jax.Array, filters: jax.Array, *, n: int, ept: int = 8,
+) -> jax.Array:
+    """Form surface/branch multipliers on load, then return their real fields."""
+    register()
+    result = jax.ShapeDtypeStruct(
+        (*inputs_hat.shape[:-2], surface_ops.shape[-2] + filters.shape[-2], n), jnp.float32,
+    )
+    return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
+        inputs_hat, surface_ops, filters, size=np.int64(n), operation=np.int64(7),
+        multiply=False, ept=np.int64(ept),
     )
 
 
@@ -126,7 +143,7 @@ def classical_fused_hat(
 
 def measure(functions: list[Compiled], x: jax.Array, y: jax.Array, repeats: int) -> dict[str, Any]:
     expected, actual = (np.asarray(f(x, y)) for f in functions)
-    tolerance = 1e-12 if x.dtype in (jnp.float64, jnp.complex128) else 2e-6
+    tolerance = 1e-12 if expected.dtype in (np.float64, np.complex128) else 2e-6
     np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance * np.max(np.abs(expected)))
     for f in functions:
         for _ in range(50):
@@ -188,6 +205,28 @@ if __name__ == "__main__":
                     lambda x, y, ept=ept: fft(x, n, b=y, outer=outer, ept=ept), a, b,
                 )
         if n == 1024 and batch in (1, 2):
+            input_pair = jnp.stack((jnp.fft.rfft(a), jnp.fft.rfft(b)), axis=1)
+            scales = jnp.asarray((1.3, 0.7), dtype=jnp.float32)
+            normalization = jnp.concatenate((1 / scales, jnp.asarray((0.9,), dtype=jnp.float32)))
+            surface_ops = jnp.asarray(
+                rng.normal(size=(4, n // 2 + 1)) + 1j * rng.normal(size=(4, n // 2 + 1)),
+                dtype=jnp.complex64,
+            )
+            field_filters = jnp.asarray(rng.normal(size=(batch, 32, n // 2 + 1)), dtype=jnp.float32)
+            for ept in args.ept:
+                cases[f"normalized_irfft_e{ept}"] = (
+                    lambda x, y, ept=ept: (fft(x, n, inverse=True, ept=ept).astype(jnp.float32)
+                        / scales[None, :, None]) * jnp.asarray((1.0, normalization[2]))[None, :, None],
+                    lambda x, y, ept=ept: fft(x, n, inverse=True, ept=ept, normalization=normalization),
+                    input_pair, input_pair,
+                )
+                cases[f"field_irfft_e{ept}"] = (
+                    lambda x, y, ept=ept: fft(jnp.concatenate((
+                        surface_ops[None] * x[:, :1], y * x[:, 1:2],
+                    ), axis=1), n, inverse=True, ept=ept),
+                    lambda x, y, ept=ept: field_irfft(x, surface_ops, y, n=n, ept=ept),
+                    input_pair.astype(jnp.complex64), field_filters,
+                )
             k = jnp.arange(n // 2 + 1, dtype=dtype)
             symbols = jnp.broadcast_to(jnp.stack((k * jnp.tanh(0.1 * k), 1j * k)), (batch, 2, n // 2 + 1))
             outer_symbols = symbols.at[..., [0, -1]].set(symbols[..., [0, -1]].real)

@@ -25,7 +25,7 @@ from flax import linen as nn  # noqa: E402
 from flax.core import Scope  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
-from scripts.benchmark_cufftdx import fft, sandwich  # noqa: E402
+from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
@@ -37,6 +37,7 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
           "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
+          "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
@@ -56,6 +57,10 @@ def build_variant(
     input_ept, g1_input_ept, field_ept, sandwich_ept = (fft_ept,) * 4
     if variant.startswith("fourier_tuned_"):
         input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
+        variant = "fourier_transforms"
+    fused_fields = variant in ("fourier_fused_fields", "fourier_fused_both")
+    fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
+    if fused_fields or fused_inputs:
         variant = "fourier_transforms"
     trial = variant
     spectral_io = variant.startswith("fourier")
@@ -106,27 +111,36 @@ def build_variant(
             eta_norm_hat = jnp.fft.rfft(eta_norm)
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
+            normalized_hat = None
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
-                physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
-                            else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
-                normalized = physical / scales[None, :, None]
-                eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
-                normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
-                eta_norm_hat, xi_phys_hat = jnp.moveaxis(
-                    fft(normalized_inputs, nx, ept=fft_ept) if trial in ("fourier_features", "fourier_allfft")
-                    else jnp.fft.rfft(normalized_inputs), 1, 0)
+                if fused_inputs:
+                    normalized_inputs = fft(inputs, nx, inverse=True, ept=input_ept,
+                                            normalization=jnp.array([1 / scales[0], 1 / scales[1], model.xi_scale], dtype=jnp.float32))
+                    eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
+                else:
+                    physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
+                                else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
+                    normalized = physical / scales[None, :, None]
+                    eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
+                    normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
+                normalized_hat = (fft(normalized_inputs, nx, ept=fft_ept)
+                                  if trial in ("fourier_features", "fourier_allfft") else jnp.fft.rfft(normalized_inputs))
+                eta_norm_hat, xi_phys_hat = jnp.moveaxis(normalized_hat, 1, 0)
                 g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
                              else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
                 if trial in ("fourier_g1fft", "fourier_allfft", "fourier_kernels", "fourier_transforms"):
                     g1_xi_hat = fft(xi_phys.astype(jnp.float64), nx, ept=g1_input_ept)
-            field_spectra = jnp.concatenate((
-                surface_ops[None, :, :] * eta_norm_hat[:, None, :],
-                filters * xi_phys_hat[:, None, :],
-            ), axis=1)
-            fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
-                      if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
-                      else jnp.fft.irfft(field_spectra, n=nx))
+            if fused_fields:
+                fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=nx, ept=field_ept)
+            else:
+                field_spectra = jnp.concatenate((
+                    surface_ops[None, :, :] * eta_norm_hat[:, None, :],
+                    filters * xi_phys_hat[:, None, :],
+                ), axis=1)
+                fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
+                          if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
+                          else jnp.fft.irfft(field_spectra, n=nx))
             features = jnp.concatenate((
                 jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
                 jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
@@ -408,6 +422,9 @@ if __name__ == "__main__":
                   fourier_product="Fused learned product FFT", fourier_allfft="Combined FFT replacements",
                   fourier_fields="cuFFTDx packed field inverse FFT", fourier_kernels="G₁ FFT + field inverse + product FFT",
                   fourier_transforms="G₁ FFT + packed field inverse FFT",
+                  fourier_fused_fields="Fuse field multipliers + inverse FFT",
+                  fourier_fused_inputs="Fuse input inverse FFT + normalization",
+                  fourier_fused_both="Both inverse-FFT fusions",
                   cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",

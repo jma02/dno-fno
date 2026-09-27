@@ -9,7 +9,7 @@ Spectral variants reduce adapter round trips; every classical order shares padde
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from functools import partial
 import json
 import os
@@ -56,10 +56,19 @@ FUSION_VARIANTS["fourier_input_spectral_all"] = "fourier_input"
 FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_g1fft", "fourier_fields", "fourier_product", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
     "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
+    "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both",
     *TUNED_TRIALS,
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
+METHODS = ("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS)
+
+
+def packed_boundary(
+    state: ti.State | ti.SpectralState, nx: int = 0, *, inverse: bool = False,
+) -> ti.State | ti.SpectralState:
+    fields = jnp.stack(state)
+    return ti.State(*ti.myifft(fields)) if inverse else ti.SpectralState(*ti.myfft(fields, nx))
 
 
 if __name__ == "__main__":
@@ -70,7 +79,7 @@ if __name__ == "__main__":
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS))
+    parser.add_argument("--methods", nargs="+", choices=(*METHODS, *(f"{method}_boundaries" for method in METHODS)))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
@@ -81,15 +90,16 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
-    if args.reference not in methods or (set(methods) & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
+    base_methods = {method.removesuffix("_boundaries") for method in methods}
+    if args.reference not in methods or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
-    if args.without_baselines and (set(methods) & {"baseline-only", "shared_m1_spectral_all"}
+    if args.without_baselines and (base_methods & {"baseline-only", "shared_m1_spectral_all"}
                                    or any(method.startswith("fourier_") for method in methods)):
         parser.error("baseline-only, shared_m1_spectral_all and Fourier-I/O methods require analytic baselines")
     loaded = {name: load_run(run) for name, run in RUNS.items()
-              if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
+              if name in base_methods or (name == "compact" and base_methods & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -98,9 +108,11 @@ if __name__ == "__main__":
         "precision": "FP64 classical/integration; FP32 learned inference",
         "timing": (f"synchronized GPU execution after {'same-executable' if args.steps else 'separate five-frame'} "
                    "warm-up; compilation and host transfers excluded"),
-        "neural_runs": {name: str(RUNS["compact" if name in FUSION_VARIANTS else name])
-                        for name in methods if not name.startswith("M")},
-        "fusion_variants": {name: FUSION_VARIANTS[name] for name in methods if name in FUSION_VARIANTS},
+        "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
+                        for name in methods if not name.startswith("M")
+                        for base in (name.removesuffix("_boundaries"),)},
+        "fusion_variants": {name: FUSION_VARIANTS[base] for name in methods
+                            for base in (name.removesuffix("_boundaries"),) if base in FUSION_VARIANTS},
         "reference": args.reference,
         "include_model_baselines": not args.without_baselines,
         "families": {},
@@ -123,7 +135,8 @@ if __name__ == "__main__":
             "horizon": float(times[-1]), "saved_frames": frames, "methods": records,
         }
         compiled, outputs = {}, {}
-        for method in methods:
+        for label in methods:
+            method = label.removesuffix("_boundaries")
             started = time.perf_counter()
             shared_baseline = method == "shared_m1_spectral_all"
             correction = None
@@ -172,16 +185,20 @@ if __name__ == "__main__":
                 rhs_patch = patch("solver.evals.model_rollout._rhs_nonlinear_if_surrogate", partial(
                     rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none",
                     predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
-            with rhs_patch:
-                compiled[method] = runner.lower(initial, times).compile()
+            with ExitStack() as patches:
+                patches.enter_context(rhs_patch)
+                if label.endswith("_boundaries"):
+                    patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
+                    patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
+                compiled[label] = runner.lower(initial, times).compile()
                 compile_seconds = time.perf_counter() - started
-                warm = compiled[method] if args.steps else runner.lower(initial, times[:5]).compile()
+                warm = compiled[label] if args.steps else runner.lower(initial, times[:5]).compile()
             warm_times = times if args.steps else times[:5]
             started = time.perf_counter()
             jax.block_until_ready(warm(initial, warm_times))
-            records[method] = {"setup_s": setup_seconds, "compile_s": compile_seconds,
+            records[label] = {"setup_s": setup_seconds, "compile_s": compile_seconds,
                                "warmup_s": time.perf_counter() - started, "seconds": []}
-            print(f"{family} {method}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)
+            print(f"{family} {label}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)
         for repeat in range(args.repeats):
             for method in list(compiled)[::1 if repeat % 2 == 0 else -1]:
                 if args.reference_once and repeat > 0 and method == args.reference:
@@ -210,6 +227,12 @@ if __name__ == "__main__":
                 cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
                 records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
                 records[method][f"cached_reference_terminal_{key}_error"] = float(cached_error[-1] / np.linalg.norm(cached[-1]))
+                if method.endswith("_boundaries") and method.removesuffix("_boundaries") in outputs:
+                    unpacked = np.asarray(outputs[method.removesuffix("_boundaries")][key]).reshape(frames, -1)
+                    records[method][f"boundary_max_{key}_difference"] = float((
+                        np.linalg.norm(actual.reshape(frames, -1) - unpacked, axis=-1)
+                        / np.linalg.norm(unpacked, axis=-1)
+                    ).max())
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"{family}: saved {args.output}", flush=True)

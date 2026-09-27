@@ -14,7 +14,7 @@ template<int N, class T, int EPT>
 using FFTBase = decltype(Block() + Size<N>() + Precision<T>() + SM<DNO_SM>() +
                          ElementsPerThread<EPT>() + FFTsPerBlock<1>());
 
-template<class FFT, bool outer = false>
+template<class FFT, bool outer = false, bool normalize = false>
 __global__ void transform(const void* a, const void* b, void* out,
                           const void* symbols, int input_length, bool multiply) {
     using C = typename FFT::value_type;
@@ -48,7 +48,52 @@ __global__ void transform(const void* a, const void* b, void* out,
                 value *= precision_of_t<FFT>(1.0 / size_of<FFT>::value);
                 value *= static_cast<const C*>(symbols)[blockIdx.x * FFT::output_length + k];
             }
-            static_cast<O*>(out)[blockIdx.x * FFT::output_length + k] = value;
+            if constexpr (normalize) {
+                const float* scales = static_cast<const float*>(b);
+                int channel = blockIdx.x % 2;
+                float2 normalized = {__fmul_rn(float(value.x), scales[channel]),
+                                     __fmul_rn(float(value.y), scales[channel])};
+                if (channel == 1) {
+                    normalized.x = __fmul_rn(normalized.x, scales[2]);
+                    normalized.y = __fmul_rn(normalized.y, scales[2]);
+                }
+                static_cast<float2*>(out)[blockIdx.x * FFT::output_length + k] = normalized;
+            } else {
+                static_cast<O*>(out)[blockIdx.x * FFT::output_length + k] = value;
+            }
+        }
+    }
+}
+
+template<class Inverse>
+__global__ void field_inverse_kernel(const void* inputs, const void* surface_ops,
+                                     const void* filters, void* out, int surfaces, int branches) {
+    using C = typename Inverse::value_type;
+    using T = precision_of_t<Inverse>;
+    constexpr int N = size_of<Inverse>::value;
+    constexpr int F = N / 2 + 1;
+    int fields = surfaces + branches;
+    int batch = blockIdx.x / fields, field = blockIdx.x % fields;
+    C data[Inverse::storage_size] = {};
+    extern __shared__ __align__(16) unsigned char scratch[];
+    for (int i = 0; i < Inverse::input_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::input_length) {
+            data[i] = static_cast<const C*>(inputs)[(2 * batch + (field >= surfaces)) * F + k];
+            if (field < surfaces) {
+                data[i] *= static_cast<const C*>(surface_ops)[field * F + k];
+            } else {
+                data[i] *= static_cast<const T*>(filters)[(batch * branches + field - surfaces) * F + k];
+            }
+            if (k == 0 || k == N / 2) data[i].y = 0;
+        }
+    }
+    Inverse().execute(data, scratch);
+    for (int i = 0; i < Inverse::output_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::output_length) {
+            data[i] *= T(1.0 / N);
+            static_cast<C*>(out)[blockIdx.x * Inverse::output_length + k] = data[i];
         }
     }
 }
@@ -205,7 +250,23 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
-    if (operation == 6) {
+    if (operation == 8) {
+        if constexpr (N == 1024) {
+            transform<I, false, true><<<out->element_count() / N, I::block_dim, I::shared_memory_size, stream>>>(
+                a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2 + 1, false);
+        } else {
+            return ffi::Error::InvalidArgument("Input normalization supports the 1024-point model grid only.");
+        }
+    } else if (operation == 7) {
+        if constexpr (N == 1024) {
+            int surfaces = b.dimensions()[b.dimensions().size() - 2];
+            int branches = symbols.dimensions()[symbols.dimensions().size() - 2];
+            field_inverse_kernel<I><<<out->element_count() / N, I::block_dim, I::shared_memory_size, stream>>>(
+                a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), surfaces, branches);
+        } else {
+            return ffi::Error::InvalidArgument("Field inverse FFT supports the 1024-point model grid only.");
+        }
+    } else if (operation == 6) {
         if constexpr (N == 1024) {
             int branches = symbols.dimensions()[symbols.dimensions().size() - 2];
             spectral_sandwich_kernel<F, I><<<out->element_count() / F::output_length, F::block_dim, shared, stream>>>(
