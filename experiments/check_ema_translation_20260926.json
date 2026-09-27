@@ -1,0 +1,38 @@
+{
+  "scope": "CPU BF16 replay,64 held-out initial snapshots; not full validation or exact CUDA reproduction",
+  "shifts": [
+    0,
+    1,
+    37,
+    256,
+    511
+  ],
+  "seconds": 54.87453662510961,
+  "unshifted_mean_relative_l2": 0.00011005385749740526,
+  "shifted_mean_relative_l2": 0.00011010417074430734,
+  "mean_shift_defect_relative_to_target": 4.432853893376887e-05,
+  "mean_baseline_shift_defect": 1.2249736300873337e-06,
+  "five_shift_ensemble_relative_l2": 0.00010350384400226176,
+  "family": {
+    "benjamin_feir": {
+      "error": 1.4737312085344456e-05,
+      "shift_defect": 6.9055154199304525e-06,
+      "ensemble_error": 1.3443179341265932e-05
+    },
+    "jonswap_tma": {
+      "error": 0.00036869558971375227,
+      "shift_defect": 0.00012954187695868313,
+      "ensemble_error": 0.00035189633490517735
+    },
+    "stokes": {
+      "error": 9.58169130171882e-06,
+      "shift_defect": 1.0814356755872723e-05,
+      "ensemble_error": 7.19674881111132e-06
+    },
+    "tanaka": {
+      "error": 4.7200850531226024e-05,
+      "shift_defect": 3.0052411602810025e-05,
+      "ensemble_error": 4.147909567109309e-05
+    }
+  }
+}
