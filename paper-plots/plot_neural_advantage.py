@@ -35,7 +35,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             for family, result in json.loads(path.read_text())["families"].items():
                 warm["families"].setdefault(family, result)["methods"].update(result["methods"])
         for result in warm["families"].values():
-            result["methods"] = {name.removesuffix("_stages").removesuffix("_boundaries"): record
+            result["methods"] = {name.split("_", 1)[0] if name.startswith("M") else name: record
                                  for name, record in result["methods"].items()}
     candidate = {"families": {}} if args.candidate_timings else {}
     for path in args.candidate_timings or ():
@@ -44,7 +44,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     if args.stack_hardware:
         for family, result in candidate["families"].items():
             for method, record in result["methods"].items():
-                classical = method.removesuffix("_stages").removesuffix("_boundaries")
+                classical = method.split("_", 1)[0]
                 if classical in ("M1", "M2"):
                     warm["families"][family]["methods"][classical]["seconds"] = record["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
@@ -221,20 +221,20 @@ if __name__ == "__main__":
         modal.single_case = True
         a100 = argparse.Namespace(**vars(modal))
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
-            directory = ROOT / "outputs/roofline_push_20260927"
+            directory = ROOT / "outputs/spectral_carry_20260927"
             classical = directory / {
                 "ada": "ada_classical.json", "blackwell": "blackwell_classical/classical.json",
-                "a100": "a100_classical_sxm/classical.json",
+                "a100": "a100_combined_sxm/classical.json",
             }[hardware]
             if config.single_case:
                 config.timings = classical
             config.classical_timings = [classical]
             config.candidate_timings = [directory / {
-                "ada": "ada_full.json", "blackwell": "blackwell_full_combined/rollouts.json",
-                "a100": "a100_full_sxm/rollouts.json",
+                "ada": "ada_full.json", "blackwell": "blackwell_full/rollouts.json",
+                "a100": "a100_combined_sxm/rollouts.json",
             }[hardware]]
-            config.candidate_method = "fourier_fused_fields_overlap_spectral_all_boundaries_stages"
-            config.candidate_previous_method = "fourier_fused_fields_spectral_all_boundaries"
+            config.candidate_method = "fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local"
+            config.candidate_previous_method = "fourier_fused_fields_overlap_spectral_all_boundaries_stages"
             config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
