@@ -41,6 +41,8 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "fourier_fused_features", "fourier_fused_features_overlap",
+          "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+          "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
@@ -64,7 +66,9 @@ def build_variant(
         input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
         variant = "fourier_transforms"
     fused_g1 = variant == "fourier_fused_g1"
-    fused_features = variant == "fourier_fused_features"
+    balanced_features = variant.startswith("fourier_balanced_features")
+    fused_product = variant.endswith("features_product")
+    fused_features = balanced_features or variant in ("fourier_fused_features", "fourier_fused_features_product")
     fused_fields = fused_features or variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
     fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
     if fused_fields or fused_inputs:
@@ -151,7 +155,8 @@ def build_variant(
                         ).sum(axis=1))(normalized_inputs)
             if fused_features:
                 features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
-                                                       n=nx, ept=field_ept, normalized_inputs=normalized_inputs)
+                                                       n=nx, ept=field_ept, normalized_inputs=normalized_inputs,
+                                                       balanced=balanced_features)
                 features = jnp.moveaxis(features, 1, -1)
             else:
                 if fused_fields:
@@ -172,11 +177,14 @@ def build_variant(
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
             features = features * jnp.tanh(features)
-            weights = jnp.moveaxis(features @ head_kernel, -1, 1)
-            if trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
+            weights = features @ head_kernel
+            if fused_product:
+                weighted_hat = fft(weights, nx, b=branch_fields, outer=filters, ept=fft_ept, channels_last=True)
+            elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
+                weights = jnp.moveaxis(weights, -1, 1)
                 weighted_hat = nx * fft(weights, nx, b=branch_fields, outer=filters.astype(jnp.complex64), ept=fft_ept)
             else:
-                weighted_hat = filters * jnp.fft.rfft(weights * branch_fields)
+                weighted_hat = filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * branch_fields)
             correction_hat = jnp.sum(weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
             if not overlap_g1:
                 g1_hat = -sandwich(
@@ -447,6 +455,9 @@ if __name__ == "__main__":
                   fourier_fields="cuFFTDx packed field inverse FFT", fourier_kernels="G₁ FFT + field inverse + product FFT",
                   fourier_transforms="G₁ FFT + packed field inverse FFT",
                   fourier_fused_fields="Fuse field multipliers + inverse FFT",
+                  fourier_balanced_features_overlap="Balance surface-feature stores + G₁ overlap",
+                  fourier_fused_features_product_overlap="Fused head product FFT + G₁ overlap",
+                  fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",
                   fourier_fused_inputs="Fuse input inverse FFT + normalization",
                   fourier_fused_both="Both inverse-FFT fusions",
                   fourier_fused_g1="Field fusion + G1 preparation fusion",

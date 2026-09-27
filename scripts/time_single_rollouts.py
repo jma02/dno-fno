@@ -61,6 +61,8 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
     "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
     "fourier_fused_features", "fourier_fused_features_overlap",
+    "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+    "fourier_balanced_features_product_overlap",
     *TUNED_TRIALS,
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
@@ -76,7 +78,7 @@ def packed_boundary(
 
 
 def method_base(name: str) -> str:
-    for suffix in ("_local", "_carry", "_stages", "_boundaries"):
+    for suffix in ("_half", "_local", "_carry", "_stages", "_boundaries"):
         name = name.removesuffix(suffix)
     return name
 
@@ -93,7 +95,7 @@ if __name__ == "__main__":
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
         f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_"))
-        for trial in ("_carry", "_local", "_carry_local")))
+        for trial in ("_carry", "_local", "_carry_local", "_carry_local_half")))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
@@ -163,7 +165,8 @@ if __name__ == "__main__":
             )
             if method.startswith("M"):
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
-                                    carry_spectral="carry" in options, local_if="local" in options)
+                                    carry_spectral="carry" in options, local_if="local" in options,
+                                    half_spectrum="half" in options)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
                                    implicit_iterations=4, zero_mean_xi=True))
@@ -188,7 +191,7 @@ if __name__ == "__main__":
                         fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
-                                    predict_gxi=predict, predict_hat=spectral_predict)
+                                    predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)
@@ -270,7 +273,8 @@ if __name__ == "__main__":
                 records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
                 records[method][f"cached_reference_terminal_{key}_error"] = float(cached_error[-1] / np.linalg.norm(cached[-1]))
                 for suffix, metric in (("_boundaries", "boundary"), ("_stages", "stage"),
-                                       ("_carry_local", "carry_local"), ("_carry", "carry"), ("_local", "local")):
+                                       ("_carry_local", "carry_local"), ("_carry", "carry"), ("_local", "local"),
+                                       ("_half", "half")):
                     if method.endswith(suffix) and method.removesuffix(suffix) in outputs:
                         unpacked = np.asarray(outputs[method.removesuffix(suffix)][key]).reshape(frames, -1)
                         records[method][f"{metric}_max_{key}_difference"] = float((

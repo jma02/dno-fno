@@ -1,6 +1,6 @@
-"""Run an explicit benchmark command on the personal jma02 Modal account.
+"""Run an explicit benchmark command using the selected Modal profile.
 
-MODAL_PROFILE=jma02 modal run scripts/modal_benchmark.py --command \
+MODAL_PROFILE=sciml-at-ud modal run scripts/modal_benchmark.py --command \
   'python scripts/benchmark_dno_dense.py --output outputs/modal_result/dense.json'
 Only listed code, the candidate checkpoint, and four reference cases/family upload.
 """
@@ -14,8 +14,7 @@ import shlex
 import subprocess
 import zipfile
 
-os.environ["MODAL_PROFILE"] = "jma02"
-import modal  # noqa: E402
+import modal
 
 ROOT = Path(__file__).resolve().parents[1]
 image = (
@@ -44,6 +43,7 @@ app = modal.App("dno-kernel-benchmarks", include_source=False)
 
 
 @app.function(image=image, gpu=os.environ.get("DNO_MODAL_GPU", "RTX-PRO-6000"),
+              cloud=os.environ.get("DNO_MODAL_CLOUD"), region=os.environ.get("DNO_MODAL_REGION"),
               timeout=3600, retries=0, max_containers=1, scaledown_window=5,
               cpu=4, memory=16384, serialized=True, include_source=False)
 def benchmark(payload: bytes, command: str, result_dir: str) -> tuple[int, dict[str, bytes]]:

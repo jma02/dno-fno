@@ -41,25 +41,27 @@ def register() -> ctypes.CDLL:
 def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
     outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
-    promote: bool = False,
+    promote: bool = False, channels_last: bool = False,
 ) -> jax.Array:
-    """Fuse inverse normalization or promote FP32 inputs on load into an FP64 FFT."""
+    """Fuse FFT loads/stores; channels_last consumes a column-major [B,N,R] head with real outer filters."""
     register()
     fp64 = promote or a.dtype in (jnp.float64, jnp.complex128)
     dtype = (jnp.float64 if fp64 else jnp.float32) if inverse else (jnp.complex128 if fp64 else jnp.complex64)
     if normalization is not None:
         dtype = jnp.float32
-    result = jax.ShapeDtypeStruct((*a.shape[:-1], n if inverse else n // 2 + 1), dtype)
-    return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
+    shape = (*a.shape[:-2], a.shape[-1], n // 2 + 1) if channels_last else (*a.shape[:-1], n if inverse else n // 2 + 1)
+    result = jax.ShapeDtypeStruct(shape, dtype)
+    layouts = (tuple(range(a.ndim - 2)) + (a.ndim - 1, a.ndim - 2), None, None) if channels_last else None
+    return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all", input_layouts=layouts)(
         a, normalization if normalization is not None else a if b is None else b, a if outer is None else outer,
-        size=np.int64(n), operation=np.int64(9 if promote else 8 if normalization is not None else 4 if outer is not None else inverse),
+        size=np.int64(n), operation=np.int64(11 if channels_last else 9 if promote else 8 if normalization is not None else 4 if outer is not None else inverse),
         multiply=b is not None, ept=np.int64(ept),
     )
 
 
 def field_irfft(
     inputs_hat: jax.Array, surface_ops: jax.Array, filters: jax.Array, *, n: int, ept: int = 8,
-    normalized_inputs: jax.Array | None = None,
+    normalized_inputs: jax.Array | None = None, balanced: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Form fields on load; optionally emit surface features [B,7,N] and branch fields."""
     register()
@@ -67,7 +69,7 @@ def field_irfft(
         results = (jax.ShapeDtypeStruct((*normalized_inputs.shape[:-2], surface_ops.shape[-2] + 3, n), jnp.float32),
                    jax.ShapeDtypeStruct((*normalized_inputs.shape[:-2], filters.shape[-2], n), jnp.float32))
         features, branches = jax.ffi.ffi_call("dno_cufftdx_features", results, vmap_method="broadcast_all")(
-            inputs_hat, surface_ops, filters, normalized_inputs, ept=np.int64(ept),
+            inputs_hat, surface_ops, filters, normalized_inputs, ept=np.int64(ept), balanced=balanced,
         )
         return features, branches
     result = jax.ShapeDtypeStruct(
@@ -247,6 +249,21 @@ if __name__ == "__main__":
                     input_pair.astype(jnp.complex64), field_filters,
                 )
                 for stage_pair in (False, True):
+                    weights = jnp.asarray(rng.normal(size=(batch, n, 32)), dtype=jnp.float32)
+                    branch_fields = jnp.asarray(rng.normal(size=(batch, 32, n)), dtype=jnp.float32)
+
+                    def product_reference(x: jax.Array, y: jax.Array) -> jax.Array:
+                        return field_filters * jnp.fft.rfft(jnp.moveaxis(x, -1, -2) * y)
+
+                    def product_candidate(x: jax.Array, y: jax.Array, ept: int = ept) -> jax.Array:
+                        return fft(x, n, b=y, outer=field_filters, ept=ept, channels_last=True)
+
+                    if stage_pair:
+                        weights, branch_fields = jnp.stack((weights, -weights)), jnp.stack((branch_fields, -branch_fields))
+                    cases[f"head_product_{'vmap' if stage_pair else 'direct'}_e{ept}"] = (
+                        jax.vmap(product_reference) if stage_pair else product_reference,
+                        jax.vmap(product_candidate) if stage_pair else product_candidate, weights, branch_fields,
+                    )
                     for output in (0, 1):
                         def feature_reference(x: jax.Array, y: jax.Array, ept: int = ept, output: int = output) -> jax.Array:
                             fields = cast(jax.Array, field_irfft(x, surface_ops, field_filters, n=n, ept=ept))
@@ -254,16 +271,20 @@ if __name__ == "__main__":
                             return (jnp.concatenate((jnp.stack((eta, eta ** 2, eta ** 3), axis=1), fields[:, :4]), axis=1)
                                     if output == 0 else fields[:, 4:])
 
-                        def feature_candidate(x: jax.Array, y: jax.Array, ept: int = ept, output: int = output) -> jax.Array:
-                            return field_irfft(x, surface_ops, field_filters, n=n, ept=ept, normalized_inputs=y)[output]
+                        def feature_candidate(x: jax.Array, y: jax.Array, ept: int = ept,
+                                              output: int = output, balanced: bool = False) -> jax.Array:
+                            return field_irfft(x, surface_ops, field_filters, n=n, ept=ept,
+                                               normalized_inputs=y, balanced=balanced)[output]
 
                         inputs, normalized = input_pair.astype(jnp.complex64), jnp.stack((a, b), axis=1).astype(jnp.float32)
                         if stage_pair:
                             inputs, normalized = jnp.stack((inputs, -inputs)), jnp.stack((normalized, -normalized))
-                        cases[f"feature_irfft_{output}_{'vmap' if stage_pair else 'direct'}_e{ept}"] = (
-                            jax.vmap(feature_reference) if stage_pair else feature_reference,
-                            jax.vmap(feature_candidate) if stage_pair else feature_candidate, inputs, normalized,
-                        )
+                        for balanced in (False, True):
+                            candidate = partial(feature_candidate, balanced=balanced)
+                            cases[f"feature_irfft_{output}_{'vmap' if stage_pair else 'direct'}_{'balanced' if balanced else 'original'}_e{ept}"] = (
+                                jax.vmap(feature_reference) if stage_pair else feature_reference,
+                                jax.vmap(candidate) if stage_pair else candidate, inputs, normalized,
+                            )
             k = jnp.arange(n // 2 + 1, dtype=dtype)
             symbols = jnp.broadcast_to(jnp.stack((k * jnp.tanh(0.1 * k), 1j * k)), (batch, 2, n // 2 + 1))
             outer_symbols = symbols.at[..., [0, -1]].set(symbols[..., [0, -1]].real)
