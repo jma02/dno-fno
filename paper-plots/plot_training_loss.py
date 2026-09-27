@@ -16,6 +16,7 @@ from matplotlib.ticker import MaxNLocator  # noqa: E402
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("run", type=Path)
 parser.add_argument("--reference", type=Path)
+parser.add_argument("--leon-result", type=Path)
 args = parser.parse_args()
 rows = list(map(json.loads, (args.run / "train_log.jsonl").read_text().splitlines()))
 best = min(rows, key=lambda row: row["val_loss"])
@@ -40,6 +41,10 @@ for ax, key, scale, title in zip(axes, ("val_l2_loss", "val_loss"), (100, 1),
     if reference:
         ax.axhline(scale * reference[key], color="#777f89", ls="--", lw=1.2,
                    label="Old full C27 · best checkpoint")
+    if key == "val_l2_loss" and args.leon_result:
+        leon_loss = json.loads(args.leon_result.read_text())["weight_ema_full_validation"]["relative_l2"]
+        ax.axhline(scale * leon_loss, color="#8b5ea8", ls=":", lw=1.8,
+                   label="Leon · epoch 4 weight EMA")
     ax.scatter(best["epoch"], scale * best[key], color="#c45b22", s=32, zorder=3)
     ax.set(xlabel="Epoch", title=title, xlim=(1, epochs[-1]))
     ax.xaxis.set_major_locator(MaxNLocator(5, integer=True))
@@ -48,7 +53,7 @@ for ax, key, scale, title in zip(axes, ("val_l2_loss", "val_loss"), (100, 1),
 fig.suptitle("Gradient-EMA training", x=0.08, y=0.98, ha="left", fontsize=19)
 fig.text(0.98, 0.955, f"{epochs[-1]} completed epochs", ha="right", color="#777f89")
 fig.legend(*axes[0].get_legend_handles_labels(), loc="upper left",
-           bbox_to_anchor=(0.07, 0.91), ncol=3, frameon=False, fontsize=10)
+           bbox_to_anchor=(0.07, 0.91), ncol=2, frameon=False, fontsize=10)
 for suffix in ("png", "pdf"):
     fig.savefig(args.run / f"loss-curve.{suffix}", dpi=180)
 plt.close(fig)
