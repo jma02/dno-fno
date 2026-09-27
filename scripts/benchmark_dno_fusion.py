@@ -23,6 +23,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from flax import linen as nn  # noqa: E402
 from flax.core import Scope  # noqa: E402
+from jax.experimental.compute_on import compute_on  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
@@ -37,7 +38,8 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
           "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
-          "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both",
+          "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
+          "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
@@ -48,6 +50,8 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    overlap_g1 = variant.endswith("_overlap")
+    variant = variant.removesuffix("_overlap")
     if variant.endswith(("_e4", "_e16")):
         variant, _, suffix = variant.rpartition("_e")
         fft_ept = int(suffix)
@@ -58,7 +62,8 @@ def build_variant(
     if variant.startswith("fourier_tuned_"):
         input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
         variant = "fourier_transforms"
-    fused_fields = variant in ("fourier_fused_fields", "fourier_fused_both")
+    fused_g1 = variant == "fourier_fused_g1"
+    fused_fields = variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
     fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
     if fused_fields or fused_inputs:
         variant = "fourier_transforms"
@@ -106,6 +111,7 @@ def build_variant(
 
         @jax.jit
         def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
+            g1_hat = None
             # Preserve the trained surface features' physical-space FP32 rounding.
             eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / scales[0]
             eta_norm_hat = jnp.fft.rfft(eta_norm)
@@ -130,7 +136,17 @@ def build_variant(
                 g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
                              else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
                 if trial in ("fourier_g1fft", "fourier_allfft", "fourier_kernels", "fourier_transforms"):
-                    g1_xi_hat = fft(xi_phys.astype(jnp.float64), nx, ept=g1_input_ept)
+                    g1_xi_hat = fft(xi_phys if fused_g1 else xi_phys.astype(jnp.float64), nx,
+                                    ept=g1_input_ept, promote=fused_g1)
+                if overlap_g1:
+                    with compute_on("gpu_stream:1"):
+                        g1_hat = jax.jit(lambda values: -sandwich(
+                            values[:, 0] if fused_g1 else (values[:, 0] * model.eta_scale).astype(jnp.float64),
+                            fft(values[:, 1] if fused_g1 else values[:, 1].astype(jnp.float64), nx,
+                                ept=g1_input_ept, promote=fused_g1), operators,
+                            spectral=True, ept=sandwich_ept,
+                            eta_scale=model.eta_scale if fused_g1 else None,
+                        ).sum(axis=1))(normalized_inputs)
             if fused_fields:
                 fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=nx, ept=field_ept)
             else:
@@ -155,12 +171,13 @@ def build_variant(
             else:
                 weighted_hat = filters * jnp.fft.rfft(weights * branch_fields)
             correction_hat = jnp.sum(weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
-            g1_hat = -sandwich(
-                (eta_norm * model.eta_scale).astype(jnp.float64),
-                g1_xi_hat, operators,
-                spectral=True, ept=sandwich_ept,
-            ).sum(axis=1)
-            result = output_scale * (g0 * xi_phys_hat + g1_hat + correction_hat)
+            if not overlap_g1:
+                g1_hat = -sandwich(
+                    eta_norm if fused_g1 else (eta_norm * model.eta_scale).astype(jnp.float64),
+                    g1_xi_hat, operators,
+                    spectral=True, ept=sandwich_ept, eta_scale=model.eta_scale if fused_g1 else None,
+                ).sum(axis=1)
+            result = output_scale * (g0 * xi_phys_hat + cast(jax.Array, g1_hat) + correction_hat)
             if mask_output:
                 return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
             return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
@@ -425,6 +442,9 @@ if __name__ == "__main__":
                   fourier_fused_fields="Fuse field multipliers + inverse FFT",
                   fourier_fused_inputs="Fuse input inverse FFT + normalization",
                   fourier_fused_both="Both inverse-FFT fusions",
+                  fourier_fused_g1="Field fusion + G1 preparation fusion",
+                  fourier_fused_fields_overlap="Overlap G1 and learned correction",
+                  fourier_fused_g1_overlap="G1 preparation fusion + overlap",
                   cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",

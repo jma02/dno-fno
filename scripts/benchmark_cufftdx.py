@@ -40,17 +40,18 @@ def register() -> ctypes.CDLL:
 def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
     outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
+    promote: bool = False,
 ) -> jax.Array:
-    """Optionally fuse inverse casting and [reciprocal eta/xi scales, xi scale]."""
+    """Fuse inverse normalization or promote FP32 inputs on load into an FP64 FFT."""
     register()
-    fp64 = a.dtype in (jnp.float64, jnp.complex128)
+    fp64 = promote or a.dtype in (jnp.float64, jnp.complex128)
     dtype = (jnp.float64 if fp64 else jnp.float32) if inverse else (jnp.complex128 if fp64 else jnp.complex64)
     if normalization is not None:
         dtype = jnp.float32
     result = jax.ShapeDtypeStruct((*a.shape[:-1], n if inverse else n // 2 + 1), dtype)
     return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
         a, normalization if normalization is not None else a if b is None else b, a if outer is None else outer,
-        size=np.int64(n), operation=np.int64(8 if normalization is not None else 4 if outer is not None else inverse),
+        size=np.int64(n), operation=np.int64(9 if promote else 8 if normalization is not None else 4 if outer is not None else inverse),
         multiply=b is not None, ept=np.int64(ept),
     )
 
@@ -71,14 +72,18 @@ def field_irfft(
 
 def sandwich(
     eta: jax.Array, xi: jax.Array, symbols: jax.Array, *, joint: bool = False,
-    spectral: bool = False, ept: int = 8,
+    spectral: bool = False, ept: int = 8, eta_scale: float | None = None,
 ) -> jax.Array:
-    """Evaluate L[eta L xi]; spectral=True takes and returns unnormalized spectra."""
+    """Evaluate L[eta L xi]; optional eta_scale scales FP32 eta before FP64 promotion."""
     register()
     shape = symbols.shape if spectral else xi.shape if joint else (*symbols.shape[:-1], xi.shape[-1])
     result = jax.ShapeDtypeStruct(shape, xi.dtype)
+    if eta_scale is not None:
+        symbols = jnp.concatenate((symbols, jnp.full(
+            (*symbols.shape[:-1], 1), jnp.float32(eta_scale), dtype=symbols.dtype,
+        )), axis=-1)
     return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
-        eta, xi, symbols, size=np.int64(eta.shape[-1]), operation=np.int64(6 if spectral else 3 if joint else 2),
+        eta, xi, symbols, size=np.int64(eta.shape[-1]), operation=np.int64(10 if eta_scale is not None else 6 if spectral else 3 if joint else 2),
         multiply=False, ept=np.int64(ept),
     )
 
@@ -214,6 +219,11 @@ if __name__ == "__main__":
             )
             field_filters = jnp.asarray(rng.normal(size=(batch, 32, n // 2 + 1)), dtype=jnp.float32)
             for ept in args.ept:
+                cases[f"promoted_rfft_e{ept}"] = (
+                    lambda x, y, ept=ept: fft(x.astype(jnp.float64), n, ept=ept),
+                    lambda x, y, ept=ept: fft(x, n, promote=True, ept=ept),
+                    a.astype(jnp.float32), b,
+                )
                 cases[f"normalized_irfft_e{ept}"] = (
                     lambda x, y, ept=ept: (fft(x, n, inverse=True, ept=ept).astype(jnp.float32)
                         / scales[None, :, None]) * jnp.asarray((1.0, normalization[2]))[None, :, None],
@@ -239,6 +249,24 @@ if __name__ == "__main__":
                 lambda x, y: sandwich(x, y, symbols).sum(axis=1), a, b,
             )
             for ept in args.ept:
+                eta_scale = 0.133552521
+                cases[f"g1_prepared_eta_e{ept}"] = (
+                    lambda x, y, ept=ept: sandwich((x * jnp.float32(eta_scale)).astype(jnp.float64),
+                                                   y, symbols, spectral=True, ept=ept),
+                    lambda x, y, ept=ept: sandwich(x, y, symbols, spectral=True, ept=ept, eta_scale=eta_scale),
+                    spectral_eta.astype(jnp.float32), spectral_xi,
+                )
+                cases[f"g1_prepared_vmap_e{ept}"] = (
+                    lambda x, y, ept=ept: jax.vmap(lambda e, z: sandwich(
+                        (e * jnp.float32(eta_scale)).astype(jnp.float64),
+                        fft(z.astype(jnp.float64), n, ept=ept), symbols, spectral=True, ept=ept,
+                    ))(x, y),
+                    lambda x, y, ept=ept: jax.vmap(lambda e, z: sandwich(
+                        e, fft(z, n, promote=True, ept=ept), symbols,
+                        spectral=True, ept=ept, eta_scale=eta_scale,
+                    ))(x, y),
+                    jnp.stack((a, b)).astype(jnp.float32), jnp.stack((b, -a)).astype(jnp.float32),
+                )
                 cases[f"g1_joint_e{ept}"] = (
                     cases["g1"][0], lambda x, y, ept=ept: sandwich(x, y, symbols, joint=True, ept=ept), a, b,
                 )

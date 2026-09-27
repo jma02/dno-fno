@@ -14,7 +14,7 @@ template<int N, class T, int EPT>
 using FFTBase = decltype(Block() + Size<N>() + Precision<T>() + SM<DNO_SM>() +
                          ElementsPerThread<EPT>() + FFTsPerBlock<1>());
 
-template<class FFT, bool outer = false, bool normalize = false>
+template<class FFT, bool outer = false, bool normalize = false, bool promote = false>
 __global__ void transform(const void* a, const void* b, void* out,
                           const void* symbols, int input_length, bool multiply) {
     using C = typename FFT::value_type;
@@ -26,7 +26,13 @@ __global__ void transform(const void* a, const void* b, void* out,
     for (int i = 0; i < FFT::input_ept; ++i) {
         int k = threadIdx.x + i * FFT::stride;
         if (k < FFT::input_length && k < input_length) {
-            I value = static_cast<const I*>(a)[blockIdx.x * input_length + k];
+            I value;
+            if constexpr (promote) {
+                float2 input = static_cast<const float2*>(a)[blockIdx.x * input_length + k];
+                value = I(input.x, input.y);
+            } else {
+                value = static_cast<const I*>(a)[blockIdx.x * input_length + k];
+            }
             if (multiply) {
                 I weight = static_cast<const I*>(b)[blockIdx.x * input_length + k];
                 value.x *= weight.x;
@@ -141,13 +147,14 @@ __global__ void sandwich_kernel(const void* eta, const void* xi, const void* sym
     }
 }
 
-template<class Forward, class Inverse>
+template<class Forward, class Inverse, bool prepare_eta = false>
 __global__ void spectral_sandwich_kernel(const void* eta, const void* xi_hat,
                                          const void* symbols, void* out, int branches) {
     using C = typename Forward::value_type;
     using T = precision_of_t<Forward>;
     constexpr int N = size_of<Forward>::value;
     constexpr int F = N / 2 + 1;
+    constexpr int symbol_length = F + prepare_eta;
     int batch = blockIdx.x / branches;
     C data[Forward::storage_size] = {};
     extern __shared__ __align__(16) unsigned char scratch[];
@@ -155,7 +162,7 @@ __global__ void spectral_sandwich_kernel(const void* eta, const void* xi_hat,
         int k = threadIdx.x + i * Inverse::stride;
         if (k < Inverse::input_length) {
             data[i] = static_cast<const C*>(xi_hat)[batch * F + k]
-                    * static_cast<const C*>(symbols)[blockIdx.x * F + k];
+                    * static_cast<const C*>(symbols)[blockIdx.x * symbol_length + k];
             if (k == 0 || k == N / 2) data[i].y = 0;
         }
     }
@@ -163,7 +170,14 @@ __global__ void spectral_sandwich_kernel(const void* eta, const void* xi_hat,
     for (int i = 0; i < Inverse::output_ept; ++i) {
         int k = threadIdx.x + i * Inverse::stride;
         if (k < Inverse::output_length) {
-            C weight = static_cast<const C*>(eta)[batch * N / 2 + k];
+            C weight;
+            if constexpr (prepare_eta) {
+                float2 input = static_cast<const float2*>(eta)[batch * N / 2 + k];
+                float scale = float(static_cast<const C*>(symbols)[blockIdx.x * symbol_length + F].x);
+                weight = C(__fmul_rn(input.x, scale), __fmul_rn(input.y, scale));
+            } else {
+                weight = static_cast<const C*>(eta)[batch * N / 2 + k];
+            }
             data[i] *= T(1.0 / N);
             data[i].x *= weight.x;
             data[i].y *= weight.y;
@@ -174,7 +188,7 @@ __global__ void spectral_sandwich_kernel(const void* eta, const void* xi_hat,
     for (int i = 0; i < Forward::output_ept; ++i) {
         int k = threadIdx.x + i * Forward::stride;
         if (k < Forward::output_length) {
-            data[i] *= static_cast<const C*>(symbols)[blockIdx.x * F + k];
+            data[i] *= static_cast<const C*>(symbols)[blockIdx.x * symbol_length + k];
             if (k == 0 || k == N / 2) data[i].y = 0;
             static_cast<C*>(out)[blockIdx.x * F + k] = data[i];
         }
@@ -250,7 +264,14 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
-    if (operation == 8) {
+    if (operation == 9) {
+        if constexpr (N == 1024) {
+            transform<F, false, false, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
+                a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, false);
+        } else {
+            return ffi::Error::InvalidArgument("Promoted input FFT supports the 1024-point model grid only.");
+        }
+    } else if (operation == 8) {
         if constexpr (N == 1024) {
             transform<I, false, true><<<out->element_count() / N, I::block_dim, I::shared_memory_size, stream>>>(
                 a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2 + 1, false);
@@ -266,11 +287,16 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         } else {
             return ffi::Error::InvalidArgument("Field inverse FFT supports the 1024-point model grid only.");
         }
-    } else if (operation == 6) {
+    } else if (operation == 6 || operation == 10) {
         if constexpr (N == 1024) {
-            int branches = symbols.dimensions()[symbols.dimensions().size() - 2];
-            spectral_sandwich_kernel<F, I><<<out->element_count() / F::output_length, F::block_dim, shared, stream>>>(
-                a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+            int branches = out->dimensions()[out->dimensions().size() - 2];
+            if (operation == 10) {
+                spectral_sandwich_kernel<F, I, true><<<out->element_count() / F::output_length, F::block_dim, shared, stream>>>(
+                    a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+            } else {
+                spectral_sandwich_kernel<F, I><<<out->element_count() / F::output_length, F::block_dim, shared, stream>>>(
+                    a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+            }
         } else {
             return ffi::Error::InvalidArgument("Spectral G1 supports the 1024-point model grid only.");
         }
@@ -307,7 +333,7 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
 ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
                     ffi::AnyBuffer symbols, ffi::Result<ffi::AnyBuffer> out,
                     int64_t size, int64_t operation, bool multiply, int64_t ept) {
-    bool fp64 = a.element_type() == ffi::F64 || a.element_type() == ffi::C128;
+    bool fp64 = a.element_type() == ffi::F64 || a.element_type() == ffi::C128 || operation == 9 || operation == 10;
     if (size == 1024) {
         if (ept == 4)
             return fp64 ? launch<1024, double, 4>(stream, a, b, symbols, out, operation, multiply)

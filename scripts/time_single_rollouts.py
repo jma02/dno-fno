@@ -4,6 +4,8 @@ Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
 The fused methods apply inference FFT optimizations to --candidate-run.
 Spectral variants reduce adapter round trips; every classical order shares padded FFT batching.
+The _stages suffix pairs GL2 stages within one trajectory, not separate rollouts.
+Overlap trials require XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, cast
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 os.environ.setdefault("JAX_PLATFORMS", "cuda")
@@ -56,7 +58,8 @@ FUSION_VARIANTS["fourier_input_spectral_all"] = "fourier_input"
 FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_g1fft", "fourier_fields", "fourier_product", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
     "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
-    "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both",
+    "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
+    "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
     *TUNED_TRIALS,
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
@@ -79,7 +82,9 @@ if __name__ == "__main__":
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--methods", nargs="+", choices=(*METHODS, *(f"{method}_boundaries" for method in METHODS)))
+    parser.add_argument("--methods", nargs="+", choices=tuple(
+        f"{method}{boundary}{stages}" for method in METHODS
+        for boundary in ("", "_boundaries") for stages in ("", "_stages")))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
@@ -90,7 +95,7 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
-    base_methods = {method.removesuffix("_boundaries") for method in methods}
+    base_methods = {method.removesuffix("_stages").removesuffix("_boundaries") for method in methods}
     if args.reference not in methods or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
@@ -110,9 +115,9 @@ if __name__ == "__main__":
                    "warm-up; compilation and host transfers excluded"),
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
-                        for base in (name.removesuffix("_boundaries"),)},
+                        for base in (name.removesuffix("_stages").removesuffix("_boundaries"),)},
         "fusion_variants": {name: FUSION_VARIANTS[base] for name in methods
-                            for base in (name.removesuffix("_boundaries"),) if base in FUSION_VARIANTS},
+                            for base in (name.removesuffix("_stages").removesuffix("_boundaries"),) if base in FUSION_VARIANTS},
         "reference": args.reference,
         "include_model_baselines": not args.without_baselines,
         "families": {},
@@ -136,7 +141,7 @@ if __name__ == "__main__":
         }
         compiled, outputs = {}, {}
         for label in methods:
-            method = label.removesuffix("_boundaries")
+            method = label.removesuffix("_stages").removesuffix("_boundaries")
             started = time.perf_counter()
             shared_baseline = method == "shared_m1_spectral_all"
             correction = None
@@ -187,9 +192,31 @@ if __name__ == "__main__":
                     predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
             with ExitStack() as patches:
                 patches.enter_context(rhs_patch)
-                if label.endswith("_boundaries"):
+                if label.removesuffix("_stages").endswith("_boundaries"):
                     patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
                     patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
+                if label.endswith("_stages"):
+                    def paired_stage_map(
+                        stage1: ti.SpectralState, stage2: ti.SpectralState, *, v0: ti.SpectralState,
+                        stage_time1: float | jax.Array, stage_time2: float | jax.Array,
+                        dt: float | jax.Array, params: ti.SolverParams,
+                        a11: float | jax.Array, a12: float | jax.Array,
+                        a21: float | jax.Array, a22: float | jax.Array,
+                        rhs: Callable[..., ti.SpectralState] = ti.rhs_nonlinear_if,
+                    ) -> tuple[ti.SpectralState, ti.SpectralState, ti.SpectralState, ti.SpectralState]:
+                        fields = jax.vmap(rhs, in_axes=(0, 0, None))(
+                            jax.tree.map(lambda first, second: jnp.stack((first, second)), stage1, stage2),
+                            jnp.stack((stage_time1, stage_time2)), params,
+                        )
+                        f1 = ti.SpectralState(*(field[0] for field in fields))
+                        f2 = ti.SpectralState(*(field[1] for field in fields))
+                        candidate1 = ti._tree_add(v0, ti._tree_scale(
+                            ti._tree_add(ti._tree_scale(f1, a11), ti._tree_scale(f2, a12)), dt))
+                        candidate2 = ti._tree_add(v0, ti._tree_scale(
+                            ti._tree_add(ti._tree_scale(f1, a21), ti._tree_scale(f2, a22)), dt))
+                        return candidate1, candidate2, f1, f2
+
+                    patches.enter_context(patch.object(ti, "_gauss_legendre_2_stage_map", paired_stage_map))
                 compiled[label] = runner.lower(initial, times).compile()
                 compile_seconds = time.perf_counter() - started
                 warm = compiled[label] if args.steps else runner.lower(initial, times[:5]).compile()
@@ -227,12 +254,13 @@ if __name__ == "__main__":
                 cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
                 records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
                 records[method][f"cached_reference_terminal_{key}_error"] = float(cached_error[-1] / np.linalg.norm(cached[-1]))
-                if method.endswith("_boundaries") and method.removesuffix("_boundaries") in outputs:
-                    unpacked = np.asarray(outputs[method.removesuffix("_boundaries")][key]).reshape(frames, -1)
-                    records[method][f"boundary_max_{key}_difference"] = float((
-                        np.linalg.norm(actual.reshape(frames, -1) - unpacked, axis=-1)
-                        / np.linalg.norm(unpacked, axis=-1)
-                    ).max())
+                for suffix, metric in (("_boundaries", "boundary"), ("_stages", "stage")):
+                    if method.endswith(suffix) and method.removesuffix(suffix) in outputs:
+                        unpacked = np.asarray(outputs[method.removesuffix(suffix)][key]).reshape(frames, -1)
+                        records[method][f"{metric}_max_{key}_difference"] = float((
+                            np.linalg.norm(actual.reshape(frames, -1) - unpacked, axis=-1)
+                            / np.linalg.norm(unpacked, axis=-1)
+                        ).max())
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"{family}: saved {args.output}", flush=True)
