@@ -53,6 +53,10 @@ FUSION_VARIANTS["fourier_spectral_all"] = "fourier"
 FUSION_VARIANTS["fourier_round_spectral_all"] = "fourier_round"
 FUSION_VARIANTS["fourier_reuse_spectral_all"] = "fourier_reuse"
 FUSION_VARIANTS["fourier_input_spectral_all"] = "fourier_input"
+FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
+    "fourier_g1fft", "fourier_fields", "fourier_product", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
+    "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
+)})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 

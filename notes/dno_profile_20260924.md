@@ -1165,3 +1165,90 @@ Its padded 2048-point inverse FFTs are different operations; earlier rejected
 cuFFTDx tests used padding8 and do not settle their current backend choice.
 Ada ran on GPU0 only; Sam's GPU1 jobs were untouched. Cloud apps completed
 and stopped. No failed checks were relaxed or slow repeats discarded.
+
+## Remaining FFTs and thread settings — September 26
+
+Screened the remaining G1 input FFT, learned-feature FFTs and product/outer
+fusion against `fourier_input`. All kernels already existed; no CUDA or
+production edits, operation5 calls, precision reduction or training.
+Raw data: `outputs/fourier_ffts_20260926/`.
+
+Replacing the FP32 input forward FFT fails the unchanged 1e-5 comparison
+threshold on every GPU (maximum 1.92e-4). It changes the spectrum used by G0
+and the surface features; those variants are excluded from full rollouts.
+Keeping that transform in cuFFT, while using cuFFTDx for the separate FP64
+G1 input forward FFT and packed FP32 field inverse FFT, passes. The selected
+variants' 48-state maximum discrepancies are 2.81e-7 on Ada, 8.28e-8 on
+Blackwell and 1.19e-7 on A100; mixed, flat and zero-input checks also pass.
+
+Product/outer fusion passes numerically but is not the fastest combination.
+HLO inspection finds an additional materialized branch slice instead of the
+previously fused slicing/head reduction/product. GEMM configurations are
+unchanged. These are compiler observations, not new hardware-counter profiles.
+Some host-wrapped forward timings are noisy, especially the first A100 screen;
+full-rollout comparisons determine selection.
+
+The Stokes selection uses six methods with three full T20 repeats each on
+every GPU (54 rollouts total). EPT is elements per thread and affects every
+cuFFTDx call in that variant, including the existing input inverse and G1
+sandwich. Selected medians:
+
+| GPU | EPT | Previous (s) | Transforms-only (s) | Reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Ada | 16 | 2.59119 | 2.39183 | 7.69% |
+| Blackwell | 8 | 3.59294 | 3.11685 | 13.25% |
+| A100 80GB | 8 | 2.30980 | 1.98608 | 14.02% |
+
+All selection outputs are finite with positive depth. These selection timings
+are separate from the final four-family confirmation used in Figure12.
+
+Modal assigned an A100 80GB PCIe to the first all-family confirmation, although
+the refinement used SXM4. Its 36 timings and 12 outputs are valid paired
+measurements: 13.56–13.76% less runtime than its control and 11.73–12.70% less
+than its M2. They remain under `a100_full/`, separate from the SXM4 plot data.
+The final SXM4 confirmation checks the assigned device before measurement.
+
+Independent four-family confirmation uses three interleaved full rollouts of
+the previous candidate, selected candidate and M2: 108 timings and 36 outputs
+across Ada, Blackwell and A100 SXM4. Same checkpoint, N1024, batch1, dt0.01,
+four GL2 iterations, pad2 and T20/200; compilation, warm-up and transfers are
+excluded. Every new repeat beats every old and M2 repeat within its family.
+All outputs are finite with positive depth.
+
+| GPU | Family | Previous (s) | New (s) | M2 (s) | Less time vs previous | Less time vs M2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Ada | Stokes | 2.59451 | 2.39253 | 4.04167 | 7.78% | 40.80% |
+| Ada | Tanaka | 25.76850 | 23.76026 | 40.48623 | 7.79% | 41.31% |
+| Ada | Benjamin–Feir | 25.77719 | 23.75486 | 40.46612 | 7.85% | 41.30% |
+| Ada | JONSWAP/TMA | 2.60286 | 2.39998 | 4.05155 | 7.79% | 40.76% |
+| Blackwell | Stokes | 3.58085 | 3.09593 | 5.12320 | 13.54% | 39.57% |
+| Blackwell | Tanaka | 35.39244 | 30.63072 | 51.18409 | 13.45% | 40.16% |
+| Blackwell | Benjamin–Feir | 35.38091 | 30.61814 | 51.18514 | 13.46% | 40.18% |
+| Blackwell | JONSWAP/TMA | 3.57711 | 3.09741 | 5.12130 | 13.41% | 39.52% |
+| A100 SXM4 | Stokes | 2.29361 | 1.97771 | 2.25535 | 13.77% | 12.31% |
+| A100 SXM4 | Tanaka | 22.62642 | 19.46694 | 22.65491 | 13.96% | 14.07% |
+| A100 SXM4 | Benjamin–Feir | 22.62464 | 19.49672 | 22.63033 | 13.83% | 13.85% |
+| A100 SXM4 | JONSWAP/TMA | 2.29183 | 1.97338 | 2.24977 | 13.89% | 12.29% |
+
+Raw confirmation data: `ada_full.json`, `blackwell_full/rollouts.json` and
+`a100_sxm_full/rollouts.json` under the directory above. Long trajectories
+are not identical. Largest new-versus-previous terminal eta differences occur
+in BF: 0.30325% on Ada, 0.18123% on Blackwell and 0.21051% on A100 SXM4.
+Corresponding trajectory eta differences are 0.06509%, 0.04393% and 0.04550%.
+Cached-M6 terminal BF errors change from 1.053713→0.802435% on Ada,
+0.914494→1.066369% on Blackwell and 1.014984→0.838917% on A100 SXM4.
+Tanaka remains about 98.87% terminal error for this timing candidate; this
+experiment does not establish a trained accuracy improvement.
+
+KEEP the benchmark-only transforms combination, EPT16 on Ada and EPT8 on
+Blackwell/A100. Figure12 updates candidate timing lines, incremental savings
+and fresh M2 timing coordinates, preserving the trained small/full accuracies
+and all spectral-EMA overlays. Classical math and the shared nonlinear RHS
+are unchanged: these replaced normalized-input/learned-field transforms have
+no identical operation in the classical spectral recurrence. This does not
+settle optimality of the classical padded 2048-point FFT backend.
+
+Final Ada confirmation ran 23:01–23:12, Blackwell 23:01–23:17, and A100 SXM4
+23:16–23:26. Cloud apps stopped; local GPU0 finished, Sam's GPU1 untouched.
+No training, production or CUDA source changes. Figure13 retains its earlier
+measured profiles; this round does not provide new roofline counters.

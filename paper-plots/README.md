@@ -196,14 +196,25 @@ is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
-All three candidate lines now use `fourier_input_spectral_all`: the existing
-FP64 cuFFTDx kernel replaces the network's batch-two input inverse FFT, with
-input rounding, normalization, G0/G1 and learned weights unchanged. Their
-annotations compare three-repeat full-rollout medians against
-`fourier_round_spectral_all` in the same run. Measurements are under
-`outputs/fourier_reuse_20260926/`: `ada_stokes.json`, `ada_rest.json`, and
-`{blackwell,a100}/rollouts.json`. The FP32 spectrum-reuse trial in the same
-directory failed accuracy checks and is not plotted.
+The candidate lines now use `fourier_transforms_e16_spectral_all` on Ada and
+`fourier_transforms_spectral_all` on Blackwell/A100. These replace the network's
+FP64 G1 input forward FFT and packed FP32 field inverse FFT with cuFFTDx;
+the original FP32 input forward FFT, weights and G0/G1 formulation are retained.
+Ada uses 16 elements per thread; Blackwell/A100 use 8. Annotations compare
+three-repeat full-rollout medians against `fourier_input_spectral_all` in the
+same run, alongside fresh M2 timings. Measurements are under
+`outputs/fourier_ffts_20260926/`: `ada_full.json`,
+`blackwell_full/rollouts.json` and `a100_sxm_full/rollouts.json`.
+The separate `a100_full/` run used an A100 PCIe and is not mixed into the SXM4
+panel. The broader FP32 input-FFT replacement
+failed accuracy checks; extra product fusion was not selected. The preceding
+input-inverse optimization remains recorded under `outputs/fourier_reuse_20260926/`.
+Across the four families, the new combination reduces rollout time by
+7.78–7.85% on Ada, 13.41–13.54% on Blackwell, and 13.77–13.96% on A100 SXM4.
+It takes 40.76–41.31%, 39.52–40.18%, and 12.29–14.07% less time than fresh M2,
+respectively. These are runtime-only candidate lines; observed rounding-sensitive
+trajectory changes and complete numerical comparisons are recorded in
+`notes/dno_profile_20260924.md`.
 
 The preceding Fourier-I/O round is saved in
 `outputs/fourier_io_20260926/{ada,blackwell,a100}_full/rollouts.json`.
@@ -211,14 +222,17 @@ That candidate preserves physical-space FP32 input rounding, returns the
 learned correction and G0 directly in Fourier space, and uses a spectral-output
 cuFFTDx G1 kernel. Runtime decreases by 18.85–19.24% on Ada, 16.28–16.90% on
 Blackwell, and 19.86–20.39% on A100 versus `fused_cufftdx_spectral_all`.
-The A100 allocation is the 80GB SXM4 variant; the classical series uses that
-run's three repeats for M1/M2 and one M6 reference rollout per family. Unmeasured
+The A100 allocation is the 80GB SXM4 variant; the classical series retains that
+run's three repeats for M1 and one M6 reference rollout per family, with M2
+refreshed by the latest paired comparison. Unmeasured
 M3–M5 are omitted; earlier 40GB A100 timings are not mixed into the new row.
 
-Ada and Blackwell M1/M2 medians retain their preceding Fourier-I/O paired runs;
+Ada and Blackwell M1 medians retain their preceding Fourier-I/O paired runs;
 M3–M6 retain the earlier three-repeat measurements on the same hardware.
-This input-FFT trial does not rerun classical timings: the spectral classical
-solver has no corresponding unpadded eta/xi input reconstruction.
+M2 is remeasured with the old and new candidates on each GPU. Classical math
+and the shared nonlinear RHS are unchanged; these replacements concern the
+network's unpadded, normalized inputs and learned fields, absent from the
+spectral classical recurrence.
 
 Each Fourier-I/O comparison uses three full batch-one rollouts of
 M1, M2, the previous candidate and the Fourier-output candidate, plus one M6

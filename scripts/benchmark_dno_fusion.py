@@ -30,7 +30,11 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
-TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input", "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
+TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
+          "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
+          "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
+          "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
+          "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16")
 
@@ -94,17 +98,25 @@ def build_variant(
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
-                physical = (fft(inputs, nx, inverse=True, ept=fft_ept) if trial == "fourier_input"
+                physical = (fft(inputs, nx, inverse=True, ept=fft_ept) if trial not in ("fourier_round", "fourier_reuse")
                             else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
                 normalized = physical / scales[None, :, None]
                 eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
-                eta_norm_hat, xi_phys_hat = jnp.moveaxis(jnp.fft.rfft(jnp.stack((eta_norm, xi_phys), axis=1)), 1, 0)
+                normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
+                eta_norm_hat, xi_phys_hat = jnp.moveaxis(
+                    fft(normalized_inputs, nx, ept=fft_ept) if trial in ("fourier_features", "fourier_allfft")
+                    else jnp.fft.rfft(normalized_inputs), 1, 0)
                 g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
                              else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
-            fields = jnp.fft.irfft(jnp.concatenate((
+                if trial in ("fourier_g1fft", "fourier_allfft", "fourier_kernels", "fourier_transforms"):
+                    g1_xi_hat = fft(xi_phys.astype(jnp.float64), nx, ept=fft_ept)
+            field_spectra = jnp.concatenate((
                 surface_ops[None, :, :] * eta_norm_hat[:, None, :],
                 filters * xi_phys_hat[:, None, :],
-            ), axis=1), n=nx)
+            ), axis=1)
+            fields = (fft(field_spectra, nx, inverse=True, ept=fft_ept)
+                      if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
+                      else jnp.fft.irfft(field_spectra, n=nx))
             features = jnp.concatenate((
                 jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
                 jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
@@ -113,8 +125,12 @@ def build_variant(
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
             features = features * jnp.tanh(features)
             weights = jnp.moveaxis(features @ head_kernel, -1, 1)
-            weighted_hat = jnp.fft.rfft(weights * fields[:, surface_ops.shape[0]:, :])
-            correction_hat = jnp.sum(filters * weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
+            branch_fields = fields[:, surface_ops.shape[0]:, :]
+            if trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
+                weighted_hat = nx * fft(weights, nx, b=branch_fields, outer=filters.astype(jnp.complex64), ept=fft_ept)
+            else:
+                weighted_hat = filters * jnp.fft.rfft(weights * branch_fields)
+            correction_hat = jnp.sum(weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
             g1_hat = -sandwich(
                 (eta_norm * model.eta_scale).astype(jnp.float64),
                 g1_xi_hat, operators,
@@ -252,7 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
-    parser.add_argument("--reference", choices=("original", "cufftdx", "fourier_round"), default="original")
+    parser.add_argument("--reference", choices=("original", "cufftdx", "fourier_round", "fourier_input"), default="original")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
@@ -376,6 +392,10 @@ if __name__ == "__main__":
     labels.update(fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
                   fourier_reuse="Reuse FP32 input spectrum for G₁",
                   fourier_input="cuFFTDx FP64 input inverse FFT",
+                  fourier_g1fft="cuFFTDx FP64 G₁ input FFT", fourier_features="cuFFTDx feature FFTs",
+                  fourier_product="Fused learned product FFT", fourier_allfft="Combined FFT replacements",
+                  fourier_fields="cuFFTDx packed field inverse FFT", fourier_kernels="G₁ FFT + field inverse + product FFT",
+                  fourier_transforms="G₁ FFT + packed field inverse FFT",
                   cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",

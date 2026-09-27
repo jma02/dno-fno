@@ -222,11 +222,13 @@ if __name__ == "__main__":
                 config.timings = paths[0]
             config.classical_timings = paths
             config.candidate_timings = [ROOT / f"outputs/fourier_io_20260926/{hardware}_full/rollouts.json"]
-            config.candidate_timings += ([ROOT / f"outputs/fourier_reuse_20260926/ada_{part}.json"
-                                          for part in ("stokes", "rest")] if hardware == "ada" else [
-                ROOT / f"outputs/fourier_reuse_20260926/{hardware}/rollouts.json"])
-            config.candidate_method = "fourier_input_spectral_all"
-            config.candidate_previous_method = "fourier_round_spectral_all"
+            config.candidate_timings += [ROOT / "outputs/fourier_ffts_20260926" / {
+                "ada": "ada_full.json", "blackwell": "blackwell_full/rollouts.json",
+                "a100": "a100_sxm_full/rollouts.json",
+            }[hardware]]
+            config.candidate_method = ("fourier_transforms_e16_spectral_all" if hardware == "ada"
+                                       else "fourier_transforms_spectral_all")
+            config.candidate_previous_method = "fourier_input_spectral_all"
             config.no_baseline_timings = None
         a100.timings = a100.candidate_timings[0]
         a100.classical_timings = None
