@@ -197,8 +197,11 @@ These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
 
 All three hardware panels use the same
-`fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local`
-candidate, with EPT8 throughout. It retains the previous paired GL2 stages
+`fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local`
+candidate, with EPT8 throughout. It fuses the learned spatial multiplication,
+forward FFT and outer filter in one kernel, avoiding the intermediate weighted
+branch buffer. The head output already has the required physical layout;
+this is not a gain from removing a head transpose. It retains paired GL2 stages
 and G1/learned-correction stream overlap, carries spectral states between
 internal timesteps, caches linear propagators at step-relative stage offsets,
 and writes surface-network features directly from the field inverse FFT.
@@ -208,26 +211,33 @@ Spectral carry and local propagators also apply to every classical order M1–M6
 alongside the previous stage pairing and boundary FFT packing. FP64 integration/G1,
 FP32 learned inference, weights and iteration count are unchanged.
 
-Annotations compare against `fourier_fused_fields_overlap_spectral_all_boundaries_stages`
+Annotations compare against `fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local`
 in the same three-repeat, four-family full-rollout benchmark. Sources under
-`outputs/spectral_carry_20260927/` are `ada_full.json`,
-`blackwell_full/rollouts.json`, and `a100_combined_sxm/rollouts.json`.
-Classical M1–M6 use fresh full-rollout measurements from `ada_classical.json`,
+`outputs/half_spectrum_20260927/` are `ada_full.json`,
+`blackwell_product_confirm/rollouts.json`, and `a100_sciml_sxm/rollouts.json`.
+These cloud runs use the approved `sciml-at-ud` workspace.
+Classical M1–M6 retain the unchanged implementation's measurements under
+`outputs/spectral_carry_20260927/`: `ada_classical.json`,
 `blackwell_classical/classical.json`, and `a100_combined_sxm/classical.json`;
-M2 uses the three-repeat median from the paired neural comparison, with its
-accuracy still taken from the classical M6 reference. Ada paired timings use GPU1;
-the all-order sweep uses GPU0. Across the four families, the common candidate
-uses 11.2–11.9% less time on Ada, 11.4–12.0% on Blackwell, and 13.2–13.9% on A100
-than its paired control. It uses 34.1–35.3%, 29.8–31.1%, and 15.0–18.1% less time
-than equally optimized M2, respectively. Most of the gain is in shared integrator
-execution; feature fusion adds a further A100 gain and is nearly neutral on Blackwell.
+M2 uses the paired three-repeat median on Ada/Blackwell and a separate seven-repeat
+confirmation in `outputs/half_spectrum_20260927/a100_m2_confirm/classical.json`
+on A100, where the initial paired M2 timings were noisy. Only its runtime is
+replaced; accuracy remains referenced to classical M6. Ada paired timings use GPU1.
+The M2 confirmation uses a separate SXM4 allocation. Cloud runtime variation
+between those runs is not an optimization gain; the orange annotations compare
+old/new neural methods measured together in the original allocation.
+Across the four families, product fusion saves another 0.60–0.75% on Ada,
+2.83–3.13% on Blackwell, and 1.34–2.48% on A100 against the preceding candidate.
+Balanced feature stores showed no useful additional gain. Half-spectrum GL2
+carry was also tested for both methods and rejected; the selected neural and
+classical paths both retain full-spectrum carry.
 
-Native feature arrays and the 48-state forward checks are exact, but changing
-the integration's rounding path changes long trajectories. For Benjamin–Feir,
-the candidate's terminal surface error against M6 changes from 0.839% to 1.022%
-on Ada/A100 and from 0.812% to 0.888% on Blackwell. The separate Ada four-way
-diagnostic attributes most sensitivity to spectral carry; local propagators
-alone give 0.836%. These remain runtime-only candidate lines. Trained-model
+Product fusion passes the 48-state forward checks with maximum relative
+difference 2.01e-9, but long trajectories are not bitwise equivalent. For
+Benjamin–Feir, terminal surface error against M6 changes from 1.022% to 1.010%
+on Ada/A100 and from 0.888% to 0.976% on Blackwell. The largest relative saved
+surface difference against the preceding candidate is 0.001223 (Blackwell BF).
+These remain runtime-only candidate lines. Trained-model
 accuracy references and EMA overlays are retained; production/training code
 is untouched. Trial details, numerical comparisons and decisions are in
 `experiments/experiments-2026-09-27.md`.
@@ -312,7 +322,7 @@ This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce 
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/spectral_carry_20260927/ada_full.json \
+  --candidate-timings outputs/half_spectrum_20260927/ada_full.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json
@@ -333,12 +343,11 @@ Reproduce the local full-rollout measurements on a free GPU with:
 ```sh
 CUDA_VISIBLE_DEVICES=1 XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
   uv run --no-sync scripts/time_single_rollouts.py \
-  --methods fourier_fused_fields_overlap_spectral_all_boundaries_stages \
-    fourier_fused_fields_overlap_spectral_all_boundaries_stages_carry_local \
-    fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local M2_boundaries_stages_carry_local \
-  --reference fourier_fused_fields_overlap_spectral_all_boundaries_stages --repeats 3 --pad-factor 2 \
+  --methods fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local \
+    fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local M2_boundaries_stages_carry_local \
+  --reference fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local --repeats 3 --pad-factor 2 \
   --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
-  --output outputs/spectral_carry_20260927/ada_full.json
+  --output outputs/half_spectrum_20260927/ada_full.json
 ```
 
 The cuFFTDx prototype is inference-only, outside both production trainers.
@@ -396,7 +405,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --candidate-method fused_cufftdx --candidate-previous-method fused_front
 ```
 
-`scripts/modal_benchmark.py` runs explicit commands in the personal account,
+`scripts/modal_benchmark.py` honors the selected `MODAL_PROFILE`,
 uploads only selected code/checkpoint/reference cases, and downloads result
 files under a fresh `--output` directory. No manuscript or notes are uploaded.
 

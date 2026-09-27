@@ -229,12 +229,12 @@ if __name__ == "__main__":
             if config.single_case:
                 config.timings = classical
             config.classical_timings = [classical]
-            config.candidate_timings = [directory / {
-                "ada": "ada_full.json", "blackwell": "blackwell_full/rollouts.json",
-                "a100": "a100_combined_sxm/rollouts.json",
+            config.candidate_timings = [ROOT / "outputs/half_spectrum_20260927" / path for path in {
+                "ada": ("ada_full.json",), "blackwell": ("blackwell_product_confirm/rollouts.json",),
+                "a100": ("a100_sciml_sxm/rollouts.json", "a100_m2_confirm/classical.json"),
             }[hardware]]
-            config.candidate_method = "fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local"
-            config.candidate_previous_method = "fourier_fused_fields_overlap_spectral_all_boundaries_stages"
+            config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+            config.candidate_previous_method = "fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local"
             config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
