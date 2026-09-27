@@ -40,6 +40,7 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
           "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
+          "fourier_fused_features", "fourier_fused_features_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
@@ -63,7 +64,8 @@ def build_variant(
         input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
         variant = "fourier_transforms"
     fused_g1 = variant == "fourier_fused_g1"
-    fused_fields = variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
+    fused_features = variant == "fourier_fused_features"
+    fused_fields = fused_features or variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
     fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
     if fused_fields or fused_inputs:
         variant = "fourier_transforms"
@@ -117,7 +119,7 @@ def build_variant(
             eta_norm_hat = jnp.fft.rfft(eta_norm)
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
-            normalized_hat = None
+            normalized_hat = normalized_inputs = None
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
                 if fused_inputs:
@@ -147,25 +149,30 @@ def build_variant(
                             spectral=True, ept=sandwich_ept,
                             eta_scale=model.eta_scale if fused_g1 else None,
                         ).sum(axis=1))(normalized_inputs)
-            if fused_fields:
-                fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=nx, ept=field_ept)
+            if fused_features:
+                features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
+                                                       n=nx, ept=field_ept, normalized_inputs=normalized_inputs)
+                features = jnp.moveaxis(features, 1, -1)
             else:
-                field_spectra = jnp.concatenate((
-                    surface_ops[None, :, :] * eta_norm_hat[:, None, :],
-                    filters * xi_phys_hat[:, None, :],
-                ), axis=1)
-                fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
-                          if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
-                          else jnp.fft.irfft(field_spectra, n=nx))
-            features = jnp.concatenate((
-                jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
-                jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
-            ), axis=-1)
+                if fused_fields:
+                    fields = cast(jax.Array, field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=nx, ept=field_ept))
+                else:
+                    field_spectra = jnp.concatenate((
+                        surface_ops[None, :, :] * eta_norm_hat[:, None, :],
+                        filters * xi_phys_hat[:, None, :],
+                    ), axis=1)
+                    fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
+                              if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
+                              else jnp.fft.irfft(field_spectra, n=nx))
+                features = jnp.concatenate((
+                    jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
+                    jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
+                ), axis=-1)
+                branch_fields = fields[:, surface_ops.shape[0]:, :]
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
             features = features * jnp.tanh(features)
             weights = jnp.moveaxis(features @ head_kernel, -1, 1)
-            branch_fields = fields[:, surface_ops.shape[0]:, :]
             if trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
                 weighted_hat = nx * fft(weights, nx, b=branch_fields, outer=filters.astype(jnp.complex64), ept=fft_ept)
             else:
@@ -445,6 +452,8 @@ if __name__ == "__main__":
                   fourier_fused_g1="Field fusion + G1 preparation fusion",
                   fourier_fused_fields_overlap="Overlap G1 and learned correction",
                   fourier_fused_g1_overlap="G1 preparation fusion + overlap",
+                  fourier_fused_features="Field inverse FFT into surface-network features",
+                  fourier_fused_features_overlap="Surface-feature fusion + G1 overlap",
                   cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",

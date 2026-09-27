@@ -31,7 +31,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from scripts.benchmark_dno_fusion import TUNED_TRIALS, build_variant  # noqa: E402
-from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, shared_m1_hat  # noqa: E402
+from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, rollout_if_trial, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
@@ -60,6 +60,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
     "fourier_fused_fields", "fourier_fused_inputs", "fourier_fused_both", "fourier_fused_g1",
     "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
+    "fourier_fused_features", "fourier_fused_features_overlap",
     *TUNED_TRIALS,
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
@@ -74,6 +75,12 @@ def packed_boundary(
     return ti.State(*ti.myifft(fields)) if inverse else ti.SpectralState(*ti.myfft(fields, nx))
 
 
+def method_base(name: str) -> str:
+    for suffix in ("_local", "_carry", "_stages", "_boundaries"):
+        name = name.removesuffix(suffix)
+    return name
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
@@ -84,7 +91,9 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
     parser.add_argument("--methods", nargs="+", choices=tuple(
         f"{method}{boundary}{stages}" for method in METHODS
-        for boundary in ("", "_boundaries") for stages in ("", "_stages")))
+        for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
+        f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_"))
+        for trial in ("_carry", "_local", "_carry_local")))
     parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
@@ -95,7 +104,7 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
-    base_methods = {method.removesuffix("_stages").removesuffix("_boundaries") for method in methods}
+    base_methods = set(map(method_base, methods))
     if args.reference not in methods or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
@@ -115,9 +124,9 @@ if __name__ == "__main__":
                    "warm-up; compilation and host transfers excluded"),
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
-                        for base in (name.removesuffix("_stages").removesuffix("_boundaries"),)},
+                        for base in (method_base(name),)},
         "fusion_variants": {name: FUSION_VARIANTS[base] for name in methods
-                            for base in (name.removesuffix("_stages").removesuffix("_boundaries"),) if base in FUSION_VARIANTS},
+                            for base in (method_base(name),) if base in FUSION_VARIANTS},
         "reference": args.reference,
         "include_model_baselines": not args.without_baselines,
         "families": {},
@@ -141,7 +150,8 @@ if __name__ == "__main__":
         }
         compiled, outputs = {}, {}
         for label in methods:
-            method = label.removesuffix("_stages").removesuffix("_boundaries")
+            method = method_base(label)
+            options = label[len(method):].split("_")
             started = time.perf_counter()
             shared_baseline = method == "shared_m1_spectral_all"
             correction = None
@@ -152,9 +162,11 @@ if __name__ == "__main__":
                 pad_factor=args.pad_factor, filter_fraction=cfg.filter_fraction,
             )
             if method.startswith("M"):
-                function = partial(ti.rollout, params=params, save_gxi=True,
+                function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
+                                    carry_spectral="carry" in options, local_if="local" in options)
+                            if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
-                                   implicit_iterations=4, zero_mean_xi=True)
+                                   implicit_iterations=4, zero_mean_xi=True))
             else:
                 predict = (cast(Predictor, build_variant(
                     loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
@@ -174,8 +186,11 @@ if __name__ == "__main__":
                     spectral_predict = predict
                     predict = partial(lambda eta, xi, fn: jnp.fft.irfft(
                         fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)
-                function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
-                                   predict_gxi=predict)
+                function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
+                                    carry_spectral="carry" in options, local_if="local" in options,
+                                    predict_gxi=predict, predict_hat=spectral_predict)
+                            if "carry" in options or "local" in options else partial(
+                                rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)
             jax.block_until_ready((initial, times, params))
             setup_seconds = time.perf_counter() - started
@@ -192,10 +207,10 @@ if __name__ == "__main__":
                     predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
             with ExitStack() as patches:
                 patches.enter_context(rhs_patch)
-                if label.removesuffix("_stages").endswith("_boundaries"):
+                if "boundaries" in options:
                     patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
                     patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
-                if label.endswith("_stages"):
+                if "stages" in options:
                     def paired_stage_map(
                         stage1: ti.SpectralState, stage2: ti.SpectralState, *, v0: ti.SpectralState,
                         stage_time1: float | jax.Array, stage_time2: float | jax.Array,
@@ -254,7 +269,8 @@ if __name__ == "__main__":
                 cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
                 records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())
                 records[method][f"cached_reference_terminal_{key}_error"] = float(cached_error[-1] / np.linalg.norm(cached[-1]))
-                for suffix, metric in (("_boundaries", "boundary"), ("_stages", "stage")):
+                for suffix, metric in (("_boundaries", "boundary"), ("_stages", "stage"),
+                                       ("_carry_local", "carry_local"), ("_carry", "carry"), ("_local", "local")):
                     if method.endswith(suffix) and method.removesuffix(suffix) in outputs:
                         unpacked = np.asarray(outputs[method.removesuffix(suffix)][key]).reshape(frames, -1)
                         records[method][f"{metric}_max_{key}_difference"] = float((

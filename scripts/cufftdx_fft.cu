@@ -71,9 +71,10 @@ __global__ void transform(const void* a, const void* b, void* out,
     }
 }
 
-template<class Inverse>
+template<class Inverse, bool features = false>
 __global__ void field_inverse_kernel(const void* inputs, const void* surface_ops,
-                                     const void* filters, void* out, int surfaces, int branches) {
+                                     const void* filters, void* out, int surfaces, int branches,
+                                     void* feature_out = nullptr, const void* normalized_inputs = nullptr) {
     using C = typename Inverse::value_type;
     using T = precision_of_t<Inverse>;
     constexpr int N = size_of<Inverse>::value;
@@ -99,7 +100,24 @@ __global__ void field_inverse_kernel(const void* inputs, const void* surface_ops
         int k = threadIdx.x + i * Inverse::stride;
         if (k < Inverse::output_length) {
             data[i] *= T(1.0 / N);
-            static_cast<C*>(out)[blockIdx.x * Inverse::output_length + k] = data[i];
+            if constexpr (features) {
+                if (field < surfaces) {
+                    C* output = static_cast<C*>(feature_out);
+                    int index = batch * (surfaces + 3) * N / 2 + k;
+                    output[index + (3 + field) * N / 2] = data[i];
+                    if (field == 0) {
+                        C value = static_cast<const C*>(normalized_inputs)[batch * N + k];
+                        T square_x = __fmul_rn(value.x, value.x), square_y = __fmul_rn(value.y, value.y);
+                        output[index] = value;
+                        output[index + N / 2] = C(square_x, square_y);
+                        output[index + N] = C(__fmul_rn(square_x, value.x), __fmul_rn(square_y, value.y));
+                    }
+                } else {
+                    static_cast<C*>(out)[(batch * branches + field - surfaces) * N / 2 + k] = data[i];
+                }
+            } else {
+                static_cast<C*>(out)[blockIdx.x * Inverse::output_length + k] = data[i];
+            }
         }
     }
 }
@@ -355,4 +373,34 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
         .Ret<ffi::AnyBuffer>().Attr<int64_t>("size").Attr<int64_t>("operation").Attr<bool>("multiply").Attr<int64_t>("ept"),
+    {ffi::Traits::kCmdBufferCompatible});
+
+template<int EPT>
+ffi::Error launch_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
+                           ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
+                           ffi::Result<ffi::AnyBuffer> branches) {
+    using I = decltype(FFTBase<1024, float, EPT>() + Type<fft_type::c2r>() +
+                       RealFFTOptions<complex_layout::natural, real_mode::folded>());
+    int surfaces = surface_ops.dimensions()[surface_ops.dimensions().size() - 2];
+    int count = filters.dimensions()[filters.dimensions().size() - 2];
+    field_inverse_kernel<I, true><<<normalized.element_count() / 2048 * (surfaces + count),
+                                    I::block_dim, I::shared_memory_size, stream>>>(
+        inputs.untyped_data(), surface_ops.untyped_data(), filters.untyped_data(),
+        branches->untyped_data(), surfaces, count, features->untyped_data(), normalized.untyped_data());
+    auto error = cudaGetLastError();
+    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
+}
+
+ffi::Error execute_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
+                            ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
+                            ffi::Result<ffi::AnyBuffer> branches, int64_t ept) {
+    if (ept == 4) return launch_features<4>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    if (ept == 16) return launch_features<16>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    return launch_features<8>(stream, inputs, surface_ops, filters, normalized, features, branches);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx_features, execute_features,
+    ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Attr<int64_t>("ept"),
     {ffi::Traits::kCmdBufferCompatible});

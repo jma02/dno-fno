@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -33,7 +33,8 @@ OUTPUT = ROOT / "outputs/cufftdx_20260925"
 @cache
 def register() -> ctypes.CDLL:
     library = ctypes.CDLL(str(OUTPUT / "cufftdx.so"))
-    jax.ffi.register_ffi_target("dno_cufftdx", jax.ffi.pycapsule(library.dno_cufftdx), platform="CUDA")
+    for name in ("dno_cufftdx", "dno_cufftdx_features"):
+        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, name)), platform="CUDA")
     return library
 
 
@@ -58,9 +59,17 @@ def fft(
 
 def field_irfft(
     inputs_hat: jax.Array, surface_ops: jax.Array, filters: jax.Array, *, n: int, ept: int = 8,
-) -> jax.Array:
-    """Form surface/branch multipliers on load, then return their real fields."""
+    normalized_inputs: jax.Array | None = None,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
+    """Form fields on load; optionally emit surface features [B,7,N] and branch fields."""
     register()
+    if normalized_inputs is not None:
+        results = (jax.ShapeDtypeStruct((*normalized_inputs.shape[:-2], surface_ops.shape[-2] + 3, n), jnp.float32),
+                   jax.ShapeDtypeStruct((*normalized_inputs.shape[:-2], filters.shape[-2], n), jnp.float32))
+        features, branches = jax.ffi.ffi_call("dno_cufftdx_features", results, vmap_method="broadcast_all")(
+            inputs_hat, surface_ops, filters, normalized_inputs, ept=np.int64(ept),
+        )
+        return features, branches
     result = jax.ShapeDtypeStruct(
         (*inputs_hat.shape[:-2], surface_ops.shape[-2] + filters.shape[-2], n), jnp.float32,
     )
@@ -234,9 +243,27 @@ if __name__ == "__main__":
                     lambda x, y, ept=ept: fft(jnp.concatenate((
                         surface_ops[None] * x[:, :1], y * x[:, 1:2],
                     ), axis=1), n, inverse=True, ept=ept),
-                    lambda x, y, ept=ept: field_irfft(x, surface_ops, y, n=n, ept=ept),
+                    lambda x, y, ept=ept: cast(jax.Array, field_irfft(x, surface_ops, y, n=n, ept=ept)),
                     input_pair.astype(jnp.complex64), field_filters,
                 )
+                for stage_pair in (False, True):
+                    for output in (0, 1):
+                        def feature_reference(x: jax.Array, y: jax.Array, ept: int = ept, output: int = output) -> jax.Array:
+                            fields = cast(jax.Array, field_irfft(x, surface_ops, field_filters, n=n, ept=ept))
+                            eta = y[:, 0]
+                            return (jnp.concatenate((jnp.stack((eta, eta ** 2, eta ** 3), axis=1), fields[:, :4]), axis=1)
+                                    if output == 0 else fields[:, 4:])
+
+                        def feature_candidate(x: jax.Array, y: jax.Array, ept: int = ept, output: int = output) -> jax.Array:
+                            return field_irfft(x, surface_ops, field_filters, n=n, ept=ept, normalized_inputs=y)[output]
+
+                        inputs, normalized = input_pair.astype(jnp.complex64), jnp.stack((a, b), axis=1).astype(jnp.float32)
+                        if stage_pair:
+                            inputs, normalized = jnp.stack((inputs, -inputs)), jnp.stack((normalized, -normalized))
+                        cases[f"feature_irfft_{output}_{'vmap' if stage_pair else 'direct'}_e{ept}"] = (
+                            jax.vmap(feature_reference) if stage_pair else feature_reference,
+                            jax.vmap(feature_candidate) if stage_pair else feature_candidate, inputs, normalized,
+                        )
             k = jnp.arange(n // 2 + 1, dtype=dtype)
             symbols = jnp.broadcast_to(jnp.stack((k * jnp.tanh(0.1 * k), 1j * k)), (batch, 2, n // 2 + 1))
             outer_symbols = symbols.at[..., [0, -1]].set(symbols[..., [0, -1]].real)

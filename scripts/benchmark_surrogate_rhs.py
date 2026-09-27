@@ -1,6 +1,6 @@
 """Benchmark-only spectral adapter and shared FFT-packing trials."""
 
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +8,15 @@ import jax.numpy as jnp
 from solver.evals.model_rollout import Predictor
 from solver.solvers import time_integrator as ti
 from solver.solvers.dno_series_jax import _dno_series_hat
+
+
+def rotate_spectrum(
+    state: ti.SpectralState, cosine: jax.Array, sine_over_omega: jax.Array, params: ti.SolverParams,
+) -> ti.SpectralState:
+    return ti.SpectralState(
+        cosine * state.eta_hat + sine_over_omega * params.g0 * state.xi_hat,
+        cosine * state.xi_hat - sine_over_omega * params.gravity * state.eta_hat,
+    )
 
 
 def shared_m1_hat(
@@ -37,8 +46,11 @@ def rhs_nonlinear_if_spectral(
     pack_ffts: Literal["none", "inputs", "all"] = "none",
     predict_correction: Predictor | None = None,
     predict_hat: Predictor | None = None,
+    rotation: tuple[jax.Array, jax.Array] | None = None,
+    ramp_time: float | jax.Array | None = None,
 ) -> ti.SpectralState:
-    physical_hat = ti.apply_linear_flow_hat(state_hat, time_value, params)
+    physical_hat = (ti.apply_linear_flow_hat(state_hat, time_value, params) if rotation is None
+                    else rotate_spectrum(state_hat, *rotation, params))
     nx = params.nx
     positive_modes = slice(0, nx // 2 + 1)
     eta_hat = physical_hat.eta_hat[..., positive_modes]
@@ -85,5 +97,88 @@ def rhs_nonlinear_if_spectral(
     if params.filter_fraction < 1.0:
         nonlinear_hat = ti._lowpass_hat(nonlinear_hat, params)
     if predict_gxi is None or predict_correction is not None:
-        nonlinear_hat = ti._tree_scale(nonlinear_hat, ti.nonlinear_ramp_factor(time_value, params))
-    return ti.apply_linear_flow_hat(nonlinear_hat, -time_value, params)
+        nonlinear_hat = ti._tree_scale(nonlinear_hat, ti.nonlinear_ramp_factor(
+            time_value if ramp_time is None else ramp_time, params))
+    return (ti.apply_linear_flow_hat(nonlinear_hat, -time_value, params) if rotation is None
+            else rotate_spectrum(nonlinear_hat, rotation[0], -rotation[1], params))
+
+
+def rollout_if_trial(
+    initial: ti.State, times: jax.Array, *, params: ti.SolverParams, substeps: int,
+    carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
+    predict_hat: Predictor | None = None,
+) -> dict[str, jax.Array]:
+    """Paired GL2 with optional spectral carry and interval-cached local rotations."""
+    initial = ti.project_zero_mean_xi(initial)
+    root3 = jnp.sqrt(jnp.asarray(3.0, dtype=initial.eta.dtype))
+    c = jnp.array([0.5 - root3 / 6, 0.5 + root3 / 6])
+    weights = jnp.array([[0.25, 0.25 - root3 / 6], [0.25 + root3 / 6, 0.25]])
+
+    def interval_step(
+        carry: ti.State | ti.SpectralState, data: tuple[jax.Array, jax.Array],
+    ) -> tuple[ti.State | ti.SpectralState, tuple[jax.Array, jax.Array, jax.Array | None]]:
+        start, interval = data
+        dt = interval / substeps
+        tau = (dt * jnp.concatenate((c, jnp.ones(1)))).reshape((3,) + (1,) * params.g0.ndim)
+        omega = jnp.sqrt(params.gravity * params.g0)
+        cosine = jnp.cos(omega * tau)
+        sine = jnp.where(omega > 0, jnp.sin(omega * tau) / omega, 0.0)
+
+        def step(index: int, state: ti.State | ti.SpectralState) -> ti.State | ti.SpectralState:
+            time_value = start + dt * index
+            state_hat = (cast(ti.SpectralState, state) if carry_spectral
+                         else ti._state_to_hat(cast(ti.State, state), params.nx))
+            v0 = state_hat if local_if else ti.apply_linear_flow_hat(state_hat, -time_value, params)
+
+            def stage_map(
+                stages: tuple[ti.SpectralState, ti.SpectralState],
+            ) -> tuple[tuple[ti.SpectralState, ti.SpectralState], ti.SpectralState, ti.SpectralState]:
+                packed = jax.tree.map(lambda first, second: jnp.stack((first, second)), *stages)
+                if local_if:
+                    fields = jax.vmap(lambda s, t, co, si: rhs_nonlinear_if_spectral(
+                        s, t, params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
+                        rotation=(co, si), ramp_time=time_value + t,
+                    ))(packed, c * dt, cosine[:2], sine[:2])
+                else:
+                    fields = jax.vmap(lambda s, t: rhs_nonlinear_if_spectral(
+                        s, t, params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
+                    ))(packed, time_value + c * dt)
+                f1 = ti.SpectralState(*(field[0] for field in fields))
+                f2 = ti.SpectralState(*(field[1] for field in fields))
+                candidates = tuple(ti._tree_add(v0, ti._tree_scale(ti._tree_add(
+                    ti._tree_scale(f1, row[0]), ti._tree_scale(f2, row[1])), dt)) for row in weights)
+                return (candidates[0], candidates[1]), f1, f2
+
+            stages = jax.lax.fori_loop(0, 4, lambda _, pair: stage_map(pair)[0], (v0, v0))
+            _, f1, f2 = stage_map(stages)
+            v1 = ti._tree_add(v0, ti._tree_scale(ti._tree_add(f1, f2), 0.5 * dt))
+            next_hat = (rotate_spectrum(v1, cosine[2], sine[2], params) if local_if
+                        else ti.apply_linear_flow_hat(v1, time_value + dt, params))
+            if params.filter_fraction < 1.0:
+                next_hat = ti._lowpass_hat(next_hat, params)
+            if carry_spectral:
+                fields = jnp.stack(next_hat)
+                reflected = jnp.concatenate((fields[..., :1], fields[..., :0:-1]), axis=-1)
+                fields = 0.5 * (fields + jnp.conj(reflected))
+                return ti.SpectralState(*fields.at[..., params.nx // 2].set(0).at[1, ..., 0].set(0))
+            return ti.project_zero_mean_xi(ti._hat_to_state(next_hat))
+
+        next_state = jax.lax.fori_loop(0, substeps, step, carry)
+        physical = (ti.project_zero_mean_xi(ti._hat_to_state(next_state)) if carry_spectral
+                    else cast(ti.State, next_state))
+        gxi = predict_gxi(*physical) if predict_gxi is not None else None
+        return next_state, (physical.eta, physical.xi, gxi)
+
+    carry = ti._state_to_hat(initial, params.nx) if carry_spectral else initial
+    _, (eta, xi, saved_gxi) = jax.lax.scan(interval_step, carry, (times[:-1], times[1:] - times[:-1]))
+    eta = jnp.concatenate((initial.eta[None], eta))
+    xi = jnp.concatenate((initial.xi[None], xi))
+    if predict_gxi is None:
+        gxi = jax.vmap(lambda e, x: ti.dno_series_eval(
+            e, x, params.k, params.depth, params.dno_order, pad_factor=params.pad_factor,
+        ))(eta, xi)
+        if params.filter_fraction < 1.0:
+            gxi = ti.apply_lowpass(gxi, params.k, params.filter_fraction)
+    else:
+        gxi = jnp.concatenate((predict_gxi(*initial)[None], cast(jax.Array, saved_gxi)))
+    return {"times": times, "eta": eta, "xi": xi, "gxi": gxi}
