@@ -1,4 +1,4 @@
-"""Evaluate the spectral DNO checkpoint on the existing test cases, one Modal GPU at a time."""
+"""Evaluate the spectral DNO checkpoint on the existing test cases, locally or on Modal."""
 
 from __future__ import annotations
 

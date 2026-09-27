@@ -189,6 +189,13 @@ candidate line and its slowdown annotations have been removed; its measured
 results remain in the experiment records below. No candidate accuracy
 coordinate is assigned.
 
+Purple lines show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
+Cloud diamonds give that single case's final surface error; Ada shows runtime only
+because its error panel uses 32-case medians. The separate full current-test suite
+is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
+These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
+CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
+
 All three candidate lines use the Fourier-output candidate `fourier_round_spectral_all`
 from `outputs/fourier_io_20260926/{ada,blackwell,a100}_full/rollouts.json`. Their annotations compare
 three-repeat full-rollout medians against `fused_cufftdx_spectral_all` in the same
@@ -242,7 +249,18 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/fourier_io_20260926/ada_full/rollouts.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
-    outputs/torch_ema_20260926/a100_80gb_timing/timings.json
+    outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
+    outputs/torch_ema_20260926/ada_timing/timings.json
+```
+
+To time the spectral transformer locally, point `DNO_TORCH_WORKTREE` at its
+worktree and select an idle GPU. Use an isolated environment: otherwise the
+repository's installed PyTorch can override the requested version.
+
+```sh
+CUDA_VISIBLE_DEVICES=0 NCCL_P2P_LEVEL=PHB uv run --isolated --no-project --python 3.11 \
+  --with modal --with torch==2.14.0 --with numpy==2.4.2 python -c \
+  'from scripts.benchmark_torch_rollouts import main; main(output="outputs/torch_ema_ada", batch_size=1, repeats=3, local=True)'
 ```
 
 Reproduce the local full-rollout measurements on a free GPU with:
