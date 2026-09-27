@@ -53,13 +53,15 @@ def fft(
 
 
 def sandwich(
-    eta: jax.Array, xi: jax.Array, symbols: jax.Array, *, joint: bool = False, ept: int = 8,
+    eta: jax.Array, xi: jax.Array, symbols: jax.Array, *, joint: bool = False,
+    spectral: bool = False, ept: int = 8,
 ) -> jax.Array:
-    """Evaluate L[eta L xi] on the fixed 1024-point model grid."""
+    """Evaluate L[eta L xi]; spectral=True takes and returns unnormalized spectra."""
     register()
-    result = jax.ShapeDtypeStruct(xi.shape if joint else (*symbols.shape[:-1], xi.shape[-1]), xi.dtype)
+    shape = symbols.shape if spectral else xi.shape if joint else (*symbols.shape[:-1], xi.shape[-1])
+    result = jax.ShapeDtypeStruct(shape, xi.dtype)
     return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
-        eta, xi, symbols, size=np.int64(xi.shape[-1]), operation=np.int64(3 if joint else 2),
+        eta, xi, symbols, size=np.int64(eta.shape[-1]), operation=np.int64(6 if spectral else 3 if joint else 2),
         multiply=False, ept=np.int64(ept),
     )
 
@@ -185,9 +187,12 @@ if __name__ == "__main__":
                     lambda x, y: outer * jnp.fft.rfft(x * y, norm="forward"),
                     lambda x, y, ept=ept: fft(x, n, b=y, outer=outer, ept=ept), a, b,
                 )
-        if n == 1024 and batch == 1:
+        if n == 1024 and batch in (1, 2):
             k = jnp.arange(n // 2 + 1, dtype=dtype)
-            symbols = jnp.stack((k * jnp.tanh(0.1 * k), 1j * k))[None]
+            symbols = jnp.broadcast_to(jnp.stack((k * jnp.tanh(0.1 * k), 1j * k)), (batch, 2, n // 2 + 1))
+            outer_symbols = symbols.at[..., [0, -1]].set(symbols[..., [0, -1]].real)
+            nyquist = (-1.0) ** jnp.arange(n)
+            spectral_eta, spectral_xi = a + 0.125 * nyquist, jnp.fft.rfft(b + 0.25 * nyquist)
             cases["g1"] = (
                 lambda x, y: jnp.fft.irfft((symbols * jnp.fft.rfft(
                     x[:, None, :] * jnp.fft.irfft(symbols * jnp.fft.rfft(y)[:, None, :], n=n)
@@ -200,6 +205,15 @@ if __name__ == "__main__":
                 )
                 cases[f"g1_parallel_e{ept}"] = (
                     cases["g1"][0], lambda x, y, ept=ept: sandwich(x, y, symbols, ept=ept).sum(axis=1), a, b,
+                )
+                cases[f"g1_spectral_e{ept}"] = (
+                    lambda x, y: outer_symbols * jnp.fft.rfft(
+                        x[:, None, :] * jnp.fft.irfft(symbols * y[:, None, :], n=n)),
+                    lambda x, y, ept=ept: sandwich(x, y, symbols, spectral=True, ept=ept), spectral_eta, spectral_xi,
+                )
+                cases[f"g1_spectral_roundtrip_e{ept}"] = (
+                    lambda x, y, ept=ept: jnp.fft.rfft(sandwich(x, jnp.fft.irfft(y, n=n), symbols, ept=ept)),
+                    lambda x, y, ept=ept: sandwich(x, y, symbols, spectral=True, ept=ept), spectral_eta, spectral_xi,
                 )
         for operation, (reference, candidate, x, y) in cases.items():
             functions = [jax.jit(f).lower(x, y).compile() for f in (reference, candidate)]

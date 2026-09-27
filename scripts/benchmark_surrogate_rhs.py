@@ -36,6 +36,7 @@ def rhs_nonlinear_if_spectral(
     *,
     pack_ffts: Literal["none", "inputs", "all"] = "none",
     predict_correction: Predictor | None = None,
+    predict_hat: Predictor | None = None,
 ) -> ti.SpectralState:
     physical_hat = ti.apply_linear_flow_hat(state_hat, time_value, params)
     nx = params.nx
@@ -43,7 +44,9 @@ def rhs_nonlinear_if_spectral(
     eta_hat = physical_hat.eta_hat[..., positive_modes]
     xi_hat = physical_hat.xi_hat[..., positive_modes]
     k = params.k[positive_modes]
-    if predict_correction is not None:
+    if predict_hat is not None:
+        gxi_hat = predict_hat(eta_hat, xi_hat).at[..., nx // 2].set(0)
+    elif predict_correction is not None:
         gxi_hat = shared_m1_hat(eta_hat, xi_hat, params, predict_correction)
     elif predict_gxi is None:
         gxi_hat = _dno_series_hat(

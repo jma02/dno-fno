@@ -30,7 +30,7 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
-TRIALS = ("cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
+TRIALS = ("fourier", "fourier_round", "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16")
 
@@ -44,8 +44,9 @@ def build_variant(
         variant, _, suffix = variant.rpartition("_e")
         fft_ept = int(suffix)
     trial = variant
+    spectral_io = variant in ("fourier", "fourier_round")
     cufftdx_g1 = variant.startswith("cufftdx")
-    if cufftdx_g1:
+    if cufftdx_g1 or spectral_io:
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
@@ -73,6 +74,53 @@ def build_variant(
             jnp.minimum(depth.astype(jnp.float32).reshape(-1, 1), jnp.log(model.h_clip_max))
         )
         jax.block_until_ready(cached)
+
+    if spectral_io:
+        filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
+        scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
+        output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
+        h = jnp.exp(jnp.minimum(depth.astype(jnp.float32).reshape(-1, 1), jnp.log(model.h_clip_max)))
+        g0 = k[None, :] * jnp.tanh(h * k[None, :])
+        k64 = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
+        g0_64 = k64[None, :] * jnp.tanh(h.astype(jnp.float64) * k64[None, :])
+        operators = jnp.stack((g0_64, jnp.broadcast_to(1j * k64, g0_64.shape)), axis=1)
+
+        @jax.jit
+        def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
+            # Preserve the trained surface features' physical-space FP32 rounding.
+            eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / scales[0]
+            eta_norm_hat = jnp.fft.rfft(eta_norm)
+            xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
+            g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
+            if trial == "fourier_round":
+                physical = jnp.fft.irfft(jnp.stack((eta_hat, xi_hat), axis=1), n=nx).astype(jnp.float32)
+                normalized = physical / scales[None, :, None]
+                eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
+                eta_norm_hat, xi_phys_hat = jnp.moveaxis(jnp.fft.rfft(jnp.stack((eta_norm, xi_phys), axis=1)), 1, 0)
+                g1_xi_hat = jnp.fft.rfft(xi_phys.astype(jnp.float64))
+            fields = jnp.fft.irfft(jnp.concatenate((
+                surface_ops[None, :, :] * eta_norm_hat[:, None, :],
+                filters * xi_phys_hat[:, None, :],
+            ), axis=1), n=nx)
+            features = jnp.concatenate((
+                jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
+                jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
+            ), axis=-1)
+            for name in ("eta_feat_proj", "eta_feat_mix"):
+                features = nn.gelu(features @ loaded.params[name]["kernel"])
+            features = features * jnp.tanh(features)
+            weights = jnp.moveaxis(features @ head_kernel, -1, 1)
+            weighted_hat = jnp.fft.rfft(weights * fields[:, surface_ops.shape[0]:, :])
+            correction_hat = jnp.sum(filters * weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
+            g1_hat = -sandwich(
+                (eta_norm * model.eta_scale).astype(jnp.float64),
+                g1_xi_hat, operators,
+                spectral=True, ept=fft_ept,
+            ).sum(axis=1)
+            result = output_scale * (g0 * xi_phys_hat + g1_hat + correction_hat)
+            return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
+
+        return forward_hat
 
     @jax.jit
     def forward(eta: jax.Array, xi: jax.Array) -> jax.Array:
@@ -220,6 +268,8 @@ if __name__ == "__main__":
     for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
         forward = build_variant(loaded, depth, eta.shape[-1], variant, fft_ept=args.ept)
+        if variant in ("fourier", "fourier_round"):
+            forward = jax.jit(lambda e, x, fn=forward: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         executable = forward.lower(eta, xi).compile()
         records[variant] = {"setup_compile_s": time.perf_counter() - started, "seconds": [],
                             "xla_cost_estimate": executable.cost_analysis()}
@@ -269,6 +319,8 @@ if __name__ == "__main__":
     expected = np.asarray(original(check_eta, check_xi, check_depth))
     for variant in (name for name in variants if name != "original"):
         candidate = build_variant(loaded, check_depth, eta.shape[-1], variant, fft_ept=args.ept)
+        if variant in ("fourier", "fourier_round"):
+            candidate = jax.jit(lambda e, x, fn=candidate: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         actual = np.asarray(candidate(check_eta, check_xi))
         relative = np.linalg.norm(actual - expected, axis=-1) / np.linalg.norm(expected, axis=-1)
         records[variant]["validation"] = {
@@ -278,6 +330,18 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
+        if variant in ("fourier", "fourier_round"):
+            other_xi = jnp.roll(check_xi, 1, axis=0)
+            other = np.asarray(candidate(check_eta, other_xi))
+            mixed = np.asarray(candidate(check_eta, 0.3 * check_xi - 0.7 * other_xi))
+            linear_error = float(np.linalg.norm(mixed - (0.3 * actual - 0.7 * other)) / np.linalg.norm(mixed))
+            flat = np.asarray(candidate(jnp.zeros_like(check_eta), check_xi))
+            flat_reference = np.asarray(original(jnp.zeros_like(check_eta), check_xi, check_depth))
+            flat_error = float(np.linalg.norm(flat - flat_reference) / np.linalg.norm(flat_reference))
+            zero_error = float(np.abs(np.asarray(candidate(check_eta, jnp.zeros_like(check_xi)))).max())
+            records[variant]["validation"].update(linearity_relative_l2=linear_error,
+                                                  flat_relative_l2=flat_error, zero_xi_max_absolute=zero_error)
+            records[variant]["validation"]["passed"] &= linear_error <= 1e-5 and flat_error <= 1e-5 and zero_error == 0
         print(f"{variant}: 48-state max relative difference {relative.max():.3g}; "
               f"passed={records[variant]['validation']['passed']}", flush=True)
     report = {"run": str(args.run), "batch_size_timing": 1, "nx": eta.shape[-1],
@@ -294,7 +358,8 @@ if __name__ == "__main__":
         "Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
         "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs", "cuFFTDx G₁",
     )))
-    labels.update(cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
+    labels.update(fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
+                  cufftdx_joint="Joint G₁", cufftdx_product="Fused learned products",
                   cufftdx_both="Joint G₁ + learned products", cufftdx_dense="Fused dense activations",
                   cufftdx_head="Non-split projection", cufftdx_lowrank16="Rank-16 surface mixing",
                   cufftdx_lowrank32="Rank-32 surface mixing")

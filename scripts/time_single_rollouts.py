@@ -49,6 +49,8 @@ FUSION_VARIANTS = {
 FUSION_VARIANTS.update({f"{name}_spectral": variant for name, variant in tuple(FUSION_VARIANTS.items())})
 FUSION_VARIANTS.update({f"fused_cufftdx_spectral_{packing}": "cufftdx" for packing in ("inputs", "all")})
 FUSION_VARIANTS["fused_front_spectral_all"] = "front"
+FUSION_VARIANTS["fourier_spectral_all"] = "fourier"
+FUSION_VARIANTS["fourier_round_spectral_all"] = "fourier_round"
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 
@@ -76,8 +78,8 @@ if __name__ == "__main__":
         parser.error("methods must include the reference; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
-    if args.without_baselines and set(methods) & {"baseline-only", "shared_m1_spectral_all"}:
-        parser.error("baseline-only and shared_m1_spectral_all require analytic baselines")
+    if args.without_baselines and set(methods) & {"baseline-only", "shared_m1_spectral_all", "fourier_spectral_all", "fourier_round_spectral_all"}:
+        parser.error("baseline-only, shared_m1_spectral_all and Fourier-I/O methods require analytic baselines")
     loaded = {name: load_run(run) for name, run in RUNS.items()
               if name in methods or (name == "compact" and set(methods) & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
@@ -117,6 +119,7 @@ if __name__ == "__main__":
             started = time.perf_counter()
             shared_baseline = method == "shared_m1_spectral_all"
             correction = None
+            spectral_predict = None
             params = ti.make_solver_params(
                 initial.eta.shape[-1], 2 * np.pi, depth[:, None],
                 dno_order=int(method[1:]) if method.startswith("M") else 1 if shared_baseline else 6,
@@ -141,6 +144,10 @@ if __name__ == "__main__":
                             jnp.fft.rfft(xi).at[..., p.nx // 2].set(0), p, r,
                         ), n=p.nx), p=params, r=correction,
                     )
+                if method.startswith("fourier_"):
+                    spectral_predict = predict
+                    predict = partial(lambda eta, xi, fn: jnp.fft.irfft(
+                        fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)
                 function = partial(rollout_surrogate, params=params, substeps=cfg.substeps,
                                    predict_gxi=predict)
             runner = jax.jit(function)
@@ -156,7 +163,7 @@ if __name__ == "__main__":
                 packing = "all" if method == "baseline-only" else method.rsplit("_", 1)[-1]
                 rhs_patch = patch("solver.evals.model_rollout._rhs_nonlinear_if_surrogate", partial(
                     rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none",
-                    predict_correction=correction if shared_baseline else None))
+                    predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
             with rhs_patch:
                 compiled[method] = runner.lower(initial, times).compile()
                 compile_seconds = time.perf_counter() - started
