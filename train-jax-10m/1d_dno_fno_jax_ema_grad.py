@@ -145,6 +145,10 @@ def main() -> None:
         help="Wave families contributing to the translation-tangent loss.",
     )
     parser.add_argument(
+        "--stokes_relative_tangent", action="store_true",
+        help="Replace Stokes local tangent loss with target-normalized global translation error.",
+    )
+    parser.add_argument(
         "--translation_tangent_smoothing_scale",
         type=float,
         default=1.0,
@@ -262,6 +266,8 @@ def main() -> None:
         parser.error("--metric_interval must be positive")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
+    if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
+        parser.error("--stokes_relative_tangent requires --translation_tangent_scope all")
     if not np.isfinite(args.nonlinear_reference) or args.nonlinear_reference <= 0.0:
         parser.error("--nonlinear_reference must be finite and positive")
     if not 1.0 <= args.nonlinear_weight_mean <= 2.0:
@@ -455,7 +461,7 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-        tanaka: jax.Array,
+        family: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
@@ -507,7 +513,8 @@ def main() -> None:
                 gxi_target=gxi,
                 depth=h_phys,
                 k=k_grid_jax,
-                sample_mask=tanaka if args.translation_tangent_scope == "tanaka" else None,
+                sample_mask=(family == PhysicalFamilyId.TANAKA) if args.translation_tangent_scope == "tanaka" else None,
+                global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
                 smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
             )
@@ -566,13 +573,13 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-        tanaka: jax.Array,
+        family: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
         def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
             data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss = compute_loss_components(
-                current_params, eta, xi, gxi, batch_depth, tanaka
+                current_params, eta, xi, gxi, batch_depth, family
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {
@@ -653,7 +660,7 @@ def main() -> None:
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
-        tanaka: jax.Array,
+        family: jax.Array,
         *,
         run_hadamard: bool,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -664,7 +671,7 @@ def main() -> None:
                 current_params, eta, xi, batch_depth,
             ))
         data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss = compute_loss_components(
-            current_params, eta, xi, gxi, batch_depth, tanaka
+            current_params, eta, xi, gxi, batch_depth, family
         )
         return jax.lax.pmean(
             (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss),
@@ -763,7 +770,7 @@ def main() -> None:
             device_count=n_devices,
         )
         return device_prefetch(
-            ((*batch[:4], family_ids[batch[4]] == PhysicalFamilyId.TANAKA) for batch in batches),
+            ((*batch[:4], family_ids[batch[4]]) for batch in batches),
             sharding=data_sharding,
         )
 
@@ -798,12 +805,12 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(train_bar, 1):
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(train_bar, 1):
             batch_size = int(eta_b.shape[0])
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
-                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, tanaka_b
+                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, family_b
             )
             pending_train_metrics.append((batch_loss, batch_metrics, batch_size))
             if len(pending_train_metrics) < args.metric_interval and batch_index < train_steps_per_epoch:
@@ -846,7 +853,7 @@ def main() -> None:
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
         pending_val_losses: list[tuple[jax.Array, ...]] = []
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(
             prefetch_batches(val_indices, None)
         ):
             val_batch_sizes.append(int(eta_b.shape[0]))
@@ -856,7 +863,7 @@ def main() -> None:
             ]
             batch_val_losses = compiled_eval_step(
                 training_state.params, validation_rng, batch_index,
-                eta_b, xi_b, gxi_b, depth_b, tanaka_b,
+                eta_b, xi_b, gxi_b, depth_b, family_b,
             )
             pending_val_losses.append(batch_val_losses)
             if len(pending_val_losses) == args.metric_interval:

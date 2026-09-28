@@ -3,7 +3,8 @@ set -euo pipefail
 cd /home/johnma/dno-fno
 
 source_run=outputs/c27_w320_b4_h80_ema_grad09_20260927
-trial_dir=outputs/c27_ema_grad_tangent_all_20260928
+run_name=$1
+trial_dir=outputs/$run_name
 export UV_CACHE_DIR=/tmp/dno-uv-cache JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 
 printf '%s waiting for both Adas\n' "$(date +%H:%M)"
@@ -31,7 +32,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --no-sync python train-jax-10m/1d_dno_fno_jax_em
   --hadamard_interval 16 --val_hadamard_interval 16 --hadamard_microbatch 8 \
   --metric_interval 16 --nonlinear_reference 0.002 --nonlinear_weight_mean 1.463313 \
   --init_checkpoint "$source_run/best_val_ckpt/ckpt_120" \
-  --run_name c27_ema_grad_tangent_all_20260928 > "$trial_dir/console.log" 2>&1
+  --run_name "$run_name" "${@:2}" > "$trial_dir/console.log" 2>&1
 
 printf '%s rollouts\n' "$(date +%H:%M)"
 eval_pids=()

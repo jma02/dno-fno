@@ -274,6 +274,95 @@ def test_all_selected_mask_matches_default_exactly() -> None:
         np.testing.assert_array_equal(masked_gradient, gradient)
 
 
+def test_global_relative_loss_matches_traveling_gain() -> None:
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(256, dtype=dtype) * (2.0 * jnp.pi / 256)
+        k = jnp.fft.fftfreq(256, d=1.0 / 256).astype(dtype)
+        tolerance = 2e-5 if dtype == jnp.float32 else 1e-12
+        for mode, speed, amplitude, gain in (
+            (1, 0.4, 1.0, 0.03), (1, -0.4, 1.0, 0.03),
+            (4, 0.4, 1.0, 0.03), (1, 0.8, 1.0, 0.03),
+            (1, 0.4, 0.02, 0.03), (3, -0.15, 2.0, -0.03),
+        ):
+            eta = amplitude * jnp.sin(mode * x)[None, :]
+            target = -speed * amplitude * mode * jnp.cos(mode * x)[None, :]
+            (loss, count), gradient = loss_and_gradient(
+                eta, (1.0 + gain) * target, target, jnp.asarray([0.2], dtype=dtype), k,
+                global_relative_mask=jnp.ones(1, dtype=jnp.bool_),
+            )
+            np.testing.assert_allclose(loss, gain**2 / 1.001, rtol=tolerance)
+            np.testing.assert_array_equal(count, 1.0)
+            assert bool(jnp.all(jnp.isfinite(gradient)))
+            assert float(jnp.linalg.norm(gradient)) > 0.0
+
+
+def test_mixed_global_local_rows_match_individual_losses_and_gradients() -> None:
+    eta, prediction, target, depth, k = _batched_inputs()
+    prediction = prediction + 0.03 * target
+    global_mask = jnp.asarray([True, False, True])
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = tuple(value.astype(dtype) for value in (eta, prediction, target, depth))
+        (loss, count), gradient = loss_and_gradient(
+            *inputs, k.astype(dtype), global_relative_mask=global_mask
+        )
+        individual = [
+            loss_and_gradient(
+                *(value[index : index + 1] for value in inputs), k.astype(dtype),
+                global_relative_mask=global_mask[index : index + 1],
+            )
+            for index in range(3)
+        ]
+        tolerance = 2e-6 if dtype == jnp.float32 else 1e-12
+        np.testing.assert_array_equal(count, 3.0)
+        np.testing.assert_allclose(
+            loss, np.mean([result[0][0] for result in individual]), rtol=tolerance
+        )
+        np.testing.assert_allclose(
+            gradient, np.concatenate([result[1] for result in individual]) / 3.0,
+            rtol=tolerance, atol=1e-12,
+        )
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+        (exact_loss, _), exact_gradient = loss_and_gradient(
+            inputs[0], inputs[2], inputs[2], inputs[3], k.astype(dtype),
+            global_relative_mask=global_mask,
+        )
+        np.testing.assert_array_equal(exact_loss, 0.0)
+        np.testing.assert_array_equal(exact_gradient, 0.0)
+
+
+def test_degenerate_global_references_fall_back_to_finite_local_loss() -> None:
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(256, dtype=dtype) * (2.0 * jnp.pi / 256)
+        k = jnp.fft.fftfreq(256, d=1.0 / 256).astype(dtype)
+        eta = jnp.broadcast_to(jnp.sin(x), (4, 256)).at[2].set(0.0)
+        target = jnp.stack((
+            jnp.zeros_like(x), jnp.sin(2.0 * x), jnp.cos(x),
+            jnp.sin(2.0 * x) + 0.001 * jnp.cos(x),
+        ))
+        prediction = target + 0.02 * jnp.cos(x)[None, :]
+        inputs = (eta, prediction, target, jnp.full(4, 0.2, dtype=dtype), k)
+        local, local_gradient = loss_and_gradient(*inputs)
+        fallback, gradient = loss_and_gradient(
+            *inputs, global_relative_mask=jnp.ones(4, dtype=jnp.bool_)
+        )
+        tolerance = 2e-6 if dtype == jnp.float32 else 1e-12
+        np.testing.assert_allclose(fallback, local, rtol=tolerance)
+        np.testing.assert_allclose(gradient, local_gradient, rtol=tolerance, atol=1e-12)
+        np.testing.assert_array_equal(fallback[1], 3.0)
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+        assert np.isfinite(np.asarray(fallback)).all()
+        np.testing.assert_array_equal(gradient[2], 0.0)
+
+
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
@@ -289,6 +378,9 @@ if __name__ == "__main__":
         test_sample_mask_matches_selected_loss_and_gradient,
         test_mask_with_no_nonflat_samples_has_zero_loss_and_gradient,
         test_all_selected_mask_matches_default_exactly,
+        test_global_relative_loss_matches_traveling_gain,
+        test_mixed_global_local_rows_match_individual_losses_and_gradients,
+        test_degenerate_global_references_fall_back_to_finite_local_loss,
     )
     for test in tests:
         test()

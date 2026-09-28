@@ -14,11 +14,12 @@ def compute_translation_tangent_loss(
     k: jax.Array,
     *,
     sample_mask: jax.Array | None = None,
+    global_relative_mask: jax.Array | None = None,
     smoothing_scale: float = 1.0,
     denominator_eps: float = 1e-3,
     gravity: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Return the local translation loss and count of selected nonflat samples.
+    """Return the translation loss and count of selected nonflat samples.
 
     An optional boolean ``sample_mask`` selects which batch rows contribute.
 
@@ -28,6 +29,10 @@ def compute_translation_tangent_loss(
     Dividing that coefficient by ``sqrt(g h)`` gives a dimensionless error
     without the singular inverse fitted-speed weighting of a global
     traveling-wave fit.
+
+    Rows in ``global_relative_mask`` instead use the squared global error
+    projection divided by the squared target projection, with a scale-aware
+    floor. Near-zero/cancelling target projections retain the local loss.
     """
     dtype = eta.dtype
     eta_hat = jnp.fft.fft(eta, axis=-1)
@@ -64,6 +69,18 @@ def compute_translation_tangent_loss(
         local_weight * local_relative_error**2,
         axis=-1,
     )
+    if global_relative_mask is not None:
+        error_projection = jnp.mean(error * eta_x, axis=-1)
+        target_projection_squared = jnp.mean(centered_target * eta_x, axis=-1) ** 2
+        norm_product = jnp.mean(centered_target**2, axis=-1) * jnp.mean(eta_x**2, axis=-1)
+        projection_floor = jnp.asarray(denominator_eps, dtype=dtype) * norm_product
+        use_global = global_relative_mask & (target_projection_squared > projection_floor)
+        denominator = jnp.where(
+            use_global, target_projection_squared + projection_floor + 1e-30, 1.0
+        )
+        per_sample_loss = jnp.where(
+            use_global, error_projection**2 / denominator, per_sample_loss
+        )
     selected = peak_energy > jnp.asarray(1e-20, dtype=dtype)
     if sample_mask is not None:
         selected = selected & sample_mask
