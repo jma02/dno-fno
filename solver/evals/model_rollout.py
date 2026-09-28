@@ -47,7 +47,7 @@ class LoadedRun(NamedTuple):
 def load_run(
     run_dir: str | Path,
     *,
-    checkpoint: Literal["best", "final"] = "best",
+    checkpoint: Literal["best", "latest", "final"] = "best",
     domain_length_override: float | None = None,
 ) -> LoadedRun:
     """Restore a JAX FNO or fixed CS-DNO training checkpoint."""
@@ -59,6 +59,7 @@ def load_run(
         run_dir
         / {
             "best": "best_val_ckpt",
+            "latest": "latest_ckpt",
             "final": "final_ckpt",
         }[checkpoint]
     )

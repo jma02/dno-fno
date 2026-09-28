@@ -872,7 +872,7 @@ def main() -> None:
     )
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
-    parser.add_argument("--checkpoint", choices=("best", "final"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "latest", "final"), default="best")
     parser.add_argument(
         "--families",
         nargs="+",
@@ -902,9 +902,11 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint=args.checkpoint)
-    checkpoint_dir = run_dir / (
-        "best_val_ckpt" if args.checkpoint == "best" else "final_ckpt"
-    )
+    checkpoint_dir = run_dir / {
+        "best": "best_val_ckpt",
+        "latest": "latest_ckpt",
+        "final": "final_ckpt",
+    }[args.checkpoint]
     checkpoint_source: dict[str, object] = {
         "run_dir": str(run_dir),
         "selection": args.checkpoint,
