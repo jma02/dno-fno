@@ -168,7 +168,8 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, help="Default: 100 forward calls or 3 full rollouts.")
     parser.add_argument("--epts", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--rollouts", action="store_true", help="Full horizons with same-executable warm-up.")
-    parser.add_argument("--sweep", action="store_true", help="Time all six orders with cuFFT controls and optimized native FFTs.")
+    parser.add_argument("--sweep", action="store_true", help="Time selected orders against their previous implementations.")
+    parser.add_argument("--sweep-orders", nargs="+", type=int, choices=range(1, 7), default=list(range(1, 7)))
     parser.add_argument("--candidate-run", type=Path, help="Also time previous/current Fourier-input candidate kernels.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/classical_tuning_20260927/micro.json")
     args = parser.parse_args()
@@ -188,17 +189,18 @@ if __name__ == "__main__":
     if args.sweep:
         variants = {f"M{order}_{kind}": {
             "order": order, "precision": "fp64",
-            "backend": ("cufft" if kind == "cufft" else "specialized_cufftdx" if order == 2 else "cufftdx_all"),
+            "backend": (("cufft" if order <= 2 else "cufftdx_all") if kind == "control" else
+                        {1: "cufftdx_all", 2: "specialized_cufftdx"}.get(order, "interleaved_cufftdx")),
             "pad_factor": 1 if kind == "native" and order <= 2 else 2,
             "ept": 16 if kind == "native" and order == 2 else 8,
-        } for order in range(1, 7) for kind in ("cufft", "native")}
-    controls = {name: f"M{settings['order']}_cufft" if args.sweep else control for name, settings in variants.items()}
+        } for order in args.sweep_orders for kind in ("control", "native")}
+    controls = {name: f"M{settings['order']}_control" if args.sweep else control for name, settings in variants.items()}
     candidates = ({f"{variant}_spectral_all_boundaries_stages_carry_local": variant for variant in (
         "fourier_fused_features_overlap", "fourier_fused_features_product_overlap")}
         if args.candidate_run else {})
     loaded = load_run(args.candidate_run) if args.candidate_run else None
     controls.update({name: next(iter(candidates)) for name in candidates})
-    controls["M6"] = "M6_cufft" if args.sweep else control
+    controls["M6"] = "M6" if args.sweep else control
     rollout = rollout_if_trial
     if args.rollouts:
         from scripts.time_single_rollouts import packed_boundary
@@ -207,12 +209,11 @@ if __name__ == "__main__":
         namespace._state_to_hat = packed_boundary
         namespace._hat_to_state = partial(packed_boundary, inverse=True)
         rollout = FunctionType(rollout_if_trial.__code__, {**rollout_if_trial.__globals__, "ti": namespace})
-    report: dict[str, Any] = {"device": jax.devices()[0].device_kind, "order": list(range(1, 7)) if args.sweep else args.order,
+    report: dict[str, Any] = {"device": jax.devices()[0].device_kind, "order": args.sweep_orders if args.sweep else args.order,
         "reference": "M6 cufft FP64 pad2", "control": controls if args.sweep or candidates else control,
         "variants": variants, "candidates": candidates, "candidate_run": str(args.candidate_run) if candidates else None,
         "fft_epts": sorted({settings["ept"] for settings in variants.values()}),
-        "timing_repeats": {name: 1 if args.sweep and name.endswith("_cufft") else args.repeats
-                           for name in (*variants, *candidates)},
+        "timing_repeats": {name: args.repeats for name in (*variants, *candidates)},
         "mode": "full_single_rollouts" if args.rollouts else "spectral_forward",
         "precision": "FP64 integrator; mixed means FP32 FFT/physical products, FP64 spectral arithmetic",
         "families": {}}
@@ -266,8 +267,6 @@ if __name__ == "__main__":
                 print(f"{family} B{batch} {name}: compiled and warmed", flush=True)
             for repeat in range(args.repeats):
                 for name in [*variants, *candidates][::1 if repeat % 2 == 0 else -1]:
-                    if args.sweep and name.endswith("_cufft") and repeat > 0:
-                        continue
                     started = time.perf_counter()
                     outputs[name] = jax.block_until_ready(compiled[name](*inputs))
                     records[name]["seconds"].append(time.perf_counter() - started)
