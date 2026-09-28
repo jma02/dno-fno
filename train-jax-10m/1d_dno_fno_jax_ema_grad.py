@@ -125,10 +125,10 @@ def main() -> None:
     parser.add_argument("--run_name", default=None)
     parser.add_argument("--init_checkpoint", default=None,
                         help="Initialize weights from this checkpoint, with fresh optimizer state.")
-    parser.add_argument("--residual_floor", type=float, default=0.001,
-                        help="Floor the residual loss denominator at this fraction of the full target norm.")
-    parser.add_argument("--residual_scale", type=float, default=1.0,
-                        help="Fixed denominator multiplier calibrated on training rows to preserve the mean sample weight.")
+    parser.add_argument("--nonlinear_reference", type=float, default=0.002,
+                        help="Relative correction beyond G0+G1 at which the nonlinear weight is 1.5.")
+    parser.add_argument("--nonlinear_weight_mean", type=float, default=1.463313,
+                        help="Fixed training mean of the nonlinear weight; default calibrated on hard128 training rows.")
     parser.add_argument("--metric_interval", type=int, default=16,
                         help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
@@ -258,10 +258,10 @@ def main() -> None:
         parser.error("--metric_interval must be positive")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
-    if not 0.0 < args.residual_floor <= 1.0:
-        parser.error("--residual_floor must be in (0, 1]")
-    if not np.isfinite(args.residual_scale) or args.residual_scale <= 0.0:
-        parser.error("--residual_scale must be finite and positive")
+    if not np.isfinite(args.nonlinear_reference) or args.nonlinear_reference <= 0.0:
+        parser.error("--nonlinear_reference must be finite and positive")
+    if not 1.0 <= args.nonlinear_weight_mean <= 2.0:
+        parser.error("--nonlinear_weight_mean must be in [1, 2]")
     if args.model == "cs_dno" and args.norm != "scale":
         parser.error("CS residual normalization requires --norm scale")
     start_time = perf_counter()
@@ -472,10 +472,13 @@ def main() -> None:
         residual_squared = jnp.sum(
             jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
         )
-        denominator = jax.lax.stop_gradient(jnp.sqrt(jnp.maximum(
-            residual_squared, jnp.maximum((args.residual_floor * target_norm) ** 2, 1e-12),
-        )))
-        data_loss = jnp.mean(error_norm / (args.residual_scale * denominator))
+        # Larger missing nonlinear corrections receive larger (bounded) weights.
+        residual_ratio = jnp.sqrt(residual_squared) / target_norm
+        nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
+        denominator = jax.lax.stop_gradient(
+            target_norm * args.nonlinear_weight_mean / nonlinear_weight
+        ) if args.model == "cs_dno" else target_norm
+        data_loss = jnp.mean(error_norm / denominator)
         full_l2_loss = jnp.mean(error_norm / target_norm)
         # Data fit uses normalized Gxi; the physics losses below use physical fields.
         h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
@@ -570,7 +573,7 @@ def main() -> None:
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {
-                "train_l2_loss": full_l2_loss, "train_residual_l2_loss": data_loss,
+                "train_l2_loss": full_l2_loss, "train_nonlinear_l2_loss": data_loss,
             }
             if args.mode_balanced_weight > 0.0:
                 mode_weight = args.mode_balanced_weight * jnp.minimum(
@@ -882,7 +885,7 @@ def main() -> None:
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_l2_loss": val_full_l2_loss,
-            "val_residual_l2_loss": val_data_loss,
+            "val_nonlinear_l2_loss": val_data_loss,
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
             "val_hadamard_loss": val_hadamard_loss,
