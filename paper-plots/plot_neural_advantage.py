@@ -20,11 +20,6 @@ import numpy as np  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper-plots/figures"
-RUNS = (
-    ("c27_tanaka_hard128_full_equal_local_20260918", "full", "larger", "#8b5ea8", "s"),
-    ("c27_branches16_tanaka_hard128_20260923", "small", "small", "#087eaa", "o"),
-    ("c27_w320_b4_h80_ema_grad09_20260927", "gradient EMA", "candidate", "#c45b22", None),
-)
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
 
@@ -69,7 +64,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     })
     axes = fig.subplots(2, 2)
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
-                        top=0.74 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
+                        top=0.78 if baseline_free or args.candidate_accuracy else 0.80, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
             timing = warm["families"][family]
@@ -114,38 +109,25 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                     transform=ax.transAxes, color="#606970", fontsize=9,
                     bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         right = float(seconds.max())
-        for run, name, _label, color, marker in RUNS:
-            source = next((ROOT / "outputs" / run).glob(
-                f"eval_best_current_test_stratified_n32*/{family}_summary.json"))
-            if args.single_case:
-                with np.load(source.with_name(f"{family}_trajs.npz")) as saved:
-                    selected = np.flatnonzero(saved["simulation_ids"] == warm["families"][family]["simulation_id"])
-                    if len(selected) != 1 or saved["times"][-1] != horizon:
-                        parser.error(f"{source}: saved accuracy case or horizon does not match")
-                    neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
-                ax.axhline(neural_error, color=color, ls="-" if marker is None else "--", lw=1.0, zorder=1)
-                print(f"{title}, {name}: saved final surface error={neural_error:.6g}%")
-                continue
-            result = json.loads(source.read_text())
-            neural_error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
-            if marker is None:
-                ax.axhline(neural_error, color=color, ls="-", lw=1.0, zorder=1)
-                print(f"{title}, {name}: saved median final surface error={neural_error:.6g}%")
-                continue
-            neural_seconds = result["surrogate_wall_s"]
-            if warm:
-                neural_seconds = scale * np.median(warm["families"][family]["methods"][name]["seconds"])
-            ax.scatter(neural_seconds, neural_error, color=color, marker=marker,
-                       s=65, edgecolors="white", linewidths=0.8, zorder=3)
-            right = max(right, neural_seconds)
-            print(f"{title}, {name}: runtime axis={neural_seconds:.3f}, error={neural_error:.6g}%")
         for comparison, color, label, method, style, width in overlays:
             if not comparison or family not in comparison["families"]:
                 continue
             methods = comparison["families"][family]["methods"]
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
-            ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
+            if comparison is candidate and not args.candidate_accuracy:
+                ax.scatter(new_seconds, 100 * record["cached_reference_terminal_eta_error"],
+                           color=color, marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
+            else:
+                ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
+            if comparison is candidate and args.candidate_accuracy:
+                source = next(args.candidate_accuracy.glob(f"eval_best_current_test_stratified_n32*/{family}_trajs.npz"))
+                with np.load(source) as saved:
+                    selected = np.flatnonzero(saved["simulation_ids"] == warm["families"][family]["simulation_id"])
+                    if len(selected) != 1 or saved["times"][-1] != horizon:
+                        parser.error(f"{source}: saved accuracy case or horizon does not match")
+                    neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
+                ax.axhline(neural_error, color=color, ls="-", lw=1.0, zorder=1)
             if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
@@ -184,14 +166,12 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         fig.text(0.10, 0.921, warm["device"], color="#59616a", fontsize=10)
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
-        *[Line2D([], [], color=color, marker=None if args.single_case else marker,
-                  ls="-" if marker is None else "--" if args.single_case else "none", lw=1.0, ms=7,
-                  label="Gradient EMA — saved accuracy" if marker is None else
-                  f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
-          for _, name, _, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, ls=style, lw=width, label=label)
+        *[Line2D([], [], color=color, marker="o" if comparison is candidate and not args.candidate_accuracy else None,
+                  ls="none" if comparison is candidate and not args.candidate_accuracy else style, ms=7, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
+        *([Line2D([], [], color="#c45b22", ls="-", lw=1.0, label="Gradient EMA — saved accuracy")]
+          if args.candidate_accuracy else []),
         *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="-.", ms=6, lw=1.3,
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
@@ -204,6 +184,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.set_defaults(candidate_accuracy=None)
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
@@ -212,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
     parser.add_argument("--spectral-timings", type=Path, nargs="+", help="Overlay spectral weight-EMA timings on matching Figure 12 hardware; show errors only on single-case panels.")
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
-    parser.add_argument("--single-case", action="store_true", help="Plot single-case errors, saved trained-model accuracy references, and candidate timing lines.")
+    parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
     if (args.classical_timings or args.candidate_timings or args.no_baseline_timings) and not args.timings:
@@ -226,29 +207,31 @@ if __name__ == "__main__":
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
+        ada_config = argparse.Namespace(**vars(modal))
         a100 = argparse.Namespace(**vars(modal))
-        for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
+        for config, hardware in ((modal, "blackwell"), (ada_config, "ada"), (a100, "a100")):
             classical = ROOT / "outputs" / {
                 "ada": "classical_all_orders_20260928/ada/classical.json",
                 "blackwell": "classical_all_orders_20260928/blackwell/classical.json",
                 "a100": "classical_all_orders_20260928/a100_sxm/classical.json",
             }[hardware]
-            if config.single_case:
-                config.timings = classical
+            config.timings = classical
             config.classical_timings = [classical]
             config.candidate_timings = [ROOT / "outputs" / {
-                "ada": "half_spectrum_20260927/ada_full.json",
+                "ada": "ema_grad_timing_20260928/ada/timings.json",
                 "blackwell": "classical_figure12_20260927/blackwell/neural.json",
                 "a100": "classical_figure12_20260927/a100_sxm/neural.json",
             }[hardware]]
+            config.candidate_accuracy = (ROOT / "outputs/c27_w320_b4_h80_ema_grad09_20260927"
+                                         if hardware != "ada" else None)
             config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
-            config.candidate_previous_method = "fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local"
+            config.candidate_previous_method = None
             config.no_baseline_timings = None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)
         draw_comparison(modal, blackwell, "Blackwell · Modal — RTX PRO 6000")
-        draw_comparison(args, ada, "Ada · Local — RTX 6000")
+        draw_comparison(ada_config, ada, "Ada · Local — RTX 6000")
         draw_comparison(a100, ampere, "A100 · Modal — A100-SXM4-80GB")
     else:
         fig = plt.figure(figsize=(10.5, 8))

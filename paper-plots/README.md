@@ -171,9 +171,10 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
-All three hardware sections show the candidate's measured runtimes as orange
-vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
-The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 evaluation,
+Ada shows orange runtime/error points for the epoch-120 gradient-EMA checkpoint,
+measured with full single rollouts of the optimized network. Cloud panels retain
+their preceding candidate timing lines and saved epoch-120 accuracy references.
+The candidate retains G0+G1 baselines, cuFFTDx G1 evaluation,
 cached depth multipliers and packed network branches. Its spectral adapter
 removes repeated physical/Fourier round trips and batches independent inverse
 FFTs. Every classical order M1–M6 receives the shared nonlinear FFT packing.
@@ -190,20 +191,21 @@ relative difference 7.75e-12; see
 `outputs/fair_classical_20260925/padding_check.json`. This does not change the
 separate 2× padding in the nonlinear water-wave RHS.
 
-The orange vertical line shows the retained fused candidate. The rejected shared-M1
-candidate line and its slowdown annotations have been removed; its measured
-results remain in the experiment records below. Orange horizontal lines add
-the epoch-120 gradient-EMA checkpoint's saved rollout accuracy from
-`outputs/c27_w320_b4_h80_ema_grad09_20260927/`:
-Ada uses the 32-case family median; cloud panels use the corresponding
-single test case from that same local evaluation. These references use the
-ordinary FP32 model with FP64 integration. They are separate from the existing
-vertical runtime lines for the earlier checkpoint and optimized execution path;
-no new joint runtime/error point or cloud evaluation is implied.
+Ada's orange points are labeled `New candidate optimized network` and use the
+best epoch-120 checkpoint in `outputs/c27_w320_b4_h80_ema_grad09_20260927/`.
+Median rollout times are 1.285576, 12.621518, 12.331878, and 1.254769 seconds
+for Stokes, Tanaka, Benjamin–Feir, and JONSWAP/TMA, respectively. For the
+Benjamin–Feir case, product fusion saves 0.567% against the preceding fusion
+but increases final surface error from 1.448749% to 1.904739%; the plotted point
+uses the latter measured error.
+On cloud panels, the dashed orange lines retain the previous checkpoint's
+optimized timings; solid orange lines show the corresponding test case's
+epoch-120 accuracy from the saved local evaluation. No cloud checkpoint timing
+is newly measured or paired with those accuracy references. The old small/full
+neural references are removed. All panels use single-case errors, including Ada.
 
 Purple lines show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
-Cloud diamonds give that single case's final surface error; Ada shows runtime only
-because its error panel uses 32-case medians. The separate full current-test suite
+Diamonds give that single case's final surface error on each GPU. The separate full current-test suite
 is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
 CUDA graph of the unchanged GL2 step; capture and warm-up are excluded.
@@ -231,14 +233,13 @@ retains `outputs/classical_interleaved_20260927/` measurements. These cloud
 points therefore span multiple allocations. Each M3–M6 optimization comparison
 uses paired old/new implementations, with three alternating full-rollout repeats
 after full-executable warm-up. Gray annotations show the paired M6 savings,
-not differences between allocations. Ada keeps its original 32-case median
-errors; cloud errors remain referenced to the cached single-case M6 trajectory.
-Neural timings are unchanged: cloud candidates remain under
-`outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`, and Ada
-uses `outputs/half_spectrum_20260927/ada_full.json`. Classical and neural runs
-retain the same integration settings and packed boundaries; neural checkpoints,
-inference paths, existing trained-model accuracy references and spectral EMA
-overlays are unchanged. The gradient-EMA accuracy references are additional.
+not differences between allocations. All errors are referenced to the cached
+single-case M6 trajectory. Ada candidate measurements are under
+`outputs/ema_grad_timing_20260928/ada/timings.json`; cloud timings remain under
+`outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`.
+Classical and neural runs retain the same integration settings and packed
+boundaries. The fused inference path is unchanged; Ada now uses the trained
+gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
@@ -248,9 +249,9 @@ difference 2.01e-9, but long trajectories are not bitwise equivalent. For
 Benjamin–Feir in the earlier product-fusion runs, terminal surface error against M6 changes from 1.022% to 1.010%
 on Ada/A100 and from 0.888% to 0.976% on Blackwell. The largest relative saved
 surface difference against the preceding candidate is 0.001223 (Blackwell BF).
-These remain runtime-only candidate lines. Trained-model
-accuracy references and EMA overlays are retained; production/training code
-is untouched. Trial details, numerical comparisons and decisions are in
+Those preceding timing-only comparisons remain archived; Ada now shows a
+measured candidate point, while cloud timing lines are retained. Spectral EMA overlays are retained;
+production/training code is untouched. Trial details, numerical comparisons and decisions are in
 `experiments/experiments-2026-09-27.md`.
 
 The preceding FFT round used `fourier_transforms_e16_spectral_all` on Ada and
@@ -355,7 +356,7 @@ files are unchanged. Render the figure with:
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/half_spectrum_20260927/ada_full.json \
+  --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json
