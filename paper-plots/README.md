@@ -177,14 +177,13 @@ The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 evaluatio
 cached depth multipliers and packed network branches. Its spectral adapter
 removes repeated physical/Fourier round trips and batches independent inverse
 FFTs. Every classical order M1–M6 receives the shared nonlinear FFT packing.
-Blackwell and A100 now use the same FP64 cuFFTDx classical implementation:
+All three GPUs now use the same FP64 cuFFTDx classical implementation:
 M1 uses unpadded DNO products with EPT8, M2 uses the specialized recurrence
 with unpadded products and EPT16, and M3–M6 use 2× padding with EPT8.
-The latest cloud M6 measurements interleave surface-power construction with
-the recurrence, reducing FFT dispatches from 22 to 12. M1–M5 have not been
-retimed with that schedule; their points are unchanged.
+M3–M6 interleave surface-power construction with the recurrence, reducing
+M6 FFT dispatches from 22 to 12. Ada's M1–M6 and the missing cloud M3–M5
+timings have been refreshed; cloud M1/M2 and M6 retain their preceding measurements.
 The unpadded M1/M2 products exploit the existing 128-mode state filter.
-Ada retains its previous measurements and 2× DNO padding.
 Each binary product is projected back to the base modes before reuse;
 the earlier 2×/8× check on 48 states across all six orders had maximum
 relative difference 7.75e-12; see
@@ -218,27 +217,22 @@ Spectral carry and local propagators also apply to every classical order M1–M6
 alongside the previous stage pairing and boundary FFT packing. FP64 integration/G1,
 FP32 learned inference, weights and iteration count are unchanged.
 
-Cloud M6 timings come from
-`outputs/classical_interleaved_20260927/{blackwell,a100_sxm}/classical.json`.
-Gray annotations compare interleaved M6 against its paired preceding M6
-implementation using three alternating full-rollout repeats per family.
-Only M6 is replaced; the M1–M5 and neural measurements remain under
-`outputs/classical_figure12_20260927/{blackwell,a100_sxm}/`:
-`classical.json` contains the preceding M1–M6 sweep and `neural.json` contains
-the current and preceding candidates. That sweep used one `sciml-at-ud`
-allocation per hardware, with three alternating full-rollout repeats after full-executable
-warm-up. Classical and neural runs retain the same integration settings and
-packed boundaries; the neural checkpoint and inference path are unchanged.
-One warmed and timed cuFFT control per order checks the selected native
-implementation. Classical errors remain referenced to the cached M6 trajectory.
-Ada is unchanged: classical measurements come from
-`outputs/spectral_carry_20260927/ada_classical.json`, and the candidate and paired
-M2 timings come from `outputs/half_spectrum_20260927/ada_full.json` on GPU1.
-Ada's orange annotations compare the candidate against
-`fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local`
-using paired old/new neural timings. Product fusion saves 0.60–0.75% on the
-retained Ada run. Both annotation types use paired measurements, not differences
-between allocations.
+Classical timings come from
+`outputs/classical_all_orders_20260928/{ada,blackwell,a100_sxm}/classical.json`.
+Ada uses a fresh all-order sweep. Cloud M3–M5 use new `sciml-at-ud` runs;
+M1/M2 retain `outputs/classical_figure12_20260927/` measurements, and M6
+retains `outputs/classical_interleaved_20260927/` measurements. These cloud
+points therefore span multiple allocations. Each M3–M6 optimization comparison
+uses paired old/new implementations, with three alternating full-rollout repeats
+after full-executable warm-up. Gray annotations show the paired M6 savings,
+not differences between allocations. Ada keeps its original 32-case median
+errors; cloud errors remain referenced to the cached single-case M6 trajectory.
+Neural timings are unchanged: cloud candidates remain under
+`outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`, and Ada
+uses `outputs/half_spectrum_20260927/ada_full.json`. Classical and neural runs
+retain the same integration settings and packed boundaries; neural checkpoints,
+inference paths, trained-model accuracy references and spectral EMA overlays
+are unchanged.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
@@ -328,17 +322,17 @@ and selected by the rollout timer; production trainers and checkpoints are
 untouched. Search results, numerical checks and merge decisions are recorded
 in `notes/dno_profile_20260924.md` and the September 25–26 logs under `experiments/`.
 This update does not regenerate figure 11, the manuscript or the ZIP. After
-building cuFFTDx for the selected cloud GPU, reproduce the shared benchmark with:
+building cuFFTDx for the selected GPU, reproduce the classical sweep with:
 
 ```sh
 XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
   UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync scripts/benchmark_classical.py \
   --sweep --rollouts --repeats 3 \
-  --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
   --output outputs/classical_sweep/sweep.json
 ```
 
-Reproduce the M6 interleaving comparison with:
+Add `--sweep-orders 3 4 5` for the cloud refresh; Ada uses all six orders.
+Reproduce the retained cloud M6 interleaving comparison with:
 
 ```sh
 XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
@@ -348,8 +342,8 @@ XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
   --output outputs/classical_interleaved/rollouts.json
 ```
 
-The cloud runner extracts the selected records into `classical.json` and
-`neural.json` for each hardware section. Render the figure with:
+The selected records populate `classical.json`; the preceding `neural.json`
+files are unchanged. Render the figure with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \

@@ -41,12 +41,6 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     for path in args.candidate_timings or ():
         for family, result in json.loads(path.read_text())["families"].items():
             candidate["families"].setdefault(family, result)["methods"].update(result["methods"])
-    if args.stack_hardware and not args.single_case:
-        for family, result in candidate["families"].items():
-            for method, record in result["methods"].items():
-                classical = method.split("_", 1)[0]
-                if classical in ("M1", "M2"):
-                    warm["families"][family]["methods"][classical]["seconds"] = record["seconds"]
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     spectral = {}
     for path in args.spectral_timings or ():
@@ -105,7 +99,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         ax.plot(seconds[:-1], errors[:-1], "o-", color="#606970", ms=4,
                 markerfacecolor="white", lw=1.1, zorder=2)
         for order, x, y in zip(orders[:-1], seconds[:-1], errors[:-1], strict=True):
-            offset = ((6, -8) if args.single_case else (8, 9)) if family == "benjamin_feir" and order == 3 else (6, 3)
+            offset = (6, -8) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
                 offset = (0, 10)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
@@ -189,7 +183,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                   ls="--" if args.single_case else "none", lw=1.0, ms=7,
                   label=f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
           for _, name, _, color, marker in reversed(RUNS)],
-        Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 — interleaved FFTs" if interleaved_m6 else "M6 time"),
+        Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
         *[Line2D([], [], color=color, ls=style, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
         *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="-.", ms=6, lw=1.3,
@@ -229,9 +223,9 @@ if __name__ == "__main__":
         a100 = argparse.Namespace(**vars(modal))
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
             classical = ROOT / "outputs" / {
-                "ada": "spectral_carry_20260927/ada_classical.json",
-                "blackwell": "classical_interleaved_20260927/blackwell/classical.json",
-                "a100": "classical_interleaved_20260927/a100_sxm/classical.json",
+                "ada": "classical_all_orders_20260928/ada/classical.json",
+                "blackwell": "classical_all_orders_20260928/blackwell/classical.json",
+                "a100": "classical_all_orders_20260928/a100_sxm/classical.json",
             }[hardware]
             if config.single_case:
                 config.timings = classical
