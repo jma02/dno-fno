@@ -64,6 +64,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
     )
+    interleaved_m6 = bool(warm and "previous_seconds" in warm["families"]["stokes"]["methods"]["M6"])
     per_step = False
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
@@ -111,6 +112,12 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         color="#606970", fontsize=8,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
+        if interleaved_m6:
+            previous_seconds = float(np.median(warm["families"][family]["methods"]["M6"]["previous_seconds"]))
+            savings = 100 * (1 - seconds[-1] / previous_seconds)
+            ax.text(0.43, 0.035, f"M6: {previous_seconds:.2f} → {seconds[-1]:.2f} s  (−{savings:.1f}%)",
+                    transform=ax.transAxes, color="#606970", fontsize=9,
+                    bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         right = float(seconds.max())
         for run, name, _label, color, marker in RUNS:
             source = next((ROOT / "outputs" / run).glob(
@@ -140,7 +147,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
             ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
-            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method:
+            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
@@ -182,7 +189,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                   ls="--" if args.single_case else "none", lw=1.0, ms=7,
                   label=f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
           for _, name, _, color, marker in reversed(RUNS)],
-        Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
+        Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 — interleaved FFTs" if interleaved_m6 else "M6 time"),
         *[Line2D([], [], color=color, ls=style, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
         *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="-.", ms=6, lw=1.3,
@@ -223,8 +230,8 @@ if __name__ == "__main__":
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
             classical = ROOT / "outputs" / {
                 "ada": "spectral_carry_20260927/ada_classical.json",
-                "blackwell": "classical_figure12_20260927/blackwell/classical.json",
-                "a100": "classical_figure12_20260927/a100_sxm/classical.json",
+                "blackwell": "classical_interleaved_20260927/blackwell/classical.json",
+                "a100": "classical_interleaved_20260927/a100_sxm/classical.json",
             }[hardware]
             if config.single_case:
                 config.timings = classical
