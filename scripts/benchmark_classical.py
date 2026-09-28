@@ -26,11 +26,14 @@ from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import _dno_series_hat  # noqa: E402
 
-Backend = Literal["cufft", "cufftdx_all", "cufftdx_products", "specialized"]
+Backend = Literal["cufft", "cufftdx_all", "cufftdx_products", "cufftdx_all_products",
+                  "specialized", "specialized_cufftdx", "specialized_cufftdx_products"]
 Precision = Literal["fp64", "fp32", "mixed"]
 VARIANTS = {f"{backend}_{precision}_p{pad}": dict(backend=backend, precision=precision, pad_factor=pad)
             for backend, precision, pad in product(
-                ("cufft", "cufftdx_all", "cufftdx_products", "specialized"), ("fp64", "fp32", "mixed"), (1, 2))}
+                ("cufft", "cufftdx_all", "cufftdx_products", "cufftdx_all_products",
+                 "specialized", "specialized_cufftdx", "specialized_cufftdx_products"),
+                ("fp64", "fp32", "mixed"), (1, 2))}
 CONTROL = "cufft_fp64_p2"
 
 
@@ -47,6 +50,8 @@ def classical_hat(
     spectral = jnp.complex64 if precision == "fp32" else jnp.complex128
     eta_hat, xi_hat = eta_hat.astype(spectral), xi_hat.astype(spectral)
     k, g0 = (value.astype(jnp.float32 if precision == "fp32" else jnp.float64) for value in (k, g0))
+    native_all = backend in ("cufftdx_all", "cufftdx_all_products", "specialized_cufftdx", "specialized_cufftdx_products")
+    fused_products = backend.endswith("products")
 
     def transform(
         values: jax.Array, n: int | None = None, axis: int = -1, *,
@@ -55,18 +60,23 @@ def classical_hat(
         dtype = ((jnp.complex128 if inverse else jnp.float64) if precision == "fp64"
                  else jnp.complex64 if inverse else jnp.float32)
         values = values.astype(dtype)
-        if backend == "cufftdx_all" or b is not None:
+        if native_all or b is not None:
             result = fft(values, values.shape[-1] if n is None else n, inverse=inverse,
                          b=None if b is None else b.astype(dtype), ept=ept)
         else:
             result = (jnp.fft.irfft if inverse else jnp.fft.rfft)(values, n=n, axis=axis)
         return result if inverse else result.astype(spectral)
 
-    if backend == "specialized":
+    if backend.startswith("specialized"):
         padded_nx = pad_factor * nx
 
         def projected_product(a: jax.Array, b: jax.Array) -> jax.Array:
-            return pad_factor * transform(a * b)[..., :nx // 2 + 1].at[..., nx // 2].set(0)
+            if fused_products:
+                a, b = jnp.broadcast_arrays(a, b)
+                coefficients = transform(a, b=b)
+            else:
+                coefficients = transform(a * b)
+            return pad_factor * coefficients[..., :nx // 2 + 1].at[..., nx // 2].set(0)
 
         q0 = g0 * xi_hat
         eta, xi_x, q0_physical = jnp.moveaxis(transform(jnp.stack(
@@ -86,7 +96,7 @@ def classical_hat(
     elif backend == "cufft" and precision == "fp64":
         result = _dno_series_hat(eta_hat, xi_hat, k, g0, nx=nx, order=order, pad_factor=pad_factor)
     else:
-        source = classical_fused_hat if backend == "cufftdx_products" else _dno_series_hat
+        source = classical_fused_hat if fused_products else _dno_series_hat
         # Private FFT bindings preserve the recurrence without process-global patches.
         namespace = SimpleNamespace(**vars(jnp))
         namespace.fft = SimpleNamespace(rfft=transform, irfft=partial(transform, inverse=True))
@@ -108,21 +118,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--order", type=int, choices=range(1, 7), default=2)
     parser.add_argument("--variants", nargs="+", choices=VARIANTS, default=[CONTROL, "specialized_fp64_p2"])
+    parser.add_argument("--control", choices=[f"{name}_e{ept}" for name in VARIANTS
+                        for ept in ((4, 8, 16) if "cufftdx" in name else (8,))], default=f"{CONTROL}_e8")
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
     parser.add_argument("--batches", nargs="+", type=int, choices=(1, 2), default=[1, 2])
     parser.add_argument("--repeats", type=int, help="Default: 100 forward calls or 3 full rollouts.")
-    parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
+    parser.add_argument("--epts", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--rollouts", action="store_true", help="Full horizons with same-executable warm-up.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/classical_tuning_20260927/micro.json")
     args = parser.parse_args()
     if args.repeats is None:
         args.repeats = 3 if args.rollouts else 100
-    if args.repeats < 1 or (args.order > 2 and any(name.startswith("specialized") for name in args.variants)):
+    if args.repeats < 1 or (args.order > 2 and any(name.startswith("specialized") for name in (*args.variants, args.control))):
         parser.error("positive repeats required; specialized algebra supports M1/M2 only")
     jax.config.update("jax_enable_x64", True)
-    variants = list(dict.fromkeys((CONTROL, *args.variants)))
+    control = args.control
+    control_name, _, control_ept = control.rpartition("_e")
+    variants = {control: {**VARIANTS[control_name], "ept": int(control_ept)}, **{
+        f"{name}_e{ept}": {**VARIANTS[name], "ept": ept}
+        for name in args.variants for ept in (args.epts if "cufftdx" in name else (8,))}}
     report: dict[str, Any] = {"device": jax.devices()[0].device_kind, "order": args.order,
-        "reference": "M6 cufft FP64 pad2", "control": CONTROL, "fft_ept": args.ept,
+        "reference": "M6 cufft FP64 pad2", "control": control, "fft_epts": args.epts,
         "mode": "full_single_rollouts" if args.rollouts else "spectral_forward",
         "precision": "FP64 integrator; mixed means FP32 FFT/physical products, FP64 spectral arithmetic",
         "families": {}}
@@ -148,9 +164,9 @@ if __name__ == "__main__":
                 jnp.fft.rfft(field[:batch, 0]).at[..., nx // 2].set(0) for field in (eta, xi)))
             compiled, outputs, records = {}, {}, {}
             for name in ("M6", *variants):
-                settings = VARIANTS[CONTROL] if name == "M6" else VARIANTS[name]
+                settings = {**VARIANTS[CONTROL], "ept": 8} if name == "M6" else variants[name]
                 predict = partial(classical_hat, k=k, g0=g0, nx=nx,
-                                  order=6 if name == "M6" else args.order, ept=args.ept, **settings)
+                                  order=6 if name == "M6" else args.order, **settings)
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral=True, local_if=True, predict_hat=predict)
                             if args.rollouts else predict)
@@ -167,7 +183,7 @@ if __name__ == "__main__":
                     records[name]["flat_g0_max_absolute"] = float(np.abs(zero - np.asarray(g0 * inputs[1])).max())
                 print(f"{family} B{batch} {name}: compiled and warmed", flush=True)
             for repeat in range(args.repeats):
-                for name in variants[::1 if repeat % 2 == 0 else -1]:
+                for name in list(variants)[::1 if repeat % 2 == 0 else -1]:
                     started = time.perf_counter()
                     outputs[name] = jax.block_until_ready(compiled[name](*inputs))
                     records[name]["seconds"].append(time.perf_counter() - started)
@@ -182,13 +198,13 @@ if __name__ == "__main__":
                     for key in cached:
                         actual = np.asarray(result[key])
                         if record["finite"]:
-                            record[key] = {"control": errors(actual, np.asarray(outputs[CONTROL][key])),
+                            record[key] = {"control": errors(actual, np.asarray(outputs[control][key])),
                                            "M6": errors(actual, np.asarray(outputs["M6"][key])),
                                            "cached_M6": errors(actual, cached[key])}
                 else:
                     record["finite"] = bool(np.isfinite(np.asarray(result)).all())
                     if record["finite"]:
-                        record.update(control=errors(np.asarray(result), np.asarray(outputs[CONTROL])),
+                        record.update(control=errors(np.asarray(result), np.asarray(outputs[control])),
                                       M6=errors(np.asarray(result), np.asarray(outputs["M6"])))
                 print(f"{family} B{batch} {name}: {record.get('median_seconds')} s; finite={record['finite']}", flush=True)
             rows[f"B{batch}"] = records
