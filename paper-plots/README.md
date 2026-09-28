@@ -240,6 +240,12 @@ single-case M6 trajectory. Ada candidate measurements are under
 Classical and neural runs retain the same integration settings and packed
 boundaries. The fused inference path is unchanged; Ada now uses the trained
 gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
+The optional teal Ada lines show the FP32 G1 timing trial from
+`outputs/g1_fp32_20260928/ada/gpu{0,1}.json`: Stokes 1.1192 s,
+Tanaka 10.9879 s, Benjamin–Feir 10.7238 s and JONSWAP/TMA 1.1079 s.
+Teal annotations compare paired FP64/FP32 G1 medians from those same files
+(12.7–13.0% less time). Existing accuracy points are unchanged; the trial
+adds timing lines only and does not change the default precision.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
@@ -357,6 +363,8 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
+  --fp32-g1-timings outputs/g1_fp32_20260928/ada/gpu0.json \
+    outputs/g1_fp32_20260928/ada/gpu1.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json

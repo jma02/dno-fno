@@ -62,6 +62,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
     "fourier_fused_features", "fourier_fused_features_overlap",
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+    "fourier_fused_features_product_overlap_g1fp32",
     "fourier_balanced_features_product_overlap",
     *TUNED_TRIALS,
 )})
@@ -122,8 +123,7 @@ if __name__ == "__main__":
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "precision": "FP64 classical/integration; FP32 learned inference",
-        "timing": (f"synchronized GPU execution after {'same-executable' if args.steps else 'separate five-frame'} "
-                   "warm-up; compilation and host transfers excluded"),
+        "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
                         for base in (method_base(name),)},
@@ -237,10 +237,8 @@ if __name__ == "__main__":
                     patches.enter_context(patch.object(ti, "_gauss_legendre_2_stage_map", paired_stage_map))
                 compiled[label] = runner.lower(initial, times).compile()
                 compile_seconds = time.perf_counter() - started
-                warm = compiled[label] if args.steps else runner.lower(initial, times[:5]).compile()
-            warm_times = times if args.steps else times[:5]
             started = time.perf_counter()
-            jax.block_until_ready(warm(initial, warm_times))
+            jax.block_until_ready(compiled[label](initial, times))
             records[label] = {"setup_s": setup_seconds, "compile_s": compile_seconds,
                                "warmup_s": time.perf_counter() - started, "seconds": []}
             print(f"{family} {label}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)

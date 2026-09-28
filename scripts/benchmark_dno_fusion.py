@@ -42,6 +42,7 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "fourier_fused_features", "fourier_fused_features_overlap",
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+          "fourier_fused_features_product_overlap_g1fp32",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
@@ -53,6 +54,9 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    g1_fp32 = variant.endswith("_g1fp32")
+    variant = variant.removesuffix("_g1fp32")
+    g1_dtype = jnp.float32 if g1_fp32 else jnp.float64
     overlap_g1 = variant.endswith("_overlap")
     variant = variant.removesuffix("_overlap")
     if variant.endswith(("_e4", "_e16")):
@@ -114,6 +118,8 @@ def build_variant(
         k64 = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
         g0_64 = k64[None, :] * jnp.tanh(h.astype(jnp.float64) * k64[None, :])
         operators = jnp.stack((g0_64, jnp.broadcast_to(1j * k64, g0_64.shape)), axis=1)
+        if g1_fp32:
+            operators = operators.astype(jnp.complex64)
 
         @jax.jit
         def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
@@ -147,8 +153,8 @@ def build_variant(
                 if overlap_g1:
                     with compute_on("gpu_stream:1"):
                         g1_hat = jax.jit(lambda values: -sandwich(
-                            values[:, 0] if fused_g1 else (values[:, 0] * model.eta_scale).astype(jnp.float64),
-                            fft(values[:, 1] if fused_g1 else values[:, 1].astype(jnp.float64), nx,
+                            values[:, 0] if fused_g1 else (values[:, 0] * model.eta_scale).astype(g1_dtype),
+                            fft(values[:, 1] if fused_g1 else values[:, 1].astype(g1_dtype), nx,
                                 ept=g1_input_ept, promote=fused_g1), operators,
                             spectral=True, ept=sandwich_ept,
                             eta_scale=model.eta_scale if fused_g1 else None,
@@ -192,6 +198,8 @@ def build_variant(
                     g1_xi_hat, operators,
                     spectral=True, ept=sandwich_ept, eta_scale=model.eta_scale if fused_g1 else None,
                 ).sum(axis=1)
+            if g1_fp32:
+                g1_hat = cast(jax.Array, g1_hat).astype(jnp.complex128)
             result = output_scale * (g0 * xi_phys_hat + cast(jax.Array, g1_hat) + correction_hat)
             if mask_output:
                 return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
@@ -457,6 +465,7 @@ if __name__ == "__main__":
                   fourier_fused_fields="Fuse field multipliers + inverse FFT",
                   fourier_balanced_features_overlap="Balance surface-feature stores + G₁ overlap",
                   fourier_fused_features_product_overlap="Fused head product FFT + G₁ overlap",
+                  fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",
                   fourier_fused_inputs="Fuse input inverse FFT + normalization",
                   fourier_fused_both="Both inverse-FFT fusions",
