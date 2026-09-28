@@ -41,7 +41,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     for path in args.candidate_timings or ():
         for family, result in json.loads(path.read_text())["families"].items():
             candidate["families"].setdefault(family, result)["methods"].update(result["methods"])
-    if args.stack_hardware:
+    if args.stack_hardware and not args.single_case:
         for family, result in candidate["families"].items():
             for method, record in result["methods"].items():
                 classical = method.split("_", 1)[0]
@@ -221,17 +221,18 @@ if __name__ == "__main__":
         modal.single_case = True
         a100 = argparse.Namespace(**vars(modal))
         for config, hardware in ((modal, "blackwell"), (args, "ada"), (a100, "a100")):
-            directory = ROOT / "outputs/spectral_carry_20260927"
-            classical = directory / {
-                "ada": "ada_classical.json", "blackwell": "blackwell_classical/classical.json",
-                "a100": "a100_combined_sxm/classical.json",
+            classical = ROOT / "outputs" / {
+                "ada": "spectral_carry_20260927/ada_classical.json",
+                "blackwell": "classical_figure12_20260927/blackwell/classical.json",
+                "a100": "classical_figure12_20260927/a100_sxm/classical.json",
             }[hardware]
             if config.single_case:
                 config.timings = classical
             config.classical_timings = [classical]
-            config.candidate_timings = [ROOT / "outputs/half_spectrum_20260927" / path for path in {
-                "ada": ("ada_full.json",), "blackwell": ("blackwell_product_confirm/rollouts.json",),
-                "a100": ("a100_sciml_sxm/rollouts.json", "a100_m2_confirm/classical.json"),
+            config.candidate_timings = [ROOT / "outputs" / {
+                "ada": "half_spectrum_20260927/ada_full.json",
+                "blackwell": "classical_figure12_20260927/blackwell/neural.json",
+                "a100": "classical_figure12_20260927/a100_sxm/neural.json",
             }[hardware]]
             config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
             config.candidate_previous_method = "fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local"

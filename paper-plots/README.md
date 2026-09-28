@@ -176,11 +176,15 @@ vertical lines, without assigning accuracy to the one-epoch timing checkpoint.
 The candidate retains the same checkpoint, G0+G1 baselines, cuFFTDx G1 evaluation,
 cached depth multipliers and packed network branches. Its spectral adapter
 removes repeated physical/Fourier round trips and batches independent inverse
-FFTs. Every classical order M1–M6 now receives the shared nonlinear FFT packing.
-Classical DNO products use 2× padding instead of 8×: the implementation projects
-each binary product back to the base modes before reuse, so 2× is sufficient
-for dealiasing at every order. On 48 states across all six orders, the maximum
-2×/8× relative difference is 7.75e-12; see
+FFTs. Every classical order M1–M6 receives the shared nonlinear FFT packing.
+Blackwell and A100 now use the same FP64 cuFFTDx classical implementation:
+M1 uses unpadded DNO products with EPT8, M2 uses the specialized recurrence
+with unpadded products and EPT16, and M3–M6 use 2× padding with EPT8.
+The unpadded M1/M2 products exploit the existing 128-mode state filter.
+Ada retains its previous measurements and 2× DNO padding.
+Each binary product is projected back to the base modes before reuse;
+the earlier 2×/8× check on 48 states across all six orders had maximum
+relative difference 7.75e-12; see
 `outputs/fair_classical_20260925/padding_check.json`. This does not change the
 separate 2× padding in the nonlinear water-wave RHS.
 
@@ -212,29 +216,27 @@ alongside the previous stage pairing and boundary FFT packing. FP64 integration/
 FP32 learned inference, weights and iteration count are unchanged.
 
 Annotations compare against `fourier_fused_features_overlap_spectral_all_boundaries_stages_carry_local`
-in the same three-repeat, four-family full-rollout benchmark. Sources under
-`outputs/half_spectrum_20260927/` are `ada_full.json`,
-`blackwell_product_confirm/rollouts.json`, and `a100_sciml_sxm/rollouts.json`.
-These cloud runs use the approved `sciml-at-ud` workspace.
-Classical M1–M6 retain the unchanged implementation's measurements under
-`outputs/spectral_carry_20260927/`: `ada_classical.json`,
-`blackwell_classical/classical.json`, and `a100_combined_sxm/classical.json`;
-M2 uses the paired three-repeat median on Ada/Blackwell and a separate seven-repeat
-confirmation in `outputs/half_spectrum_20260927/a100_m2_confirm/classical.json`
-on A100, where the initial paired M2 timings were noisy. Only its runtime is
-replaced; accuracy remains referenced to classical M6. Ada paired timings use GPU1.
-The M2 confirmation uses a separate SXM4 allocation. Cloud runtime variation
-between those runs is not an optimization gain; the orange annotations compare
-old/new neural methods measured together in the original allocation.
-Across the four families, product fusion saves another 0.60–0.75% on Ada,
-2.83–3.13% on Blackwell, and 1.34–2.48% on A100 against the preceding candidate.
+in the same three-repeat, four-family full-rollout benchmark. Fresh cloud
+measurements are under `outputs/classical_figure12_20260927/{blackwell,a100_sxm}/`:
+`classical.json` contains M1–M6 and `neural.json` contains the current and
+preceding candidates. Each hardware comparison uses one `sciml-at-ud`
+allocation, with three alternating full-rollout repeats after full-executable
+warm-up. Classical and neural runs retain the same integration settings and
+packed boundaries; the neural checkpoint and inference path are unchanged.
+One warmed and timed cuFFT control per order checks the selected native
+implementation. Classical errors remain referenced to the cached M6 trajectory.
+Ada is unchanged: classical measurements come from
+`outputs/spectral_carry_20260927/ada_classical.json`, and the candidate and paired
+M2 timings come from `outputs/half_spectrum_20260927/ada_full.json` on GPU1.
+The orange annotations use only paired old/new neural timings, not differences
+between allocations. Product fusion saves 0.60–0.75% on the retained Ada run.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
 
 Product fusion passes the 48-state forward checks with maximum relative
 difference 2.01e-9, but long trajectories are not bitwise equivalent. For
-Benjamin–Feir, terminal surface error against M6 changes from 1.022% to 1.010%
+Benjamin–Feir in the earlier product-fusion runs, terminal surface error against M6 changes from 1.022% to 1.010%
 on Ada/A100 and from 0.888% to 0.976% on Blackwell. The largest relative saved
 surface difference against the preceding candidate is 0.001223 (Blackwell BF).
 These remain runtime-only candidate lines. Trained-model
@@ -316,7 +318,19 @@ only as a benchmark option. Both are isolated in `scripts/benchmark_surrogate_rh
 and selected by the rollout timer; production trainers and checkpoints are
 untouched. Search results, numerical checks and merge decisions are recorded
 in `notes/dno_profile_20260924.md` and the September 25–26 logs under `experiments/`.
-This update does not regenerate figure 11, the manuscript or the ZIP. Reproduce with:
+This update does not regenerate figure 11, the manuscript or the ZIP. After
+building cuFFTDx for the selected cloud GPU, reproduce the shared benchmark with:
+
+```sh
+XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+  UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync scripts/benchmark_classical.py \
+  --sweep --rollouts --repeats 3 \
+  --candidate-run outputs/c27_w320_b4_h80_tanaka_hard128_20260924 \
+  --output outputs/classical_sweep/sweep.json
+```
+
+The cloud runner extracts the selected records into `classical.json` and
+`neural.json` for each hardware section. Render the figure with:
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
