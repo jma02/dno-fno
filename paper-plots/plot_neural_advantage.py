@@ -56,8 +56,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     overlays = (
         (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
-        (fp32_g1, "#178178", "FP32 G₁ trial — timing",
-         "fourier_fused_features_product_overlap_g1fp32_spectral_all_boundaries_stages_carry_local", "--", 1.3),
+        (fp32_g1, "#178178", "FP32 FFT trial — timing",
+         "fourier_fused_features_product_overlap_g1fp32_reuse_inputfp32_spectral_all_boundaries_stages_carry_local", "--", 1.3),
     )
     interleaved_m6 = bool(warm and "previous_seconds" in warm["families"]["stokes"]["methods"]["M6"])
     per_step = False
@@ -143,7 +143,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             if comparison is fp32_g1:
                 previous_seconds = float(np.median(methods[args.candidate_method]["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
-                ax.text(0.43, 0.095, f"G₁: {previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
+                ax.text(0.35, 0.095, f"FFT: {previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
             right = max(right, new_seconds)
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
-    parser.add_argument("--fp32-g1-timings", type=Path, nargs="+", help="Add an Ada-only FP32 G1 timing trial to --stack-hardware.")
+    parser.add_argument("--fp32-g1-timings", type=Path, nargs="+", help="Add an Ada-only combined FP32 FFT timing trial to --stack-hardware.")
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")

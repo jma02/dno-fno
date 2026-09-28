@@ -20,7 +20,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from scripts.benchmark_cufftdx import classical_fused_hat, fft  # noqa: E402
+from scripts.benchmark_cufftdx import classical_fused_hat, fft, sandwich  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, load_run  # noqa: E402
@@ -37,16 +37,21 @@ VARIANTS = {f"{backend}_{precision}_p{pad}": dict(backend=backend, precision=pre
                  "specialized", "specialized_cufftdx", "specialized_cufftdx_products",
                  "interleaved", "interleaved_cufftdx"),
                 ("fp64", "fp32", "mixed"), (1, 2))}
+VARIANTS["specialized_cufftdx_g1fp32_p1"] = dict(
+    backend="specialized_cufftdx", precision="fp64", pad_factor=1, g1_fp32=True,
+)
 CONTROL = "cufft_fp64_p2"
 
 
 def classical_hat(
     eta_hat: jax.Array, xi_hat: jax.Array, k: jax.Array, g0: jax.Array, *,
     nx: int, order: int, pad_factor: int = 2, backend: Backend = "cufft",
-    precision: Precision = "fp64", ept: int = 8,
+    precision: Precision = "fp64", ept: int = 8, g1_fp32: bool = False,
 ) -> jax.Array:
     """Mixed uses FP32 physical FFT/products, FP64 spectral arithmetic and exact G0.
 
+    The specialized pad1 M2 trial g1_fp32 changes only G1 arithmetic; its
+    promoted result feeds the otherwise FP64 G2 recurrence.
     All modes through N/2 are retained; only the Nyquist mode is zeroed.
     Return complex128 so the surrounding time integrator remains FP64.
     """
@@ -85,10 +90,18 @@ def classical_hat(
         q0 = g0 * xi_hat
         eta, xi_x, q0_physical = jnp.moveaxis(transform(jnp.stack(
             (eta_hat, 1j * k * xi_hat, q0), axis=-2), padded_nx, inverse=True), -2, 0)
-        fields = (eta, xi_x, q0_physical) if order == 2 else (xi_x, q0_physical)
+        fields = (eta,) if g1_fp32 else (eta, xi_x, q0_physical) if order == 2 else (xi_x, q0_physical)
         products = projected_product(eta[..., None, :], jnp.stack(fields, axis=-2))
         symbols = jnp.stack(jnp.broadcast_arrays(1j * k, g0), axis=-2)
-        q1 = -jnp.sum(symbols * products[..., -2:, :], axis=-2)
+        if g1_fp32:
+            symbols = jnp.broadcast_to(symbols, (*xi_hat.shape[:-1], 2, xi_hat.shape[-1]))
+            q1 = -sandwich(
+                eta.astype(jnp.float32), xi_hat.astype(jnp.complex64),
+                symbols.astype(jnp.complex64), spectral=True, ept=ept,
+            ).sum(axis=-2).astype(jnp.complex128)
+            q1 = q1.at[..., nx // 2].set(0)
+        else:
+            q1 = -jnp.sum(symbols * products[..., -2:, :], axis=-2)
         result = q0 + q1
         if order == 2:
             e2, q1_physical = jnp.moveaxis(transform(jnp.stack(
@@ -177,6 +190,8 @@ if __name__ == "__main__":
         args.repeats = 3 if args.rollouts else 100
     if args.repeats < 1 or (not args.sweep and args.order > 2 and any(name.startswith("specialized") for name in (*args.variants, args.control))):
         parser.error("positive repeats required; specialized algebra supports M1/M2 only")
+    if any("g1fp32" in name for name in (*args.variants, args.control)) and (args.sweep or args.order != 2):
+        parser.error("selective G1 FP32 supports only the specialized pad1 M2 trial, without --sweep")
     if (args.sweep or args.candidate_run) and not args.rollouts:
         parser.error("--sweep and --candidate-run require --rollouts")
     jax.config.update("jax_enable_x64", True)

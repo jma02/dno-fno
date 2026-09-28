@@ -240,12 +240,15 @@ single-case M6 trajectory. Ada candidate measurements are under
 Classical and neural runs retain the same integration settings and packed
 boundaries. The fused inference path is unchanged; Ada now uses the trained
 gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
-The optional teal Ada lines show the FP32 G1 timing trial from
-`outputs/g1_fp32_20260928/ada/gpu{0,1}.json`: Stokes 1.1192 s,
-Tanaka 10.9879 s, Benjamin–Feir 10.7238 s and JONSWAP/TMA 1.1079 s.
-Teal annotations compare paired FP64/FP32 G1 medians from those same files
-(12.7–13.0% less time). Existing accuracy points are unchanged; the trial
-adds timing lines only and does not change the default precision.
+The optional teal Ada lines show the combined FP32 G1, reused xi FFT and
+FP32 input inverse-FFT trial from `outputs/g1_fp32_tuning_20260928/ada/gpu{0,1}.json`:
+Stokes 1.0696 s, Tanaka 10.3357 s, Benjamin–Feir 10.0451 s and JONSWAP/TMA 1.0395 s.
+Teal annotations compare against the original FP64 control in those same files
+(17.2–18.5% less time); the incremental saving over FP32 G1 alone is 6.3–6.5%.
+The trial fails strict 48-state forward equivalence and changes Benjamin–Feir
+terminal error from 1.9047% to 0.6746%, with a maximum saved-surface relative
+difference of 1.30% against the original path. Existing accuracy points remain
+unchanged: this is a timing-only precision trial, not a default precision switch.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
@@ -363,8 +366,8 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
-  --fp32-g1-timings outputs/g1_fp32_20260928/ada/gpu0.json \
-    outputs/g1_fp32_20260928/ada/gpu1.json \
+  --fp32-g1-timings outputs/g1_fp32_tuning_20260928/ada/gpu0.json \
+    outputs/g1_fp32_tuning_20260928/ada/gpu1.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json

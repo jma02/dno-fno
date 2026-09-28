@@ -34,6 +34,10 @@ from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # n
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
 TUNED_TRIALS = tuple("fourier_tuned_" + "_".join(map(str, epts)) + suffix
                      for epts in product((4, 8, 16), repeat=4) for suffix in ("", "_mask"))
+G1_FP32_BASE = "fourier_fused_features_product_overlap_g1fp32"
+G1_FP32_TRIALS = tuple(G1_FP32_BASE + suffix + tuning
+    for suffix in ("", "_reuse", "_inputfp32", "_reuse_inputfp32")
+    for tuning in ("", *(f"_g1e{a}x{b}" for a, b in product((4, 8, 16), repeat=2))))
 TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
@@ -42,11 +46,10 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "fourier_fused_features", "fourier_fused_features_overlap",
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
-          "fourier_fused_features_product_overlap_g1fp32",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
-          "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS)
+          "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS, *G1_FP32_TRIALS)
 
 
 def build_variant(
@@ -54,6 +57,12 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    variant, _, g1_tuning = variant.partition("_g1e")
+    input_fp32 = variant.endswith("_inputfp32")
+    variant = variant.removesuffix("_inputfp32")
+    reuse_g1 = variant.endswith("_reuse") and "_g1fp32" in variant
+    if reuse_g1:
+        variant = variant.removesuffix("_reuse")
     g1_fp32 = variant.endswith("_g1fp32")
     variant = variant.removesuffix("_g1fp32")
     g1_dtype = jnp.float32 if g1_fp32 else jnp.float64
@@ -66,6 +75,8 @@ def build_variant(
     variant = variant.removesuffix("_mask")
     # Input inverse, G1 input forward, packed-field inverse, G1 sandwich.
     input_ept, g1_input_ept, field_ept, sandwich_ept = (fft_ept,) * 4
+    if g1_tuning:
+        g1_input_ept, sandwich_ept = map(int, g1_tuning.split("x"))
     if variant.startswith("fourier_tuned_"):
         input_ept, g1_input_ept, field_ept, sandwich_ept = map(int, variant.removeprefix("fourier_tuned_").split("_"))
         variant = "fourier_transforms"
@@ -132,6 +143,8 @@ def build_variant(
             normalized_hat = normalized_inputs = None
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
+                if input_fp32:
+                    inputs = inputs.astype(jnp.complex64)
                 if fused_inputs:
                     normalized_inputs = fft(inputs, nx, inverse=True, ept=input_ept,
                                             normalization=jnp.array([1 / scales[0], 1 / scales[1], model.xi_scale], dtype=jnp.float32))
@@ -153,12 +166,13 @@ def build_variant(
                 if overlap_g1:
                     with compute_on("gpu_stream:1"):
                         g1_hat = jax.jit(lambda values: -sandwich(
-                            values[:, 0] if fused_g1 else (values[:, 0] * model.eta_scale).astype(g1_dtype),
-                            fft(values[:, 1] if fused_g1 else values[:, 1].astype(g1_dtype), nx,
+                            values[0][:, 0] if fused_g1 else (values[0][:, 0] * model.eta_scale).astype(g1_dtype),
+                            values[1] if reuse_g1 else fft(
+                                values[0][:, 1] if fused_g1 else values[0][:, 1].astype(g1_dtype), nx,
                                 ept=g1_input_ept, promote=fused_g1), operators,
                             spectral=True, ept=sandwich_ept,
                             eta_scale=model.eta_scale if fused_g1 else None,
-                        ).sum(axis=1))(normalized_inputs)
+                        ).sum(axis=1))((normalized_inputs, xi_phys_hat) if reuse_g1 else (normalized_inputs,))
             if fused_features:
                 features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
                                                        n=nx, ept=field_ept, normalized_inputs=normalized_inputs,
@@ -481,6 +495,7 @@ if __name__ == "__main__":
     labels.update({name: f"{labels[name.rpartition('_e')[0]]} · EPT {name.rpartition('_e')[2]}"
                    for name in TRIALS if name.endswith(("_e4", "_e16"))})
     labels.update({name: "FFT EPTs " + name.removeprefix("fourier_tuned_").replace("_", "/") for name in TUNED_TRIALS})
+    labels.update({name: "FP32 G₁" + name.removeprefix(G1_FP32_BASE).replace("_", " · ") for name in G1_FP32_TRIALS})
     medians = [records[name]["median_us"] for name in variants]
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
     ax.barh([labels[name] for name in variants], medians, color="#278475")
