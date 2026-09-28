@@ -11,6 +11,7 @@ from collections import defaultdict
 from contextlib import suppress
 import csv
 import ctypes
+from functools import partial
 import gzip
 import importlib.metadata
 import json
@@ -90,11 +91,15 @@ if __name__ == "__main__":
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_profile_20260924")
     parser.add_argument("--depth-mode", choices=("fixed", "dynamic"), default="fixed")
-    parser.add_argument("--variant", choices=("original", "cufftdx", "fourier_round"), default="original")
+    parser.add_argument("--variant", choices=("original", "cufftdx", "fourier_round",
+        "fourier_fused_features_product_overlap", "classical_m2", "classical_m6"), default="original")
+    parser.add_argument("--stages", type=int, choices=(1, 2), default=1,
+                        help="One forward or two vmap-paired GL2 stage forwards; trajectory batch stays one.")
     parser.add_argument("--capture", type=int, default=0, help="Capture this many warmed calls instead of benchmarking.")
     parser.add_argument("--trace", type=int, default=0, help="Trace this many native forwards after clean timing.")
     parser.add_argument("--repeats", type=int, default=200)
     parser.add_argument("--analyze", action="store_true", help="Plot measured rooflines and forward traces from the hardware/model result tree (no GPU work).")
+    parser.add_argument("--analyze-current", action="store_true", help="Plot current Ada network/M2/M6 kernel timings (no GPU work).")
     parser.add_argument("--hardware-diagnosis", action="store_true", help="Compare dispatch, dependent execution, and 16 real GL2 steps with an annotated GPU trace.")
     args = parser.parse_args()
     if args.capture < 0 or args.trace < 0 or args.repeats < 1:
@@ -103,6 +108,80 @@ if __name__ == "__main__":
         parser.error("capture and trace must run separately")
     if args.variant != "original" and args.depth_mode != "fixed":
         parser.error("optimized variants require fixed depth")
+    if args.analyze_current:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        labels = {"network": "Current network", "m2": "CS M2", "m6": "CS M6"}
+        colors = {"FP64 cuFFTDx G1": "#c78450", "FP64 FFTs": "#bb5548", "FP32 FFTs": "#277da8",
+                  "Dense GEMMs": "#589365", "Other kernels": "#909ba3", "Device copies": "#b9a336"}
+        records: dict[str, Any] = {}
+        for model in labels:
+            for stages in (1, 2):
+                directory = args.output / f"{model}_s{stages}"
+                timing = json.loads((directory / "fixed.json").read_text())
+                trace = json.loads((directory / "forward_trace.json").read_text())
+                scope, calls = trace["scopes"]["forward"], trace["traced_calls"]
+                kernels = sorted((dict(name=name, count_per_call=count / calls, us_per_call=duration / calls)
+                                  for name, (count, duration) in scope["kernels_count_us"].items()),
+                                 key=lambda kernel: kernel["us_per_call"], reverse=True)
+                records[directory.name] = {
+                    "clean_median_us": timing["median_us"], "clean_iqr_us": [timing["p25_us"], timing["p75_us"]],
+                    "input_shape": timing["input_shape"], "variant": timing["variant"],
+                    "reference_relative_error": timing["wrapper_relative_error"],
+                    "traced_gpu_busy_us": scope["gpu_busy_us"] / calls,
+                    "summed_kernel_us": sum(kernel["us_per_call"] for kernel in kernels),
+                    "launches": sum(kernel["count_per_call"] for kernel in kernels), "kernels": kernels,
+                    "categories": {name: dict(count_per_call=count / calls, us_per_call=duration / calls)
+                                   for name, (count, duration) in scope["categories_count_us"].items()},
+                }
+        fig, (latency, breakdown) = plt.subplots(1, 2, figsize=(12, 4.8))
+        fig.subplots_adjust(left=0.13, right=0.98, top=0.78, bottom=0.28, wspace=0.45)
+        positions = np.arange(len(labels))
+        for stages, offset, color in ((1, -0.18, "#8ba0ac"), (2, 0.18, "#c45b22")):
+            values = [records[f"{model}_s{stages}"]["clean_median_us"] for model in labels]
+            errors = np.asarray([[value - records[f"{model}_s{stages}"]["clean_iqr_us"][0],
+                                  records[f"{model}_s{stages}"]["clean_iqr_us"][1] - value]
+                                 for model, value in zip(labels, values)]).T
+            bars = latency.barh(positions + offset, values, height=0.32, color=color, xerr=errors,
+                                error_kw={"elinewidth": 0.8, "capsize": 2},
+                                label="One stage" if stages == 1 else "Two stages together")
+            latency.bar_label(bars, labels=[f"{value:.1f}" for value in values], padding=4, fontsize=9)
+        latency.legend(frameon=False, loc="upper left", bbox_to_anchor=(0, -0.21), fontsize=9)
+        latency.set(title="Synchronized forward latency", xlabel="Microseconds per call")
+        latency.set_xlim(0, 1.22 * max(record["clean_median_us"] for record in records.values()))
+        left = np.zeros(len(labels))
+        for name, color in colors.items():
+            values = np.asarray([records[f"{model}_s2"]["categories"].get(name, {}).get("us_per_call", 0)
+                                 for model in labels])
+            if np.any(values):
+                breakdown.barh(positions, values, left=left, height=0.58, color=color,
+                               label={"FP64 cuFFTDx G1": "G₁ kernel", "Dense GEMMs": "Matrix multiplies"}.get(name, name))
+                left += values
+        breakdown.set(title="Two-stage kernel breakdown", xlabel="Summed GPU kernel time (µs)")
+        for index, model in enumerate(labels):
+            breakdown.text(left[index] + 3, index, f"{int(records[f'{model}_s2']['launches'])} kernels", va="center", fontsize=9)
+        breakdown.set_xlim(0, 1.30 * left.max())
+        breakdown.legend(frameon=False, loc="upper left", bbox_to_anchor=(0, -0.21), ncol=2, fontsize=9)
+        for ax in (latency, breakdown):
+            ax.set(yticks=positions, yticklabels=list(labels.values()), ylim=(2.55, -0.55))
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.grid(axis="x", alpha=0.15)
+            ax.set_axisbelow(True)
+        fig.suptitle("Current Ada DNO profile", fontsize=20, y=0.97)
+        fig.text(0.13, 0.88, "RTX 6000 Ada · N = 1024 · one trajectory · epoch 120", fontsize=11, color="#626b73")
+        analysis = {
+            "scope": "Native spectral DNO forwards, not complete rollouts; paired stages repeat one P128-filtered Stokes state.",
+            "counters": "ERR_NVGPUCTRPERM: hardware counters unavailable; no roofline points inferred from XLA estimates.",
+            "timing": "400 synchronized calls after 50 warmups; separate 20-call GPU traces. Summed kernel durations can overlap and are not wall time.",
+            "records": records,
+        }
+        (args.output / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+        for suffix in ("png", "pdf"):
+            fig.savefig(ROOT / "paper-plots/figures" / f"14-current-ada-profile.{suffix}", dpi=180)
+        print(f"Saved current Ada kernel profile to {args.output / 'analysis.json'}", flush=True)
+        raise SystemExit(0)
     if args.analyze:
         import matplotlib
         matplotlib.use("Agg")
@@ -368,13 +447,42 @@ if __name__ == "__main__":
         print(f"Saved {summary['gpu_events']} GPU events in {len(summary['scopes'])} annotated workloads", flush=True)
         raise SystemExit(0)
     predict = build_predict_gxi_batched(loaded)
+    nx = eta.shape[-1]
+    classical_order = int(args.variant[-1]) if args.variant.startswith("classical_") else None
+    spectral_io = args.variant.startswith(("fourier", "classical_"))
+    current = classical_order is not None or args.variant == "fourier_fused_features_product_overlap"
     # Rollouts hold depth fixed: its multiplier MLPs can be constant-folded.
     function = jax.jit((lambda eta, xi: predict(eta, xi, depth)) if args.depth_mode == "fixed" else predict)
+    reference_function = jax.jit(lambda e, x: predict(e, x, depth))
     inputs = (eta, xi) if args.depth_mode == "fixed" else (eta, xi, depth)
-    if args.variant != "original":
-        function = build_variant(loaded, depth, eta.shape[-1], args.variant)
+    if classical_order is not None:
+        from scripts.benchmark_classical import classical_hat
+        from solver.solvers import time_integrator as ti
+
+        params = ti.make_solver_params(nx, 2 * np.pi, jnp.exp(depth)[:, None],
+                                      dno_order=classical_order, pad_factor=2, filter_fraction=0.25)
+        classical = partial(classical_hat, k=params.k[:nx // 2 + 1],
+                            g0=params.g0[..., :nx // 2 + 1], nx=nx, order=classical_order, precision="fp64")
+        function = jax.jit(partial(classical,
+            backend="specialized_cufftdx" if classical_order == 2 else "interleaved_cufftdx",
+            pad_factor=1 if classical_order == 2 else 2, ept=16 if classical_order == 2 else 8))
+        reference_function = jax.jit(partial(classical, backend="cufft", pad_factor=2))
+    elif args.variant != "original":
+        function = build_variant(loaded, depth, nx, args.variant, fft_ept=8)
         if args.variant == "fourier_round":
-            inputs = (jnp.fft.rfft(eta), jnp.fft.rfft(xi))
+            reference_function = build_variant(loaded, depth, nx, "cufftdx")
+    if spectral_io:
+        inputs = tuple(jnp.fft.rfft(field) for field in (eta, xi))
+        if current:
+            # Match the P128 state support of the current steady rollout kernels.
+            inputs = tuple(jnp.where(jnp.arange(nx // 2 + 1) <= nx // 8, field, 0) for field in inputs)
+    reference_inputs = (inputs if classical_order is not None else
+                        tuple(jnp.fft.irfft(field, n=nx) for field in inputs) if spectral_io else (eta, xi))
+    if args.stages == 2:
+        function = jax.jit(jax.vmap(function, in_axes=(0, 0) if args.depth_mode == "fixed" else (0, 0, None)))
+        reference_function = jax.jit(jax.vmap(reference_function))
+        inputs = (*tuple(jnp.stack((field, field)) for field in inputs[:2]), *inputs[2:])
+        reference_inputs = tuple(jnp.stack((field, field)) for field in reference_inputs)
     label = args.depth_mode
     jax.block_until_ready(inputs)
     started = time.perf_counter()
@@ -383,13 +491,11 @@ if __name__ == "__main__":
     for _ in range(50):
         jax.block_until_ready(executable(*inputs))
     actual = jax.block_until_ready(executable(*inputs))
-    if args.variant == "fourier_round":
-        actual = jnp.fft.irfft(actual, n=eta.shape[-1])
-        reference = build_variant(loaded, depth, eta.shape[-1], "cufftdx")(eta, xi).block_until_ready()
-    else:
-        reference = predict(eta, xi, depth).block_until_ready()
+    if spectral_io and classical_order is None:
+        actual = jnp.fft.irfft(actual, n=nx)
+    reference = reference_function(*reference_inputs).block_until_ready()
     relative_error = float(jnp.linalg.norm(actual - reference) / jnp.linalg.norm(reference))
-    if not all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(actual)) or relative_error > 1e-5:
+    if not all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(actual)) or relative_error > (1e-9 if classical_order else 1e-5):
         raise RuntimeError(f"Profile wrapper changed the prediction: relative error {relative_error}")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.capture:
@@ -401,7 +507,7 @@ if __name__ == "__main__":
             jax.block_until_ready(executable(*inputs))
         if driver.cuProfilerStop() != 0:
             raise RuntimeError("CUDA profiler stop failed")
-        print(f"Captured {args.capture} batch-one {label} calls", flush=True)
+        print(f"Captured {args.capture} batch-one {label} calls, {args.stages} stage(s) each", flush=True)
     else:
         durations = []
         for _ in range(args.repeats):
@@ -409,14 +515,17 @@ if __name__ == "__main__":
             jax.block_until_ready(executable(*inputs))
             durations.append(time.perf_counter() - started)
         report = {
-            "run": str(args.run), "checkpoint_epoch": loaded.epoch,
-            "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
+            "run": None if classical_order else str(args.run), "checkpoint_epoch": None if classical_order else loaded.epoch,
+            "parameters": 0 if classical_order else sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
             "device": jax.devices()[0].device_kind, "jax_version": jax.__version__,
-            "batch_size": 1, "nx": eta.shape[-1], "depth_mode": args.depth_mode,
+            "batch_size": 1, "stages": args.stages, "nx": nx, "depth_mode": args.depth_mode,
             "variant": args.variant,
-            "input_space": "unnormalized rFFT" if args.variant == "fourier_round" else "physical",
-            "output_space": "unnormalized rFFT" if args.variant == "fourier_round" else "physical",
-            "workload": "one DNO forward pass; no time integrator",
+            "input_space": "unnormalized rFFT" if spectral_io else "physical",
+            "output_space": "unnormalized rFFT" if spectral_io else "physical",
+            "input_shape": list(inputs[0].shape), "input_filter_cutoff": nx // 8 if current else None,
+            "workload": f"{args.stages} DNO stage forward(s), one trajectory; no time integrator",
+            "probe": "Stokes initial state, repeated for paired-stage shape",
+            "reference": f"FP64 cuFFT M{classical_order}, padding2" if classical_order else "physical model forward",
             "compile_s": compile_s, "seconds": durations,
             "median_us": float(np.median(durations) * 1e6),
             "p25_us": float(np.percentile(durations, 25) * 1e6),
@@ -424,7 +533,7 @@ if __name__ == "__main__":
             "wrapper_relative_error": relative_error,
             "xla_cost_estimate": executable.cost_analysis(),
             "memory_analysis": str(executable.memory_analysis()),
-            "caveat": "XLA operation/traffic estimates are not measured instructions or DRAM traffic; transcendental and FFT accounting may differ from hardware.",
+            "caveat": "XLA estimates omit native FFI kernel work/traffic and are not a measured roofline; FFT and transcendental accounting is incomplete.",
         }
         (args.output / f"{label}.json").write_text(json.dumps(report, indent=2) + "\n")
         (args.output / f"{label}.hlo").write_text(executable.as_text())

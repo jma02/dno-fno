@@ -1346,3 +1346,83 @@ then freeze those settings for the final runtime/error comparison. This is
 offline configuration selection, not adaptive timestepping during a rollout.
 The present work only tunes classical padding, recurrence execution, FFT backend,
 and numerical precision, leaving the training run untouched.
+
+## Current epoch-120 Ada kernel profile — September 28
+
+[Current profile PNG](../paper-plots/figures/14-current-ada-profile.png) /
+[PDF](../paper-plots/figures/14-current-ada-profile.pdf). Raw measurements and
+the compact `analysis.json` are in `outputs/model_roofline_20260928/`.
+Figure12 and the earlier three-chip Figure13 are unchanged.
+
+The counter-access probe again failed with `ERR_NVGPUCTRPERM`; the user selected
+kernel timings only. No measured FLOP/DRAM-byte roofline or utilization percentage
+is available. XLA estimates omit native FFI work and are not substituted for
+hardware counters. No driver permissions, clocks, native kernels or weights changed.
+
+Profiled the exact current spectral forward builders: epoch120 network
+`fourier_fused_features_product_overlap` at EPT8; M2 specialized native FP64,
+padding1/EPT16; M6 interleaved native FP64, padding2/EPT8. Each uses the same
+P128-filtered Stokes initial state, N1024, fixed depth, one trajectory.
+Two-stage inputs have shape `(2,1,513)` and use `vmap`, as in the GL2 stage pair;
+the probe repeats the state rather than integrating a trajectory. Network runs
+used GPU0 and classical runs GPU1, both initially idle. Each process made 400
+synchronized calls after 50 warmups, then a separate 20-call JAX trace.
+
+| Forward | Clean median, one stage | Clean median, two stages | Two-stage traced kernel sum | Kernels |
+| --- | ---: | ---: | ---: | ---: |
+| Network | 114.43 us | 145.51 us | 67.71 us | 23 |
+| CS M2 | 101.05 us | 101.96 us | 39.30 us | 9 |
+| CS M6 | 276.67 us | 277.50 us | 213.40 us | 27 |
+
+Clean latency includes dispatch/synchronization; traced kernel durations come
+from separate instrumented calls. Neither is a full-rollout timing, and their
+difference is not a measured GPU-stall duration. Same-order cuFFT/padding2
+reference errors are 2.30e-16 for M2 and 1.44e-16 for M6. Network differences
+from the physical FP32 predictor are at most 1.35e-7 on this probe.
+
+The paired network's summed kernel times are 16.65 us FP64 transforms,
+14.86 us G1 sandwich, 8.46 us FP32 transforms, 9.84 us matrix multiplies and
+17.89 us other kernels. Thus FP64 transforms/G1 account for 46.5%, versus
+14.5% for matrix multiplies. The longest individual kernel is G1, with only
+four blocks of 128 threads. These launch dimensions show small parallel grids,
+not measured occupancy or bandwidth saturation.
+
+The paired standalone trace has no main/side-stream overlap despite the variant
+name: HLO schedules the asynchronous G1 start after the learned residual.
+This is a scheduling lead, not a demonstrated optimization; inspect the embedded
+rollout schedule before changing it. Removing every matrix multiply would remove
+only 14.5% of this kernel sum, so dense-width reduction alone is not evidence for
+closing the approximately24% full-runtime reduction needed to tie current M2.
+
+### Accuracy experiments to prioritize (not run)
+
+1. **Audit numerical paths with frozen weights.** Compare physical JAX,
+   pre-product spectral, current spectral and FP64 diagnostic execution on
+   training/validation states and short validation trajectories. The existing
+   test result (BF error1.45% to1.90% for0.57% faster product fusion) motivates
+   this check but must not become the tuning set. Report full-DNO and nonlinear
+   residual errors separately. Also isolate baseline depth clipping at h=5
+   when testing small-amplitude, deeper-water cases; it is not an established
+   cause of the present errors.
+2. **Target relative nonlinear-residual accuracy.** Keep the full-target loss
+   and test an auxiliary error divided by
+   `max(norm(G_M6 xi - (G0+G1)xi), tau*norm(G_M6 xi))`, with a training-derived
+   floor. Simply subtracting the baseline from both loss operands changes no
+   numerator. An equal-update head-only fine-tune is a cheap first comparison:
+   the correction is linear in `phi_proj` with frozen trunk/multipliers. This
+   adds no inference work. Second-order vanishing is already architectural;
+   matching the actual G2 coefficient would be new supervision.
+3. **Select for dynamics.** Use a separate validation-IC rollout panel for
+   checkpoint/loss selection; if warranted, fine-tune4–16-step windows from
+   training ICs. Use the differentiable JAX path, not native kernels without
+   backward rules. The smaller model's better scalar validation but worse
+   three-family median rollout accuracy motivates this over blind extra epochs.
+
+Reproduce one paired network profile with `CUDA_VISIBLE_DEVICES=0
+XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true uv run --no-sync
+scripts/profile_dno.py --run outputs/c27_w320_b4_h80_ema_grad09_20260927
+--variant fourier_fused_features_product_overlap --stages 2 --repeats 400
+--trace 20 --output outputs/model_roofline_20260928/network_s2` (one command).
+Classical variants are `classical_m2` and `classical_m6`. Render without a GPU:
+`JAX_PLATFORMS=cpu uv run --no-sync scripts/profile_dno.py --analyze-current
+--output outputs/model_roofline_20260928`.
