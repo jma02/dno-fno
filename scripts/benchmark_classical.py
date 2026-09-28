@@ -23,6 +23,7 @@ import numpy as np  # noqa: E402
 from scripts.benchmark_cufftdx import classical_fused_hat, fft  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
+from solver.evals.model_rollout import LoadedRun, load_run  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import _dno_series_hat  # noqa: E402
 
@@ -125,20 +126,51 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, help="Default: 100 forward calls or 3 full rollouts.")
     parser.add_argument("--epts", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--rollouts", action="store_true", help="Full horizons with same-executable warm-up.")
+    parser.add_argument("--sweep", action="store_true", help="Time all six orders with cuFFT controls and optimized native FFTs.")
+    parser.add_argument("--candidate-run", type=Path, help="Also time previous/current Fourier-input candidate kernels.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/classical_tuning_20260927/micro.json")
     args = parser.parse_args()
     if args.repeats is None:
         args.repeats = 3 if args.rollouts else 100
-    if args.repeats < 1 or (args.order > 2 and any(name.startswith("specialized") for name in (*args.variants, args.control))):
+    if args.repeats < 1 or (not args.sweep and args.order > 2 and any(name.startswith("specialized") for name in (*args.variants, args.control))):
         parser.error("positive repeats required; specialized algebra supports M1/M2 only")
+    if (args.sweep or args.candidate_run) and not args.rollouts:
+        parser.error("--sweep and --candidate-run require --rollouts")
     jax.config.update("jax_enable_x64", True)
     control = args.control
     control_name, _, control_ept = control.rpartition("_e")
     variants = {control: {**VARIANTS[control_name], "ept": int(control_ept)}, **{
         f"{name}_e{ept}": {**VARIANTS[name], "ept": ept}
         for name in args.variants for ept in (args.epts if "cufftdx" in name else (8,))}}
-    report: dict[str, Any] = {"device": jax.devices()[0].device_kind, "order": args.order,
-        "reference": "M6 cufft FP64 pad2", "control": control, "fft_epts": args.epts,
+    variants = {name: {"order": args.order, **settings} for name, settings in variants.items()}
+    if args.sweep:
+        variants = {f"M{order}_{kind}": {
+            "order": order, "precision": "fp64",
+            "backend": ("cufft" if kind == "cufft" else "specialized_cufftdx" if order == 2 else "cufftdx_all"),
+            "pad_factor": 1 if kind == "native" and order <= 2 else 2,
+            "ept": 16 if kind == "native" and order == 2 else 8,
+        } for order in range(1, 7) for kind in ("cufft", "native")}
+    controls = {name: f"M{settings['order']}_cufft" if args.sweep else control for name, settings in variants.items()}
+    candidates = ({f"{variant}_spectral_all_boundaries_stages_carry_local": variant for variant in (
+        "fourier_fused_features_overlap", "fourier_fused_features_product_overlap")}
+        if args.candidate_run else {})
+    loaded = load_run(args.candidate_run) if args.candidate_run else None
+    controls.update({name: next(iter(candidates)) for name in candidates})
+    controls["M6"] = "M6_cufft" if args.sweep else control
+    rollout = rollout_if_trial
+    if args.sweep or candidates:
+        from scripts.time_single_rollouts import packed_boundary
+
+        namespace = SimpleNamespace(**vars(ti))
+        namespace._state_to_hat = packed_boundary
+        namespace._hat_to_state = partial(packed_boundary, inverse=True)
+        rollout = FunctionType(rollout_if_trial.__code__, {**rollout_if_trial.__globals__, "ti": namespace})
+    report: dict[str, Any] = {"device": jax.devices()[0].device_kind, "order": list(range(1, 7)) if args.sweep else args.order,
+        "reference": "M6 cufft FP64 pad2", "control": controls if args.sweep or candidates else control,
+        "variants": variants, "candidates": candidates, "candidate_run": str(args.candidate_run) if candidates else None,
+        "fft_epts": sorted({settings["ept"] for settings in variants.values()}),
+        "timing_repeats": {name: 1 if args.sweep and name.endswith("_cufft") else args.repeats
+                           for name in (*variants, *candidates)},
         "mode": "full_single_rollouts" if args.rollouts else "spectral_forward",
         "precision": "FP64 integrator; mixed means FP32 FFT/physical products, FP64 spectral arithmetic",
         "families": {}}
@@ -163,12 +195,20 @@ if __name__ == "__main__":
             inputs = ((ti.State(eta[0], xi[0]), times) if args.rollouts else tuple(
                 jnp.fft.rfft(field[:batch, 0]).at[..., nx // 2].set(0) for field in (eta, xi)))
             compiled, outputs, records = {}, {}, {}
-            for name in ("M6", *variants):
-                settings = {**VARIANTS[CONTROL], "ept": 8} if name == "M6" else variants[name]
-                predict = partial(classical_hat, k=k, g0=g0, nx=nx,
-                                  order=6 if name == "M6" else args.order, **settings)
-                function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
-                                    carry_spectral=True, local_if=True, predict_hat=predict)
+            for name in ("M6", *variants, *candidates):
+                physical_predict = None
+                if name in candidates:
+                    from scripts.benchmark_dno_fusion import build_variant
+
+                    predict = build_variant(cast(LoadedRun, loaded), jnp.log(depth[:, 0]), nx, candidates[name], fft_ept=8)
+                    physical_predict = partial(lambda e, x, fn: jnp.fft.irfft(
+                        fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]), fn=predict)
+                else:
+                    settings = {**VARIANTS[CONTROL], "ept": 8, "order": 6} if name == "M6" else variants[name]
+                    predict = partial(classical_hat, k=k, g0=g0, nx=nx, **settings)
+                function = (partial(rollout, params=params, substeps=cfg.substeps,
+                                    carry_spectral=True, local_if=True, half_spectrum=False,
+                                    predict_hat=predict, predict_gxi=physical_predict)
                             if args.rollouts else predict)
                 started = time.perf_counter()
                 compiled[name] = jax.jit(function).lower(*inputs).compile()
@@ -183,10 +223,13 @@ if __name__ == "__main__":
                     records[name]["flat_g0_max_absolute"] = float(np.abs(zero - np.asarray(g0 * inputs[1])).max())
                 print(f"{family} B{batch} {name}: compiled and warmed", flush=True)
             for repeat in range(args.repeats):
-                for name in list(variants)[::1 if repeat % 2 == 0 else -1]:
+                for name in [*variants, *candidates][::1 if repeat % 2 == 0 else -1]:
+                    if args.sweep and name.endswith("_cufft") and repeat > 0:
+                        continue
                     started = time.perf_counter()
                     outputs[name] = jax.block_until_ready(compiled[name](*inputs))
                     records[name]["seconds"].append(time.perf_counter() - started)
+                    print(f"{family} B{batch} {name}: repeat {repeat + 1}: {records[name]['seconds'][-1]:.6f}s", flush=True)
             for name, result in outputs.items():
                 record = records[name]
                 if record["seconds"]:
@@ -198,13 +241,13 @@ if __name__ == "__main__":
                     for key in cached:
                         actual = np.asarray(result[key])
                         if record["finite"]:
-                            record[key] = {"control": errors(actual, np.asarray(outputs[control][key])),
+                            record[key] = {"control": errors(actual, np.asarray(outputs[controls[name]][key])),
                                            "M6": errors(actual, np.asarray(outputs["M6"][key])),
                                            "cached_M6": errors(actual, cached[key])}
                 else:
                     record["finite"] = bool(np.isfinite(np.asarray(result)).all())
                     if record["finite"]:
-                        record.update(control=errors(np.asarray(result), np.asarray(outputs[control])),
+                        record.update(control=errors(np.asarray(result), np.asarray(outputs[controls[name]])),
                                       M6=errors(np.asarray(result), np.asarray(outputs["M6"])))
                 print(f"{family} B{batch} {name}: {record.get('median_seconds')} s; finite={record['finite']}", flush=True)
             rows[f"B{batch}"] = records
