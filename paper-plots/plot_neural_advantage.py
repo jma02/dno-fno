@@ -23,6 +23,7 @@ OUT = ROOT / "paper-plots/figures"
 RUNS = (
     ("c27_tanaka_hard128_full_equal_local_20260918", "full", "larger", "#8b5ea8", "s"),
     ("c27_branches16_tanaka_hard128_20260923", "small", "small", "#087eaa", "o"),
+    ("c27_w320_b4_h80_ema_grad09_20260927", "gradient EMA", "candidate", "#c45b22", None),
 )
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
@@ -68,7 +69,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     })
     axes = fig.subplots(2, 2)
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
-                        top=0.78 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
+                        top=0.74 if candidate or baseline_free else 0.81, hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
             timing = warm["families"][family]
@@ -122,14 +123,18 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                     if len(selected) != 1 or saved["times"][-1] != horizon:
                         parser.error(f"{source}: saved accuracy case or horizon does not match")
                     neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
-                ax.axhline(neural_error, color=color, ls="--", lw=1.0, zorder=1)
+                ax.axhline(neural_error, color=color, ls="-" if marker is None else "--", lw=1.0, zorder=1)
                 print(f"{title}, {name}: saved final surface error={neural_error:.6g}%")
                 continue
             result = json.loads(source.read_text())
+            neural_error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
+            if marker is None:
+                ax.axhline(neural_error, color=color, ls="-", lw=1.0, zorder=1)
+                print(f"{title}, {name}: saved median final surface error={neural_error:.6g}%")
+                continue
             neural_seconds = result["surrogate_wall_s"]
             if warm:
                 neural_seconds = scale * np.median(warm["families"][family]["methods"][name]["seconds"])
-            neural_error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
             ax.scatter(neural_seconds, neural_error, color=color, marker=marker,
                        s=65, edgecolors="white", linewidths=0.8, zorder=3)
             right = max(right, neural_seconds)
@@ -180,8 +185,9 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         *[Line2D([], [], color=color, marker=None if args.single_case else marker,
-                  ls="--" if args.single_case else "none", lw=1.0, ms=7,
-                  label=f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
+                  ls="-" if marker is None else "--" if args.single_case else "none", lw=1.0, ms=7,
+                  label="Gradient EMA — saved accuracy" if marker is None else
+                  f"Neural — {name}" + (" (saved accuracy)" if args.single_case else ""))
           for _, name, _, color, marker in reversed(RUNS)],
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
         *[Line2D([], [], color=color, ls=style, lw=width, label=label)

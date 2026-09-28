@@ -190,10 +190,16 @@ relative difference 7.75e-12; see
 `outputs/fair_classical_20260925/padding_check.json`. This does not change the
 separate 2× padding in the nonlinear water-wave RHS.
 
-The orange line shows the retained fused candidate. The rejected shared-M1
+The orange vertical line shows the retained fused candidate. The rejected shared-M1
 candidate line and its slowdown annotations have been removed; its measured
-results remain in the experiment records below. No candidate accuracy
-coordinate is assigned.
+results remain in the experiment records below. Orange horizontal lines add
+the epoch-120 gradient-EMA checkpoint's saved rollout accuracy from
+`outputs/c27_w320_b4_h80_ema_grad09_20260927/`:
+Ada uses the 32-case family median; cloud panels use the corresponding
+single test case from that same local evaluation. These references use the
+ordinary FP32 model with FP64 integration. They are separate from the existing
+vertical runtime lines for the earlier checkpoint and optimized execution path;
+no new joint runtime/error point or cloud evaluation is implied.
 
 Purple lines show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
 Cloud diamonds give that single case's final surface error; Ada shows runtime only
@@ -231,8 +237,8 @@ Neural timings are unchanged: cloud candidates remain under
 `outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`, and Ada
 uses `outputs/half_spectrum_20260927/ada_full.json`. Classical and neural runs
 retain the same integration settings and packed boundaries; neural checkpoints,
-inference paths, trained-model accuracy references and spectral EMA overlays
-are unchanged.
+inference paths, existing trained-model accuracy references and spectral EMA
+overlays are unchanged. The gradient-EMA accuracy references are additional.
 Balanced feature stores showed no useful additional gain. Half-spectrum GL2
 carry was also tested for both methods and rejected; the selected neural and
 classical paths both retain full-spectrum carry.
