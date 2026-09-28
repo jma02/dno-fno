@@ -136,9 +136,13 @@ def main() -> None:
         "--translation_tangent_weight",
         type=float,
         default=0.0,
-        help="Weight of the localized translation-tangent error on Tanaka rows only. Projects "
+        help="Weight of the localized translation-tangent error on selected rows. Projects "
         "the DNO error onto eta_x in periodic windows and normalizes "
         "by sqrt(g*h). 0 disables.",
+    )
+    parser.add_argument(
+        "--translation_tangent_scope", choices=("tanaka", "all"), default="tanaka",
+        help="Wave families contributing to the translation-tangent loss.",
     )
     parser.add_argument(
         "--translation_tangent_smoothing_scale",
@@ -430,7 +434,6 @@ def main() -> None:
         "xi_scale": xi_scale,
         "eta_scale": eta_scale,
         "target_scale": target_scale,
-        "translation_tangent_scope": "tanaka",
     }
     with open(run_dir / "config.json", "w", encoding="utf-8") as handle:
         json.dump(config_payload, handle, indent=2)
@@ -504,7 +507,7 @@ def main() -> None:
                 gxi_target=gxi,
                 depth=h_phys,
                 k=k_grid_jax,
-                sample_mask=tanaka,
+                sample_mask=tanaka if args.translation_tangent_scope == "tanaka" else None,
                 smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
             )
@@ -814,7 +817,7 @@ def main() -> None:
                 # Skipped Hadamard batches add zero loss and zero to the evaluation count.
                 hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
                 hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
-                # Translation loss is a mean over selected nonflat Tanaka rows only.
+                # Translation loss is a mean over selected nonflat rows.
                 selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * buffered_size
                 tangent_sample_count += selected_count
                 tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
@@ -868,7 +871,7 @@ def main() -> None:
         if val_batch_losses:
             losses = np.asarray(val_batch_losses)
             means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
-            # Validation is ordered by family: do not dilute Tanaka loss with other rows.
+            # Weight translation loss by its selected nonflat rows across batches.
             tangent_counts = losses[:, 4] * val_batch_sizes
             means[2] = np.dot(losses[:, 2], tangent_counts) / max(tangent_counts.sum(), 1.0)
             hadamard_selected = np.arange(len(losses)) % args.val_hadamard_interval == 0
