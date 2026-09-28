@@ -28,12 +28,14 @@ from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import _dno_series_hat  # noqa: E402
 
 Backend = Literal["cufft", "cufftdx_all", "cufftdx_products", "cufftdx_all_products",
-                  "specialized", "specialized_cufftdx", "specialized_cufftdx_products"]
+                  "specialized", "specialized_cufftdx", "specialized_cufftdx_products",
+                  "interleaved", "interleaved_cufftdx"]
 Precision = Literal["fp64", "fp32", "mixed"]
 VARIANTS = {f"{backend}_{precision}_p{pad}": dict(backend=backend, precision=precision, pad_factor=pad)
             for backend, precision, pad in product(
                 ("cufft", "cufftdx_all", "cufftdx_products", "cufftdx_all_products",
-                 "specialized", "specialized_cufftdx", "specialized_cufftdx_products"),
+                 "specialized", "specialized_cufftdx", "specialized_cufftdx_products",
+                 "interleaved", "interleaved_cufftdx"),
                 ("fp64", "fp32", "mixed"), (1, 2))}
 CONTROL = "cufft_fp64_p2"
 
@@ -51,7 +53,8 @@ def classical_hat(
     spectral = jnp.complex64 if precision == "fp32" else jnp.complex128
     eta_hat, xi_hat = eta_hat.astype(spectral), xi_hat.astype(spectral)
     k, g0 = (value.astype(jnp.float32 if precision == "fp32" else jnp.float64) for value in (k, g0))
-    native_all = backend in ("cufftdx_all", "cufftdx_all_products", "specialized_cufftdx", "specialized_cufftdx_products")
+    native_all = backend in ("cufftdx_all", "cufftdx_all_products", "specialized_cufftdx",
+                            "specialized_cufftdx_products", "interleaved_cufftdx")
     fused_products = backend.endswith("products")
 
     def transform(
@@ -94,6 +97,45 @@ def classical_hat(
                                          jnp.stack((xi_x, q0_physical, q1_physical), axis=-2))
             symbols = jnp.stack(jnp.broadcast_arrays(g0 * (1j * k), k ** 2, g0), axis=-2)
             result -= jnp.sum(symbols * products, axis=-2)
+    elif backend.startswith("interleaved"):
+        padded_nx = pad_factor * nx
+        gm_hats = [g0 * xi_hat]
+        eta, xi_x, q0_physical = jnp.moveaxis(transform(jnp.stack(
+            (eta_hat, 1j * k * xi_hat, gm_hats[0]), axis=-2), padded_nx, inverse=True), -2, 0)
+        eta_powers, gm_padded = [eta, eta], [q0_physical]
+        for m in range(1, order + 1):
+            products = [(eta_powers[m], xi_x)]
+            if m % 2 == 0:
+                r = m // 2
+                symbols = [g0 * k ** (2 * (r - 1)) * (1j * k)]
+                for s in range(r):
+                    products.extend(((eta_powers[2 * (r - s)], gm_padded[2 * s]),
+                                     (eta_powers[2 * (r - s) - 1], gm_padded[2 * s + 1])))
+                    symbols.extend((k ** (2 * (r - s)), g0 * k ** (2 * (r - s - 1))))
+            else:
+                r = (m + 1) // 2
+                symbols = [k ** (2 * (r - 1)) * (1j * k)]
+                for s in range(r - 1):
+                    products.extend(((eta_powers[2 * (r - s) - 1], gm_padded[2 * s]),
+                                     (eta_powers[2 * (r - s - 1)], gm_padded[2 * s + 1])))
+                    symbols.extend((g0 * k ** (2 * (r - s - 1)), k ** (2 * (r - s - 1))))
+                products.append((eta_powers[1], gm_padded[2 * (r - 1)]))
+                symbols.append(g0)
+            # The next surface power shares this FFT batch, retaining its projection.
+            if m < order:
+                products.append((eta, eta_powers[m]))
+            left, right = zip(*products)
+            coefficients = transform(jnp.stack(left, axis=-2) * jnp.stack(right, axis=-2))[..., :nx // 2 + 1]
+            product_hats = pad_factor * coefficients.at[..., nx // 2].set(0)
+            gm_hat = -jnp.sum(jnp.stack(jnp.broadcast_arrays(*symbols), axis=-2)
+                             * product_hats[..., :len(symbols), :], axis=-2)
+            gm_hats.append(gm_hat)
+            if m < order:
+                gm, power = jnp.moveaxis(transform(jnp.stack(
+                    (gm_hat, product_hats[..., -1, :] / (m + 1)), axis=-2), padded_nx, inverse=True), -2, 0)
+                gm_padded.append(gm)
+                eta_powers.append(power)
+        result = sum(gm_hats, start=jnp.zeros_like(gm_hats[0]))
     elif backend == "cufft" and precision == "fp64":
         result = _dno_series_hat(eta_hat, xi_hat, k, g0, nx=nx, order=order, pad_factor=pad_factor)
     else:
@@ -158,7 +200,7 @@ if __name__ == "__main__":
     controls.update({name: next(iter(candidates)) for name in candidates})
     controls["M6"] = "M6_cufft" if args.sweep else control
     rollout = rollout_if_trial
-    if args.sweep or candidates:
+    if args.rollouts:
         from scripts.time_single_rollouts import packed_boundary
 
         namespace = SimpleNamespace(**vars(ti))
