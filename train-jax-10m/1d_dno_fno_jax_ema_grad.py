@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import cast
+from typing import Any, cast
 
 os.environ.setdefault("NCCL_P2P_LEVEL", "PHB")
 
@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import linen as nn
 from flax.training import checkpoints
 from flax.training import train_state
 from jax.experimental.shard_map import shard_map
@@ -45,13 +46,13 @@ from util import (  # noqa: E402
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
-from hadamard_shape_regularizer import ApplyFn, compute_hadamard_loss  # noqa: E402
+from hadamard_shape_regularizer import compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_translation_tangent_loss,
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 
-from dno_net_v2 import CraigSulemDNO  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
 from losses import relative_l2_loss  # noqa: E402
 from checkpoint_util import (  # noqa: E402
@@ -122,6 +123,8 @@ def main() -> None:
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
+    parser.add_argument("--metric_interval", type=int, default=16,
+                        help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
     parser.add_argument(
         "--translation_tangent_weight",
@@ -241,6 +244,8 @@ def main() -> None:
     args = parser.parse_args()
     if not 0.0 <= args.gradient_ema_decay < 1.0:
         parser.error("--gradient_ema_decay must be in [0, 1)")
+    if args.metric_interval < 1:
+        parser.error("--metric_interval must be positive")
     start_time = perf_counter()
 
     training_dtype = jnp.float32
@@ -322,6 +327,32 @@ def main() -> None:
             jnp.zeros((1, 1), dtype=training_dtype),
         )["params"]
 
+    def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array) -> jax.Array:
+        if args.model != "cs_dno":
+            return cast(jax.Array, model.apply(variables, inputs, depth))
+        multiplier_model = DepthAwareMultiplier(args.latent, domain_length, 5.0, args.cs_mult_hidden)
+
+        def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
+                      context: nn.module.InterceptorContext) -> Any:
+            if isinstance(context.module, CraigSulemBlock) and context.method_name == "__call__":
+                eta_features, xi_phys, log_depth = call_args
+                if context.module.name != f"cs_block_{args.n_blocks - 1}":
+                    return jnp.zeros_like(xi_phys)
+                groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
+                weights = eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups], axis=-1)
+                filters = jnp.concatenate([
+                    cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
+                    for group in groups
+                ], axis=-1)
+                xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
+                filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
+                weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
+                return jnp.fft.irfft(jnp.sum(filters * weighted_hat, axis=-1), n=nx, axis=-1, norm="forward")
+            return next_fun(*call_args, **call_kwargs)
+
+        with nn.intercept_methods(intercept):
+            return cast(jax.Array, model.apply(variables, inputs, depth))
+
     # Set the learning-rate schedule and initialize AdamW's update state.
     total_steps = args.epochs * train_steps_per_epoch
     if args.lr_warmup_steps > 0:
@@ -343,7 +374,7 @@ def main() -> None:
     )
     print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
     training_state = train_state.TrainState.create(
-        apply_fn=model.apply, params=params, tx=optimizer
+        apply_fn=apply_model, params=params, tx=optimizer
     )
 
     training_state = replicate_pytree_from_host(training_state, replicated)
@@ -390,7 +421,7 @@ def main() -> None:
         batch_targets = norm_targets_jax(gxi)
         predictions = cast(
             jax.Array,
-            model.apply(
+            apply_model(
                 {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth
             ),
         )
@@ -454,7 +485,7 @@ def main() -> None:
         batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
         return compute_hadamard_loss(
             rng=rng_probe,
-            apply_fn=cast(ApplyFn, model.apply),
+            apply_fn=apply_model,
             model_params=current_params,
             eta_phys=eta_sub,
             xi_phys=xi_sub,
@@ -697,36 +728,41 @@ def main() -> None:
         tangent_loss_sum = tangent_sample_count = 0.0
         hadamard_loss_sum = 0.0
         hadamard_batch_evaluation_count = 0.0
+        pending_train_metrics: list[tuple[jax.Array, dict[str, jax.Array], int]] = []
         train_bar = tqdm(
             prefetch_batches(train_indices, epoch_rng),
             total=train_steps_per_epoch,
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for eta_b, xi_b, gxi_b, depth_b, tanaka_b in train_bar:
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(train_bar, 1):
             batch_size = int(eta_b.shape[0])
-            train_batch_sizes.append(batch_size)
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
                 training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, tanaka_b
             )
-            batch_loss, batch_metrics = jax.device_get((batch_loss, batch_metrics))
-            batch_loss_value = float(batch_loss)
-            batch_losses.append(batch_loss_value)
-            # Skipped Hadamard batches add zero loss and zero to the evaluation count.
-            hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
-            hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
-            # Translation loss is a mean over selected nonflat Tanaka rows only.
-            selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * batch_size
-            tangent_sample_count += selected_count
-            tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
-            # Other losses are batch means; convert them to sums over samples.
-            for name, batch_mean in batch_metrics.items():
-                loss_sums[name] = (
-                    loss_sums.get(name, 0.0) + float(batch_mean) * batch_size
-                )
-            train_bar.set_postfix(loss=batch_loss_value, refresh=False)
+            pending_train_metrics.append((batch_loss, batch_metrics, batch_size))
+            if len(pending_train_metrics) < args.metric_interval and batch_index < train_steps_per_epoch:
+                continue
+            for batch_loss, batch_metrics, buffered_size in jax.device_get(pending_train_metrics):
+                batch_loss_value = float(batch_loss)
+                if not np.isfinite(batch_loss_value):
+                    raise FloatingPointError(f"Non-finite training loss at epoch {epoch}, batch {batch_index}")
+                batch_losses.append(batch_loss_value)
+                train_batch_sizes.append(buffered_size)
+                # Skipped Hadamard batches add zero loss and zero to the evaluation count.
+                hadamard_loss_sum += float(batch_metrics.pop("hadamard_loss", 0.0))
+                hadamard_batch_evaluation_count += float(batch_metrics.pop("hadamard_active", 0.0))
+                # Translation loss is a mean over selected nonflat Tanaka rows only.
+                selected_count = float(batch_metrics.pop("translation_tangent_fraction", 0.0)) * buffered_size
+                tangent_sample_count += selected_count
+                tangent_loss_sum += float(batch_metrics.pop("translation_tangent_loss", 0.0)) * selected_count
+                # Other losses are batch means; convert them to sums over samples.
+                for name, batch_mean in batch_metrics.items():
+                    loss_sums[name] = loss_sums.get(name, 0.0) + float(batch_mean) * buffered_size
+            pending_train_metrics.clear()
+            train_bar.set_postfix(loss=batch_losses[-1], refresh=False)
 
         # Require one optimizer update per batch and matching counters across GPUs.
         epoch_end_step, epoch_end_optimizer_count = training_counter_values(
@@ -746,6 +782,7 @@ def main() -> None:
         # Evaluate validation samples without shuffling or changing model parameters.
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
+        pending_val_losses: list[tuple[jax.Array, ...]] = []
         for batch_index, (eta_b, xi_b, gxi_b, depth_b, tanaka_b) in enumerate(
             prefetch_batches(val_indices, None)
         ):
@@ -757,7 +794,12 @@ def main() -> None:
                 training_state.params, jax.random.fold_in(validation_rng, batch_index),
                 eta_b, xi_b, gxi_b, depth_b, tanaka_b,
             )
-            val_batch_losses.append(tuple(map(float, jax.device_get(batch_val_losses))))
+            pending_val_losses.append(batch_val_losses)
+            if len(pending_val_losses) == args.metric_interval:
+                val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
+                pending_val_losses.clear()
+        if pending_val_losses:
+            val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
 
         # Each Hadamard subset estimates its full batch's mean, so use full batch sizes.
         val_data_loss = val_mode_loss = val_tangent_loss = val_hadamard_loss = float("inf")
