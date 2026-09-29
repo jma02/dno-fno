@@ -96,6 +96,7 @@ def load_run(
             baseline_order=int(config.get(
                 "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]
             )),
+            baseline_true_depth=bool(config.get("cs_baseline_true_depth", False)),
             domain_length=float(config["domain_length"]),
             xi_scale=float(config["xi_scale"]),
             eta_scale=float(config["eta_scale"]),

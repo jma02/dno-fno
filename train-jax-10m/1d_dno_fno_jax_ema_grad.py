@@ -83,9 +83,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
-        help="Analytic baseline order: G0+G1 or G0+G1+G2. Nonlinear sample weights "
-        "always use the reference correction beyond G0+G1.",
+        help="Analytic baseline order: G0+G1 or G0+G1+G2.",
     )
+    parser.add_argument("--cs_baseline_true_depth", action="store_true",
+                        help="Use the actual depth for the analytic baseline, without clipping at h=5.")
     parser.add_argument(
         "--cs_mult_hidden",
         type=int,
@@ -107,7 +108,7 @@ def main() -> None:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
+        default=1,
         help="Final epoch number and learning-rate schedule length. "
         "Keep the same value when resuming; completed epochs are not repeated.",
     )
@@ -115,7 +116,7 @@ def main() -> None:
         "--stop_after_epoch", type=int, default=1,
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
     )
-    parser.add_argument("--lr", type=float, default=5e-7)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument(
         "--lr_warmup_steps",
         type=int,
@@ -138,6 +139,10 @@ def main() -> None:
                         help="Relative correction beyond G0+G1 at which the nonlinear weight is 1.5.")
     parser.add_argument("--nonlinear_weight_mean", type=float, default=1.463313,
                         help="Fixed training mean of the nonlinear weight; default calibrated on hard128 training rows.")
+    parser.add_argument("--data_normalization", choices=("nonlinear", "residual"), default="nonlinear",
+                        help="Weight by the M1 correction, or divide by the model's own baseline residual.")
+    parser.add_argument("--residual_floor", type=float, default=1e-6,
+                        help="Residual denominator floor as a fraction of the target norm.")
     parser.add_argument("--metric_interval", type=int, default=16,
                         help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
@@ -281,6 +286,10 @@ def main() -> None:
         parser.error("--nonlinear_reference must be finite and positive")
     if not 1.0 <= args.nonlinear_weight_mean <= 2.0:
         parser.error("--nonlinear_weight_mean must be in [1, 2]")
+    if not np.isfinite(args.residual_floor) or args.residual_floor <= 0.0:
+        parser.error("--residual_floor must be finite and positive")
+    if args.data_normalization == "residual" and args.model != "cs_dno":
+        parser.error("--data_normalization residual requires --model cs_dno")
     if args.model == "cs_dno" and args.norm != "scale":
         parser.error("CS residual normalization requires --norm scale")
     start_time = perf_counter()
@@ -345,6 +354,7 @@ def main() -> None:
             use_relative_elevation=args.cs_use_relative_elevation,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
+            baseline_true_depth=args.cs_baseline_true_depth,
             domain_length=domain_length,
             xi_scale=xi_scale,
             eta_scale=eta_scale,
@@ -379,16 +389,11 @@ def main() -> None:
                     *, return_baseline: bool = False) -> Any:
         if args.model != "cs_dno":
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
-            return (prediction, jnp.zeros_like(prediction)) if return_baseline else prediction
+            return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)) if return_baseline else prediction
         multiplier_model = DepthAwareMultiplier(args.latent, domain_length, 5.0, args.cs_mult_hidden)
-        baseline_terms: list[jax.Array] = []
 
         def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
                       context: nn.module.InterceptorContext) -> Any:
-            if return_baseline and context.method_name in ("_linear_baseline", "_g1_baseline"):
-                value = next_fun(*call_args, **call_kwargs)
-                baseline_terms.append(value)
-                return value
             if isinstance(context.module, CraigSulemBlock) and context.method_name == "__call__":
                 eta_features, xi_phys, log_depth = call_args
                 if context.module.name != f"cs_block_{args.n_blocks - 1}":
@@ -406,11 +411,7 @@ def main() -> None:
             return next_fun(*call_args, **call_kwargs)
 
         with nn.intercept_methods(intercept):
-            prediction = cast(jax.Array, model.apply(variables, inputs, depth))
-        if return_baseline:
-            # Keep sample weighting fixed to G0+G1, including when prediction uses G2.
-            return prediction, (baseline_terms[0] + baseline_terms[1])[..., None]
-        return prediction
+            return model.apply(variables, inputs, depth, return_baseline=return_baseline)
 
     # Set the learning-rate schedule and initialize AdamW's update state.
     total_steps = args.epochs * train_steps_per_epoch
@@ -474,10 +475,12 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
         family: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+        *,
+        collect_family_metrics: bool = False,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
-        predictions, baseline = apply_model(
+        predictions, baseline, m1_baseline = apply_model(
             {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
             return_baseline=True,
         )
@@ -493,14 +496,34 @@ def main() -> None:
         residual_squared = jnp.sum(
             jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
         )
-        # Weight the correction beyond G0+G1, independent of the model's baseline order.
-        residual_ratio = jnp.sqrt(residual_squared) / target_norm
-        nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
-        denominator = jax.lax.stop_gradient(
-            target_norm * args.nonlinear_weight_mean / nonlinear_weight
-        ) if args.model == "cs_dno" else target_norm
+        residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
+        denominator = target_norm
+        if args.model == "cs_dno":
+            if args.data_normalization == "residual":
+                denominator = residual_denominator
+            else:
+                # The control keeps its weighting based on the M1 correction.
+                m1_hat = jnp.fft.rfft(m1_baseline, axis=1)
+                residual_ratio = jnp.sqrt(jnp.sum(
+                    jnp.abs((target_hat - m1_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
+                )) / target_norm
+                nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
+                denominator = target_norm * args.nonlinear_weight_mean / nonlinear_weight
+        denominator = jax.lax.stop_gradient(denominator)
         data_loss = jnp.mean(error_norm / denominator)
         full_l2_loss = jnp.mean(error_norm / target_norm)
+        family_metrics: tuple[jax.Array, ...] = ()
+        if collect_family_metrics:
+            row_metrics = jnp.stack((
+                jnp.ones_like(error_norm), error_norm / target_norm,
+                error_norm / residual_denominator, squared_error < residual_squared,
+                error_norm / denominator,
+            ))
+            # Masked means, not means of each shard's family means: pmean remains exact.
+            family_metrics = tuple(
+                value for family_id in PhysicalFamilyId
+                for value in jnp.mean(jnp.where(family == family_id, row_metrics, 0.0), axis=1)
+            )
         # Data fit uses normalized Gxi; the physics losses below use physical fields.
         h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
         gxi_prediction = denorm_targets_jax(predictions)[..., 0]
@@ -539,7 +562,7 @@ def main() -> None:
                 / jnp.maximum(global_selected, jnp.float32(1.0))
             )
             tangent_loss = tangent_loss * shard_weight
-        return data_loss, mode_loss, tangent_loss, local_selected / eta.shape[0], full_l2_loss
+        return data_loss, mode_loss, tangent_loss, local_selected / eta.shape[0], full_l2_loss, family_metrics
 
     def hadamard_loss_on_subset(
         rng: jax.Array,
@@ -549,16 +572,12 @@ def main() -> None:
         batch_depth: jax.Array,
     ) -> jax.Array:
         rng_perm, rng_probe = jax.random.split(rng)
-        h_phys = jnp.exp(
-            jnp.minimum(batch_depth.astype(training_dtype)[:, 0], log_h_max)
-        )
         sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
             :hadamard_microbatch_local
         ]
         eta_sub = eta.astype(training_dtype)[sample_indices]
         xi_sub = xi.astype(training_dtype)[sample_indices]
-        depth_sub = h_phys[sample_indices]
-        batch_depth_sub = jnp.log(depth_sub)[:, None].astype(jnp.float64)
+        batch_depth_sub = batch_depth.astype(training_dtype)[sample_indices].astype(jnp.float64)
         return compute_hadamard_loss(
             rng=rng_probe,
             apply_fn=apply_model,
@@ -590,12 +609,12 @@ def main() -> None:
         def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
-            data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss = compute_loss_components(
+            data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss, _ = compute_loss_components(
                 current_params, eta, xi, gxi, batch_depth, family
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {
-                "train_l2_loss": full_l2_loss, "train_nonlinear_l2_loss": data_loss,
+                "train_l2_loss": full_l2_loss, "train_data_loss": data_loss,
             }
             if args.mode_balanced_weight > 0.0:
                 mode_weight = args.mode_balanced_weight * jnp.minimum(
@@ -675,18 +694,18 @@ def main() -> None:
         family: jax.Array,
         *,
         run_hadamard: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, ...]:
         hadamard_loss = jnp.float32(0.0)
         if args.hadamard_weight > 0.0 and run_hadamard:
             hadamard_loss = training_dtype(hadamard_loss_on_subset(
                 jax.random.fold_in(jax.random.fold_in(rng_key, batch_index), jax.lax.axis_index("batch")),
                 current_params, eta, xi, batch_depth,
             ))
-        data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss = compute_loss_components(
-            current_params, eta, xi, gxi, batch_depth, family
+        data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss, family_metrics = compute_loss_components(
+            current_params, eta, xi, gxi, batch_depth, family, collect_family_metrics=True,
         )
         return jax.lax.pmean(
-            (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss),
+            (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss, *family_metrics),
             axis_name="batch",
         )
 
@@ -696,7 +715,7 @@ def main() -> None:
                 partial(eval_step, run_hadamard=run_hadamard),
                 mesh=mesh,
                 in_specs=(P(), P(), P(), partition, partition, partition, partition, partition),
-                out_specs=(P(), P(), P(), P(), P(), P()),
+                out_specs=(P(),) * (6 + 5 * len(PhysicalFamilyId)),
                 check_rep=False,
             )
         )
@@ -887,8 +906,8 @@ def main() -> None:
         # Ordinary losses use every batch; HD is a diagnostic on fixed sampled batches.
         val_data_loss = val_mode_loss = val_tangent_loss = val_hadamard_loss = float("inf")
         val_full_l2_loss = float("inf")
+        losses = np.asarray(val_batch_losses)
         if val_batch_losses:
-            losses = np.asarray(val_batch_losses)
             means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
             # Weight translation loss by its selected nonflat rows across batches.
             tangent_counts = losses[:, 4] * val_batch_sizes
@@ -907,11 +926,19 @@ def main() -> None:
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_l2_loss": val_full_l2_loss,
-            "val_nonlinear_l2_loss": val_data_loss,
+            "val_data_loss": val_data_loss,
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
             "val_hadamard_loss": val_hadamard_loss,
         }
+        if val_batch_losses:
+            family_totals = np.sum(losses[:, 6:] * np.asarray(val_batch_sizes)[:, None], axis=0).reshape(-1, 5)
+            for family_id, (count, relative, residual, wins, data_sum) in zip(PhysicalFamilyId, family_totals):
+                prefix = f"val_{family_id.name.lower()}"
+                epoch_record[f"{prefix}_l2_loss"] = float(relative / count)
+                epoch_record[f"{prefix}_baseline_ratio_floored"] = float(residual / count)
+                epoch_record[f"{prefix}_baseline_win_fraction"] = float(wins / count)
+                epoch_record[f"{prefix}_data_loss_share"] = float(data_sum / family_totals[:, 4].sum())
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)

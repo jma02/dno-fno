@@ -51,7 +51,8 @@ class ComputeMetricsTest(unittest.TestCase):
         }
         for options in (
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
-            {"cs_use_relative_elevation": True, "cs_baseline_order": 2},
+            {"cs_baseline_true_depth": True},
+            {"cs_use_relative_elevation": True, "cs_baseline_order": 2, "cs_baseline_true_depth": True},
         ):
             with self.subTest(options=options), patch(
                 "solver.evals.model_rollout.Path.read_text",
@@ -65,6 +66,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 loaded = load_run("/tmp/dno-architecture-loader-test")
                 self.assertEqual(loaded.model.use_relative_elevation, options.get("cs_use_relative_elevation", False))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
+                self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)

@@ -93,6 +93,7 @@ class CraigSulemDNO(nn.Module):
     use_relative_elevation: bool = False  # Append physical eta / actual depth.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
+    baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
 
     domain_length: float = 2 * jnp.pi
     # Multiply normalized inputs/outputs by these scales to get physical units.
@@ -113,7 +114,7 @@ class CraigSulemDNO(nn.Module):
     def _linear_baseline(self, xi_norm: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         grid_size = xi_norm.shape[1]
         xi_phys = xi_norm * self.xi_scale
-        h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max)))
+        h = jnp.exp(depth if self.baseline_true_depth else jnp.minimum(depth, jnp.log(self.h_clip_max)))
         return (self._g0_apply(xi_phys, h, grid_size) / self.target_scale).astype(xi_norm.dtype)
 
     def _g1_baseline(
@@ -126,7 +127,7 @@ class CraigSulemDNO(nn.Module):
         grid_size = xi_norm.shape[1]
         eta_phys = (eta_norm * self.eta_scale).astype(jnp.float64)
         xi_phys = (xi_norm * self.xi_scale).astype(jnp.float64)
-        h = jnp.exp(jnp.minimum(depth, jnp.log(self.h_clip_max))).astype(jnp.float64)
+        h = jnp.exp(depth if self.baseline_true_depth else jnp.minimum(depth, jnp.log(self.h_clip_max))).astype(jnp.float64)
 
         k = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
             grid_size // 2 + 1, dtype=jnp.float64,
@@ -147,7 +148,9 @@ class CraigSulemDNO(nn.Module):
         return ((g0_term + dx_term) / self.target_scale).astype(xi_norm.dtype)
 
     @nn.compact
-    def __call__(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+    def __call__(
+        self, inputs: jnp.ndarray, depth: jnp.ndarray, *, return_baseline: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
         clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
@@ -161,15 +164,16 @@ class CraigSulemDNO(nn.Module):
             baseline = self._linear_baseline(xi_norm, depth)
         if self.baseline_order >= 1:
             baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
+        m1_baseline = baseline
         if self.baseline_order == 2:
-            # Keep the M1 calls above available to the training loss's fixed weighting.
+            # Retain M1 separately for training objectives that use fixed sample weights.
             k64 = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
                 grid_size // 2 + 1, dtype=jnp.float64,
             )
             baseline = dno_series_eval(
                 (eta_norm * self.eta_scale).astype(jnp.float64),
                 xi_phys.astype(jnp.float64), k64,
-                jnp.exp(clipped_log_depth).astype(jnp.float64), order=2,
+                jnp.exp(depth if self.baseline_true_depth else clipped_log_depth).astype(jnp.float64), order=2,
             ) / self.target_scale
 
         # Build polynomial and spatial derivative features from eta.
@@ -222,4 +226,7 @@ class CraigSulemDNO(nn.Module):
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5
         correction = correction / self.target_scale
-        return (baseline + correction)[..., None]
+        prediction = (baseline + correction)[..., None]
+        if return_baseline:
+            return prediction, baseline[..., None], m1_baseline[..., None]
+        return prediction

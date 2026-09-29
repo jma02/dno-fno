@@ -33,7 +33,7 @@ Try hitting the Ar5iv API to grab a nice readable HTML instead of trying to use 
 ### Experiments
 - Every training experiment starts from scratch with fresh model and optimizer initialization. Do not initialize from trained checkpoints or resume a previous run unless the user explicitly requests it.
 - Train exactly one epoch per experiment, then evaluate rollouts. Do not extend the training budget without explicit user approval.
-- Use `5e-7` as the default learning rate for neural-DNO training experiments unless explicitly overridden.
+- Use `2e-5` as the default learning rate for scratch neural-DNO experiments, with `--epochs 1` so warmup and cosine decay fit the one-epoch budget, unless explicitly overridden.
 - Keep a log of all experiments in `experiments/experiments-<YYYY-MM-DD>.md` with correctness, timing, and merge decision. Append to the dated file for the day the experiment ran, creating it from the header in `EXPERIMENTS.md` if it does not exist yet, and add its row to the index in `EXPERIMENTS.md`.
 - `EXPERIMENTS.md` is the index only. Do not add experiment rows to it.
 - Use local `HH:MM` time from `date` when adding new rows.

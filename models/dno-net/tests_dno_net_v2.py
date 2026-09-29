@@ -85,21 +85,10 @@ def _learned_residual(
     depth: jnp.ndarray,
 ) -> jnp.ndarray:
     inputs = jnp.stack((eta, xi), axis=-1)
-    output = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
-    if model.baseline_order == -1:
-        return output
-    baseline = model._linear_baseline(xi, depth)
-    if model.baseline_order >= 1:
-        baseline = baseline + model._g1_baseline(eta, xi, depth)
-    if model.baseline_order == 2:
-        k = (2 * jnp.pi / model.domain_length) * jnp.arange(xi.shape[-1] // 2 + 1, dtype=jnp.float64)
-        baseline = dno_series_eval(
-            (eta * model.eta_scale).astype(jnp.float64),
-            (xi * model.xi_scale).astype(jnp.float64), k,
-            jnp.exp(jnp.minimum(depth, jnp.log(model.h_clip_max))).astype(jnp.float64),
-            order=2,
-        ) / model.target_scale
-    return output - baseline
+    output, baseline, _ = cast(tuple[jax.Array, jax.Array, jax.Array], model.apply(
+        variables, inputs, depth, return_baseline=True,
+    ))
+    return (output - baseline)[..., 0]
 
 
 def test_default_matches_original_forward() -> None:
@@ -311,6 +300,50 @@ def test_m2_zero_init_matches_classical_batched_fp64() -> None:
         assert sum(float(jnp.sum(leaf**2)) for leaf in jax.tree.leaves(gradient)) > 0
 
 
+def test_true_depth_analytic_baselines_and_returned_components() -> None:
+    eta, xi, _ = _state()
+    for order in (0, 1, 2):
+        model = _model(baseline_order=order).clone(
+            baseline_true_depth=True, domain_length=8 * pi,
+            eta_scale=0.17, xi_scale=0.08, target_scale=0.13,
+        )
+        clipped = model.clone(baseline_true_depth=False)
+        for dtype in (jnp.float32, jnp.float64):
+            inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (2, eta.shape[-1], 2)).astype(dtype)
+            depth = jnp.log(jnp.asarray([[0.8], [12.0]], dtype=dtype))
+            variables = model.init(jax.random.PRNGKey(12), inputs, depth)
+            prediction, baseline, m1 = cast(tuple[jax.Array, jax.Array, jax.Array], model.apply(
+                variables, inputs, depth, return_baseline=True,
+            ))
+            physical = (
+                (inputs[..., 0] * model.eta_scale).astype(jnp.float64),
+                (inputs[..., 1] * model.xi_scale).astype(jnp.float64),
+                0.25 * jnp.arange(eta.shape[-1] // 2 + 1, dtype=jnp.float64),
+                jnp.exp(depth).astype(jnp.float64),
+            )
+            expected = dno_series_eval(*physical, order=order)[..., None] / model.target_scale
+            expected_m1 = dno_series_eval(*physical, order=min(order, 1))[..., None] / model.target_scale
+            assert jnp.array_equal(prediction, cast(jax.Array, model.apply(variables, inputs, depth)))
+            assert jnp.array_equal(prediction, baseline)
+            tolerance = 2e-6 if dtype == jnp.float32 else 1e-11
+            assert float(jnp.linalg.norm(baseline - expected) / jnp.linalg.norm(expected)) < tolerance
+            assert float(jnp.linalg.norm(m1 - expected_m1) / jnp.linalg.norm(expected_m1)) < tolerance
+            if order == 2:
+                assert jnp.array_equal(baseline, expected)
+            clipped_prediction = cast(jax.Array, clipped.apply(variables, inputs, depth))
+            assert jnp.array_equal(clipped_prediction[0], prediction[0])
+            assert float(jnp.linalg.norm(clipped_prediction[1] - prediction[1])) > 1e-5
+            assert jnp.array_equal(clipped_prediction, cast(jax.Array, model.apply(
+                variables, inputs, jnp.minimum(depth, jnp.log(model.h_clip_max)),
+            )))
+            if dtype == jnp.float64:
+                active = _activate_residual(variables)
+                true_residual = _learned_residual(model, active, inputs[..., 0], inputs[..., 1], depth)
+                clipped_residual = _learned_residual(clipped, active, inputs[..., 0], inputs[..., 1], depth)
+                assert float(jnp.linalg.norm(true_residual)) > 0
+                assert jnp.allclose(true_residual, clipped_residual, rtol=1e-9, atol=1e-14)
+
+
 def test_experimental_residual_orders() -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
@@ -341,6 +374,7 @@ def main() -> int:
         test_eta_feature_configuration_controls_trunk_shape,
         test_relative_elevation_uses_physical_eta_and_unclipped_depth,
         test_m2_zero_init_matches_classical_batched_fp64,
+        test_true_depth_analytic_baselines_and_returned_components,
         test_experimental_residual_orders,
     )
     for test in tests:

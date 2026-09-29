@@ -24,8 +24,8 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --no-sync python train-jax-10m/1d_dno_fno_jax_em
   --model cs_dno --norm scale \
   --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
   --width 320 --n_blocks 8 --latent 4 --cs_mult_hidden 80 --cs_n_polys 3 \
-  --batch_size 1024 --epochs 120 --stop_after_epoch 1 --seed 0 \
-  --lr 5e-7 --lr_warmup_steps 500 --gradient_ema_decay 0.9 \
+  --batch_size 1024 --epochs 1 --stop_after_epoch 1 --seed 0 \
+  --lr 2e-5 --lr_warmup_steps 500 --gradient_ema_decay 0.9 --cs_baseline_true_depth \
   --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 \
   --translation_tangent_weight 10 --translation_tangent_scope all \
   --hadamard_weight 0.01 --hadamard_warmup_steps 500 \
