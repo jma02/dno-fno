@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import jax
 import jax.numpy as jnp
 
@@ -18,6 +20,8 @@ def compute_translation_tangent_loss(
     smoothing_scale: float = 1.0,
     denominator_eps: float = 1e-3,
     gravity: float = 1.0,
+    loss_norm: Literal["squared", "charbonnier"] = "squared",
+    charbonnier_eps: float = 1e-7,
 ) -> tuple[jax.Array, jax.Array]:
     """Return the translation loss and count of selected nonflat samples.
 
@@ -33,6 +37,10 @@ def compute_translation_tangent_loss(
     Rows in ``global_relative_mask`` instead use the squared global error
     projection divided by the squared target projection, with a scale-aware
     floor. Near-zero/cancelling target projections retain the local loss.
+
+    ``charbonnier`` uses sqrt(row_loss + eps^2) - eps before averaging.
+    This is a smooth absolute global or RMS local phase error, with finite
+    zero-error gradients and nonvanishing slope outside the smoothing floor.
     """
     dtype = eta.dtype
     eta_hat = jnp.fft.fft(eta, axis=-1)
@@ -80,6 +88,12 @@ def compute_translation_tangent_loss(
         )
         per_sample_loss = jnp.where(
             use_global, error_projection**2 / denominator, per_sample_loss
+        )
+    if loss_norm == "charbonnier":
+        eps = jnp.asarray(charbonnier_eps, dtype=dtype)
+        # Rationalization avoids subtractive cancellation near zero.
+        per_sample_loss = per_sample_loss / (
+            jnp.sqrt(per_sample_loss + eps**2) + eps
         )
     selected = peak_energy > jnp.asarray(1e-20, dtype=dtype)
     if sample_mask is not None:

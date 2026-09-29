@@ -176,6 +176,19 @@ def main() -> None:
         "for each sample, preventing large estimates in nearly flat regions.",
     )
     parser.add_argument(
+        "--translation_tangent_loss_norm",
+        choices=("squared", "charbonnier"),
+        default="squared",
+        help="Per-row tangent error norm: squared phase pressure, or Charbonnier "
+        "sqrt(row_loss + eps^2) - eps for absolute global / RMS local phase error.",
+    )
+    parser.add_argument(
+        "--translation_tangent_charbonnier_eps",
+        type=float,
+        default=1e-7,
+        help="Charbonnier smoothing epsilon; must be finite and positive.",
+    )
+    parser.add_argument(
         "--mode_balanced_weight",
         type=float,
         default=0.0,
@@ -282,6 +295,11 @@ def main() -> None:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
         parser.error("--stokes_relative_tangent requires --translation_tangent_scope all")
+    if (
+        not np.isfinite(args.translation_tangent_charbonnier_eps)
+        or args.translation_tangent_charbonnier_eps <= 0.0
+    ):
+        parser.error("--translation_tangent_charbonnier_eps must be finite and positive")
     if not np.isfinite(args.nonlinear_reference) or args.nonlinear_reference <= 0.0:
         parser.error("--nonlinear_reference must be finite and positive")
     if not 1.0 <= args.nonlinear_weight_mean <= 2.0:
@@ -552,6 +570,8 @@ def main() -> None:
                 global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
                 smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
+                loss_norm=args.translation_tangent_loss_norm,
+                charbonnier_eps=args.translation_tangent_charbonnier_eps,
             )
             # Weight each GPU's contribution by its number of selected nonflat samples.
             global_selected = jax.lax.psum(local_selected, axis_name="batch")

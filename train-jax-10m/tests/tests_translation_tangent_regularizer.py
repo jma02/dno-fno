@@ -336,6 +336,188 @@ def test_mixed_global_local_rows_match_individual_losses_and_gradients() -> None
         np.testing.assert_array_equal(exact_gradient, 0.0)
 
 
+def test_charbonnier_selected_mean_matches_rowwise_formula() -> None:
+    eta, _, target, depth, k = _batched_inputs()
+    x = jnp.arange(eta.shape[-1], dtype=eta.dtype) * (2.0 * jnp.pi / eta.shape[-1])
+    modes = jnp.asarray([1.0, 2.0, 3.0], dtype=eta.dtype)[:, None]
+    gains = jnp.asarray([0.03, -0.05, 0.07], dtype=eta.dtype)[:, None]
+    prediction = target * (1.0 + gains) + 0.02 * jnp.sin((modes + 2.0) * x[None, :])
+    global_mask = jnp.asarray([True, False, True])
+    sample_mask = jnp.asarray([True, True, False])
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True),
+        static_argnames=("loss_norm",),
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = tuple(
+            value.astype(dtype) for value in (eta, prediction, target, depth)
+        )
+        kk = k.astype(dtype)
+        (loss, count), gradient = loss_and_gradient(
+            *inputs,
+            kk,
+            sample_mask=sample_mask,
+            global_relative_mask=global_mask,
+            loss_norm="charbonnier",
+        )
+        np.testing.assert_array_equal(count, 2.0)
+        raws = []
+        expected = []
+        row_gradients = []
+        for index in (0, 1):
+            row_eta, row_prediction, row_target, row_depth = (
+                value[index : index + 1] for value in inputs
+            )
+            raw, raw_count = compute_translation_tangent_loss(
+                row_eta,
+                row_prediction,
+                row_target,
+                row_depth,
+                kk,
+                global_relative_mask=global_mask[index : index + 1],
+            )
+            np.testing.assert_array_equal(raw_count, 1.0)
+            raw_scalar = float(raw)
+            raws.append(raw_scalar)
+            expected.append(raw_scalar / (np.sqrt(raw_scalar + 1e-14) + 1e-7))
+            (row_loss, _), row_gradient = loss_and_gradient(
+                row_eta,
+                row_prediction,
+                row_target,
+                row_depth,
+                kk,
+                global_relative_mask=global_mask[index : index + 1],
+                loss_norm="charbonnier",
+            )
+            np.testing.assert_allclose(
+                row_loss, expected[-1], rtol=2e-6 if dtype == jnp.float32 else 1e-12
+            )
+            row_gradients.append(np.asarray(row_gradient[0]))
+        tolerance = 2e-5 if dtype == jnp.float32 else 1e-12
+        atol = 1e-8 if dtype == jnp.float32 else 1e-14
+        np.testing.assert_allclose(
+            loss, np.mean(expected), rtol=tolerance, atol=atol
+        )
+        for index in (0, 1):
+            np.testing.assert_allclose(
+                gradient[index], row_gradients[index] / 2.0, rtol=tolerance, atol=atol
+            )
+        np.testing.assert_array_equal(gradient[2], 0.0)
+        mean_raw_transform = np.mean(raws) / (np.sqrt(np.mean(raws) + 1e-14) + 1e-7)
+        assert not np.isclose(float(loss), mean_raw_transform, rtol=1e-3)
+
+
+def test_charbonnier_degenerate_cases_are_finite_or_zero() -> None:
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True),
+        static_argnames=("loss_norm",),
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        eta, prediction, target, depth, k = _batched_inputs()
+        inputs = tuple(
+            value.astype(dtype) for value in (eta, prediction, target, depth)
+        )
+        kk = k.astype(dtype)
+
+        (loss, _), gradient = loss_and_gradient(
+            inputs[0], inputs[2], inputs[2], inputs[3], kk, loss_norm="charbonnier"
+        )
+        np.testing.assert_array_equal(loss, 0.0)
+        np.testing.assert_array_equal(gradient, 0.0)
+
+        flat = jnp.zeros_like(inputs[0])
+        (loss, count), gradient = loss_and_gradient(
+            flat, inputs[1], inputs[2], inputs[3], kk, loss_norm="charbonnier"
+        )
+        np.testing.assert_array_equal((loss, count), (0.0, 0.0))
+        np.testing.assert_array_equal(gradient, 0.0)
+
+        mixed_eta = inputs[0].at[2].set(0.0)
+        (loss, count), gradient = loss_and_gradient(
+            mixed_eta, inputs[1], inputs[2], inputs[3], kk, loss_norm="charbonnier"
+        )
+        np.testing.assert_array_equal(count, 2.0)
+        assert np.isfinite(np.asarray(loss))
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+        np.testing.assert_array_equal(gradient[2], 0.0)
+        assert float(jnp.linalg.norm(gradient[:2])) > 0.0
+
+        (loss, count), gradient = loss_and_gradient(
+            *inputs,
+            kk,
+            sample_mask=jnp.zeros(3, dtype=jnp.bool_),
+            loss_norm="charbonnier",
+        )
+        np.testing.assert_array_equal((loss, count), (0.0, 0.0))
+        np.testing.assert_array_equal(gradient, 0.0)
+
+        x = jnp.arange(256, dtype=dtype) * (2.0 * jnp.pi / 256)
+        eta_degenerate = jnp.stack((jnp.sin(x), jnp.sin(x)))
+        target_degenerate = jnp.stack((jnp.zeros_like(x), jnp.sin(2.0 * x)))
+        prediction_degenerate = target_degenerate + 0.02 * jnp.cos(x)[None, :]
+        (loss, count), gradient = loss_and_gradient(
+            eta_degenerate,
+            prediction_degenerate,
+            target_degenerate,
+            jnp.full(2, 0.2, dtype=dtype),
+            kk,
+            global_relative_mask=jnp.ones(2, dtype=jnp.bool_),
+            loss_norm="charbonnier",
+        )
+        np.testing.assert_array_equal(count, 2.0)
+        assert np.isfinite(np.asarray(loss))
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+        assert float(jnp.linalg.norm(gradient)) > 0.0
+
+
+def test_charbonnier_traveling_gain_is_nearly_linear_in_gain() -> None:
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True),
+        static_argnames=("loss_norm",),
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(256, dtype=dtype) * (2.0 * jnp.pi / 256)
+        k = jnp.fft.fftfreq(256, d=1.0 / 256).astype(dtype)
+        squared_tolerance = 2e-5 if dtype == jnp.float32 else 1e-12
+        for mode in (1, 3):
+            eta = jnp.sin(mode * x)[None, :]
+            target = -0.4 * mode * jnp.cos(mode * x)[None, :]
+            depth = jnp.asarray([0.2], dtype=dtype)
+            values = []
+            gradient_norms = []
+            for gain in (0.01, 0.02):
+                prediction = (1.0 + gain) * target
+                (squared, _), _ = loss_and_gradient(
+                    eta,
+                    prediction,
+                    target,
+                    depth,
+                    k,
+                    global_relative_mask=jnp.ones(1, dtype=jnp.bool_),
+                )
+                np.testing.assert_allclose(
+                    squared, gain**2 / 1.001, rtol=squared_tolerance
+                )
+                (loss, _), gradient = loss_and_gradient(
+                    eta,
+                    prediction,
+                    target,
+                    depth,
+                    k,
+                    global_relative_mask=jnp.ones(1, dtype=jnp.bool_),
+                    loss_norm="charbonnier",
+                )
+                raw = float(squared)
+                expected = raw / (np.sqrt(raw + 1e-14) + 1e-7)
+                np.testing.assert_allclose(loss, expected, rtol=2e-4)
+                values.append(float(loss))
+                gradient_norms.append(float(jnp.linalg.norm(gradient)))
+            np.testing.assert_allclose(values[1], 2.0 * values[0], rtol=2e-4)
+            np.testing.assert_allclose(gradient_norms[1], gradient_norms[0], rtol=2e-4)
+            assert all(norm > 0.0 for norm in gradient_norms)
+            assert all(np.isfinite(value) for value in values)
+
+
 def test_degenerate_global_references_fall_back_to_finite_local_loss() -> None:
     loss_and_gradient = jax.jit(
         jax.value_and_grad(compute_translation_tangent_loss, argnums=1, has_aux=True)
@@ -380,6 +562,9 @@ if __name__ == "__main__":
         test_all_selected_mask_matches_default_exactly,
         test_global_relative_loss_matches_traveling_gain,
         test_mixed_global_local_rows_match_individual_losses_and_gradients,
+        test_charbonnier_selected_mean_matches_rowwise_formula,
+        test_charbonnier_degenerate_cases_are_finite_or_zero,
+        test_charbonnier_traveling_gain_is_nearly_linear_in_gain,
         test_degenerate_global_references_fall_back_to_finite_local_loss,
     )
     for test in tests:
