@@ -96,7 +96,7 @@ if __name__ == "__main__":
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
         f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_"))
         for trial in ("_carry", "_local", "_carry_local", "_carry_local_half")))
-    parser.add_argument("--reference", default="M6", help="Method used for numerical comparisons; must be included in --methods.")
+    parser.add_argument("--reference", default="M6", help="Method in --methods, or cached_M6 to use the saved reference trajectory.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
@@ -107,8 +107,8 @@ if __name__ == "__main__":
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
     base_methods = set(map(method_base, methods))
-    if args.reference not in methods or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
-        parser.error("methods must include the reference; candidate methods require --candidate-run")
+    if (args.reference != "cached_M6" and args.reference not in methods) or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
+        parser.error("methods must include the reference unless cached_M6; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
         parser.error("--without-baselines applies only to neural methods")
     if args.without_baselines and (base_methods & {"baseline-only", "shared_m1_spectral_all"}
@@ -259,7 +259,8 @@ if __name__ == "__main__":
                 continue
             for key in ("eta", "xi", "gxi"):
                 actual = np.asarray(result[key])
-                reference = np.asarray(outputs[args.reference][key])
+                reference = (saved_reference[key] if args.reference == "cached_M6"
+                             else np.asarray(outputs[args.reference][key]))
                 error = np.linalg.norm((actual - reference).reshape(frames, -1), axis=-1)
                 scale = np.linalg.norm(reference.reshape(frames, -1), axis=-1)
                 records[method][f"terminal_{key}_error"] = float(error[-1] / scale[-1])

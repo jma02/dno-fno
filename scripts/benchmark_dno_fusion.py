@@ -27,6 +27,7 @@ from jax.experimental.compute_on import compute_on  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
+from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
@@ -124,7 +125,8 @@ def build_variant(
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
-        h = jnp.exp(jnp.minimum(depth.astype(jnp.float32).reshape(-1, 1), jnp.log(model.h_clip_max)))
+        log_depth = depth.astype(jnp.float32).reshape(-1, 1)
+        h = jnp.exp(log_depth if model.baseline_true_depth else jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
         g0 = k[None, :] * jnp.tanh(h * k[None, :])
         k64 = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
         g0_64 = k64[None, :] * jnp.tanh(h.astype(jnp.float64) * k64[None, :])
@@ -133,14 +135,28 @@ def build_variant(
             operators = operators.astype(jnp.complex64)
 
         @jax.jit
+        def m2_hat(inputs: jax.Array) -> jax.Array:
+            physical = jnp.stack((inputs[:, 0] * model.eta_scale, inputs[:, 1]), axis=1)
+            eta64_hat, xi64_hat = jnp.moveaxis(
+                fft(physical.astype(jnp.float64), nx, ept=16).at[..., -1].set(0), 1, 0,
+            )
+            return classical_hat(
+                eta64_hat, xi64_hat, k64, g0_64, nx=nx, order=2,
+                pad_factor=2, backend="specialized_cufftdx", precision="fp64", ept=16,
+            )
+
+        @jax.jit
         def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
-            g1_hat = None
+            analytic_hat = None
             # Preserve the trained surface features' physical-space FP32 rounding.
             eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / scales[0]
             eta_norm_hat = jnp.fft.rfft(eta_norm)
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
             normalized_hat = normalized_inputs = None
+            if trial == "fourier" and model.baseline_order == 2:
+                xi_phys = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32) / scales[1]) * model.xi_scale
+                normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
             if trial != "fourier":
                 inputs = jnp.stack((eta_hat, xi_hat), axis=1)
                 if input_fp32:
@@ -165,14 +181,17 @@ def build_variant(
                                     ept=g1_input_ept, promote=fused_g1)
                 if overlap_g1:
                     with compute_on("gpu_stream:1"):
-                        g1_hat = jax.jit(lambda values: -sandwich(
-                            values[0][:, 0] if fused_g1 else (values[0][:, 0] * model.eta_scale).astype(g1_dtype),
-                            values[1] if reuse_g1 else fft(
-                                values[0][:, 1] if fused_g1 else values[0][:, 1].astype(g1_dtype), nx,
-                                ept=g1_input_ept, promote=fused_g1), operators,
-                            spectral=True, ept=sandwich_ept,
-                            eta_scale=model.eta_scale if fused_g1 else None,
-                        ).sum(axis=1))((normalized_inputs, xi_phys_hat) if reuse_g1 else (normalized_inputs,))
+                        if model.baseline_order == 2:
+                            analytic_hat = m2_hat(normalized_inputs)
+                        else:
+                            analytic_hat = jax.jit(lambda values: -sandwich(
+                                values[0][:, 0] if fused_g1 else (values[0][:, 0] * model.eta_scale).astype(g1_dtype),
+                                values[1] if reuse_g1 else fft(
+                                    values[0][:, 1] if fused_g1 else values[0][:, 1].astype(g1_dtype), nx,
+                                    ept=g1_input_ept, promote=fused_g1), operators,
+                                spectral=True, ept=sandwich_ept,
+                                eta_scale=model.eta_scale if fused_g1 else None,
+                            ).sum(axis=1))((normalized_inputs, xi_phys_hat) if reuse_g1 else (normalized_inputs,))
             if fused_features:
                 features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
                                                        n=nx, ept=field_ept, normalized_inputs=normalized_inputs,
@@ -196,7 +215,7 @@ def build_variant(
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
-            features = features * jnp.tanh(features)
+            features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             weights = features @ head_kernel
             if fused_product:
                 weighted_hat = fft(weights, nx, b=branch_fields, outer=filters, ept=fft_ept, channels_last=True)
@@ -207,14 +226,18 @@ def build_variant(
                 weighted_hat = filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * branch_fields)
             correction_hat = jnp.sum(weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
             if not overlap_g1:
-                g1_hat = -sandwich(
-                    eta_norm if fused_g1 else (eta_norm * model.eta_scale).astype(jnp.float64),
-                    g1_xi_hat, operators,
-                    spectral=True, ept=sandwich_ept, eta_scale=model.eta_scale if fused_g1 else None,
-                ).sum(axis=1)
-            if g1_fp32:
-                g1_hat = cast(jax.Array, g1_hat).astype(jnp.complex128)
-            result = output_scale * (g0 * xi_phys_hat + cast(jax.Array, g1_hat) + correction_hat)
+                if model.baseline_order == 2:
+                    analytic_hat = m2_hat(cast(jax.Array, normalized_inputs))
+                else:
+                    analytic_hat = -sandwich(
+                        eta_norm if fused_g1 else (eta_norm * model.eta_scale).astype(jnp.float64),
+                        g1_xi_hat, operators,
+                        spectral=True, ept=sandwich_ept, eta_scale=model.eta_scale if fused_g1 else None,
+                    ).sum(axis=1)
+            analytic_hat = cast(jax.Array, analytic_hat).astype(jnp.complex128)
+            if model.baseline_order != 2:
+                analytic_hat = g0 * xi_phys_hat + analytic_hat
+            result = output_scale * (analytic_hat + correction_hat)
             if mask_output:
                 return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
             return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
@@ -240,7 +263,7 @@ def build_variant(
                 input_fields = (jnp.stack((inputs[..., 0], inputs[..., 1] * model.xi_scale), axis=1)
                                 if include_correction else (inputs[..., 1] * model.xi_scale)[:, None, :])
                 spectra = jnp.fft.rfft(input_fields)
-                h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
+                h = jnp.exp(log_depth if model.baseline_true_depth else jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
                 base_k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1)
                 symbol = base_k[None, :] * jnp.tanh(h * base_k[None, :])
                 packed_hat = (symbol[:, None, :] * spectra[:, -1:, :])[:, :int(include_baselines), :]
@@ -276,7 +299,7 @@ def build_variant(
                 eta_norm, xi_norm, log_depth = call_args
                 eta_phys = (eta_norm * model.eta_scale).astype(jnp.float64)
                 xi_phys = (xi_norm * model.xi_scale).astype(jnp.float64)
-                h = jnp.exp(jnp.minimum(log_depth, jnp.log(model.h_clip_max))).astype(jnp.float64)
+                h = jnp.exp(log_depth if model.baseline_true_depth else jnp.minimum(log_depth, jnp.log(model.h_clip_max))).astype(jnp.float64)
                 k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
                 symbol = k[None, :] * jnp.tanh(h * k[None, :])
                 if cufftdx_g1:
