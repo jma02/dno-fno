@@ -18,10 +18,12 @@ os.environ.setdefault("JAX_ENABLE_X64", "True")
 
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemDNO
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO
+from solver.solvers.dno_series_jax import dno_series_eval
 
 jax.config.update("jax_enable_x64", True)
 
@@ -37,6 +39,7 @@ def _model(
     use_second_deriv: bool = True,
     use_half_deriv: bool = True,
     use_hilbert: bool = True,
+    use_relative_elevation: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -47,6 +50,7 @@ def _model(
         use_second_deriv=use_second_deriv,
         use_half_deriv=use_half_deriv,
         use_hilbert=use_hilbert,
+        use_relative_elevation=use_relative_elevation,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -85,9 +89,45 @@ def _learned_residual(
     if model.baseline_order == -1:
         return output
     baseline = model._linear_baseline(xi, depth)
-    if model.baseline_order == 1:
+    if model.baseline_order >= 1:
         baseline = baseline + model._g1_baseline(eta, xi, depth)
+    if model.baseline_order == 2:
+        k = (2 * jnp.pi / model.domain_length) * jnp.arange(xi.shape[-1] // 2 + 1, dtype=jnp.float64)
+        baseline = dno_series_eval(
+            (eta * model.eta_scale).astype(jnp.float64),
+            (xi * model.xi_scale).astype(jnp.float64), k,
+            jnp.exp(jnp.minimum(depth, jnp.log(model.h_clip_max))).astype(jnp.float64),
+            order=2,
+        ) / model.target_scale
     return output - baseline
+
+
+def test_default_matches_original_forward() -> None:
+    """Both opt-in experiments leave the existing learned M1 forward unchanged."""
+    eta, xi, depth = _state()
+    model = _model()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = _activate_residual(model.init(jax.random.PRNGKey(0), inputs, depth))
+    k = jnp.arange(eta.shape[-1] // 2 + 1, dtype=eta.dtype)
+    eta_hat = jnp.fft.rfft(eta)
+    features = jnp.stack([
+        eta, eta**2, eta**3,
+        *(jnp.fft.irfft(symbol * eta_hat, n=eta.shape[-1]) for symbol in
+          (1j * k, -(k**2), jnp.sqrt(k), -1j * jnp.sign(k))),
+    ], axis=-1)
+    for name in ("eta_feat_proj", "eta_feat_mix"):
+        features = nn.gelu(features @ cast(jax.Array, variables["params"][name]["kernel"]))
+    features = features * jnp.tanh(features)
+    residual = jnp.zeros_like(xi)
+    for index in range(model.n_blocks):
+        block = CraigSulemBlock(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden)
+        residual += cast(jax.Array, block.apply(
+            {"params": variables["params"][f"cs_block_{index}"]}, features, xi, depth,
+        ))
+    expected = model._linear_baseline(xi, depth) + model._g1_baseline(eta, xi, depth)
+    expected += residual / (model.n_blocks * model.latent) ** 0.5
+    actual = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
+    assert jnp.array_equal(actual, expected)
 
 
 def test_order_two_has_zero_value_and_first_variation() -> None:
@@ -134,8 +174,8 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for baseline_order in (-1, 0, 1):
-        model = _model(baseline_order=baseline_order)
+    for baseline_order, relative_elevation in ((-1, False), (0, False), (1, False), (1, True), (2, False)):
+        model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -146,6 +186,12 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         combined = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
         expected = 0.3 * residual_xi - 0.7 * residual_psi
         assert float(jnp.linalg.norm(combined - expected) / jnp.linalg.norm(expected)) < 1e-11
+        if baseline_order == 2:
+            full_xi = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
+            full_psi = cast(jax.Array, model.apply(variables, jnp.stack((eta, psi), axis=-1), depth))[..., 0]
+            assert jnp.allclose(jnp.vdot(psi, full_xi), jnp.vdot(full_psi, xi), rtol=1e-11, atol=1e-14)
+            full_combined = cast(jax.Array, model.apply(variables, jnp.stack((eta, 0.3 * xi - 0.7 * psi), axis=-1), depth))[..., 0]
+            assert jnp.allclose(full_combined, 0.3 * full_xi - 0.7 * full_psi, rtol=1e-11, atol=1e-14)
 
 
 def test_baseline_free_flat_surface_is_trainable() -> None:
@@ -202,6 +248,7 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
     configurations = (
         (_model(baseline_order=-1), 8),
         (_model(baseline_order=0), 7),
+        (_model(use_relative_elevation=True), 8),
         (_model(n_polys=1), 5),
         (_model(n_polys=2, use_second_deriv=False), 5),
         (
@@ -223,14 +270,78 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
         assert jnp.all(jnp.isfinite(output))
 
 
+def test_relative_elevation_uses_physical_eta_and_unclipped_depth() -> None:
+    eta, xi, _ = _state()
+    depth = jnp.log(jnp.asarray([[0.1], [8.0]], dtype=eta.dtype))
+    inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (2, eta.shape[-1], 2))
+    model = _model(use_relative_elevation=True).clone(eta_scale=0.17)
+    variables = unfreeze(model.init(jax.random.PRNGKey(8), inputs, depth))
+    kernel = variables["params"]["eta_feat_proj"]["kernel"]
+    variables["params"]["eta_feat_proj"]["kernel"] = jnp.zeros_like(kernel).at[-1, 0].set(1)
+    _, captured = model.apply(
+        variables, inputs, depth,
+        capture_intermediates=lambda module, _: module.name == "eta_feat_proj",
+    )
+    projection = cast(jax.Array, captured["intermediates"]["eta_feat_proj"]["__call__"][0])
+    assert jnp.allclose(projection[..., 0], inputs[..., 0] * model.eta_scale / jnp.exp(depth), rtol=1e-14)
+    assert jnp.all(projection[..., 1:] == 0)
+
+
+def test_m2_zero_init_matches_classical_batched_fp64() -> None:
+    eta, xi, _ = _state()
+    model = _model(baseline_order=2).clone(eta_scale=0.17, xi_scale=0.08, target_scale=0.13)
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = jnp.stack((jnp.concatenate((eta, 0.7 * eta)), jnp.concatenate((xi, -xi))), axis=-1).astype(dtype)
+        depth = jnp.log(jnp.asarray([[0.08], [12.0]], dtype=dtype))
+        variables = model.init(jax.random.PRNGKey(9), inputs, depth)
+        actual = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
+        expected = dno_series_eval(
+            (inputs[..., 0] * model.eta_scale).astype(jnp.float64),
+            (inputs[..., 1] * model.xi_scale).astype(jnp.float64),
+            jnp.arange(eta.shape[-1] // 2 + 1, dtype=jnp.float64),
+            jnp.exp(jnp.minimum(depth, jnp.log(model.h_clip_max))).astype(jnp.float64),
+            order=2,
+        ) / model.target_scale
+        assert actual.dtype == jnp.float64
+        assert jnp.array_equal(actual, expected)
+        assert jnp.allclose(jnp.mean(actual, axis=-1), 0, atol=1e-14)
+        assert jnp.allclose(jnp.fft.rfft(actual)[..., -1], 0, atol=1e-14)
+        gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, model.apply({"params": params}, inputs, depth)) ** 2))(variables["params"])
+        assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(gradient))
+        assert sum(float(jnp.sum(leaf**2)) for leaf in jax.tree.leaves(gradient)) > 0
+
+
+def test_experimental_residual_orders() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    for model, order in ((_model(use_relative_elevation=True), 2), (_model(baseline_order=2), 3)):
+        variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
+        def residual(surface: jnp.ndarray) -> jnp.ndarray:
+            return _learned_residual(model, variables, surface, xi, depth)
+
+        value, variation = jax.jvp(residual, (jnp.zeros_like(eta),), (eta,))
+        assert jnp.max(jnp.abs(value)) < 1e-14
+        assert jnp.max(jnp.abs(variation)) < 1e-14
+        if order == 3:
+            second = jax.jvp(lambda surface: jax.jvp(residual, (surface,), (eta,))[1], (jnp.zeros_like(eta),), (eta,))[1]
+            assert jnp.max(jnp.abs(second)) < 1e-14
+        norms = [float(jnp.linalg.norm(residual(epsilon * eta))) for epsilon in (0.125, 0.0625, 0.03125)]
+        assert all(value > 0 for value in norms)
+        assert all(abs(norms[index] / norms[index + 1] / 2**order - 1) < 0.1 for index in (0, 1))
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
+        test_default_matches_original_forward,
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
         test_learned_operator_is_self_adjoint_and_linear,
         test_baseline_free_flat_surface_is_trainable,
         test_g0_only_preserves_flat_surface_and_allows_first_order_correction,
         test_eta_feature_configuration_controls_trunk_shape,
+        test_relative_elevation_uses_physical_eta_and_unclipped_depth,
+        test_m2_zero_init_matches_classical_batched_fp64,
+        test_experimental_residual_orders,
     )
     for test in tests:
         test()

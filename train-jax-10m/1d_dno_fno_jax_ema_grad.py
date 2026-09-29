@@ -78,6 +78,15 @@ def main() -> None:
             f"--cs_use_{feature}", action=argparse.BooleanOptionalAction, default=True
         )
     parser.add_argument(
+        "--cs_use_relative_elevation", action="store_true",
+        help="Add physical eta/h to the surface features.",
+    )
+    parser.add_argument(
+        "--cs_baseline_order", type=int, choices=(1, 2), default=1,
+        help="Analytic baseline order: G0+G1 or G0+G1+G2. Nonlinear sample weights "
+        "always use the reference correction beyond G0+G1.",
+    )
+    parser.add_argument(
         "--cs_mult_hidden",
         type=int,
         default=32,
@@ -333,7 +342,9 @@ def main() -> None:
             use_second_deriv=args.cs_use_second_deriv,
             use_half_deriv=args.cs_use_half_deriv,
             use_hilbert=args.cs_use_hilbert,
+            use_relative_elevation=args.cs_use_relative_elevation,
             mult_hidden=args.cs_mult_hidden,
+            baseline_order=args.cs_baseline_order,
             domain_length=domain_length,
             xi_scale=xi_scale,
             eta_scale=eta_scale,
@@ -397,6 +408,7 @@ def main() -> None:
         with nn.intercept_methods(intercept):
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
         if return_baseline:
+            # Keep sample weighting fixed to G0+G1, including when prediction uses G2.
             return prediction, (baseline_terms[0] + baseline_terms[1])[..., None]
         return prediction
 
@@ -481,7 +493,7 @@ def main() -> None:
         residual_squared = jnp.sum(
             jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
         )
-        # Larger missing nonlinear corrections receive larger (bounded) weights.
+        # Weight the correction beyond G0+G1, independent of the model's baseline order.
         residual_ratio = jnp.sqrt(residual_squared) / target_norm
         nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
         denominator = jax.lax.stop_gradient(

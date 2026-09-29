@@ -3,13 +3,15 @@
 Here eta is surface elevation and xi is surface velocity potential.
 Each correction branch applies M[spatial_weights(eta) * M[xi]], where M is
 a depth-dependent real Fourier filter. The correction is self-adjoint,
-linear in xi. It starts at order eta^2 with G0+G1, at order eta with G0
-alone, or uses a constant surface feature to learn the full DNO without a baseline.
+linear in xi. It starts at order eta^3 with G0+G1+G2, eta^2 with G0+G1,
+eta with G0 alone, or uses a constant feature to learn the full DNO.
 """
 from __future__ import annotations
 
 import jax.numpy as jnp
 from flax import linen as nn
+
+from solver.solvers.dno_series_jax import dno_series_eval
 
 
 class DepthAwareMultiplier(nn.Module):
@@ -88,8 +90,9 @@ class CraigSulemDNO(nn.Module):
     use_second_deriv: bool = True     # Second spatial derivative.
     use_half_deriv: bool = True       # Fourier multiplier sqrt(abs(k)).
     use_hilbert: bool = True          # Hilbert transform.
+    use_relative_elevation: bool = False  # Append physical eta / actual depth.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
-    baseline_order: int = 1           # -1: none, 0: G0, 1: G0 + G1.
+    baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
 
     domain_length: float = 2 * jnp.pi
     # Multiply normalized inputs/outputs by these scales to get physical units.
@@ -156,8 +159,18 @@ class CraigSulemDNO(nn.Module):
         baseline = jnp.zeros_like(xi_norm)
         if self.baseline_order >= 0:
             baseline = self._linear_baseline(xi_norm, depth)
-        if self.baseline_order == 1:
+        if self.baseline_order >= 1:
             baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
+        if self.baseline_order == 2:
+            # Keep the M1 calls above available to the training loss's fixed weighting.
+            k64 = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
+                grid_size // 2 + 1, dtype=jnp.float64,
+            )
+            baseline = dno_series_eval(
+                (eta_norm * self.eta_scale).astype(jnp.float64),
+                xi_phys.astype(jnp.float64), k64,
+                jnp.exp(clipped_log_depth).astype(jnp.float64), order=2,
+            ) / self.target_scale
 
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
@@ -179,6 +192,8 @@ class CraigSulemDNO(nn.Module):
                 features.append(jnp.fft.irfft(
                     multiplier * eta_hat, n=grid_size, axis=-1,
                 ))
+        if self.use_relative_elevation:
+            features.append(eta_norm * self.eta_scale / jnp.exp(depth))
         eta_features = jnp.stack(features, axis=-1)
 
         # With no constant input, zero eta gives zero features.
@@ -187,8 +202,10 @@ class CraigSulemDNO(nn.Module):
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
             )
         # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
-        # For G0+G1, the lift enforces O(eta^2); a constant input removes that constraint.
-        if self.baseline_order != 0:
+        # Preserve the analytic Taylor terms; a constant input removes this constraint.
+        if self.baseline_order == 2:
+            eta_features = eta_features * jnp.tanh(eta_features) ** 2
+        elif self.baseline_order != 0:
             eta_features = eta_features * jnp.tanh(eta_features)
 
         # Sum parallel correction groups, starting from zero in xi's dtype.

@@ -91,8 +91,11 @@ def load_run(
             use_second_deriv=bool(config["cs_use_second_deriv"]),
             use_half_deriv=bool(config["cs_use_half_deriv"]),
             use_hilbert=bool(config["cs_use_hilbert"]),
+            use_relative_elevation=bool(config.get("cs_use_relative_elevation", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
-            baseline_order={"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name],
+            baseline_order=int(config.get(
+                "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]
+            )),
             domain_length=float(config["domain_length"]),
             xi_scale=float(config["xi_scale"]),
             eta_scale=float(config["eta_scale"]),

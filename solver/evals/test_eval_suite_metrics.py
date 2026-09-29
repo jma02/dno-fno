@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -25,7 +26,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     compute_metrics,
     run_family,
 )
-from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched  # noqa: E402
+from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
@@ -39,6 +40,32 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_checkpoint_loader_restores_cs_architecture_options(self) -> None:
+        config = {
+            "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
+            "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
+            "cs_use_first_deriv": True, "cs_use_second_deriv": True,
+            "cs_use_half_deriv": True, "cs_use_hilbert": True,
+            "domain_length": 2 * np.pi, "xi_scale": 1.0,
+            "eta_scale": 1.0, "target_scale": 1.0,
+        }
+        for options in (
+            {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
+            {"cs_use_relative_elevation": True, "cs_baseline_order": 2},
+        ):
+            with self.subTest(options=options), patch(
+                "solver.evals.model_rollout.Path.read_text",
+                side_effect=[json.dumps({**config, **options}), json.dumps({"epoch": 1, "stats": {}})],
+            ), patch(
+                "solver.evals.model_rollout.checkpoints.restore_checkpoint",
+                return_value={"params": {}},
+            ), patch(
+                "solver.evals.model_rollout.ocp.PyTreeCheckpointer",
+            ):
+                loaded = load_run("/tmp/dno-architecture-loader-test")
+                self.assertEqual(loaded.model.use_relative_elevation, options.get("cs_use_relative_elevation", False))
+                self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
+
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)
         truth = {"eta": values, "xi": values * 0, "gxi": values * 0, "wall_s": 1.0}
