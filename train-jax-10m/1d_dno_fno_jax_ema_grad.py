@@ -103,10 +103,10 @@ def main() -> None:
         "Keep the same value when resuming; completed epochs are not repeated.",
     )
     parser.add_argument(
-        "--stop_after_epoch", type=int, default=0,
+        "--stop_after_epoch", type=int, default=1,
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
     )
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=5e-7)
     parser.add_argument(
         "--lr_warmup_steps",
         type=int,
