@@ -4,6 +4,7 @@ cd /home/johnma/dno-fno
 
 reference_run=outputs/c27_w320_b4_h80_ema_grad09_20260927
 run_name=$1
+epochs=${EPOCHS:-1}
 trial_dir=outputs/$run_name
 export UV_CACHE_DIR=/tmp/dno-uv-cache JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 
@@ -24,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0,1 uv run --no-sync python train-jax-10m/1d_dno_fno_jax_em
   --model cs_dno --norm scale \
   --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
   --width 320 --n_blocks 8 --latent 4 --cs_mult_hidden 80 --cs_n_polys 3 \
-  --batch_size 1024 --epochs 1 --stop_after_epoch 1 --seed 0 \
+  --batch_size 1024 --epochs "$epochs" --stop_after_epoch "$epochs" --seed 0 \
   --lr 2e-5 --lr_warmup_steps 500 --gradient_ema_decay 0.9 --cs_baseline_true_depth \
   --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 \
   --translation_tangent_weight 10 --translation_tangent_scope all \
@@ -37,7 +38,7 @@ printf '%s rollouts\n' "$(date +%H:%M)"
 eval_pids=()
 for gpu in 0 1; do
   if (( gpu == 0 )); then families=(stokes tanaka); else families=(jonswap_tma benjamin_feir); fi
-  eval_dir="$trial_dir/eval_epoch1_test_stratified_n32_gpu$gpu"
+  eval_dir="$trial_dir/eval_epoch${epochs}_test_stratified_n32_gpu$gpu"
   mkdir "$eval_dir"
   CUDA_VISIBLE_DEVICES="$gpu" uv run --no-sync python -m solver.evals.eval_suite \
     --run_dir "$trial_dir" --checkpoint latest --gpu \
