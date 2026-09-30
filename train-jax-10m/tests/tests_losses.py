@@ -14,9 +14,14 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "models" / "fno-jax"))
+sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
+from translation_tangent_regularizer import (  # noqa: E402
+    compute_modal_phase_loss,
+    compute_translation_tangent_loss,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -268,10 +273,107 @@ def test_family_metrics_recombine_uneven_counts_and_isolate_nan() -> None:
     np.testing.assert_array_equal(failed_metrics[1:], metrics[1:])
 
 
+def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
+    path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
+    component = next(node for node in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(node, ast.FunctionDef) and node.name == "compute_loss_components")
+    config = SimpleNamespace(
+        model="fno", residual_floor=1e-6, mode_balanced_weight=0.0,
+        translation_tangent_weight=0.3, translation_tangent_scope="tanaka",
+        translation_tangent_geometry="coupled_modal", translation_tangent_k_max=1,
+        translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
+        translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
+        stokes_relative_tangent=False,
+    )
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array,
+        *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        prediction = (variables["params"][..., None] - 7.0) / 4.0
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+
+    nx = 32
+    phase = jnp.arange(nx) * (2 * jnp.pi / nx)
+    k = jnp.fft.fftfreq(nx) * nx / 4
+    amplitude = jnp.arange(1, 7)[:, None] / 6
+    eta = amplitude * (jnp.cos(phase) + 0.3 * jnp.cos(5 * phase))
+    xi = amplitude * (0.4 * jnp.sin(phase) + 0.2 * jnp.cos(5 * phase))
+    target = amplitude * (0.2 * jnp.cos(phase) + 0.3 * jnp.sin(5 * phase))
+    prediction = target + amplitude * (0.03 * jnp.sin(phase) + 0.2 * jnp.cos(5 * phase))
+    depth = jnp.array([8.0, 0.5, 2.0, 12.0, 0.4, 1.0])
+    family = jnp.array([PhysicalFamilyId.TANAKA, PhysicalFamilyId.STOKES, PhysicalFamilyId.STOKES,
+                        PhysicalFamilyId.TANAKA, PhysicalFamilyId.TANAKA, PhysicalFamilyId.STOKES])
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
+        "norm_targets_jax": lambda target: (target[..., None] - 7.0) / 4.0,
+        "denorm_targets_jax": lambda target: target * 4.0 + 7.0,
+        "apply_model": apply_model, "log_h_max": np.log(5.0), "k_grid_jax": k,
+        "compute_modal_phase_loss": compute_modal_phase_loss,
+        "compute_translation_tangent_loss": compute_translation_tangent_loss,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[component], type_ignores=[])), str(path), "exec"), namespace)
+    losses = jax.vmap(namespace["compute_loss_components"], axis_name="batch")
+    arguments = tuple(field.reshape((2, 3) + field.shape[1:])
+                      for field in (eta, xi, target, jnp.log(depth)[:, None], family))
+    predictions = prediction.reshape(2, 3, nx)
+    target_shards = target.reshape(2, 3, nx)
+    options: dict[str, Any] = dict(
+        sample_mask=family == PhysicalFamilyId.TANAKA, denominator_eps=1e-3,
+        loss_norm="charbonnier", charbonnier_eps=1e-7,
+    )
+    data_losses = []
+    for geometry in ("coupled_modal", "local"):
+        config.translation_tangent_geometry = geometry
+        data, _, tangent, fraction, full, _ = losses(predictions, *arguments)
+        data_losses.append(data)
+        np.testing.assert_array_equal(data, full)
+        np.testing.assert_allclose(fraction, [1 / 3, 2 / 3])
+        if geometry == "coupled_modal":
+            expected, count = compute_modal_phase_loss(
+                eta, xi, prediction, target, depth, k, k_max=1, **options,
+            )
+            # These alternatives must be distinguishable in this fixture.
+            for wrong_xi, wrong_depth, wrong_k_max in (
+                (xi / 3, depth, 1), (xi, jnp.minimum(depth, 5.0), 1), (xi, depth, 128),
+            ):
+                wrong, _ = compute_modal_phase_loss(
+                    eta, wrong_xi, prediction, target, wrong_depth, k,
+                    k_max=wrong_k_max, **options,
+                )
+                assert not np.isclose(expected, wrong, rtol=1e-5, atol=1e-10)
+        else:
+            expected, count = compute_translation_tangent_loss(
+                eta, prediction, target, jnp.minimum(depth, 5.0), k,
+                smoothing_scale=1.0, **options,
+            )
+        assert count == 3
+        np.testing.assert_allclose(jnp.mean(tangent), expected, rtol=1e-11)
+
+        def objective(params: jax.Array) -> jax.Array:
+            data, _, tangent, _, _, _ = losses(params, *arguments)
+            return jnp.mean(data + config.translation_tangent_weight * tangent)
+
+        evaluate = jax.jit(jax.value_and_grad(objective))
+        for params in (predictions, target_shards):
+            value, gradient = evaluate(params)
+            assert bool(jnp.isfinite(value) & jnp.all(jnp.isfinite(gradient)))
+            if params is target_shards:
+                np.testing.assert_allclose(value, 0.0, atol=1e-14)
+                np.testing.assert_allclose(gradient, 0.0, atol=1e-8)
+    config.translation_tangent_weight = 0.0
+    ordinary_data = losses(predictions, *arguments)[0]
+    for data in data_losses:
+        np.testing.assert_array_equal(data, ordinary_data)
+
+
 if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_residual_denominator_gradients_scaling_and_zero_head()
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
+    test_tangent_geometry_wiring_and_uneven_shard_reduction()
     print("[PASS] data normalization, finite gradients, and family metric reductions")

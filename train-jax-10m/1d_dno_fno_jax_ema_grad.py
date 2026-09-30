@@ -49,6 +49,7 @@ from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from hadamard_shape_regularizer import compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
+    compute_modal_phase_loss,
     compute_translation_tangent_loss,
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
@@ -158,6 +159,12 @@ def main() -> None:
         "--translation_tangent_scope", choices=("tanaka", "all"), default="tanaka",
         help="Wave families contributing to the translation-tangent loss.",
     )
+    parser.add_argument(
+        "--translation_tangent_geometry", choices=("local", "coupled_modal"), default="local",
+        help="Local translation projection, or directional Fourier phase-rate errors of the coupled eta/xi dynamics.",
+    )
+    parser.add_argument("--translation_tangent_k_max", type=int, default=128,
+                        help="Highest Fourier mode in the coupled-modal phase loss; match the rollout cutoff.")
     parser.add_argument(
         "--stokes_relative_tangent", action="store_true",
         help="Replace Stokes local tangent loss with target-normalized global translation error.",
@@ -295,6 +302,10 @@ def main() -> None:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
         parser.error("--stokes_relative_tangent requires --translation_tangent_scope all")
+    if args.stokes_relative_tangent and args.translation_tangent_geometry != "local":
+        parser.error("--stokes_relative_tangent requires local tangent geometry")
+    if args.translation_tangent_k_max < 1:
+        parser.error("--translation_tangent_k_max must be positive")
     if (
         not np.isfinite(args.translation_tangent_charbonnier_eps)
         or args.translation_tangent_charbonnier_eps <= 0.0
@@ -560,19 +571,23 @@ def main() -> None:
         tangent_loss = jnp.float32(0.0)
         local_selected = jnp.float32(0.0)
         if args.translation_tangent_weight > 0.0:
-            tangent_loss, local_selected = compute_translation_tangent_loss(
-                eta=eta,
-                gxi_prediction=gxi_prediction,
-                gxi_target=gxi,
-                depth=h_phys,
-                k=k_grid_jax,
+            tangent_options: dict[str, Any] = dict(
                 sample_mask=(family == PhysicalFamilyId.TANAKA) if args.translation_tangent_scope == "tanaka" else None,
-                global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
-                smoothing_scale=args.translation_tangent_smoothing_scale,
                 denominator_eps=args.translation_tangent_denominator_eps,
                 loss_norm=args.translation_tangent_loss_norm,
                 charbonnier_eps=args.translation_tangent_charbonnier_eps,
             )
+            if args.translation_tangent_geometry == "coupled_modal":
+                tangent_loss, local_selected = compute_modal_phase_loss(
+                    eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                    k_max=args.translation_tangent_k_max, **tangent_options,
+                )
+            else:
+                tangent_loss, local_selected = compute_translation_tangent_loss(
+                    eta, gxi_prediction, gxi, h_phys, k_grid_jax,
+                    global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
+                    smoothing_scale=args.translation_tangent_smoothing_scale, **tangent_options,
+                )
             # Weight each GPU's contribution by its number of selected nonflat samples.
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
             device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")

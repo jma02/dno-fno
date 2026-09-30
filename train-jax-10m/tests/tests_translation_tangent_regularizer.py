@@ -1,4 +1,4 @@
-"""CPU invariants for the localized translation-tangent objective."""
+"""CPU invariants for translation-tangent and coupled modal-phase objectives."""
 
 from __future__ import annotations
 
@@ -10,9 +10,15 @@ import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from translation_tangent_regularizer import (  # noqa: E402
+    compute_modal_phase_loss,
     compute_translation_tangent_loss,
+)
+from solver.solvers.time_integrator import (  # noqa: E402
+    dealiased_zakharov_xi_rhs,
+    spectral_dx,
 )
 
 
@@ -545,6 +551,203 @@ def test_degenerate_global_references_fall_back_to_finite_local_loss() -> None:
         np.testing.assert_array_equal(gradient[2], 0.0)
 
 
+def test_modal_exact_and_flat_rows_have_finite_zero_gradients() -> None:
+    loss_and_gradient = jax.jit(
+        jax.value_and_grad(compute_modal_phase_loss, argnums=2, has_aux=True),
+        static_argnames=("loss_norm",),
+    )
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(128, dtype=dtype) * (2.0 * jnp.pi / 128)
+        k = jnp.fft.fftfreq(128, d=1.0 / 128).astype(dtype)
+        eta = jnp.stack((0.03 * jnp.cos(3.0 * x), jnp.zeros_like(x)))
+        xi = jnp.stack((0.04 * jnp.sin(3.0 * x), jnp.zeros_like(x)))
+        target = 0.05 * jnp.cos(3.0 * x)[None, :] * jnp.ones((2, 1), dtype=dtype)
+        depth = jnp.asarray([0.2, 0.3], dtype=dtype)
+        for norm in ("squared", "charbonnier"):
+            (loss, count), gradient = loss_and_gradient(
+                eta, xi, target, target, depth, k, loss_norm=norm
+            )
+            np.testing.assert_array_equal((loss, count), (0.0, 1.0))
+            np.testing.assert_array_equal(gradient, 0.0)
+            assert bool(jnp.all(jnp.isfinite(gradient)))
+            (loss, count), gradient = loss_and_gradient(
+                eta, xi, target * 1.1, target, depth, k,
+                sample_mask=jnp.asarray([False, True]), loss_norm=norm,
+            )
+            np.testing.assert_array_equal((loss, count), (0.0, 0.0))
+            np.testing.assert_array_equal(gradient, 0.0)
+
+
+def test_modal_standing_wave_retains_both_opposite_phase_rates() -> None:
+    # At an eta turning point the two traveling coordinates remain nonzero,
+    # and their signed phase defects cancel if summed before squaring.
+    for dtype in (jnp.float32, jnp.float64):
+        n, mode = 128, 3
+        x = jnp.arange(n, dtype=dtype) * (2.0 * jnp.pi / n)
+        k = jnp.fft.fftfreq(n, d=1.0 / n).astype(dtype)
+        eta = jnp.zeros((1, n), dtype=dtype)
+        xi = 0.04 * jnp.cos(mode * x)[None, :]
+        depth = jnp.asarray([0.2], dtype=dtype)
+        g0 = mode * jnp.tanh(mode * depth[0])
+        target = g0 * xi
+        denominator_eps = 1e-3
+
+        def gain_loss(gain: jax.Array) -> jax.Array:
+            return compute_modal_phase_loss(
+                eta, xi, (1.0 + gain) * target, target, depth, k,
+                k_max=8.0, denominator_eps=denominator_eps,
+            )[0]
+
+        gain = jnp.asarray(0.03, dtype=dtype)
+        loss, gradient = jax.jit(jax.value_and_grad(gain_loss))(gain)
+        tolerance = 2e-5 if dtype == jnp.float32 else 1e-12
+        np.testing.assert_allclose(loss, gain**2 / (1.0 + denominator_eps)**2, rtol=tolerance)
+        np.testing.assert_allclose(gradient, 2.0 * gain / (1.0 + denominator_eps)**2, rtol=tolerance)
+        _, count = compute_modal_phase_loss(eta, xi, target * 1.03, target, depth, k)
+    np.testing.assert_array_equal(count, 1.0)
+
+
+def test_modal_excludes_dc_nyquist_and_out_of_band_states() -> None:
+    n = 128
+    k = jnp.fft.fftfreq(n, d=1.0 / n)
+    eta = 0.1 + jnp.tile(jnp.asarray([0.02, -0.02]), n // 2)[None, :]
+    xi = jnp.tile(jnp.asarray([0.03, 0.0, -0.03, 0.0]), n // 4)[None, :]
+    x = jnp.arange(n, dtype=jnp.float64) * (2.0 * jnp.pi / n)
+    target = jnp.sin(3.0 * x)[None, :]
+    (loss, count), gradient = jax.value_and_grad(
+        compute_modal_phase_loss, argnums=2, has_aux=True
+    )(
+        eta, xi, 1.1 * target, target, jnp.asarray([0.2]), k,
+        k_max=8.0, loss_norm="charbonnier",
+    )
+    np.testing.assert_array_equal((loss, count), (0.0, 0.0))
+    np.testing.assert_array_equal(gradient, 0.0)
+
+
+def test_modal_radial_error_has_no_instantaneous_phase_defect() -> None:
+    n = 128
+    x = jnp.arange(n, dtype=jnp.float64) * (2.0 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1.0 / n)
+    eta = 0.03 * jnp.cos(3.0 * x)[None, :]
+    zero = jnp.zeros_like(eta)
+    loss, count = compute_modal_phase_loss(
+        eta, zero, 0.2 * eta, zero, jnp.asarray([0.2]), k, k_max=8.0
+    )
+    np.testing.assert_allclose(loss, 0.0, atol=1e-28)
+    np.testing.assert_array_equal(count, 1.0)
+
+
+def test_modal_matches_dealiased_rhs_and_normal_coordinate_phase_difference() -> None:
+    n = 128
+    x = jnp.arange(n, dtype=jnp.float64) * (2.0 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1.0 / n)
+    eta = (0.04 * jnp.cos(3.0 * x) + 0.02 * jnp.sin(5.0 * x))[None, :]
+    xi = (0.03 * jnp.sin(3.0 * x) + 0.01 * jnp.cos(5.0 * x))[None, :]
+    # Out-of-band q modes differ by mode 3: their product must survive into
+    # the retained xi equation even though direct eta_t errors are filtered.
+    target = (0.02 * jnp.cos(3.0 * x) + 0.04 * jnp.sin(17.0 * x))[None, :]
+    direction = (0.013 * jnp.sin(5.0 * x) + 0.02 * jnp.sin(20.0 * x))[None, :]
+    prediction = target + direction
+    depth, gravity, floor_coefficient = 0.2, 1.7, 1e-3
+    eta_x, xi_x = (spectral_dx(field, k) for field in (eta, xi))
+    rhs_target, rhs_prediction = (
+        -gravity * eta + dealiased_zakharov_xi_rhs(eta_x, xi_x, field)
+        for field in (target, prediction)
+    )
+    modes = np.arange(1, 9)
+    g0 = modes * np.tanh(modes * depth)
+    omega = np.sqrt(gravity * g0)
+    eta_hat, xi_hat, target_hat, prediction_hat, target_rhs_hat, prediction_rhs_hat = (
+        np.fft.rfft(np.asarray(field[0]), norm="forward")[modes]
+        for field in (eta, xi, target, prediction, rhs_target, rhs_prediction)
+    )
+    signs = np.asarray([1.0, -1.0])[:, None]
+    coordinates = np.sqrt(gravity) * eta_hat + signs * 1j * np.sqrt(g0) * xi_hat
+    rhs_coordinates = [
+        np.sqrt(gravity) * q_hat + signs * 1j * np.sqrt(g0) * r_hat
+        for q_hat, r_hat in ((target_hat, target_rhs_hat), (prediction_hat, prediction_rhs_hat))
+    ]
+    energy = np.abs(coordinates)**2
+    denominator = energy + floor_coefficient * np.max(energy) + 1e-30
+    numerator = np.imag(np.conj(coordinates) * (rhs_coordinates[1] - rhs_coordinates[0]))
+    expected = np.sum(energy * (numerator / (omega * denominator))**2) / np.sum(energy)
+    actual, _ = compute_modal_phase_loss(
+        eta, xi, prediction, target, jnp.asarray([depth]), k,
+        k_max=8.0, gravity=gravity, denominator_eps=floor_coefficient,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=1e-18)
+
+    # On occupied modes, the formula is the derivative of the actual complex
+    # angle, not the real (amplitude) component of the RHS difference.
+    occupied = energy > 1e-12 * np.max(energy)
+    dt = 1e-6
+    phase_rates = [
+        (
+            np.angle(1.0 + dt * rhs[occupied] / coordinates[occupied])
+            - np.angle(1.0 - dt * rhs[occupied] / coordinates[occupied])
+        ) / (2.0 * dt)
+        for rhs in rhs_coordinates
+    ]
+    np.testing.assert_allclose(
+        phase_rates[1] - phase_rates[0], numerator[occupied] / energy[occupied],
+        rtol=2e-5, atol=1e-10,
+    )
+
+    def directional_loss(scale: jax.Array) -> jax.Array:
+        return compute_modal_phase_loss(
+            eta, xi, target + scale * direction, target, jnp.asarray([depth]), k,
+            k_max=8.0, gravity=gravity, loss_norm="charbonnier",
+        )[0]
+
+    scale = jnp.asarray(1.0)
+    derivative = jax.grad(directional_loss)(scale)
+    finite_difference = (directional_loss(scale + 1e-5) - directional_loss(scale - 1e-5)) / 2e-5
+    np.testing.assert_allclose(derivative, finite_difference, rtol=1e-7, atol=1e-10)
+    assert float(actual) > 1e-6
+
+
+def test_modal_masks_centering_and_translation_preserve_selected_mean() -> None:
+    n = 128
+    x = jnp.arange(n, dtype=jnp.float64) * (2.0 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1.0 / n)
+    modes = jnp.asarray([2.0, 3.0, 5.0])[:, None]
+    eta = 0.03 * jnp.cos(modes * x)
+    xi = 0.04 * jnp.sin(modes * x)
+    target = 0.05 * jnp.sin(modes * x)
+    prediction = target * jnp.asarray([1.1, 1.2, 1.3])[:, None]
+    depth = jnp.asarray([0.1, 0.2, 0.3])
+    mask = jnp.asarray([True, False, True])
+    evaluate = jax.jit(
+        jax.value_and_grad(compute_modal_phase_loss, argnums=2, has_aux=True),
+        static_argnames=("loss_norm",),
+    )
+    for norm in ("squared", "charbonnier"):
+        (loss, count), gradient = evaluate(
+            eta, xi, prediction, target, depth, k, sample_mask=mask, loss_norm=norm
+        )
+        individual_losses = []
+        for index in (0, 2):
+            (single, _), single_gradient = evaluate(
+                eta[index:index + 1], xi[index:index + 1], prediction[index:index + 1],
+                target[index:index + 1], depth[index:index + 1], k, loss_norm=norm,
+            )
+            individual_losses.append(single)
+            np.testing.assert_allclose(gradient[index], single_gradient[0] / 2.0, rtol=1e-11, atol=1e-14)
+        np.testing.assert_allclose(loss, np.mean(individual_losses), rtol=1e-12)
+        np.testing.assert_array_equal(count, 2.0)
+        np.testing.assert_array_equal(gradient[1], 0.0)
+        offsets = jnp.asarray([0.7, -0.3, 0.2])[:, None]
+        shifted_inputs = [
+            jnp.roll(field, 19, axis=-1)
+            for field in (eta, xi + offsets, prediction + offsets, target - 2.0 * offsets)
+        ]
+        (shifted_loss, shifted_count), shifted_gradient = evaluate(
+            *shifted_inputs, depth, k, sample_mask=mask, loss_norm=norm
+        )
+        np.testing.assert_allclose((shifted_loss, shifted_count), (loss, count), rtol=1e-11)
+        np.testing.assert_allclose(shifted_gradient, jnp.roll(gradient, 19, axis=-1), rtol=1e-10, atol=1e-13)
+
+
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
@@ -566,6 +769,12 @@ if __name__ == "__main__":
         test_charbonnier_degenerate_cases_are_finite_or_zero,
         test_charbonnier_traveling_gain_is_nearly_linear_in_gain,
         test_degenerate_global_references_fall_back_to_finite_local_loss,
+        test_modal_exact_and_flat_rows_have_finite_zero_gradients,
+        test_modal_standing_wave_retains_both_opposite_phase_rates,
+        test_modal_excludes_dc_nyquist_and_out_of_band_states,
+        test_modal_radial_error_has_no_instantaneous_phase_defect,
+        test_modal_matches_dealiased_rhs_and_normal_coordinate_phase_difference,
+        test_modal_masks_centering_and_translation_preserve_selected_mean,
     )
     for test in tests:
         test()

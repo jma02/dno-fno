@@ -1,4 +1,4 @@
-"""Localized translation-tangent matching for Dirichlet--Neumann data."""
+"""Translation and coupled modal-phase matching for Dirichlet--Neumann data."""
 
 from __future__ import annotations
 
@@ -6,6 +6,121 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
+
+from solver.solvers.time_integrator import (
+    _spectral_truncate_real,
+    _spectral_upsample_real,
+)
+
+
+def compute_modal_phase_loss(
+    eta: jax.Array,
+    xi: jax.Array,
+    gxi_prediction: jax.Array,
+    gxi_target: jax.Array,
+    depth: jax.Array,
+    k: jax.Array,
+    *,
+    sample_mask: jax.Array | None = None,
+    k_max: float = 128.0,
+    denominator_eps: float = 1e-3,
+    gravity: float = 1.0,
+    loss_norm: Literal["squared", "charbonnier"] = "squared",
+    charbonnier_eps: float = 1e-7,
+) -> tuple[jax.Array, jax.Array]:
+    """Match the two traveling-mode phase rates of the coupled water-wave RHS.
+
+    With forward-normalized Fourier coefficients, the normal coordinates are
+    ``a_± = sqrt(g) eta_hat ± i sqrt(G0) xi_hat``. Their linear phase rates are
+    ``∓omega``, where ``G0 = |k| tanh(|k| h)`` and ``omega = sqrt(g G0)``.
+    The phase-rate defect is ``imag(conj(a_±) delta_a_t_±) / |a_±|^2``;
+    division by omega makes it dimensionless. Squared defects are averaged
+    with the reference normal-coordinate energies before the optional smooth
+    RMS transform. The denominator floor is relative to the largest retained
+    mode energy in each row, and zero-energy rows are excluded.
+
+    Both equations use the same state, so their RHS difference needs only
+    ``delta_q`` and the Bernoulli difference. The latter is evaluated in its
+    cancellation-free factorized form on the solver's two-times Fourier grid.
+    DNO outputs are mean-centered, but their high modes enter this product
+    before the final mode restriction, matching surrogate rollout semantics.
+    DC and Nyquist are excluded. Depth is physical and need not be clipped.
+    """
+    dtype = eta.dtype
+    nx = eta.shape[-1]
+    centered_prediction = gxi_prediction - jnp.mean(
+        gxi_prediction, axis=-1, keepdims=True
+    )
+    centered_target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
+    error = centered_prediction - centered_target
+    eta_hat, xi_hat, error_hat = (
+        jnp.fft.rfft(field, axis=-1, norm="forward").at[..., -1].set(0)
+        for field in (eta, xi, error)
+    )
+    k_abs = jnp.abs(k[: nx // 2 + 1]).astype(dtype)
+    eta_x, xi_x = (
+        jnp.fft.irfft(1j * k_abs[None, :] * field_hat, n=nx, norm="forward")
+        for field_hat in (eta_hat, xi_hat)
+    )
+    padded = _spectral_upsample_real(
+        jnp.stack((eta_x, xi_x, centered_target, error), axis=1), 2 * nx
+    )
+    eta_x_padded, xi_x_padded, target_padded, error_padded = (
+        padded[:, index] for index in range(4)
+    )
+    xi_rhs_error = _spectral_truncate_real(
+        error_padded
+        * (target_padded + eta_x_padded * xi_x_padded + 0.5 * error_padded)
+        / (1.0 + eta_x_padded**2),
+        nx,
+    )
+    xi_rhs_error_hat = jnp.fft.rfft(xi_rhs_error, axis=-1, norm="forward")
+
+    g0 = k_abs[None, :] * jnp.tanh(depth[:, None] * k_abs[None, :])
+    sqrt_g = jnp.sqrt(jnp.asarray(gravity, dtype=dtype))
+    sqrt_g0 = jnp.sqrt(g0)
+    signs = jnp.asarray([1.0, -1.0], dtype=dtype)[None, :, None]
+    coordinates = sqrt_g * eta_hat[:, None, :] + (
+        signs * 1j * sqrt_g0[:, None, :] * xi_hat[:, None, :]
+    )
+    rhs_error = sqrt_g * error_hat[:, None, :] + (
+        signs * 1j * sqrt_g0[:, None, :] * xi_rhs_error_hat[:, None, :]
+    )
+    band = (k_abs > 0.0) & (k_abs <= k_max)
+    band = band.at[-1].set(False)
+    energy = jax.lax.stop_gradient(jnp.where(
+        band[None, None, :], jnp.abs(coordinates) ** 2, 0.0
+    ))
+    peak_energy = jnp.max(energy, axis=(1, 2), keepdims=True)
+    absolute_floor = jnp.asarray(1e-30, dtype=dtype)
+    total_energy = jnp.sum(energy, axis=(1, 2))
+    selected = total_energy > absolute_floor
+    if sample_mask is not None:
+        selected = selected & sample_mask
+    denominator = jnp.where(
+        selected[:, None, None],
+        energy + jnp.asarray(denominator_eps, dtype=dtype) * peak_energy + absolute_floor,
+        1.0,
+    )
+    omega = jnp.sqrt(jnp.where(band[None, :], gravity * g0, 1.0))
+    phase_numerator = jnp.where(
+        band[None, None, :], jnp.imag(jnp.conj(coordinates) * rhs_error), 0.0
+    )
+    phase_rate_error = phase_numerator / (
+        omega[:, None, :] * denominator
+    )
+    mode_weight = energy / jnp.maximum(total_energy[:, None, None], absolute_floor)
+    per_sample_loss = jnp.sum(mode_weight * phase_rate_error**2, axis=(1, 2))
+    if loss_norm == "charbonnier":
+        eps = jnp.asarray(charbonnier_eps, dtype=dtype)
+        per_sample_loss = per_sample_loss / (
+            jnp.sqrt(per_sample_loss + eps**2) + eps
+        )
+    selected_count = jnp.sum(selected.astype(dtype))
+    loss = jnp.sum(jnp.where(selected, per_sample_loss, 0.0)) / jnp.maximum(
+        selected_count, 1.0
+    )
+    return loss, selected_count
 
 
 def compute_translation_tangent_loss(
