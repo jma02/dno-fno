@@ -41,11 +41,27 @@ def geometry_features(eta: Array, depth: float, nz: int) -> Tensor:
     return torch.tensor(fields, dtype=torch.float32)[None]
 
 
-def correction(layers: nn.ModuleList, residual: Tensor, geometry: Tensor, diagonal: Tensor) -> Tensor:
-    """Jacobi plus a residual-scaled U-Net correction; periodic only in x."""
-    scale = residual.square().mean((1, 2, 3), keepdim=True).sqrt()
-    scaled = residual / scale.clamp_min(1e-20)
-    values = torch.cat((scaled / diagonal, geometry.expand(len(residual), -1, -1, -1)), dim=1)
+def flat_inverse_blocks(height: float, nx: int, nz: int) -> Array:
+    """Exact flat-strip FEM inverse: one small vertical matrix per Fourier mode."""
+    dx, dz = 2 * np.pi / nx, height / nz
+    vertical = np.diag(np.r_[1., np.full(nz - 1, 2.)])
+    vertical -= np.diag(np.ones(nz - 1), 1) + np.diag(np.ones(nz - 1), -1)
+    horizontal = 4 * np.sin(np.pi * np.arange(nx // 2 + 1) / nx) ** 2
+    matrices = dx / dz * vertical + dz / dx * horizontal[:, None, None] * np.diag(np.r_[.5, np.ones(nz - 1)])
+    return cast(Array, np.linalg.inv(matrices))
+
+
+def flat_inverse(residual: Array, inverse_blocks: Array) -> Array:
+    nz, nx = inverse_blocks.shape[-1], 2 * (len(inverse_blocks) - 1)
+    spectrum = np.fft.rfft(residual.reshape(*residual.shape[:-1], nz, nx), axis=-1)
+    return np.fft.irfft(np.einsum("kij,...jk->...ik", inverse_blocks, spectrum), n=nx, axis=-1).reshape(residual.shape)
+
+
+def correction(layers: nn.ModuleList, initial: Tensor, geometry: Tensor) -> Tensor:
+    """Learn a correction to the flat solution, scaled by its RMS."""
+    scale = initial.square().mean((1, 2, 3), keepdim=True).sqrt()
+    scaled = initial / scale.clamp_min(1e-20)
+    values = torch.cat((scaled, geometry.expand(len(initial), -1, -1, -1)), dim=1)
     skips = []
     for layer in layers[:4]:
         values = F.pad(F.pad(values, (1, 1, 0, 0), mode="circular"), (0, 0, 1, 1), mode="replicate")
@@ -58,13 +74,43 @@ def correction(layers: nn.ModuleList, residual: Tensor, geometry: Tensor, diagon
         values = torch.cat((values, skip), dim=1)
         values = F.pad(F.pad(values, (1, 1, 0, 0), mode="circular"), (0, 0, 1, 1), mode="replicate")
         values = F.gelu(layer(values))
-    return scale * (scaled / diagonal + layers[-1](values))
+    return scale * (scaled + layers[-1](values))
 
 
 @torch.inference_mode()
-def neural_inverse(residual: Array, layers: nn.ModuleList, geometry: Tensor, diagonal: Tensor) -> Array:
-    rhs = torch.tensor(residual.reshape(diagonal.shape), dtype=torch.float32)
-    return correction(layers, rhs, geometry, diagonal).numpy().ravel().astype(np.float64)
+def neural_inverse(residual: Array, layers: nn.ModuleList, geometry: Tensor, inverse_blocks: Array) -> Array:
+    initial = torch.tensor(flat_inverse(residual, inverse_blocks).reshape(1, 1, *geometry.shape[-2:]), dtype=torch.float32)
+    return correction(layers, initial, geometry).numpy().ravel().astype(np.float64)
+
+
+def training_pairs(full: csr_matrix, nx: int, nz: int, count: int,
+                   rng: np.random.Generator) -> tuple[Array, Array]:
+    """Interior noise, smooth known corrections, and random surface forcing."""
+    matrix = full[:-nx, :-nx].tocsc()
+    rhs = rng.normal(size=(count, nz * nx))
+    quarter = count // 4
+    vertical = np.cos(np.pi * (np.arange(nz)[:, None] + .5) * np.arange(nz)[None, :] / nz)
+    k = np.arange(nx // 2 + 1)
+    coefficients = np.fft.rfft(rng.normal(size=(quarter, nz, nx)), axis=-1)
+    coefficients /= 1 + k[None, :] ** 2 + np.arange(nz)[:, None] ** 2
+    errors = np.einsum("vm,bvx->bmx", vertical, np.fft.irfft(coefficients, n=nx))
+    rhs[quarter:2 * quarter] = (matrix @ errors.reshape(quarter, -1).T).T
+    boundary = np.fft.rfft(rng.normal(size=(count - 2 * quarter, nx)), axis=-1)
+    boundary[:quarter] /= 1 + k ** 2
+    boundary[:, 0] = 0
+    rhs[2 * quarter:] = -(full[:-nx, -nx:] @ np.fft.irfft(boundary, n=nx).T).T
+    target = splu(matrix).solve(rhs.T).T
+    scale = np.sqrt(np.mean(target ** 2, axis=1, keepdims=True))
+    return rhs / scale, target / scale
+
+
+def inverse_loss(layers: nn.ModuleList, initial: Tensor, target: Tensor, rhs: Tensor,
+                 geometry: Tensor, matrix: Tensor) -> Tensor:
+    prediction = correction(layers, initial, geometry)
+    residual = torch.sparse.mm(matrix, prediction.flatten(1).T).T.reshape_as(rhs) - rhs
+    relative_residual = residual.square().mean((1, 2, 3)) / rhs.square().mean((1, 2, 3))
+    # Targets have unit RMS; the small equation term discourages oscillatory errors.
+    return (prediction - target).square().mean() + .01 * relative_residual.mean()
 
 
 def solve(matrix: csr_matrix, rhs: Array, inverse: Inverse | None) -> tuple[Array, dict]:
@@ -84,6 +130,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples-per-surface", type=int, default=1024)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--learning-rate", type=float, default=2e-5)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(2)
@@ -107,51 +155,80 @@ if __name__ == "__main__":
     stiffness = [assemble_stiffness(surface, float(depth), nz) for surface, depth in zip(eta, metadata["depth"], strict=True)]
     matrices = [matrix[:-nx, :-nx].tocsr() for matrix in stiffness]
     geometry = [geometry_features(surface, float(depth), nz) for surface, depth in zip(eta, metadata["depth"], strict=True)]
-    diagonals = [torch.tensor(matrix.diagonal().reshape(1, 1, nz, nx), dtype=torch.float32) for matrix in matrices]
+    started = perf_counter()
+    flat_blocks = [flat_inverse_blocks(float(depth + surface.mean()), nx, nz)
+                   for surface, depth in zip(eta, metadata["depth"], strict=True)]
+    flat_setup_seconds = (perf_counter() - started) / len(flat_blocks)
     head = nn.Conv2d(8, 1, 1)
     nn.init.zeros_(head.weight)
     nn.init.zeros_(cast(Tensor, head.bias))
     layers = nn.ModuleList([nn.Conv2d(5, 8, 3), *(nn.Conv2d(8, 8, 3) for _ in range(3)),
                             *(nn.Conv2d(16, 8, 3) for _ in range(3)), head])
-    optimizer = torch.optim.Adam(layers.parameters(), lr=2e-5)
+    optimizer = torch.optim.Adam(layers.parameters(), lr=args.learning_rate)
+    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=args.learning_rate / 10)
 
-    # Manufactured interior corrections give exact (A e, e) pairs without solving A.
-    # Cosine vertical modes vanish at the top and have zero bottom normal derivative.
-    vertical = np.cos(np.pi * (np.arange(8)[:, None] + .5) * np.arange(nz)[None, :] / nz)
-    horizontal_k = np.arange(nx // 2 + 1)
+    # Both sets use only the six training geometries. Validation has independent
+    # RHS draws; the three held-out geometries are evaluated only after selection.
     started = perf_counter()
-    training = []
+    datasets = []
+    for count in (args.samples_per_surface, 128):
+        samples = []
+        for index in range(6):
+            rhs, target = training_pairs(stiffness[index], nx, nz, count, rng)
+            initial = flat_inverse(rhs, flat_blocks[index])
+            samples.append(tuple(torch.tensor(value.reshape(count, 1, nz, nx), dtype=torch.float32)
+                                 for value in (initial, target, rhs)))
+        datasets.append(samples)
+    train_data, validation_data = datasets
+    sparse_matrices = [torch.sparse_coo_tensor(torch.tensor(np.stack((coo.row, coo.col))), torch.tensor(coo.data),
+                                              size=coo.shape, dtype=torch.float32).coalesce()
+                       for coo in (matrix.tocoo() for matrix in matrices[:6])]
+    data_seconds = perf_counter() - started
+    started = perf_counter()
+    training, validation = [], []
     batches = [(surface, first) for surface in range(6)
                for first in range(0, args.samples_per_surface, batch_size)]
-    rng.shuffle(batches)
-    layers.train()
-    for step, (surface, first) in enumerate(batches):
-        count = min(batch_size, args.samples_per_surface - first)
-        coefficients = rng.normal(size=(count, 8, nx // 2 + 1)) + 1j * rng.normal(size=(count, 8, nx // 2 + 1))
-        # Half smooth, half broad-band in x; both use the first eight vertical modes.
-        decay = (1 + horizontal_k[None, :] ** 2 + np.arange(8)[:, None] ** 2)
-        coefficients[:count // 2] /= decay
-        coefficients[..., -1] = 0
-        errors = np.einsum("vm,bvx->bmx", vertical, np.fft.irfft(coefficients, n=nx))
-        errors /= np.sqrt(np.mean(errors ** 2, axis=(1, 2), keepdims=True))
-        rhs = (matrices[surface] @ errors.reshape(count, -1).T).T
-        target = torch.tensor(errors[:, None], dtype=torch.float32)
-        rhs_tensor = torch.tensor(rhs.reshape(count, 1, nz, nx), dtype=torch.float32)
-        prediction = correction(layers, rhs_tensor, geometry[surface], diagonals[surface])
-        loss = (prediction - target).square().mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        training.append(float(loss.detach()))
-        if step % 64 == 0 or step == len(batches) - 1:
-            print(f"epoch 1, batch {step + 1}/{len(batches)}: correction MSE {training[-1]:.6g}", flush=True)
-    training_seconds = perf_counter() - started
-    layers.eval()
+    with torch.no_grad():
+        baseline_loss = float(torch.stack([inverse_loss(layers, initial, target, rhs, geometry[index], sparse_matrices[index])
+                                           for index, (initial, target, rhs) in enumerate(validation_data)]).mean())
+    best_loss, best_epoch = baseline_loss, 0
     torch.save(layers.state_dict(), args.output / "weights.pt")
-    report = {"nx": nx, "nz": nz, "epochs": 1, "learning_rate": 2e-5,
+    print(f"Flat-only validation loss: {baseline_loss:.6g}", flush=True)
+    for epoch in range(args.epochs):
+        rng.shuffle(batches)
+        permutations = [torch.randperm(args.samples_per_surface) for _ in range(6)]
+        layers.train()
+        losses = []
+        for surface, first in batches:
+            selected = permutations[surface][first:first + batch_size]
+            initial, target, rhs = (value[selected] for value in train_data[surface])
+            loss = inverse_loss(layers, initial, target, rhs, geometry[surface], sparse_matrices[surface])
+            if not torch.isfinite(loss):
+                raise RuntimeError(f"Nonfinite training loss at epoch {epoch + 1}")
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach()))
+        training.append(float(np.mean(losses)))
+        layers.eval()
+        with torch.no_grad():
+            validation.append(float(torch.stack([inverse_loss(layers, initial, target, rhs, geometry[index], sparse_matrices[index])
+                                                  for index, (initial, target, rhs) in enumerate(validation_data)]).mean()))
+        if validation[-1] < best_loss:
+            best_loss, best_epoch = validation[-1], epoch + 1
+            torch.save(layers.state_dict(), args.output / "weights.pt")
+        schedule.step()
+        print(f"epoch {epoch + 1}/{args.epochs}: train {training[-1]:.6g}, validation {validation[-1]:.6g}, best {best_epoch}", flush=True)
+    training_seconds = perf_counter() - started
+    layers.load_state_dict(torch.load(args.output / "weights.pt", map_location="cpu", weights_only=True))
+    layers.eval()
+    report = {"nx": nx, "nz": nz, "epochs": args.epochs, "learning_rate": args.learning_rate,
               "training_samples": 6 * args.samples_per_surface, "seed": 0,
               "parameters": sum(value.numel() for value in layers.parameters()),
               "training_seconds": training_seconds, "training_loss": training,
+              "validation_loss": validation, "flat_validation_loss": baseline_loss,
+              "best_epoch": best_epoch, "data_seconds": data_seconds,
+              "flat_setup_seconds_per_geometry": flat_setup_seconds,
               "torch_version": torch.__version__, "cases": []}
 
     for index in range(6, 9):
@@ -167,12 +244,27 @@ if __name__ == "__main__":
         ilu_setup = perf_counter() - started
         jacobi_diagonal = matrix.diagonal()
         methods = {"none": None, "jacobi": lambda r: r / jacobi_diagonal,
-                   "neural": lambda r: neural_inverse(r, layers, geometry[index], diagonals[index]),
+                   "flat": lambda r: flat_inverse(r, flat_blocks[index]),
+                   "neural": lambda r: neural_inverse(r, layers, geometry[index], flat_blocks[index]),
                    "ilu": ilu.solve}
         case = {"simulation_id": int(metadata["simulation_id"][index]),
-                "depth": float(metadata["depth"][index]), "methods": {},
+                "depth": float(metadata["depth"][index]), "methods": {}, "standalone": {},
                 "direct_setup_seconds": direct_setup, "ilu_setup_seconds": ilu_setup}
         for name, inverse in methods.items():
+            if inverse is not None:
+                prediction = inverse(rhs)
+                times = []
+                for _ in range(3):
+                    started = perf_counter()
+                    prediction = inverse(rhs)
+                    times.append(perf_counter() - started)
+                flux = (full[-nx:, :-nx] @ prediction + full[-nx:, -nx:] @ phi) / (2 * np.pi / nx)
+                case["standalone"][name] = {
+                    "seconds": float(np.median(times)),
+                    "potential_error": float(np.linalg.norm(prediction - reference) / np.linalg.norm(reference)),
+                    "relative_residual": float(np.linalg.norm(rhs - matrix @ prediction) / np.linalg.norm(rhs)),
+                    "dno_error": float(np.linalg.norm(flux - reference_flux) / np.linalg.norm(reference_flux))}
+                print(f"test {case['simulation_id']} {name} WITHOUT GMRES: {case['standalone'][name]}", flush=True)
             solve(matrix, rhs, inverse)  # Warm the same operation outside timings.
             measured = [solve(matrix, rhs, inverse) for _ in range(3)]
             value, metrics = measured[-1]
@@ -189,6 +281,18 @@ if __name__ == "__main__":
             factor.solve(rhs)
             direct_times.append(perf_counter() - started)
         case["direct_solve_seconds"] = float(np.median(direct_times))
+        # Fresh mixed RHS probes on the unseen geometries, not just physical xi.
+        probe_rhs, probe_target = training_pairs(full, nx, nz, 128, rng)
+        probe_flat = flat_inverse(probe_rhs, flat_blocks[index])
+        with torch.no_grad():
+            probe_neural = correction(layers, torch.tensor(probe_flat.reshape(-1, 1, nz, nx), dtype=torch.float32),
+                                      geometry[index]).numpy().reshape(128, -1).astype(np.float64)
+        case["unseen_rhs"] = {}
+        for name, prediction in (("flat", probe_flat), ("neural", probe_neural)):
+            errors = np.linalg.norm(prediction - probe_target, axis=1) / np.linalg.norm(probe_target, axis=1)
+            residuals = np.linalg.norm((matrix @ prediction.T).T - probe_rhs, axis=1) / np.linalg.norm(probe_rhs, axis=1)
+            case["unseen_rhs"][name] = {"potential_median_p95": np.percentile(errors, [50, 95]).tolist(),
+                                       "residual_median_p95": np.percentile(residuals, [50, 95]).tolist()}
         report["cases"].append(case)
         (args.output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -211,8 +315,8 @@ if __name__ == "__main__":
                     potential = splu(matrix.tocsc()).solve(rhs)
                 else:
                     features = geometry_features(surface, float(metadata["depth"][6]), nz)
-                    diagonal = torch.tensor(matrix.diagonal().reshape(1, 1, nz, nx), dtype=torch.float32)
-                    potential, metrics = solve(matrix, rhs, lambda r: neural_inverse(r, layers, features, diagonal))
+                    blocks = flat_inverse_blocks(float(metadata["depth"][6] + surface.mean()), nx, nz)
+                    potential, metrics = solve(matrix, rhs, lambda r: neural_inverse(r, layers, features, blocks))
                     if not metrics["converged"]:
                         raise RuntimeError(f"Rollout interior solve failed: {metrics}")
                 flux = (full[-nx:, :-nx] @ potential + full[-nx:, -nx:] @ phi) / (2 * np.pi / nx)

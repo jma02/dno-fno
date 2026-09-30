@@ -14,9 +14,10 @@ solve A × interior potential = b
 surface reaction / horizontal grid spacing = approximate DNO output
 ```
 
-The tiny U-Net predicts an interior correction from a residual and the geometry.
-It adds that correction to Jacobi (division by the matrix diagonal). The network
-is nonlinear in the residual, so all comparisons use **right-preconditioned
+The tiny U-Net corrects a flat-water solution using the wavy geometry. A Fourier
+transform in x reduces the flat inverse to 33 small vertical matrices; these
+are precomputed at the mean fluid height. Input and output are scaled by the
+flat solution's RMS. The combined inverse is nonlinear in the residual, so comparisons use **right-preconditioned
 flexible GMRES**, not ordinary GMRES. PyAMG supplies the solver; the final true
 residual is also checked explicitly. See the [PyAMG documentation](https://pyamg.readthedocs.io/en/latest/generated/pyamg.krylov.html#pyamg.krylov.fgmres).
 
@@ -27,9 +28,9 @@ From the repository root, using its existing CPU-capable PyTorch environment:
 ```sh
 CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 UV_CACHE_DIR=/tmp/codex-uv-cache \
   uv run --no-sync --with pyamg==5.3.0 cpu-preconditioner/run.py \
-  --output outputs/cpu_preconditioner_trial
+  --epochs 100 --learning-rate 1e-3 --output outputs/cpu_preconditioner_trial
 
-CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 uv run --no-sync \
+CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 uv run --no-sync --with pyamg==5.3.0 \
   python -m unittest discover -s cpu-preconditioner/tests -v
 ```
 
@@ -40,17 +41,33 @@ distinct simulation IDs. Depths range from 0.206 to 0.347. Fourier resampling
 reduces 1,024 horizontal samples to 64; there are 16 vertical cells and 1,024
 interior unknowns, including the bottom nodes.
 
-The 5,609-parameter network trains from scratch for **one epoch**, Adam learning
-rate `2e-5`, using two CPU threads. The six training geometries supply 6,144
-synthetic pairs `(A e, e)`: the known correction `e` gives an exact training label
-without an inverse solve. Half are smooth horizontally, half cover the retained
-horizontal modes; both use eight vertical cosine modes. They are not uniformly
-sampled over the entire interior vector space. The loss is mean squared error
-in the unit-RMS correction, not the PDE residual. Test potentials are the actual
-held-out Tanaka boundary potentials; no test data enter training.
+The 5,609-parameter network trains from scratch using two CPU threads. The user
+approved **100 epochs at initial learning rate `1e-3`** for this CPU experiment;
+cosine decay ends at `1e-4`. This is an exception to the repo's one-epoch rule,
+not a change to production training.
 
-## First result
+The six training geometries supply 6,144 fixed pairs `(r, A^-1 r)`: one quarter
+white interior forcing, one quarter smooth manufactured corrections using all
+16 vertical modes, and half surface-boundary forcing (smooth and broad-band).
+Sparse LU supplies exact same-grid labels. Each pair is scaled to unit target
+RMS. The loss is relative squared potential error plus `0.01` times relative
+squared equation residual. Independent draws (128 per training geometry) select
+the best checkpoint; they are RHS validation, not unseen-geometry validation.
+The three test geometries and their actual Tanaka potentials never enter
+training or selection. Fresh mixed RHS probes also test these unseen geometries.
 
+`results.json` separates **standalone** inverse predictions from solutions
+**after FGMRES**. The analytic flat inverse is always evaluated on its own:
+the learned correction must improve on that baseline to deserve credit. DNO
+error is measured separately because surface differentiation can amplify small
+potential errors. Solver timings include every flat inverse and NN application;
+matrix/factor setup is reported separately. Training time includes validation
+and checkpoint selection.
+
+## Original one-epoch result
+
+The original Jacobi-plus-U-Net pilot used one epoch at `2e-5`, manufactured
+corrections with only eight vertical modes, and no boundary-forcing examples.
 Completed September 29, 2026; training took **5.12 seconds**. Raw weights,
 timings, and short-rollout arrays are in `outputs/cpu_preconditioner_20260929/`.
 All methods reached relative equation residual below `1e-9` on all three test
@@ -66,9 +83,10 @@ conversion/inference and Krylov work but excluding matrix/geometry setup.
 | Direct sparse LU | — | 0.048–0.056 ms after factorization |
 
 ILU and direct LU setup each cost approximately 2.0–2.2 ms per geometry.
-The learned preconditioner **did not improve convergence and was much slower**
-in this one-epoch pilot. This does not establish the performance of a fully
-trained or larger model; no additional epochs or tuning runs were performed.
+The learned preconditioner **did not improve convergence and was much slower**.
+Its standalone potential error was **97.5%** on the three held-out ICs, almost
+identical to Jacobi. The accurate corrected solve below was not evidence that
+the network had learned an accurate inverse.
 
 The NN-assisted solve's DNO output agrees with the same-grid direct result to
 `3.76e-7` relative or better. Separately, refining from 64×16 to 256×64 changes
@@ -83,5 +101,39 @@ paths use the same coarse FEM discretization. Final eta/xi differences are
 only a coupling check—not the production GL2/filter protocol or a long-rollout
 stability/accuracy result.
 
+## Trained flat-inverse correction
+
+September 30: the approved 100-epoch run took **8 minutes 35 seconds**, including
+validation and checkpoint selection. Epoch 100 had the best validation loss:
+`4.35e-5`, versus `2.82e-3` for the untrained flat baseline. Results and weights:
+`outputs/cpu_preconditioner_flat_20260930/`.
+
+These are predictions **before GMRES**, compared with the same-grid direct solve:
+
+| Held-out simulation | Flat potential error | Flat + NN potential error | Flat + NN DNO error |
+|---|---:|---:|---:|
+| 16477 | 1.241% | 0.927% | 124.8% |
+| 16494 | 3.886% | 0.458% | 57.0% |
+| 16602 | 4.633% | 0.377% | 27.9% |
+
+On 128 fresh mixed RHSs per unseen geometry, learned potential error has medians
+0.80–0.84% and 95th percentiles 1.04–1.16%. Thus the correction actually learned
+an inverse approximation; it is not just exploiting the physical test RHSs.
+However, potential accuracy still does **not** give an accurate standalone DNO.
+
+FGMRES iterations fall from **6 / 8 / 8** with the flat inverse to **5 / 7 / 7**
+with its learned correction. All solves converge, but the NN adds overhead:
+**6.53–9.11 ms versus 0.60–0.76 ms** for flat-only FGMRES. ILU takes 0.57–0.59 ms.
+The analytic flat inverse accounts for most of the improvement over the original
+Jacobi pilot. This is progress in inverse prediction, **not a CPU acceleration
+or a standalone DNO replacement**. No production model or GPU job was changed.
+
+An independent four-step RK4 check **without GMRES**, using the first test IC,
+gives final eta errors 0.197% (flat) and 0.120% (flat + NN) against the same-grid
+direct rollout. All states stay finite, but the horizon is only `0.004`; this
+does not establish useful long-time accuracy. The original GMRES-corrected
+smoke agrees to `2.33e-12` in eta because it solves the equations accurately.
+Both diagnostics are saved in the result directory.
+
 Read `laplace.py` for the discrete operator and `run.py` for the network,
-single training pass, solver comparison, and short coupled test.
+training loop, solver comparison, and short coupled test.
