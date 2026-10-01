@@ -47,6 +47,8 @@ from util import (  # noqa: E402
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
+from solver.evals.eval_suite import FAMILY_CONFIGS, _write_json, compute_macro_summary, run_family  # noqa: E402
+from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched  # noqa: E402
 from hadamard_shape_regularizer import compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
@@ -121,6 +123,10 @@ def main() -> None:
         "--stop_after_epoch", type=int, default=1,
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
     )
+    parser.add_argument("--rollout_epochs", type=int, nargs="+", default=[],
+                        help="Evaluate 32 stratified test trajectories per family at these epochs.")
+    parser.add_argument("--rollout_truth_run",
+                        help="Run directory containing the two cached-M6 reference evaluation groups.")
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument(
         "--lr_warmup_steps",
@@ -299,6 +305,9 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.rollout_epochs and (args.rollout_truth_run is None or
+                               any(epoch < 1 or epoch > args.epochs for epoch in args.rollout_epochs)):
+        parser.error("--rollout_epochs requires --rollout_truth_run and epochs within the training budget")
     if not 0.0 <= args.gradient_ema_decay < 1.0:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if args.metric_interval < 1:
@@ -1021,6 +1030,31 @@ def main() -> None:
                 stats=stats,
                 async_manager=checkpoint_async_manager,
             )
+
+        if epoch in args.rollout_epochs:
+            print(f"Epoch {epoch}: starting 128 milestone rollouts", flush=True)
+            rollout_loaded = LoadedRun(model, training_state.params, config_payload, stats, args.norm, epoch)
+            rollout_predict = build_predict_gxi_batched(rollout_loaded)
+            for group, families in enumerate((("stokes", "tanaka"), ("jonswap_tma", "benjamin_feir"))):
+                rollout_dir = run_dir / f"eval_epoch{epoch}_test_stratified_n32_gpu{group}"
+                rollout_dir.mkdir(parents=True, exist_ok=True)
+                rollout_summaries = {
+                    family: run_family(
+                        family, FAMILY_CONFIGS[family], rollout_loaded, rollout_predict,
+                        rollout_dir, dataset_path, 32,
+                        Path(args.rollout_truth_run) / f"eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu{group}",
+                        {"run_dir": str(run_dir), "selection": "latest",
+                         "path": str(run_dir / "latest_ckpt"), "epoch": epoch},
+                        32, ic_selection="stratified",
+                    ) for family in families
+                }
+                for filename, payload in (
+                    ("all_summaries.json", rollout_summaries),
+                    ("macro_summary.json", compute_macro_summary(rollout_summaries)),
+                ):
+                    _write_json(rollout_dir / filename, payload)
+            del rollout_loaded, rollout_predict
+            print(f"Epoch {epoch}: milestone rollouts complete; continuing training", flush=True)
 
     summary_payload = {
         "dataset": args.dataset,

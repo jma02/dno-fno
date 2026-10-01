@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
 import tempfile
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -15,6 +17,7 @@ import numpy as np
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from solver.evals.eval_suite import (  # noqa: E402
+    FAMILY_CONFIGS,
     IC,
     FamilyConfig,
     _json_ready,
@@ -22,6 +25,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     _rollout_ic_chunks,
     _try_load_cached_truth,
     _write_truth_cache,
+    _write_json,
     compute_macro_summary,
     compute_metrics,
     main as eval_main,
@@ -32,6 +36,8 @@ from dno_net_v2 import CraigSulemDNO  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+import optax  # noqa: E402
+from flax.training.train_state import TrainState  # noqa: E402
 from solver.gen_data.pipeline.batch_storage import save_completed_batch  # noqa: E402
 from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
@@ -41,6 +47,97 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_trainer_milestones_evaluate_current_state_without_changing_training(self) -> None:
+        path = Path(__file__).resolve().parents[2] / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
+        milestone = next(
+            node for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "epoch in args.rollout_epochs"
+        )
+        code = compile(ast.Module(body=[milestone], type_ignores=[]), str(path), "exec")
+        model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
+        inputs = 0.01 * jax.random.normal(jax.random.PRNGKey(4), (1, 16, 2), dtype=jnp.float32)
+        depth = jnp.zeros((1, 1), dtype=jnp.float32)
+        params = model.init(jax.random.PRNGKey(0), inputs, depth)["params"]
+        state = TrainState.create(
+            apply_fn=model.apply, params=params,
+            tx=optax.chain(optax.ema(0.9, debias=True), optax.adamw(2e-5)),
+        )
+        gradients = jax.tree_util.tree_map(jnp.ones_like, params)
+        state = state.apply_gradients(grads=gradients)
+        sharding = jax.sharding.NamedSharding(
+            jax.sharding.Mesh(np.asarray(jax.devices()[:1]), ("data",)), jax.sharding.PartitionSpec(),
+        )
+        state = jax.device_put(state, sharding)
+        before = jax.tree_util.tree_map(lambda value: np.asarray(value).copy(), state)
+        expected_next = state.apply_gradients(grads=gradients)
+        config = {"model": "cs_dno"}
+        stats = {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0}
+        train_rng = jax.random.PRNGKey(7)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for epoch in (9, 10, 11, 30, 60, 120):
+                with self.subTest(epoch=epoch):
+                    build = Mock(wraps=build_predict_gxi_batched)
+                    evaluate = Mock(return_value={"epoch": epoch})
+                    macro = Mock(return_value={"n_families": 2})
+                    namespace: dict[str, Any] = {
+                        "epoch": epoch,
+                        "args": SimpleNamespace(rollout_epochs=[10, 30, 60],
+                                                rollout_truth_run=str(directory / "truth"), norm="scale"),
+                        "model": model, "training_state": state, "config_payload": config,
+                        "stats": stats, "run_dir": directory, "dataset_path": directory / "dataset",
+                        "LoadedRun": LoadedRun, "build_predict_gxi_batched": build,
+                        "run_family": evaluate, "FAMILY_CONFIGS": FAMILY_CONFIGS,
+                        "compute_macro_summary": macro, "Path": Path, "_write_json": _write_json,
+                        "print": Mock(), "train_rng": train_rng,
+                        "epoch_end_step": 1, "epoch_end_optimizer_count": 1,
+                    }
+                    exec(code, namespace)
+                    self.assertIs(namespace["training_state"], state)
+                    self.assertIs(namespace["train_rng"], train_rng)
+                    self.assertEqual(namespace["epoch_end_step"], 1)
+                    self.assertEqual(namespace["epoch_end_optimizer_count"], 1)
+                    for actual, expected in zip(jax.tree_util.tree_leaves(state), jax.tree_util.tree_leaves(before)):
+                        np.testing.assert_array_equal(actual, expected)
+                    if epoch not in (10, 30, 60):
+                        build.assert_not_called()
+                        evaluate.assert_not_called()
+                        macro.assert_not_called()
+                        continue
+                    loaded = build.call_args.args[0]
+                    build.assert_called_once_with(loaded)
+                    self.assertIs(loaded.model, model)
+                    self.assertIs(loaded.params, state.params)
+                    self.assertIs(loaded.config, config)
+                    self.assertIs(loaded.stats, stats)
+                    self.assertEqual((loaded.epoch, loaded.norm_mode), (epoch, "scale"))
+                    self.assertEqual(evaluate.call_count, 4)
+                    for index, family in enumerate(("stokes", "tanaka", "jonswap_tma", "benjamin_feir")):
+                        call = evaluate.call_args_list[index]
+                        group = index // 2
+                        out = directory / f"eval_epoch{epoch}_test_stratified_n32_gpu{group}"
+                        cache = directory / "truth" / f"eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu{group}"
+                        self.assertEqual(call.args[:2], (family, FAMILY_CONFIGS[family]))
+                        self.assertIs(call.args[2], loaded)
+                        self.assertIs(call.args[3], evaluate.call_args_list[0].args[3])
+                        self.assertEqual(call.args[4:], (
+                            out, directory / "dataset", 32, cache,
+                            {"run_dir": str(directory), "selection": "latest",
+                             "path": str(directory / "latest_ckpt"), "epoch": epoch}, 32,
+                        ))
+                        self.assertEqual(call.kwargs, {"ic_selection": "stratified"})
+                        self.assertEqual(json.loads((out / "all_summaries.json").read_text())[family], {"epoch": epoch})
+                        self.assertEqual(json.loads((out / "macro_summary.json").read_text()), {"n_families": 2})
+                    predictor = evaluate.call_args_list[0].args[3]
+                    expected = build_predict_gxi_batched(loaded, center_xi=False)
+                    np.testing.assert_array_equal(
+                        predictor(inputs[..., 0], inputs[..., 1], depth),
+                        expected(inputs[..., 0], inputs[..., 1], depth),
+                    )
+                    actual_next = namespace["training_state"].apply_gradients(grads=gradients)
+                    for actual, expected in zip(jax.tree_util.tree_leaves(actual_next), jax.tree_util.tree_leaves(expected_next)):
+                        np.testing.assert_array_equal(actual, expected)
+
     def test_checkpoint_loader_restores_cs_architecture_options(self) -> None:
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
