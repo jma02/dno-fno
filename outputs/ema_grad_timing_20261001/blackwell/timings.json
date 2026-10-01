@@ -1,0 +1,162 @@
+{
+  "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "visible_devices": null,
+  "batch_size": 1,
+  "nx": 1024,
+  "internal_dt": 0.01,
+  "gl2_iterations": 4,
+  "fft_ept": 8,
+  "classical_pad_factor": 2,
+  "precision": "FP64 classical/integration; FP32 learned inference",
+  "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
+  "neural_runs": {
+    "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": "/repo/outputs/c27_w320_b4_h80_ema_grad09_20260927"
+  },
+  "fusion_variants": {
+    "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": "fourier_fused_features_product_overlap"
+  },
+  "reference": "cached_M6",
+  "include_model_baselines": true,
+  "families": {
+    "stokes": {
+      "simulation_id": 517582,
+      "steps": 2000,
+      "horizon": 20.0,
+      "saved_frames": 251,
+      "methods": {
+        "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": {
+          "setup_s": 3.080323270000001,
+          "compile_s": 2.302909251999999,
+          "warmup_s": 1.8772584009999989,
+          "seconds": [
+            1.6601070769999993,
+            1.6600890360000022,
+            1.6586083480000013
+          ],
+          "finite": true,
+          "minimum_depth": 15.413273468634491,
+          "terminal_eta_error": 2.8793449642032097e-05,
+          "max_eta_error": 2.8793449642032097e-05,
+          "trajectory_eta_error": 1.6760583957497296e-05,
+          "cached_reference_max_eta_error": 2.8793449642032097e-05,
+          "cached_reference_terminal_eta_error": 2.8793449642032097e-05,
+          "terminal_xi_error": 2.9022922560923927e-05,
+          "max_xi_error": 2.9022922560923927e-05,
+          "trajectory_xi_error": 1.6737564921504608e-05,
+          "cached_reference_max_xi_error": 2.9022922560923927e-05,
+          "cached_reference_terminal_xi_error": 2.9022922560923927e-05,
+          "terminal_gxi_error": 2.9626015058512526e-05,
+          "max_gxi_error": 2.9626015058512526e-05,
+          "trajectory_gxi_error": 1.7618860133714104e-05,
+          "cached_reference_max_gxi_error": 2.9626015058512526e-05,
+          "cached_reference_terminal_gxi_error": 2.9626015058512526e-05
+        }
+      }
+    },
+    "tanaka": {
+      "simulation_id": 3686647,
+      "steps": 20000,
+      "horizon": 200.0,
+      "saved_frames": 251,
+      "methods": {
+        "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": {
+          "setup_s": 2.1546249619999998,
+          "compile_s": 1.9425711279999973,
+          "warmup_s": 16.202650989,
+          "seconds": [
+            16.191948182000004,
+            16.18612272,
+            16.192486920999997
+          ],
+          "finite": true,
+          "minimum_depth": 0.050103220767812234,
+          "terminal_eta_error": 0.028968470181403815,
+          "max_eta_error": 0.028968470181403815,
+          "trajectory_eta_error": 0.012828293668235787,
+          "cached_reference_max_eta_error": 0.028968470181403815,
+          "cached_reference_terminal_eta_error": 0.028968470181403815,
+          "terminal_xi_error": 0.00885447863407285,
+          "max_xi_error": 0.00885447863407285,
+          "trajectory_xi_error": 0.003946618836114423,
+          "cached_reference_max_xi_error": 0.00885447863407285,
+          "cached_reference_terminal_xi_error": 0.00885447863407285,
+          "terminal_gxi_error": 0.057273038150924944,
+          "max_gxi_error": 0.057273038150924944,
+          "trajectory_gxi_error": 0.02533947268026664,
+          "cached_reference_max_gxi_error": 0.057273038150924944,
+          "cached_reference_terminal_gxi_error": 0.057273038150924944
+        }
+      }
+    },
+    "benjamin_feir": {
+      "simulation_id": 3714872,
+      "steps": 20000,
+      "horizon": 200.0,
+      "saved_frames": 251,
+      "methods": {
+        "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": {
+          "setup_s": 2.1466228629999904,
+          "compile_s": 1.5838296099999951,
+          "warmup_s": 16.190361444000004,
+          "seconds": [
+            16.179542569999995,
+            16.184085381999978,
+            16.172768531999992
+          ],
+          "finite": true,
+          "minimum_depth": 4.9706695159132845,
+          "terminal_eta_error": 0.00861117214305264,
+          "max_eta_error": 0.00861117214305264,
+          "trajectory_eta_error": 0.002510392488405105,
+          "cached_reference_max_eta_error": 0.00861117214305264,
+          "cached_reference_terminal_eta_error": 0.00861117214305264,
+          "terminal_xi_error": 0.00796782680554808,
+          "max_xi_error": 0.00796782680554808,
+          "trajectory_xi_error": 0.002265131552312432,
+          "cached_reference_max_xi_error": 0.00796782680554808,
+          "cached_reference_terminal_xi_error": 0.00796782680554808,
+          "terminal_gxi_error": 0.014634943004337254,
+          "max_gxi_error": 0.016201664967238717,
+          "trajectory_gxi_error": 0.005595803118761848,
+          "cached_reference_max_gxi_error": 0.016201664967238717,
+          "cached_reference_terminal_gxi_error": 0.014634943004337254
+        }
+      }
+    },
+    "jonswap_tma": {
+      "simulation_id": 3735800,
+      "steps": 2000,
+      "horizon": 20.0,
+      "saved_frames": 251,
+      "methods": {
+        "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local": {
+          "setup_s": 2.3103962510000144,
+          "compile_s": 1.6467025780000029,
+          "warmup_s": 1.669339094999998,
+          "seconds": [
+            1.658366056999995,
+            1.6577457089999825,
+            1.6582781630000056
+          ],
+          "finite": true,
+          "minimum_depth": 6.353450890111135,
+          "terminal_eta_error": 0.002479971177843273,
+          "max_eta_error": 0.002479971177843273,
+          "trajectory_eta_error": 0.001700166693827331,
+          "cached_reference_max_eta_error": 0.002479971177843273,
+          "cached_reference_terminal_eta_error": 0.0024799711778432736,
+          "terminal_xi_error": 0.0018992769631239908,
+          "max_xi_error": 0.0019792474139443098,
+          "trajectory_xi_error": 0.0013041587100395048,
+          "cached_reference_max_xi_error": 0.0019792474139443098,
+          "cached_reference_terminal_xi_error": 0.0018992769631239908,
+          "terminal_gxi_error": 0.003502781940029699,
+          "max_gxi_error": 0.0038147657618816185,
+          "trajectory_gxi_error": 0.002621003524339135,
+          "cached_reference_max_gxi_error": 0.0038147657618816185,
+          "cached_reference_terminal_gxi_error": 0.003502781940029699
+        }
+      }
+    }
+  }
+}

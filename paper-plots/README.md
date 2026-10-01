@@ -174,13 +174,12 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 ([LaTeX source](meeting-notes-2026-10-01.tex)) summarize the accuracy results and current experiments.
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
 The meeting layout places the four families in columns, with logarithmic runtime
-axes and identical axis limits within each column. Measurements are unchanged.
+axes and identical axis limits within each column.
 Repeated savings annotations and redundant transformer timing lines are removed;
-transformer diamonds retain both runtime and accuracy. Cloud saved-accuracy
-references remain separate horizontal lines, not paired runtime/error points.
-Ada shows orange runtime/error points for the epoch-120 gradient-EMA checkpoint,
-measured with full single rollouts of the optimized network. Cloud panels retain
-their preceding candidate timing lines and saved epoch-120 accuracy references.
+transformer diamonds retain both runtime and accuracy. All three hardware rows
+show orange runtime/error points for the epoch-120 gradient-EMA checkpoint,
+measured with full single rollouts of the optimized network. The separate cloud
+timing and saved-accuracy lines have been replaced by jointly measured points.
 The candidate retains G0+G1 baselines, cuFFTDx G1 evaluation,
 cached depth multipliers and packed network branches. Its spectral adapter
 removes repeated physical/Fourier round trips and batches independent inverse
@@ -205,11 +204,24 @@ for Stokes, Tanaka, Benjamin–Feir, and JONSWAP/TMA, respectively. For the
 Benjamin–Feir case, product fusion saves 0.567% against the preceding fusion
 but increases final surface error from 1.448749% to 1.904739%; the plotted point
 uses the latter measured error.
-On cloud panels, the dashed orange lines retain the previous checkpoint's
-optimized timings; solid orange lines show the corresponding test case's
-epoch-120 accuracy from the saved local evaluation. No cloud checkpoint timing
-is newly measured or paired with those accuracy references. The old small/full
-neural references are removed. All panels use single-case errors, including Ada.
+Cloud points use October 1 full-rollout measurements of the same trained
+checkpoint in `outputs/ema_grad_timing_20261001/{blackwell,a100_sxm}/timings.json`.
+Each point pairs the median of three warmed repeats with the final surface error
+against cached M6 from that execution, not a saved local accuracy reference.
+The old small/full neural references are removed. All panels use single-case errors.
+
+October 1 median warm rollout times (seconds):
+
+| GPU | Stokes | Tanaka | Benjamin–Feir | JONSWAP/TMA |
+| --- | ---: | ---: | ---: | ---: |
+| A100-SXM4-80GB | 0.934274 | 9.078840 | 9.081056 | 0.933793 |
+| RTX PRO 6000 Blackwell | 1.660089 | 16.191948 | 16.179543 | 1.658278 |
+
+Both runs used `jma02`, the existing CUDA12.9/JAX0.9.2 image, EPT8, FP64
+integration/G1, FP32 learned inference, and the unchanged full-horizon cases.
+All eight trajectories remained finite with positive depth. The Blackwell BF
+error is 0.861117%, versus 1.904739% on A100/Ada; each plotted dot uses its own
+measured error rather than transferring accuracy across GPUs.
 
 The Ada panels also show two experiments trained from scratch for 120 epochs
 at LR `2e-5`: `Local tangent — 120 epochs` (blue squares) and
@@ -221,8 +233,8 @@ repeats with final surface errors from those same measured trajectories,
 not the separate 32-case family medians. Measurements are stored in
 `outputs/phase_timing_20260930/{control,modal}.json` and use the same optimized
 network implementation as the existing orange point. The three one-epoch
-markers have been replaced; the existing epoch-120 orange point and the
-Blackwell/A100 results are retained.
+markers have been replaced; the existing Ada epoch-120 orange point is retained.
+Blackwell/A100 trained-checkpoint points are measured separately.
 
 Median warm seconds (three full repeats per case):
 
@@ -262,10 +274,10 @@ uses paired old/new implementations, with three alternating full-rollout repeats
 after full-executable warm-up. Paired M6 savings remain in the source records;
 they are not differences between allocations. All errors are referenced to the cached
 single-case M6 trajectory. Ada candidate measurements are under
-`outputs/ema_grad_timing_20260928/ada/timings.json`; cloud timings remain under
-`outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`.
+`outputs/ema_grad_timing_20260928/ada/timings.json`; cloud measurements are under
+`outputs/ema_grad_timing_20261001/{blackwell,a100_sxm}/timings.json`.
 Classical and neural runs retain the same integration settings and packed
-boundaries. The fused inference path is unchanged; Ada now uses the trained
+boundaries. The fused inference path is unchanged; all three GPUs use the trained
 gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
 The unused FP32 FFT trial has been removed from Figure 12. Its combined FP32 G1,
 reused xi FFT and FP32 input inverse-FFT measurements remain archived in
@@ -286,8 +298,8 @@ difference 2.01e-9, but long trajectories are not bitwise equivalent. For
 Benjamin–Feir in the earlier product-fusion runs, terminal surface error against M6 changes from 1.022% to 1.010%
 on Ada/A100 and from 0.888% to 0.976% on Blackwell. The largest relative saved
 surface difference against the preceding candidate is 0.001223 (Blackwell BF).
-Those preceding timing-only comparisons remain archived; Ada now shows a
-measured candidate point, while cloud timing lines are retained. Spectral EMA overlays are retained;
+Those preceding timing-only comparisons remain archived; all hardware rows now
+show measured candidate points. Spectral EMA overlays are retained;
 production/training code is untouched. Trial details, numerical comparisons and decisions are in
 `experiments/experiments-2026-09-27.md`.
 

@@ -74,7 +74,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     })
     axes = fig.subplots(1, 4) if compact else fig.subplots(2, 2)
     fig.subplots_adjust(left=0.065 if compact else 0.10, right=0.98, bottom=0.13,
-                        top=0.67 if compact else 0.74 if phase else 0.78 if baseline_free or args.candidate_accuracy else 0.80,
+                        top=0.67 if compact else 0.74 if phase else 0.78 if baseline_free else 0.80,
                         hspace=0.37, wspace=0.32 if compact else 0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
@@ -132,19 +132,11 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             methods = comparison["families"][family]["methods"]
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
-            if comparison is candidate and not args.candidate_accuracy:
+            if comparison is candidate:
                 ax.scatter(new_seconds, 100 * record["cached_reference_terminal_eta_error"],
                            color=color, marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
             else:
                 ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
-            if comparison is candidate and args.candidate_accuracy:
-                source = next(args.candidate_accuracy.glob(f"eval_best_current_test_stratified_n32*/{family}_trajs.npz"))
-                with np.load(source) as saved:
-                    selected = np.flatnonzero(saved["simulation_ids"] == warm["families"][family]["simulation_id"])
-                    if len(selected) != 1 or saved["times"][-1] != horizon:
-                        parser.error(f"{source}: saved accuracy case or horizon does not match")
-                    neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
-                ax.axhline(neural_error, color=color, ls="-", lw=1.0, alpha=0.55, zorder=1)
             if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6 and not compact:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
@@ -199,11 +191,9 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, marker="o" if comparison is candidate and not args.candidate_accuracy else None,
-                  ls="none" if comparison is candidate and not args.candidate_accuracy else style, ms=7, lw=width, label=label)
+        *[Line2D([], [], color=color, marker="o" if comparison is candidate else None,
+                  ls="none" if comparison is candidate else style, ms=7, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
-        *([Line2D([], [], color="#c45b22", ls="-", lw=1.0, label="Gradient EMA — saved accuracy")]
-          if args.candidate_accuracy else []),
         *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="none" if args.single_case else "-.", ms=6, lw=1.3,
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
@@ -219,7 +209,6 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.set_defaults(candidate_accuracy=None)
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
@@ -257,11 +246,9 @@ if __name__ == "__main__":
             config.classical_timings = [classical]
             config.candidate_timings = [ROOT / "outputs" / {
                 "ada": "ema_grad_timing_20260928/ada/timings.json",
-                "blackwell": "classical_figure12_20260927/blackwell/neural.json",
-                "a100": "classical_figure12_20260927/a100_sxm/neural.json",
+                "blackwell": "ema_grad_timing_20261001/blackwell/timings.json",
+                "a100": "ema_grad_timing_20261001/a100_sxm/timings.json",
             }[hardware]]
-            config.candidate_accuracy = (ROOT / "outputs/c27_w320_b4_h80_ema_grad09_20260927"
-                                         if hardware != "ada" else None)
             config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
             config.candidate_previous_method = None
             config.no_baseline_timings = None
