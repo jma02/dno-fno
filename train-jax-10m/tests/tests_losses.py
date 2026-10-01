@@ -135,6 +135,82 @@ def test_nonlinear_denominator_prioritizes_larger_corrections() -> None:
         config.model = "cs_dno"
 
 
+def test_target_normalization_matches_unweighted_relative_l2() -> None:
+    config = SimpleNamespace(model="cs_dno", data_normalization="target", residual_floor=1e-6)
+    losses = trainer_loss(config)
+    evaluate = jax.jit(jax.value_and_grad(losses, argnums=(0, 2, 3), has_aux=True))
+    ordinary = jax.jit(jax.value_and_grad(relative_l2_loss))
+    family = jnp.array([1, 2, 3, 4])
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(512, dtype=dtype) * (2 * jnp.pi / 512)
+        target = jnp.arange(1, 5, dtype=dtype)[:, None, None] * jnp.sin(x)[None, :, None]
+        # The old objective includes modes above the phase diagnostic's k=128 cutoff.
+        prediction = target + 0.01 * jnp.cos(160 * x)[None, :, None]
+        for scale in (0.0, 1e-14, 1.0):
+            for pred in (scale * target, scale * prediction):
+                truth = scale * target
+                (value, (full, _)), gradients = evaluate(pred, truth, 0.7 * truth, 0.9 * truth, family)
+                expected, expected_gradient = ordinary(pred, truth)
+                np.testing.assert_array_equal(value, expected)
+                np.testing.assert_array_equal(full, expected)
+                np.testing.assert_array_equal(gradients[0], expected_gradient)
+                assert bool(jnp.isfinite(value) & jnp.all(jnp.isfinite(gradients[0])))
+                for gradient in gradients[1:]:
+                    np.testing.assert_array_equal(gradient, 0)
+
+
+def test_bounded_weights_decrease_and_have_stopped_scale_invariant_gradients() -> None:
+    config = SimpleNamespace(model="cs_dno", data_normalization="bounded", residual_floor=1e-6,
+                             nonlinear_reference=0.002, nonlinear_weight_mean=1.4)
+    losses = trainer_loss(config)
+    evaluate = jax.jit(jax.value_and_grad(losses, argnums=(0, 1, 2, 3), has_aux=True))
+    family = jnp.array([PhysicalFamilyId.TANAKA])
+    ratios = np.array([0.0, 1e-5, 0.001, 0.002, 0.02, 1.0, 1e4])
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(64, dtype=dtype) * (2 * jnp.pi / 64)
+        target = jnp.sin(x)[None, :, None]
+        prediction = target + 0.01 * jnp.cos(2 * x)[None, :, None]
+        ordinary, ordinary_gradient = jax.jit(jax.value_and_grad(relative_l2_loss))(prediction, target)
+        target_hat = np.asarray(jnp.fft.rfft(target, axis=1))
+        weights = []
+        for ratio in ratios:
+            baseline = (1 - jnp.asarray(ratio, dtype=dtype)) * target
+            residual_hat = (target_hat - np.asarray(jnp.fft.rfft(baseline, axis=1))).astype(np.complex128)
+            measured_ratio = np.linalg.norm(residual_hat) / np.linalg.norm(target_hat.astype(np.complex128))
+            expected = (1 + config.nonlinear_reference
+                        / (np.hypot(measured_ratio, config.residual_floor) + config.nonlinear_reference))
+            expected /= config.nonlinear_weight_mean
+            (weighted, (full, _)), gradients = evaluate(prediction, target, baseline, target, family)
+            np.testing.assert_array_equal(full, ordinary)
+            weight = float(weighted / ordinary)
+            weights.append(weight)
+            np.testing.assert_allclose(weight, expected, rtol=5e-6)
+            np.testing.assert_allclose(gradients[0], weight * ordinary_gradient, rtol=3e-5, atol=1e-8)
+            np.testing.assert_allclose(gradients[1], -gradients[0], rtol=1e-6)
+            np.testing.assert_array_equal(gradients[2], 0)
+            np.testing.assert_array_equal(gradients[3], 0)
+            for scale in (0.1, 7.0):
+                scaled, _ = losses(scale * prediction, scale * target, scale * baseline, scale * target, family)
+                # Tiny residuals subtract nearly equal FP32 FFT coefficients.
+                np.testing.assert_allclose(scaled, weighted, rtol=1e-4 if dtype == jnp.float32 else 1e-11)
+            (changed_m1, _), _ = evaluate(prediction, target, baseline, 0.3 * target, family)
+            np.testing.assert_array_equal(changed_m1, weighted)
+        assert np.all(np.diff(weights) < 0)
+        assert np.all(np.asarray(weights) >= 1 / config.nonlinear_weight_mean)
+        assert np.all(np.asarray(weights) <= 2 / config.nonlinear_weight_mean)
+        for scale in (0.0, 1e-14, 1.0):
+            truth = scale * target
+            for pred in (truth, truth + 1e-8):
+                (value, (full, metrics)), gradients = evaluate(pred, truth, truth, truth, family)
+                assert bool(jnp.isfinite(value) & jnp.isfinite(full))
+                assert bool(jnp.all(jnp.isfinite(jnp.asarray(metrics))))
+                assert all(bool(jnp.all(jnp.isfinite(gradient))) for gradient in gradients)
+                if bool(jnp.array_equal(pred, truth)):
+                    assert value == full == 0
+                    for gradient in gradients:
+                        np.testing.assert_array_equal(gradient, 0)
+
+
 def test_residual_denominator_gradients_scaling_and_zero_head() -> None:
     config = SimpleNamespace(model="cs_dno", data_normalization="residual", residual_floor=1e-6)
     losses = trainer_loss(config)
@@ -372,6 +448,8 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
 if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
+    test_target_normalization_matches_unweighted_relative_l2()
+    test_bounded_weights_decrease_and_have_stopped_scale_invariant_gradients()
     test_residual_denominator_gradients_scaling_and_zero_head()
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()

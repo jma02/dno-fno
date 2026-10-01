@@ -139,9 +139,10 @@ def main() -> None:
     parser.add_argument("--nonlinear_reference", type=float, default=0.002,
                         help="Relative correction beyond G0+G1 at which the nonlinear weight is 1.5.")
     parser.add_argument("--nonlinear_weight_mean", type=float, default=1.463313,
-                        help="Fixed training mean of the nonlinear weight; default calibrated on hard128 training rows.")
-    parser.add_argument("--data_normalization", choices=("nonlinear", "residual"), default="nonlinear",
-                        help="Weight by the M1 correction, or divide by the model's own baseline residual.")
+                        help="Fixed training mean of the selected row weight; default is for nonlinear weighting.")
+    parser.add_argument("--data_normalization", choices=("target", "bounded", "nonlinear", "residual"), default="nonlinear",
+                        help="Target-relative loss, bounded inverse-residual weighting (raw weights 1..2), "
+                        "nonlinear weighting, or normalization by the model's baseline residual.")
     parser.add_argument("--residual_floor", type=float, default=1e-6,
                         help="Residual denominator floor as a fraction of the target norm.")
     parser.add_argument("--metric_interval", type=int, default=16,
@@ -317,8 +318,8 @@ def main() -> None:
         parser.error("--nonlinear_weight_mean must be in [1, 2]")
     if not np.isfinite(args.residual_floor) or args.residual_floor <= 0.0:
         parser.error("--residual_floor must be finite and positive")
-    if args.data_normalization == "residual" and args.model != "cs_dno":
-        parser.error("--data_normalization residual requires --model cs_dno")
+    if args.data_normalization in ("bounded", "residual") and args.model != "cs_dno":
+        parser.error("--data_normalization bounded/residual requires --model cs_dno")
     if args.model == "cs_dno" and args.norm != "scale":
         parser.error("CS residual normalization requires --norm scale")
     start_time = perf_counter()
@@ -530,8 +531,12 @@ def main() -> None:
         if args.model == "cs_dno":
             if args.data_normalization == "residual":
                 denominator = residual_denominator
-            else:
-                # The control keeps its weighting based on the M1 correction.
+            elif args.data_normalization == "bounded":
+                residual_ratio = residual_denominator / target_norm
+                row_weight = 1.0 + args.nonlinear_reference / (residual_ratio + args.nonlinear_reference)
+                denominator = target_norm * args.nonlinear_weight_mean / row_weight
+            elif args.data_normalization == "nonlinear":
+                # Nonlinear weighting uses the M1 correction even with a G2 baseline.
                 m1_hat = jnp.fft.rfft(m1_baseline, axis=1)
                 residual_ratio = jnp.sqrt(jnp.sum(
                     jnp.abs((target_hat - m1_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
