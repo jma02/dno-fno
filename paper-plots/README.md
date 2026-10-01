@@ -508,3 +508,51 @@ profile is shown without substituting estimated roofline points. Lower panels
 show separate JAX-traced kernel times; clean forward latencies, replay settings,
 and raw per-kernel metrics are in `outputs/model_roofline_20260926/analysis.json`.
 Rebuild with `uv run --no-sync scripts/profile_dno.py --analyze --output outputs/model_roofline_20260926`.
+
+### 15–17: Phase and local-potential diagnostics
+
+- [Phase-speed PNG](figures/15-phase-speed-error.png) / [PDF](figures/15-phase-speed-error.pdf)
+- [Fourier-phase PNG](figures/16-fourier-phase-error.png) / [PDF](figures/16-fourier-phase-error.pdf)
+- [Local-perturbation PNG](figures/17-local-perturbation-error.png) / [PDF](figures/17-local-perturbation-error.pdf)
+
+These compare the saved epoch-120 original EMA, local-tangent and modal-phase
+recipes (`c27_w320_b4_h80_ema_grad09_20260927`,
+`c27_phase_m1_tg10_ep120_gpu0_20260930`, and
+`c27_phase_modal_tg25_ep120_gpu1_20260930` under `outputs/`). Lines/points
+are case medians; shading/error bars are interquartile ranges. The original
+uses its uncentered `eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu*`
+rollouts; the other two use `eval_epoch120_test_stratified_n32_gpu*`.
+These are comparisons of trained recipes, not isolated causal effects of
+individual loss terms.
+
+**15:** At each saved state, fit rigid-translation speed by
+`c = -<G(eta)xi, eta_x> / <eta_x, eta_x>`, using spectral differentiation.
+Evaluate this separately on the predicted and M6-reference states and plot
+`100*abs(c_pred-c_ref)/abs(c_ref)`. Use all 32 Stokes cases and the 11 isolated
+Tanaka cases (parameter groups containing `_m1_`). This is instantaneous
+least-squares translation speed, not accumulated displacement divided by time.
+
+**16:** For surface elevation, compute the wrapped mode-angle difference
+`phi_k = arg(pred_eta_hat_k * conj(ref_eta_hat_k))`, then
+`sqrt(sum(abs(ref_eta_hat_k)^2 * phi_k^2) / sum(abs(ref_eta_hat_k)^2))`,
+converted to degrees. Modes are 1–128 on the 2pi domain; each family has
+32 cases. No translation alignment is applied. The common zero-error initial
+frame is omitted on the logarithmic axis. This is a circular phase-angle
+metric, not relative L2 error or an unwrapped count of phase revolutions.
+
+**17:** Reuses `outputs/operator_probe_a100_20261001/operator_probes.npz`.
+At fixed surface and depth compare original xi with `xi + 0.1*zeta`, where
+zeta preserves xi's retained Fourier amplitudes but randomizes its phases.
+Thus `norm(0.1*zeta)/norm(xi) = 0.1`. For each of 32 cases per family,
+take the median DNO relative L2 error over four perturbations before computing
+the family median/IQR. Each input has its own FP64 M6/padding-8 reference
+output and denominator; M2 is included as a baseline. This measures total
+operator error on nearby potential inputs, not surface-shape derivatives
+or error in the incremental response. Fully scrambled potentials are excluded.
+
+All three figures are CPU-only reductions of existing saved results:
+
+```sh
+OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync paper-plots/plot_phase_diagnostics.py
+```
