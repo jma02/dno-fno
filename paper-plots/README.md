@@ -267,8 +267,9 @@ single-case M6 trajectory. Ada candidate measurements are under
 Classical and neural runs retain the same integration settings and packed
 boundaries. The fused inference path is unchanged; Ada now uses the trained
 gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
-The optional teal Ada lines show the combined FP32 G1, reused xi FFT and
-FP32 input inverse-FFT trial from `outputs/g1_fp32_tuning_20260928/ada/gpu{0,1}.json`:
+The unused FP32 FFT trial has been removed from Figure 12. Its combined FP32 G1,
+reused xi FFT and FP32 input inverse-FFT measurements remain archived in
+`outputs/g1_fp32_tuning_20260928/ada/gpu{0,1}.json`:
 Stokes 1.0696 s, Tanaka 10.3357 s, Benjamin–Feir 10.0451 s and JONSWAP/TMA 1.0395 s.
 Comparisons against the original FP64 control in those same files show
 (17.2–18.5% less time); the incremental saving over FP32 G1 alone is 6.3–6.5%.
@@ -393,8 +394,6 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
-  --fp32-g1-timings outputs/g1_fp32_tuning_20260928/ada/gpu0.json \
-    outputs/g1_fp32_tuning_20260928/ada/gpu1.json \
   --phase-timings outputs/phase_timing_20260930/control.json \
     outputs/phase_timing_20260930/modal.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
