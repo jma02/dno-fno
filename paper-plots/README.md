@@ -509,21 +509,18 @@ show separate JAX-traced kernel times; clean forward latencies, replay settings,
 and raw per-kernel metrics are in `outputs/model_roofline_20260926/analysis.json`.
 Rebuild with `uv run --no-sync scripts/profile_dno.py --analyze --output outputs/model_roofline_20260926`.
 
-### 15–17: Phase and local-potential diagnostics
+### 15–18: Phase and local-potential diagnostics
 
 - [Translation-drift share PNG](figures/15-phase-speed-error.png) / [PDF](figures/15-phase-speed-error.pdf)
 - [Fourier-phase PNG](figures/16-fourier-phase-error.png) / [PDF](figures/16-fourier-phase-error.pdf)
 - [Local-perturbation PNG](figures/17-local-perturbation-error.png) / [PDF](figures/17-local-perturbation-error.pdf)
+- [Perturbation examples PNG](figures/18-local-perturbation-examples.png) / [PDF](figures/18-local-perturbation-examples.pdf)
 
-These compare the saved epoch-120 original EMA, local-tangent and modal-phase
-recipes (`c27_w320_b4_h80_ema_grad09_20260927`,
-`c27_phase_m1_tg10_ep120_gpu0_20260930`, and
-`c27_phase_modal_tg25_ep120_gpu1_20260930` under `outputs/`). Lines/points
-are case medians; shading/error bars are interquartile ranges. The original
-uses its uncentered `eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu*`
-rollouts; the other two use `eval_epoch120_test_stratified_n32_gpu*`.
-These are comparisons of trained recipes, not isolated causal effects of
-individual loss terms.
+These show the original epoch-120 EMA model, labeled “Neural network”:
+`outputs/c27_w320_b4_h80_ema_grad09_20260927`, using its uncentered
+`eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu*` rollouts.
+Lines/points are case medians; shading/error bars are interquartile ranges.
+M2 is included in the local-perturbation comparison.
 
 **15:** Plot the percentage of squared surface error removed by one rigid
 translation: `100*(1 - min_s ||pred(x+s)-ref(x)||^2 / ||pred-ref||^2)`.
@@ -561,7 +558,17 @@ multiplier. This measures nearby-input sensitivity, not surface-shape
 derivatives or error in the incremental response. Fully scrambled
 potentials are excluded.
 
-All three figures are CPU-only reductions of existing saved results:
+**18:** The actual first perturbation direction from the audit, reconstructed
+with its saved seed and original full-array random-draw order. Show the first
+case of each family (simulation IDs 517582, 3686647, 3714872, 3735800), with
+original and perturbed potential above, and the added change below. Each
+column uses the same vertical scale in both rows, in units of the original
+potential's RMS. The added change is not magnified; its RMS is exactly 10%
+of the original. Surface eta and depth h are unchanged. “Local” here means
+nearby in function space, not a spatially confined bump. These are four
+actual examples from the probes summarized in Figure 17, not new experiments.
+
+All four figures are CPU-only reductions of existing saved results:
 
 ```sh
 OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 UV_CACHE_DIR=/tmp/dno-uv-cache \

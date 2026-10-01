@@ -28,9 +28,7 @@ FIGURES = ROOT / "paper-plots/figures"
 FAMILIES = ("stokes", "tanaka", "benjamin_feir", "jonswap_tma")
 TITLES = ("Stokes", "Tanaka", "Benjamin–Feir", "JONSWAP / TMA")
 MODELS = (
-    ("c27_w320_b4_h80_ema_grad09_20260927", "Original EMA", "#c45b22"),
-    ("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent", "#007da6"),
-    ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase", "#009e73"),
+    ("c27_w320_b4_h80_ema_grad09_20260927", "Neural network", "#c45b22"),
 )
 
 
@@ -44,9 +42,10 @@ def median_band(
 
 def save_figure(fig: Figure, name: str, title: str, ylabel: str) -> None:
     fig.suptitle(title, x=0.08, ha="left", fontsize=19, y=0.99)
-    handles, labels = fig.axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper left", bbox_to_anchor=(0.075, 0.945),
-               ncol=len(labels), frameon=False, fontsize=11)
+    legend = {label: handle for ax in fig.axes
+              for handle, label in zip(*ax.get_legend_handles_labels())}
+    fig.legend(legend.values(), legend.keys(), loc="upper left", bbox_to_anchor=(0.075, 0.945),
+               ncol=len(legend), frameon=False, fontsize=11)
     fig.supylabel(ylabel, x=0.015, fontsize=12)
     for ax in fig.axes:
         ax.grid(axis="y", color="#e8ebee", linewidth=0.8)
@@ -70,8 +69,7 @@ def main() -> None:
     phase_fig, phase_axes = plt.subplots(2, 2, figsize=(11, 8))
     for family_index, family in enumerate(FAMILIES):
         for run, label, color in MODELS:
-            evaluation = ("eval_best_current_test_stratified_n32_fp32net_fp64solver"
-                          if run == MODELS[0][0] else "eval_epoch120_test_stratified_n32")
+            evaluation = "eval_best_current_test_stratified_n32_fp32net_fp64solver"
             path = ROOT / "outputs" / run / f"{evaluation}_gpu{int(family_index >= 2)}" / f"{family}_trajs.npz"
             with np.load(path) as data:
                 times = data["times"]
@@ -139,7 +137,7 @@ def main() -> None:
                 np.quantile(ratios[data["family_ids"] == family_index], [0.25, 0.5, 0.75])
                 for family_index in range(4)
             ]).T
-            x = np.arange(4) + (index - 1.5) * 0.13
+            x = np.arange(4) + (index - 0.5) * 0.13
             ax.errorbar(x, median, yerr=np.stack((median - low, high - median)),
                         color=color, label=label, marker="o", markersize=6,
                         linestyle="none", elinewidth=1.5, capsize=4)
@@ -154,6 +152,41 @@ def main() -> None:
             transform=ax.get_yaxis_transform(), fontsize=10)
     save_figure(probe_fig, "17-local-perturbation-error", "DNO error after a 10% potential perturbation",
                 "Perturbed error / original error")
+
+    metadata = json.loads((ROOT / "outputs/operator_probe_a100_20261001/operator_probes.json").read_text())
+    with np.load(ROOT / metadata["cases"]) as cases:
+        coefficients = np.fft.rfft(cases["xi"], axis=-1, norm="forward")
+        coefficients[:, 0] = 0
+        coefficients[:, 129:] = 0
+        original = np.fft.irfft(coefficients, n=1024, axis=-1, norm="forward")
+        phases = np.random.default_rng(metadata["seed"]).uniform(
+            0, 2 * np.pi, size=(len(original), 4, 513))
+        changes = 0.1 * np.fft.irfft(np.abs(coefficients)[:, None] * np.exp(1j * phases),
+                                   n=1024, axis=-1, norm="forward")
+        np.testing.assert_allclose(
+            np.linalg.norm(changes, axis=-1) / np.linalg.norm(original, axis=-1)[:, None],
+            0.1, rtol=1e-12)
+        example_fig, axes = plt.subplots(2, 4, figsize=(13, 6.5), sharex=True, sharey="col")
+        x = np.arange(1024) / 1024
+        for family_index, title in enumerate(TITLES):
+            case = np.flatnonzero(cases["family_ids"] == family_index)[0]
+            scale = np.sqrt(np.mean(original[case]**2))
+            base, change = original[case] / scale, changes[case, 0] / scale
+            axes[0, family_index].plot(x, base, color="#606970", linewidth=1.6, label="Original potential")
+            axes[0, family_index].plot(x, base + change, color="#c45b22", linewidth=1.6,
+                                       linestyle="--", label="Perturbed potential")
+            axes[0, family_index].set_title(title, loc="left")
+            axes[1, family_index].plot(x, change, color="#007da6", linewidth=1.6,
+                                       label="Added change (10% RMS)")
+            axes[1, family_index].axhline(0, color="#bfc6cc", linewidth=0.7)
+            axes[1, family_index].set_xlabel("x / L")
+            axes[1, family_index].set_xticks([0, 0.5, 1])
+            axes[1, family_index].set_xlim(0, 1)
+            print(f"Perturbation example {title}: simulation {cases['simulation_ids'][case]}, probe 0", flush=True)
+        axes[0, 0].set_ylabel("Potential")
+        axes[1, 0].set_ylabel("Added change")
+    save_figure(example_fig, "18-local-perturbation-examples", "Examples of the 10% potential perturbations",
+                "Units of original potential RMS")
 
 
 if __name__ == "__main__":
