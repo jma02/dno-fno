@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +17,8 @@ sys.path.insert(0, str(REPO_ROOT / "models" / "fno-jax"))
 sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
+from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
+from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
@@ -445,6 +447,283 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         np.testing.assert_array_equal(data, ordinary_data)
 
 
+def trainer_function(name: str) -> ast.FunctionDef:
+    source = ast.parse((REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py").read_text())
+    return next(node for node in ast.walk(source)
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
+    component = trainer_function("train_step")
+    prelude_end = next(i for i, node in enumerate(component.body) if isinstance(node, ast.FunctionDef))
+    function = ast.parse(
+        "def prepare(step, rng_key, eta, xi, gxi, batch_depth, family):\n"
+        "    current_state = SimpleNamespace(step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += component.body[:prelude_end]
+    function.body += ast.parse("return eta, xi, gxi, batch_depth, family, n_data_only_rows").body
+    nx, size = 512, 8
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    amplitude = jnp.arange(1, size + 1)[:, None]
+    eta = (0.02 + amplitude * 0.0002 * jnp.cos(2 * x)).astype(jnp.float32)
+    xi = (amplitude * (0.003 * jnp.sin(x) + 0.001 * jnp.cos(7 * x))).astype(jnp.float32)
+    target = (0.2 * xi).astype(jnp.float32)
+    depth = jnp.log(jnp.array([8.0, 0.3, 0.6, 1.0, 2.0, 12.0, 0.1, 0.4]))[:, None].astype(jnp.float32)
+    family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
+    fields = (eta, xi, target, depth, family)
+    before = tuple(np.array(value) for value in fields)
+    config = SimpleNamespace(dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+                             rollout_training_weight=0.0)
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace, "args": config,
+        "nx": nx, "domain_length": 2 * np.pi, "k_rfft_jax": jnp.arange(nx // 2 + 1),
+        "compute_dno_target": compute_dno_target,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "trainer_probe", "exec"), namespace)
+    prepare = jax.vmap(namespace["prepare"], in_axes=(None, None, 0, 0, 0, 0, 0), axis_name="batch")
+    inputs = tuple(value[None] for value in fields)
+    key = jax.random.PRNGKey(17)
+    for mode in ("off", "control", "scrambled"):
+        config.dirichlet_probe_mode = mode
+        result = tuple(value[0] for value in prepare(3, key, *inputs))
+        repeated = tuple(value[0] for value in prepare(3, key, *inputs))
+        for actual, same in zip(result, repeated):
+            np.testing.assert_array_equal(actual, same)
+        if mode == "off":
+            assert result[-1] == 0
+            for actual, original in zip(result, fields):
+                np.testing.assert_array_equal(actual, original)
+            continue
+        assert result[-1] == 2
+        for actual, original in zip(result, fields):
+            np.testing.assert_array_equal(actual[:6], original[:6])
+            assert actual.dtype == original.dtype
+        for field in (0, 3, 4):
+            np.testing.assert_array_equal(result[field][6:], fields[field][:2])
+        original_hat = np.fft.rfft(np.asarray(xi[:2], dtype=np.float64), axis=-1)
+        original_hat[:, 0] = 0
+        original_hat[:, 129:] = 0
+        actual_hat = np.fft.rfft(np.asarray(result[1][6:], dtype=np.float64), axis=-1)
+        np.testing.assert_allclose(np.abs(actual_hat), np.abs(original_hat), rtol=1e-5, atol=2e-8)
+        np.testing.assert_allclose(np.linalg.norm(result[1][6:], axis=-1), np.linalg.norm(xi[:2], axis=-1), rtol=1e-7)
+        np.testing.assert_allclose(actual_hat[:, 0], 0, atol=2e-8)
+        np.testing.assert_allclose(actual_hat[:, 129:], 0, atol=2e-8)
+        _, _, expected = compute_dno_target(
+            eta[:2], result[1][6:], jnp.exp(depth[:2].astype(jnp.float64)),
+            nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+        )
+        np.testing.assert_allclose(result[2][6:], expected, rtol=2e-5, atol=2e-8)
+        _, _, clipped = compute_dno_target(
+            eta[:2], result[1][6:], jnp.minimum(jnp.exp(depth[:2].astype(jnp.float64)), 5),
+            nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+        )
+        assert np.linalg.norm(np.asarray(expected[0] - clipped[0])) > 1e-6
+        changed = prepare(4, key, *inputs)[1][0]
+        if mode == "scrambled":
+            assert not np.allclose(result[1][6:], xi[:2])
+            assert not np.allclose(changed[6:], result[1][6:])
+        else:
+            np.testing.assert_allclose(result[1][6:], xi[:2], atol=1e-9)
+            np.testing.assert_array_equal(changed, result[1])
+    for original, unchanged in zip(fields, before):
+        np.testing.assert_array_equal(original, unchanged)
+    hadamard_call = next(node for node in ast.walk(component) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == "hadamard_loss_on_subset")
+    assert [ast.unparse(argument) for argument in hadamard_call.args[-3:]] == [
+        "eta[:n_auxiliary_rows]", "xi[:n_auxiliary_rows]", "batch_depth[:n_auxiliary_rows]",
+    ]
+
+
+def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() -> None:
+    component = trainer_function("compute_loss_components")
+    config = SimpleNamespace(
+        model="fno", residual_floor=1e-6, mode_balanced_weight=6.0,
+        mode_balanced_k_max=128.0, mode_balanced_activity_threshold=1e-4,
+        mode_balanced_denominator_eps=1e-6, translation_tangent_weight=10.0,
+        translation_tangent_scope="tanaka", translation_tangent_geometry="local",
+        translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="squared",
+        translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
+        stokes_relative_tangent=False,
+    )
+    nx = 64
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    amplitude = jnp.arange(1, 9)[:, None] / 8
+    eta = 0.02 + amplitude * (jnp.cos(x) + 0.2 * jnp.cos(3 * x))
+    xi = amplitude * jnp.sin(x)
+    target = amplitude * (0.2 * jnp.cos(x) + 0.1 * jnp.sin(3 * x))
+    prediction = target + amplitude**2 * (0.03 * jnp.sin(x) + 0.04 * jnp.cos(3 * x))
+    depth = jnp.log(jnp.arange(1, 9, dtype=jnp.float64))[:, None]
+    family = jnp.array([2, 1, 2, 3, 2, 4, 2, 2])
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array,
+        *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        result = variables["params"][..., None] / 4
+        return result, jnp.zeros_like(result), jnp.zeros_like(result)
+
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
+        "norm_targets_jax": lambda target: target[..., None] / 4,
+        "denorm_targets_jax": lambda target: target * 4,
+        "apply_model": apply_model, "log_h_max": np.log(5.0),
+        "k_grid_jax": jnp.fft.fftfreq(nx) * nx, "k_rfft_jax": jnp.arange(nx // 2 + 1),
+        "compute_mode_balanced_loss": compute_mode_balanced_loss,
+        "compute_translation_tangent_loss": compute_translation_tangent_loss,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[component], type_ignores=[])), "trainer_components", "exec"), namespace)
+    losses = namespace["compute_loss_components"]
+    fields = (eta, xi, target, depth, family)
+
+    def evaluate(params: jax.Array, size: int, n_data_only_rows: int = 0) -> tuple[jax.Array, ...]:
+        return jax.vmap(lambda p, *values: losses(p, *values, n_data_only_rows=n_data_only_rows),
+                        axis_name="batch")(params[None], *(value[None, :size] for value in fields))
+
+    augmented = evaluate(prediction, 8, 2)
+    prefix = evaluate(prediction[:6], 6)
+    ordinary = evaluate(prediction, 8)
+    np.testing.assert_allclose(augmented[0][0], relative_l2_loss(prediction[..., None] / 4, target[..., None] / 4), rtol=1e-12)
+    np.testing.assert_array_equal(augmented[0], ordinary[0])
+    np.testing.assert_array_equal(augmented[4], ordinary[4])
+    for index in (1, 2):
+        np.testing.assert_allclose(augmented[index], prefix[index], rtol=1e-12)
+        assert not np.allclose(ordinary[index], prefix[index], rtol=1e-5, atol=1e-12)
+        gradient = jax.grad(lambda p: jnp.sum(evaluate(p, 8, 2)[index]))(prediction)
+        np.testing.assert_array_equal(gradient[6:], 0)
+        assert np.linalg.norm(gradient[:6]) > 0
+        validation_gradient = jax.grad(lambda p: jnp.sum(evaluate(p, 8)[index]))(prediction)
+        assert np.linalg.norm(validation_gradient[6:]) > 0
+    np.testing.assert_allclose(augmented[3] * 8, prefix[3] * 6)
+    data_gradient = jax.grad(lambda p: jnp.sum(evaluate(p, 8, 2)[0]))(prediction)
+    assert np.linalg.norm(data_gradient[6:]) > 0
+    data_only = evaluate(prediction, 8, 8)
+    for index in (0, 4):
+        np.testing.assert_array_equal(data_only[index], ordinary[index])
+    for index in (1, 2, 3):
+        np.testing.assert_array_equal(data_only[index], 0)
+    np.testing.assert_array_equal(
+        jax.grad(lambda p: jnp.sum(evaluate(p, 8, 8)[0]))(prediction),
+        jax.grad(lambda p: jnp.sum(evaluate(p, 8)[0]))(prediction),
+    )
+
+
+def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
+    from solver.solvers import time_integrator as ti
+
+    component = trainer_function("train_step")
+    prelude_end = next(i for i, node in enumerate(component.body) if isinstance(node, ast.FunctionDef))
+    function = ast.parse(
+        "def prepare(params, step, eta, xi, gxi, batch_depth, family):\n"
+        "    current_state = SimpleNamespace(params=params, step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += component.body[:prelude_end]
+    function.body += ast.parse(
+        "return rollout_eta, rollout_xi, rollout_target, rollout_valid, rollout_scheduled"
+    ).body
+    nx, size = 512, 4
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    amplitude = jnp.arange(1, size + 1)[:, None]
+    eta = (0.02 + amplitude * 0.0002 * jnp.cos(2 * x)).astype(jnp.float32)
+    xi = (0.01 + amplitude * 0.003 * jnp.sin(x)).astype(jnp.float32)
+    target = (0.2 * xi).astype(jnp.float32)
+    depth = jnp.log(jnp.array([8.0, 0.3, 0.6, 1.0]))[:, None].astype(jnp.float32)
+    family = jnp.arange(1, size + 1)
+    fields = (eta, xi, target, depth, family)
+    config = SimpleNamespace(
+        dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+        rollout_training_weight=1.0, rollout_training_start_epoch=60,
+        rollout_training_interval=16, rollout_training_microbatch=size,
+        rollout_training_steps=4, poison=False, poison_target=np.nan,
+    )
+
+    def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
+        return variables["params"] * (inputs[..., :1] + inputs[..., 1:])
+
+    def rollout(
+        initial: ti.State, times: jax.Array, params: ti.SolverParams,
+        predict: Callable[[jax.Array, jax.Array], jax.Array], *, substeps: int,
+    ) -> dict[str, jax.Array]:
+        assert substeps == 4
+        velocity = predict(initial.eta, initial.xi)
+        eta_new = initial.eta + times[-1] * velocity + 0.0001 * jnp.cos(140 * x)
+        xi_new = initial.xi - jnp.mean(initial.xi, axis=-1, keepdims=True) + times[-1] * velocity
+        xi_new += 0.0001 * jnp.sin(140 * x)
+        if config.poison:
+            eta_new = eta_new.at[1].set(jnp.nan).at[2].set(-2 * jnp.asarray(params.depth)[2])
+        return {"eta": jnp.stack((initial.eta, eta_new)), "xi": jnp.stack((initial.xi, xi_new))}
+
+    def teacher(eta: jax.Array, xi: jax.Array, depth: jax.Array, **options: Any) -> tuple[jax.Array, ...]:
+        assert options == dict(nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0)
+        projected_eta, projected_xi, labels = compute_dno_target(eta, xi, depth, **options)
+        if config.poison:
+            safe_inputs = jnp.all(jnp.isfinite(eta) & jnp.isfinite(xi) & (eta + depth > 0))
+            labels = cast(jax.Array, jnp.where(safe_inputs, labels, jnp.nan)).at[3].set(config.poison_target)
+        return projected_eta, projected_xi, labels
+
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace, "args": config,
+        "nx": nx, "domain_length": 2 * np.pi, "n_devices": 1, "train_steps_per_epoch": 16,
+        "training_dtype": jnp.float32, "apply_model": apply_model, "ti": ti, "cast": cast,
+        "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
+        "denorm_targets_jax": lambda prediction: prediction * 4,
+        "rollout_surrogate": rollout, "compute_dno_target": teacher,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "trainer_rollout", "exec"), namespace)
+    prepare = namespace["prepare"]
+    params, active_step = jnp.float32(0.7), 59 * 16
+    for step in (active_step - 16, active_step - 1, active_step + 1):
+        result = prepare(params, step, *fields)
+        for actual, original in zip(result[:3], fields[:3]):
+            np.testing.assert_array_equal(actual, original)
+        assert result[3] == 0 and not result[4]
+    result = prepare(params, active_step, *fields)
+    assert result[3] == 1 and result[4]
+    raw = rollout(
+        ti.State(eta.astype(jnp.float64), xi.astype(jnp.float64)), jnp.array([0.0, 0.04]),
+        ti.make_solver_params(nx, 2 * np.pi, jnp.exp(depth.astype(jnp.float64))),
+        lambda e, z: 4 * params * (e / 2 + z / 3 - jnp.mean(e / 2 + z / 3, axis=-1, keepdims=True)),
+        substeps=4,
+    )
+    expected = teacher(raw["eta"][-1], raw["xi"][-1], jnp.exp(depth.astype(jnp.float64)),
+                       nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0)
+    for actual, projected in zip(result[:3], expected):
+        assert actual.dtype == jnp.float32 and actual.shape == (size, nx)
+        np.testing.assert_allclose(actual, projected, rtol=2e-5, atol=2e-8)
+        np.testing.assert_allclose(np.fft.rfft(actual.astype(jnp.float64), axis=-1)[:, 129:], 0, atol=2e-7)
+    np.testing.assert_allclose(result[0].mean(axis=-1), eta.mean(axis=-1), atol=1e-8)
+    clipped = compute_dno_target(result[0], result[1], jnp.minimum(jnp.exp(depth.astype(jnp.float64)), 5),
+                                 nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0)[2]
+    assert np.linalg.norm(np.asarray(result[2][0] - clipped[0])) > 1e-6
+    detached_grad = jax.grad(lambda p: sum(jnp.sum(v**2) for v in prepare(p, active_step, *fields)[:3]))(params)
+    np.testing.assert_array_equal(detached_grad, 0)
+
+    def student_loss(p: jax.Array) -> jax.Array:
+        e, z, labels, _, _ = prepare(p, active_step, *fields)
+        prediction = apply_model({"params": p}, jnp.stack((e / 2, z / 3), axis=-1), depth)[..., 0] * 4
+        return jnp.mean((prediction - labels) ** 2)
+
+    value, gradient = jax.value_and_grad(student_loss)(params)
+    compiled = jax.jit(jax.value_and_grad(student_loss))(params)
+    np.testing.assert_allclose(compiled, (value, gradient), rtol=2e-5)
+    inputs = result[0] / 2 + result[1] / 3
+    expected_gradient = jnp.mean(2 * (4 * params * inputs - result[2]) * 4 * inputs)
+    assert jnp.isfinite(value) and jnp.isfinite(gradient) and gradient != 0
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-6)
+    config.poison = True
+    for config.poison_target in (np.nan, 1e40):
+        rejected = prepare(params, active_step, *fields)
+        assert rejected[3] == 0.25
+        for actual, original, clean in zip(rejected[:3], fields[:3], result[:3]):
+            np.testing.assert_array_equal(actual[1:], original[1:])
+            np.testing.assert_array_equal(actual[:1], clean[:1])
+    assert "rollout" not in ast.unparse(trainer_function("eval_step"))
+    assert "compute_dno_target" not in ast.unparse(trainer_function("eval_step"))
+
+
 if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
@@ -454,4 +733,7 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
+    test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
+    test_rollout_teacher_schedule_detachment_projection_and_rejection()
     print("[PASS] data normalization, finite gradients, and family metric reductions")

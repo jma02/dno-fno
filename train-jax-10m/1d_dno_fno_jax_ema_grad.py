@@ -46,9 +46,11 @@ from util import (  # noqa: E402
     replicate_pytree_from_host,
 )
 from solver.solvers.dno_series_jax import build_grid  # noqa: E402
+from solver.solvers import time_integrator as ti  # noqa: E402
+from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS, _write_json, compute_macro_summary, run_family  # noqa: E402
-from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched  # noqa: E402
+from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, rollout_surrogate  # noqa: E402
 from hadamard_shape_regularizer import compute_hadamard_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
@@ -113,6 +115,14 @@ def main() -> None:
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument(
+        "--dirichlet_probe_mode", choices=("off", "control", "scrambled"), default="off",
+        help="Replace the batch tail with paired copies of prefix surfaces; scrambled randomizes their potential phases.",
+    )
+    parser.add_argument(
+        "--dirichlet_probe_fraction", type=float, default=0.25,
+        help="Fraction of each batch reserved for paired DNO-data-only rows, at most one half.",
+    )
+    parser.add_argument(
         "--epochs",
         type=int,
         default=1,
@@ -127,6 +137,13 @@ def main() -> None:
                         help="Evaluate 32 stratified test trajectories per family at these epochs.")
     parser.add_argument("--rollout_truth_run",
                         help="Run directory containing the two cached-M6 reference evaluation groups.")
+    parser.add_argument("--rollout_training_weight", type=float, default=0.0,
+                        help="Extra mean data-loss weight on detached learned-rollout states labelled by M6; applied only on scheduled updates.")
+    parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
+    parser.add_argument("--rollout_training_interval", type=int, default=16)
+    parser.add_argument("--rollout_training_microbatch", type=int, default=8)
+    parser.add_argument("--rollout_training_steps", type=int, default=10,
+                        help="Number of GL2 steps at dt=0.01 used to generate each training endpoint.")
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument(
         "--lr_warmup_steps",
@@ -312,6 +329,11 @@ def main() -> None:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
+    if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
+        parser.error("--rollout_training_weight must be finite and nonnegative")
+    if min(args.rollout_training_start_epoch, args.rollout_training_interval,
+           args.rollout_training_microbatch, args.rollout_training_steps) < 1:
+        parser.error("rollout-training epoch, interval, microbatch and steps must be positive")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
@@ -333,6 +355,8 @@ def main() -> None:
         parser.error("--residual_floor must be finite and positive")
     if args.data_normalization in ("bounded", "residual") and args.model != "cs_dno":
         parser.error("--data_normalization bounded/residual requires --model cs_dno")
+    if not 0.0 < args.dirichlet_probe_fraction <= 0.5:
+        parser.error("--dirichlet_probe_fraction must be in (0, 0.5]")
     if args.model == "cs_dno" and args.norm != "scale":
         parser.error("CS residual normalization requires --norm scale")
     start_time = perf_counter()
@@ -345,6 +369,8 @@ def main() -> None:
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
     devices = jax.local_devices()
     n_devices = len(devices)
+    if args.rollout_training_weight > 0 and args.rollout_training_microbatch % n_devices:
+        parser.error("--rollout_training_microbatch must be divisible by the device count")
     if args.batch_size % n_devices != 0:
         raise ValueError(
             f"batch_size {args.batch_size} must be divisible by device count {n_devices}"
@@ -521,6 +547,7 @@ def main() -> None:
         family: jax.Array,
         *,
         collect_family_metrics: bool = False,
+        n_data_only_rows: int = 0,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
@@ -575,6 +602,16 @@ def main() -> None:
         # Data fit uses normalized Gxi; the physics losses below use physical fields.
         h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
         gxi_prediction = denorm_targets_jax(predictions)[..., 0]
+        # Paired probe rows contribute only to data fit; auxiliary means use originals.
+        full_batch_size = eta.shape[0]
+        n_auxiliary_rows = full_batch_size - n_data_only_rows
+        if n_auxiliary_rows == 0:
+            zero = jnp.float32(0.0)
+            return data_loss, zero, zero, zero, full_l2_loss, family_metrics
+        eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets = (
+            value[:n_auxiliary_rows]
+            for value in (eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets)
+        )
         mode_loss = jnp.float32(0.0)
         if args.mode_balanced_weight > 0.0:
             mode_loss = compute_mode_balanced_loss(
@@ -616,7 +653,7 @@ def main() -> None:
                 / jnp.maximum(global_selected, jnp.float32(1.0))
             )
             tangent_loss = tangent_loss * shard_weight
-        return data_loss, mode_loss, tangent_loss, local_selected / eta.shape[0], full_l2_loss, family_metrics
+        return data_loss, mode_loss, tangent_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
 
     def hadamard_loss_on_subset(
         rng: jax.Array,
@@ -660,16 +697,131 @@ def main() -> None:
         batch_depth: jax.Array,
         family: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
+        n_data_only_rows = (
+            int(args.dirichlet_probe_fraction * eta.shape[0])
+            if args.dirichlet_probe_mode != "off" else 0
+        )
+        n_auxiliary_rows = eta.shape[0] - n_data_only_rows
+        if n_data_only_rows:
+            probe_xi = xi[:n_data_only_rows].astype(jnp.float64)
+            if args.dirichlet_probe_mode == "scrambled":
+                probe_rng = jax.random.fold_in(
+                    jax.random.fold_in(rng_key, current_state.step),
+                    jax.lax.axis_index("batch") + 4099,
+                )
+                probe_hat = jnp.fft.rfft(probe_xi, axis=-1)
+                phases = jax.random.uniform(
+                    probe_rng, probe_hat.shape, dtype=jnp.float64,
+                    minval=0.0, maxval=2.0 * jnp.pi,
+                )
+                probe_hat = jnp.where(
+                    (k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0),
+                    jnp.abs(probe_hat) * jnp.exp(1j * phases), 0.0,
+                )
+                probe_xi = jnp.fft.irfft(probe_hat, n=nx, axis=-1)
+            _, probe_xi, probe_target = compute_dno_target(
+                eta[:n_data_only_rows], probe_xi,
+                jnp.exp(batch_depth[:n_data_only_rows].astype(jnp.float64)),
+                nx=nx, length=domain_length, dno_order=6, pad_factor=8,
+                maximum_wavenumber=128.0,
+            )
+            eta, xi, gxi, batch_depth, family = (
+                jnp.concatenate((original[:n_auxiliary_rows], tail.astype(original.dtype)), axis=0)
+                for original, tail in (
+                    (eta, eta[:n_data_only_rows]), (xi, probe_xi), (gxi, probe_target),
+                    (batch_depth, batch_depth[:n_data_only_rows]),
+                    (family, family[:n_data_only_rows]),
+                )
+            )
+
+        rollout_batch = None
+        if args.rollout_training_weight > 0:
+            rollout_scheduled = (
+                (current_state.step >= (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
+                & (current_state.step % args.rollout_training_interval == 0)
+            )
+            n_rollout = min(args.rollout_training_microbatch // n_devices, n_auxiliary_rows)
+            rollout_depth = batch_depth[:n_rollout]
+            source_fields = (eta[:n_rollout], xi[:n_rollout], gxi[:n_rollout])
+
+            def generate_rollout_batch(_: None) -> tuple[jax.Array, ...]:
+                frozen_params = jax.tree_util.tree_map(jax.lax.stop_gradient, current_state.params)
+                depth = jnp.exp(rollout_depth.astype(jnp.float64))
+
+                def predict_frozen(eta_phys: jax.Array, xi_phys: jax.Array) -> jax.Array:
+                    prediction = apply_model(
+                        {"params": frozen_params},
+                        norm_inputs_jax(training_dtype(eta_phys), training_dtype(xi_phys)),
+                        training_dtype(rollout_depth),
+                    )
+                    physical = denorm_targets_jax(prediction)[..., 0].astype(jnp.float64)
+                    return physical - jnp.mean(physical, axis=-1, keepdims=True)
+
+                trajectory = rollout_surrogate(
+                    ti.State(*map(lambda value: jax.lax.stop_gradient(value.astype(jnp.float64)), source_fields[:2])),
+                    jnp.array([0.0, 0.01 * args.rollout_training_steps], dtype=jnp.float64),
+                    ti.make_solver_params(
+                        nx, domain_length, depth,
+                        filter_fraction=min(1.0, 128.0 * domain_length / (jnp.pi * nx)),
+                    ),
+                    predict_frozen, substeps=args.rollout_training_steps,
+                )
+                eta_new, xi_new = map(jax.lax.stop_gradient, (trajectory["eta"][-1], trajectory["xi"][-1]))
+                valid = jnp.all(jnp.isfinite(eta_new) & jnp.isfinite(xi_new) & (eta_new + depth > 0), axis=-1)
+                # Invalid endpoints are sanitized before M6 and fall back to original supervised rows.
+                eta_new, xi_new, target_new = compute_dno_target(
+                    jnp.where(valid[:, None], eta_new, source_fields[0]),
+                    jnp.where(valid[:, None], xi_new, source_fields[1]), depth,
+                    nx=nx, length=domain_length, dno_order=6, pad_factor=8,
+                    maximum_wavenumber=128.0,
+                )
+                generated_fields = tuple(
+                    generated.astype(original.dtype)
+                    for generated, original in zip((eta_new, xi_new, target_new), source_fields)
+                )
+                valid &= jnp.all(jnp.isfinite(jnp.stack(generated_fields)), axis=(0, 2))
+                valid &= jnp.all(eta_new + depth > 0, axis=-1)
+                fields = tuple(
+                    jax.lax.stop_gradient(cast(jax.Array, jnp.where(valid[:, None], generated, original)))
+                    for generated, original in zip(generated_fields, source_fields)
+                )
+                return *fields, jnp.mean(valid.astype(jnp.float32))
+
+            rollout_eta, rollout_xi, rollout_target, rollout_valid = jax.lax.cond(
+                rollout_scheduled, generate_rollout_batch,
+                lambda _: (*map(jax.lax.stop_gradient, source_fields), jnp.float32(0.0)), None,
+            )
+            rollout_batch = (
+                rollout_scheduled, rollout_depth, family[:n_rollout],
+                rollout_eta, rollout_xi, rollout_target, rollout_valid,
+            )
+
         def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
             data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss, _ = compute_loss_components(
-                current_params, eta, xi, gxi, batch_depth, family
+                current_params, eta, xi, gxi, batch_depth, family,
+                n_data_only_rows=n_data_only_rows,
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             metrics: dict[str, jax.Array] = {
                 "train_l2_loss": full_l2_loss, "train_data_loss": data_loss,
             }
+            if rollout_batch is not None:
+                scheduled, depth_sub, family_sub, eta_sub, xi_sub, target_sub, valid_fraction = rollout_batch
+                rollout_loss = jax.lax.cond(
+                    scheduled,
+                    lambda p: compute_loss_components(
+                        p, eta_sub, xi_sub, target_sub, depth_sub, family_sub,
+                        n_data_only_rows=eta_sub.shape[0],
+                    )[0],
+                    lambda _: jnp.float64(0.0), current_params,
+                )
+                data_loss += args.rollout_training_weight * rollout_loss
+                metrics.update(
+                    rollout_data_loss=rollout_loss, rollout_valid_fraction=valid_fraction,
+                    rollout_active=jnp.float32(scheduled),
+                )
             if args.mode_balanced_weight > 0.0:
                 mode_weight = args.mode_balanced_weight * jnp.minimum(
                     jnp.asarray(current_state.step, dtype=training_dtype)
@@ -693,7 +845,8 @@ def main() -> None:
                 hadamard_loss = jax.lax.cond(
                     hadamard_scheduled,
                     lambda rng: hadamard_loss_on_subset(
-                        rng, current_params, eta, xi, batch_depth
+                        rng, current_params, eta[:n_auxiliary_rows],
+                        xi[:n_auxiliary_rows], batch_depth[:n_auxiliary_rows],
                     ),
                     lambda _: jnp.float64(0.0),
                     rng_hadamard,
@@ -996,6 +1149,9 @@ def main() -> None:
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)
+        if loss_sums.get("rollout_active", 0.0) > 0:
+            for name in ("rollout_data_loss", "rollout_valid_fraction"):
+                epoch_record[name] = loss_sums[name] / loss_sums["rollout_active"]
         if args.translation_tangent_weight > 0.0:
             epoch_record["translation_tangent_loss"] = tangent_loss_sum / max(tangent_sample_count, 1.0)
         if hadamard_batch_evaluation_count:
