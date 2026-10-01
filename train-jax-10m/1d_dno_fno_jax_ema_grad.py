@@ -140,6 +140,8 @@ def main() -> None:
     parser.add_argument("--rollout_training_weight", type=float, default=0.0,
                         help="Extra mean data-loss weight on detached learned-rollout states labelled by M6; applied only on scheduled updates.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
+    parser.add_argument("--rollout_training_ramp_epochs", type=int, default=5,
+                        help="Linear weight ramp duration; start 60 and ramp 5 reach full weight at the start of epoch 65.")
     parser.add_argument("--rollout_training_interval", type=int, default=16)
     parser.add_argument("--rollout_training_microbatch", type=int, default=8)
     parser.add_argument("--rollout_training_steps", type=int, default=10,
@@ -331,9 +333,9 @@ def main() -> None:
         parser.error("--metric_interval must be positive")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
         parser.error("--rollout_training_weight must be finite and nonnegative")
-    if min(args.rollout_training_start_epoch, args.rollout_training_interval,
+    if min(args.rollout_training_start_epoch, args.rollout_training_ramp_epochs, args.rollout_training_interval,
            args.rollout_training_microbatch, args.rollout_training_steps) < 1:
-        parser.error("rollout-training epoch, interval, microbatch and steps must be positive")
+        parser.error("rollout-training epoch, ramp, interval, microbatch and steps must be positive")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
@@ -817,10 +819,14 @@ def main() -> None:
                     )[0],
                     lambda _: jnp.float64(0.0), current_params,
                 )
-                data_loss += args.rollout_training_weight * rollout_loss
+                rollout_weight = args.rollout_training_weight * jnp.clip(
+                    (current_state.step - (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
+                    / (args.rollout_training_ramp_epochs * train_steps_per_epoch), 0.0, 1.0,
+                )
+                data_loss += rollout_weight * rollout_loss
                 metrics.update(
                     rollout_data_loss=rollout_loss, rollout_valid_fraction=valid_fraction,
-                    rollout_active=jnp.float32(scheduled),
+                    rollout_active=jnp.float32(scheduled), rollout_weight=rollout_weight * scheduled,
                 )
             if args.mode_balanced_weight > 0.0:
                 mode_weight = args.mode_balanced_weight * jnp.minimum(
@@ -1150,7 +1156,7 @@ def main() -> None:
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)
         if loss_sums.get("rollout_active", 0.0) > 0:
-            for name in ("rollout_data_loss", "rollout_valid_fraction"):
+            for name in ("rollout_data_loss", "rollout_valid_fraction", "rollout_weight"):
                 epoch_record[name] = loss_sums[name] / loss_sums["rollout_active"]
         if args.translation_tangent_weight > 0.0:
             epoch_record["translation_tangent_loss"] = tangent_loss_sum / max(tangent_sample_count, 1.0)

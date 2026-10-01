@@ -610,6 +610,57 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
     )
 
 
+def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
+    scheduled = next(node for node in ast.walk(trainer_function("train_step"))
+                     if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                     and node.targets[0].id == "rollout_scheduled")
+    function = ast.parse(
+        "def evaluate(current_params, step, enabled):\n"
+        "    current_state = SimpleNamespace(step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += [scheduled]
+    function.body += ast.parse(
+        "rollout_batch = (rollout_scheduled, batch_depth, family, 3 * eta, xi, gxi, "
+        "jnp.float32(rollout_scheduled)) if enabled else None"
+    ).body
+    function.body += [trainer_function("compute_training_loss")]
+    function.body += ast.parse("return compute_training_loss(current_params)").body
+    config = SimpleNamespace(
+        rollout_training_weight=0.75, rollout_training_start_epoch=60,
+        rollout_training_ramp_epochs=5, rollout_training_interval=16,
+        mode_balanced_weight=0.0, translation_tangent_weight=0.0, hadamard_weight=0.0,
+    )
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace,
+        "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float32,
+        "eta": jnp.ones((2, 4)), "xi": jnp.zeros((2, 4)), "gxi": jnp.zeros((2, 4)),
+        "batch_depth": jnp.zeros((2, 1)), "family": jnp.ones(2), "n_data_only_rows": 0,
+        "compute_loss_components": lambda p, eta, *fields, **options: (
+            jnp.mean((p - eta) ** 2), 0, 0, 0, jnp.mean((p - eta) ** 2), (),
+        ),
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "trainer_ramp", "exec"), namespace)
+    differentiate = jax.value_and_grad(namespace["evaluate"], has_aux=True)
+    for evaluate in (differentiate, jax.jit(differentiate, static_argnums=2)):
+        for step, fraction, active in (
+            (59 * 32 - 16, 0.0, False), (59 * 32, 0.0, True),
+            (59 * 32 + 16, 0.1, True), (61 * 32 + 16, 0.5, True),
+            (64 * 32, 1.0, True), (70 * 32, 1.0, True), (64 * 32 + 1, 0.0, False),
+        ):
+            (loss, metrics), gradient = evaluate(jnp.float64(2.0), step, True)
+            weight = 0.75 * fraction
+            np.testing.assert_allclose(loss, 1 + weight, rtol=1e-7)
+            np.testing.assert_allclose(gradient, 2 - 2 * weight, rtol=1e-7)
+            np.testing.assert_allclose(metrics["rollout_weight"], weight, rtol=1e-7)
+            assert metrics["rollout_active"] == active
+            assert metrics["rollout_data_loss"] == float(active)
+            assert metrics["train_data_loss"] == 1
+        (loss, metrics), gradient = evaluate(jnp.float64(2.0), 64 * 32, False)
+        assert loss == 1 and gradient == 2
+        assert set(metrics) == {"train_l2_loss", "train_data_loss"}
+
+
 def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     from solver.solvers import time_integrator as ti
 
@@ -735,5 +786,6 @@ if __name__ == "__main__":
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
+    test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
     print("[PASS] data normalization, finite gradients, and family metric reductions")
