@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure, SubFigure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import LogLocator, MaxNLocator, NullLocator  # noqa: E402
+from matplotlib.ticker import LogLocator, MaxNLocator, NullLocator, StrMethodFormatter  # noqa: E402
 import numpy as np  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +69,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
          "fourier_fused_features_product_overlap_g1fp32_reuse_inputfp32_spectral_all_boundaries_stages_carry_local", "--", 1.3),
     )
     interleaved_m6 = bool(warm and "previous_seconds" in warm["families"]["stokes"]["methods"]["M6"])
+    compact = args.stack_hardware
     per_step = False
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
@@ -76,10 +77,10 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2", "grid.linewidth": 0.6,
         "xtick.color": "#59616a", "ytick.color": "#59616a",
     })
-    axes = fig.subplots(2, 2)
-    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
-                        top=0.74 if phase else 0.78 if baseline_free or args.candidate_accuracy or fp32_g1 else 0.80,
-                        hspace=0.37, wspace=0.25)
+    axes = fig.subplots(1, 4) if compact else fig.subplots(2, 2)
+    fig.subplots_adjust(left=0.065 if compact else 0.10, right=0.98, bottom=0.13,
+                        top=0.67 if compact else 0.74 if phase else 0.78 if baseline_free or args.candidate_accuracy or fp32_g1 else 0.80,
+                        hspace=0.37, wspace=0.32 if compact else 0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
             timing = warm["families"][family]
@@ -102,8 +103,11 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 parser.error("the candidate overlay requires full-trajectory timings")
             scale = 1000 / timing["steps"] if per_step else 1.0
             seconds = scale * np.asarray([np.median(timing["methods"][f"M{order}"]["seconds"]) for order in orders])
-        ax.set(yscale="log")
-        ax.xaxis.set_major_locator(MaxNLocator(4))
+        ax.set(yscale="log", xscale="log" if compact else "linear")
+        ax.xaxis.set_major_locator(LogLocator(subs=(1, 2, 5), numticks=12) if compact else MaxNLocator(4))
+        if compact:
+            ax.xaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
+            ax.xaxis.set_minor_locator(NullLocator())
         ax.yaxis.set_major_locator(LogLocator(numticks=5))
         ax.yaxis.set_minor_locator(NullLocator())
         ax.grid(axis="y", zorder=0)
@@ -119,13 +123,14 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         color="#606970", fontsize=8,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
-        if interleaved_m6:
+        if interleaved_m6 and not compact:
             previous_seconds = float(np.median(warm["families"][family]["methods"]["M6"]["previous_seconds"]))
             savings = 100 * (1 - seconds[-1] / previous_seconds)
             ax.text(0.43, 0.035, f"M6: {previous_seconds:.2f} → {seconds[-1]:.2f} s  (−{savings:.1f}%)",
                     transform=ax.transAxes, color="#606970", fontsize=9,
                     bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         right = float(seconds.max())
+        left = float(seconds.min())
         for comparison, color, label, method, style, width in overlays:
             if not comparison or family not in comparison["families"]:
                 continue
@@ -144,21 +149,22 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                     if len(selected) != 1 or saved["times"][-1] != horizon:
                         parser.error(f"{source}: saved accuracy case or horizon does not match")
                     neural_error = 100 * float(saved["rel_l2_eta"][-1, selected[0]])
-                ax.axhline(neural_error, color=color, ls="-", lw=1.0, zorder=1)
-            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6:
+                ax.axhline(neural_error, color=color, ls="-", lw=1.0, alpha=0.55, zorder=1)
+            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6 and not compact:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
                 ax.text(0.43, 0.035, f"{previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
-            if comparison is fp32_g1:
+            if comparison is fp32_g1 and not compact:
                 previous_seconds = float(np.median(methods[args.candidate_method]["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
                 ax.text(0.35, 0.095, f"FFT: {previous_seconds:.2f} → {new_seconds:.2f} s  (−{savings:.1f}%)",
                         transform=ax.transAxes, color=color, fontsize=9,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
             right = max(right, new_seconds)
+            left = min(left, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
         for run, label, color, marker in PHASE_STYLES:
             if family not in phase.get(run, {}):
@@ -169,6 +175,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             ax.scatter(phase_seconds, phase_error, color=color, marker=marker,
                        s=65, edgecolors="white", linewidths=0.8, zorder=4)
             right = max(right, phase_seconds)
+            left = min(left, phase_seconds)
             print(f"{title}, {label}: {phase_seconds:.3f}s; error={phase_error:.6g}%; finite={record['finite']}")
         if family in spectral:
             record = spectral[family]
@@ -177,7 +184,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 parser.error(f"{family}: spectral runtime must be finite and positive")
             spectral_error = record["cached_reference_terminal_eta_error"]
             finite = record["finite"] and spectral_error is not None and np.isfinite(spectral_error)
-            ax.axvline(spectral_seconds, color="#7444a5", ls="-.", lw=1.3, zorder=1)
+            if not args.single_case or not finite:
+                ax.axvline(spectral_seconds, color="#7444a5", ls="-.", lw=1.3, zorder=1)
             if args.single_case and spectral_error is not None and finite:
                 ax.scatter(spectral_seconds, 100 * spectral_error, color="#7444a5", marker="D",
                            s=65, edgecolors="white", linewidths=0.8, zorder=3)
@@ -187,14 +195,16 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 ax.annotate("failed", (spectral_seconds, 0.92), xycoords=ax.get_xaxis_transform(),
                             xytext=(6, -3), textcoords="offset points", color="#7444a5", fontsize=8)
             right = max(right, spectral_seconds)
+            left = min(left, spectral_seconds)
             print(f"{title}, Spectral DNO weight EMA: {spectral_seconds:.3f}s; finite={finite}; error={spectral_error}")
-        ax.set_xlim(0, 1.13 * right)
+        ax.set_xlim(left / 1.28 if compact else 0, 1.28 * right if compact else 1.13 * right)
         ax.margins(y=0.15)
         ax.set_title(title, loc="left", fontsize=12, pad=12)
         ax.set_title(f"T = {horizon:g}", loc="right", fontsize=9, color="#777f86", pad=12)
 
     fig.suptitle(heading or ("Single-rollout runtime vs error" if warm else "Batch runtime vs error"),
-                 y=0.94 if heading else 0.96, fontsize=14 if heading else 18, ha="left", x=0.10)
+                 y=0.97 if compact else 0.94 if heading else 0.96, fontsize=14 if heading else 18,
+                 ha="left", x=0.065 if compact else 0.10)
     if args.single_case and not heading:
         fig.text(0.10, 0.921, warm["device"], color="#59616a", fontsize=10)
     fig.legend(handles=[
@@ -205,16 +215,17 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
           for comparison, color, label, _method, style, width in overlays if comparison],
         *([Line2D([], [], color="#c45b22", ls="-", lw=1.0, label="Gradient EMA — saved accuracy")]
           if args.candidate_accuracy else []),
-        *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="-.", ms=6, lw=1.3,
+        *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="none" if args.single_case else "-.", ms=6, lw=1.3,
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=label)
           for run, label, color, marker in PHASE_STYLES if run in phase],
-    ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
-        ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
+    ], loc="upper left", bbox_to_anchor=(0.06, 0.90) if compact else (0.09, 0.895 if args.single_case and not heading else 0.91),
+        ncols=3 if compact else 2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
-    fig.supxlabel(xlabel, y=0.06, fontsize=11)
-    fig.supylabel("Final surface error (%)" if args.single_case else "Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
+    if not compact:
+        fig.supxlabel(xlabel, y=0.06, fontsize=11)
+        fig.supylabel("Final surface error (%)" if args.single_case else "Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
 
 
 if __name__ == "__main__":
@@ -270,12 +281,21 @@ if __name__ == "__main__":
             config.no_baseline_timings = None
             config.fp32_g1_timings = args.fp32_g1_timings if hardware == "ada" else None
             config.phase_timings = args.phase_timings if hardware == "ada" else None
-        fig = plt.figure(figsize=(10.5, 24.75))
-        fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
-        blackwell, ada, ampere = fig.subfigures(3, 1)
+        fig = plt.figure(figsize=(18, 13.5))
+        fig.suptitle("Single-rollout runtime vs error", y=0.99, fontsize=18, ha="right", x=0.98)
+        grid = fig.add_gridspec(3, 1, top=0.945, bottom=0.04, hspace=0.04)
+        blackwell, ada, ampere = (fig.add_subfigure(grid[row]) for row in range(3))
         draw_comparison(modal, blackwell, "Blackwell · Modal — RTX PRO 6000")
         draw_comparison(ada_config, ada, "Ada · Local — RTX 6000")
         draw_comparison(a100, ampere, "A100 · Modal — A100-SXM4-80GB")
+        for column in range(4):
+            panels = fig.axes[column::4]
+            limits = [(min(ax.get_xlim()[0] for ax in panels), max(ax.get_xlim()[1] for ax in panels)),
+                      (min(ax.get_ylim()[0] for ax in panels), max(ax.get_ylim()[1] for ax in panels))]
+            for ax in panels:
+                ax.set(xlim=limits[0], ylim=limits[1])
+        fig.supxlabel("One rollout (seconds, log scale)", y=0.012, fontsize=12)
+        fig.supylabel("Final surface error (%)", x=0.012, fontsize=12)
     else:
         fig = plt.figure(figsize=(10.5, 8))
         draw_comparison(args, fig)

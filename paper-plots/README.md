@@ -170,7 +170,14 @@ Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/famil
 ### 12-potential-new-nn
 
 [PNG](figures/12-potential-new-nn.png) / [PDF](figures/12-potential-new-nn.pdf).
+[October 1 meeting notes](meeting-notes-2026-10-01.pdf)
+([LaTeX source](meeting-notes-2026-10-01.tex)) summarize the accuracy results and current experiments.
 Blackwell/Modal panels are on top, Ada/local in the middle, and A100/Modal below.
+The meeting layout places the four families in columns, with logarithmic runtime
+axes and identical axis limits within each column. Measurements are unchanged.
+Repeated savings annotations and redundant transformer timing lines are removed;
+transformer diamonds retain both runtime and accuracy. Cloud saved-accuracy
+references remain separate horizontal lines, not paired runtime/error points.
 Ada shows orange runtime/error points for the epoch-120 gradient-EMA checkpoint,
 measured with full single rollouts of the optimized network. Cloud panels retain
 their preceding candidate timing lines and saved epoch-120 accuracy references.
@@ -224,7 +231,7 @@ Median warm seconds (three full repeats per case):
 | Local tangent — 120 epochs | 1.304564 | 12.598781 | 12.642550 | 1.287951 |
 | Modal phase — 120 epochs | 1.275761 | 12.458121 | 12.352980 | 1.257213 |
 
-Purple lines show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
+Purple diamonds show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
 Diamonds give that single case's final surface error on each GPU. The separate full current-test suite
 is saved under `outputs/torch_ema_20260926/evaluation/` (128/128 finite).
 These timings use BF16/FP32 neural inference, FP64 integration, and a reusable
@@ -252,8 +259,8 @@ M1/M2 retain `outputs/classical_figure12_20260927/` measurements, and M6
 retains `outputs/classical_interleaved_20260927/` measurements. These cloud
 points therefore span multiple allocations. Each M3–M6 optimization comparison
 uses paired old/new implementations, with three alternating full-rollout repeats
-after full-executable warm-up. Gray annotations show the paired M6 savings,
-not differences between allocations. All errors are referenced to the cached
+after full-executable warm-up. Paired M6 savings remain in the source records;
+they are not differences between allocations. All errors are referenced to the cached
 single-case M6 trajectory. Ada candidate measurements are under
 `outputs/ema_grad_timing_20260928/ada/timings.json`; cloud timings remain under
 `outputs/classical_figure12_20260927/{blackwell,a100_sxm}/neural.json`.
@@ -263,7 +270,7 @@ gradient-EMA checkpoint. Spectral EMA measurements are unchanged.
 The optional teal Ada lines show the combined FP32 G1, reused xi FFT and
 FP32 input inverse-FFT trial from `outputs/g1_fp32_tuning_20260928/ada/gpu{0,1}.json`:
 Stokes 1.0696 s, Tanaka 10.3357 s, Benjamin–Feir 10.0451 s and JONSWAP/TMA 1.0395 s.
-Teal annotations compare against the original FP64 control in those same files
+Comparisons against the original FP64 control in those same files show
 (17.2–18.5% less time); the incremental saving over FP32 G1 alone is 6.3–6.5%.
 The trial fails strict 48-state forward equivalence and changes Benjamin–Feir
 terminal error from 1.9047% to 0.6746%, with a maximum saved-surface relative

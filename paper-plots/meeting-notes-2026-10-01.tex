@@ -1,0 +1,91 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,booktabs,microtype,hyperref}
+\hypersetup{colorlinks=true,urlcolor=blue}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.45em}
+\pagestyle{empty}
+\begin{document}
+{\Large Neural DNO meeting notes}\hfill October 1, 2026
+
+\textbf{Main message.} Inference is now fast enough to compete with low-order
+Craig--Sulem evaluation, but we do not yet have a reliable accuracy advantage.
+The phase-focused recipes improved Stokes substantially and hurt Tanaka. Our next
+tests target depth conditioning and incomplete supervision of the operator.
+
+\subsection*{Where we stand}
+Median terminal surface error in percent, 32 test cases per family, against M6.
+All three neural models below were trained for 120 epochs.
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+& M2 & M3 & Original EMA & Local tangent & Modal phase \\
+\midrule
+Stokes & 0.000470 & 0.000144 & 0.01055 & 0.002296 & 0.002385 \\
+Tanaka & 0.1893 & 0.01237 & 0.1241 & 0.2150 & 0.1759 \\
+Benjamin--Feir & 0.4026 & 0.2267 & 0.3127 & 0.3121 & 0.2923 \\
+JONSWAP/TMA & 0.01917 & 0.005882 & 0.1516 & 0.1249 & 0.1019 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Accuracy.} The new recipes improve Stokes by about $4.5\times$ versus
+the original EMA model, but neither beats M3's median in any family. Modal phase
+improves three medians versus local tangent while worsening all four
+95th-percentile errors. Tanaka's 95th percentile rises from $4.64\%$ (original)
+to $7.67\%$ (local) and $11.19\%$ (modal).
+Both new recipes also changed the data normalization; the Stokes improvement
+cannot be attributed to phase loss alone.
+
+\textbf{Runtime.} On Ada, the original optimized EMA model takes
+$1.25$--$1.29$ seconds for $T=20$ and $12.33$--$12.62$ seconds for $T=200$.
+M2 takes approximately $0.97/9.6$ seconds and M3 $1.57/15.7$ seconds.
+The model sits between them in cost, but generally not in accuracy.
+These are warm, full single rollouts, not batch-throughput estimates.
+
+\subsection*{What the diagnostics suggest}
+\textbf{Phase drift matters, but its loss is not a complete fix.}
+Earlier alignment diagnostics attributed most Stokes/Tanaka trajectory error
+to translation. The completed experiments show that targeting phase can improve
+one regime while making steep Tanaka tails worse.
+
+\textbf{A stronger lead: learning the operator beyond the observed potential.}
+At fixed $(\eta,h)$, changing only the phases of $\xi$ while preserving its
+Fourier amplitudes raises the original model's paired median one-step error
+by $23\times$ on Stokes and $119\times$ on Benjamin--Feir.
+All three models beat M2 on all 32 original BF inputs but on none of the
+32 scrambled-input case medians. This suggests inadequate coverage of
+Dirichlet directions; it does not yet establish the cause of rollout drift.
+
+\textbf{Depth conditioning remains plausible.}
+Adding $\eta/h$ improved all four fresh one-epoch median rollout errors,
+but worsened Tanaka's 95th percentile. Gauge centering made little difference;
+learned surface filters were mixed. Positivity held on the four audited hard
+Tanaka surfaces, so positivity enforcement is not our first intervention.
+
+\subsection*{Running now and next decision}
+As of 03:22 local time, the $\eta/h$ candidate has completed 7 of 120 epochs;
+its otherwise identical target-loss control is queued on GPU 1.
+Rollouts are scheduled at epochs 10, 30, 60, and 120.
+
+The separate fresh one-epoch pilot tests \textbf{CS-labelled potential probes}:
+keep each surface/depth, retain the original potential, and add a same-spectrum
+phase-scrambled potential with its own M6 label. Its paired control is running;
+the probe arm follows. Both use LR $2\times10^{-5}$ and receive 128-case rollout
+evaluation. This changes training coverage, not inference cost.
+
+\textbf{Decision criterion.} Compare the controlled runs using family medians
+\emph{and} tails. Look for gains that survive rollout evaluation without a
+Tanaka regression before committing to another long run. Do not promote a
+variant solely because its aggregate validation loss is lower.
+
+{\footnotesize
+\textbf{Figure 12:} each plotted accuracy is one selected test case, not the
+32-case medians above. Dashed neural lines show timing only; cloud horizontal
+orange lines retain saved EMA accuracy separately. No new timings were run for
+this cleanup. Sources: September 30 and October 1 experiment logs,
+\texttt{outputs/phase\_timing\_20260930/}, and
+\texttt{outputs/operator\_probe\_a100\_20261001/}.}
+\end{document}
