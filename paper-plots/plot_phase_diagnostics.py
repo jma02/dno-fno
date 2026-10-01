@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/dno-fno-mpl")
 
@@ -17,6 +18,12 @@ from matplotlib.figure import Figure
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.analyze_rollout_translation_decomposition import (  # noqa: E402
+    aligned_fields,
+    optimal_displacement,
+)
+
 FIGURES = ROOT / "paper-plots/figures"
 FAMILIES = ("stokes", "tanaka", "benjamin_feir", "jonswap_tma")
 TITLES = ("Stokes", "Tanaka", "Benjamin–Feir", "JONSWAP / TMA")
@@ -25,13 +32,6 @@ MODELS = (
     ("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent", "#007da6"),
     ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase", "#009e73"),
 )
-
-
-def fitted_speed(eta: np.ndarray, q: np.ndarray) -> np.ndarray:
-    """Least-squares speed in eta_t = q = -c eta_x on the 2pi domain."""
-    k = np.arange(eta.shape[-1] // 2 + 1)
-    dx = np.fft.irfft(1j * k * np.fft.rfft(eta, axis=-1), n=eta.shape[-1])
-    return -np.sum(q * dx, axis=-1) / np.sum(dx**2, axis=-1)
 
 
 def median_band(
@@ -49,7 +49,6 @@ def save_figure(fig: Figure, name: str, title: str, ylabel: str) -> None:
                ncol=len(labels), frameon=False, fontsize=11)
     fig.supylabel(ylabel, x=0.015, fontsize=12)
     for ax in fig.axes:
-        ax.set_yscale("log")
         ax.grid(axis="y", color="#e8ebee", linewidth=0.8)
         ax.set_axisbelow(True)
         ax.spines[["top", "right"]].set_visible(False)
@@ -80,62 +79,81 @@ def main() -> None:
                 pred = data["pred_eta"]
                 if not (np.isfinite(truth).all() and np.isfinite(pred).all()):
                     raise ValueError(f"Nonfinite saved trajectory: {path}")
-                ref_hat = np.fft.rfft(truth, axis=-1)[..., 1:129]
-                pred_hat = np.fft.rfft(pred, axis=-1)[..., 1:129]
-                angles = np.angle(pred_hat * ref_hat.conj())
-                power = np.abs(ref_hat)**2
-                phase = np.rad2deg(np.sqrt(
-                    np.sum(power * angles**2, axis=-1) / np.sum(power, axis=-1)
-                ))
+                ref_hat = np.fft.rfft(truth[1:], axis=-1)
+                pred_hat = np.fft.rfft(pred[1:], axis=-1)
+                weights = np.full(ref_hat.shape[-1], 2.)
+                weights[[0, -1]] = 1
+                total = np.sum(weights * np.abs(pred_hat - ref_hat)**2, axis=-1)
+                amplitude = np.sum(weights * (np.abs(pred_hat) - np.abs(ref_hat))**2, axis=-1)
+                phase = 100 * (1 - amplitude / total)
+                if not (np.isfinite(phase).all() and np.all((phase >= -1e-6) & (phase <= 100 + 1e-6))):
+                    raise ValueError(f"Undefined phase decomposition: {path}")
+                phase = np.clip(phase, 0, 100)
                 ax = phase_axes.flat[family_index]
-                median_band(ax, times[1:], phase[1:], label, color)
+                median_band(ax, times[1:], phase, label, color)
                 ax.set_title(f"{TITLES[family_index]} · {truth.shape[1]} cases", loc="left")
                 ax.set_xlabel("Time")
                 ax.set_xlim(0, times[-1])
-                print(f"{label}, {family}: final Fourier-phase median {np.median(phase[-1]):.6g} deg")
+                ax.set_ylim(0, 100)
+                ax.set_yticks([0, 25, 50, 75, 100])
+                print(f"{label}, {family}: final Fourier-phase share {np.median(phase[-1]):.3f}%", flush=True)
                 if family_index < 2:
                     groups = json.loads(path.with_name(f"{family}_summary.json").read_text())[
                         "evaluation_source"]["selected_parameter_group_ids"]
                     selected = np.array([family == "stokes" or "_m1_" in group for group in groups])
-                    c_ref = fitted_speed(truth[:, selected], data["truth_gxi"][:, selected])
-                    c_pred = fitted_speed(pred[:, selected], data["pred_gxi"][:, selected])
-                    speed_error = 100 * np.abs((c_pred - c_ref) / c_ref)
-                    if not np.isfinite(speed_error).all():
-                        raise ValueError(f"Undefined fitted speed: {path}")
+                    reference = truth[5::5, selected].reshape(-1, truth.shape[-1])
+                    prediction = pred[5::5, selected].reshape(reference.shape)
+                    shifts = np.array([
+                        optimal_displacement(p, r, 2 * np.pi)
+                        for p, r in zip(prediction, reference)
+                    ])
+                    aligned = aligned_fields(prediction, shifts, 2 * np.pi)
+                    raw_error = np.sum((prediction - reference)**2, axis=-1)
+                    aligned_error = np.minimum(raw_error, np.sum((aligned - reference)**2, axis=-1))
+                    translation = (100 * (1 - aligned_error / raw_error)).reshape(-1, selected.sum())
+                    if not (np.isfinite(translation).all() and np.all(translation <= phase[4::5, selected] + 1e-5)):
+                        raise ValueError(f"Inconsistent translation decomposition: {path}")
                     ax = speed_axes[family_index]
-                    median_band(ax, times, speed_error, label, color)
+                    median_band(ax, times[5::5], translation, label, color)
                     title = "Stokes" if family == "stokes" else "Isolated Tanaka"
                     ax.set_title(f"{title} · {selected.sum()} cases", loc="left")
                     ax.set_xlabel("Time")
                     ax.set_xlim(0, times[-1])
-                    print(f"{label}, {family}: final fitted-speed median {np.median(speed_error[-1]):.6g}%")
+                    ax.set_ylim(0, 100)
+                    ax.set_yticks([0, 25, 50, 75, 100])
+                    print(f"{label}, {family}: final translation-removable share {np.median(translation[-1]):.3f}%", flush=True)
 
-    save_figure(speed_fig, "15-phase-speed-error", "Phase-speed error",
-                "Fitted translation-speed error (%)")
-    save_figure(phase_fig, "16-fourier-phase-error", "Fourier-phase error",
-                "Power-weighted RMS phase error (degrees)")
+    save_figure(speed_fig, "15-phase-speed-error", "Surface error removed by translation alignment",
+                "Share of total squared surface error (%)")
+    save_figure(phase_fig, "16-fourier-phase-error", "Fourier-phase share of surface error",
+                "Share of total squared surface error (%)")
 
-    probe_fig, probe_axes = plt.subplots(2, 2, figsize=(11, 8))
+    probe_fig, ax = plt.subplots(figsize=(11, 5.8))
     with np.load(ROOT / "outputs/operator_probe_a100_20261001/operator_probes.npz") as data:
         methods = data["method_names"].tolist()
         errors = data["relative_l2"]
-        for family_index, title in enumerate(TITLES):
-            ax = probe_axes.flat[family_index]
-            selected = data["family_ids"] == family_index
-            for index, (run, label, color) in enumerate((("M2", "M2", "#606970"), *MODELS)):
-                per_case = errors[methods.index(run), selected]
-                values = 100 * np.stack((per_case[:, 0], np.median(per_case[:, 5:9], axis=1)))
-                low, median, high = np.quantile(values, [0.25, 0.5, 0.75], axis=1)
-                x = np.array([0., 1.]) + (index - 1.5) * 0.055
-                ax.errorbar(x, median, yerr=np.stack((median - low, high - median)),
-                            color=color, label=label, marker="o", markersize=5,
-                            linewidth=1.6, elinewidth=1, capsize=3)
-                print(f"{label}, {FAMILIES[family_index]}: DNO median {median[0]:.6g} -> {median[1]:.6g}%")
-            ax.set_title(f"{title} · {selected.sum()} cases", loc="left")
-            ax.set_xticks([0, 1], ["Original potential", "10% perturbation"])
-            ax.set_xlim(-0.25, 1.25)
-    save_figure(probe_fig, "17-local-perturbation-error", "Local potential perturbations",
-                "Relative DNO error (%)")
+        for index, (run, label, color) in enumerate((("M2", "M2", "#606970"), *MODELS)):
+            per_case = errors[methods.index(run)]
+            ratios = np.median(per_case[:, 5:9], axis=1) / per_case[:, 0]
+            low, median, high = np.array([
+                np.quantile(ratios[data["family_ids"] == family_index], [0.25, 0.5, 0.75])
+                for family_index in range(4)
+            ]).T
+            x = np.arange(4) + (index - 1.5) * 0.13
+            ax.errorbar(x, median, yerr=np.stack((median - low, high - median)),
+                        color=color, label=label, marker="o", markersize=6,
+                        linestyle="none", elinewidth=1.5, capsize=4)
+            print(f"{label}: paired perturbation multipliers {median.round(3)}", flush=True)
+    ax.set_xticks(np.arange(4), TITLES)
+    ax.set_xlim(-0.45, 3.45)
+    ax.set_yscale("log")
+    ax.set_ylim(0.85, 25)
+    ax.set_yticks([1, 2, 5, 10, 20], ["1×", "2×", "5×", "10×", "20×"])
+    ax.axhline(1, color="#606970", linestyle="--", linewidth=1)
+    ax.text(0.99, 1.07, "1× = unchanged error", ha="right", color="#606970",
+            transform=ax.get_yaxis_transform(), fontsize=10)
+    save_figure(probe_fig, "17-local-perturbation-error", "DNO error after a 10% potential perturbation",
+                "Perturbed error / original error")
 
 
 if __name__ == "__main__":

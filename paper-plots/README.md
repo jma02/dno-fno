@@ -511,7 +511,7 @@ Rebuild with `uv run --no-sync scripts/profile_dno.py --analyze --output outputs
 
 ### 15–17: Phase and local-potential diagnostics
 
-- [Phase-speed PNG](figures/15-phase-speed-error.png) / [PDF](figures/15-phase-speed-error.pdf)
+- [Translation-drift share PNG](figures/15-phase-speed-error.png) / [PDF](figures/15-phase-speed-error.pdf)
 - [Fourier-phase PNG](figures/16-fourier-phase-error.png) / [PDF](figures/16-fourier-phase-error.pdf)
 - [Local-perturbation PNG](figures/17-local-perturbation-error.png) / [PDF](figures/17-local-perturbation-error.pdf)
 
@@ -525,30 +525,41 @@ rollouts; the other two use `eval_epoch120_test_stratified_n32_gpu*`.
 These are comparisons of trained recipes, not isolated causal effects of
 individual loss terms.
 
-**15:** At each saved state, fit rigid-translation speed by
-`c = -<G(eta)xi, eta_x> / <eta_x, eta_x>`, using spectral differentiation.
-Evaluate this separately on the predicted and M6-reference states and plot
-`100*abs(c_pred-c_ref)/abs(c_ref)`. Use all 32 Stokes cases and the 11 isolated
-Tanaka cases (parameter groups containing `_m1_`). This is instantaneous
-least-squares translation speed, not accumulated displacement divided by time.
+**15:** Plot the percentage of squared surface error removed by one rigid
+translation: `100*(1 - min_s ||pred(x+s)-ref(x)||^2 / ||pred-ref||^2)`.
+Use continuous Fourier alignment, including zero shift as a candidate, on
+every fifth saved frame after the initial state. All 32 Stokes cases and the
+11 isolated Tanaka cases (groups containing `_m1_`) are included. This
+diagnoses accumulated translation drift; it does not divide a speed error
+by a surface error. A value of 100% means translation alone removes all
+surface error, while 0% means alignment cannot improve it.
 
-**16:** For surface elevation, compute the wrapped mode-angle difference
-`phi_k = arg(pred_eta_hat_k * conj(ref_eta_hat_k))`, then
-`sqrt(sum(abs(ref_eta_hat_k)^2 * phi_k^2) / sum(abs(ref_eta_hat_k)^2))`,
-converted to degrees. Modes are 1–128 on the 2pi domain; each family has
-32 cases. No translation alignment is applied. The common zero-error initial
-frame is omitted on the logarithmic axis. This is a circular phase-angle
-metric, not relative L2 error or an unwrapped count of phase revolutions.
+**16:** Split squared surface error into Fourier-amplitude and phase parts.
+With predicted/reference Fourier coefficients P/R, the phase share is
+`100*(1 - sum(w*(abs(P)-abs(R))^2) / sum(w*abs(P-R)^2))`.
+All rFFT coefficients are included with Hermitian weights (1 at DC/Nyquist,
+2 elsewhere), so the denominator equals physical squared L2 error up to
+the common FFT normalization. Equivalently, each mode's phase component is
+`2*abs(P)*abs(R)*(1-cos(arg(P*conj(R))))`. Each family has 32 cases.
+Both figures compute shares per case before taking median/IQR, use a 0–100%
+axis, and omit the zero-error initial frame where the ratio is undefined.
+Translation-removable error cannot exceed Fourier-phase error: the former
+allows one common shift, the latter independent phase correction per mode.
+These are overlapping decompositions, not percentages to add together.
 
 **17:** Reuses `outputs/operator_probe_a100_20261001/operator_probes.npz`.
 At fixed surface and depth compare original xi with `xi + 0.1*zeta`, where
 zeta preserves xi's retained Fourier amplitudes but randomizes its phases.
 Thus `norm(0.1*zeta)/norm(xi) = 0.1`. For each of 32 cases per family,
-take the median DNO relative L2 error over four perturbations before computing
-the family median/IQR. Each input has its own FP64 M6/padding-8 reference
-output and denominator; M2 is included as a baseline. This measures total
-operator error on nearby potential inputs, not surface-shape derivatives
-or error in the incremental response. Fully scrambled potentials are excluded.
+divide the median DNO relative L2 error over four perturbations by that case's
+original error, then compute the family median/IQR of these paired ratios.
+The dashed 1x line means unchanged error; 10x means ten times the original
+relative error. Each input has its own FP64 M6/padding-8 reference output
+and denominator; M2 is included as a baseline. These are error multipliers,
+not absolute accuracy rankings: a small original error can yield a large
+multiplier. This measures nearby-input sensitivity, not surface-shape
+derivatives or error in the incremental response. Fully scrambled
+potentials are excluded.
 
 All three figures are CPU-only reductions of existing saved results:
 
