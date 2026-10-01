@@ -40,6 +40,7 @@ def _model(
     use_half_deriv: bool = True,
     use_hilbert: bool = True,
     use_relative_elevation: bool = False,
+    use_learned_eta_filters: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -51,6 +52,7 @@ def _model(
         use_half_deriv=use_half_deriv,
         use_hilbert=use_hilbert,
         use_relative_elevation=use_relative_elevation,
+        use_learned_eta_filters=use_learned_eta_filters,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -73,6 +75,11 @@ def _activate_residual(variables: VariableState) -> FrozenVariableDict:
         key = jax.random.PRNGKey(100 + block_idx)
         mutable["params"][f"cs_block_{block_idx}"]["phi_proj"]["kernel"] = (
             0.2 * jax.random.normal(key, kernel.shape, dtype=kernel.dtype)
+        )
+    if "eta_filter_out" in mutable["params"]:
+        kernel = mutable["params"]["eta_filter_out"]["kernel"]
+        mutable["params"]["eta_filter_out"]["kernel"] = 0.2 * jax.random.normal(
+            jax.random.PRNGKey(102), kernel.shape, dtype=kernel.dtype,
         )
     return freeze(mutable)
 
@@ -163,8 +170,12 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for baseline_order, relative_elevation in ((-1, False), (0, False), (1, False), (1, True), (2, False)):
-        model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation)
+    for baseline_order, relative_elevation, learned_filters in (
+        (-1, False, False), (0, False, False), (1, False, False),
+        (1, True, False), (2, False, False), (1, False, True),
+    ):
+        model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation,
+                       use_learned_eta_filters=learned_filters)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -238,6 +249,7 @@ def test_eta_feature_configuration_controls_trunk_shape() -> None:
         (_model(baseline_order=-1), 8),
         (_model(baseline_order=0), 7),
         (_model(use_relative_elevation=True), 8),
+        (_model(use_learned_eta_filters=True), 7),
         (_model(n_polys=1), 5),
         (_model(n_polys=2, use_second_deriv=False), 5),
         (
@@ -300,6 +312,75 @@ def test_m2_zero_init_matches_classical_batched_fp64() -> None:
         assert sum(float(jnp.sum(leaf**2)) for leaf in jax.tree.leaves(gradient)) > 0
 
 
+def test_learned_eta_filters_preserve_initial_features_and_shared_parameters() -> None:
+    """The opt-in starts at the identical function, not just an identical baseline."""
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    fixed = _model()
+    learned = _model(use_learned_eta_filters=True)
+    original = fixed.init(jax.random.PRNGKey(13), inputs, depth)
+    variables = learned.init(jax.random.PRNGKey(13), inputs, depth)
+    for name, parameters in original["params"].items():
+        assert all(jnp.array_equal(a, b) for a, b in zip(
+            jax.tree.leaves(parameters), jax.tree.leaves(variables["params"][name]), strict=True,
+        ))
+    original = _activate_residual(original)
+    active = unfreeze(_activate_residual(variables))
+    active["params"]["eta_filter_out"] = variables["params"]["eta_filter_out"]
+    outputs, features = [], []
+    for model, state in ((fixed, original), (learned, active)):
+        output, captured = model.apply(
+            state, inputs, depth,
+            capture_intermediates=lambda module, _: module.name == "eta_feat_proj",
+        )
+        outputs.append(output)
+        features.append(captured["intermediates"]["eta_feat_proj"]["__call__"][0])
+    assert jnp.array_equal(features[0], features[1])
+    assert jnp.array_equal(outputs[0], outputs[1])
+    for state in (active, _activate_residual(variables)):
+        gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, learned.apply(
+            {"params": params}, inputs, depth,
+        )) ** 2))(state["params"])
+        assert jnp.linalg.norm(gradient["eta_filter_out"]["kernel"]) > 0
+        if state is not active:
+            assert jnp.linalg.norm(gradient["eta_filter_hidden"]["kernel"]) > 0
+        assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+
+
+def test_learned_eta_filters_change_spectral_shape_and_condition_on_depth() -> None:
+    """A nonlinear frequency envelope expands the fixed power-law feature basis."""
+    eta, xi, _ = _state(128)
+    eta = jnp.zeros_like(eta).at[:, 0].set(0.01)
+    inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (2, eta.shape[-1], 2))
+    depth = jnp.log(jnp.asarray([[0.1], [0.8]], dtype=eta.dtype))
+    model = _model(use_learned_eta_filters=True)
+    variables = unfreeze(model.init(jax.random.PRNGKey(14), inputs, depth))
+    params = jax.tree.map(lambda value: value.astype(eta.dtype), variables["params"])
+    variables["params"] = params
+    params["eta_filter_hidden"]["kernel"] = jnp.zeros_like(params["eta_filter_hidden"]["kernel"]).at[:, 0].set(jnp.asarray([2.0, 0.2, 0.3]))
+    params["eta_filter_hidden"]["bias"] = jnp.zeros_like(params["eta_filter_hidden"]["bias"]).at[0].set(-6)
+    params["eta_filter_out"]["kernel"] = jnp.zeros_like(params["eta_filter_out"]["kernel"]).at[0, :].set(jnp.asarray([0.8, -0.6]))
+    params["eta_feat_proj"]["kernel"] = jnp.eye(7, model.width // 2)
+    _, captured = model.apply(
+        variables, inputs, depth,
+        capture_intermediates=lambda module, _: module.name == "eta_feat_proj",
+    )
+    features = cast(jax.Array, captured["intermediates"]["eta_feat_proj"]["__call__"][0])
+    k = jnp.arange(eta.shape[-1] // 2 + 1, dtype=eta.dtype)
+    hidden = jnp.tanh(2.0 * jnp.log1p(k) + 0.2 * depth + 0.3 * jnp.tanh(jnp.exp(depth) * k) - 6)
+    for channel, symbol, scale in ((4, -(k**2), 0.8), (5, jnp.sqrt(k), -0.6)):
+        expected = symbol * (1 + 0.5 * jnp.tanh(scale * hidden))
+        actual = jnp.fft.rfft(features[..., channel]) / jnp.fft.rfft(eta)
+        assert jnp.allclose(actual, expected, rtol=1e-11, atol=1e-10)
+        assert jnp.linalg.norm(actual[0] - actual[1]) > 0
+    p = k[1:]
+    old_basis = jnp.stack((jnp.ones_like(p), p**0.5, p, p**2, p**2.5, p**4), axis=-1)
+    old_basis /= jnp.linalg.norm(old_basis, axis=0)
+    quadratic_gain = p**4 * (1 + 0.5 * jnp.tanh(0.8 * hidden[0, 1:]))**2
+    projection = old_basis @ jnp.linalg.lstsq(old_basis, quadratic_gain, rcond=None)[0]
+    assert jnp.linalg.norm(quadratic_gain - projection) / jnp.linalg.norm(quadratic_gain) > 1e-5
+
+
 def test_true_depth_analytic_baselines_and_returned_components() -> None:
     eta, xi, _ = _state()
     for order in (0, 1, 2):
@@ -347,7 +428,10 @@ def test_true_depth_analytic_baselines_and_returned_components() -> None:
 def test_experimental_residual_orders() -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
-    for model, order in ((_model(use_relative_elevation=True), 2), (_model(baseline_order=2), 3)):
+    for model, order in (
+        (_model(use_relative_elevation=True), 2), (_model(baseline_order=2), 3),
+        (_model(use_learned_eta_filters=True), 2),
+    ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
             return _learned_residual(model, variables, surface, xi, depth)
@@ -374,6 +458,8 @@ def main() -> int:
         test_eta_feature_configuration_controls_trunk_shape,
         test_relative_elevation_uses_physical_eta_and_unclipped_depth,
         test_m2_zero_init_matches_classical_batched_fp64,
+        test_learned_eta_filters_preserve_initial_features_and_shared_parameters,
+        test_learned_eta_filters_change_spectral_shape_and_condition_on_depth,
         test_true_depth_analytic_baselines_and_returned_components,
         test_experimental_residual_orders,
     )

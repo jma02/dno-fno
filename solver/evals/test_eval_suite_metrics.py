@@ -24,6 +24,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     _write_truth_cache,
     compute_macro_summary,
     compute_metrics,
+    main as eval_main,
     run_family,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
@@ -52,6 +53,7 @@ class ComputeMetricsTest(unittest.TestCase):
         for options in (
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
             {"cs_baseline_true_depth": True},
+            {"cs_use_learned_eta_filters": True},
             {"cs_use_relative_elevation": True, "cs_baseline_order": 2, "cs_baseline_true_depth": True},
         ):
             with self.subTest(options=options), patch(
@@ -65,6 +67,7 @@ class ComputeMetricsTest(unittest.TestCase):
             ):
                 loaded = load_run("/tmp/dno-architecture-loader-test")
                 self.assertEqual(loaded.model.use_relative_elevation, options.get("cs_use_relative_elevation", False))
+                self.assertEqual(loaded.model.use_learned_eta_filters, options.get("cs_use_learned_eta_filters", False))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
 
@@ -89,6 +92,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 summaries.append(run_family(
                     "tanaka", FamilyConfig(2, 1.0, 1.0, 1), loaded, Mock(),
                     directory, directory, 2, directory, {}, 2,
+                    center_xi=True,
                     pred=pred if reuse else None,
                 ))
                 with np.load(directory / "tanaka_trajs.npz") as archive:
@@ -98,6 +102,29 @@ class ComputeMetricsTest(unittest.TestCase):
             for name in saved[0]:
                 np.testing.assert_array_equal(saved[0][name], saved[1][name])
             self.assertEqual(summaries[1]["model_nonfinite_any_count_truth_valid"], 1)
+            self.assertTrue(summaries[1]["center_xi"])
+
+    def test_center_xi_cli_passes_option_to_predictor_and_summary(self) -> None:
+        loaded = LoadedRun(None, {}, {}, {}, "scale", 120)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temporary:
+                argv = ["eval_suite", "--run_dir", temporary, "--families", "tanaka"]
+                if enabled:
+                    argv.append("--center_xi")
+                with patch("sys.argv", argv), patch(
+                    "solver.evals.eval_suite.load_run", return_value=loaded,
+                ), patch(
+                    "solver.evals.eval_suite.build_predict_gxi_batched",
+                ) as build_predictor, patch(
+                    "solver.evals.eval_suite.run_family", return_value={"center_xi": enabled},
+                ) as evaluate_family, patch(
+                    "solver.evals.eval_suite.compute_macro_summary", return_value={},
+                ), patch("solver.evals.eval_suite._write_json") as write_json:
+                    eval_main()
+                build_predictor.assert_called_once_with(loaded, center_xi=enabled)
+                self.assertEqual(evaluate_family.call_args.kwargs["center_xi"], enabled)
+                self.assertIs(evaluate_family.call_args.args[3], build_predictor.return_value)
+                self.assertEqual(write_json.call_args_list[0].args[1], {"tanaka": {"center_xi": enabled}})
 
     def test_evaluation_uses_float32_network_and_float64_output(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
@@ -119,6 +146,41 @@ class ComputeMetricsTest(unittest.TestCase):
             {"params": params}, inputs, depth
         ))[..., 0].astype(jnp.float64)
         np.testing.assert_allclose(output, expected - expected.mean(axis=-1, keepdims=True), rtol=1e-12, atol=1e-14)
+
+    def test_center_xi_removes_offsets_before_float32_rounding(self) -> None:
+        model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4)
+        nx = 32
+        x = jnp.arange(nx, dtype=jnp.float64) * (2.0 * jnp.pi / nx)
+        eta = jnp.stack((0.03 * jnp.cos(x), 0.02 * jnp.sin(2.0 * x)))
+        xi = jnp.tile(jnp.asarray([1.0, 0.0, -1.0, 0.0]), nx // 4)[None, :]
+        xi = xi * jnp.asarray([2.0**-12, 2.0**-11])[:, None]
+        log_depth = jnp.log(jnp.asarray([0.1, 0.8]))
+        inputs = jnp.stack((eta, xi), axis=-1).astype(jnp.float32)
+        params = dict(model.init(
+            jax.random.PRNGKey(2), inputs, log_depth.astype(jnp.float32)[:, None]
+        )["params"])
+        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full((4, 2), 0.1, dtype=jnp.float32)
+        for norm, stats in (
+            ("scale", {"feature_absmax": [0.25, 2.0], "target_absmax": 3.0}),
+            ("minmax", {"feature_min": [-0.25, -0.5], "feature_max": [0.75, 1.5],
+                        "target_min": -1.0, "target_max": 2.0}),
+        ):
+            with self.subTest(norm=norm):
+                loaded = LoadedRun(model, params, {}, stats, norm, 0)
+                default = build_predict_gxi_batched(loaded)
+                disabled = build_predict_gxi_batched(loaded, center_xi=False)
+                centered = build_predict_gxi_batched(loaded, center_xi=True)
+                expected = centered(eta, xi, log_depth)
+                np.testing.assert_array_equal(default(eta, xi, log_depth), disabled(eta, xi, log_depth))
+                for offsets in ([1e-5, -1e-4], [32768.0, -65536.0]):
+                    shifted = xi + jnp.asarray(offsets)[:, None]
+                    output = centered(eta, shifted, log_depth)
+                    np.testing.assert_array_equal(output, expected)
+                    np.testing.assert_allclose(jnp.mean(output, axis=-1), 0.0, atol=1e-15)
+                    self.assertEqual(output.dtype, jnp.float64)
+                self.assertGreater(
+                    float(jnp.linalg.norm(disabled(eta, shifted, log_depth) - expected)), 1e-7
+                )
 
     def test_fno_spectral_layer_preserves_evaluation_precision(self) -> None:
         layer = SpectralConv1d(in_channels=2, out_channels=2, modes=4)

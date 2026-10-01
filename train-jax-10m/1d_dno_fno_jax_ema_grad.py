@@ -83,6 +83,10 @@ def main() -> None:
         help="Add physical eta/h to the surface features.",
     )
     parser.add_argument(
+        "--cs_use_learned_eta_filters", action="store_true",
+        help="Learn depth-conditioned modulations of the second- and half-derivative surface filters.",
+    )
+    parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
     )
@@ -382,6 +386,7 @@ def main() -> None:
             use_half_deriv=args.cs_use_half_deriv,
             use_hilbert=args.cs_use_hilbert,
             use_relative_elevation=args.cs_use_relative_elevation,
+            use_learned_eta_filters=args.cs_use_learned_eta_filters,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,

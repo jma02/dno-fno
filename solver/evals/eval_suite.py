@@ -735,6 +735,7 @@ def run_family(
     rollout_batch_size: int | None,
     *,
     ic_selection: ICSelection = "first",
+    center_xi: bool = False,
     pred: RolloutPayload | None = None,
 ) -> dict[str, Any]:
     ics, source, nx, length = _load_paper_dataset_ics(
@@ -850,6 +851,7 @@ def run_family(
             "surrogate_wall_s": pred["wall_s"],
             "truth_protocol": json.loads(protocol_json),
             "precision": "float32 network, float64 integration and saved trajectories",
+            "center_xi": center_xi,
             "rollout_batch_size": min(rollout_batch_size or len(ics), len(ics)),
         }
     )
@@ -889,6 +891,10 @@ def main() -> None:
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--truth_cache", default=None)
     parser.add_argument("--rollout_batch_size", type=int, default=None)
+    parser.add_argument(
+        "--center_xi", action="store_true",
+        help="Remove each physical potential's mean before float32 network conversion.",
+    )
     parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
     if not args.gpu:
@@ -913,7 +919,7 @@ def main() -> None:
         "path": str(checkpoint_dir),
         "epoch": loaded.epoch,
     }
-    predict_gxi_batched = build_predict_gxi_batched(loaded)
+    predict_gxi_batched = build_predict_gxi_batched(loaded, center_xi=args.center_xi)
     truth_cache_dir = Path(args.truth_cache).resolve() if args.truth_cache else None
     summaries = {
         family: run_family(
@@ -928,6 +934,7 @@ def main() -> None:
             checkpoint_source,
             args.rollout_batch_size,
             ic_selection=args.ic_selection,
+            center_xi=args.center_xi,
         )
         for family in args.families
     }

@@ -92,6 +92,7 @@ def load_run(
             use_half_deriv=bool(config["cs_use_half_deriv"]),
             use_hilbert=bool(config["cs_use_hilbert"]),
             use_relative_elevation=bool(config.get("cs_use_relative_elevation", False)),
+            use_learned_eta_filters=bool(config.get("cs_use_learned_eta_filters", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
             baseline_order=int(config.get(
                 "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]
@@ -124,11 +125,15 @@ def load_run(
     )
 
 
-def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
+def build_predict_gxi_batched(
+    loaded: LoadedRun, *, center_xi: bool = False,
+) -> BatchedPredictor:
     """Build a JIT-compiled ``(eta, xi, log_depth) -> G(eta)xi`` predictor.
 
     ``eta`` and ``xi`` have shape ``(batch, nx)``. ``log_depth`` has shape
     ``(batch,)`` or ``(batch, 1)``. The returned field is mean-free per sample.
+    With ``center_xi``, remove the physical potential's mean before conversion
+    to float32, so a gauge offset cannot change the network's rounded inputs.
     """
     model_dtype = jnp.float32
     feature_min = target_min = 0.0
@@ -158,6 +163,8 @@ def build_predict_gxi_batched(loaded: LoadedRun) -> BatchedPredictor:
         xi: jnp.ndarray,
         log_depth: jnp.ndarray,
     ) -> jnp.ndarray:
+        if center_xi:
+            xi = xi - jnp.mean(xi, axis=-1, keepdims=True)
         features = jnp.stack((eta.astype(model_dtype), xi.astype(model_dtype)), axis=-1)
         if loaded.norm_mode == "scale":
             normalized = features / feature_scale

@@ -91,6 +91,7 @@ class CraigSulemDNO(nn.Module):
     use_half_deriv: bool = True       # Fourier multiplier sqrt(abs(k)).
     use_hilbert: bool = True          # Hilbert transform.
     use_relative_elevation: bool = False  # Append physical eta / actual depth.
+    use_learned_eta_filters: bool = False  # Modulate the two even surface filters.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
     baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
@@ -185,11 +186,26 @@ class CraigSulemDNO(nn.Module):
         )
         k_op = k_arr[None, :]
         eta_hat = jnp.fft.rfft(eta_norm, axis=-1)
+        second_symbol, half_symbol = -(k_op ** 2), jnp.sqrt(k_op)
+        if self.use_learned_eta_filters:
+            surface_k, surface_log_h = jnp.broadcast_arrays(k_op, clipped_log_depth)
+            surface_conditioning = jnp.stack((
+                jnp.log1p(surface_k), surface_log_h,
+                jnp.tanh(jnp.exp(surface_log_h) * surface_k),
+            ), axis=-1)
+            surface_hidden = nn.tanh(nn.Dense(
+                self.mult_hidden, name="eta_filter_hidden",
+            )(surface_conditioning))
+            surface_modulation = 1.0 + 0.5 * nn.tanh(nn.Dense(
+                2, name="eta_filter_out", kernel_init=nn.initializers.zeros,
+            )(surface_hidden))
+            second_symbol = second_symbol * surface_modulation[..., 0]
+            half_symbol = half_symbol * surface_modulation[..., 1]
 
         for enabled, multiplier in (
             (self.use_first_deriv, 1j * k_op),
-            (self.use_second_deriv, -(k_op ** 2)),
-            (self.use_half_deriv, jnp.sqrt(k_op)),
+            (self.use_second_deriv, second_symbol),
+            (self.use_half_deriv, half_symbol),
             (self.use_hilbert, -1j * jnp.sign(k_arr).astype(eta_hat.dtype)[None, :]),
         ):
             if enabled:
