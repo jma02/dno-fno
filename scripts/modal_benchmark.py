@@ -44,7 +44,8 @@ app = modal.App("dno-kernel-benchmarks", include_source=False)
 
 @app.function(image=image, gpu=os.environ.get("DNO_MODAL_GPU", "RTX-PRO-6000"),
               cloud=os.environ.get("DNO_MODAL_CLOUD"), region=os.environ.get("DNO_MODAL_REGION"),
-              timeout=3600, retries=0, max_containers=1, scaledown_window=5,
+              timeout=int(os.environ.get("DNO_MODAL_TIMEOUT", "3600")),
+              retries=0, max_containers=1, scaledown_window=5,
               cpu=4, memory=16384, serialized=True, include_source=False)
 def benchmark(payload: bytes, command: str, result_dir: str) -> tuple[int, dict[str, bytes]]:
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
