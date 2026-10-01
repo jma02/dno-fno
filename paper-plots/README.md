@@ -204,24 +204,25 @@ epoch-120 accuracy from the saved local evaluation. No cloud checkpoint timing
 is newly measured or paired with those accuracy references. The old small/full
 neural references are removed. All panels use single-case errors, including Ada.
 
-The Ada panels also show three one-epoch, from-scratch experiments at LR `2e-5`:
-`M1 control`, `M1 residual`, and `G2 residual`. Their points pair median warm
-single-rollout times with final surface errors from those same measured
-trajectories. The residual models normalize the data loss by the remaining
-analytic-baseline error; the G2 model includes the exact FP64 quadratic term
-using the same projected recurrence with 2× padding. Measurements are stored
-in `outputs/scratch_timing_20260929/{control,residual_m1,residual_g2}/gpu{0,1}.json`.
-The existing epoch-120 point and the Blackwell/A100 results are retained.
+The Ada panels also show two experiments trained from scratch for 120 epochs
+at LR `2e-5`: `Local tangent — 120 epochs` (blue squares) and
+`Modal phase — 120 epochs` (green triangles). Both use the M1 analytic baseline
+and residual-normalized data loss. The control uses squared local tangent
+loss with weight 10; the candidate uses coupled modal Charbonnier loss with
+weight 25. Their points pair median warm single-rollout times from three full
+repeats with final surface errors from those same measured trajectories,
+not the separate 32-case family medians. Measurements are stored in
+`outputs/phase_timing_20260930/{control,modal}.json` and use the same optimized
+network implementation as the existing orange point. The three one-epoch
+markers have been replaced; the existing epoch-120 orange point and the
+Blackwell/A100 results are retained.
+
 Median warm seconds (three full repeats per case):
 
 | Model | Stokes | Tanaka | Benjamin–Feir | JONSWAP/TMA |
 | --- | ---: | ---: | ---: | ---: |
-| M1 control | 1.306 | 12.599 | 12.369 | 1.278 |
-| M1 residual | 1.289 | 12.674 | 12.344 | 1.259 |
-| G2 residual | 1.618 | 15.858 | 15.521 | 1.579 |
-
-The G2 model is slightly slower than the existing M3 measurements
-(1.573, 15.685, 15.296, 1.539 seconds in the same family order).
+| Local tangent — 120 epochs | 1.304564 | 12.598781 | 12.642550 | 1.287951 |
+| Modal phase — 120 epochs | 1.275761 | 12.458121 | 12.352980 | 1.257213 |
 
 Purple lines show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
 Diamonds give that single case's final surface error on each GPU. The separate full current-test suite
@@ -387,9 +388,8 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
   --fp32-g1-timings outputs/g1_fp32_tuning_20260928/ada/gpu0.json \
     outputs/g1_fp32_tuning_20260928/ada/gpu1.json \
-  --scratch-timings outputs/scratch_timing_20260929/control/gpu{0,1}.json \
-    outputs/scratch_timing_20260929/residual_m1/gpu{0,1}.json \
-    outputs/scratch_timing_20260929/residual_g2/gpu{0,1}.json \
+  --phase-timings outputs/phase_timing_20260930/control.json \
+    outputs/phase_timing_20260930/modal.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json

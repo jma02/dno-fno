@@ -22,9 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper-plots/figures"
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
-SCRATCH_STYLES = (("control", "M1 control — 1 epoch", "#007da6", "s"),
-                  ("residual_m1", "M1 residual — 1 epoch", "#009e73", "^"),
-                  ("residual_g2", "G2 residual — 1 epoch", "#cc4c86", "P"))
+PHASE_STYLES = (("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent — 120 epochs", "#007da6", "s"),
+                ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase — 120 epochs", "#009e73", "^"))
 
 
 def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
@@ -43,13 +42,13 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     fp32_g1 = {"families": {}} if args.fp32_g1_timings else {}
     for path in args.fp32_g1_timings or ():
         fp32_g1["families"].update(json.loads(path.read_text())["families"])
-    scratch = {}
-    scratch_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
-    for path in args.scratch_timings or ():
+    phase = {}
+    phase_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+    for path in args.phase_timings or ():
         result = json.loads(path.read_text())
-        run = Path(result["neural_runs"][scratch_method]).name.removeprefix("c27_scratch_lr2e5_").rsplit("_", 1)[0]
-        scratch.setdefault(run, {}).update({family: timing["methods"][scratch_method]
-                                           for family, timing in result["families"].items()})
+        run = Path(result["neural_runs"][phase_method]).name
+        phase.setdefault(run, {}).update({family: timing["methods"][phase_method]
+                                         for family, timing in result["families"].items()})
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     spectral = {}
     for path in args.spectral_timings or ():
@@ -79,7 +78,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     })
     axes = fig.subplots(2, 2)
     fig.subplots_adjust(left=0.10, right=0.97, bottom=0.14,
-                        top=0.74 if scratch else 0.78 if baseline_free or args.candidate_accuracy or fp32_g1 else 0.80,
+                        top=0.74 if phase else 0.78 if baseline_free or args.candidate_accuracy or fp32_g1 else 0.80,
                         hspace=0.37, wspace=0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
@@ -114,6 +113,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             offset = (6, -8) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
                 offset = (0, 10)
+            if phase and order == 2:
+                offset = (6, -10)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
@@ -159,16 +160,16 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
             right = max(right, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
-        for run, label, color, marker in SCRATCH_STYLES:
-            if family not in scratch.get(run, {}):
+        for run, label, color, marker in PHASE_STYLES:
+            if family not in phase.get(run, {}):
                 continue
-            record = scratch[run][family]
-            scratch_seconds = float(np.median(record["seconds"]))
-            scratch_error = 100 * record["cached_reference_terminal_eta_error"]
-            ax.scatter(scratch_seconds, scratch_error, color=color, marker=marker,
+            record = phase[run][family]
+            phase_seconds = float(np.median(record["seconds"]))
+            phase_error = 100 * record["cached_reference_terminal_eta_error"]
+            ax.scatter(phase_seconds, phase_error, color=color, marker=marker,
                        s=65, edgecolors="white", linewidths=0.8, zorder=4)
-            right = max(right, scratch_seconds)
-            print(f"{title}, {label}: {scratch_seconds:.3f}s; error={scratch_error:.6g}%; finite={record['finite']}")
+            right = max(right, phase_seconds)
+            print(f"{title}, {label}: {phase_seconds:.3f}s; error={phase_error:.6g}%; finite={record['finite']}")
         if family in spectral:
             record = spectral[family]
             spectral_seconds = float(np.median(record["seconds"]))
@@ -208,7 +209,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=label)
-          for run, label, color, marker in SCRATCH_STYLES if run in scratch],
+          for run, label, color, marker in PHASE_STYLES if run in phase],
     ], loc="upper left", bbox_to_anchor=(0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
@@ -223,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
     parser.add_argument("--fp32-g1-timings", type=Path, nargs="+", help="Add an Ada-only combined FP32 FFT timing trial to --stack-hardware.")
-    parser.add_argument("--scratch-timings", type=Path, nargs="+", help="Add the three one-epoch scratch models to the Ada panels.")
+    parser.add_argument("--phase-timings", type=Path, nargs="+", help="Add the two 120-epoch phase experiments to the Ada panels.")
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
@@ -242,8 +243,8 @@ if __name__ == "__main__":
         parser.error("--spectral-timings requires --single-case or --stack-hardware")
     if args.fp32_g1_timings and not args.stack_hardware:
         parser.error("--fp32-g1-timings requires --stack-hardware")
-    if args.scratch_timings and not args.stack_hardware:
-        parser.error("--scratch-timings requires --stack-hardware")
+    if args.phase_timings and not args.stack_hardware:
+        parser.error("--phase-timings requires --stack-hardware")
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
@@ -268,7 +269,7 @@ if __name__ == "__main__":
             config.candidate_previous_method = None
             config.no_baseline_timings = None
             config.fp32_g1_timings = args.fp32_g1_timings if hardware == "ada" else None
-            config.scratch_timings = args.scratch_timings if hardware == "ada" else None
+            config.phase_timings = args.phase_timings if hardware == "ada" else None
         fig = plt.figure(figsize=(10.5, 24.75))
         fig.suptitle("Single-rollout runtime vs error", y=0.995, fontsize=18, ha="left", x=0.10)
         blackwell, ada, ampere = fig.subfigures(3, 1)
