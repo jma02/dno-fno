@@ -10,16 +10,22 @@ IFS=, read -ra train_gpus <<< "$train_gpu_ids"
 trial_dir=outputs/$run_name
 export UV_CACHE_DIR=/tmp/dno-uv-cache JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 
-printf '%s waiting for Ada GPU(s) %s\n' "$(date +%H:%M)" "$train_gpu_ids"
-while true; do
-  gpu_processes=$(nvidia-smi -i "$train_gpu_ids" --query-compute-apps=pid --format=csv,noheader)
-  if [[ -z "$gpu_processes" ]]; then
-    sleep 30
+if [[ ${SHARE_GPU:-0} == 1 ]]; then
+  export XLA_PYTHON_CLIENT_PREALLOCATE=true
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.45}
+  printf '%s sharing Ada GPU(s) %s with memory fraction %s\n' "$(date +%H:%M)" "$train_gpu_ids" "$XLA_PYTHON_CLIENT_MEM_FRACTION"
+else
+  printf '%s waiting for Ada GPU(s) %s\n' "$(date +%H:%M)" "$train_gpu_ids"
+  while true; do
     gpu_processes=$(nvidia-smi -i "$train_gpu_ids" --query-compute-apps=pid --format=csv,noheader)
-    [[ -z "$gpu_processes" ]] && break
-  fi
-  sleep 30
-done
+    if [[ -z "$gpu_processes" ]]; then
+      sleep 30
+      gpu_processes=$(nvidia-smi -i "$train_gpu_ids" --query-compute-apps=pid --format=csv,noheader)
+      [[ -z "$gpu_processes" ]] && break
+    fi
+    sleep 30
+  done
+fi
 
 mkdir "$trial_dir"
 printf '%s training\n' "$(date +%H:%M)"
