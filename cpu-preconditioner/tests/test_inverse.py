@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from laplace import assemble_stiffness  # noqa: E402
 from run import (  # noqa: E402
     cached_inverse, diagonal_scaling, flat_inverse, flat_inverse_blocks,
-    geometry_features, tensor_inverse, training_pairs,
+    geometry_features, predict_scaling, tensor_inverse, training_pairs,
 )
 
 
@@ -23,7 +23,7 @@ class InverseTests(unittest.TestCase):
         torch.manual_seed(17)
         self.layers = nn.Sequential(nn.Conv2d(4, 8, 1), nn.Tanh(), nn.Conv2d(8, 8, 1),
                                     nn.Tanh(), nn.Conv2d(8, 2, 1))
-        self.geometry = geometry_features(.03 * np.cos(np.arange(64) * 2 * np.pi / 64), .25, 16)
+        self.geometry = torch.from_numpy(geometry_features(.03 * np.cos(np.arange(64) * 2 * np.pi / 64), .25, 16)[None])
         self.blocks = flat_inverse_blocks(.25, 64, 16)
         self.rhs = np.random.default_rng(8).normal(size=(3, 16 * 64))
 
@@ -56,7 +56,7 @@ class InverseTests(unittest.TestCase):
 
     def test_flat_limit_and_zero_head(self) -> None:
         with torch.inference_mode():
-            geometry = geometry_features(np.full(64, .04), .25, 16)
+            geometry = torch.from_numpy(geometry_features(np.full(64, .04), .25, 16)[None])
             torch.testing.assert_close(diagonal_scaling(self.layers, geometry), torch.ones(1, 1, 16, 64),
                                        rtol=2e-7, atol=0)
         for parameter in self.layers[-1].parameters():
@@ -66,11 +66,31 @@ class InverseTests(unittest.TestCase):
         np.testing.assert_array_equal(scaling, 1)
         np.testing.assert_array_equal(cached_inverse(self.rhs, scaling, self.blocks), flat_inverse(self.rhs, self.blocks))
 
+    def test_numpy_coefficients_and_inverse_match_torch(self) -> None:
+        rng = np.random.default_rng(21)
+        for nx, nz, depth in ((24, 8, .018), (64, 16, .25), (128, 32, 1.), (32, 12, 10.)):
+            for parameter in self.layers.parameters():
+                nn.init.normal_(parameter, std=.2)
+            x = np.arange(nx) * 2 * np.pi / nx
+            surface = .08 * min(depth, 1.) * (np.cos(x) + .3 * np.sin(3 * x))
+            geometry = geometry_features(surface, depth, nz)
+            weights = [value.numpy() for value in self.layers.state_dict().values()]
+            scaling = predict_scaling(weights, geometry)
+            with torch.inference_mode():
+                expected = diagonal_scaling(self.layers, torch.from_numpy(geometry[None])).numpy().ravel().astype(np.float64)
+            np.testing.assert_allclose(scaling, expected, rtol=3e-7, atol=3e-7)
+            self.assertEqual(scaling.dtype, np.float64)
+            blocks = flat_inverse_blocks(float(depth + surface.mean()), nx, nz)
+            rhs = rng.normal(size=(3, nz * nx))
+            actual_value = cached_inverse(rhs, scaling, blocks)
+            expected_value = cached_inverse(rhs, expected, blocks)
+            self.assertLess(np.linalg.norm(actual_value - expected_value) / np.linalg.norm(expected_value), 1e-6)
+
     def test_flat_inverse_matches_fem_and_periodicity(self) -> None:
         rng = np.random.default_rng(19)
-        for nx, nz in ((24, 8), (64, 16)):
-            matrix = assemble_stiffness(np.full(nx, .04), .25, nz)[:-nx, :-nx].tocsc()
-            blocks = flat_inverse_blocks(.29, nx, nz)
+        for nx, nz, depth in ((24, 8, .25), (64, 16, .018), (128, 32, .25), (64, 16, 10.)):
+            matrix = assemble_stiffness(np.full(nx, .04 * depth), depth, nz)[:-nx, :-nx].tocsc()
+            blocks = flat_inverse_blocks(1.04 * depth, nx, nz)
             rhs = rng.normal(size=(3, nx * nz))
             expected = splu(matrix).solve(rhs.T).T
             actual = flat_inverse(rhs, blocks)

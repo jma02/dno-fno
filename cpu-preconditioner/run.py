@@ -16,9 +16,8 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 import numpy as np  # noqa: E402
 from numpy.typing import NDArray  # noqa: E402
-from pyamg.krylov import fgmres  # noqa: E402
 from scipy.sparse import csr_matrix  # noqa: E402
-from scipy.sparse.linalg import LinearOperator, spilu, splu  # noqa: E402
+from scipy.sparse.linalg import LinearOperator, cg, splu  # noqa: E402
 import torch  # noqa: E402
 from torch import Tensor, nn  # noqa: E402
 
@@ -30,24 +29,24 @@ ROOT = Path(__file__).resolve().parents[1]
 ROWS = [16584, 19784, 16984, 18784, 18184, 24984, 34984, 38384, 59984]
 
 
-def geometry_features(eta: Array, depth: float, nz: int) -> Tensor:
+def geometry_features(eta: Array, depth: float, nz: int) -> NDArray[np.float32]:
     nx = len(eta)
     slope = np.fft.irfft(1j * np.arange(nx // 2 + 1) * np.fft.rfft(eta), n=nx)
     s = np.arange(nz)[:, None] / nz
-    fields = np.stack(np.broadcast_arrays((depth + eta)[None, :] / depth,
-                                          s * slope[None, :], s + 0 * eta,
-                                          np.full((nz, nx), depth)))
-    return torch.tensor(fields, dtype=torch.float32)[None]
+    fields = np.empty((4, nz, nx), dtype=np.float32)
+    fields[0], fields[1], fields[2], fields[3] = (depth + eta) / depth, s * slope, s, depth
+    return fields
 
 
 def flat_inverse_blocks(height: float, nx: int, nz: int) -> Array:
     """Exact flat-strip FEM inverse: one small vertical matrix per Fourier mode."""
     dx, dz = 2 * np.pi / nx, height / nz
-    vertical = np.diag(np.r_[1., np.full(nz - 1, 2.)])
-    vertical -= np.diag(np.ones(nz - 1), 1) + np.diag(np.ones(nz - 1), -1)
+    # Cosine eigenvectors satisfy the Neumann bottom and Dirichlet surface.
+    angles = (np.arange(nz) + .5) * np.pi / nz
+    vectors = np.sqrt(2 / nz) * np.cos(np.arange(nz)[:, None] * angles)
     horizontal = 4 * np.sin(np.pi * np.arange(nx // 2 + 1) / nx) ** 2
-    matrices = dx / dz * vertical + dz / dx * horizontal[:, None, None] * np.diag(np.r_[.5, np.ones(nz - 1)])
-    return cast(Array, np.linalg.inv(matrices))
+    eigenvalues = dx / dz * (4 * np.sin(angles / 2) ** 2) + dz / dx * horizontal[:, None]
+    return (vectors / eigenvalues[:, None, :]) @ vectors.T
 
 
 def flat_inverse(residual: Array, inverse_blocks: Array) -> Array:
@@ -65,6 +64,16 @@ def diagonal_scaling(layers: nn.Sequential, geometry: Tensor) -> Tensor:
     return torch.exp(deviation * coefficients[:, :1] + geometry[:, 1:2].square() * coefficients[:, 1:2])
 
 
+def predict_scaling(weights: list[NDArray[np.float32]], geometry: NDArray[np.float32]) -> Array:
+    """Same pointwise network as training, without Torch's tiny-operation overhead."""
+    values = geometry.reshape(4, -1)
+    for index in (0, 2):
+        values = np.tanh(weights[index][:, :, 0, 0] @ values + weights[index + 1][:, None])
+    coefficients = (weights[4][:, :, 0, 0] @ values + weights[5][:, None]).reshape(2, *geometry.shape[1:])
+    deviation = geometry[0] / geometry[0].mean(axis=-1, keepdims=True) - 1
+    return np.exp(deviation * coefficients[0] + geometry[1] ** 2 * coefficients[1]).ravel().astype(np.float64)
+
+
 def cached_inverse(residual: Array, scaling: Array, inverse_blocks: Array) -> Array:
     return scaling * flat_inverse(scaling * residual, inverse_blocks)
 
@@ -78,7 +87,7 @@ def tensor_inverse(rhs: Tensor, scaling: Tensor, inverse_blocks: Tensor) -> Tens
 
 def training_pairs(full: csr_matrix, nx: int, nz: int, count: int,
                    rng: np.random.Generator, inverse_blocks: Array) -> tuple[Array, Array]:
-    """Half mixed forcing, half directions requested by flat-preconditioned GMRES."""
+    """Half mixed forcing, half residuals passed to the flat inverse during CG."""
     matrix = full[:-nx, :-nx].tocsr()
     ordinary_count = count // 2
     rhs = rng.normal(size=(ordinary_count, nz * nx))
@@ -121,15 +130,21 @@ def inverse_loss(layers: nn.Sequential, rhs: Tensor, target: Tensor, geometry: T
 
 
 def solve(matrix: csr_matrix, rhs: Array, inverse: Inverse | None) -> tuple[Array, dict]:
-    history = []
+    """CG requires both this FEM matrix and the supplied inverse to be linear SPD."""
+    iterations = 0
+
+    def count_iteration(_: Array) -> None:
+        nonlocal iterations
+        iterations += 1
+
     # SciPy's factory accepts matvec via __new__, which its base-class stub omits.
     preconditioner = None if inverse is None else LinearOperator(shape=matrix.shape, matvec=inverse, dtype=np.float64)  # pyright: ignore[reportCallIssue]
     started = perf_counter()
-    value, info = fgmres(matrix, rhs, M=preconditioner, tol=1e-9, restart=40,
-                         maxiter=20, residuals=history)
+    value, info = cg(matrix, rhs, M=preconditioner, rtol=1e-9, atol=0,
+                     maxiter=800, callback=count_iteration)
     seconds = perf_counter() - started
     residual = float(np.linalg.norm(rhs - matrix @ value) / np.linalg.norm(rhs))
-    return value, {"seconds": seconds, "iterations": len(history) - 1,
+    return value, {"seconds": seconds, "iterations": iterations,
                    "relative_residual": residual, "converged": bool(info == 0 and residual <= 1e-9)}
 
 
@@ -137,9 +152,9 @@ def validation_iteration_counts(matrices: list[csr_matrix], probes: list[Array],
                                 layers: nn.Sequential, geometry: list[Tensor],
                                 flat_blocks: list[Array]) -> list[float]:
     iterations = []
+    weights = [value.numpy() for value in layers.state_dict().values()]
     for index, sources in enumerate(probes):
-        with torch.inference_mode():
-            scaling = diagonal_scaling(layers, geometry[index]).numpy().ravel().astype(np.float64)
+        scaling = predict_scaling(weights, geometry[index][0].numpy())
         for source in sources:
             _, metrics = solve(matrices[index], source,
                                lambda r: cached_inverse(r, scaling, flat_blocks[index]))
@@ -175,7 +190,8 @@ if __name__ == "__main__":
         raise ValueError("Expected six distinct training ICs and three held-out test ICs")
     stiffness = [assemble_stiffness(surface, float(depth), nz) for surface, depth in zip(eta, metadata["depth"], strict=True)]
     matrices = [matrix[:-nx, :-nx].tocsr() for matrix in stiffness]
-    geometry = [geometry_features(surface, float(depth), nz) for surface, depth in zip(eta, metadata["depth"], strict=True)]
+    geometry = [torch.from_numpy(geometry_features(surface, float(depth), nz)[None])
+                for surface, depth in zip(eta, metadata["depth"], strict=True)]
     started = perf_counter()
     flat_blocks = [flat_inverse_blocks(float(depth + surface.mean()), nx, nz)
                    for surface, depth in zip(eta, metadata["depth"], strict=True)]
@@ -220,7 +236,7 @@ if __name__ == "__main__":
     validation_iterations = [{"epoch": 0, "iterations": baseline_iterations}]
     torch.save(layers.state_dict(), args.output / "weights.pt")
     print(f"Flat-only validation loss: {baseline_loss:.6g}", flush=True)
-    print(f"Flat-only validation GMRES mean/max: {np.mean(baseline_iterations):.3f}/{max(baseline_iterations)}", flush=True)
+    print(f"Flat-only validation CG mean/max: {np.mean(baseline_iterations):.3f}/{max(baseline_iterations)}", flush=True)
     for epoch in range(args.epochs):
         rng.shuffle(batches)
         permutations = [torch.randperm(args.samples_per_surface) for _ in range(6)]
@@ -248,14 +264,14 @@ if __name__ == "__main__":
             if score < best_score:
                 best_score, best_epoch = score, epoch + 1
                 torch.save(layers.state_dict(), args.output / "weights.pt")
-            print(f"validation GMRES mean/max: {np.mean(iterations):.3f}/{max(iterations)}", flush=True)
+            print(f"validation CG mean/max: {np.mean(iterations):.3f}/{max(iterations)}", flush=True)
         schedule.step()
         print(f"epoch {epoch + 1}/{args.epochs}: train {training[-1]:.6g}, validation {validation[-1]:.6g}, best {best_epoch}", flush=True)
     training_seconds = perf_counter() - started
-    torch.set_num_threads(1)  # Tiny coefficient inference is faster without thread overhead.
     layers.load_state_dict(torch.load(args.output / "weights.pt", map_location="cpu", weights_only=True))
     layers.eval()
-    report = {"nx": nx, "nz": nz, "epochs": args.epochs, "learning_rate": args.learning_rate,
+    weights = [value.numpy() for value in layers.state_dict().values()]
+    report = {"nx": nx, "nz": nz, "solver": "cg", "epochs": args.epochs, "learning_rate": args.learning_rate,
               "training_samples": 6 * args.samples_per_surface, "seed": 0,
               "parameters": sum(value.numel() for value in layers.parameters()),
               "training_seconds": training_seconds, "training_loss": training,
@@ -273,23 +289,18 @@ if __name__ == "__main__":
         direct_setup = perf_counter() - started
         reference = factor.solve(rhs)
         reference_flux = (full[-nx:, :-nx] @ reference + full[-nx:, -nx:] @ phi) / (2 * np.pi / nx)
-        started = perf_counter()
-        ilu = spilu(matrix.tocsc(), drop_tol=1e-3, fill_factor=10)
-        ilu_setup = perf_counter() - started
         jacobi_diagonal = matrix.diagonal()
-        with torch.inference_mode():
-            diagonal_scaling(layers, geometry[index])  # Warm setup outside its timing.
-            started = perf_counter()
-            features = geometry_features(eta[index], float(metadata["depth"][index]), nz)
-            scaling = diagonal_scaling(layers, features).numpy().ravel().astype(np.float64)
-            neural_setup = perf_counter() - started
+        predict_scaling(weights, geometry[index][0].numpy())  # Warm setup outside its timing.
+        started = perf_counter()
+        features = geometry_features(eta[index], float(metadata["depth"][index]), nz)
+        scaling = predict_scaling(weights, features)
+        neural_setup = perf_counter() - started
         methods = {"none": None, "jacobi": lambda r: r / jacobi_diagonal,
                    "flat": lambda r: flat_inverse(r, flat_blocks[index]),
-                   "neural": lambda r: cached_inverse(r, scaling, flat_blocks[index]),
-                   "ilu": ilu.solve}
+                   "neural": lambda r: cached_inverse(r, scaling, flat_blocks[index])}
         case = {"simulation_id": int(metadata["simulation_id"][index]),
                 "depth": float(metadata["depth"][index]), "methods": {}, "standalone": {},
-                "direct_setup_seconds": direct_setup, "ilu_setup_seconds": ilu_setup,
+                "direct_setup_seconds": direct_setup,
                 "neural_setup_seconds": neural_setup}
         for name, inverse in methods.items():
             if inverse is not None:
@@ -305,7 +316,7 @@ if __name__ == "__main__":
                     "potential_error": float(np.linalg.norm(prediction - reference) / np.linalg.norm(reference)),
                     "relative_residual": float(np.linalg.norm(rhs - matrix @ prediction) / np.linalg.norm(rhs)),
                     "dno_error": float(np.linalg.norm(flux - reference_flux) / np.linalg.norm(reference_flux))}
-                print(f"test {case['simulation_id']} {name} WITHOUT GMRES: {case['standalone'][name]}", flush=True)
+                print(f"test {case['simulation_id']} {name} WITHOUT CG: {case['standalone'][name]}", flush=True)
             solve(matrix, rhs, inverse)  # Warm the same operation outside timings.
             measured = [solve(matrix, rhs, inverse) for _ in range(3)]
             value, metrics = measured[-1]
@@ -355,8 +366,7 @@ if __name__ == "__main__":
                 else:
                     features = geometry_features(surface, float(metadata["depth"][6]), nz)
                     blocks = flat_inverse_blocks(float(metadata["depth"][6] + surface.mean()), nx, nz)
-                    with torch.inference_mode():
-                        scaling = diagonal_scaling(layers, features).numpy().ravel().astype(np.float64)
+                    scaling = predict_scaling(weights, features)
                     potential, metrics = solve(matrix, rhs, lambda r: cached_inverse(r, scaling, blocks))
                     if not metrics["converged"]:
                         raise RuntimeError(f"Rollout interior solve failed: {metrics}")
