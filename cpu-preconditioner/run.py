@@ -84,22 +84,36 @@ def neural_inverse(residual: Array, layers: nn.ModuleList, geometry: Tensor, inv
 
 
 def training_pairs(full: csr_matrix, nx: int, nz: int, count: int,
-                   rng: np.random.Generator) -> tuple[Array, Array]:
-    """Interior noise, smooth known corrections, and random surface forcing."""
-    matrix = full[:-nx, :-nx].tocsc()
-    rhs = rng.normal(size=(count, nz * nx))
-    quarter = count // 4
+                   rng: np.random.Generator, inverse_blocks: Array) -> tuple[Array, Array]:
+    """Half mixed forcing, half directions requested by flat-preconditioned GMRES."""
+    matrix = full[:-nx, :-nx].tocsr()
+    ordinary_count = count // 2
+    rhs = rng.normal(size=(ordinary_count, nz * nx))
+    quarter = ordinary_count // 4
     vertical = np.cos(np.pi * (np.arange(nz)[:, None] + .5) * np.arange(nz)[None, :] / nz)
     k = np.arange(nx // 2 + 1)
     coefficients = np.fft.rfft(rng.normal(size=(quarter, nz, nx)), axis=-1)
     coefficients /= 1 + k[None, :] ** 2 + np.arange(nz)[:, None] ** 2
     errors = np.einsum("vm,bvx->bmx", vertical, np.fft.irfft(coefficients, n=nx))
     rhs[quarter:2 * quarter] = (matrix @ errors.reshape(quarter, -1).T).T
-    boundary = np.fft.rfft(rng.normal(size=(count - 2 * quarter, nx)), axis=-1)
+    boundary = np.fft.rfft(rng.normal(size=(ordinary_count - 2 * quarter, nx)), axis=-1)
     boundary[:quarter] /= 1 + k ** 2
     boundary[:, 0] = 0
     rhs[2 * quarter:] = -(full[:-nx, -nx:] @ np.fft.irfft(boundary, n=nx).T).T
-    target = splu(matrix).solve(rhs.T).T
+    directions = []
+
+    def record_direction(residual: Array) -> Array:
+        directions.append(residual.copy())
+        return flat_inverse(residual, inverse_blocks)
+
+    for source in rhs[rng.permutation(ordinary_count)]:
+        _, metrics = solve(matrix, source, record_direction)
+        if not metrics["converged"]:
+            raise RuntimeError(f"Training-direction solve failed: {metrics}")
+        if len(directions) >= count - ordinary_count:
+            break
+    rhs = np.concatenate((rhs, np.asarray(directions[:count - ordinary_count])))
+    target = splu(matrix.tocsc()).solve(rhs.T).T
     scale = np.sqrt(np.mean(target ** 2, axis=1, keepdims=True))
     return rhs / scale, target / scale
 
@@ -109,8 +123,8 @@ def inverse_loss(layers: nn.ModuleList, initial: Tensor, target: Tensor, rhs: Te
     prediction = correction(layers, initial, geometry)
     residual = torch.sparse.mm(matrix, prediction.flatten(1).T).T.reshape_as(rhs) - rhs
     relative_residual = residual.square().mean((1, 2, 3)) / rhs.square().mean((1, 2, 3))
-    # Targets have unit RMS; the small equation term discourages oscillatory errors.
-    return (prediction - target).square().mean() + .01 * relative_residual.mean()
+    # Train A P(r) close to r, rather than prioritizing interior potential accuracy.
+    return relative_residual.mean() + .01 * (prediction - target).square().mean()
 
 
 def solve(matrix: csr_matrix, rhs: Array, inverse: Inverse | None) -> tuple[Array, dict]:
@@ -124,6 +138,18 @@ def solve(matrix: csr_matrix, rhs: Array, inverse: Inverse | None) -> tuple[Arra
     residual = float(np.linalg.norm(rhs - matrix @ value) / np.linalg.norm(rhs))
     return value, {"seconds": seconds, "iterations": len(history) - 1,
                    "relative_residual": residual, "converged": bool(info == 0 and residual <= 1e-9)}
+
+
+def validation_iteration_counts(matrices: list[csr_matrix], probes: list[Array],
+                                layers: nn.ModuleList, geometry: list[Tensor],
+                                flat_blocks: list[Array]) -> list[float]:
+    iterations = []
+    for index, sources in enumerate(probes):
+        for source in sources:
+            _, metrics = solve(matrices[index], source,
+                               lambda r: neural_inverse(r, layers, geometry[index], flat_blocks[index]))
+            iterations.append(metrics["iterations"] if metrics["converged"] else float("inf"))
+    return iterations
 
 
 if __name__ == "__main__":
@@ -174,7 +200,7 @@ if __name__ == "__main__":
     for count in (args.samples_per_surface, 128):
         samples = []
         for index in range(6):
-            rhs, target = training_pairs(stiffness[index], nx, nz, count, rng)
+            rhs, target = training_pairs(stiffness[index], nx, nz, count, rng, flat_blocks[index])
             initial = flat_inverse(rhs, flat_blocks[index])
             samples.append(tuple(torch.tensor(value.reshape(count, 1, nz, nx), dtype=torch.float32)
                                  for value in (initial, target, rhs)))
@@ -191,9 +217,16 @@ if __name__ == "__main__":
     with torch.no_grad():
         baseline_loss = float(torch.stack([inverse_loss(layers, initial, target, rhs, geometry[index], sparse_matrices[index])
                                            for index, (initial, target, rhs) in enumerate(validation_data)]).mean())
-    best_loss, best_epoch = baseline_loss, 0
+    # These 48 fixed validation RHSs never come from the three test geometries.
+    validation_rhs = [values[2][np.linspace(0, 127, 8, dtype=int)].numpy().reshape(8, -1).astype(np.float64)
+                      for values in validation_data]
+    baseline_iterations = validation_iteration_counts(matrices, validation_rhs, layers, geometry, flat_blocks)
+    best_score = (sum(baseline_iterations), baseline_loss)
+    best_epoch = 0
+    validation_iterations = [{"epoch": 0, "iterations": baseline_iterations}]
     torch.save(layers.state_dict(), args.output / "weights.pt")
     print(f"Flat-only validation loss: {baseline_loss:.6g}", flush=True)
+    print(f"Flat-only validation GMRES mean/max: {np.mean(baseline_iterations):.3f}/{max(baseline_iterations)}", flush=True)
     for epoch in range(args.epochs):
         rng.shuffle(batches)
         permutations = [torch.randperm(args.samples_per_surface) for _ in range(6)]
@@ -214,9 +247,14 @@ if __name__ == "__main__":
         with torch.no_grad():
             validation.append(float(torch.stack([inverse_loss(layers, initial, target, rhs, geometry[index], sparse_matrices[index])
                                                   for index, (initial, target, rhs) in enumerate(validation_data)]).mean()))
-        if validation[-1] < best_loss:
-            best_loss, best_epoch = validation[-1], epoch + 1
-            torch.save(layers.state_dict(), args.output / "weights.pt")
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == args.epochs:
+            iterations = validation_iteration_counts(matrices, validation_rhs, layers, geometry, flat_blocks)
+            validation_iterations.append({"epoch": epoch + 1, "iterations": iterations})
+            score = (sum(iterations), validation[-1])
+            if score < best_score:
+                best_score, best_epoch = score, epoch + 1
+                torch.save(layers.state_dict(), args.output / "weights.pt")
+            print(f"validation GMRES mean/max: {np.mean(iterations):.3f}/{max(iterations)}", flush=True)
         schedule.step()
         print(f"epoch {epoch + 1}/{args.epochs}: train {training[-1]:.6g}, validation {validation[-1]:.6g}, best {best_epoch}", flush=True)
     training_seconds = perf_counter() - started
@@ -227,6 +265,7 @@ if __name__ == "__main__":
               "parameters": sum(value.numel() for value in layers.parameters()),
               "training_seconds": training_seconds, "training_loss": training,
               "validation_loss": validation, "flat_validation_loss": baseline_loss,
+              "validation_iterations": validation_iterations,
               "best_epoch": best_epoch, "data_seconds": data_seconds,
               "flat_setup_seconds_per_geometry": flat_setup_seconds,
               "torch_version": torch.__version__, "cases": []}
@@ -282,7 +321,7 @@ if __name__ == "__main__":
             direct_times.append(perf_counter() - started)
         case["direct_solve_seconds"] = float(np.median(direct_times))
         # Fresh mixed RHS probes on the unseen geometries, not just physical xi.
-        probe_rhs, probe_target = training_pairs(full, nx, nz, 128, rng)
+        probe_rhs, probe_target = training_pairs(full, nx, nz, 128, rng, flat_blocks[index])
         probe_flat = flat_inverse(probe_rhs, flat_blocks[index])
         with torch.no_grad():
             probe_neural = correction(layers, torch.tensor(probe_flat.reshape(-1, 1, nz, nx), dtype=torch.float32),

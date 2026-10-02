@@ -83,13 +83,14 @@ class InverseTests(unittest.TestCase):
     def test_mixed_training_labels_solve_the_same_system(self) -> None:
         nx, nz = 24, 8
         full = assemble_stiffness(.04 * np.cos(np.arange(nx) * 2 * np.pi / nx), .25, nz)
-        rhs, target = training_pairs(full, nx, nz, 32, np.random.default_rng(20))
+        rhs, target = training_pairs(full, nx, nz, 32, np.random.default_rng(20), flat_inverse_blocks(.25, nx, nz))
         np.testing.assert_allclose(np.mean(target ** 2, axis=1), 1, rtol=1e-14)
         residual = (full[:-nx, :-nx] @ target.T).T - rhs
         self.assertLess(np.max(np.linalg.norm(residual, axis=1) / np.linalg.norm(rhs, axis=1)), 1e-12)
-        # Only the boundary-forced half should have identically zero deep forcing.
-        np.testing.assert_array_equal(rhs[16:, :-nx], 0)
-        self.assertTrue(np.all(np.linalg.norm(rhs[:16, :-nx], axis=1) > 0))
+        # Half the ordinary draws are boundary forcing; the final half are Krylov directions.
+        np.testing.assert_array_equal(rhs[8:16, :-nx], 0)
+        self.assertTrue(np.all(np.linalg.norm(rhs[:8, :-nx], axis=1) > 0))
+        self.assertTrue(np.all(np.linalg.norm(rhs[16:], axis=1) > 0))
 
 
 if __name__ == "__main__":
