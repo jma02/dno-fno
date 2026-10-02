@@ -22,8 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper-plots/figures"
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
-PHASE_STYLES = (("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent — 120 epochs", "#007da6", "s"),
-                ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase — 120 epochs", "#009e73", "^"))
+TRAINED_STYLES = (("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent — 120 epochs", "#007da6", "s"),
+                  ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase — 120 epochs", "#009e73", "^"),
+                  ("c27_rollout_teacher_m6_ep120_gpu0_20261001", "Rollout-supervised network", "#d34a87", "P"))
 
 
 def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
@@ -39,13 +40,13 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     for path in args.candidate_timings or ():
         for family, result in json.loads(path.read_text())["families"].items():
             candidate["families"].setdefault(family, result)["methods"].update(result["methods"])
-    phase = {}
-    phase_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
-    for path in args.phase_timings or ():
+    trained = {}
+    trained_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+    for path in args.trained_timings or ():
         result = json.loads(path.read_text())
-        run = Path(result["neural_runs"][phase_method]).name
-        phase.setdefault(run, {}).update({family: timing["methods"][phase_method]
-                                         for family, timing in result["families"].items()})
+        run = Path(result["neural_runs"][trained_method]).name
+        trained.setdefault(run, {}).update({family: timing["methods"][trained_method]
+                                           for family, timing in result["families"].items()})
     baseline_free = json.loads(args.no_baseline_timings.read_text()) if args.no_baseline_timings and not args.single_case else None
     spectral = {}
     for path in args.spectral_timings or ():
@@ -74,7 +75,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     })
     axes = fig.subplots(1, 4) if compact else fig.subplots(2, 2)
     fig.subplots_adjust(left=0.065 if compact else 0.10, right=0.98, bottom=0.13,
-                        top=0.67 if compact else 0.74 if phase else 0.78 if baseline_free else 0.80,
+                        top=0.67 if compact else 0.74 if trained else 0.78 if baseline_free else 0.80,
                         hspace=0.37, wspace=0.32 if compact else 0.25)
     for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
         if args.single_case:
@@ -112,7 +113,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             offset = (6, -8) if family == "benjamin_feir" and order == 3 else (6, 3)
             if (candidate or baseline_free) and order == 1:
                 offset = (0, 10)
-            if phase and order == 2:
+            if trained and order == 2:
                 offset = (6, -10)
             ax.annotate(f"M{order}", (x, y), xytext=offset, textcoords="offset points",
                         color="#606970", fontsize=8,
@@ -147,17 +148,17 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             right = max(right, new_seconds)
             left = min(left, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
-        for run, label, color, marker in PHASE_STYLES:
-            if family not in phase.get(run, {}):
+        for run, label, color, marker in TRAINED_STYLES:
+            if family not in trained.get(run, {}):
                 continue
-            record = phase[run][family]
-            phase_seconds = float(np.median(record["seconds"]))
-            phase_error = 100 * record["cached_reference_terminal_eta_error"]
-            ax.scatter(phase_seconds, phase_error, color=color, marker=marker,
+            record = trained[run][family]
+            trained_seconds = float(np.median(record["seconds"]))
+            trained_error = 100 * record["cached_reference_terminal_eta_error"]
+            ax.scatter(trained_seconds, trained_error, color=color, marker=marker,
                        s=65, edgecolors="white", linewidths=0.8, zorder=4)
-            right = max(right, phase_seconds)
-            left = min(left, phase_seconds)
-            print(f"{title}, {label}: {phase_seconds:.3f}s; error={phase_error:.6g}%; finite={record['finite']}")
+            right = max(right, trained_seconds)
+            left = min(left, trained_seconds)
+            print(f"{title}, {label}: {trained_seconds:.3f}s; error={trained_error:.6g}%; finite={record['finite']}")
         if family in spectral:
             record = spectral[family]
             spectral_seconds = float(np.median(record["seconds"]))
@@ -198,7 +199,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
         *[Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=label)
-          for run, label, color, marker in PHASE_STYLES if run in phase],
+          for run, label, color, marker in TRAINED_STYLES if run in trained],
     ], loc="upper left", bbox_to_anchor=(0.06, 0.90) if compact else (0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=3 if compact else 2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
     xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
@@ -212,7 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
-    parser.add_argument("--phase-timings", type=Path, nargs="+", help="Add the two 120-epoch phase experiments to the Ada panels.")
+    parser.add_argument("--trained-timings", type=Path, nargs="+", help="Add measured trained-model comparisons to the Ada panels.")
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
     parser.add_argument("--no-baseline-timings", type=Path, help="Overlay speed-only full rollouts with model G0+G1 omitted.")
@@ -229,8 +230,8 @@ if __name__ == "__main__":
         parser.error("--stack-hardware requires local --timings and --candidate-timings without --single-case")
     if args.spectral_timings and not (args.single_case or args.stack_hardware):
         parser.error("--spectral-timings requires --single-case or --stack-hardware")
-    if args.phase_timings and not args.stack_hardware:
-        parser.error("--phase-timings requires --stack-hardware")
+    if args.trained_timings and not args.stack_hardware:
+        parser.error("--trained-timings requires --stack-hardware")
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
@@ -252,7 +253,7 @@ if __name__ == "__main__":
             config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
             config.candidate_previous_method = None
             config.no_baseline_timings = None
-            config.phase_timings = args.phase_timings if hardware == "ada" else None
+            config.trained_timings = args.trained_timings if hardware == "ada" else None
         fig = plt.figure(figsize=(18, 13.5))
         fig.suptitle("Single-rollout runtime vs error", y=0.99, fontsize=18, ha="right", x=0.98)
         grid = fig.add_gridspec(3, 1, top=0.945, bottom=0.04, hspace=0.04)

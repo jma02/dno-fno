@@ -210,6 +210,15 @@ Each point pairs the median of three warmed repeats with the final surface error
 against cached M6 from that execution, not a saved local accuracy reference.
 The old small/full neural references are removed. All panels use single-case errors.
 
+Ada additionally shows pink plus markers labeled `Rollout-supervised network`
+for the latest epoch-120 checkpoint in
+`outputs/c27_rollout_teacher_m6_ep120_gpu0_20261001/`. Each marker pairs a fresh
+full single-rollout timing with the error from that same optimized execution,
+against the same cached M6 reference case used by the other methods. These are
+not the 32-case median errors reported in the training comparison. Measurements
+are saved in `outputs/rollout_teacher_timing_20261002/ada/timings.json`;
+the Blackwell and A100 points remain unchanged.
+
 October 1 median warm rollout times (seconds):
 
 | GPU | Stokes | Tanaka | Benjamin–Feir | JONSWAP/TMA |
@@ -406,8 +415,9 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
-  --phase-timings outputs/phase_timing_20260930/control.json \
+  --trained-timings outputs/phase_timing_20260930/control.json \
     outputs/phase_timing_20260930/modal.json \
+    outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json
@@ -424,6 +434,18 @@ CUDA_VISIBLE_DEVICES=0 NCCL_P2P_LEVEL=PHB uv run --isolated --no-project --pytho
 ```
 
 Reproduce the local full-rollout measurements on a free GPU with:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync scripts/time_single_rollouts.py \
+  --candidate-run outputs/c27_rollout_teacher_m6_ep120_gpu0_20261001 \
+  --checkpoint latest --reference cached_M6 --repeats 3 --pad-factor 2 --ept 8 \
+  --methods fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local \
+  --output outputs/rollout_teacher_timing_20261002/ada/timings.json
+```
+
+The preceding inference-optimization comparison can be reproduced with:
 
 ```sh
 CUDA_VISIBLE_DEVICES=1 XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \

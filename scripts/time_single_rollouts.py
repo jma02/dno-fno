@@ -91,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
+    parser.add_argument("--checkpoint", choices=("best", "latest", "final"), default="best")
     parser.add_argument("--methods", nargs="+", choices=tuple(
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
@@ -114,7 +115,7 @@ if __name__ == "__main__":
     if args.without_baselines and (base_methods & {"baseline-only", "shared_m1_spectral_all"}
                                    or any(method.startswith("fourier_") for method in methods)):
         parser.error("baseline-only, shared_m1_spectral_all and Fourier-I/O methods require analytic baselines")
-    loaded = {name: load_run(run) for name, run in RUNS.items()
+    loaded = {name: load_run(run, checkpoint=args.checkpoint) for name, run in RUNS.items()
               if name in base_methods or (name == "compact" and base_methods & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
@@ -122,6 +123,7 @@ if __name__ == "__main__":
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "precision": "FP64 classical/integration; FP32 learned inference",
+        "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
