@@ -14,12 +14,16 @@ solve A × interior potential = b
 surface reaction / horizontal grid spacing = approximate DNO output
 ```
 
-The tiny U-Net corrects a flat-water solution using the wavy geometry. A Fourier
-transform in x reduces the flat inverse to 33 small vertical matrices; these
-are precomputed at the mean fluid height. Input and output are scaled by the
-flat solution's RMS. The combined inverse is nonlinear in the residual, so comparisons use **right-preconditioned
-flexible GMRES**, not ordinary GMRES. PyAMG supplies the solver; the final true
-residual is also checked explicitly. See the [PyAMG documentation](https://pyamg.readthedocs.io/en/latest/generated/pyamg.krylov.html#pyamg.krylov.fgmres).
+The network predicts a positive scaling field `D` from geometry, once per
+surface. Each preconditioner application is then `D * flat_inverse(D * r)`:
+no NN inference inside GMRES. The flat inverse uses a Fourier transform in x
+and 33 small vertical inverse matrices, precomputed at mean fluid height.
+The network starts at `D=1` and retains that exact limit for flat surfaces.
+Its action is linear in the residual, symmetric and positive definite.
+Comparisons retain **right-preconditioned flexible GMRES** so the solver is
+unchanged from the earlier nonlinear U-Net experiments below. PyAMG supplies
+the solver; the final true residual is checked explicitly. See the
+[PyAMG documentation](https://pyamg.readthedocs.io/en/latest/generated/pyamg.krylov.html#pyamg.krylov.fgmres).
 
 ## Run
 
@@ -41,7 +45,8 @@ distinct simulation IDs. Depths range from 0.206 to 0.347. Fourier resampling
 reduces 1,024 horizontal samples to 64; there are 16 vertical cells and 1,024
 interior unknowns, including the bottom nodes.
 
-The 5,609-parameter network trains from scratch using two CPU threads. The user
+The 130-parameter pointwise network trains from scratch using two CPU threads
+and evaluates using one (less overhead for this tiny network). The user
 approved **100 epochs at initial learning rate `1e-3`** for this CPU experiment;
 cosine decay ends at `1e-4`. This is an exception to the repo's one-epoch rule,
 not a change to production training.
@@ -148,8 +153,8 @@ Both diagnostics are saved in the result directory.
 ## Training on GMRES directions
 
 October 1: the previous network's training-geometry potential errors were small,
-but equation errors on directions requested by FGMRES reached 5–11%. The current
-recipe above targets that gap without changing the network or inference work.
+but equation errors on directions requested by FGMRES reached 5–11%. The training
+recipe above targeted that gap while retaining the 5,609-parameter U-Net.
 The user approved another fresh 100-epoch CPU run at `1e-3`; it took **8 minutes
 38 seconds**. Epoch 100 was selected by validation iterations: mean **5.71**,
 versus **7.33** for the previous NN and **7.88** for the flat inverse on the same
@@ -185,6 +190,45 @@ errors 19.7/61.2/38.6%; optimizing solver iterations need not improve every
 standalone field error. The four-step corrected rollout still agrees with
 direct FEM to `7.99e-12` in eta, but remains only a coupling check. Keep this
 isolated as a better learned preconditioner, not a production acceleration.
+
+## Cached geometry coefficients
+
+October 2: replaced per-iteration U-Net inference with the geometry-only scaling
+described above. Same training pairs, loss and validation selection; fresh
+weights, approved 100 epochs at `1e-3`. Training took **91 seconds**, selecting
+epoch 80. Mean validation iterations barely improve: **7.83 versus 7.88** for
+flat-only, and worse than the previous U-Net's **5.71**. A diagonal scaling
+cannot represent the previous network's general spatial correction.
+
+The fixed 27 held-out ICs were evaluated with all methods sharing the optimized
+flat inverse and one-thread inference. Seven warmed repeats per case, randomized method order, include
+flat-block setup, geometry features, coefficient prediction, solve and true
+residual verification. Common FEM assembly is separate (about 0.55 ms).
+
+| Method | Original three iterations | Additional 12, training-depth mean | Additional 12, broad-depth mean | Median setup + solve across the three cohorts |
+|---|---:|---:|---:|---:|
+| Flat inverse | 6 / 8 / 8 | 7.08 | 6.58 | 0.87–0.98 ms |
+| Analytic height scaling | 4 / 7 / 8 | 6.42 | 5.67 | 0.82–0.93 ms |
+| Two flat corrections | 3 / 4 / 5 | 4.00 | 4.08 | 0.82–0.84 ms |
+| Previous U-Net | 4 / 6 / 6 | 5.33 | 6.00 | 4.67–5.09 ms |
+| Cached NN | 4 / 7 / 8 | 6.25 | 6.08 | 1.20–1.25 ms |
+
+The analytic control uses `D=sqrt((h+eta)/(h+mean(eta)))`, without training.
+Against it, the cached NN improves iterations on four cases, ties 18, and
+regresses on five. Caching is **about four times faster than the U-Net**, but
+is not a runtime or iteration win over the inexpensive nonlearned controls.
+Each cached application costs about 24 microseconds. A separate setup benchmark
+found one-thread inference 1.54 times faster than two threads, with bitwise
+identical coefficients; disabling MKLDNN gave no additional benefit.
+
+All 945 timed solves converge, with maximum true relative residual `9.83e-10`.
+On the original three ICs, standalone potential errors are 0.113/0.316/0.504%,
+but standalone DNO errors remain 3.54/18.39/24.98%. The four-step corrected
+smoke agrees with direct FEM to `2.05e-11` in eta and `1.99e-13` in xi; again,
+this is not a long-rollout result. Keep the cached formulation as an isolated
+cost experiment, not a production solver improvement. Results, weights and the
+paired audit are in `outputs/cpu_preconditioner_cached_20261002/`. The table uses
+`paired_eval_1thread.json`; the earlier two-thread audit is also retained.
 
 Read `laplace.py` for the discrete operator and `run.py` for the network,
 training loop, solver comparison, and short coupled test.

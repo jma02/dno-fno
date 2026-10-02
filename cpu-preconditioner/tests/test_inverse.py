@@ -1,4 +1,4 @@
-"""Independent checks of the learned correction, without a Krylov solver."""
+"""Checks of the cached linear inverse and its differentiable training path."""
 
 from pathlib import Path
 import sys
@@ -12,8 +12,8 @@ from torch import nn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from laplace import assemble_stiffness  # noqa: E402
 from run import (  # noqa: E402
-    correction, flat_inverse, flat_inverse_blocks, geometry_features, neural_inverse,
-    training_pairs,
+    cached_inverse, diagonal_scaling, flat_inverse, flat_inverse_blocks,
+    geometry_features, tensor_inverse, training_pairs,
 )
 
 
@@ -21,48 +21,50 @@ class InverseTests(unittest.TestCase):
     def setUp(self) -> None:
         torch.set_num_threads(2)
         torch.manual_seed(17)
-        self.layers = nn.ModuleList([
-            nn.Conv2d(5, 8, 3), *(nn.Conv2d(8, 8, 3) for _ in range(3)),
-            *(nn.Conv2d(16, 8, 3) for _ in range(3)), nn.Conv2d(8, 1, 1),
-        ])
+        self.layers = nn.Sequential(nn.Conv2d(4, 8, 1), nn.Tanh(), nn.Conv2d(8, 8, 1),
+                                    nn.Tanh(), nn.Conv2d(8, 2, 1))
         self.geometry = geometry_features(.03 * np.cos(np.arange(64) * 2 * np.pi / 64), .25, 16)
-        self.initial = torch.randn(3, 1, 16, 64)
+        self.blocks = flat_inverse_blocks(.25, 64, 16)
+        self.rhs = np.random.default_rng(8).normal(size=(3, 16 * 64))
 
-    def test_zero_and_positive_scaling(self) -> None:
+    def test_linearity_symmetry_and_positive_quadratic_form(self) -> None:
         with torch.inference_mode():
-            zero = correction(self.layers, torch.zeros_like(self.initial), self.geometry)
-            self.assertEqual(torch.count_nonzero(zero).item(), 0)
-            value = correction(self.layers, self.initial, self.geometry)
-            for scale in (.01, 100.):
-                scaled = correction(self.layers, scale * self.initial, self.geometry)
-                torch.testing.assert_close(scaled / scale, value, rtol=2e-5, atol=2e-6)
+            scaling = diagonal_scaling(self.layers, self.geometry).numpy().ravel().astype(np.float64)
+        values = cached_inverse(self.rhs, scaling, self.blocks)
+        actual = cached_inverse(2 * self.rhs[0] - 3 * self.rhs[1], scaling, self.blocks)
+        np.testing.assert_allclose(actual, 2 * values[0] - 3 * values[1], rtol=1e-11, atol=1e-11)
+        np.testing.assert_allclose(self.rhs[0] @ values[1], self.rhs[1] @ values[0], rtol=1e-12)
+        self.assertTrue(np.all(np.sum(self.rhs * values, axis=1) > 0))
+        np.testing.assert_array_equal(cached_inverse(np.zeros(1024), scaling, self.blocks), 0)
 
-    def test_batch_and_finite_gradients(self) -> None:
-        value = correction(self.layers, self.initial, self.geometry)
-        individual = torch.cat([
-            correction(self.layers, initial[None], self.geometry) for initial in self.initial
-        ])
-        torch.testing.assert_close(value, individual, rtol=2e-5, atol=2e-6)
-        value.square().mean().backward()
-        for parameter in self.layers.parameters():
-            self.assertIsNotNone(parameter.grad)
-            if parameter.grad is not None:
-                self.assertTrue(torch.isfinite(parameter.grad).all().item())
+    def test_tensor_numpy_agreement_and_finite_gradients(self) -> None:
+        for dtype, tolerance in ((torch.float32, 3e-5), (torch.float64, 1e-11)):
+            self.layers.to(dtype=dtype)
+            self.layers.zero_grad()
+            scaling = diagonal_scaling(self.layers, self.geometry.to(dtype=dtype))
+            rhs = torch.tensor(self.rhs.reshape(3, 1, 16, 64), dtype=dtype)
+            blocks = torch.tensor(self.blocks, dtype=torch.complex64 if dtype == torch.float32 else torch.complex128)
+            value = tensor_inverse(rhs, scaling, blocks)
+            expected = cached_inverse(self.rhs, scaling.detach().numpy().ravel().astype(np.float64), self.blocks)
+            np.testing.assert_allclose(value.detach().numpy().reshape(3, -1), expected,
+                                       rtol=tolerance, atol=tolerance)
+            value.square().mean().backward()
+            for parameter in self.layers.parameters():
+                self.assertIsNotNone(parameter.grad)
+                if parameter.grad is not None:
+                    self.assertTrue(torch.isfinite(parameter.grad).all().item())
 
-    def test_zero_head_preserves_flat_inverse(self) -> None:
+    def test_flat_limit_and_zero_head(self) -> None:
+        with torch.inference_mode():
+            geometry = geometry_features(np.full(64, .04), .25, 16)
+            torch.testing.assert_close(diagonal_scaling(self.layers, geometry), torch.ones(1, 1, 16, 64),
+                                       rtol=2e-7, atol=0)
         for parameter in self.layers[-1].parameters():
             nn.init.zeros_(parameter)
         with torch.inference_mode():
-            torch.testing.assert_close(
-                correction(self.layers, self.initial, self.geometry), self.initial,
-                rtol=2e-7, atol=2e-7,
-            )
-        matrix = assemble_stiffness(np.zeros(64), .25, 16)[:-64, :-64].tocsc()
-        factor = splu(matrix)
-        rhs = np.random.default_rng(8).normal(size=matrix.shape[0])
-        expected = factor.solve(rhs)
-        actual = neural_inverse(rhs, self.layers, self.geometry, flat_inverse_blocks(.25, 64, 16))
-        self.assertLess(np.linalg.norm(actual - expected) / np.linalg.norm(expected), 2e-7)
+            scaling = diagonal_scaling(self.layers, self.geometry).numpy().ravel().astype(np.float64)
+        np.testing.assert_array_equal(scaling, 1)
+        np.testing.assert_array_equal(cached_inverse(self.rhs, scaling, self.blocks), flat_inverse(self.rhs, self.blocks))
 
     def test_flat_inverse_matches_fem_and_periodicity(self) -> None:
         rng = np.random.default_rng(19)
