@@ -453,6 +453,60 @@ def trainer_function(name: str) -> ast.FunctionDef:
                 if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
+def test_input_noise_scale_spectrum_rng_and_depth_safety() -> None:
+    function = ast.parse(
+        "def prepare(step, rng_key, eta, xi, gxi, batch_depth):\n"
+        "    current_state = SimpleNamespace(step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += trainer_function("train_step").body[:1]
+    function.body += ast.parse("return eta, xi, gxi, batch_depth").body
+    nx = 512
+    config = SimpleNamespace(input_noise_rms=0.01)
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace,
+        "args": config, "nx": nx, "k_rfft_jax": jnp.arange(nx // 2 + 1), "cast": cast,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "trainer_noise", "exec"), namespace)
+    prepare = jax.vmap(namespace["prepare"], in_axes=(None, None, 0, 0, 0, 0), axis_name="batch")
+    x = jnp.arange(nx, dtype=jnp.float32) * (2 * jnp.pi / nx)
+    eta = jnp.stack((0.03 * jnp.cos(x), 0.004 * jnp.sin(7 * x), jnp.zeros_like(x)))
+    xi = jnp.stack((0.05 * jnp.sin(2 * x), 0.02 * jnp.cos(3 * x), jnp.zeros_like(x)))
+    inputs = tuple(jnp.stack((field, field)) for field in (eta, xi, xi * 2, jnp.zeros((3, 1), jnp.float32)))
+    key = jax.random.PRNGKey(23)
+    result = prepare(1, key, *inputs)
+    compiled = jax.jit(prepare)(1, key, *inputs)
+    for actual, traced in zip(result, compiled):
+        np.testing.assert_allclose(actual, traced, rtol=1e-6, atol=1e-8)
+    for actual, original in zip(result[2:], inputs[2:]):
+        np.testing.assert_array_equal(actual, original)
+    changes = []
+    for actual, original in zip(result[:2], inputs[:2]):
+        delta = np.asarray(actual - original)
+        changes.append(delta)
+        rms = np.sqrt(np.mean(np.asarray(original[:, :2]) ** 2, axis=-1))
+        np.testing.assert_allclose(np.sqrt(np.mean(delta[:, :2] ** 2, axis=-1)), .01 * rms, rtol=2e-5)
+        np.testing.assert_allclose(delta.mean(axis=-1), 0, atol=1e-9)
+        np.testing.assert_allclose(np.fft.rfft(delta, axis=-1)[..., 129:], 0, atol=1e-7)
+        np.testing.assert_array_equal(actual[:, 2], original[:, 2])
+        assert not np.allclose(delta[0], delta[1], atol=1e-7)
+    assert not np.allclose(changes[0], changes[1], atol=1e-7)
+    repeated = prepare(1, key, *inputs)
+    changed = prepare(2, key, *inputs)
+    for original, same, different in zip(result[:2], repeated[:2], changed[:2]):
+        np.testing.assert_array_equal(original, same)
+        assert not np.allclose(original, different, atol=1e-7)
+    config.input_noise_rms = 0.0
+    for actual, original in zip(prepare(1, key, *inputs), inputs):
+        np.testing.assert_array_equal(actual, original)
+    config.input_noise_rms = 1e4
+    # Huge mean-zero perturbations must be rejected before they dry a valid row.
+    for actual, original in zip(prepare(1, key, *inputs), inputs):
+        np.testing.assert_array_equal(actual, original)
+    assert "input_noise" not in ast.unparse(trainer_function("eval_step"))
+    assert "input_noise" not in ast.unparse(trainer_function("compute_loss_components"))
+
+
 def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
     component = trainer_function("train_step")
     prelude_end = next(i for i, node in enumerate(component.body) if isinstance(node, ast.FunctionDef))
@@ -473,7 +527,7 @@ def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
     family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
     fields = (eta, xi, target, depth, family)
     before = tuple(np.array(value) for value in fields)
-    config = SimpleNamespace(dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+    config = SimpleNamespace(input_noise_rms=0.0, dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
                              rollout_training_weight=0.0)
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace, "args": config,
@@ -685,7 +739,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     family = jnp.arange(1, size + 1)
     fields = (eta, xi, target, depth, family)
     config = SimpleNamespace(
-        dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+        input_noise_rms=0.0, dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
         rollout_training_steps=4, poison=False, poison_target=np.nan,
@@ -784,6 +838,7 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()

@@ -114,6 +114,9 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--input_noise_rms", type=float, default=0.0,
+                        help="Training-only eta/xi noise relative to each centered field's RMS; "
+                        "smooth spectrum 1/(1+k^2), 0<|k|<=128, unchanged DNO targets.")
     parser.add_argument(
         "--dirichlet_probe_mode", choices=("off", "control", "scrambled"), default="off",
         help="Replace the batch tail with paired copies of prefix surfaces; scrambled randomizes their potential phases.",
@@ -331,6 +334,8 @@ def main() -> None:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
+    if not np.isfinite(args.input_noise_rms) or args.input_noise_rms < 0:
+        parser.error("--input_noise_rms must be finite and nonnegative")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
         parser.error("--rollout_training_weight must be finite and nonnegative")
     if min(args.rollout_training_start_epoch, args.rollout_training_ramp_epochs, args.rollout_training_interval,
@@ -699,6 +704,25 @@ def main() -> None:
         batch_depth: jax.Array,
         family: jax.Array,
     ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
+        if args.input_noise_rms > 0:
+            noise_key = jax.random.fold_in(
+                jax.random.fold_in(rng_key, current_state.step),
+                jax.lax.axis_index("batch") + 8191,
+            )
+            fields = jnp.stack((eta, xi))
+            centered = fields - jnp.mean(fields, axis=-1, keepdims=True)
+            raw_noise = jax.random.normal(noise_key, fields.shape, dtype=fields.dtype)
+            noise_hat = jnp.fft.rfft(raw_noise, axis=-1) * (
+                ((k_rfft_jax > 0) & (k_rfft_jax <= 128)) / (1 + k_rfft_jax**2)
+            )
+            noise = jnp.fft.irfft(noise_hat, n=nx, axis=-1)
+            noise *= args.input_noise_rms * jnp.sqrt(jnp.mean(centered**2, axis=-1, keepdims=True)) / jnp.maximum(
+                jnp.sqrt(jnp.mean(noise**2, axis=-1, keepdims=True)), 1e-30,
+            )
+            eta_noisy, xi_noisy = fields + noise
+            valid = jnp.all(eta_noisy + jnp.exp(batch_depth.astype(jnp.float64)) > 0, axis=-1)
+            eta, xi = (cast(jax.Array, jnp.where(valid[:, None], noisy, original))
+                       for noisy, original in ((eta_noisy, eta), (xi_noisy, xi)))
         n_data_only_rows = (
             int(args.dirichlet_probe_fraction * eta.shape[0])
             if args.dirichlet_probe_mode != "off" else 0
