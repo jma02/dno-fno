@@ -141,7 +141,7 @@ def main() -> None:
     parser.add_argument("--rollout_truth_run",
                         help="Run directory containing the two cached-M6 reference evaluation groups.")
     parser.add_argument("--rollout_training_weight", type=float, default=0.0,
-                        help="Extra mean data-loss weight on detached learned-rollout states labelled by M6; applied only on scheduled updates.")
+                        help="Weight on data, mode-balanced and tangent losses at detached M6-labelled rollout states; applied only on scheduled updates.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
     parser.add_argument("--rollout_training_ramp_epochs", type=int, default=5,
                         help="Linear weight ramp duration; start 60 and ramp 5 reach full weight at the start of epoch 65.")
@@ -830,34 +830,39 @@ def main() -> None:
                 n_data_only_rows=n_data_only_rows,
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
+            mode_weight = args.mode_balanced_weight * jnp.minimum(
+                jnp.asarray(current_state.step, dtype=training_dtype)
+                / max(args.mode_balanced_warmup_steps, 1),
+                1.0,
+            )
             metrics: dict[str, jax.Array] = {
                 "train_l2_loss": full_l2_loss, "train_data_loss": data_loss,
             }
             if rollout_batch is not None:
                 scheduled, depth_sub, family_sub, eta_sub, xi_sub, target_sub, valid_fraction = rollout_batch
-                rollout_loss = jax.lax.cond(
+                rollout_loss, rollout_mode_loss, rollout_tangent_loss = jax.lax.cond(
                     scheduled,
-                    lambda p: compute_loss_components(
+                    lambda p: tuple(map(jnp.float64, compute_loss_components(
                         p, eta_sub, xi_sub, target_sub, depth_sub, family_sub,
-                        n_data_only_rows=eta_sub.shape[0],
-                    )[0],
-                    lambda _: jnp.float64(0.0), current_params,
+                    )[:3])),
+                    lambda _: (jnp.float64(0.0),) * 3, current_params,
                 )
                 rollout_weight = args.rollout_training_weight * jnp.clip(
                     (current_state.step - (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
                     / (args.rollout_training_ramp_epochs * train_steps_per_epoch), 0.0, 1.0,
                 )
                 data_loss += rollout_weight * rollout_loss
+                physics_loss += rollout_weight * (
+                    mode_weight * rollout_mode_loss
+                    + args.translation_tangent_weight * rollout_tangent_loss
+                )
                 metrics.update(
                     rollout_data_loss=rollout_loss, rollout_valid_fraction=valid_fraction,
+                    rollout_mode_balanced_loss=rollout_mode_loss,
+                    rollout_translation_tangent_loss=rollout_tangent_loss,
                     rollout_active=jnp.float32(scheduled), rollout_weight=rollout_weight * scheduled,
                 )
             if args.mode_balanced_weight > 0.0:
-                mode_weight = args.mode_balanced_weight * jnp.minimum(
-                    jnp.asarray(current_state.step, dtype=training_dtype)
-                    / max(args.mode_balanced_warmup_steps, 1),
-                    1.0,
-                )
                 physics_loss += mode_weight * mode_loss
                 metrics["mode_balanced_loss"] = mode_loss
             if args.translation_tangent_weight > 0.0:
@@ -1180,7 +1185,8 @@ def main() -> None:
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)
         if loss_sums.get("rollout_active", 0.0) > 0:
-            for name in ("rollout_data_loss", "rollout_valid_fraction", "rollout_weight"):
+            for name in ("rollout_data_loss", "rollout_mode_balanced_loss",
+                         "rollout_translation_tangent_loss", "rollout_valid_fraction", "rollout_weight"):
                 epoch_record[name] = loss_sums[name] / loss_sums["rollout_active"]
         if args.translation_tangent_weight > 0.0:
             epoch_record["translation_tangent_loss"] = tangent_loss_sum / max(tangent_sample_count, 1.0)
