@@ -2,6 +2,7 @@
 
 import ast
 from collections.abc import Callable
+from itertools import product
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -683,6 +684,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     config = SimpleNamespace(
         rollout_training_weight=0.75, rollout_training_start_epoch=60,
         rollout_training_ramp_epochs=5, rollout_training_interval=16,
+        rollout_training_loss="full",
         model="fno", residual_floor=1e-6, mode_balanced_weight=6.0,
         mode_balanced_warmup_steps=4000, mode_balanced_k_max=128.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
@@ -735,7 +737,10 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     params = jnp.float64(0.7)
     assert not np.allclose(expected_components(params, 1.0), expected_components(params, 3.0))
     assert bool(jnp.all(jnp.abs(jax.jacfwd(expected_components)(params, 3.0)) > 1e-5))
-    for shards in (1, 2):
+    for shards, loss_mode, ramp in product((1, 2), ("full", "data"), (5, 0)):
+        config.rollout_training_loss, config.rollout_training_ramp_epochs = loss_mode, ramp
+        config.rollout_training_start_epoch = 60
+        auxiliary_mask = jnp.array([1.0, float(loss_mode == "full"), float(loss_mode == "full")])
         fields = tuple(field.reshape((shards, 8 // shards) + field.shape[1:])
                        for field in (eta, xi, target, jnp.log(depth)[:, None], family))
         mapped = jax.vmap(namespace["evaluate"], in_axes=(None, None, None, 0, 0, 0, 0, 0), axis_name="batch")
@@ -750,10 +755,11 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
                 (64 * 32, 1.0, True), (70 * 32, 1.0, True), (64 * 32 + 1, 0.0, False),
             ):
                 (loss, metrics), gradient = evaluate(params, step, True)
-                weight = 0.75 * fraction
+                weight = 0.75 * (float(active) if ramp == 0 else fraction)
                 coefficients = jnp.array([1.0, 6.0 * min(step / 4000, 1), 10.0])
                 expected, expected_gradient = jax.value_and_grad(
-                    lambda p: coefficients @ (expected_components(p, 1.0) + weight * expected_components(p, 3.0)),
+                    lambda p: coefficients @ (expected_components(p, 1.0)
+                                              + weight * auxiliary_mask * expected_components(p, 3.0)),
                 )(params)
                 np.testing.assert_allclose((loss, gradient), (expected, expected_gradient), rtol=1e-10)
                 np.testing.assert_allclose(metrics["rollout_weight"], weight, rtol=1e-7)
@@ -761,13 +767,26 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
                 np.testing.assert_allclose([
                     metrics["rollout_data_loss"], metrics["rollout_mode_balanced_loss"],
                     metrics["rollout_translation_tangent_loss"],
-                ], float(active) * expected_components(params, 3.0), rtol=1e-10)
-                np.testing.assert_allclose(metrics["train_data_loss"], expected_components(params, 1.0)[0])
+                ], float(active) * auxiliary_mask * expected_components(params, 3.0), rtol=1e-10)
+                np.testing.assert_allclose([
+                    metrics["train_data_loss"], metrics["mode_balanced_loss"],
+                    metrics["translation_tangent_loss"],
+                ], expected_components(params, 1.0), rtol=1e-10)
             (loss, metrics), gradient = evaluate(params, 64 * 32, False)
             coefficients = jnp.array([1.0, 6.0 * 64 * 32 / 4000, 10.0])
             expected = jax.value_and_grad(lambda p: coefficients @ expected_components(p, 1.0))(params)
             np.testing.assert_allclose((loss, gradient), expected, rtol=1e-10)
             assert not any(key.startswith("rollout_") for key in metrics)
+        if ramp == 0:
+            config.rollout_training_start_epoch = 1
+            (loss, metrics), gradient = differentiate(params, 0, True)
+            coefficients = jnp.array([1.0, 0.0, 10.0])
+            expected = jax.value_and_grad(
+                lambda p: coefficients @ (expected_components(p, 1.0)
+                                          + 0.75 * auxiliary_mask * expected_components(p, 3.0)),
+            )(params)
+            np.testing.assert_allclose((loss, gradient), expected, rtol=1e-10)
+            assert metrics["rollout_active"] == 1 and metrics["rollout_weight"] == 0.75
 
 
 def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:

@@ -141,10 +141,12 @@ def main() -> None:
     parser.add_argument("--rollout_truth_run",
                         help="Run directory containing the two cached-M6 reference evaluation groups.")
     parser.add_argument("--rollout_training_weight", type=float, default=0.0,
-                        help="Weight on data, mode-balanced and tangent losses at detached M6-labelled rollout states; applied only on scheduled updates.")
+                        help="Weight on the selected loss at detached M6-labelled rollout states; applied only on scheduled updates.")
+    parser.add_argument("--rollout_training_loss", choices=("data", "full"), default="full",
+                        help="Generated targets use data loss alone or data plus mode-balancing and tangent losses; original-data losses are unchanged.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
     parser.add_argument("--rollout_training_ramp_epochs", type=int, default=5,
-                        help="Linear weight ramp duration; start 60 and ramp 5 reach full weight at the start of epoch 65.")
+                        help="Linear weight ramp duration; 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
     parser.add_argument("--rollout_training_interval", type=int, default=16)
     parser.add_argument("--rollout_training_microbatch", type=int, default=8)
     parser.add_argument("--rollout_training_steps", type=int, default=10,
@@ -338,9 +340,11 @@ def main() -> None:
         parser.error("--input_noise_rms must be finite and nonnegative")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
         parser.error("--rollout_training_weight must be finite and nonnegative")
-    if min(args.rollout_training_start_epoch, args.rollout_training_ramp_epochs, args.rollout_training_interval,
+    if args.rollout_training_ramp_epochs < 0:
+        parser.error("rollout-training ramp must be nonnegative")
+    if min(args.rollout_training_start_epoch, args.rollout_training_interval,
            args.rollout_training_microbatch, args.rollout_training_steps) < 1:
-        parser.error("rollout-training epoch, ramp, interval, microbatch and steps must be positive")
+        parser.error("rollout-training epoch, interval, microbatch and steps must be positive")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
@@ -844,12 +848,15 @@ def main() -> None:
                     scheduled,
                     lambda p: tuple(map(jnp.float64, compute_loss_components(
                         p, eta_sub, xi_sub, target_sub, depth_sub, family_sub,
+                        n_data_only_rows=eta_sub.shape[0] if args.rollout_training_loss == "data" else 0,
                     )[:3])),
                     lambda _: (jnp.float64(0.0),) * 3, current_params,
                 )
-                rollout_weight = args.rollout_training_weight * jnp.clip(
-                    (current_state.step - (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
-                    / (args.rollout_training_ramp_epochs * train_steps_per_epoch), 0.0, 1.0,
+                rollout_weight = args.rollout_training_weight * (
+                    jnp.clip(
+                        (current_state.step - (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
+                        / (args.rollout_training_ramp_epochs * train_steps_per_epoch), 0.0, 1.0,
+                    ) if args.rollout_training_ramp_epochs > 0 else 1.0
                 )
                 data_loss += rollout_weight * rollout_loss
                 physics_loss += rollout_weight * (
