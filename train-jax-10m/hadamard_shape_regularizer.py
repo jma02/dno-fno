@@ -1,4 +1,4 @@
-"""Finite-secant Hadamard shape-consistency regularizer for a learned DNO.
+"""Hadamard consistency and teacher-labelled local responses for a learned DNO.
 
 For a Dirichlet--Neumann operator ``G(eta)`` and arbitrary surface direction
 ``zeta``, the Hadamard identity is
@@ -6,8 +6,9 @@ For a Dirichlet--Neumann operator ``G(eta)`` and arbitrary surface direction
     D_eta G(eta)[zeta] xi = -G(eta)(zeta * B) - d_x(zeta * V),
 
 where ``B = (Gxi + eta_x * xi_x) / (1 + eta_x**2)`` and
-``V = xi_x - B * eta_x``.  This module measures the identity using only the
-learned operator: it does not require an order-N Craig--Sulem reference.
+``V = xi_x - B * eta_x``. ``compute_hadamard_loss`` measures this identity using
+only the learned operator. ``compute_local_response_loss`` instead anchors
+joint surface/potential responses to a frozen order-six Craig--Sulem reference.
 
 The finite secant avoids differentiating a JVP through the parameter loss.  A
 small, relative perturbation is used so the same configuration applies across
@@ -20,6 +21,10 @@ from typing import Any, Callable, Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
+
+from solver.gen_data.pipeline.dno_target import project_fixed_band
+from solver.solvers.dno_series_jax import build_grid, dno_series_eval
+from solver.solvers.time_integrator import dealiased_zakharov_xi_rhs
 
 
 Array: TypeAlias = jax.Array
@@ -159,3 +164,169 @@ def compute_hadamard_loss(
     forcing_energy = projected_sobolev_energy(forcing, k_typed, k_max, sobolev_order)
     denominator = forcing_energy + jnp.asarray(denominator_eps, dtype=dtype)
     return jnp.mean(residual_energy / denominator)
+
+
+def compute_local_response_loss(
+    rng: Array,
+    apply_fn: ApplyFn,
+    model_params: Any,
+    eta_phys: Array,
+    xi_phys: Array,
+    batch_depth_local: Array,
+    norm_inputs_fn: NormalizeInputsFn,
+    denorm_targets_fn: DenormalizeTargetsFn,
+    k: Array,
+    dtype: jnp.dtype,
+    *,
+    mode: Literal["secant", "teacher", "targeted"],
+    length: float,
+    k_max: float = 128.0,
+    sobolev_order: Literal[0, 1] = 1,
+    fd_step_min: float = 1e-3,
+    fd_step_max: float = 3e-3,
+    min_surface_rms: float = 1e-3,
+    denominator_eps: float = 1e-12,
+) -> Array:
+    """Match a joint eta/xi response to a frozen FP64, order-six DNO.
+
+    ``secant`` compares central finite differences. ``teacher`` compares the
+    student's central difference with the teacher's joint Hadamard derivative.
+    ``targeted`` uses central differences with an equal per-row mixture of smooth
+    random directions, independent Fourier-phase changes, and instantaneous
+    model/reference flow defects. No rollout or gradient through that defect is
+    used. The two defect components share one normalization factor: their mean
+    squared amplitudes relative to the respective field RMS average to one.
+    This preserves their relative physical amplitudes.
+
+    All teacher evaluations use the actual depth ``exp(batch_depth_local)`` and
+    dataset input projection P128. The Hadamard construction retains the full
+    base DNO and product spectra until its final output projection. The loss
+    projects to ``k_max`` and divides the
+    response-error energy by the detached teacher-response energy. Directions,
+    step sizes, and normalization are also frozen during parameter gradients.
+    """
+    del k  # Rebuild physical modes in FP64, independently of the training dtype.
+    _, k64 = build_grid(eta_phys.shape[-1], length)
+    k64 = k64.astype(jnp.float64)
+    eta, xi = map(
+        lambda field: jax.lax.stop_gradient(project_fixed_band(
+            field.astype(jnp.float64), k64, maximum_wavenumber=128.0,
+        )),
+        (eta_phys, xi_phys),
+    )
+    log_depth = jax.lax.stop_gradient(batch_depth_local.astype(jnp.float64))
+    physical_depth = jnp.exp(log_depth)
+    batch_size, nx = eta.shape
+    key_probe, key_eps, key_phase, key_choice = jax.random.split(rng, 4)
+    cutoff = min(k_max, 128.0)
+    direction_mask = (jnp.abs(k64) > 0.0) & (jnp.abs(k64) <= cutoff)
+    fields = jnp.stack((eta, xi))
+    centered = fields - jnp.mean(fields, axis=-1, keepdims=True)
+    scales = jnp.maximum(
+        jnp.sqrt(jnp.mean(centered**2, axis=-1)),
+        jnp.asarray([min_surface_rms, 1e-12], dtype=jnp.float64)[:, None],
+    )
+    weight_sq = jnp.ones_like(k64) if sobolev_order == 0 else 1 + k64**2
+    raw = jax.random.normal(key_probe, fields.shape, dtype=jnp.float64)
+    directions = jnp.fft.ifft(
+        jnp.fft.fft(raw, axis=-1) * direction_mask / jnp.sqrt(weight_sq), axis=-1,
+    ).real
+    directions *= scales[..., None] / jnp.maximum(
+        jnp.sqrt(jnp.mean(directions**2, axis=-1, keepdims=True)), 1e-30,
+    )
+
+    def student(eta_input: Array, xi_input: Array) -> Array:
+        inputs = norm_inputs_fn(eta_input.astype(dtype), xi_input.astype(dtype))
+        predictions = apply_fn({"params": model_params}, inputs, log_depth.astype(dtype))
+        values = denorm_targets_fn(predictions)[..., 0].astype(jnp.float64)
+        return values - jnp.mean(values, axis=-1, keepdims=True)
+
+    def teacher(eta_input: Array, xi_input: Array) -> Array:
+        # Do not prefilter xi_input here: the Hadamard combined potential contains
+        # product modes above P128 that must participate in the DNO recurrence.
+        values = dno_series_eval(
+            eta_input, xi_input, k64, physical_depth, order=6, pad_factor=8,
+        )
+        return jax.lax.stop_gradient(values - jnp.mean(values, axis=-1, keepdims=True))
+
+    if mode == "targeted":
+        # Independent rates per mode and field are phase changes, not a common
+        # spatial translation (which would assign rates proportional to k).
+        phase_rates = jax.random.normal(
+            key_phase, (2, batch_size, nx // 2 + 1), dtype=jnp.float64,
+        )
+        phase_hat = 1j * phase_rates * jnp.fft.rfft(fields, axis=-1)
+        phase_hat *= direction_mask[: nx // 2 + 1]
+        phase_hat = phase_hat.at[..., nx // 2].set(0)
+        phase_directions = jnp.fft.irfft(phase_hat, n=nx, axis=-1)
+        phase_directions *= scales[..., None] / jnp.maximum(
+            jnp.sqrt(jnp.mean(phase_directions**2, axis=-1, keepdims=True)), 1e-30,
+        )
+
+        q6 = teacher(eta, xi)
+        q_model = jax.lax.stop_gradient(student(eta, xi))
+        eta_x = spectral_dx(eta, k64)
+        xi_x = spectral_dx(xi, k64)
+        defect = jnp.stack((
+            q_model - q6,
+            dealiased_zakharov_xi_rhs(eta_x, xi_x, q_model)
+            - dealiased_zakharov_xi_rhs(eta_x, xi_x, q6),
+        ))
+        defect = jnp.fft.ifft(
+            jnp.fft.fft(defect, axis=-1) * direction_mask, axis=-1,
+        ).real
+        joint_rms = jnp.sqrt(jnp.mean(
+            jnp.mean(defect**2, axis=-1) / scales**2, axis=0,
+        ))
+        defect_directions = jnp.where(
+            joint_rms[None, :, None] > 1e-30,
+            defect / jnp.maximum(joint_rms[None, :, None], 1e-30),
+            directions,
+        )
+        choice = jax.random.randint(key_choice, (batch_size,), 0, 3)
+        directions = jnp.where(
+            (choice == 1)[None, :, None], phase_directions,
+            jnp.where((choice == 2)[None, :, None], defect_directions, directions),
+        )
+
+    zeta, chi = jax.lax.stop_gradient(directions)
+    if fd_step_min == fd_step_max:
+        fd_step = jnp.full((batch_size,), fd_step_min, dtype=jnp.float64)
+    else:
+        fd_step = jnp.exp(jax.random.uniform(
+            key_eps, (batch_size,), dtype=jnp.float64,
+            minval=jnp.log(fd_step_min), maxval=jnp.log(fd_step_max),
+        ))
+    # Both perturbed surfaces keep at least half the base water-column height.
+    positive_step = jnp.min(
+        (physical_depth + eta) / jnp.maximum(jnp.abs(zeta), 1e-30), axis=-1,
+    ) / 2.0
+    fd_step = jax.lax.stop_gradient(jnp.minimum(fd_step, positive_step))[:, None]
+    eta_plus, eta_minus, xi_plus, xi_minus = map(
+        lambda field: jax.lax.stop_gradient(project_fixed_band(
+            field, k64, maximum_wavenumber=128.0,
+        )),
+        (eta + fd_step * zeta, eta - fd_step * zeta,
+         xi + fd_step * chi, xi - fd_step * chi),
+    )
+    response = (student(eta_plus, xi_plus) - student(eta_minus, xi_minus)) / (2 * fd_step)
+    if mode == "teacher":
+        eta_x = spectral_dx(eta, k64)
+        xi_x = spectral_dx(xi, k64)
+        b_velocity = (teacher(eta, xi) + eta_x * xi_x) / (1.0 + eta_x**2)
+        v_velocity = xi_x - b_velocity * eta_x
+        reference = teacher(eta, chi - zeta * b_velocity) - spectral_dx(
+            zeta * v_velocity, k64,
+        )
+    else:
+        reference = (teacher(eta_plus, xi_plus) - teacher(eta_minus, xi_minus)) / (2 * fd_step)
+    reference = jax.lax.stop_gradient(project_fixed_band(
+        reference, k64, maximum_wavenumber=128.0,
+    ))
+    residual_energy = projected_sobolev_energy(
+        response - reference, k64, cutoff, sobolev_order,
+    )
+    reference_energy = jax.lax.stop_gradient(projected_sobolev_energy(
+        reference, k64, cutoff, sobolev_order,
+    ))
+    return jnp.mean(residual_energy / (reference_energy + denominator_eps))

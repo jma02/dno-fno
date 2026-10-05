@@ -51,7 +51,7 @@ from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS, _write_json, compute_macro_summary, run_family  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, rollout_surrogate  # noqa: E402
-from hadamard_shape_regularizer import compute_hadamard_loss  # noqa: E402
+from hadamard_shape_regularizer import compute_hadamard_loss, compute_local_response_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
     compute_translation_tangent_loss,
@@ -268,6 +268,11 @@ def main() -> None:
         default=0.0,
         help="Weight of the randomized finite-secant DNO Hadamard shape-identity "
         "loss. 0 disables the regularizer.",
+    )
+    parser.add_argument(
+        "--hadamard_mode", choices=("self", "secant", "teacher", "targeted"), default="self",
+        help="Local regularizer: learned identity, M6 joint secant, M6 Hadamard derivative, "
+        "or M6 secant with phase/flow-defect directions.",
     )
     parser.add_argument(
         "--hadamard_interval",
@@ -680,7 +685,10 @@ def main() -> None:
         eta_sub = eta.astype(training_dtype)[sample_indices]
         xi_sub = xi.astype(training_dtype)[sample_indices]
         batch_depth_sub = batch_depth.astype(training_dtype)[sample_indices].astype(jnp.float64)
-        return compute_hadamard_loss(
+        response_loss = compute_hadamard_loss if args.hadamard_mode == "self" else partial(
+            compute_local_response_loss, mode=args.hadamard_mode, length=domain_length,
+        )
+        return response_loss(
             rng=rng_probe,
             apply_fn=apply_model,
             model_params=current_params,
