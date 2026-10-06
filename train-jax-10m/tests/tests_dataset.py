@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Iterator
 
 import jax
@@ -213,10 +215,47 @@ def test_prefetch_preserves_batches_and_producer_exceptions() -> None:
             raise AssertionError("Producer failure did not reach the consumer")
 
 
+def test_surface_feature_rms_uses_normalized_training_rows() -> None:
+    path = TRAIN_DIR / "1d_dno_fno_jax_ema_grad.py"
+    fitting = next(
+        node for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Attribute)
+        and node.test.attr == "cs_normalize_surface_features"
+    )
+    code = compile(ast.Module(body=fitting.body, type_ignores=[]), str(path), "exec")
+    nx, wave_number, eta_scale = 64, 3, 2.0
+    train_indices = np.arange(0, 1200, 2)
+    x = np.arange(nx) * (2 * np.pi / nx)
+    for amplitude in (0.0, 0.25):
+        args = SimpleNamespace(
+            cs_n_polys=3, cs_use_first_deriv=True, cs_use_second_deriv=True,
+            cs_use_half_deriv=True, cs_use_hilbert=True,
+            cs_use_relative_elevation=True,
+        )
+        # Interleaved held-out rows must not affect fitting, including the zero floor.
+        eta = np.full((1200, nx), 1e9, dtype=np.float32)
+        eta[train_indices] = eta_scale * amplitude * np.cos(wave_number * x)
+        namespace = {
+            "np": np, "args": args, "dataset": {"eta": eta, "depth": np.full(1200, 0.5)},
+            "train_indices": train_indices, "eta_scale": eta_scale,
+            "domain_length": 2 * np.pi, "nx": nx,
+        }
+        exec(code, namespace)
+        rms = amplitude / np.sqrt(2)
+        expected = np.maximum([
+            rms, amplitude**2 * np.sqrt(3 / 8), amplitude**3 * np.sqrt(5 / 16),
+            wave_number * rms, wave_number**2 * rms, np.sqrt(wave_number) * rms,
+            rms, eta_scale / 0.5 * rms,
+        ], 1e-12)
+        np.testing.assert_allclose(args.cs_surface_feature_scales, expected, rtol=1e-6)
+        np.testing.assert_array_equal(np.sort(namespace["feature_rows"]), train_indices)
+
+
 def main() -> int:
     test_loads_readonly_arrays_and_keeps_simulation_splits()
     test_normalizers_preserve_both_modes_and_constant_fields()
     test_prefetch_preserves_batches_and_producer_exceptions()
+    test_surface_feature_rms_uses_normalized_training_rows()
     print(
         "[PASS] dataset splits, epoch shuffles, train-only/cache stats, both normalizers, prefetch"
     )

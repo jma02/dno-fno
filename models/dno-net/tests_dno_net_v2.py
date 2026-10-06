@@ -41,6 +41,8 @@ def _model(
     use_hilbert: bool = True,
     use_relative_elevation: bool = False,
     use_learned_eta_filters: bool = False,
+    surface_feature_scales: tuple[float, ...] | None = None,
+    surface_context_width: int = 0,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -53,6 +55,8 @@ def _model(
         use_hilbert=use_hilbert,
         use_relative_elevation=use_relative_elevation,
         use_learned_eta_filters=use_learned_eta_filters,
+        surface_feature_scales=surface_feature_scales,
+        surface_context_width=surface_context_width,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -170,12 +174,13 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for baseline_order, relative_elevation, learned_filters in (
-        (-1, False, False), (0, False, False), (1, False, False),
-        (1, True, False), (2, False, False), (1, False, True),
+    for baseline_order, relative_elevation, learned_filters, context_width in (
+        (-1, False, False, 0), (0, False, False, 0), (1, False, False, 0),
+        (1, True, False, 0), (2, False, False, 0), (1, False, True, 0),
+        (1, False, False, 8),
     ):
         model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation,
-                       use_learned_eta_filters=learned_filters)
+                       use_learned_eta_filters=learned_filters, surface_context_width=context_width)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -431,6 +436,8 @@ def test_experimental_residual_orders() -> None:
     for model, order in (
         (_model(use_relative_elevation=True), 2), (_model(baseline_order=2), 3),
         (_model(use_learned_eta_filters=True), 2),
+        (_model(surface_context_width=8), 2),
+        (_model(surface_context_width=8, surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
     ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
@@ -445,6 +452,63 @@ def test_experimental_residual_orders() -> None:
         norms = [float(jnp.linalg.norm(residual(epsilon * eta))) for epsilon in (0.125, 0.0625, 0.03125)]
         assert all(value > 0 for value in norms)
         assert all(abs(norms[index] / norms[index + 1] / 2**order - 1) < 0.1 for index in (0, 1))
+
+
+def test_surface_feature_scaling_folds_into_first_projection() -> None:
+    """Fixed RMS normalization needs no extra inference work once its kernel is folded."""
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
+    for context_width in (0, 8):
+        normalized = _model(surface_feature_scales=scales, surface_context_width=context_width)
+        folded = normalized.clone(surface_feature_scales=None)
+        variables = _activate_residual(normalized.init(jax.random.PRNGKey(15), inputs, depth))
+        variables = jax.tree.map(lambda value: value.astype(eta.dtype), variables)
+        folded_variables = unfreeze(variables)
+        folded_variables["params"]["eta_feat_proj"]["kernel"] /= jnp.asarray(scales)[:, None]
+        expected = cast(jax.Array, normalized.apply(variables, inputs, depth))
+        actual = cast(jax.Array, folded.apply(folded_variables, inputs, depth))
+        assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-14)
+        assert jnp.linalg.norm(_learned_residual(normalized, variables, eta, xi, depth)) > 0
+
+
+def test_surface_context_is_nonlocal_and_depth_conditioned() -> None:
+    """The learned context transports geometry beyond the support of local features."""
+    eta, xi, _ = _state()
+    eta = jnp.zeros_like(eta).at[:, 0].set(0.04)
+    inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (2, eta.shape[-1], 2))
+    depth = jnp.log(jnp.asarray([[0.1], [0.8]], dtype=eta.dtype))
+    model = _model(n_polys=1, use_first_deriv=False, use_second_deriv=False,
+                   use_half_deriv=False, use_hilbert=False, surface_context_width=8)
+    variables = _activate_residual(model.init(jax.random.PRNGKey(16), inputs, depth))
+    output, captured = model.apply(
+        variables, inputs, depth,
+        capture_intermediates=lambda module, _: module.name == "eta_context_expand",
+    )
+    context = cast(jax.Array, captured["intermediates"]["eta_context_expand"]["__call__"][0])
+    assert jnp.linalg.norm(context[:, 1:, :]) > 1e-8
+    assert jnp.linalg.norm(context[0] - context[1]) > 1e-8
+    translated = cast(jax.Array, model.apply(variables, jnp.roll(inputs, 7, axis=1), depth))
+    assert jnp.allclose(translated, jnp.roll(output, 7, axis=1), rtol=1e-10, atol=1e-13)
+
+
+def test_surface_context_has_live_gradients_and_unchanged_shared_initialization() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    model = _model(surface_context_width=8)
+    original = _model().init(jax.random.PRNGKey(17), inputs, depth)
+    variables = model.init(jax.random.PRNGKey(17), inputs, depth)
+    for name, parameters in original["params"].items():
+        assert all(jnp.array_equal(a, b) for a, b in zip(
+            jax.tree.leaves(parameters), jax.tree.leaves(variables["params"][name]), strict=True,
+        ))
+    variables = _activate_residual(variables)
+    gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, model.apply(
+        {"params": params}, inputs, depth,
+    )) ** 2))(variables["params"])
+    for name in ("eta_context_in", "eta_context_hidden", "eta_context_out", "eta_context_expand"):
+        assert jnp.linalg.norm(gradient[name]["kernel"]) > 1e-15
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
 
 
 def main() -> int:
@@ -462,6 +526,9 @@ def main() -> int:
         test_learned_eta_filters_change_spectral_shape_and_condition_on_depth,
         test_true_depth_analytic_baselines_and_returned_components,
         test_experimental_residual_orders,
+        test_surface_feature_scaling_folds_into_first_projection,
+        test_surface_context_is_nonlocal_and_depth_conditioned,
+        test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
     )
     for test in tests:
         test()

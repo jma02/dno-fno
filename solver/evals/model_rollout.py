@@ -82,6 +82,7 @@ def load_run(
     )
 
     if model_name in ("cs_dno", "cs_dno_g0", "cs_dno_no_baseline"):
+        surface_scales = config.get("cs_surface_feature_scales")
         model = CraigSulemDNO(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),
@@ -93,6 +94,8 @@ def load_run(
             use_hilbert=bool(config["cs_use_hilbert"]),
             use_relative_elevation=bool(config.get("cs_use_relative_elevation", False)),
             use_learned_eta_filters=bool(config.get("cs_use_learned_eta_filters", False)),
+            surface_feature_scales=None if surface_scales is None else tuple(map(float, surface_scales)),
+            surface_context_width=int(config.get("cs_surface_context_width", 0)),
             mult_hidden=int(config["cs_mult_hidden"]),
             baseline_order=int(config.get(
                 "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]

@@ -90,6 +90,10 @@ def main() -> None:
         "--cs_use_learned_eta_filters", action="store_true",
         help="Learn depth-conditioned modulations of the second- and half-derivative surface filters.",
     )
+    parser.add_argument("--cs_normalize_surface_features", action="store_true",
+                        help="Fit fixed per-feature RMS scales on up to 65536 training rows.")
+    parser.add_argument("--cs_surface_context_width", type=int, default=0,
+                        help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -375,6 +379,10 @@ def main() -> None:
         parser.error("--dirichlet_probe_fraction must be in (0, 0.5]")
     if args.model == "cs_dno" and args.norm != "scale":
         parser.error("CS residual normalization requires --norm scale")
+    if args.cs_surface_context_width < 0:
+        parser.error("--cs_surface_context_width must be nonnegative")
+    if args.model != "cs_dno" and (args.cs_normalize_surface_features or args.cs_surface_context_width):
+        parser.error("Surface-feature experiments require --model cs_dno")
     start_time = perf_counter()
 
     training_dtype = jnp.float32
@@ -425,6 +433,36 @@ def main() -> None:
     eta_scale, xi_scale = map(float, np.where(feature_scale > 0, feature_scale, 1.0))
     target_absmax = float(cast(float, stats["target_absmax"]))
     target_scale = target_absmax if target_absmax > 0 else 1.0
+    args.cs_surface_feature_scales = None
+    if args.cs_normalize_surface_features:
+        # Independent RNG: fitting training-only scales must not advance the batch shuffle.
+        feature_rows = np.random.default_rng(0).choice(
+            train_indices, size=min(65536, train_indices.size), replace=False,
+        )
+        feature_k = (2.0 * np.pi / domain_length) * np.arange(nx // 2 + 1)
+        feature_symbols = [symbol for enabled, symbol in (
+            (args.cs_use_first_deriv, 1j * feature_k),
+            (args.cs_use_second_deriv, -feature_k**2),
+            (args.cs_use_half_deriv, np.sqrt(feature_k)),
+            (args.cs_use_hilbert, -1j * np.sign(feature_k)),
+        ) if enabled]
+        feature_energy = np.zeros(args.cs_n_polys + len(feature_symbols) + args.cs_use_relative_elevation)
+        for start in range(0, feature_rows.size, 256):
+            rows = feature_rows[start:start + 256]
+            eta_features = np.asarray(dataset["eta"][rows], dtype=np.float32) / np.float32(eta_scale)
+            fields = [eta_features**p for p in range(1, args.cs_n_polys + 1)]
+            eta_hat = np.fft.rfft(eta_features, axis=-1)
+            fields.extend(np.fft.irfft(eta_hat * symbol, n=nx, axis=-1) for symbol in feature_symbols)
+            if args.cs_use_relative_elevation:
+                fields.append(eta_features * eta_scale / dataset["depth"][rows, None])
+            feature_energy += np.array([
+                np.sum(np.square(field, dtype=np.float64)) for field in fields
+            ])
+        feature_rms = np.sqrt(feature_energy / (feature_rows.size * nx))
+        if not np.all(np.isfinite(feature_rms)):
+            raise FloatingPointError("Non-finite training surface-feature RMS")
+        args.cs_surface_feature_scales = np.maximum(feature_rms, 1e-12).tolist()
+        print(f"Surface-feature RMS ({feature_rows.size} training rows): {args.cs_surface_feature_scales}")
     # Construct the selected model and initialize its parameters.
     if args.model == "cs_dno":
         model = CraigSulemDNO(
@@ -438,6 +476,9 @@ def main() -> None:
             use_hilbert=args.cs_use_hilbert,
             use_relative_elevation=args.cs_use_relative_elevation,
             use_learned_eta_filters=args.cs_use_learned_eta_filters,
+            surface_feature_scales=(tuple(args.cs_surface_feature_scales)
+                                    if args.cs_surface_feature_scales is not None else None),
+            surface_context_width=args.cs_surface_context_width,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,

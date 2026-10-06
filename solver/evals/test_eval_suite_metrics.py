@@ -151,6 +151,10 @@ class ComputeMetricsTest(unittest.TestCase):
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
+            {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
+            {"cs_surface_context_width": 4},
+            {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1],
+             "cs_surface_context_width": 4},
             {"cs_use_relative_elevation": True, "cs_baseline_order": 2, "cs_baseline_true_depth": True},
         ):
             with self.subTest(options=options), patch(
@@ -167,6 +171,9 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.use_learned_eta_filters, options.get("cs_use_learned_eta_filters", False))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
+                scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
+                self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
+                self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)
