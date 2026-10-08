@@ -133,6 +133,17 @@ def build_variant(
         operators = jnp.stack((g0_64, jnp.broadcast_to(1j * k64, g0_64.shape)), axis=1)
         if g1_fp32:
             operators = operators.astype(jnp.complex64)
+        context_multiplier = None
+        if model.surface_context_width:
+            context_k, context_log_h = jnp.broadcast_arrays(k[None, :], jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
+            conditioning = jnp.stack((
+                jnp.log1p(context_k), context_log_h, jnp.tanh(jnp.exp(context_log_h) * context_k),
+            ), axis=-1)
+            hidden = loaded.params["eta_context_hidden"]
+            context_hidden = nn.tanh(conditioning @ hidden["kernel"] + hidden["bias"])
+            output = loaded.params["eta_context_out"]
+            context_multiplier = 0.1 * nn.tanh(context_hidden @ output["kernel"] + output["bias"])
+            jax.block_until_ready(context_multiplier)
 
         @jax.jit
         def m2_hat(inputs: jax.Array) -> jax.Array:
@@ -213,8 +224,16 @@ def build_variant(
                     jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
                 ), axis=-1)
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
+            if model.surface_feature_scales is not None:
+                features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
+                if name == "eta_feat_proj" and context_multiplier is not None:
+                    context = features @ loaded.params["eta_context_in"]["kernel"]
+                    context = jnp.fft.irfft(
+                        context_multiplier * jnp.fft.rfft(context, axis=1), n=nx, axis=1,
+                    )
+                    features = features + context @ loaded.params["eta_context_expand"]["kernel"]
             features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             weights = features @ head_kernel
             if fused_product:
@@ -368,6 +387,7 @@ def build_variant(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
+    parser.add_argument("--checkpoint", choices=("best", "latest"), default="best")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
@@ -378,7 +398,7 @@ if __name__ == "__main__":
     variants = args.variants
     if not args.capture and args.reference not in variants:
         parser.error("include the numerical reference in variants")
-    loaded = load_run(args.run)
+    loaded = load_run(args.run, checkpoint=args.checkpoint)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
         "eval_best_current_test_stratified_n32*/stokes_trajs.npz"
     ))

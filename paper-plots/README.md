@@ -232,25 +232,14 @@ All eight trajectories remained finite with positive depth. The Blackwell BF
 error is 0.861117%, versus 1.904739% on A100/Ada; each plotted dot uses its own
 measured error rather than transferring accuracy across GPUs.
 
-The Ada panels also show two experiments trained from scratch for 120 epochs
-at LR `2e-5`: `Local tangent — 120 epochs` (blue squares) and
-`Modal phase — 120 epochs` (green triangles). Both use the M1 analytic baseline
-and residual-normalized data loss. The control uses squared local tangent
-loss with weight 10; the candidate uses coupled modal Charbonnier loss with
-weight 25. Their points pair median warm single-rollout times from three full
-repeats with final surface errors from those same measured trajectories,
-not the separate 32-case family medians. Measurements are stored in
-`outputs/phase_timing_20260930/{control,modal}.json` and use the same optimized
-network implementation as the existing orange point. The three one-epoch
-markers have been replaced; the existing Ada epoch-120 orange point is retained.
-Blackwell/A100 trained-checkpoint points are measured separately.
-
-Median warm seconds (three full repeats per case):
-
-| Model | Stokes | Tanaka | Benjamin–Feir | JONSWAP/TMA |
-| --- | ---: | ---: | ---: | ---: |
-| Local tangent — 120 epochs | 1.304564 | 12.598781 | 12.642550 | 1.287951 |
-| Modal phase — 120 epochs | 1.275761 | 12.458121 | 12.352980 | 1.257213 |
+The renderer replaces the obsolete local-tangent and modal-phase overlays with
+`RMS + Fourier context` (blue squares), once fresh timings are supplied for
+`outputs/c27_surface_rms_context8_rollout_ep120_gpu0_20261006/`.
+Use its latest epoch-120 checkpoint, not best epoch119. The optimized spectral
+adapter applies the fixed training-feature RMS scales and the learned width-8
+Fourier-context residual; its depth-dependent context multiplier is cached.
+Do not reuse the earlier architecture's runtime or substitute the 32-case median
+error for this figure's single-case error. Blackwell/A100 measurements stay unchanged.
 
 Purple diamonds show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
 Diamonds give that single case's final surface error on each GPU. The separate full current-test suite
@@ -415,9 +404,8 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
   --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
-  --trained-timings outputs/phase_timing_20260930/control.json \
-    outputs/phase_timing_20260930/modal.json \
-    outputs/rollout_teacher_timing_20261002/ada/timings.json \
+  --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
+    outputs/rms_context_timing_20261007/ada/timings.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
     outputs/torch_ema_20260926/a100_80gb_timing/timings.json \
     outputs/torch_ema_20260926/ada_timing/timings.json
@@ -433,7 +421,28 @@ CUDA_VISIBLE_DEVICES=0 NCCL_P2P_LEVEL=PHB uv run --isolated --no-project --pytho
   'from scripts.benchmark_torch_rollouts import main; main(output="outputs/torch_ema_ada", batch_size=1, repeats=3, local=True)'
 ```
 
-Reproduce the local full-rollout measurements on a free GPU with:
+Before rendering the new overlay, check the new architecture and measure full
+single rollouts on a free Ada. The first command includes a 48-state comparison
+against the ordinary model; the second measures all four families with three
+warmed repeats and records accuracy from those same executions:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync scripts/benchmark_dno_fusion.py \
+  --run outputs/c27_surface_rms_context8_rollout_ep120_gpu0_20261006 \
+  --checkpoint latest --variants original fourier_fused_features_product_overlap \
+  --repeats 3 --ept 8 --output outputs/rms_context_timing_20261007/ada/forward
+CUDA_VISIBLE_DEVICES=0 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync scripts/time_single_rollouts.py \
+  --candidate-run outputs/c27_surface_rms_context8_rollout_ep120_gpu0_20261006 \
+  --checkpoint latest --reference cached_M6 --repeats 3 --pad-factor 2 --ept 8 \
+  --methods fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local \
+  --output outputs/rms_context_timing_20261007/ada/timings.json
+```
+
+Reproduce the preceding rollout-supervised model's measurements on a free GPU with:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false \

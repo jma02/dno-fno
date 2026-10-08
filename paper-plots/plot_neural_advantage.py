@@ -22,9 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "paper-plots/figures"
 FAMILIES = (("stokes", "Stokes"), ("tanaka", "Tanaka"),
             ("benjamin_feir", "Benjamin–Feir"), ("jonswap_tma", "JONSWAP / TMA"))
-TRAINED_STYLES = (("c27_phase_m1_tg10_ep120_gpu0_20260930", "Local tangent — 120 epochs", "#007da6", "s"),
-                  ("c27_phase_modal_tg25_ep120_gpu1_20260930", "Modal phase — 120 epochs", "#009e73", "^"),
-                  ("c27_rollout_teacher_m6_ep120_gpu0_20261001", "Rollout-supervised network", "#d34a87", "P"))
+TRAINED_STYLES = (("c27_rollout_teacher_m6_ep120_gpu0_20261001", "Rollout-supervised network", "#d34a87", "P"),
+                  ("c27_surface_rms_context8_rollout_ep120_gpu0_20261006", "RMS + Fourier context", "#007da6", "s"))
 
 
 def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
