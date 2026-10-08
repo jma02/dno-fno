@@ -1,6 +1,6 @@
 """Compare saved networks with M3 on identical states and fresh FP64 M6 targets.
 
-CPU-only; no training or trajectory integration. Also evaluate saved reference
+Defaults to CPU; no training or trajectory integration. Also evaluate saved reference
 trajectory snapshots, without feeding predictions back into the integrator.
 """
 from __future__ import annotations
@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 import sys
 
-os.environ["JAX_PLATFORMS"] = "cpu"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
