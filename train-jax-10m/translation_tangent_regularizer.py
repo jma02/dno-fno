@@ -13,6 +13,117 @@ from solver.solvers.time_integrator import (
 )
 
 
+def _bernoulli_rhs_defect(
+    eta_x: jax.Array, xi_x: jax.Array, target: jax.Array, error: jax.Array,
+) -> jax.Array:
+    """Cancellation-free difference of the two dealiased xi equations."""
+    nx = eta_x.shape[-1]
+    padded = _spectral_upsample_real(jnp.stack((eta_x, xi_x, target, error), axis=1), 2 * nx)
+    eta_x_padded, xi_x_padded, target_padded, error_padded = (
+        padded[:, index] for index in range(4)
+    )
+    return _spectral_truncate_real(
+        error_padded * (target_padded + eta_x_padded * xi_x_padded + 0.5 * error_padded)
+        / (1.0 + eta_x_padded**2), nx,
+    )
+
+
+def compute_phase_mechanism_loss(
+    eta: jax.Array,
+    xi: jax.Array,
+    gxi_prediction: jax.Array,
+    gxi_target: jax.Array,
+    depth: jax.Array,
+    k: jax.Array,
+    *,
+    mechanism: Literal["carrier", "sideband", "momentum"],
+    sample_mask: jax.Array | None = None,
+    carrier_mode: jax.Array | None = None,
+    sideband_offset: jax.Array | None = None,
+    horizon: float = 1.0,
+    activity_floor: float = 1e-6,
+    charbonnier_eps: float = 1e-7,
+    gravity: float = 1.0,
+    k_max: float = 128.0,
+) -> tuple[jax.Array, jax.Array]:
+    """Match a family-specific signed RHS defect, with smooth absolute loss.
+
+    Carrier: T times the phase-rate defect of the dominant traveling coordinate
+    at the prescribed carrier (or largest-energy mode when omitted). Sideband:
+    T times delta_omega_lower + delta_omega_upper - 2 delta_omega_carrier, using
+    the same traveling direction and fixed carrier/offset metadata, not a peak
+    that can change during modulation. Normal coordinates are sqrt(g)*eta_hat
+    +/- i*sqrt(G0)*xi_hat. Inactive modes are excluded, not denominator-floored
+    or energy-weighted; this keeps active weak sidebands influential.
+
+    Momentum: T*mean(xi_x*delta_q - eta_x*delta_xi_t)/(RMS(eta)*RMS(xi_x)).
+    This matches momentum production of the supplied target RHS, not zero.
+    Training labels are P128 M6 outputs; their missing high modes make this an
+    approximation to the full-q M6 momentum target in the Bernoulli equation.
+    All three residuals are dimensionless. T is a normalization horizon, not a
+    trajectory prediction. Only predictions receive parameter gradients; no
+    solver evaluation, trajectory differentiation, or new network call occurs.
+    """
+    nx, dtype = eta.shape[-1], eta.dtype
+    target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
+    error = gxi_prediction - jnp.mean(gxi_prediction, axis=-1, keepdims=True) - target
+    eta_hat, xi_hat, error_hat = (
+        jnp.fft.rfft(field, axis=-1, norm="forward").at[..., -1].set(0)
+        for field in (eta, xi, error)
+    )
+    k_abs = jnp.abs(k[:nx // 2 + 1]).astype(dtype)
+    eta_x, xi_x = (
+        jnp.fft.irfft(1j * k_abs * spectrum, n=nx, norm="forward")
+        for spectrum in (eta_hat, xi_hat)
+    )
+    rhs_error = _bernoulli_rhs_defect(eta_x, xi_x, target, error)
+    if mechanism == "momentum":
+        scale = jnp.sqrt(jnp.mean(eta**2, axis=-1) * jnp.mean(xi_x**2, axis=-1))
+        selected = scale > 1e-30
+        residual = jnp.mean(xi_x * error - eta_x * rhs_error, axis=-1) / jnp.where(selected, scale, 1.0)
+    else:
+        signs = jnp.asarray([1.0, -1.0], dtype=dtype)[None, :, None]
+        sqrt_g0 = jnp.sqrt(k_abs * jnp.tanh(depth[:, None] * k_abs))
+        sqrt_g = jnp.sqrt(jnp.asarray(gravity, dtype=dtype))
+        coordinates = sqrt_g * eta_hat[:, None, :] + signs * 1j * sqrt_g0[:, None, :] * xi_hat[:, None, :]
+        band = (k_abs > 0) & (k_abs <= k_max)
+        band = band.at[-1].set(False)
+        energy = jnp.where(band, jnp.abs(coordinates)**2, 0.0)
+        if carrier_mode is None:
+            if mechanism == "sideband":
+                raise ValueError("Sideband phase loss requires fixed carrier-mode metadata")
+            carrier_mode = jnp.argmax(jnp.sum(energy, axis=1), axis=-1)
+        if mechanism == "sideband":
+            if sideband_offset is None:
+                raise ValueError("Sideband phase loss requires fixed sideband-offset metadata")
+            modes = jnp.stack((carrier_mode - sideband_offset, carrier_mode,
+                               carrier_mode + sideband_offset), axis=-1)
+        else:
+            modes = carrier_mode[:, None]
+        rows = jnp.arange(eta.shape[0])
+        direction = jnp.argmax(energy[rows, :, jnp.clip(carrier_mode, 0, nx // 2)], axis=-1)
+        selected_modes = jnp.clip(modes, 0, nx // 2)
+        mode_energy = energy[rows[:, None], direction[:, None], selected_modes]
+        peak = jnp.max(energy, axis=(1, 2))
+        active = ((modes > 0) & (modes < nx // 2)
+                  & (mode_energy > activity_floor * peak[:, None]) & (mode_energy > 1e-30))
+        selected = jnp.all(active, axis=-1)
+        coordinate_defect = sqrt_g * error_hat[:, None, :] + signs * 1j * sqrt_g0[:, None, :] * jnp.fft.rfft(
+            rhs_error, axis=-1, norm="forward",
+        )[:, None, :]
+        numerator = jnp.imag(jnp.conj(coordinates) * coordinate_defect)
+        rates = numerator[rows[:, None], direction[:, None], selected_modes] / jnp.where(active, mode_energy, 1.0)
+        residual = rates[:, 0] + rates[:, 2] - 2.0 * rates[:, 1] if mechanism == "sideband" else rates[:, 0]
+    if sample_mask is not None:
+        selected = selected & sample_mask
+    residual = jnp.where(selected, horizon * residual, 0.0)
+    squared = residual**2
+    eps = jnp.asarray(charbonnier_eps, dtype=dtype)
+    per_sample = squared / (jnp.sqrt(squared + eps**2) + eps)
+    count = jnp.sum(selected.astype(dtype))
+    return jnp.sum(per_sample) / jnp.maximum(count, 1.0), count
+
+
 def compute_modal_phase_loss(
     eta: jax.Array,
     xi: jax.Array,
@@ -62,18 +173,7 @@ def compute_modal_phase_loss(
         jnp.fft.irfft(1j * k_abs[None, :] * field_hat, n=nx, norm="forward")
         for field_hat in (eta_hat, xi_hat)
     )
-    padded = _spectral_upsample_real(
-        jnp.stack((eta_x, xi_x, centered_target, error), axis=1), 2 * nx
-    )
-    eta_x_padded, xi_x_padded, target_padded, error_padded = (
-        padded[:, index] for index in range(4)
-    )
-    xi_rhs_error = _spectral_truncate_real(
-        error_padded
-        * (target_padded + eta_x_padded * xi_x_padded + 0.5 * error_padded)
-        / (1.0 + eta_x_padded**2),
-        nx,
-    )
+    xi_rhs_error = _bernoulli_rhs_defect(eta_x, xi_x, centered_target, error)
     xi_rhs_error_hat = jnp.fft.rfft(xi_rhs_error, axis=-1, norm="forward")
 
     g0 = k_abs[None, :] * jnp.tanh(depth[:, None] * k_abs[None, :])

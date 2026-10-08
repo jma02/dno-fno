@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
+    compute_phase_mechanism_loss,
     compute_translation_tangent_loss,
 )
 from solver.solvers.time_integrator import (  # noqa: E402
@@ -748,6 +750,149 @@ def test_modal_masks_centering_and_translation_preserve_selected_mean() -> None:
         np.testing.assert_allclose(shifted_gradient, jnp.roll(gradient, 19, axis=-1), rtol=1e-10, atol=1e-13)
 
 
+def test_carrier_phase_has_coupled_half_gain_and_correct_horizon() -> None:
+    n, mode, gain, horizon = 128, 4, .03, 20.
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(n, dtype=dtype) * (2 * jnp.pi / n)
+        k = jnp.fft.fftfreq(n, d=1. / n).astype(dtype)
+        depth = jnp.asarray([.2], dtype=dtype)
+        g0 = mode * jnp.tanh(mode * depth[0])
+        eta = 1e-7 * jnp.cos(mode * x)[None]
+        for direction in (-1., 1.):
+            xi = direction * 1e-7 / jnp.sqrt(g0) * jnp.sin(mode * x)[None]
+            target = g0 * xi
+            loss, count = compute_phase_mechanism_loss(
+                eta, xi, (1 + gain) * target, target, depth, k,
+                mechanism="carrier", horizon=horizon,
+            )
+            expected_squared = (horizon * gain * float(jnp.sqrt(g0)) / 2)**2
+            expected = expected_squared / (np.sqrt(expected_squared + 1e-14) + 1e-7)
+            np.testing.assert_allclose(loss, expected, rtol=2e-5 if dtype == jnp.float32 else 1e-11)
+            np.testing.assert_array_equal(count, 1.)
+
+
+def test_sideband_relative_phase_cancels_translation_but_detects_differential_drift() -> None:
+    n, horizon, dc = 128, 200., .002
+    x = jnp.arange(n, dtype=jnp.float64) * (2 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1. / n)
+    modes = jnp.asarray([4, 5, 6])
+    amplitudes = 1e-8 * jnp.asarray([.1, 1., .1])
+    g0 = modes * jnp.tanh(.2 * modes)
+    eta = jnp.sum(amplitudes[:, None] * jnp.cos(modes[:, None] * x), axis=0)[None]
+    xi = jnp.sum((amplitudes / jnp.sqrt(g0))[:, None] * jnp.sin(modes[:, None] * x), axis=0)[None]
+    target = jnp.sum((amplitudes * jnp.sqrt(g0))[:, None] * jnp.sin(modes[:, None] * x), axis=0)[None]
+    for mismatch in (0., .1):
+        rates = dc * modes.astype(jnp.float64).at[-1].multiply(1 + mismatch)
+        error = jnp.sum((2 * rates * amplitudes)[:, None] * jnp.sin(modes[:, None] * x), axis=0)[None]
+        loss, count = compute_phase_mechanism_loss(
+            eta, xi, target + error, target, jnp.asarray([.2]), k,
+            mechanism="sideband", carrier_mode=jnp.asarray([5]), sideband_offset=jnp.asarray([1]), horizon=horizon,
+        )
+        squared = (horizon * dc * 6 * mismatch)**2
+        expected = squared / (np.sqrt(squared + 1e-14) + 1e-7)
+        np.testing.assert_allclose(loss, expected, rtol=1e-8, atol=1e-18)
+        np.testing.assert_array_equal(count, 1.)
+    # Fixed sidebands are not replaced by whichever neighbor has nonzero energy.
+    one_mode_eta = 1e-8 * jnp.cos(5 * x)[None]
+    loss, count = compute_phase_mechanism_loss(
+        one_mode_eta, jnp.zeros_like(one_mode_eta), target + error, target, jnp.asarray([.2]), k,
+        mechanism="sideband", carrier_mode=jnp.asarray([5]), sideband_offset=jnp.asarray([1]),
+    )
+    np.testing.assert_array_equal((loss, count), (0., 0.))
+
+
+def test_momentum_defect_matches_dealiased_rhs_including_high_mode_products() -> None:
+    n = 128
+    x = jnp.arange(n, dtype=jnp.float64) * (2 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1. / n)
+    eta = (.03 * jnp.sin(3 * x) + .01 * jnp.cos(5 * x))[None]
+    xi = (.04 * jnp.sin(3 * x) - .02 * jnp.cos(4 * x))[None]
+    target = (.05 * jnp.sin(3 * x) + .08 * jnp.sin(17 * x))[None]
+    error = (.01 * jnp.cos(3 * x) + .02 * jnp.sin(20 * x))[None]
+    eta_x, xi_x = (spectral_dx(field, k) for field in (eta, xi))
+    xi_defect = (dealiased_zakharov_xi_rhs(eta_x, xi_x, target + error)
+                 - dealiased_zakharov_xi_rhs(eta_x, xi_x, target))
+    residual = 200 * jnp.mean(xi_x * error - eta_x * xi_defect) / jnp.sqrt(jnp.mean(eta**2) * jnp.mean(xi_x**2))
+    expected = residual**2 / (jnp.sqrt(residual**2 + 1e-14) + 1e-7)
+    loss, count = compute_phase_mechanism_loss(
+        eta, xi, target + error, target, jnp.asarray([.2]), k,
+        mechanism="momentum", horizon=200, k_max=8,
+    )
+    np.testing.assert_allclose(loss, expected, rtol=1e-12)
+    np.testing.assert_array_equal(count, 1.)
+
+
+def test_mechanism_losses_masks_gauge_translation_and_gradients() -> None:
+    n = 128
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(n, dtype=dtype) * (2 * jnp.pi / n)
+        k = jnp.fft.fftfreq(n, d=1. / n).astype(dtype)
+        eta = (.03 * jnp.cos(5 * x) + .004 * jnp.cos(4 * x) + .003 * jnp.cos(6 * x))[None]
+        xi = .02 * jnp.sin(5 * x)[None] + .1 * eta
+        target = .05 * jnp.sin(5 * x)[None]
+        prediction = target + .01 * jnp.cos(4 * x)[None] + .002 * jnp.cos(5 * x)[None]
+        depth = jnp.asarray([.2], dtype=dtype)
+        for mechanism in ("carrier", "sideband", "momentum"):
+            evaluate = jax.jit(jax.value_and_grad(compute_phase_mechanism_loss, argnums=2, has_aux=True),
+                               static_argnames=("mechanism",))
+            options: dict[str, Any] = dict(mechanism=mechanism, carrier_mode=jnp.asarray([5]), sideband_offset=jnp.asarray([1]))
+            (loss, count), gradient = evaluate(eta, xi, prediction, target, depth, k, **options)
+            assert float(loss) > 0 and bool(jnp.isfinite(gradient).all()) and float(jnp.linalg.norm(gradient)) > 0
+            np.testing.assert_array_equal(count, 1.)
+            offsets = (0., .7, -.3, .5)
+            shifted = tuple(jnp.roll(field + offset, 13, axis=-1)
+                            for field, offset in zip((eta, xi, prediction, target), offsets))
+            (shifted_loss, shifted_count), shifted_gradient = evaluate(*shifted, depth, k, **options)
+            tolerance = 5e-4 if dtype == jnp.float32 else 1e-10
+            np.testing.assert_allclose((shifted_loss, shifted_count), (loss, count), rtol=tolerance, atol=1e-10)
+            np.testing.assert_allclose(shifted_gradient, jnp.roll(gradient, 13, axis=-1), rtol=tolerance, atol=1e-5 if dtype == jnp.float32 else 1e-11)
+            for inputs, mask in (((eta, xi, target, target), None),
+                                 ((eta, xi, prediction, target), jnp.asarray([False])),
+                                 ((jnp.zeros_like(eta), jnp.zeros_like(xi), prediction, target), None)):
+                (zero, selected), zero_gradient = evaluate(*inputs, depth, k, sample_mask=mask, **options)
+                np.testing.assert_array_equal(zero, 0.)
+                np.testing.assert_array_equal(zero_gradient, 0.)
+                if inputs[0] is not eta or mask is not None:
+                    np.testing.assert_array_equal(selected, 0.)
+            if dtype == jnp.float64:
+                direction = prediction - target
+                def objective(scale: float | jax.Array) -> jax.Array:
+                    return compute_phase_mechanism_loss(eta, xi, target + scale * direction,
+                                                        target, depth, k, **options)[0]
+                analytical = jax.grad(objective)(1.)
+                finite = (objective(1. + 1e-5) - objective(1. - 1e-5)) / 2e-5
+                np.testing.assert_allclose(analytical, finite, rtol=1e-6, atol=1e-10)
+
+
+def test_mechanism_batched_selection_equals_individual_rows() -> None:
+    n = 128
+    x = jnp.arange(n, dtype=jnp.float64) * (2 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1. / n)
+    carrier, offset = jnp.asarray([5, 7, 9]), jnp.asarray([1, 2, 3])
+    modes = jnp.stack((carrier - offset, carrier, carrier + offset), axis=-1)
+    eta = jnp.sum(jnp.asarray([.004, .03, .003])[None, :, None] * jnp.cos(modes[..., None] * x), axis=1)
+    xi = jnp.sum(.02 * jnp.sin(modes[..., None] * x), axis=1) * jnp.asarray([1., -1., -1.])[:, None]
+    target = .05 * jnp.sin(carrier[:, None] * x)
+    prediction = target + .01 * jnp.cos((carrier - offset)[:, None] * x) + .002 * jnp.cos(carrier[:, None] * x)
+    depth = jnp.asarray([.2, .3, .1])
+    evaluate = jax.jit(jax.value_and_grad(compute_phase_mechanism_loss, argnums=2, has_aux=True), static_argnames=("mechanism",))
+    for mechanism in ("carrier", "sideband", "momentum"):
+        options: dict[str, Any] = dict(mechanism=mechanism, carrier_mode=carrier, sideband_offset=offset)
+        (loss, count), gradient = evaluate(eta, xi, prediction, target, depth, k,
+                                           sample_mask=jnp.asarray([True, False, True]), **options)
+        singles = []
+        for row in (0, 2):
+            (single, _), single_gradient = evaluate(
+                *(field[row:row + 1] for field in (eta, xi, prediction, target, depth)), k,
+                mechanism=mechanism, carrier_mode=carrier[row:row + 1], sideband_offset=offset[row:row + 1],
+            )
+            singles.append(single)
+            np.testing.assert_allclose(gradient[row], single_gradient[0] / 2, rtol=1e-11, atol=1e-12)
+        np.testing.assert_allclose(loss, np.mean(singles), rtol=1e-11)
+        np.testing.assert_array_equal(count, 2.)
+        np.testing.assert_array_equal(gradient[1], 0.)
+
+
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
@@ -775,6 +920,11 @@ if __name__ == "__main__":
         test_modal_radial_error_has_no_instantaneous_phase_defect,
         test_modal_matches_dealiased_rhs_and_normal_coordinate_phase_difference,
         test_modal_masks_centering_and_translation_preserve_selected_mean,
+        test_carrier_phase_has_coupled_half_gain_and_correct_horizon,
+        test_sideband_relative_phase_cancels_translation_but_detects_differential_drift,
+        test_momentum_defect_matches_dealiased_rhs_including_high_mode_products,
+        test_mechanism_losses_masks_gauge_translation_and_gradients,
+        test_mechanism_batched_selection_equals_individual_rows,
     )
     for test in tests:
         test()

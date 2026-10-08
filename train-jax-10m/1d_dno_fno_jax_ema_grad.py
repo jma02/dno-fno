@@ -48,11 +48,13 @@ from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
+from solver.gen_data.benjamin_feir_sampling import BENJAMIN_FEIR_PARAMETER_GROUPS  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS, _write_json, compute_macro_summary, run_family  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, rollout_surrogate  # noqa: E402
 from hadamard_shape_regularizer import compute_hadamard_loss, compute_local_response_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
+    compute_phase_mechanism_loss,
     compute_translation_tangent_loss,
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
@@ -65,6 +67,19 @@ from checkpoint_util import (  # noqa: E402
     save_checkpoint,
     training_counter_values,
 )
+
+
+def subsample_family_indices(
+    indices: np.ndarray, family_ids: np.ndarray, fraction: float, seed: int,
+) -> np.ndarray:
+    if fraction == 1.0:
+        return indices
+    rng = np.random.default_rng(seed)
+    split_families = family_ids[indices]
+    groups = (indices[split_families == family] for family in PhysicalFamilyId)
+    return np.sort(np.concatenate([
+        rng.choice(group, size=int(fraction * group.size), replace=False) for group in groups
+    ]))
 
 
 def main() -> None:
@@ -115,6 +130,10 @@ def main() -> None:
         help="Dataset directory containing the saved .npy arrays.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--train_fraction", type=float, default=1.0,
+                        help="Fixed seeded fraction of training rows retained per family.")
+    parser.add_argument("--validation_fraction", type=float, default=1.0,
+                        help="Fixed seeded fraction of validation rows retained per family; test rollouts are unchanged.")
     parser.add_argument("--modes", type=int, default=32)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--n_blocks", type=int, default=2)
@@ -192,6 +211,11 @@ def main() -> None:
     parser.add_argument("--metric_interval", type=int, default=16,
                         help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
+    parser.add_argument("--phase_mechanism", choices=("none", "stokes_carrier", "tanaka_momentum", "bf_sideband"),
+                        default="none", help="Family-specific coupled phase or momentum-production target.")
+    parser.add_argument("--phase_mechanism_weight", type=float, default=0.0)
+    parser.add_argument("--jonswap_mode_balanced_scale", type=float, default=1.0,
+                        help="Multiply only JONSWAP/TMA rows' mode-balancing penalty by this factor.")
     parser.add_argument(
         "--translation_tangent_weight",
         type=float,
@@ -344,6 +368,14 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if not np.isfinite(args.phase_mechanism_weight) or args.phase_mechanism_weight < 0:
+        parser.error("phase_mechanism_weight must be finite and nonnegative")
+    if not np.isfinite(args.jonswap_mode_balanced_scale) or args.jonswap_mode_balanced_scale < 0:
+        parser.error("jonswap_mode_balanced_scale must be finite and nonnegative")
+    if (args.phase_mechanism == "none") != (args.phase_mechanism_weight == 0):
+        parser.error("A phase mechanism requires a positive weight; none requires zero weight")
+    if not all(0.0 < fraction <= 1.0 for fraction in (args.train_fraction, args.validation_fraction)):
+        parser.error("--train_fraction and --validation_fraction must be in (0, 1]")
     if args.rollout_epochs and (args.rollout_truth_run is None or
                                any(epoch < 1 or epoch > args.epochs for epoch in args.rollout_epochs)):
         parser.error("--rollout_epochs requires --rollout_truth_run and epochs within the training budget")
@@ -431,7 +463,19 @@ def main() -> None:
     family_ids = np.load(dataset_path / "family_id.npy", mmap_mode="r")
     nx = int(dataset["x"].shape[0])
     train_indices, val_indices, _ = build_dataset_split_indices(dataset)
+    train_indices = subsample_family_indices(train_indices, family_ids, args.train_fraction, args.seed)
+    val_indices = subsample_family_indices(val_indices, family_ids, args.validation_fraction, args.seed + 1)
+    if not train_indices.size or not val_indices.size:
+        parser.error("The selected fractions leave an empty training or validation split")
     stats = load_or_compute_stats(dataset_path, dataset, indices=train_indices)
+    phase_modes = None
+    if args.phase_mechanism == "bf_sideband":
+        phase_modes = np.zeros((family_ids.size, 2), dtype=np.int16)
+        selected_rows = np.concatenate((train_indices, val_indices))
+        bf_rows = selected_rows[family_ids[selected_rows] == PhysicalFamilyId.BENJAMIN_FEIR]
+        group_ids = np.load(dataset_path / "parameter_group_id.npy", mmap_mode="r")
+        groups, inverse = np.unique(group_ids[bf_rows], return_inverse=True)
+        phase_modes[bf_rows] = np.asarray([BENJAMIN_FEIR_PARAMETER_GROUPS[group] for group in groups])[inverse]
     full_batches, remainder = divmod(train_indices.size, args.batch_size)
     train_steps_per_epoch = (
         full_batches + bool(remainder // n_devices) + bool(remainder % n_devices)
@@ -624,7 +668,11 @@ def main() -> None:
         *,
         collect_family_metrics: bool = False,
         n_data_only_rows: int = 0,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
+        carrier_modes = sideband_offsets = None
+        if args.phase_mechanism == "bf_sideband":
+            carrier_modes, sideband_offsets = family[:, 1], family[:, 2]
+            family = family[:, 0]
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
         predictions, baseline, m1_baseline = apply_model(
@@ -683,7 +731,7 @@ def main() -> None:
         n_auxiliary_rows = full_batch_size - n_data_only_rows
         if n_auxiliary_rows == 0:
             zero = jnp.float32(0.0)
-            return data_loss, zero, zero, zero, full_l2_loss, family_metrics
+            return data_loss, zero, zero, zero, zero, full_l2_loss, family_metrics
         eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets = (
             value[:n_auxiliary_rows]
             for value in (eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets)
@@ -699,6 +747,8 @@ def main() -> None:
                 k_max=args.mode_balanced_k_max,
                 activity_threshold=args.mode_balanced_activity_threshold,
                 denominator_eps=args.mode_balanced_denominator_eps,
+                sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
+                                                       training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
             )
         tangent_loss = jnp.float32(0.0)
         local_selected = jnp.float32(0.0)
@@ -729,7 +779,28 @@ def main() -> None:
                 / jnp.maximum(global_selected, jnp.float32(1.0))
             )
             tangent_loss = tangent_loss * shard_weight
-        return data_loss, mode_loss, tangent_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
+        mechanism_loss = jnp.float32(0.0)
+        if args.phase_mechanism == "stokes_carrier":
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        elif args.phase_mechanism == "tanaka_momentum":
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="momentum", sample_mask=family == PhysicalFamilyId.TANAKA, horizon=200.0,
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        elif args.phase_mechanism == "bf_sideband":
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="sideband", sample_mask=family == PhysicalFamilyId.BENJAMIN_FEIR, horizon=200.0,
+                carrier_mode=cast(jax.Array, carrier_modes)[:n_auxiliary_rows],
+                sideband_offset=cast(jax.Array, sideband_offsets)[:n_auxiliary_rows],
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        return data_loss, mode_loss, tangent_loss, mechanism_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
 
     def hadamard_loss_on_subset(
         rng: jax.Array,
@@ -897,7 +968,7 @@ def main() -> None:
         def compute_training_loss(
             current_params: FlatParams,
         ) -> tuple[jax.Array, dict[str, jax.Array]]:
-            data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss, _ = compute_loss_components(
+            data_loss, mode_loss, tangent_loss, mechanism_loss, tangent_fraction, full_l2_loss, _ = compute_loss_components(
                 current_params, eta, xi, gxi, batch_depth, family,
                 n_data_only_rows=n_data_only_rows,
             )
@@ -912,13 +983,13 @@ def main() -> None:
             }
             if rollout_batch is not None:
                 scheduled, depth_sub, family_sub, eta_sub, xi_sub, target_sub, valid_fraction = rollout_batch
-                rollout_loss, rollout_mode_loss, rollout_tangent_loss = jax.lax.cond(
+                rollout_loss, rollout_mode_loss, rollout_tangent_loss, rollout_mechanism_loss = jax.lax.cond(
                     scheduled,
                     lambda p: tuple(map(jnp.float64, compute_loss_components(
                         p, eta_sub, xi_sub, target_sub, depth_sub, family_sub,
                         n_data_only_rows=eta_sub.shape[0] if args.rollout_training_loss == "data" else 0,
-                    )[:3])),
-                    lambda _: (jnp.float64(0.0),) * 3, current_params,
+                    )[:4])),
+                    lambda _: (jnp.float64(0.0),) * 4, current_params,
                 )
                 rollout_weight = args.rollout_training_weight * (
                     jnp.clip(
@@ -930,11 +1001,13 @@ def main() -> None:
                 physics_loss += rollout_weight * (
                     mode_weight * rollout_mode_loss
                     + args.translation_tangent_weight * rollout_tangent_loss
+                    + args.phase_mechanism_weight * rollout_mechanism_loss
                 )
                 metrics.update(
                     rollout_data_loss=rollout_loss, rollout_valid_fraction=valid_fraction,
                     rollout_mode_balanced_loss=rollout_mode_loss,
                     rollout_translation_tangent_loss=rollout_tangent_loss,
+                    rollout_phase_mechanism_loss=rollout_mechanism_loss,
                     rollout_active=jnp.float32(scheduled), rollout_weight=rollout_weight * scheduled,
                 )
             if args.mode_balanced_weight > 0.0:
@@ -944,6 +1017,9 @@ def main() -> None:
                 physics_loss += args.translation_tangent_weight * tangent_loss
                 metrics["translation_tangent_loss"] = tangent_loss
                 metrics["translation_tangent_fraction"] = tangent_fraction
+            if args.phase_mechanism_weight > 0.0:
+                physics_loss += args.phase_mechanism_weight * mechanism_loss
+                metrics["phase_mechanism_loss"] = mechanism_loss
             if args.hadamard_weight > 0.0:
                 # Evaluate Hadamard on a small random subset, only on scheduled steps.
                 hadamard_scheduled = current_state.step % args.hadamard_interval == 0
@@ -1018,11 +1094,11 @@ def main() -> None:
                 jax.random.fold_in(jax.random.fold_in(rng_key, batch_index), jax.lax.axis_index("batch")),
                 current_params, eta, xi, batch_depth,
             ))
-        data_loss, mode_loss, tangent_loss, tangent_fraction, full_l2_loss, family_metrics = compute_loss_components(
+        data_loss, mode_loss, tangent_loss, mechanism_loss, tangent_fraction, full_l2_loss, family_metrics = compute_loss_components(
             current_params, eta, xi, gxi, batch_depth, family, collect_family_metrics=True,
         )
         return jax.lax.pmean(
-            (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss, *family_metrics),
+            (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss, mechanism_loss, *family_metrics),
             axis_name="batch",
         )
 
@@ -1032,7 +1108,7 @@ def main() -> None:
                 partial(eval_step, run_hadamard=run_hadamard),
                 mesh=mesh,
                 in_specs=(P(), P(), P(), partition, partition, partition, partition, partition),
-                out_specs=(P(),) * (6 + 5 * len(PhysicalFamilyId)),
+                out_specs=(P(),) * (7 + 5 * len(PhysicalFamilyId)),
                 check_rep=False,
             )
         )
@@ -1118,7 +1194,8 @@ def main() -> None:
             device_count=n_devices,
         )
         return device_prefetch(
-            ((*batch[:4], family_ids[batch[4]]) for batch in batches),
+            ((*batch[:4], family_ids[batch[4]] if phase_modes is None else
+              np.column_stack((family_ids[batch[4]], phase_modes[batch[4]]))) for batch in batches),
             sharding=data_sharding,
         )
 
@@ -1223,6 +1300,7 @@ def main() -> None:
         # Ordinary losses use every batch; HD is a diagnostic on fixed sampled batches.
         val_data_loss = val_mode_loss = val_tangent_loss = val_hadamard_loss = float("inf")
         val_full_l2_loss = float("inf")
+        val_mechanism_loss = float("inf")
         losses = np.asarray(val_batch_losses)
         if val_batch_losses:
             means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
@@ -1233,10 +1311,12 @@ def main() -> None:
             means[3] = np.average(losses[hadamard_selected, 3], weights=np.asarray(val_batch_sizes)[hadamard_selected])
             val_data_loss, val_mode_loss, val_tangent_loss, val_hadamard_loss = map(float, means)
             val_full_l2_loss = float(np.average(losses[:, 5], weights=val_batch_sizes))
+            val_mechanism_loss = float(np.average(losses[:, 6], weights=val_batch_sizes))
         val_loss = (
             val_data_loss
             + args.mode_balanced_weight * val_mode_loss
             + args.translation_tangent_weight * val_tangent_loss
+            + args.phase_mechanism_weight * val_mechanism_loss
         )
         epoch_record = {
             "epoch": epoch,
@@ -1247,9 +1327,10 @@ def main() -> None:
             "val_mode_balanced_loss": val_mode_loss,
             "val_translation_tangent_loss": val_tangent_loss,
             "val_hadamard_loss": val_hadamard_loss,
+            "val_phase_mechanism_loss": val_mechanism_loss,
         }
         if val_batch_losses:
-            family_totals = np.sum(losses[:, 6:] * np.asarray(val_batch_sizes)[:, None], axis=0).reshape(-1, 5)
+            family_totals = np.sum(losses[:, 7:] * np.asarray(val_batch_sizes)[:, None], axis=0).reshape(-1, 5)
             for family_id, (count, relative, residual, wins, data_sum) in zip(PhysicalFamilyId, family_totals):
                 prefix = f"val_{family_id.name.lower()}"
                 epoch_record[f"{prefix}_l2_loss"] = float(relative / count)
@@ -1261,7 +1342,8 @@ def main() -> None:
             epoch_record[name] = total / sum(train_batch_sizes)
         if loss_sums.get("rollout_active", 0.0) > 0:
             for name in ("rollout_data_loss", "rollout_mode_balanced_loss",
-                         "rollout_translation_tangent_loss", "rollout_valid_fraction", "rollout_weight"):
+                         "rollout_translation_tangent_loss", "rollout_phase_mechanism_loss",
+                         "rollout_valid_fraction", "rollout_weight"):
                 epoch_record[name] = loss_sums[name] / loss_sums["rollout_active"]
         if args.translation_tangent_weight > 0.0:
             epoch_record["translation_tangent_loss"] = tangent_loss_sum / max(tangent_sample_count, 1.0)

@@ -21,6 +21,7 @@ def compute_mode_balanced_loss(
     huber_delta: float = 1.0,
     ratio_cap: float = 100.0,
     dispersion_weighting: bool = False,
+    sample_weight: jax.Array | None = None,
 ) -> jax.Array:
     """Compare complex DNO coefficients with soft balance over active modes.
 
@@ -48,6 +49,9 @@ def compute_mode_balanced_loss(
 
     This changes only the relative weight of samples; the complex per-mode
     loss within each sample is unchanged.
+
+    Optional sample weights multiply rows before the ordinary batch mean, so
+    ablating one family does not increase the other families' coefficients.
     """
     real_dtype = eta.dtype
     eta_hat, prediction_hat, target_hat = (
@@ -99,4 +103,6 @@ def compute_mode_balanced_loss(
             jnp.sum(omega_squared * eta_energy, axis=-1) / safe_eta_energy
         )
         per_sample_loss = effective_frequency_squared * per_sample_loss
+    if sample_weight is not None:
+        per_sample_loss *= jax.lax.stop_gradient(sample_weight)
     return jnp.mean(per_sample_loss)

@@ -60,6 +60,25 @@ def test_exact_prediction_has_zero_loss() -> None:
     assert loss.shape == ()
 
 
+def test_row_ablation_preserves_other_gradients_and_batch_denominator() -> None:
+    x, k = _grid(64)
+    eta = jnp.stack((.1 * jnp.cos(3 * x), .2 * jnp.cos(5 * x)))
+    target = jnp.stack((.2 * jnp.sin(3 * x), .3 * jnp.sin(5 * x)))
+    prediction = target + .01 * eta
+    depth = jnp.array([.5, 1.0])
+    full_value, full_gradient = jax.value_and_grad(compute_mode_balanced_loss, argnums=1)(
+        eta, prediction, target, depth, k,
+    )
+    masked_value, masked_gradient = jax.value_and_grad(compute_mode_balanced_loss, argnums=1)(
+        eta, prediction, target, depth, k, sample_weight=jnp.array([1.0, 0.0]),
+    )
+    single = compute_mode_balanced_loss(eta[:1], prediction[:1], target[:1], depth[:1], k)
+    np.testing.assert_allclose(masked_value, .5 * single, rtol=1e-12)
+    np.testing.assert_allclose(masked_gradient[0], full_gradient[0], rtol=1e-12)
+    np.testing.assert_array_equal(masked_gradient[1], 0.0)
+    assert 0 < masked_value < full_value
+
+
 def test_complex_loss_detects_amplitude_and_phase_error() -> None:
     x, _ = _grid()
     depth_value = 0.4
@@ -309,6 +328,7 @@ def test_dispersion_weighting_is_finite_for_flat_surface() -> None:
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
+        test_row_ablation_preserves_other_gradients_and_batch_denominator,
         test_complex_loss_detects_amplitude_and_phase_error,
         test_sideband_fractional_error_has_comparable_weight_to_carrier,
         test_zero_and_out_of_band_modes_are_finite_and_inactive,
