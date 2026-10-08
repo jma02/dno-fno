@@ -1,12 +1,15 @@
 """Craig-Sulem neural DNO with a selectable analytic baseline.
 
 Here eta is surface elevation and xi is surface velocity potential.
-Each correction branch applies M[spatial_weights(eta) * M[xi]], where M is
-a depth-dependent real Fourier filter. The correction is self-adjoint,
+Ordinary branches apply M[spatial_weights(eta) * M[xi]]; optional nested
+branches apply gamma M[eta N[eta M[xi]]], with real depth-dependent filters.
+The correction is self-adjoint,
 linear in xi. It starts at order eta^3 with G0+G1+G2, eta^2 with G0+G1,
 eta with G0 alone, or uses a constant feature to learn the full DNO.
 """
 from __future__ import annotations
+
+from typing import cast
 
 import jax.numpy as jnp
 from flax import linen as nn
@@ -38,11 +41,12 @@ class DepthAwareMultiplier(nn.Module):
 
 
 class CraigSulemBlock(nn.Module):
-    """Sum parallel branches: filter xi, multiply by spatial weights, filter again."""
+    """Sum tied-filter branches, optionally nesting a filter between two eta factors."""
     n_branches: int
     domain_length: float
     h_clip_max: float
     mult_hidden: int = 32
+    nested: bool = False
 
     @nn.compact
     def __call__(
@@ -50,14 +54,18 @@ class CraigSulemBlock(nn.Module):
         eta_features: jnp.ndarray,
         xi_phys: jnp.ndarray,
         depth: jnp.ndarray,
+        *,
+        eta_norm: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         grid_size = eta_features.shape[1]
 
         # Initialize the learned contribution to zero.
-        spatial_weights = nn.Dense(
-            self.n_branches, name="phi_proj",
-            kernel_init=nn.initializers.zeros, use_bias=False,
-        )(eta_features)
+        spatial_weights = None
+        if not self.nested:
+            spatial_weights = nn.Dense(
+                self.n_branches, name="phi_proj",
+                kernel_init=nn.initializers.zeros, use_bias=False,
+            )(eta_features)
 
         # Use the same real filter on both sides to keep the correction self-adjoint.
         multiplier = DepthAwareMultiplier(
@@ -72,7 +80,20 @@ class CraigSulemBlock(nn.Module):
         filtered_xi = jnp.fft.irfft(
             multiplier * xi_hat[..., None], n=grid_size, axis=1, norm="forward",
         )
-        weighted_xi = spatial_weights * filtered_xi
+        if self.nested:
+            inner_multiplier = DepthAwareMultiplier(
+                self.n_branches, self.domain_length, self.h_clip_max,
+                self.mult_hidden, name="m_inner",
+            )(depth, grid_size // 2 + 1)
+            surface = cast(jnp.ndarray, eta_norm)[..., None]
+            inner_hat = jnp.fft.rfft(surface * filtered_xi, axis=1, norm="forward")
+            inner_field = jnp.fft.irfft(
+                inner_multiplier * inner_hat, n=grid_size, axis=1, norm="forward",
+            )
+            gamma = self.param("gamma", nn.initializers.zeros, (self.n_branches,))
+            weighted_xi = gamma * surface * inner_field
+        else:
+            weighted_xi = cast(jnp.ndarray, spatial_weights) * filtered_xi
         weighted_xi_hat = jnp.fft.rfft(weighted_xi, axis=1, norm="forward")
         correction_hat = jnp.sum(multiplier * weighted_xi_hat, axis=-1)
         return jnp.fft.irfft(correction_hat, n=grid_size, axis=-1, norm="forward")
@@ -83,6 +104,7 @@ class CraigSulemDNO(nn.Module):
     width: int                        # Each shared eta layer has width // 2 channels.
     n_blocks: int = 4                 # Groups of parallel branches, summed together.
     latent: int = 64                  # Branches per group.
+    nested_blocks: int = 0            # Replace this many final groups with M eta N eta M.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -263,14 +285,18 @@ class CraigSulemDNO(nn.Module):
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)
+        # The nested eta factors use the same fixed training-RMS scaling as the trunk.
+        nested_surface = (eta_norm / self.surface_feature_scales[0]
+                          if self.surface_feature_scales is not None else eta_norm)
         for block_idx in range(self.n_blocks):
             correction = correction + CraigSulemBlock(
                 n_branches=self.latent,
                 domain_length=self.domain_length,
                 h_clip_max=self.h_clip_max,
                 mult_hidden=self.mult_hidden,
+                nested=block_idx >= self.n_blocks - self.nested_blocks,
                 name=f"cs_block_{block_idx}",
-            )(eta_features, xi_phys, clipped_log_depth)
+            )(eta_features, xi_phys, clipped_log_depth, eta_norm=nested_surface)
 
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5

@@ -87,6 +87,7 @@ def load_run(
         model = CraigSulemDNO(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),
+            nested_blocks=int(config.get("cs_nested_blocks", 0)),
             latent=int(config["latent"]),
             n_polys=int(config["cs_n_polys"]),
             use_first_deriv=bool(config["cs_use_first_deriv"]),

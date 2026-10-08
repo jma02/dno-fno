@@ -96,13 +96,23 @@ def build_variant(
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
+    if model.nested_blocks:
+        if not include_baselines or not include_correction:
+            raise ValueError("Nested inference requires the full baseline and correction.")
+        if variant == "original":
+            return jax.jit(lambda eta, xi: predict(eta, xi, depth))
+        if not spectral_io:
+            raise ValueError("Nested inference supports original or Fourier-I/O variants only.")
+    ordinary_blocks = model.n_blocks - model.nested_blocks
+    ordinary_branches = ordinary_blocks * model.latent
     factors = None
     if "lowrank" in trial:
         rank = int(trial.split("lowrank")[1])
         with np.load(ROOT / "outputs/cufftdx_20260925/lowrank_factors.npz") as saved:
             factors = (jnp.asarray(saved[f"A{rank}"]), jnp.asarray(saved[f"B{rank}"]))
-    head_kernel = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["phi_proj"]["kernel"]
-                                        for i in range(model.n_blocks)), axis=-1)
+    head_kernel = (jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["phi_proj"]["kernel"]
+                                        for i in range(ordinary_blocks)), axis=-1)
+                   if ordinary_blocks else None)
     cached = None
     k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
     surface_ops = jnp.stack([symbol for enabled, symbol in (
@@ -123,6 +133,17 @@ def build_variant(
 
     if spectral_io:
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
+        inner_filters = gamma = None
+        if model.nested_blocks:
+            inner = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden)
+            inner_filters = jnp.moveaxis(jax.jit(lambda d: jnp.concatenate(tuple(cast(jax.Array, inner.apply(
+                {"params": loaded.params[f"cs_block_{i}"]["m_inner"]}, d, nx // 2 + 1,
+            )) for i in range(ordinary_blocks, model.n_blocks)), axis=-1))(
+                jnp.minimum(depth.astype(jnp.float32).reshape(-1, 1), jnp.log(model.h_clip_max))
+            ), -1, 1)
+            gamma = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["gamma"]
+                                         for i in range(ordinary_blocks, model.n_blocks)))
+            jax.block_until_ready((inner_filters, gamma))
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
         log_depth = depth.astype(jnp.float32).reshape(-1, 1)
@@ -239,15 +260,29 @@ def build_variant(
             features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             if model.surface_context_gate and context is not None:
                 features = features * (1.0 + jnp.tanh(context))
-            weights = features @ head_kernel
-            if fused_product:
-                weighted_hat = fft(weights, nx, b=branch_fields, outer=filters, ept=fft_ept, channels_last=True)
-            elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
-                weights = jnp.moveaxis(weights, -1, 1)
-                weighted_hat = nx * fft(weights, nx, b=branch_fields, outer=filters.astype(jnp.complex64), ept=fft_ept)
-            else:
-                weighted_hat = filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * branch_fields)
-            correction_hat = jnp.sum(weighted_hat, axis=1) / (model.n_blocks * model.latent) ** 0.5
+            correction_hat = jnp.zeros_like(xi_phys_hat)
+            if ordinary_blocks:
+                weights = features @ cast(jax.Array, head_kernel)
+                ordinary_fields = branch_fields[:, :ordinary_branches]
+                ordinary_filters = filters[:, :ordinary_branches]
+                if fused_product:
+                    weighted_hat = fft(weights, nx, b=ordinary_fields, outer=ordinary_filters,
+                                       ept=fft_ept, channels_last=True)
+                elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
+                    weights = jnp.moveaxis(weights, -1, 1)
+                    weighted_hat = nx * fft(weights, nx, b=ordinary_fields,
+                                           outer=ordinary_filters.astype(jnp.complex64), ept=fft_ept)
+                else:
+                    weighted_hat = ordinary_filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * ordinary_fields)
+                correction_hat = jnp.sum(weighted_hat, axis=1)
+            if model.nested_blocks:
+                nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
+                inner_hat = jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:])
+                middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=nx)
+                nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
+                    cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :] * middle)
+                correction_hat = correction_hat + jnp.sum(nested_hat, axis=1)
+            correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if not overlap_g1:
                 if model.baseline_order == 2:
                     analytic_hat = m2_hat(cast(jax.Array, normalized_inputs))
@@ -306,7 +341,7 @@ def build_variant(
                 if trial == "cufftdx_dense":
                     hidden = dense(call_args[0], loaded.params["eta_feat_proj"]["kernel"], "gelu")
                     hidden = dense(hidden, loaded.params["eta_feat_mix"]["kernel"], "gelu_lift")
-                    dense_weights = dense(hidden, head_kernel)
+                    dense_weights = dense(hidden, cast(jax.Array, head_kernel))
                     return jnp.zeros_like(hidden)
             if isinstance(module, nn.Dense) and module.name == "eta_feat_mix":
                 if trial == "cufftdx_dense":
@@ -349,7 +384,7 @@ def build_variant(
                 result = cached[block]
             elif isinstance(module, nn.Dense) and module.name == "phi_proj" and trial in ("cufftdx_dense", "cufftdx_head"):
                 if dense_weights is None:
-                    dense_weights = dense(call_args[0], head_kernel)
+                    dense_weights = dense(call_args[0], cast(jax.Array, head_kernel))
                 block = int(cast(Scope, module.scope).path[-2].removeprefix("cs_block_"))
                 result = dense_weights[..., block * model.latent:(block + 1) * model.latent]
             else:

@@ -22,7 +22,7 @@ from flax import linen as nn
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier
 from solver.solvers.dno_series_jax import dno_series_eval
 
 jax.config.update("jax_enable_x64", True)
@@ -44,6 +44,7 @@ def _model(
     surface_feature_scales: tuple[float, ...] | None = None,
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
+    nested_blocks: int = 0,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -59,6 +60,7 @@ def _model(
         surface_feature_scales=surface_feature_scales,
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
+        nested_blocks=nested_blocks,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -77,11 +79,13 @@ def _activate_residual(variables: VariableState) -> FrozenVariableDict:
     """Replace zero-init block projections to mimic a trained checkpoint."""
     mutable = unfreeze(variables)
     for block_idx in range(2):
-        kernel = mutable["params"][f"cs_block_{block_idx}"]["phi_proj"]["kernel"]
+        block = mutable["params"][f"cs_block_{block_idx}"]
         key = jax.random.PRNGKey(100 + block_idx)
-        mutable["params"][f"cs_block_{block_idx}"]["phi_proj"]["kernel"] = (
-            0.2 * jax.random.normal(key, kernel.shape, dtype=kernel.dtype)
-        )
+        if "gamma" in block:
+            block["gamma"] = 0.2 * jax.random.normal(key, block["gamma"].shape, dtype=block["gamma"].dtype)
+        else:
+            kernel = block["phi_proj"]["kernel"]
+            block["phi_proj"]["kernel"] = 0.2 * jax.random.normal(key, kernel.shape, dtype=kernel.dtype)
     if "eta_filter_out" in mutable["params"]:
         kernel = mutable["params"]["eta_filter_out"]["kernel"]
         mutable["params"]["eta_filter_out"]["kernel"] = 0.2 * jax.random.normal(
@@ -444,6 +448,8 @@ def test_experimental_residual_orders() -> None:
         (_model(surface_context_width=8, surface_context_gate=True,
                 surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
         (_model(baseline_order=2, surface_context_width=8, surface_context_gate=True), 3),
+        (_model(nested_blocks=1, surface_context_width=8), 2),
+        (_model(nested_blocks=2), 2),
     ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
@@ -558,6 +564,70 @@ def test_bounded_context_gate_reuses_context_and_preserves_initialization() -> N
     assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
 
 
+def test_nested_branch_formula_and_gradients() -> None:
+    eta, xi, depth = _state()
+    features = jnp.stack((eta, eta**2), axis=-1)
+    block = CraigSulemBlock(4, 2 * pi, 5.0, 16, nested=True)
+    variables = unfreeze(block.init(jax.random.PRNGKey(19), features, xi, depth, eta_norm=eta))
+    assert set(variables["params"]) == {"m_shared", "m_inner", "gamma"}
+    assert jnp.all(block.apply(variables, features, xi, depth, eta_norm=eta) == 0)
+    variables["params"]["gamma"] = jnp.asarray([0.1, -0.2, 0.3, -0.4], dtype=jnp.float32)
+    multiplier = DepthAwareMultiplier(4, 2 * pi, 5.0, 16)
+    outer, inner = (cast(jax.Array, multiplier.apply(
+        {"params": variables["params"][name]}, depth, eta.shape[-1] // 2 + 1,
+    )) for name in ("m_shared", "m_inner"))
+    field = jnp.fft.irfft(outer * jnp.fft.rfft(xi)[..., None], n=eta.shape[-1], axis=1)
+    field = jnp.fft.irfft(inner * jnp.fft.rfft(eta[..., None] * field, axis=1), n=eta.shape[-1], axis=1)
+    expected = jnp.fft.irfft(jnp.sum(
+        outer * jnp.fft.rfft(variables["params"]["gamma"] * eta[..., None] * field, axis=1), axis=-1,
+    ), n=eta.shape[-1])
+    actual = cast(jax.Array, block.apply(variables, features, xi, depth, eta_norm=eta))
+    assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-15)
+    gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, block.apply(
+        {"params": params}, features, xi, depth, eta_norm=eta,
+    )) ** 2))(variables["params"])
+    assert jnp.linalg.norm(gradient["gamma"]) > 0
+    for name in ("m_shared", "m_inner"):
+        for layer in ("hidden", "out"):
+            assert jnp.linalg.norm(gradient[name][layer]["kernel"]) > 0
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+
+
+def test_nested_model_replacement_preserves_structure() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
+    original = _model(surface_context_width=8, surface_feature_scales=scales)
+    original_variables = original.init(jax.random.PRNGKey(20), inputs, depth)
+    for nested_blocks in (1, 2):
+        model = original.clone(nested_blocks=nested_blocks)
+        variables = model.init(jax.random.PRNGKey(20), inputs, depth)
+        for name, parameters in original_variables["params"].items():
+            if name.startswith("cs_block_") and int(name.rsplit("_", 1)[-1]) >= model.n_blocks - nested_blocks:
+                parameters = {"m_shared": parameters["m_shared"]}
+                assert set(variables["params"][name]) == {"m_shared", "m_inner", "gamma"}
+            for key, value in parameters.items():
+                assert all(jnp.array_equal(a, b) for a, b in zip(
+                    jax.tree.leaves(value), jax.tree.leaves(variables["params"][name][key]), strict=True,
+                ))
+        assert jnp.array_equal(
+            cast(jax.Array, model.apply(variables, inputs, depth)),
+            cast(jax.Array, original.apply(original_variables, inputs, depth)),
+        )
+        variables = _activate_residual(variables)
+        psi = jnp.roll(xi, 9, axis=-1)
+        actual = _learned_residual(model, variables, eta, xi, depth)
+        if nested_blocks == model.n_blocks:
+            unscaled = _learned_residual(model.clone(surface_feature_scales=None), variables, eta, xi, depth)
+            assert jnp.allclose(actual, unscaled / scales[0]**2, rtol=1e-10, atol=1e-14)
+        other = _learned_residual(model, variables, eta, psi, depth)
+        assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+        mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+        assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+        shifted = _learned_residual(model, variables, jnp.roll(eta, 7, axis=-1), jnp.roll(xi, 7, axis=-1), depth)
+        assert jnp.allclose(shifted, jnp.roll(actual, 7, axis=-1), rtol=1e-10, atol=1e-14)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -577,6 +647,8 @@ def main() -> int:
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
         test_bounded_context_gate_reuses_context_and_preserves_initialization,
+        test_nested_branch_formula_and_gradients,
+        test_nested_model_replacement_preserves_structure,
     )
     for test in tests:
         test()

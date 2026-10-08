@@ -111,6 +111,8 @@ def main() -> None:
                         help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
     parser.add_argument("--cs_surface_context_gate", action="store_true",
                         help="Also modulate the quadratic surface lift by bounded Fourier context.")
+    parser.add_argument("--cs_nested_blocks", type=int, default=0,
+                        help="Replace the final N branch groups with learned nested surface/filter compositions.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -425,6 +427,10 @@ def main() -> None:
         parser.error("--cs_surface_context_width must be nonnegative")
     if args.cs_surface_context_gate and args.cs_surface_context_width == 0:
         parser.error("--cs_surface_context_gate requires --cs_surface_context_width > 0")
+    if not 0 <= args.cs_nested_blocks <= args.n_blocks:
+        parser.error("--cs_nested_blocks must be between zero and --n_blocks")
+    if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
+        parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
     if args.model != "cs_dno" and (args.cs_normalize_surface_features or args.cs_surface_context_width):
         parser.error("Surface-feature experiments require --model cs_dno")
     start_time = perf_counter()
@@ -536,6 +542,7 @@ def main() -> None:
                                     if args.cs_surface_feature_scales is not None else None),
             surface_context_width=args.cs_surface_context_width,
             surface_context_gate=args.cs_surface_context_gate,
+            nested_blocks=args.cs_nested_blocks,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,
@@ -583,14 +590,30 @@ def main() -> None:
                 if context.module.name != f"cs_block_{args.n_blocks - 1}":
                     return jnp.zeros_like(xi_phys)
                 groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
-                weights = eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups], axis=-1)
+                ordinary_groups = args.n_blocks - args.cs_nested_blocks
+                ordinary_branches = ordinary_groups * args.latent
+                weights = (eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups[:ordinary_groups]], axis=-1)
+                           if ordinary_groups else jnp.zeros((*eta_features.shape[:2], 0), dtype=eta_features.dtype))
                 filters = jnp.concatenate([
                     cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
                     for group in groups
                 ], axis=-1)
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
                 filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
-                weighted_hat = jnp.fft.rfft(weights * filtered, axis=1, norm="forward")
+                weighted = weights * filtered[..., :ordinary_branches]
+                if args.cs_nested_blocks:
+                    nested_eta = call_kwargs["eta_norm"][..., None]
+                    inner_filters = jnp.concatenate([
+                        cast(jax.Array, multiplier_model.apply({"params": group["m_inner"]}, log_depth, nx // 2 + 1))
+                        for group in groups[ordinary_groups:]
+                    ], axis=-1)
+                    inner = jnp.fft.irfft(
+                        inner_filters * jnp.fft.rfft(nested_eta * filtered[..., ordinary_branches:], axis=1, norm="forward"),
+                        n=nx, axis=1, norm="forward",
+                    )
+                    gains = jnp.concatenate([group["gamma"] for group in groups[ordinary_groups:]])
+                    weighted = jnp.concatenate((weighted, nested_eta * inner * gains), axis=-1)
+                weighted_hat = jnp.fft.rfft(weighted, axis=1, norm="forward")
                 return jnp.fft.irfft(jnp.sum(filters * weighted_hat, axis=-1), n=nx, axis=-1, norm="forward")
             return next_fun(*call_args, **call_kwargs)
 

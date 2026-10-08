@@ -21,6 +21,7 @@ for variant in "$@"; do
     tanaka) variant_args=(--phase_mechanism tanaka_momentum --phase_mechanism_weight 0.01384754275706006) ;;
     bf) variant_args=(--phase_mechanism bf_sideband --phase_mechanism_weight 0.00013728115168189654) ;;
     jonswap) variant_args=(--jonswap_mode_balanced_scale 0) ;;
+    nested) variant_args=(--cs_nested_blocks 2) ;;
     *) printf 'Unsupported phase experiment: %s\n' "$variant" >&2; exit 2 ;;
   esac
   run_name=c27_phase40_${variant}_subset16_${run_date}
@@ -51,6 +52,7 @@ for variant in "$@"; do
     --batch_size 1024 --epochs 40 --stop_after_epoch 40 --seed 0 \
     --train_fraction 0.0625 --validation_fraction 0.0625 \
     --lr 2e-5 --lr_warmup_steps 500 --gradient_ema_decay 0.9 \
+    --weight_ema_decay 0.999 --weight_ema_start_fraction 0.8 \
     --data_normalization target --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 \
     --translation_tangent_weight 10 --translation_tangent_scope tanaka \
     --hadamard_weight 0.01 --hadamard_warmup_steps 500 --hadamard_interval 16 \
@@ -60,5 +62,16 @@ for variant in "$@"; do
     --rollout_training_interval 16 --rollout_training_microbatch 8 --rollout_training_steps 10 \
     --rollout_epochs 40 --rollout_truth_run "$reference_run" \
     --run_name "$run_name" "${variant_args[@]}" > "$trial_dir/console.log" 2>&1
+  for group in 0 1; do
+    families=(stokes tanaka)
+    (( group == 0 )) || families=(jonswap_tma benjamin_feir)
+    uv run --no-sync python -m solver.evals.eval_suite --gpu \
+      --run_dir "$trial_dir" --checkpoint weight_ema --families "${families[@]}" \
+      --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
+      --n_ics 32 --ic_selection stratified --rollout_batch_size 32 \
+      --truth_cache "$reference_run/eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu$group" \
+      --output_dir "$trial_dir/eval_epoch40_weight_ema_test_stratified_n32_gpu$group" \
+      >> "$trial_dir/console.log" 2>&1
+  done
   printf '%s %s training and rollouts complete\n' "$(date +%H:%M)" "$run_name"
 done

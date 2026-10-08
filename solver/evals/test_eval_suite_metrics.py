@@ -139,6 +139,7 @@ class ComputeMetricsTest(unittest.TestCase):
                         np.testing.assert_array_equal(actual, expected)
 
     def test_checkpoint_loader_restores_cs_architecture_options(self) -> None:
+        jax.devices()  # Initialize plugin discovery before mocking Path.read_text.
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
             "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
@@ -149,6 +150,7 @@ class ComputeMetricsTest(unittest.TestCase):
         }
         for options in (
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
+            {"cs_nested_blocks": 1, "cs_baseline_order": 1},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
@@ -171,6 +173,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.use_relative_elevation, options.get("cs_use_relative_elevation", False))
                 self.assertEqual(loaded.model.use_learned_eta_filters, options.get("cs_use_learned_eta_filters", False))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
+                self.assertEqual(loaded.model.nested_blocks, options.get("cs_nested_blocks", 0))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
@@ -184,8 +187,42 @@ class ComputeMetricsTest(unittest.TestCase):
         }) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
             loaded = load_run("/tmp/dno-architecture-loader-test", checkpoint="weight_ema")
             self.assertEqual(restore.call_args.kwargs["ckpt_dir"].name, "weight_ema_ckpt")
-            np.testing.assert_array_equal(loaded.params["value"], [2.0])
-            self.assertEqual(loaded.epoch, 1)
+        np.testing.assert_array_equal(loaded.params["value"], [2.0])
+        self.assertEqual(loaded.epoch, 1)
+
+    def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
+        model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
+                             baseline_order=1, baseline_true_depth=True)
+        inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(4), (2, 32, 2), dtype=jnp.float32)
+        depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float32))
+        params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
+        params["cs_block_0"]["gamma"] = jnp.full((2,), 0.1, dtype=jnp.float32)
+        prediction, baseline, m1 = cast(tuple[jax.Array, jax.Array, jax.Array],
+                                       model.apply({"params": params}, inputs, depth, return_baseline=True))
+        np.testing.assert_array_equal(baseline, m1)
+        self.assertGreater(float(jnp.linalg.norm(prediction - baseline)), 1e-7)
+        config = {
+            "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
+            "cs_nested_blocks": 1, "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
+            "cs_use_first_deriv": True, "cs_use_second_deriv": True,
+            "cs_use_half_deriv": True, "cs_use_hilbert": True,
+            "cs_baseline_order": 1, "cs_baseline_true_depth": True,
+            "domain_length": 2 * np.pi, "xi_scale": 1.0, "eta_scale": 1.0, "target_scale": 1.0,
+        }
+        stats = {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0}
+        with patch("solver.evals.model_rollout.Path.read_text", side_effect=[
+            json.dumps(config), json.dumps({"epoch": 40, "stats": stats}),
+        ]), patch("solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value={
+            "params": params,
+        }), patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
+            restored = load_run("/tmp/dno-nested-loader-test", checkpoint="latest")
+        actual = build_predict_gxi_batched(restored)(inputs[..., 0], inputs[..., 1], depth)
+        expected = prediction[..., 0].astype(jnp.float64)
+        np.testing.assert_allclose(actual, expected - expected.mean(axis=-1, keepdims=True),
+                                   rtol=2e-6, atol=1e-7)
+        self.assertEqual(restored.model.nested_blocks, 1)
+        self.assertEqual(restored.model.baseline_order, 1)
+        self.assertEqual(restored.epoch, 40)
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)

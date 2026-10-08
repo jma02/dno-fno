@@ -11,13 +11,16 @@ from typing import Any, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import linen as nn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "models" / "fno-jax"))
+sys.path.insert(0, str(REPO_ROOT / "models" / "dno-net"))
 sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
@@ -316,7 +319,7 @@ def test_family_metrics_recombine_uneven_counts_and_isolate_nan() -> None:
     namespace: dict[str, Any] = {"np": np, "PhysicalFamilyId": PhysicalFamilyId}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
     aggregate = namespace["aggregate"]
-    full_record = aggregate(np.concatenate((np.zeros(6), metrics.ravel()))[None, :], [12])
+    full_record = aggregate(np.concatenate((np.zeros(7), metrics.ravel()))[None, :], [12])
     for family_id in PhysicalFamilyId:
         selected_errors = np.asarray(errors)[np.asarray(family == family_id)]
         prefix = f"val_{family_id.name.lower()}"
@@ -333,7 +336,7 @@ def test_family_metrics_recombine_uneven_counts_and_isolate_nan() -> None:
         for start, end in partitions:
             _, (_, values) = losses(prediction[start:end], target[start:end], baseline[start:end],
                                     jnp.zeros_like(target[start:end]), family[start:end])
-            rows.append(np.concatenate((np.zeros(6), np.asarray(values))))
+            rows.append(np.concatenate((np.zeros(7), np.asarray(values))))
             sizes.append(end - start)
         record = aggregate(np.stack(rows), sizes)
         assert record.keys() == full_record.keys()
@@ -362,7 +365,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         translation_tangent_geometry="coupled_modal", translation_tangent_k_max=1,
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
-        stokes_relative_tangent=False,
+        stokes_relative_tangent=False, phase_mechanism="none",
     )
 
     def apply_model(
@@ -384,7 +387,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
     family = jnp.array([PhysicalFamilyId.TANAKA, PhysicalFamilyId.STOKES, PhysicalFamilyId.STOKES,
                         PhysicalFamilyId.TANAKA, PhysicalFamilyId.TANAKA, PhysicalFamilyId.STOKES])
     namespace: dict[str, Any] = {
-        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config, "cast": cast,
         "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: (target[..., None] - 7.0) / 4.0,
@@ -406,7 +409,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
     data_losses = []
     for geometry in ("coupled_modal", "local"):
         config.translation_tangent_geometry = geometry
-        data, _, tangent, fraction, full, _ = losses(predictions, *arguments)
+        data, _, tangent, _, fraction, full, _ = losses(predictions, *arguments)
         data_losses.append(data)
         np.testing.assert_array_equal(data, full)
         np.testing.assert_allclose(fraction, [1 / 3, 2 / 3])
@@ -432,7 +435,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         np.testing.assert_allclose(jnp.mean(tangent), expected, rtol=1e-11)
 
         def objective(params: jax.Array) -> jax.Array:
-            data, _, tangent, _, _, _ = losses(params, *arguments)
+            data, _, tangent, _, _, _, _ = losses(params, *arguments)
             return jnp.mean(data + config.translation_tangent_weight * tangent)
 
         evaluate = jax.jit(jax.value_and_grad(objective))
@@ -452,6 +455,61 @@ def trainer_function(name: str) -> ast.FunctionDef:
     source = ast.parse((REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py").read_text())
     return next(node for node in ast.walk(source)
                 if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def test_packed_nested_branches_match_native_values_and_gradients() -> None:
+    nx = 32
+    inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
+    depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
+    probe = jax.random.normal(jax.random.PRNGKey(9), (3, nx, 1), dtype=jnp.float32)
+    for nested_blocks in (0, 1, 2):
+        model = CraigSulemDNO(
+            width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
+            surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
+            surface_context_width=2, baseline_order=1, baseline_true_depth=True,
+            eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
+        )
+        params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        for index in range(2):
+            group = params[f"cs_block_{index}"]
+            if index < 2 - nested_blocks:
+                group["phi_proj"]["kernel"] = jnp.arange(8, dtype=jnp.float32).reshape(4, 2) * 0.02 - 0.07
+            else:
+                group["gamma"] = jnp.array([0.2, -0.3], dtype=jnp.float32)
+        namespace: dict[str, Any] = {
+            "jax": jax, "jnp": jnp, "nn": nn, "Any": Any, "cast": cast, "model": model,
+            "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
+            "nx": nx, "domain_length": float(model.domain_length),
+            "args": SimpleNamespace(model="cs_dno", n_blocks=2, cs_nested_blocks=nested_blocks,
+                                    latent=2, cs_mult_hidden=4),
+        }
+        exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
+                     "trainer_packed_apply", "exec"), namespace)
+        packed_apply = namespace["apply_model"]
+        native = cast(tuple[jax.Array, jax.Array, jax.Array],
+                      model.apply({"params": params}, inputs, depth, return_baseline=True))
+        packed = jax.jit(packed_apply, static_argnames="return_baseline")(
+            {"params": params}, inputs, depth, return_baseline=True,
+        )
+        for actual, expected in zip(packed, native):
+            np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
+        np.testing.assert_array_equal(packed[1], packed[2])
+
+        def objective(parameters: dict[str, Any], values: jax.Array, *, packed: bool) -> jax.Array:
+            apply = packed_apply if packed else model.apply
+            return jnp.sum(cast(jax.Array, apply({"params": parameters}, values, depth)) * probe)
+
+        differentiate = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)), static_argnames="packed")
+        expected_value, expected_grad = differentiate(params, inputs, packed=False)
+        actual_value, actual_grad = differentiate(params, inputs, packed=True)
+        np.testing.assert_allclose(actual_value, expected_value, rtol=3e-6, atol=2e-7)
+        for actual, expected in zip(jax.tree.leaves(actual_grad), jax.tree.leaves(expected_grad)):
+            np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-7)
+            assert bool(jnp.all(jnp.isfinite(actual)))
+        for index in range(2 - nested_blocks, 2):
+            group_grad = actual_grad[0][f"cs_block_{index}"]
+            for part in ("gamma", "m_inner", "m_shared"):
+                assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
 
 
 def test_input_noise_scale_spectrum_rng_and_depth_safety() -> None:
@@ -599,7 +657,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         translation_tangent_scope="tanaka", translation_tangent_geometry="local",
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="squared",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
-        stokes_relative_tangent=False,
+        stokes_relative_tangent=False, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
     )
     nx = 64
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -619,7 +677,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         return result, jnp.zeros_like(result), jnp.zeros_like(result)
 
     namespace: dict[str, Any] = {
-        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config, "cast": cast,
         "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
@@ -642,7 +700,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
     ordinary = evaluate(prediction, 8)
     np.testing.assert_allclose(augmented[0][0], relative_l2_loss(prediction[..., None] / 4, target[..., None] / 4), rtol=1e-12)
     np.testing.assert_array_equal(augmented[0], ordinary[0])
-    np.testing.assert_array_equal(augmented[4], ordinary[4])
+    np.testing.assert_array_equal(augmented[5], ordinary[5])
     for index in (1, 2):
         np.testing.assert_allclose(augmented[index], prefix[index], rtol=1e-12)
         assert not np.allclose(ordinary[index], prefix[index], rtol=1e-5, atol=1e-12)
@@ -651,13 +709,13 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         assert np.linalg.norm(gradient[:6]) > 0
         validation_gradient = jax.grad(lambda p: jnp.sum(evaluate(p, 8)[index]))(prediction)
         assert np.linalg.norm(validation_gradient[6:]) > 0
-    np.testing.assert_allclose(augmented[3] * 8, prefix[3] * 6)
+    np.testing.assert_allclose(augmented[4] * 8, prefix[4] * 6)
     data_gradient = jax.grad(lambda p: jnp.sum(evaluate(p, 8, 2)[0]))(prediction)
     assert np.linalg.norm(data_gradient[6:]) > 0
     data_only = evaluate(prediction, 8, 8)
-    for index in (0, 4):
+    for index in (0, 5):
         np.testing.assert_array_equal(data_only[index], ordinary[index])
-    for index in (1, 2, 3):
+    for index in (1, 2, 3, 4):
         np.testing.assert_array_equal(data_only[index], 0)
     np.testing.assert_array_equal(
         jax.grad(lambda p: jnp.sum(evaluate(p, 8, 8)[0]))(prediction),
@@ -692,7 +750,8 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         translation_tangent_geometry="local", translation_tangent_denominator_eps=1e-3,
         translation_tangent_loss_norm="squared", translation_tangent_charbonnier_eps=1e-7,
         translation_tangent_smoothing_scale=1.0, stokes_relative_tangent=False,
-        hadamard_weight=0.0,
+        hadamard_weight=0.0, phase_mechanism="none", phase_mechanism_weight=0.0,
+        jonswap_mode_balanced_scale=1.0,
     )
     nx = 32
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -721,7 +780,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         ))
 
     namespace: dict[str, Any] = {
-        "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace,
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace, "cast": cast,
         "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64,
         "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
@@ -912,6 +971,7 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_packed_nested_branches_match_native_values_and_gradients()
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
