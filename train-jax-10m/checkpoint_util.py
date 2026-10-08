@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
 import jax
 import numpy as np
 import optax
+from flax import struct
 from flax.training import checkpoints
 from flax.training import train_state
 import orbax.checkpoint as ocp
@@ -22,6 +23,29 @@ class CheckpointMetadata(TypedDict):
     stats: dict[str, object]
 
 
+class WeightEMATrainState(train_state.TrainState):
+    weight_ema_params: Any = None
+    weight_ema_decay: float = struct.field(pytree_node=False, default=0.0)
+    weight_ema_start_step: int = struct.field(pytree_node=False, default=0)
+
+    def apply_gradients(self, *, grads: Any, **kwargs: Any) -> WeightEMATrainState:
+        state = cast(WeightEMATrainState, super().apply_gradients(grads=grads, **kwargs))
+        if self.weight_ema_decay > 0.0:
+            shadow = jax.lax.cond(
+                state.step > self.weight_ema_start_step,
+                lambda: jax.lax.cond(
+                    self.step == self.weight_ema_start_step,
+                    lambda: state.params,
+                    lambda: optax.incremental_update(
+                        state.params, self.weight_ema_params, 1.0 - self.weight_ema_decay,
+                    ),
+                ),
+                lambda: self.weight_ema_params,
+            )
+            state = state.replace(weight_ema_params=shadow)
+        return state
+
+
 def save_checkpoint(
     output_dir: Path,
     state: train_state.TrainState,
@@ -30,24 +54,35 @@ def save_checkpoint(
     best_epoch: int,
     stats: dict[str, object],
     async_manager: checkpoints.AsyncManager,
+    *,
+    weight_ema: bool = False,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    host_state = jax.device_get(state)
-
+    if weight_ema:
+        ema_state = cast(WeightEMATrainState, state)
+        payload = {"params": jax.device_get(ema_state.weight_ema_params), "step": int(state.step)}
+        metadata = {
+            "epoch": int(history[-1]["epoch"]), "stats": stats,
+            "params_kind": "weight_ema", "weight_ema_decay": ema_state.weight_ema_decay,
+            "weight_ema_start_step": ema_state.weight_ema_start_step,
+        }
+    else:
+        host_state = jax.device_get(state)
+        payload = {
+            "params": host_state.params, "opt_state": host_state.opt_state,
+            "step": int(host_state.step),
+        }
+        if isinstance(host_state, WeightEMATrainState) and host_state.weight_ema_params is not None:
+            payload["weight_ema_params"] = host_state.weight_ema_params
+        metadata = {
+            "epoch": int(history[-1]["epoch"]),
+            "train_loss": history[-1]["train_loss"], "val_loss": history[-1]["val_loss"],
+            "history": history, "best_val_loss": best_val_loss,
+            "best_epoch": best_epoch, "stats": stats,
+        }
     payload = {
-        "params": jax.tree_util.tree_map(np.asarray, host_state.params),
-        "opt_state": jax.tree_util.tree_map(np.asarray, host_state.opt_state),
-        "step": int(host_state.step),
-    }
-
-    metadata = {
-        "epoch": int(history[-1]["epoch"]),
-        "train_loss": history[-1]["train_loss"],
-        "val_loss": history[-1]["val_loss"],
-        "history": history,
-        "best_val_loss": best_val_loss,
-        "best_epoch": best_epoch,
-        "stats": stats,
+        name: value if name == "step" else jax.tree_util.tree_map(np.asarray, value)
+        for name, value in payload.items()
     }
     checkpoints.save_checkpoint(
         ckpt_dir=output_dir,

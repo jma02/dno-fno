@@ -153,6 +153,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_use_learned_eta_filters": True},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
             {"cs_surface_context_width": 4},
+            {"cs_surface_context_width": 4, "cs_surface_context_gate": True},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1],
              "cs_surface_context_width": 4},
             {"cs_use_relative_elevation": True, "cs_baseline_order": 2, "cs_baseline_true_depth": True},
@@ -174,6 +175,17 @@ class ComputeMetricsTest(unittest.TestCase):
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
                 self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
+                self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
+
+        with patch("solver.evals.model_rollout.Path.read_text", side_effect=[
+            json.dumps(config), json.dumps({"epoch": 1, "stats": {}}),
+        ]), patch("solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value={
+            "params": {"value": np.array([2.0], dtype=np.float32)},
+        }) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
+            loaded = load_run("/tmp/dno-architecture-loader-test", checkpoint="weight_ema")
+            self.assertEqual(restore.call_args.kwargs["ckpt_dir"].name, "weight_ema_ckpt")
+            np.testing.assert_array_equal(loaded.params["value"], [2.0])
+            self.assertEqual(loaded.epoch, 1)
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)

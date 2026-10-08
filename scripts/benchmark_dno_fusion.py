@@ -226,6 +226,7 @@ def build_variant(
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
             if model.surface_feature_scales is not None:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
+            context = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
                 if name == "eta_feat_proj" and context_multiplier is not None:
@@ -233,8 +234,11 @@ def build_variant(
                     context = jnp.fft.irfft(
                         context_multiplier * jnp.fft.rfft(context, axis=1), n=nx, axis=1,
                     )
-                    features = features + context @ loaded.params["eta_context_expand"]["kernel"]
+                    context = context @ loaded.params["eta_context_expand"]["kernel"]
+                    features = features + context
             features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
+            if model.surface_context_gate and context is not None:
+                features = features * (1.0 + jnp.tanh(context))
             weights = features @ head_kernel
             if fused_product:
                 weighted_hat = fft(weights, nx, b=branch_fields, outer=filters, ept=fft_ept, channels_last=True)
@@ -387,7 +391,7 @@ def build_variant(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
-    parser.add_argument("--checkpoint", choices=("best", "latest"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "latest", "weight_ema"), default="best")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)

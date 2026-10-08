@@ -19,7 +19,6 @@ import numpy as np
 import optax
 from flax import linen as nn
 from flax.training import checkpoints
-from flax.training import train_state
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import orbax.checkpoint as ocp
@@ -62,6 +61,7 @@ from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # n
 from fno1d import FNO1d  # noqa: E402
 from checkpoint_util import (  # noqa: E402
     CheckpointMetadata,
+    WeightEMATrainState,
     save_checkpoint,
     training_counter_values,
 )
@@ -94,6 +94,8 @@ def main() -> None:
                         help="Fit fixed per-feature RMS scales on up to 65536 training rows.")
     parser.add_argument("--cs_surface_context_width", type=int, default=0,
                         help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
+    parser.add_argument("--cs_surface_context_gate", action="store_true",
+                        help="Also modulate the quadratic surface lift by bounded Fourier context.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -169,6 +171,10 @@ def main() -> None:
         "--gradient_ema_decay", type=float, default=0.9,
         help="Bias-corrected gradient EMA decay before AdamW; must be in [0, 1).",
     )
+    parser.add_argument("--weight_ema_decay", type=float, default=0.0,
+                        help="Inference-only EMA of post-update parameters; 0 disables it.")
+    parser.add_argument("--weight_ema_start_fraction", type=float, default=0.8,
+                        help="Fraction of planned optimizer updates completed before weight averaging starts.")
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
@@ -343,6 +349,10 @@ def main() -> None:
         parser.error("--rollout_epochs requires --rollout_truth_run and epochs within the training budget")
     if not 0.0 <= args.gradient_ema_decay < 1.0:
         parser.error("--gradient_ema_decay must be in [0, 1)")
+    if not 0.0 <= args.weight_ema_decay < 1.0:
+        parser.error("--weight_ema_decay must be in [0, 1)")
+    if not 0.0 <= args.weight_ema_start_fraction < 1.0:
+        parser.error("--weight_ema_start_fraction must be in [0, 1)")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
     if not np.isfinite(args.input_noise_rms) or args.input_noise_rms < 0:
@@ -381,6 +391,8 @@ def main() -> None:
         parser.error("CS residual normalization requires --norm scale")
     if args.cs_surface_context_width < 0:
         parser.error("--cs_surface_context_width must be nonnegative")
+    if args.cs_surface_context_gate and args.cs_surface_context_width == 0:
+        parser.error("--cs_surface_context_gate requires --cs_surface_context_width > 0")
     if args.model != "cs_dno" and (args.cs_normalize_surface_features or args.cs_surface_context_width):
         parser.error("Surface-feature experiments require --model cs_dno")
     start_time = perf_counter()
@@ -479,6 +491,7 @@ def main() -> None:
             surface_feature_scales=(tuple(args.cs_surface_feature_scales)
                                     if args.cs_surface_feature_scales is not None else None),
             surface_context_width=args.cs_surface_context_width,
+            surface_context_gate=args.cs_surface_context_gate,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,
@@ -560,9 +573,15 @@ def main() -> None:
         optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay),
     )
     print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
-    training_state = train_state.TrainState.create(
-        apply_fn=apply_model, params=params, tx=optimizer
+    training_state = WeightEMATrainState.create(
+        apply_fn=apply_model, params=params, tx=optimizer,
+        weight_ema_params=params if args.weight_ema_decay > 0.0 else None,
+        weight_ema_decay=args.weight_ema_decay,
+        weight_ema_start_step=int(total_steps * args.weight_ema_start_fraction),
     )
+    if args.weight_ema_decay > 0.0:
+        print(f"inference-only weight EMA: decay={args.weight_ema_decay}, "
+              f"starts after update {training_state.weight_ema_start_step}")
 
     training_state = replicate_pytree_from_host(training_state, replicated)
     checkpoint_async_manager = checkpoints.AsyncManager(max_workers=1)
@@ -749,14 +768,14 @@ def main() -> None:
         )
 
     def train_step(
-        current_state: train_state.TrainState,
+        current_state: WeightEMATrainState,
         rng_key: jax.Array,
         eta: jax.Array,
         xi: jax.Array,
         gxi: jax.Array,
         batch_depth: jax.Array,
         family: jax.Array,
-    ) -> tuple[train_state.TrainState, jax.Array, dict[str, jax.Array]]:
+    ) -> tuple[WeightEMATrainState, jax.Array, dict[str, jax.Array]]:
         if args.input_noise_rms > 0:
             noise_key = jax.random.fold_in(
                 jax.random.fold_in(rng_key, current_state.step),
@@ -1033,22 +1052,22 @@ def main() -> None:
     if metadata_path.exists():
         metadata: CheckpointMetadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         resume_epoch = metadata["epoch"]
+        restore_target = {
+            "params": training_state.params,
+            "opt_state": training_state.opt_state,
+            "step": int(training_state.step),
+        }
+        if args.weight_ema_decay > 0.0:
+            restore_target["weight_ema_params"] = training_state.weight_ema_params
         restored = checkpoints.restore_checkpoint(
             ckpt_dir=latest_ckpt_dir,
-            target={
-                "params": training_state.params,
-                "opt_state": training_state.opt_state,
-                "step": int(training_state.step),
-            },
+            target=restore_target,
             step=resume_epoch,
             prefix="ckpt_",
             orbax_checkpointer=ocp.PyTreeCheckpointer(),
         )
-        training_state = training_state.replace(
-            params=restored["params"],
-            opt_state=restored["opt_state"],
-            step=jnp.asarray(int(restored["step"]), dtype=jnp.int32),
-        )
+        restored["step"] = jnp.asarray(int(restored["step"]), dtype=jnp.int32)
+        training_state = training_state.replace(**restored)
         training_state = replicate_pytree_from_host(training_state, replicated)
         history = metadata["history"]
         train_loss = metadata["train_loss"]
@@ -1264,6 +1283,12 @@ def main() -> None:
             stats=stats,
             async_manager=checkpoint_async_manager,
         )
+        if args.weight_ema_decay > 0.0 and epoch_end_step > training_state.weight_ema_start_step:
+            save_checkpoint(
+                run_dir / "weight_ema_ckpt", state=training_state, history=history,
+                best_val_loss=best_val_loss, best_epoch=best_epoch, stats=stats,
+                async_manager=checkpoint_async_manager, weight_ema=True,
+            )
 
         # Save a separate copy whenever validation improves.
         if val_loss < best_val_loss:

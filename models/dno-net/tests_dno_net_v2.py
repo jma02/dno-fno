@@ -43,6 +43,7 @@ def _model(
     use_learned_eta_filters: bool = False,
     surface_feature_scales: tuple[float, ...] | None = None,
     surface_context_width: int = 0,
+    surface_context_gate: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -57,6 +58,7 @@ def _model(
         use_learned_eta_filters=use_learned_eta_filters,
         surface_feature_scales=surface_feature_scales,
         surface_context_width=surface_context_width,
+        surface_context_gate=surface_context_gate,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -174,13 +176,14 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for baseline_order, relative_elevation, learned_filters, context_width in (
-        (-1, False, False, 0), (0, False, False, 0), (1, False, False, 0),
-        (1, True, False, 0), (2, False, False, 0), (1, False, True, 0),
-        (1, False, False, 8),
+    for baseline_order, relative_elevation, learned_filters, context_width, context_gate in (
+        (-1, False, False, 0, False), (0, False, False, 0, False), (1, False, False, 0, False),
+        (1, True, False, 0, False), (2, False, False, 0, False), (1, False, True, 0, False),
+        (1, False, False, 8, False), (1, False, False, 8, True),
     ):
         model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation,
-                       use_learned_eta_filters=learned_filters, surface_context_width=context_width)
+                       use_learned_eta_filters=learned_filters, surface_context_width=context_width,
+                       surface_context_gate=context_gate)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -438,6 +441,9 @@ def test_experimental_residual_orders() -> None:
         (_model(use_learned_eta_filters=True), 2),
         (_model(surface_context_width=8), 2),
         (_model(surface_context_width=8, surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
+        (_model(surface_context_width=8, surface_context_gate=True,
+                surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
+        (_model(baseline_order=2, surface_context_width=8, surface_context_gate=True), 3),
     ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
@@ -511,6 +517,47 @@ def test_surface_context_has_live_gradients_and_unchanged_shared_initialization(
     assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
 
 
+def test_bounded_context_gate_reuses_context_and_preserves_initialization() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    original = _model(surface_context_width=8)
+    gated = original.clone(surface_context_gate=True)
+    variables = original.init(jax.random.PRNGKey(18), inputs, depth)
+    gated_variables = gated.init(jax.random.PRNGKey(18), inputs, depth)
+    assert jax.tree.structure(variables) == jax.tree.structure(gated_variables)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(variables), jax.tree.leaves(gated_variables), strict=True,
+    ))
+    assert jnp.array_equal(
+        cast(jax.Array, original.apply(variables, inputs, depth)),
+        cast(jax.Array, gated.apply(variables, inputs, depth)),
+    )
+    variables = _activate_residual(variables)
+    output, captured = gated.apply(
+        variables, inputs, depth,
+        capture_intermediates=lambda module, _: module.name in (
+            "eta_feat_mix", "eta_context_expand", "phi_proj",
+        ),
+    )
+    context = cast(jax.Array, captured["intermediates"]["eta_context_expand"]["__call__"][0])
+    z = nn.gelu(cast(jax.Array, captured["intermediates"]["eta_feat_mix"]["__call__"][0]))
+    features = z * jnp.tanh(z) * (1 + jnp.tanh(context))
+    for index in range(gated.n_blocks):
+        block = f"cs_block_{index}"
+        expected = features @ cast(jax.Array, variables["params"][block]["phi_proj"]["kernel"])
+        actual = cast(jax.Array, captured["intermediates"][block]["phi_proj"]["__call__"][0])
+        assert jnp.array_equal(actual, expected)
+    assert jnp.linalg.norm(output - original.apply(variables, inputs, depth)) > 1e-10
+    translated = cast(jax.Array, gated.apply(variables, jnp.roll(inputs, 7, axis=1), depth))
+    assert jnp.allclose(translated, jnp.roll(output, 7, axis=1), rtol=1e-10, atol=1e-13)
+    gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, gated.apply(
+        {"params": params}, inputs, depth,
+    )) ** 2))(variables["params"])
+    for name in ("eta_context_in", "eta_context_hidden", "eta_context_out", "eta_context_expand"):
+        assert jnp.linalg.norm(gradient[name]["kernel"]) > 1e-15
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -529,6 +576,7 @@ def main() -> int:
         test_surface_feature_scaling_folds_into_first_projection,
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
+        test_bounded_context_gate_reuses_context_and_preserves_initialization,
     )
     for test in tests:
         test()

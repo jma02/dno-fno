@@ -874,7 +874,7 @@ def main() -> None:
     )
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
-    parser.add_argument("--checkpoint", choices=("best", "latest", "final"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "latest", "final", "weight_ema"), default="best")
     parser.add_argument(
         "--families",
         nargs="+",
@@ -912,6 +912,7 @@ def main() -> None:
         "best": "best_val_ckpt",
         "latest": "latest_ckpt",
         "final": "final_ckpt",
+        "weight_ema": "weight_ema_ckpt",
     }[args.checkpoint]
     checkpoint_source: dict[str, object] = {
         "run_dir": str(run_dir),

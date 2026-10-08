@@ -47,7 +47,7 @@ class LoadedRun(NamedTuple):
 def load_run(
     run_dir: str | Path,
     *,
-    checkpoint: Literal["best", "latest", "final"] = "best",
+    checkpoint: Literal["best", "latest", "final", "weight_ema"] = "best",
     domain_length_override: float | None = None,
 ) -> LoadedRun:
     """Restore a JAX FNO or fixed CS-DNO training checkpoint."""
@@ -61,6 +61,7 @@ def load_run(
             "best": "best_val_ckpt",
             "latest": "latest_ckpt",
             "final": "final_ckpt",
+            "weight_ema": "weight_ema_ckpt",
         }[checkpoint]
     )
     metadata = json.loads(
@@ -96,6 +97,7 @@ def load_run(
             use_learned_eta_filters=bool(config.get("cs_use_learned_eta_filters", False)),
             surface_feature_scales=None if surface_scales is None else tuple(map(float, surface_scales)),
             surface_context_width=int(config.get("cs_surface_context_width", 0)),
+            surface_context_gate=bool(config.get("cs_surface_context_gate", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
             baseline_order=int(config.get(
                 "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]

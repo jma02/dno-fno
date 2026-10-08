@@ -43,21 +43,26 @@ CUDA_VISIBLE_DEVICES="$train_gpu_ids" uv run --no-sync python train-jax-10m/1d_d
   --run_name "$run_name" "${@:2}" > "$trial_dir/console.log" 2>&1
 
 printf '%s rollouts\n' "$(date +%H:%M)"
-eval_pids=()
-for group in 0 1; do
-  if (( group == 0 )); then families=(stokes tanaka); else families=(jonswap_tma benjamin_feir); fi
-  gpu=${train_gpus[group % ${#train_gpus[@]}]}
-  eval_dir="$trial_dir/eval_epoch${epochs}_test_stratified_n32_gpu$group"
-  mkdir "$eval_dir"
-  CUDA_VISIBLE_DEVICES="$gpu" uv run --no-sync python -m solver.evals.eval_suite \
-    --run_dir "$trial_dir" --checkpoint latest --gpu \
-    --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
-    --families "${families[@]}" --n_ics 32 --ic_selection stratified --rollout_batch_size 32 \
-    --truth_cache "$reference_run/eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu$group" \
-    --output_dir "$eval_dir" > "$eval_dir/console.log" 2>&1 &
-  if (( ${#train_gpus[@]} == 1 )); then wait "$!"; else eval_pids+=("$!"); fi
+read -ra eval_checkpoints <<< "${EVAL_CHECKPOINTS:-latest}"
+for checkpoint in "${eval_checkpoints[@]}"; do
+  eval_pids=()
+  eval_suffix=""
+  if [[ "$checkpoint" != latest ]]; then eval_suffix="_$checkpoint"; fi
+  for group in 0 1; do
+    if (( group == 0 )); then families=(stokes tanaka); else families=(jonswap_tma benjamin_feir); fi
+    gpu=${train_gpus[group % ${#train_gpus[@]}]}
+    eval_dir="$trial_dir/eval_epoch${epochs}${eval_suffix}_test_stratified_n32_gpu$group"
+    mkdir "$eval_dir"
+    CUDA_VISIBLE_DEVICES="$gpu" uv run --no-sync python -m solver.evals.eval_suite \
+      --run_dir "$trial_dir" --checkpoint "$checkpoint" --gpu \
+      --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
+      --families "${families[@]}" --n_ics 32 --ic_selection stratified --rollout_batch_size 32 \
+      --truth_cache "$reference_run/eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu$group" \
+      --output_dir "$eval_dir" > "$eval_dir/console.log" 2>&1 &
+    if (( ${#train_gpus[@]} == 1 )); then wait "$!"; else eval_pids+=("$!"); fi
+  done
+  eval_failed=0
+  for pid in "${eval_pids[@]}"; do wait "$pid" || eval_failed=1; done
+  (( eval_failed == 0 ))
 done
-eval_failed=0
-for pid in "${eval_pids[@]}"; do wait "$pid" || eval_failed=1; done
-(( eval_failed == 0 ))
 printf '%s complete\n' "$(date +%H:%M)"

@@ -94,6 +94,7 @@ class CraigSulemDNO(nn.Module):
     use_learned_eta_filters: bool = False  # Modulate the two even surface filters.
     surface_feature_scales: tuple[float, ...] | None = None  # Fixed training-feature RMS.
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
+    surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
     baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
@@ -223,6 +224,7 @@ class CraigSulemDNO(nn.Module):
             )
 
         # With no constant input, zero eta gives zero features.
+        context = None
         for name in ("eta_feat_proj", "eta_feat_mix"):
             eta_features = nn.gelu(
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
@@ -246,15 +248,18 @@ class CraigSulemDNO(nn.Module):
                     context_multiplier * jnp.fft.rfft(context, axis=1),
                     n=grid_size, axis=1,
                 )
-                eta_features = eta_features + nn.Dense(
+                context = nn.Dense(
                     self.width // 2, name="eta_context_expand", use_bias=False,
                 )(context)
+                eta_features = eta_features + context
         # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
         # Preserve the analytic Taylor terms; a constant input removes this constraint.
         if self.baseline_order == 2:
             eta_features = eta_features * jnp.tanh(eta_features) ** 2
         elif self.baseline_order != 0:
             eta_features = eta_features * jnp.tanh(eta_features)
+        if self.surface_context_gate and context is not None:
+            eta_features = eta_features * (1.0 + jnp.tanh(context))
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)
