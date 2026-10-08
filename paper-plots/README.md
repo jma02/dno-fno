@@ -537,6 +537,33 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 uploads only selected code/checkpoint/reference cases, and downloads result
 files under a fresh `--output` directory. No manuscript or notes are uploaded.
 
+### 12b-subsampled-40-epochs
+
+[PNG](figures/12b-subsampled-40-epochs.png) / [PDF](figures/12b-subsampled-40-epochs.pdf).
+The fresh 40-epoch screens use the same fixed, per-family 1/16 training subset,
+gradient EMA, and rollout supervision beginning at epoch20. Only completed
+epoch40 runs are shown: control, Stokes carrier phase, Tanaka momentum,
+BF sideband phase, and JONSWAP-only mode-balancing ablation as they finish.
+Each panel reports the median terminal surface relative L2 error over the
+same32 full test trajectories, in percent. The test cases are not subsampled.
+
+The horizontal coordinate is warm batch-one inference latency, not training
+duration or the batch32 evaluation wall time. All loss variants have identical
+inference architecture and share the existing three-repeat Ada measurement in
+`outputs/rms_context_timing_20261007/ada/timings.json`:1.4794/14.2912/14.3604/1.4607s
+for Stokes/Tanaka/BF/JONSWAP. These are architecture-cost coordinates, not fresh
+checkpoint-specific timings; the plot labels this reuse and does not jitter
+overlapping points. The ordinary-inference32-case errors are separate from
+those optimized single-case timing measurements. M2/M3 errors use the same
+32-case medians from `outputs/cs_order_sweep_20260923`, with their measured
+single-rollout times from `outputs/classical_all_orders_20260928/ada/classical.json`.
+All timings use dt.01, four GL2 iterations, FP64 integration, and T20/200;
+the learned path is FP32. No old120-epoch model accuracies enter this figure.
+
+```sh
+UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --subset40
+```
+
 ### 13-model-roofline
 
 [PNG](figures/13-model-roofline.png) / [PDF](figures/13-model-roofline.pdf).
