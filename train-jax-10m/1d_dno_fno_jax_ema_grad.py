@@ -213,8 +213,8 @@ def main() -> None:
     parser.add_argument("--metric_interval", type=int, default=16,
                         help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
-    parser.add_argument("--phase_mechanism", choices=("none", "stokes_carrier", "tanaka_momentum", "bf_sideband"),
-                        default="none", help="Family-specific coupled phase or momentum-production target.")
+    parser.add_argument("--phase_mechanism", choices=("none", "stokes_carrier", "tanaka_momentum", "all_momentum", "bf_sideband"),
+                        default="none", help="Coupled phase or momentum-production target; all_momentum uses every family uniformly.")
     parser.add_argument("--phase_mechanism_weight", type=float, default=0.0)
     parser.add_argument("--jonswap_mode_balanced_scale", type=float, default=1.0,
                         help="Multiply only JONSWAP/TMA rows' mode-balancing penalty by this factor.")
@@ -809,10 +809,11 @@ def main() -> None:
                 mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
             )
             mechanism_loss *= mechanism_count / full_batch_size
-        elif args.phase_mechanism == "tanaka_momentum":
+        elif args.phase_mechanism in ("tanaka_momentum", "all_momentum"):
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
-                mechanism="momentum", sample_mask=family == PhysicalFamilyId.TANAKA, horizon=200.0,
+                mechanism="momentum", horizon=200.0,
+                sample_mask=family == PhysicalFamilyId.TANAKA if args.phase_mechanism == "tanaka_momentum" else None,
             )
             mechanism_loss *= mechanism_count / full_batch_size
         elif args.phase_mechanism == "bf_sideband":

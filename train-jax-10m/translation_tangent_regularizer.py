@@ -46,7 +46,7 @@ def compute_phase_mechanism_loss(
     gravity: float = 1.0,
     k_max: float = 128.0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Match a family-specific signed RHS defect, with smooth absolute loss.
+    """Match a signed RHS defect, with smooth absolute loss.
 
     Carrier: T times the phase-rate defect of the dominant traveling coordinate
     at the prescribed carrier (or largest-energy mode when omitted). Sideband:

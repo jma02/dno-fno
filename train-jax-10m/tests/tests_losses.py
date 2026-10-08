@@ -26,6 +26,7 @@ from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
+    compute_phase_mechanism_loss,
     compute_translation_tangent_loss,
 )
 
@@ -512,6 +513,90 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                 assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
 
 
+def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> None:
+    nx, size = 32, 8
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    amplitude = jnp.arange(1, size + 1)[:, None] / size
+    eta = amplitude * (0.03 * jnp.cos(x) + 0.01 * jnp.sin(2 * x))
+    xi = amplitude * (0.02 * jnp.sin(x) + 0.01 * jnp.cos(3 * x))
+    target = amplitude * (0.04 * jnp.sin(x) + 0.01 * jnp.cos(2 * x))
+    depth = jnp.log(jnp.linspace(0.2, 8.0, size))[:, None]
+    family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
+    config = SimpleNamespace(
+        model="fno", residual_floor=1e-6, mode_balanced_weight=0.0,
+        translation_tangent_weight=0.0, phase_mechanism="all_momentum",
+        phase_mechanism_weight=0.03, hadamard_weight=0.0, mode_balanced_warmup_steps=1,
+        rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
+        rollout_training_loss="full",
+    )
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array, *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        prediction = variables["params"][:, None, None] * jnp.sum(inputs, axis=-1, keepdims=True)
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "Any": Any, "cast": cast, "FlatParams": Any, "args": config,
+        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "norm_inputs_jax": lambda e, p: jnp.stack((e, p), axis=-1),
+        "norm_targets_jax": lambda q: q[..., None], "denorm_targets_jax": lambda q: q,
+        "log_h_max": np.log(5.0), "k_grid_jax": jnp.fft.fftfreq(nx) * nx,
+        "compute_phase_mechanism_loss": compute_phase_mechanism_loss, "apply_model": apply_model,
+        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0,
+    }
+    exec(compile(ast.Module(body=[trainer_function("compute_loss_components"),
+                                 trainer_function("compute_training_loss")], type_ignores=[]),
+                 "trainer_all_momentum", "exec"), namespace)
+    components = namespace["compute_loss_components"]
+    params = jnp.linspace(0.4, 0.9, size)
+    fields = (eta, xi, target, depth, family)
+    prediction = params[:, None] * (eta + xi)
+    for mechanism in ("none", "tanaka_momentum", "all_momentum"):
+        config.phase_mechanism = mechanism
+        losses = components(params, *fields)
+        if mechanism == "none":
+            assert losses[3] == 0
+            continue
+        mask = family == PhysicalFamilyId.TANAKA if mechanism == "tanaka_momentum" else None
+        expected, count = compute_phase_mechanism_loss(
+            eta, xi, prediction, target, jnp.exp(depth[:, 0]), namespace["k_grid_jax"],
+            mechanism="momentum", horizon=200.0, sample_mask=mask,
+        )
+        np.testing.assert_allclose(losses[3], expected * count / size, rtol=1e-12)
+        gradient = jax.grad(lambda p: components(p, *fields)[3])(params)
+        selected = np.asarray(family == PhysicalFamilyId.TANAKA) if mask is not None else np.ones(size, bool)
+        assert np.all(np.abs(np.asarray(gradient)[selected]) > 1e-8)
+        np.testing.assert_array_equal(np.asarray(gradient)[~selected], 0)
+    relabeled = fields[:-1] + (jnp.full_like(family, 99),)
+    for actual, expected in zip(components(params, *relabeled)[:6], components(params, *fields)[:6]):
+        np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(jax.grad(lambda p: components(p, *relabeled)[3])(params), gradient)
+    generated = (1.5 * eta, 1.2 * xi, 0.8 * target, depth, family)
+    base, teacher = components(params, *fields), components(params, *generated)
+    namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family)
+    for loss_mode in ("full", "data"):
+        config.rollout_training_loss = loss_mode
+        namespace["rollout_batch"] = (True, depth, family, *generated[:3], jnp.float32(1.0))
+        (actual, metrics), actual_gradient = jax.value_and_grad(
+            namespace["compute_training_loss"], has_aux=True,
+        )(params)
+
+        expected_value, expected_gradient = jax.value_and_grad(lambda p: sum(
+            value[0] * data_weight + value[3] * momentum_weight
+            for value, data_weight, momentum_weight in (
+                (components(p, *fields), 1.0, config.phase_mechanism_weight),
+                (components(p, *generated), config.rollout_training_weight,
+                 config.rollout_training_weight * config.phase_mechanism_weight if loss_mode == "full" else 0.0),
+            )
+        ))(params)
+        np.testing.assert_allclose(actual, expected_value, rtol=1e-12)
+        np.testing.assert_allclose(actual_gradient, expected_gradient, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(metrics["phase_mechanism_loss"], base[3], rtol=1e-12)
+        np.testing.assert_allclose(metrics["rollout_phase_mechanism_loss"],
+                                   teacher[3] if loss_mode == "full" else 0.0, rtol=1e-12)
+
+
 def test_input_noise_scale_spectrum_rng_and_depth_safety() -> None:
     function = ast.parse(
         "def prepare(step, rng_key, eta, xi, gxi, batch_depth):\n"
@@ -972,6 +1057,7 @@ if __name__ == "__main__":
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_packed_nested_branches_match_native_values_and_gradients()
+    test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()

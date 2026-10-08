@@ -5,7 +5,7 @@ cd /home/johnma/dno-fno
 gpu=${1:?GPU index required}
 shift
 [[ "$gpu" == 0 || "$gpu" == 1 ]] || { printf 'Use local GPU 0 or 1\n' >&2; exit 2; }
-(( $# )) || set -- stokes tanaka bf jonswap
+(( $# )) || set -- control_ema momentum nested_momentum nested4
 run_date=$(date +%Y%m%d)
 reference_run=outputs/c27_w320_b4_h80_ema_grad09_20260927
 export CUDA_VISIBLE_DEVICES="$gpu" JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
@@ -14,14 +14,17 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
 
 for variant in "$@"; do
   variant_args=()
-  # Fixed at 10% of the target family's data-gradient norm at fresh initialization.
+  # Coefficients are calibrated at fresh initialization on training rows only.
   case "$variant" in
-    control) ;;
+    control|control_ema) ;;
     stokes) variant_args=(--phase_mechanism stokes_carrier --phase_mechanism_weight 0.002797671729980144) ;;
     tanaka) variant_args=(--phase_mechanism tanaka_momentum --phase_mechanism_weight 0.01384754275706006) ;;
     bf) variant_args=(--phase_mechanism bf_sideband --phase_mechanism_weight 0.00013728115168189654) ;;
     jonswap) variant_args=(--jonswap_mode_balanced_scale 0) ;;
     nested) variant_args=(--cs_nested_blocks 2) ;;
+    nested4) variant_args=(--cs_nested_blocks 4) ;;
+    momentum) variant_args=(--phase_mechanism all_momentum --phase_mechanism_weight 0.005148699661509522) ;;
+    nested_momentum) variant_args=(--cs_nested_blocks 2 --phase_mechanism all_momentum --phase_mechanism_weight 0.005148699661509522) ;;
     *) printf 'Unsupported phase experiment: %s\n' "$variant" >&2; exit 2 ;;
   esac
   run_name=c27_phase40_${variant}_subset16_${run_date}
@@ -73,5 +76,18 @@ for variant in "$@"; do
       --output_dir "$trial_dir/eval_epoch40_weight_ema_test_stratified_n32_gpu$group" \
       >> "$trial_dir/console.log" 2>&1
   done
-  printf '%s %s training and rollouts complete\n' "$(date +%H:%M)" "$run_name"
+  printf '%s %s training and rollouts complete; measuring single-rollout runtime\n' "$(date +%H:%M)" "$run_name"
+  XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+    uv run --no-sync scripts/benchmark_dno_fusion.py --run "$trial_dir" --checkpoint weight_ema \
+      --variants original fourier_fused_features_product_overlap --repeats 100 --ept 8 \
+      --output "$trial_dir/timing/forward" >> "$trial_dir/console.log" 2>&1
+  uv run --no-sync python -c \
+    'import json, sys; from pathlib import Path; result = json.loads(Path(sys.argv[1]).read_text()); assert result["variants"]["fourier_fused_features_product_overlap"]["validation"]["passed"], "Optimized inference failed parity"' \
+    "$trial_dir/timing/forward/results.json"
+  XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+    uv run --no-sync scripts/time_single_rollouts.py --candidate-run "$trial_dir" --checkpoint weight_ema \
+      --reference cached_M6 --repeats 3 --pad-factor 2 --ept 8 \
+      --methods fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local \
+      --output "$trial_dir/timing/timings.json" >> "$trial_dir/console.log" 2>&1
+  printf '%s %s complete\n' "$(date +%H:%M)" "$run_name"
 done
