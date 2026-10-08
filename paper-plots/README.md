@@ -232,14 +232,26 @@ All eight trajectories remained finite with positive depth. The Blackwell BF
 error is 0.861117%, versus 1.904739% on A100/Ada; each plotted dot uses its own
 measured error rather than transferring accuracy across GPUs.
 
-The renderer replaces the obsolete local-tangent and modal-phase overlays with
-`RMS + Fourier context` (blue squares), once fresh timings are supplied for
+The Ada row replaces the obsolete local-tangent and modal-phase overlays with
+`RMS + Fourier context` (blue squares), measured on October 7 for
 `outputs/c27_surface_rms_context8_rollout_ep120_gpu0_20261006/`.
-Use its latest epoch-120 checkpoint, not best epoch119. The optimized spectral
+These use its latest epoch-120 checkpoint, not best epoch119. The optimized spectral
 adapter applies the fixed training-feature RMS scales and the learned width-8
 Fourier-context residual; its depth-dependent context multiplier is cached.
-Do not reuse the earlier architecture's runtime or substitute the 32-case median
-error for this figure's single-case error. Blackwell/A100 measurements stay unchanged.
+The native fused forward passed a 48-state comparison against the ordinary model
+(maximum relative difference `7.29e-7`). Three warmed full single-rollout repeats
+per family are stored in `outputs/rms_context_timing_20261007/ada/timings.json`.
+All four trajectories remain finite with positive depth. Blackwell/A100 measurements
+stay unchanged.
+
+| Family | Median runtime (s) | Final surface error (%) |
+| --- | ---: | ---: |
+| Stokes | 1.479432 | 0.002083 |
+| Tanaka | 14.291180 | 3.357832 |
+| Benjamin–Feir | 14.360399 | 0.324359 |
+| JONSWAP/TMA | 1.460715 | 0.233506 |
+
+Each error belongs to the measured single case, not the 32-case family median.
 
 Purple diamonds show the trained spectral transformer's epoch-4 weight-EMA checkpoint.
 Diamonds give that single case's final surface error on each GPU. The separate full current-test suite
