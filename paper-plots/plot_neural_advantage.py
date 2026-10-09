@@ -241,18 +241,12 @@ if __name__ == "__main__":
         completed = []
         for suffix, label, color, marker in screens:
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_20261009"
-            results = {}
-            for checkpoint in ("_weight_ema", ""):
-                paths = {family: run / f"eval_epoch1{checkpoint}_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
-                         for family, _ in FAMILIES}
-                if all(path.exists() for path in paths.values()):
-                    results = {family: json.loads(path.read_text()) for family, path in paths.items()}
-                    if not checkpoint:
-                        label += " (raw)"
-                    break
-            if not results:
+            paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
+                     for family, _ in FAMILIES}
+            if not all(path.exists() for path in paths.values()):
                 print(f"Pending: {label}")
                 continue
+            results = {family: json.loads(path.read_text()) for family, path in paths.items()}
             timing_path = run / "timing/timings.json"
             if not timing_path.exists() and suffix in ("polynomial_skip", "even_features"):
                 print(f"Awaiting architecture timing: {label}")
@@ -260,7 +254,7 @@ if __name__ == "__main__":
             timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
             completed.append((results, timings, label, color, marker))
         if not completed:
-            parser.error("No completed four-family one-epoch rollout evaluation with an available runtime yet.")
+            parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
             "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
             "axes.spines.top": False, "axes.spines.right": False,
@@ -313,7 +307,7 @@ if __name__ == "__main__":
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
         fig.suptitle("Figure 12b · One epoch, full data", x=0.10, y=0.965, ha="left", fontsize=19)
-        fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA unless marked raw", color="#59616a", fontsize=11)
+        fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
         fig.text(0.10, 0.891, "Unchanged architectures share measured runtime.", color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)

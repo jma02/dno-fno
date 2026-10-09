@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock, patch
 
 import jax
 import jax.numpy as jnp
@@ -456,6 +457,65 @@ def trainer_function(name: str) -> ast.FunctionDef:
     source = ast.parse((REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py").read_text())
     return next(node for node in ast.walk(source)
                 if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def test_milestone_rollouts_use_only_started_weight_ema() -> None:
+    main = trainer_function("main")
+    validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "args.rollout_epochs and args.weight_ema_decay == 0.0")
+    schedule_validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                               and ast.unparse(node.test) == "args.rollout_epochs and min(args.rollout_epochs) <= args.epochs * args.weight_ema_start_fraction")
+    milestone = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                     and ast.unparse(node.test) == "epoch in args.rollout_epochs")
+    checkpoint = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "args.weight_ema_decay > 0.0 and epoch_end_step > training_state.weight_ema_start_step")
+    config = SimpleNamespace(rollout_epochs=[1], epochs=1, weight_ema_decay=0.999,
+                             weight_ema_start_fraction=0.8, norm="scale",
+                             rollout_truth_run="/tmp/ema-milestone-reference")
+    state = SimpleNamespace(params=object(), weight_ema_params=object(), weight_ema_start_step=80)
+    families = ("stokes", "tanaka", "jonswap_tma", "benjamin_feir")
+    loaded, predict, evaluate, save, write = (Mock() for _ in range(5))
+    namespace: dict[str, Any] = {
+        "args": config, "training_state": state, "epoch": 1, "epoch_end_step": 100,
+        "run_dir": Path("/tmp/ema-milestone-run"), "dataset_path": Path("/tmp/ema-milestone-data"),
+        "model": object(), "config_payload": {}, "stats": {}, "history": [],
+        "best_val_loss": 0.0, "best_epoch": 1, "checkpoint_async_manager": object(),
+        "LoadedRun": loaded, "build_predict_gxi_batched": predict, "run_family": evaluate,
+        "save_checkpoint": save, "_write_json": write, "compute_macro_summary": Mock(),
+        "FAMILY_CONFIGS": dict.fromkeys(families), "Path": Path, "print": Mock(),
+        "parser": SimpleNamespace(error=Mock(side_effect=ValueError)),
+    }
+    validate = compile(ast.Module(body=[validation, schedule_validation], type_ignores=[]), "milestone_validation", "exec")
+    evaluate_milestone = compile(ast.Module(body=[checkpoint, milestone], type_ignores=[]), "ema_milestone", "exec")
+    exec(validate, namespace)
+    config.weight_ema_decay = 0.0
+    with np.testing.assert_raises(ValueError):
+        exec(validate, namespace)
+    assert "requires --weight_ema_decay" in namespace["parser"].error.call_args.args[0]
+    config.weight_ema_decay = 0.999
+    config.epochs = 5
+    for milestones in ([3], [4], [4, 5]):
+        config.rollout_epochs = milestones
+        with np.testing.assert_raises(ValueError):
+            exec(validate, namespace)
+        assert "must follow the weight-EMA start" in namespace["parser"].error.call_args.args[0]
+    config.rollout_epochs = [5]
+    exec(validate, namespace)
+    config.epochs, config.rollout_epochs = 1, [1]
+    with patch.object(Path, "mkdir"):
+        exec(evaluate_milestone, namespace)
+    assert loaded.call_args.args[1] is state.weight_ema_params
+    assert loaded.call_args.args[1] is not state.params
+    assert save.call_count == 1 and save.call_args.kwargs["weight_ema"] is True
+    assert save.call_args.args[0] == namespace["run_dir"] / "weight_ema_ckpt"
+    assert evaluate.call_count == 4 and write.call_count == 4
+    for call, family in zip(evaluate.call_args_list, families, strict=True):
+        group = 0 if family in ("stokes", "tanaka") else 1
+        assert call.args[0] == family
+        assert call.args[4] == namespace["run_dir"] / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{group}"
+        assert call.args[6] == call.args[9] == 32
+        assert call.args[8] == {"run_dir": str(namespace["run_dir"]), "selection": "weight_ema",
+                                "path": str(namespace["run_dir"] / "weight_ema_ckpt"), "epoch": 1}
 
 
 def test_packed_nested_branches_match_native_values_and_gradients() -> None:
@@ -1148,6 +1208,7 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_milestone_rollouts_use_only_started_weight_ema()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()

@@ -170,7 +170,7 @@ def main() -> None:
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
     )
     parser.add_argument("--rollout_epochs", type=int, nargs="+", default=[],
-                        help="Evaluate 32 stratified test trajectories per family at these epochs.")
+                        help="Evaluate weight-EMA parameters on 32 stratified test trajectories per family at these epochs.")
     parser.add_argument("--rollout_truth_run",
                         help="Run directory containing the two cached-M6 reference evaluation groups.")
     parser.add_argument("--rollout_training_weight", type=float, default=0.0,
@@ -391,8 +391,12 @@ def main() -> None:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
+    if args.rollout_epochs and args.weight_ema_decay == 0.0:
+        parser.error("--rollout_epochs requires --weight_ema_decay > 0")
     if not 0.0 <= args.weight_ema_start_fraction < 1.0:
         parser.error("--weight_ema_start_fraction must be in [0, 1)")
+    if args.rollout_epochs and min(args.rollout_epochs) <= args.epochs * args.weight_ema_start_fraction:
+        parser.error("--rollout_epochs must follow the weight-EMA start; choose later milestones or an earlier --weight_ema_start_fraction")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
     if not np.isfinite(args.input_noise_rms) or args.input_noise_rms < 0:
@@ -1433,19 +1437,19 @@ def main() -> None:
             )
 
         if epoch in args.rollout_epochs:
-            print(f"Epoch {epoch}: starting 128 milestone rollouts", flush=True)
-            rollout_loaded = LoadedRun(model, training_state.params, config_payload, stats, args.norm, epoch)
+            print(f"Epoch {epoch}: starting 128 weight-EMA milestone rollouts", flush=True)
+            rollout_loaded = LoadedRun(model, training_state.weight_ema_params, config_payload, stats, args.norm, epoch)
             rollout_predict = build_predict_gxi_batched(rollout_loaded)
             for group, families in enumerate((("stokes", "tanaka"), ("jonswap_tma", "benjamin_feir"))):
-                rollout_dir = run_dir / f"eval_epoch{epoch}_test_stratified_n32_gpu{group}"
+                rollout_dir = run_dir / f"eval_epoch{epoch}_weight_ema_test_stratified_n32_gpu{group}"
                 rollout_dir.mkdir(parents=True, exist_ok=True)
                 rollout_summaries = {
                     family: run_family(
                         family, FAMILY_CONFIGS[family], rollout_loaded, rollout_predict,
                         rollout_dir, dataset_path, 32,
                         Path(args.rollout_truth_run) / f"eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu{group}",
-                        {"run_dir": str(run_dir), "selection": "latest",
-                         "path": str(run_dir / "latest_ckpt"), "epoch": epoch},
+                        {"run_dir": str(run_dir), "selection": "weight_ema",
+                         "path": str(run_dir / "weight_ema_ckpt"), "epoch": epoch},
                         32, ic_selection="stratified",
                     ) for family in families
                 }

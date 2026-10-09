@@ -5,7 +5,7 @@ cd /home/johnma/dno-fno
 gpu=${1:?GPU index required}
 shift
 [[ "$gpu" == 0 || "$gpu" == 1 ]] || { printf 'Use local GPU 0 or 1\n' >&2; exit 2; }
-(( $# )) || set -- control reflection polynomial_skip momentum_half momentum_quarter mb2 even_features lr_low lr_high
+(( $# )) || set -- control reflection polynomial_skip momentum_half momentum_quarter mb2 even_features lr_low lr_high multiplier_skip
 run_date=$(date +%Y%m%d)
 reference_run=outputs/c27_w320_b4_h80_ema_grad09_20260927
 export CUDA_VISIBLE_DEVICES="$gpu" JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
@@ -20,6 +20,7 @@ for variant in "$@"; do
     control|control_ema) ;;
     reflection) variant_args=(--reflection_augmentation) ;;
     polynomial_skip) variant_args=(--cs_surface_polynomial_skip) ;;
+    multiplier_skip) variant_args=(--cs_multiplier_skip) ;;
     momentum_half) variant_args=(--phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761) ;;
     momentum_quarter) variant_args=(--phase_mechanism all_momentum --phase_mechanism_weight 0.0012871749153773805) ;;
     mb2) variant_args=(--mode_balanced_weight 2) ;;
@@ -60,7 +61,7 @@ for variant in "$@"; do
     fi
     sleep 30
   done
-  printf '%s fresh training %s; final 128-case rollouts follow\n' "$(date +%H:%M)" "$run_name"
+  printf '%s fresh training %s; final 128-case weight-EMA rollouts follow\n' "$(date +%H:%M)" "$run_name"
   uv run --no-sync python train-jax-10m/1d_dno_fno_jax_ema_grad.py \
     --model cs_dno --norm scale \
     --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
@@ -79,17 +80,6 @@ for variant in "$@"; do
     --rollout_training_interval 16 --rollout_training_microbatch 8 --rollout_training_steps 10 \
     --rollout_epochs 1 --rollout_truth_run "$reference_run" \
     --run_name "$run_name" "${variant_args[@]}" > "$trial_dir/console.log" 2>&1
-  for group in 0 1; do
-    families=(stokes tanaka)
-    (( group == 0 )) || families=(jonswap_tma benjamin_feir)
-    uv run --no-sync python -m solver.evals.eval_suite --gpu \
-      --run_dir "$trial_dir" --checkpoint weight_ema --families "${families[@]}" \
-      --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
-      --n_ics 32 --ic_selection stratified --rollout_batch_size 32 \
-      --truth_cache "$reference_run/eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu$group" \
-      --output_dir "$trial_dir/eval_epoch1_weight_ema_test_stratified_n32_gpu$group" \
-      >> "$trial_dir/console.log" 2>&1
-  done
   uv run --no-sync paper-plots/plot_neural_advantage.py --one-epoch >> "$trial_dir/console.log" 2>&1 \
     || printf '%s Figure12b refresh failed; see %s/console.log\n' "$(date +%H:%M)" "$trial_dir" >&2
   if [[ ${DNO_SHARE_GPU:-0} == 1 ]]; then
