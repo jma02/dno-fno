@@ -111,6 +111,8 @@ def main() -> None:
                         help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
     parser.add_argument("--cs_surface_context_gate", action="store_true",
                         help="Also modulate the quadratic surface lift by bounded Fourier context.")
+    parser.add_argument("--cs_surface_polynomial_skip", action="store_true",
+                        help="Append normalized eta squared/cubed directly to the final surface features.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
     parser.add_argument(
@@ -141,6 +143,8 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--reflection_augmentation", action="store_true",
+                        help="Reflect eta, xi, and target together for half of training rows.")
     parser.add_argument("--input_noise_rms", type=float, default=0.0,
                         help="Training-only eta/xi noise relative to each centered field's RMS; "
                         "smooth spectrum 1/(1+k^2), 0<|k|<=128, unchanged DNO targets.")
@@ -427,6 +431,8 @@ def main() -> None:
         parser.error("--cs_surface_context_width must be nonnegative")
     if args.cs_surface_context_gate and args.cs_surface_context_width == 0:
         parser.error("--cs_surface_context_gate requires --cs_surface_context_width > 0")
+    if args.cs_surface_polynomial_skip and (args.model != "cs_dno" or args.cs_n_polys < 3 or args.cs_baseline_order != 1):
+        parser.error("Polynomial skip requires cs_dno, at least three surface powers, and the G0+G1 baseline")
     if not 0 <= args.cs_nested_blocks <= args.n_blocks:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
@@ -542,6 +548,7 @@ def main() -> None:
                                     if args.cs_surface_feature_scales is not None else None),
             surface_context_width=args.cs_surface_context_width,
             surface_context_gate=args.cs_surface_context_gate,
+            surface_polynomial_skip=args.cs_surface_polynomial_skip,
             nested_blocks=args.cs_nested_blocks,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
@@ -871,6 +878,15 @@ def main() -> None:
         batch_depth: jax.Array,
         family: jax.Array,
     ) -> tuple[WeightEMATrainState, jax.Array, dict[str, jax.Array]]:
+        if args.reflection_augmentation:
+            reflection_key = jax.random.fold_in(
+                jax.random.fold_in(rng_key, current_state.step),
+                jax.lax.axis_index("batch") + 12289,
+            )
+            reflected = jax.random.bernoulli(reflection_key, shape=(eta.shape[0], 1))
+            reflection_indices = (-jnp.arange(nx)) % nx
+            eta, xi, gxi = (jnp.where(reflected, field[:, reflection_indices], field)
+                            for field in (eta, xi, gxi))
         if args.input_noise_rms > 0:
             noise_key = jax.random.fold_in(
                 jax.random.fold_in(rng_key, current_state.step),

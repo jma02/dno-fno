@@ -5,18 +5,27 @@ cd /home/johnma/dno-fno
 gpu=${1:?GPU index required}
 shift
 [[ "$gpu" == 0 || "$gpu" == 1 ]] || { printf 'Use local GPU 0 or 1\n' >&2; exit 2; }
-(( $# )) || set -- control_ema momentum nested_momentum nested4
+(( $# )) || set -- control reflection polynomial_skip momentum_half momentum_quarter mb2 even_features lr_low lr_high
 run_date=$(date +%Y%m%d)
 reference_run=outputs/c27_w320_b4_h80_ema_grad09_20260927
 export CUDA_VISIBLE_DEVICES="$gpu" JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 export UV_CACHE_DIR=/tmp/dno-uv-cache MPLCONFIGDIR=/tmp/dno-matplotlib
-export XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.80}
 
 for variant in "$@"; do
   variant_args=()
   # Coefficients are calibrated at fresh initialization on training rows only.
   case "$variant" in
     control|control_ema) ;;
+    reflection) variant_args=(--reflection_augmentation) ;;
+    polynomial_skip) variant_args=(--cs_surface_polynomial_skip) ;;
+    momentum_half) variant_args=(--phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761) ;;
+    momentum_quarter) variant_args=(--phase_mechanism all_momentum --phase_mechanism_weight 0.0012871749153773805) ;;
+    mb2) variant_args=(--mode_balanced_weight 2) ;;
+    even_features) variant_args=(--no-cs_use_first_deriv --no-cs_use_hilbert) ;;
+    lr_low) variant_args=(--lr 1e-5) ;;
+    lr_high) variant_args=(--lr 4e-5) ;;
     stokes) variant_args=(--phase_mechanism stokes_carrier --phase_mechanism_weight 0.002797671729980144) ;;
     tanaka) variant_args=(--phase_mechanism tanaka_momentum --phase_mechanism_weight 0.01384754275706006) ;;
     bf) variant_args=(--phase_mechanism bf_sideband --phase_mechanism_weight 0.00013728115168189654) ;;
@@ -27,13 +36,18 @@ for variant in "$@"; do
     nested_momentum) variant_args=(--cs_nested_blocks 2 --phase_mechanism all_momentum --phase_mechanism_weight 0.005148699661509522) ;;
     *) printf 'Unsupported phase experiment: %s\n' "$variant" >&2; exit 2 ;;
   esac
-  run_name=c27_phase40_${variant}_subset16_${run_date}
+  run_name=c27_phase1_${variant}_full_${run_date}
   trial_dir=outputs/$run_name
-  printf '%s waiting for idle Ada GPU%s for %s\n' "$(date +%H:%M)" "$gpu" "$variant"
+  printf '%s preparing Ada GPU%s for %s\n' "$(date +%H:%M)" "$gpu" "$variant"
   while true; do
     if [[ -d "$trial_dir" ]]; then
       printf '%s skipping claimed experiment %s\n' "$(date +%H:%M)" "$run_name"
       continue 2
+    fi
+    if [[ ${DNO_SHARE_GPU:-0} == 1 ]]; then
+      if mkdir "$trial_dir"; then break; fi
+      [[ -d "$trial_dir" ]] || exit 1
+      continue
     fi
     gpu_processes=$(nvidia-smi -i "$gpu" --query-compute-apps=pid --format=csv,noheader)
     if [[ -z "$gpu_processes" ]]; then
@@ -52,8 +66,8 @@ for variant in "$@"; do
     --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
     --width 320 --n_blocks 8 --latent 4 --cs_mult_hidden 80 --cs_n_polys 3 \
     --cs_normalize_surface_features --cs_surface_context_width 8 --cs_baseline_true_depth \
-    --batch_size 1024 --epochs 40 --stop_after_epoch 40 --seed 0 \
-    --train_fraction 0.0625 --validation_fraction 0.0625 \
+    --batch_size 1024 --epochs 1 --stop_after_epoch 1 --seed 0 \
+    --train_fraction 1 --validation_fraction 1 \
     --lr 2e-5 --lr_warmup_steps 500 --gradient_ema_decay 0.9 \
     --weight_ema_decay 0.999 --weight_ema_start_fraction 0.8 \
     --data_normalization target --mode_balanced_weight 6 --mode_balanced_warmup_steps 500 \
@@ -61,9 +75,9 @@ for variant in "$@"; do
     --hadamard_weight 0.01 --hadamard_warmup_steps 500 --hadamard_interval 16 \
     --val_hadamard_interval 16 --hadamard_microbatch 8 --metric_interval 16 \
     --rollout_training_weight 1 --rollout_training_loss full \
-    --rollout_training_start_epoch 20 --rollout_training_ramp_epochs 2 \
+    --rollout_training_start_epoch 1 --rollout_training_ramp_epochs 1 \
     --rollout_training_interval 16 --rollout_training_microbatch 8 --rollout_training_steps 10 \
-    --rollout_epochs 40 --rollout_truth_run "$reference_run" \
+    --rollout_epochs 1 --rollout_truth_run "$reference_run" \
     --run_name "$run_name" "${variant_args[@]}" > "$trial_dir/console.log" 2>&1
   for group in 0 1; do
     families=(stokes tanaka)
@@ -73,9 +87,13 @@ for variant in "$@"; do
       --dataset outputs/paper_dataset_full_equal_tanaka_hard128_20260918/arrays \
       --n_ics 32 --ic_selection stratified --rollout_batch_size 32 \
       --truth_cache "$reference_run/eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu$group" \
-      --output_dir "$trial_dir/eval_epoch40_weight_ema_test_stratified_n32_gpu$group" \
+      --output_dir "$trial_dir/eval_epoch1_weight_ema_test_stratified_n32_gpu$group" \
       >> "$trial_dir/console.log" 2>&1
   done
+  if [[ ${DNO_SHARE_GPU:-0} == 1 ]]; then
+    printf '%s %s complete; isolated timings deferred while sharing GPU\n' "$(date +%H:%M)" "$run_name"
+    continue
+  fi
   printf '%s %s training and rollouts complete; measuring single-rollout runtime\n' "$(date +%H:%M)" "$run_name"
   XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
     uv run --no-sync scripts/benchmark_dno_fusion.py --run "$trial_dir" --checkpoint weight_ema \

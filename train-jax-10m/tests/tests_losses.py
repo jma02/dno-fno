@@ -463,18 +463,20 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
     depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
     probe = jax.random.normal(jax.random.PRNGKey(9), (3, nx, 1), dtype=jnp.float32)
-    for nested_blocks in (0, 1, 2):
+    for nested_blocks, polynomial_skip in ((0, False), (1, False), (2, False), (1, True)):
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_context_width=2, baseline_order=1, baseline_true_depth=True,
+            surface_polynomial_skip=polynomial_skip,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
         for index in range(2):
             group = params[f"cs_block_{index}"]
             if index < 2 - nested_blocks:
-                group["phi_proj"]["kernel"] = jnp.arange(8, dtype=jnp.float32).reshape(4, 2) * 0.02 - 0.07
+                shape = cast(jax.Array, group["phi_proj"]["kernel"]).shape
+                group["phi_proj"]["kernel"] = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape) * 0.02 - 0.07
             else:
                 group["gamma"] = jnp.array([0.2, -0.3], dtype=jnp.float32)
         namespace: dict[str, Any] = {
@@ -482,7 +484,7 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
             "nx": nx, "domain_length": float(model.domain_length),
             "args": SimpleNamespace(model="cs_dno", n_blocks=2, cs_nested_blocks=nested_blocks,
-                                    latent=2, cs_mult_hidden=4),
+                                    latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip),
         }
         exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
                      "trainer_packed_apply", "exec"), namespace)
@@ -511,6 +513,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
                 assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
+        if polynomial_skip:
+            assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][-2:])) > 0
 
 
 def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> None:
@@ -597,13 +601,87 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
                                    teacher[3] if loss_mode == "full" else 0.0, rtol=1e-12)
 
 
+def test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6() -> None:
+    component = trainer_function("train_step")
+    reflection = next(node for node in component.body
+                      if isinstance(node, ast.If) and "args.reflection_augmentation" in ast.unparse(node.test))
+    function = ast.parse(
+        "def prepare(step, rng_key, eta, xi, gxi, batch_depth, family):\n"
+        "    current_state = SimpleNamespace(step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += [reflection]
+    function.body += ast.parse("return eta, xi, gxi, batch_depth, family, rng_key").body
+    nx, size = 64, 32
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    amplitude = jnp.linspace(0.5, 1.0, size)[:, None]
+    eta = amplitude * (0.008 * jnp.cos(x) + 0.003 * jnp.sin(3 * x))
+    xi = amplitude * (0.02 * jnp.sin(x) + 0.006 * jnp.cos(2 * x))
+    depth = jnp.log(jnp.linspace(0.1, 8.0, size))[:, None]
+    family = jnp.tile(jnp.arange(1, 5), size // 4)
+    target = compute_dno_target(
+        eta, xi, jnp.exp(depth), nx=nx, length=2 * np.pi,
+        dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+    )[2]
+    fields = eta, xi, target, depth, family
+    inputs = tuple(jnp.stack((value, value)) for value in fields)
+    config = SimpleNamespace(reflection_augmentation=True)
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace,
+        "args": config, "nx": nx, "cast": cast,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "trainer_reflection", "exec"), namespace)
+    prepare = jax.vmap(namespace["prepare"], in_axes=(None, None, 0, 0, 0, 0, 0), axis_name="batch")
+    key = jax.random.PRNGKey(41)
+    result = prepare(7, key, *inputs)
+    repeated = jax.jit(prepare)(7, key, *inputs)
+    changed = prepare(8, key, *inputs)
+    indices = (-jnp.arange(nx)) % nx
+    flipped = np.asarray(result[0][..., 1] != inputs[0][..., 1])
+    assert np.any(flipped) and not np.all(flipped)
+    assert not np.array_equal(flipped[0], flipped[1])
+    assert not np.array_equal(result[0], changed[0])
+    for actual, original in zip(result[:3], inputs[:3]):
+        expected = jnp.where(flipped[..., None], original[..., indices], original)
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(actual[..., 0], original[..., 0])
+        # Periodic reflection conjugates each Fourier coefficient; no grid shift.
+        expected_hat = jnp.fft.rfft(original, axis=-1)
+        expected_hat = jnp.where(flipped[..., None], expected_hat.conj(), expected_hat)
+        np.testing.assert_allclose(jnp.fft.rfft(actual, axis=-1), expected_hat, atol=2e-15)
+    for actual, original in zip(result[3:5], inputs[3:]):
+        np.testing.assert_array_equal(actual, original)
+    for actual, same in zip(result, repeated):
+        np.testing.assert_array_equal(actual, same)
+    np.testing.assert_array_equal(result[-1], jnp.broadcast_to(key, (2,) + key.shape))
+    _, _, regenerated = compute_dno_target(
+        result[0], result[1], jnp.exp(result[3]), nx=nx, length=2 * np.pi,
+        dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+    )
+    np.testing.assert_allclose(regenerated, result[2], rtol=1e-10, atol=2e-14)
+    k = jnp.arange(nx // 2 + 1)
+    derivative = jnp.fft.irfft(1j * k * jnp.fft.rfft(inputs[0], axis=-1), n=nx, axis=-1)
+    reflected_derivative = jnp.fft.irfft(1j * k * jnp.fft.rfft(result[0], axis=-1), n=nx, axis=-1)
+    np.testing.assert_allclose(
+        reflected_derivative, jnp.where(flipped[..., None], -derivative[..., indices], derivative), atol=1e-14,
+    )
+    config.reflection_augmentation = False
+    disabled = prepare(7, key, *inputs)
+    for actual, original in zip(disabled[:5], inputs):
+        np.testing.assert_array_equal(actual, original)
+    np.testing.assert_array_equal(disabled[-1], result[-1])
+    assert "reflection_augmentation" not in ast.unparse(trainer_function("eval_step"))
+
+
 def test_input_noise_scale_spectrum_rng_and_depth_safety() -> None:
     function = ast.parse(
         "def prepare(step, rng_key, eta, xi, gxi, batch_depth):\n"
         "    current_state = SimpleNamespace(step=step)"
     ).body[0]
     assert isinstance(function, ast.FunctionDef)
-    function.body += trainer_function("train_step").body[:1]
+    function.body += [next(node for node in trainer_function("train_step").body
+                          if isinstance(node, ast.If) and "args.input_noise_rms" in ast.unparse(node.test))]
     function.body += ast.parse("return eta, xi, gxi, batch_depth").body
     nx = 512
     config = SimpleNamespace(input_noise_rms=0.01)
@@ -671,7 +749,8 @@ def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
     family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
     fields = (eta, xi, target, depth, family)
     before = tuple(np.array(value) for value in fields)
-    config = SimpleNamespace(input_noise_rms=0.0, dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+    config = SimpleNamespace(reflection_augmentation=False, input_noise_rms=0.0,
+                             dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
                              rollout_training_weight=0.0)
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace, "args": config,
@@ -957,7 +1036,8 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     family = jnp.arange(1, size + 1)
     fields = (eta, xi, target, depth, family)
     config = SimpleNamespace(
-        input_noise_rms=0.0, dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
+        reflection_augmentation=False, input_noise_rms=0.0,
+        dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
         rollout_training_steps=4, poison=False, poison_target=np.nan,
@@ -1058,6 +1138,7 @@ if __name__ == "__main__":
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
+    test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()

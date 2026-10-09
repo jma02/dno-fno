@@ -247,6 +247,7 @@ def build_variant(
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
             if model.surface_feature_scales is not None:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
+            polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
             context = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 features = nn.gelu(features @ loaded.params[name]["kernel"])
@@ -260,6 +261,8 @@ def build_variant(
             features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             if model.surface_context_gate and context is not None:
                 features = features * (1.0 + jnp.tanh(context))
+            if polynomial_features is not None:
+                features = jnp.concatenate((features, polynomial_features), axis=-1)
             correction_hat = jnp.zeros_like(xi_phys_hat)
             if ordinary_blocks:
                 weights = features @ cast(jax.Array, head_kernel)

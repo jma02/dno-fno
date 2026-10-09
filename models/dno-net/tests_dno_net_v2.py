@@ -44,6 +44,7 @@ def _model(
     surface_feature_scales: tuple[float, ...] | None = None,
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
+    surface_polynomial_skip: bool = False,
     nested_blocks: int = 0,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
@@ -60,6 +61,7 @@ def _model(
         surface_feature_scales=surface_feature_scales,
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
+        surface_polynomial_skip=surface_polynomial_skip,
         nested_blocks=nested_blocks,
         mult_hidden=16,
         baseline_order=baseline_order,
@@ -450,6 +452,7 @@ def test_experimental_residual_orders() -> None:
         (_model(baseline_order=2, surface_context_width=8, surface_context_gate=True), 3),
         (_model(nested_blocks=1, surface_context_width=8), 2),
         (_model(nested_blocks=2), 2),
+        (_model(surface_polynomial_skip=True, surface_context_width=8), 2),
     ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
@@ -564,6 +567,74 @@ def test_bounded_context_gate_reuses_context_and_preserves_initialization() -> N
     assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
 
 
+def test_polynomial_skip_formula_initialization_and_gradients() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    for scales in (None, (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)):
+        original = _model(surface_context_width=8, surface_context_gate=True,
+                          surface_feature_scales=scales)
+        model = original.clone(surface_polynomial_skip=True)
+        original_variables = original.init(jax.random.PRNGKey(21), inputs, depth)
+        variables = model.init(jax.random.PRNGKey(21), inputs, depth)
+        for name, parameters in original_variables["params"].items():
+            if name.startswith("cs_block_"):
+                assert cast(jax.Array, variables["params"][name]["phi_proj"]["kernel"]).shape == (18, model.latent)
+                assert jnp.all(variables["params"][name]["phi_proj"]["kernel"] == 0)
+                parameters = {"m_shared": parameters["m_shared"]}
+            for key, value in parameters.items():
+                assert all(jnp.array_equal(a, b) for a, b in zip(
+                    jax.tree.leaves(value), jax.tree.leaves(variables["params"][name][key]), strict=True,
+                ))
+        assert jnp.array_equal(cast(jax.Array, model.apply(variables, inputs, depth)),
+                               cast(jax.Array, original.apply(original_variables, inputs, depth)))
+        variables = _activate_residual(variables)
+        _, captured = model.apply(
+            variables, inputs, depth,
+            capture_intermediates=lambda module, _: module.name in (
+                "eta_feat_mix", "eta_context_expand", "phi_proj",
+            ),
+        )
+        context = cast(jax.Array, captured["intermediates"]["eta_context_expand"]["__call__"][0])
+        z = nn.gelu(cast(jax.Array, captured["intermediates"]["eta_feat_mix"]["__call__"][0]))
+        polynomial_features = jnp.stack((eta**2, eta**3), axis=-1)
+        if scales is not None:
+            polynomial_features /= jnp.asarray(scales[1:3])
+        features = jnp.concatenate((z * jnp.tanh(z) * (1 + jnp.tanh(context)), polynomial_features), axis=-1)
+        for index in range(model.n_blocks):
+            block = f"cs_block_{index}"
+            expected = features @ cast(jax.Array, variables["params"][block]["phi_proj"]["kernel"])
+            actual = cast(jax.Array, captured["intermediates"][block]["phi_proj"]["__call__"][0])
+            assert jnp.array_equal(actual, expected)
+        gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, model.apply(
+            {"params": params}, inputs, depth,
+        )) ** 2))(variables["params"])
+        assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+        for index in range(model.n_blocks):
+            assert jnp.all(jnp.linalg.norm(gradient[f"cs_block_{index}"]["phi_proj"]["kernel"][-2:], axis=-1) > 0)
+        psi = jnp.roll(xi, 9, axis=-1)
+        actual = _learned_residual(model, variables, eta, xi, depth)
+        other = _learned_residual(model, variables, eta, psi, depth)
+        mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+        assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+        assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+
+
+def test_even_surface_features_enforce_reflection_covariance() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    reflection = (-jnp.arange(eta.shape[-1])) % eta.shape[-1]
+    for polynomial_skip in (False, True):
+        model = _model(use_first_deriv=False, use_hilbert=False,
+                       surface_feature_scales=(0.2, 0.04, 0.008, 8., 0.7),
+                       surface_context_width=8, surface_context_gate=True,
+                       surface_polynomial_skip=polynomial_skip)
+        variables = _activate_residual(model.init(jax.random.PRNGKey(22), inputs, depth))
+        output = cast(jax.Array, model.apply(variables, inputs, depth))
+        reflected = cast(jax.Array, model.apply(variables, inputs[:, reflection], depth))
+        assert jnp.allclose(reflected, output[:, reflection], rtol=1e-10, atol=1e-13)
+        assert jnp.linalg.norm(_learned_residual(model, variables, eta, xi, depth)) > 0
+
+
 def test_nested_branch_formula_and_gradients() -> None:
     eta, xi, depth = _state()
     features = jnp.stack((eta, eta**2), axis=-1)
@@ -647,6 +718,8 @@ def main() -> int:
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
         test_bounded_context_gate_reuses_context_and_preserves_initialization,
+        test_polynomial_skip_formula_initialization_and_gradients,
+        test_even_surface_features_enforce_reflection_covariance,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
     )

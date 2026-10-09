@@ -156,6 +156,9 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
             {"cs_surface_context_width": 4},
             {"cs_surface_context_width": 4, "cs_surface_context_gate": True},
+            {"cs_surface_polynomial_skip": True},
+            {"cs_surface_polynomial_skip": True, "cs_surface_feature_scales": [0.1, 0.02, 0.003, 10.0, 0.3],
+             "cs_use_first_deriv": False, "cs_use_hilbert": False},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1],
              "cs_surface_context_width": 4},
             {"cs_use_relative_elevation": True, "cs_baseline_order": 2, "cs_baseline_true_depth": True},
@@ -179,6 +182,9 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
                 self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
                 self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
+                self.assertEqual(loaded.model.surface_polynomial_skip, options.get("cs_surface_polynomial_skip", False))
+                self.assertEqual(loaded.model.use_first_deriv, options.get("cs_use_first_deriv", True))
+                self.assertEqual(loaded.model.use_hilbert, options.get("cs_use_hilbert", True))
 
         with patch("solver.evals.model_rollout.Path.read_text", side_effect=[
             json.dumps(config), json.dumps({"epoch": 1, "stats": {}}),

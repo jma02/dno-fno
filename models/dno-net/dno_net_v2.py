@@ -117,6 +117,7 @@ class CraigSulemDNO(nn.Module):
     surface_feature_scales: tuple[float, ...] | None = None  # Fixed training-feature RMS.
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
+    surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
     baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
@@ -244,6 +245,7 @@ class CraigSulemDNO(nn.Module):
             eta_features = eta_features / jnp.asarray(
                 self.surface_feature_scales, dtype=eta_features.dtype,
             )
+        polynomial_features = eta_features[..., 1:3] if self.surface_polynomial_skip else None
 
         # With no constant input, zero eta gives zero features.
         context = None
@@ -282,6 +284,8 @@ class CraigSulemDNO(nn.Module):
             eta_features = eta_features * jnp.tanh(eta_features)
         if self.surface_context_gate and context is not None:
             eta_features = eta_features * (1.0 + jnp.tanh(context))
+        if polynomial_features is not None:
+            eta_features = jnp.concatenate((eta_features, polynomial_features), axis=-1)
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)
