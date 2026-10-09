@@ -291,8 +291,8 @@ if __name__ == "__main__":
                 ax.scatter(seconds, error, s=45, marker=marker, color=color, edgecolors="white", linewidths=0.7, zorder=4)
                 print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "
                       f"finite {result['n_model_finite_truth_valid']}/{result['n_truth_valid']}")
-            for (error, seconds, label, color), label_y in zip(sorted(points, reverse=True), np.linspace(0.90, 0.12, len(points)), strict=True):
-                ax.annotate(f"{label}\n{error:.3g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
+            for (error, seconds, label, color), label_y in zip(sorted(points, reverse=True), 0.90 - 0.0975 * np.arange(len(points)), strict=True):
+                ax.annotate(f"{label}\n{error:.4g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
                             ha="left", va="center", color=color, fontsize=9,
                             arrowprops={"arrowstyle": "-", "color": color, "lw": 0.7, "alpha": 0.6, "relpos": (0, 0.5)},
                             bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5}, zorder=5)
