@@ -157,6 +157,8 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_surface_context_width": 4},
             {"cs_surface_context_width": 4, "cs_surface_context_gate": True},
             {"cs_surface_polynomial_skip": True},
+            {"cs_multiplier_skip": True},
+            {"cs_multiplier_skip": True, "cs_nested_blocks": 1},
             {"cs_surface_polynomial_skip": True, "cs_surface_feature_scales": [0.1, 0.02, 0.003, 10.0, 0.3],
              "cs_use_first_deriv": False, "cs_use_hilbert": False},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1],
@@ -183,6 +185,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
                 self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
                 self.assertEqual(loaded.model.surface_polynomial_skip, options.get("cs_surface_polynomial_skip", False))
+                self.assertEqual(loaded.model.multiplier_skip, options.get("cs_multiplier_skip", False))
                 self.assertEqual(loaded.model.use_first_deriv, options.get("cs_use_first_deriv", True))
                 self.assertEqual(loaded.model.use_hilbert, options.get("cs_use_hilbert", True))
 
@@ -229,6 +232,41 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(restored.model.nested_blocks, 1)
         self.assertEqual(restored.model.baseline_order, 1)
         self.assertEqual(restored.epoch, 40)
+
+    def test_cached_fourier_multiplier_skip_matches_nonzero_native_branches(self) -> None:
+        from scripts.benchmark_dno_fusion import build_variant
+
+        nx = 64
+        inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(14), (2, nx, 2), dtype=jnp.float32)
+        depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float32))
+        stats = {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0}
+        # Use the identical sandwich algebra on CPU; only the native FFT binding is replaced.
+        with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda eta, xi, symbols, **kwargs:
+                   symbols * jnp.fft.rfft(eta[:, None, :] * jnp.fft.irfft(
+                       symbols * xi[:, None, :], n=nx), n=nx)):
+            for nested in (0, 1):
+                with self.subTest(nested=nested):
+                    model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=nested, latent=2,
+                                         mult_hidden=4, multiplier_skip=True, baseline_true_depth=True)
+                    params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
+                    for index in range(2):
+                        block = params[f"cs_block_{index}"]
+                        for name in ("m_shared", "m_inner") if index >= 2 - nested else ("m_shared",):
+                            block[name]["symbol_skip"]["kernel"] = jnp.asarray(
+                                [[0.4, -0.3], [1.0, 0.7], [-0.2, 0.5]], dtype=jnp.float32)
+                        if index >= 2 - nested:
+                            block["gamma"] = jnp.full((2,), 0.2, dtype=jnp.float32)
+                        else:
+                            block["phi_proj"]["kernel"] = jnp.full_like(cast(jax.Array, block["phi_proj"]["kernel"]), 0.1)
+                    loaded = LoadedRun(model, params, {"model": "cs_dno"}, stats, "scale", 1)
+                    expected = build_predict_gxi_batched(loaded)(inputs[..., 0], inputs[..., 1], depth)
+                    transformed = build_variant(loaded, depth, nx, "fourier_round")
+                    actual = jnp.fft.irfft(transformed(
+                        jnp.fft.rfft(inputs[..., 0].astype(jnp.float64)),
+                        jnp.fft.rfft(inputs[..., 1].astype(jnp.float64)),
+                    ), n=nx)
+                    relative = jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected)
+                    self.assertLess(float(relative), 5e-7)
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)

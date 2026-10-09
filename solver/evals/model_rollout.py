@@ -101,6 +101,7 @@ def load_run(
             surface_context_gate=bool(config.get("cs_surface_context_gate", False)),
             surface_polynomial_skip=bool(config.get("cs_surface_polynomial_skip", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
+            multiplier_skip=bool(config.get("cs_multiplier_skip", False)),
             baseline_order=int(config.get(
                 "cs_baseline_order", {"cs_dno": 1, "cs_dno_g0": 0, "cs_dno_no_baseline": -1}[model_name]
             )),

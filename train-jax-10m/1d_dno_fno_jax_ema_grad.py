@@ -113,6 +113,8 @@ def main() -> None:
                         help="Also modulate the quadratic surface lift by bounded Fourier context.")
     parser.add_argument("--cs_surface_polynomial_skip", action="store_true",
                         help="Append normalized eta squared/cubed directly to the final surface features.")
+    parser.add_argument("--cs_multiplier_skip", action="store_true",
+                        help="Add a learned linear skip from normalized 1, k*tanh(kh), k squared to each multiplier.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
     parser.add_argument(
@@ -549,6 +551,7 @@ def main() -> None:
             surface_context_width=args.cs_surface_context_width,
             surface_context_gate=args.cs_surface_context_gate,
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
+            multiplier_skip=args.cs_multiplier_skip,
             nested_blocks=args.cs_nested_blocks,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
@@ -588,7 +591,10 @@ def main() -> None:
         if args.model != "cs_dno":
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
             return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)) if return_baseline else prediction
-        multiplier_model = DepthAwareMultiplier(args.latent, domain_length, 5.0, args.cs_mult_hidden)
+        multiplier_model = DepthAwareMultiplier(
+            args.latent, domain_length, 5.0, args.cs_mult_hidden,
+            multiplier_skip=args.cs_multiplier_skip,
+        )
 
         def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
                       context: nn.module.InterceptorContext) -> Any:

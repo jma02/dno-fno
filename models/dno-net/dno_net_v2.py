@@ -26,6 +26,7 @@ class DepthAwareMultiplier(nn.Module):
     domain_length: float
     h_clip_max: float
     hidden: int = 32
+    multiplier_skip: bool = False
 
     @nn.compact
     def __call__(self, depth: jnp.ndarray, n_freq: int) -> jnp.ndarray:
@@ -35,9 +36,18 @@ class DepthAwareMultiplier(nn.Module):
         kh = h * k
         features = jnp.stack([k, h, jnp.tanh(kh), k * jnp.tanh(kh)], axis=-1)
         hidden = nn.tanh(nn.Dense(self.hidden, name="hidden")(features))
-        return nn.Dense(
+        multiplier = nn.Dense(
             self.out_channels, name="out", kernel_init=nn.initializers.lecun_normal(),
         )(hidden)
+        if self.multiplier_skip:
+            k_ref = 2.0 * jnp.pi * 128 / self.domain_length
+            symbols = jnp.stack((jnp.ones_like(k), k * jnp.tanh(kh) / k_ref,
+                                 (k / k_ref) ** 2), axis=-1)
+            multiplier = multiplier + nn.Dense(
+                self.out_channels, name="symbol_skip", use_bias=False,
+                kernel_init=nn.initializers.zeros,
+            )(symbols)
+        return multiplier
 
 
 class CraigSulemBlock(nn.Module):
@@ -47,6 +57,7 @@ class CraigSulemBlock(nn.Module):
     h_clip_max: float
     mult_hidden: int = 32
     nested: bool = False
+    multiplier_skip: bool = False
 
     @nn.compact
     def __call__(
@@ -73,6 +84,7 @@ class CraigSulemBlock(nn.Module):
             domain_length=self.domain_length,
             h_clip_max=self.h_clip_max,
             hidden=self.mult_hidden,
+            multiplier_skip=self.multiplier_skip,
             name="m_shared",
         )(depth, grid_size // 2 + 1)
 
@@ -83,7 +95,7 @@ class CraigSulemBlock(nn.Module):
         if self.nested:
             inner_multiplier = DepthAwareMultiplier(
                 self.n_branches, self.domain_length, self.h_clip_max,
-                self.mult_hidden, name="m_inner",
+                self.mult_hidden, multiplier_skip=self.multiplier_skip, name="m_inner",
             )(depth, grid_size // 2 + 1)
             surface = cast(jnp.ndarray, eta_norm)[..., None]
             inner_hat = jnp.fft.rfft(surface * filtered_xi, axis=1, norm="forward")
@@ -119,6 +131,7 @@ class CraigSulemDNO(nn.Module):
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
+    multiplier_skip: bool = False    # Learn constant, G0, and k^2 symbol coefficients.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
     baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
 
@@ -299,6 +312,7 @@ class CraigSulemDNO(nn.Module):
                 h_clip_max=self.h_clip_max,
                 mult_hidden=self.mult_hidden,
                 nested=block_idx >= self.n_blocks - self.nested_blocks,
+                multiplier_skip=self.multiplier_skip,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, clipped_log_depth, eta_norm=nested_surface)
 

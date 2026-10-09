@@ -46,6 +46,7 @@ def _model(
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
     nested_blocks: int = 0,
+    multiplier_skip: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
         width=32,
@@ -63,6 +64,7 @@ def _model(
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
         nested_blocks=nested_blocks,
+        multiplier_skip=multiplier_skip,
         mult_hidden=16,
         baseline_order=baseline_order,
         domain_length=2.0 * pi,
@@ -699,6 +701,70 @@ def test_nested_model_replacement_preserves_structure() -> None:
         assert jnp.allclose(shifted, jnp.roll(actual, 7, axis=-1), rtol=1e-10, atol=1e-14)
 
 
+def test_multiplier_skip_symbol_basis_and_grid_independence() -> None:
+    depth = jnp.log(jnp.asarray([[0.08], [8.0]], dtype=jnp.float64))
+    for length in (2 * pi, 8 * pi):
+        model = DepthAwareMultiplier(3, length, 5.0, multiplier_skip=True)
+        original = model.clone(multiplier_skip=False)
+        variables = unfreeze(model.init(jax.random.PRNGKey(23), depth, 257))
+        original_variables = original.init(jax.random.PRNGKey(23), depth, 257)
+        assert jnp.array_equal(cast(jax.Array, model.apply(variables, depth, 257)),
+                               cast(jax.Array, original.apply(original_variables, depth, 257)))
+        variables["params"]["out"] = jax.tree.map(jnp.zeros_like, variables["params"]["out"])
+        variables["params"]["symbol_skip"]["kernel"] = jnp.eye(3)
+        actual = cast(jax.Array, model.apply(variables, depth, 257))
+        k = (2 * pi / length) * jnp.arange(257, dtype=jnp.float64)
+        k_ref = 2 * pi * 128 / length
+        k, h = jnp.broadcast_arrays(k[None, :], jnp.exp(jnp.minimum(depth, jnp.log(5.0))))
+        expected = jnp.stack((jnp.ones_like(k), k * jnp.tanh(k * h) / k_ref,
+                              (k / k_ref) ** 2), axis=-1)
+        assert jnp.allclose(actual, expected, rtol=1e-14, atol=1e-14)
+        assert jnp.array_equal(actual[:, :33], cast(jax.Array, model.apply(variables, depth, 33)))
+        assert jnp.allclose(actual[:, 256, 2] / actual[:, 128, 2], 4.0)
+        assert jnp.allclose(actual[:, 128, 2], 1.0)
+
+
+def test_multiplier_skip_preserves_initialization_and_operator_structure() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    for nested_blocks in (0, 1, 2):
+        original = _model(nested_blocks=nested_blocks)
+        model = original.clone(multiplier_skip=True)
+        original_variables = original.init(jax.random.PRNGKey(24), inputs, depth)
+        variables = model.init(jax.random.PRNGKey(24), inputs, depth)
+        stripped = unfreeze(variables)
+        for block_idx in range(model.n_blocks):
+            block = stripped["params"][f"cs_block_{block_idx}"]
+            for name in ("m_shared", "m_inner"):
+                if name in block:
+                    assert jnp.all(block[name].pop("symbol_skip")["kernel"] == 0)
+        assert all(jnp.array_equal(a, b) for a, b in zip(
+            jax.tree.leaves(original_variables), jax.tree.leaves(stripped), strict=True,
+        ))
+        variables = unfreeze(_activate_residual(variables))
+        assert jnp.array_equal(cast(jax.Array, model.apply(variables, inputs, depth)),
+                               cast(jax.Array, original.apply(_activate_residual(original_variables), inputs, depth)))
+        gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, model.apply(
+            {"params": params}, inputs, depth,
+        )) ** 2))(variables["params"])
+        assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+        for block_idx in range(model.n_blocks):
+            block_name = f"cs_block_{block_idx}"
+            for name in ("m_shared", "m_inner"):
+                if name in variables["params"][block_name]:
+                    assert jnp.linalg.norm(gradient[block_name][name]["symbol_skip"]["kernel"]) > 0
+                    kernel = variables["params"][block_name][name]["symbol_skip"]["kernel"]
+                    variables["params"][block_name][name]["symbol_skip"]["kernel"] = jnp.broadcast_to(
+                        jnp.asarray([0.1, -0.15, 0.05], dtype=kernel.dtype)[:, None], kernel.shape,
+                    )
+        psi = jnp.roll(xi, 9, axis=-1)
+        actual = _learned_residual(model, variables, eta, xi, depth)
+        other = _learned_residual(model, variables, eta, psi, depth)
+        mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+        assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+        assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -722,6 +788,8 @@ def main() -> int:
         test_even_surface_features_enforce_reflection_covariance,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
+        test_multiplier_skip_symbol_basis_and_grid_independence,
+        test_multiplier_skip_preserves_initialization_and_operator_structure,
     )
     for test in tests:
         test()

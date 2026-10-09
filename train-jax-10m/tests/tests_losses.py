@@ -463,12 +463,15 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
     depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
     probe = jax.random.normal(jax.random.PRNGKey(9), (3, nx, 1), dtype=jnp.float32)
-    for nested_blocks, polynomial_skip in ((0, False), (1, False), (2, False), (1, True)):
+    for nested_blocks, polynomial_skip, multiplier_skip in (
+        (0, False, False), (1, False, False), (2, False, False), (1, True, False),
+        (0, False, True), (1, True, True),
+    ):
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_context_width=2, baseline_order=1, baseline_true_depth=True,
-            surface_polynomial_skip=polynomial_skip,
+            surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
@@ -479,12 +482,17 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                 group["phi_proj"]["kernel"] = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape) * 0.02 - 0.07
             else:
                 group["gamma"] = jnp.array([0.2, -0.3], dtype=jnp.float32)
+            if multiplier_skip:
+                for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
+                    shape = cast(jax.Array, group[part]["symbol_skip"]["kernel"]).shape
+                    group[part]["symbol_skip"]["kernel"] = jnp.linspace(-0.2, 0.3, int(np.prod(shape)), dtype=jnp.float32).reshape(shape)
         namespace: dict[str, Any] = {
             "jax": jax, "jnp": jnp, "nn": nn, "Any": Any, "cast": cast, "model": model,
             "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
             "nx": nx, "domain_length": float(model.domain_length),
             "args": SimpleNamespace(model="cs_dno", n_blocks=2, cs_nested_blocks=nested_blocks,
-                                    latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip),
+                                    latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
+                                    cs_multiplier_skip=multiplier_skip),
         }
         exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
                      "trainer_packed_apply", "exec"), namespace)
@@ -515,6 +523,10 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                 assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
         if polynomial_skip:
             assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][-2:])) > 0
+        if multiplier_skip:
+            for index in range(2):
+                for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
+                    assert float(jnp.linalg.norm(actual_grad[0][f"cs_block_{index}"][part]["symbol_skip"]["kernel"])) > 0
 
 
 def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> None:
