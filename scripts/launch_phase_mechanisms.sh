@@ -90,6 +90,8 @@ for variant in "$@"; do
       --output_dir "$trial_dir/eval_epoch1_weight_ema_test_stratified_n32_gpu$group" \
       >> "$trial_dir/console.log" 2>&1
   done
+  uv run --no-sync paper-plots/plot_neural_advantage.py --one-epoch >> "$trial_dir/console.log" 2>&1 \
+    || printf '%s Figure12b refresh failed; see %s/console.log\n' "$(date +%H:%M)" "$trial_dir" >&2
   if [[ ${DNO_SHARE_GPU:-0} == 1 ]]; then
     printf '%s %s complete; isolated timings deferred while sharing GPU\n' "$(date +%H:%M)" "$run_name"
     continue
