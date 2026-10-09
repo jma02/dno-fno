@@ -219,38 +219,57 @@ if __name__ == "__main__":
     parser.add_argument("--spectral-timings", type=Path, nargs="+", help="Overlay spectral weight-EMA timings on matching Figure 12 hardware; show errors only on single-case panels.")
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
     parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
-    parser.add_argument("--subset40", action="store_true", help="Figure 12b: completed 40-epoch subset screens at shared architecture runtime.")
+    parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
-    if args.subset40:
+    if args.one_epoch:
         classical = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
         neural = json.loads((ROOT / "outputs/rms_context_timing_20261007/ada/timings.json").read_text())
         method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
         screens = (
-            ("control_subset16_gpu0", "Control", "#343b43", "o"),
-            ("stokes_subset16", "Stokes phase", "#cf6327", "s"),
-            ("tanaka_subset16", "Tanaka momentum", "#008772", "D"),
-            ("bf_subset16", "BF sideband phase", "#7855ad", "^"),
-            ("jonswap_subset16", "JONSWAP MB off", "#007da6", "P"),
+            ("control", "Control", "#343b43", "o"),
+            ("reflection", "Reflection augmentation", "#cf6327", "s"),
+            ("polynomial_skip", "Polynomial shortcut", "#008772", "D"),
+            ("momentum_half", "Momentum × ½", "#7855ad", "^"),
+            ("momentum_quarter", "Momentum × ¼", "#007da6", "v"),
+            ("mb2", "Mode balancing × ⅓", "#ba3e75", "P"),
+            ("even_features", "Even surface features", "#9b761d", "X"),
+            ("lr_low", "Learning rate 1e−5", "#627b34", "<"),
+            ("lr_high", "Learning rate 4e−5", "#a4473b", ">"),
         )
         completed = []
         for suffix, label, color, marker in screens:
-            run = ROOT / f"outputs/c27_phase40_{suffix}_20261008"
-            if not (run / "summary.json").exists():
+            run = ROOT / f"outputs/c27_phase1_{suffix}_full_20261009"
+            results = {}
+            for checkpoint in ("_weight_ema", ""):
+                paths = {family: run / f"eval_epoch1{checkpoint}_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
+                         for family, _ in FAMILIES}
+                if all(path.exists() for path in paths.values()):
+                    results = {family: json.loads(path.read_text()) for family, path in paths.items()}
+                    if not checkpoint:
+                        label += " (raw)"
+                    break
+            if not results:
                 print(f"Pending: {label}")
                 continue
-            completed.append((run, label, color, marker))
+            timing_path = run / "timing/timings.json"
+            if not timing_path.exists() and suffix in ("polynomial_skip", "even_features"):
+                print(f"Awaiting architecture timing: {label}")
+                continue
+            timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
+            completed.append((results, timings, label, color, marker))
+        if not completed:
+            parser.error("No completed four-family one-epoch rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
             "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
             "axes.spines.top": False, "axes.spines.right": False,
             "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
             "xtick.color": "#59616a", "ytick.color": "#59616a",
         })
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
-        fig.subplots_adjust(left=0.10, right=0.97, top=0.80, bottom=0.12, hspace=0.38, wspace=0.27)
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9.5))
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
-            seconds = float(np.median(timing["methods"][method]["seconds"]))
             with np.load(ROOT / f"outputs/cs_order_sweep_20260923/{family}.npz") as data:
                 orders = (2, 3)
                 classical_errors = [100 * float(np.median(data["eta_rel_l2"][np.flatnonzero(data["orders"] == order)[0], -1]))
@@ -261,22 +280,26 @@ if __name__ == "__main__":
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
             points = []
-            group = 0 if family in ("stokes", "tanaka") else 1
-            for run, label, color, marker in completed:
-                result = json.loads((run / f"eval_epoch40_test_stratified_n32_gpu{group}/{family}_summary.json").read_text())
+            for results, timings, label, color, marker in completed:
+                result = results[family]
+                seconds = float(np.median(timings["families"][family]["methods"][method]["seconds"]))
+                failures = result["model_nonfinite_any_count_truth_valid"]
+                if failures:
+                    label += f" · {failures}/{result['n_truth_valid']} failed"
                 error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
-                points.append((error, label, color, marker))
+                points.append((error, seconds, label, color))
                 ax.scatter(seconds, error, s=45, marker=marker, color=color, edgecolors="white", linewidths=0.7, zorder=4)
-                print(f"{family}, {label}: median error {error:.8g}%; shared runtime {seconds:.6f}s")
-            for (error, label, color, _), label_y in zip(sorted(points, reverse=True), np.linspace(0.90, 0.49, len(points)), strict=True):
+                print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "
+                      f"finite {result['n_model_finite_truth_valid']}/{result['n_truth_valid']}")
+            for (error, seconds, label, color), label_y in zip(sorted(points, reverse=True), np.linspace(0.90, 0.12, len(points)), strict=True):
                 ax.annotate(f"{label}\n{error:.3g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
                             ha="left", va="center", color=color, fontsize=9,
-                            arrowprops={"arrowstyle": "-", "color": color, "lw": 0.7, "alpha": 0.6},
+                            arrowprops={"arrowstyle": "-", "color": color, "lw": 0.7, "alpha": 0.6, "relpos": (0, 0.5)},
                             bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5}, zorder=5)
             values = classical_errors + [point[0] for point in points]
             log_low, log_high = np.log10([min(values), max(values)])
             span = max(log_high - log_low, 0.5)
-            ax.set(yscale="log", xlim=(0, 2.0 * max(classical_seconds)),
+            ax.set(yscale="log", xlim=(0, 2.0 * max(*classical_seconds, *(point[1] for point in points))),
                    ylim=(10**(log_low - 0.13 * span), 10**(log_high + 0.20 * span)))
             ax.xaxis.set_major_locator(MaxNLocator(4))
             ax.yaxis.set_major_locator(LogLocator(numticks=5))
@@ -287,12 +310,12 @@ if __name__ == "__main__":
             ax.grid(axis="y", lw=0.6)
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
-        fig.suptitle("Figure 12b · 40-epoch training screens", x=0.10, y=0.965, ha="left", fontsize=19)
-        fig.text(0.10, 0.915, "1/16 training data · RTX 6000 Ada · 32 test cases per family", color="#59616a", fontsize=11)
-        fig.text(0.10, 0.875, "Neural points share the measured architecture runtime.", color="#59616a", fontsize=10)
+        fig.suptitle("Figure 12b · One epoch, full data", x=0.10, y=0.965, ha="left", fontsize=19)
+        fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA unless marked raw", color="#59616a", fontsize=11)
+        fig.text(0.10, 0.891, "Unchanged architectures share measured runtime.", color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)
-        stem = OUT / (args.output_name or "12b-subsampled-40-epochs")
+        stem = OUT / (args.output_name or "12b-one-epoch-full-data")
         stem.parent.mkdir(parents=True, exist_ok=True)
         for extension in ("png", "pdf"):
             fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
