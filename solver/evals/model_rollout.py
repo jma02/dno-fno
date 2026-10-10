@@ -102,6 +102,7 @@ def load_run(
                                        tuple(tuple(map(float, row)) for row in surface_transform)),
             surface_context_width=int(config.get("cs_surface_context_width", 0)),
             surface_context_gate=bool(config.get("cs_surface_context_gate", False)),
+            surface_depth_gate=bool(config.get("cs_surface_depth_gate", False)),
             surface_polynomial_skip=bool(config.get("cs_surface_polynomial_skip", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
             multiplier_skip=bool(config.get("cs_multiplier_skip", False)),

@@ -138,6 +138,7 @@ class CraigSulemDNO(nn.Module):
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
+    surface_depth_gate: bool = False  # Condition lifted features on depth alone.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     multiplier_skip: bool = False    # Learn constant, G0, and k^2 symbol coefficients.
     log_multiplier_inputs: bool = False  # Compress multiplier coordinates before tanh.
@@ -310,6 +311,13 @@ class CraigSulemDNO(nn.Module):
             eta_features = eta_features * (1.0 + jnp.tanh(context))
         if polynomial_features is not None:
             eta_features = jnp.concatenate((eta_features, polynomial_features), axis=-1)
+        if self.surface_depth_gate:
+            t = clipped_log_depth / 4.0
+            gains = 1.0 + 0.5 * jnp.tanh(nn.Dense(
+                eta_features.shape[-1], use_bias=False,
+                kernel_init=nn.initializers.zeros, name="eta_depth_gate",
+            )(jnp.concatenate((t, t**2), axis=-1)))
+            eta_features = eta_features * gains[:, None, :]
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)

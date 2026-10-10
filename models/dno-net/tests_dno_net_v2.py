@@ -46,6 +46,7 @@ def _model(
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
+    surface_depth_gate: bool = False,
     nested_blocks: int = 0,
     multiplier_skip: bool = False,
 ) -> CraigSulemDNO:
@@ -65,6 +66,7 @@ def _model(
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
+        surface_depth_gate=surface_depth_gate,
         nested_blocks=nested_blocks,
         multiplier_skip=multiplier_skip,
         mult_hidden=16,
@@ -96,6 +98,11 @@ def _activate_residual(variables: VariableState) -> FrozenVariableDict:
         kernel = mutable["params"]["eta_filter_out"]["kernel"]
         mutable["params"]["eta_filter_out"]["kernel"] = 0.2 * jax.random.normal(
             jax.random.PRNGKey(102), kernel.shape, dtype=kernel.dtype,
+        )
+    if "eta_depth_gate" in mutable["params"]:
+        kernel = mutable["params"]["eta_depth_gate"]["kernel"]
+        mutable["params"]["eta_depth_gate"]["kernel"] = 0.2 * jax.random.normal(
+            jax.random.PRNGKey(103), kernel.shape, dtype=kernel.dtype,
         )
     return freeze(mutable)
 
@@ -457,6 +464,9 @@ def test_experimental_residual_orders() -> None:
         (_model(nested_blocks=1, surface_context_width=8), 2),
         (_model(nested_blocks=2), 2),
         (_model(surface_polynomial_skip=True, surface_context_width=8), 2),
+        (_model(surface_depth_gate=True, surface_context_width=8), 2),
+        (_model(surface_depth_gate=True, surface_context_width=8,
+                surface_context_gate=True, surface_polynomial_skip=True), 2),
     ):
         variables = _activate_residual(model.init(jax.random.PRNGKey(10), inputs, depth))
         def residual(surface: jnp.ndarray) -> jnp.ndarray:
@@ -615,6 +625,99 @@ def test_bounded_context_gate_reuses_context_and_preserves_initialization() -> N
     for name in ("eta_context_in", "eta_context_hidden", "eta_context_out", "eta_context_expand"):
         assert jnp.linalg.norm(gradient[name]["kernel"]) > 1e-15
     assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+
+
+def test_depth_gate_initial_identity_shared_parameters_and_gradient() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    original = _model(surface_context_width=8).clone(width=320, n_blocks=8, latent=4, mult_hidden=80)
+    gated = original.clone(surface_depth_gate=True)
+    variables = original.init(jax.random.PRNGKey(28), inputs, depth)
+    gated_variables = unfreeze(gated.init(jax.random.PRNGKey(28), inputs, depth))
+    kernel = gated_variables["params"].pop("eta_depth_gate")["kernel"]
+    assert kernel.shape == (2, 160) and jnp.all(kernel == 0)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(variables), jax.tree.leaves(gated_variables), strict=True,
+    ))
+    for active in (False, True):
+        original_variables = _activate_residual(variables) if active else variables
+        gated_variables = unfreeze(original_variables)
+        gated_variables["params"]["eta_depth_gate"] = {"kernel": kernel}
+        assert jnp.array_equal(cast(jax.Array, original.apply(original_variables, inputs, depth)),
+                               cast(jax.Array, gated.apply(gated_variables, inputs, depth)))
+    gradients = jax.grad(lambda params, fields, log_depth: jnp.sum(cast(jax.Array, gated.apply(
+        {"params": params}, fields, log_depth,
+    )) ** 2), argnums=(0, 1, 2))(gated_variables["params"], inputs, depth)
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+    assert jnp.linalg.norm(gradients[0]["eta_depth_gate"]["kernel"]) > 0
+
+
+def test_depth_gate_formula_clipping_and_feature_order() -> None:
+    eta, xi, _ = _state()
+    inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (4, eta.shape[-1], 2))
+    depth = jnp.log(jnp.asarray([[0.08], [0.8], [5.0], [12.0]], dtype=eta.dtype))
+    for polynomial_skip in (False, True):
+        model = _model(surface_context_width=8, surface_context_gate=True,
+                       surface_polynomial_skip=polynomial_skip, surface_depth_gate=True)
+        variables = _activate_residual(model.init(jax.random.PRNGKey(29), inputs, depth))
+        output, captured = model.apply(
+            variables, inputs, depth,
+            capture_intermediates=lambda module, _: module.name in (
+                "eta_feat_mix", "eta_context_expand", "eta_depth_gate", "phi_proj",
+            ),
+        )
+        context = cast(jax.Array, captured["intermediates"]["eta_context_expand"]["__call__"][0])
+        z = nn.gelu(cast(jax.Array, captured["intermediates"]["eta_feat_mix"]["__call__"][0]))
+        features = z * jnp.tanh(z) * (1 + jnp.tanh(context))
+        if polynomial_skip:
+            features = jnp.concatenate((features, inputs[..., :1] ** 2, inputs[..., :1] ** 3), axis=-1)
+        t = jnp.minimum(depth, jnp.log(5.0)) / 4.0
+        gate_logits = jnp.concatenate((t, t**2), axis=-1) @ cast(jax.Array, variables["params"]["eta_depth_gate"]["kernel"])
+        assert jnp.array_equal(gate_logits, cast(jax.Array, captured["intermediates"]["eta_depth_gate"]["__call__"][0]))
+        features *= (1 + 0.5 * jnp.tanh(gate_logits))[:, None, :]
+        for index in range(model.n_blocks):
+            block = f"cs_block_{index}"
+            expected = features @ cast(jax.Array, variables["params"][block]["phi_proj"]["kernel"])
+            assert jnp.array_equal(expected, cast(jax.Array, captured["intermediates"][block]["phi_proj"]["__call__"][0]))
+        assert jnp.array_equal(output[2], output[3])
+        derivative = jax.grad(lambda log_depth: jnp.sum(cast(jax.Array, model.apply(
+            variables, inputs, log_depth,
+        )) ** 2))(depth)
+        assert jnp.all(jnp.isfinite(derivative)) and derivative[-1, 0] == 0
+        assert jnp.linalg.norm(derivative[:2]) > 0
+
+
+def test_depth_gate_changes_leading_quadratic_without_losing_structure() -> None:
+    eta, xi, depth = _state()
+    model = _model(surface_context_width=8, surface_depth_gate=True)
+    variables = _activate_residual(model.init(jax.random.PRNGKey(30), jnp.stack((eta, xi), axis=-1), depth))
+    coefficients = []
+    for enabled in (False, True):
+        current = model.clone(surface_depth_gate=enabled)
+
+        def correction(surface: jnp.ndarray) -> jnp.ndarray:
+            _, captured = current.apply(
+                variables, jnp.stack((surface, xi), axis=-1), depth,
+                capture_intermediates=lambda module, _: str(module.name).startswith("cs_block_"),
+            )
+            return sum(cast(jax.Array, captured["intermediates"][f"cs_block_{i}"]["__call__"][0])
+                       for i in range(current.n_blocks)) / (current.n_blocks * current.latent) ** 0.5
+
+        zero = jnp.zeros_like(eta)
+        value, first = jax.jvp(correction, (zero,), (eta,))
+        assert jnp.all(value == 0) and jnp.all(first == 0)
+        second = jax.jvp(lambda surface: jax.jvp(correction, (surface,), (eta,))[1], (zero,), (eta,))[1]
+        coefficients.append(0.5 * second)
+        assert jnp.linalg.norm(correction(1e-4 * eta) / 1e-8 - coefficients[-1]) / jnp.linalg.norm(coefficients[-1]) < 1e-3
+    assert jnp.linalg.norm(coefficients[1] - coefficients[0]) / jnp.linalg.norm(coefficients[0]) > 1e-4
+    psi = jnp.roll(xi, 9, axis=-1)
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+    assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+    shifted = _learned_residual(model, variables, jnp.roll(eta, 9, axis=-1), psi, depth)
+    assert jnp.allclose(shifted, jnp.roll(actual, 9, axis=-1), rtol=1e-10, atol=1e-14)
 
 
 def test_polynomial_skip_formula_initialization_and_gradients() -> None:
@@ -884,6 +987,9 @@ def main() -> int:
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
         test_bounded_context_gate_reuses_context_and_preserves_initialization,
+        test_depth_gate_initial_identity_shared_parameters_and_gradient,
+        test_depth_gate_formula_clipping_and_feature_order,
+        test_depth_gate_changes_leading_quadratic_without_losing_structure,
         test_polynomial_skip_formula_initialization_and_gradients,
         test_even_surface_features_enforce_reflection_covariance,
         test_nested_branch_formula_and_gradients,

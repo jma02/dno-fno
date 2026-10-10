@@ -792,24 +792,32 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
     depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
     probe = jax.random.normal(jax.random.PRNGKey(9), (3, nx, 1), dtype=jnp.float32)
-    for nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs, whiten in (
+    cases = [(nested, polynomial, multiplier, log_inputs, whiten, False, 2)
+             for nested, polynomial, multiplier, log_inputs, whiten in (
         (0, False, False, False, False), (1, False, False, False, False),
         (2, False, False, False, False), (1, True, False, False, False),
         (0, False, True, False, False), (1, True, True, False, False),
         (0, False, False, True, False), (1, True, True, True, False),
         (0, False, False, False, True), (1, True, False, False, True),
-    ):
+    )]
+    cases += [(0, polynomial, False, False, False, True, context)
+              for polynomial, context in product((False, True), (0, 2))]
+    for nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs, whiten, depth_gate, context in cases:
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
                                        if whiten else None),
-            surface_context_width=2, baseline_order=1, baseline_true_depth=True,
+            surface_context_width=context, surface_context_gate=depth_gate and bool(context),
+            surface_depth_gate=depth_gate, baseline_order=1, baseline_true_depth=True,
             surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
             log_multiplier_inputs=log_multiplier_inputs,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        if depth_gate:
+            shape = cast(jax.Array, params["eta_depth_gate"]["kernel"]).shape
+            params["eta_depth_gate"]["kernel"] = jnp.linspace(-0.6, 0.7, int(np.prod(shape)), dtype=jnp.float32).reshape(shape)
         for index in range(2):
             group = params[f"cs_block_{index}"]
             if index < 2 - nested_blocks:
@@ -859,6 +867,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                 assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
         if polynomial_skip:
             assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][-2:])) > 0
+        if depth_gate:
+            assert float(jnp.linalg.norm(actual_grad[0]["eta_depth_gate"]["kernel"])) > 0
         if multiplier_skip:
             for index in range(2):
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):

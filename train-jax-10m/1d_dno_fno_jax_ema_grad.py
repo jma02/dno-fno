@@ -113,6 +113,8 @@ def main() -> None:
                         help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
     parser.add_argument("--cs_surface_context_gate", action="store_true",
                         help="Also modulate the quadratic surface lift by bounded Fourier context.")
+    parser.add_argument("--cs_surface_depth_gate", action="store_true",
+                        help="Modulate lifted surface features by a bounded, depth-only learned gain.")
     parser.add_argument("--cs_surface_polynomial_skip", action="store_true",
                         help="Append normalized eta squared/cubed directly to the final surface features.")
     parser.add_argument("--cs_multiplier_skip", action="store_true",
@@ -608,6 +610,7 @@ def main() -> None:
                                        if args.cs_surface_feature_transform is not None else None),
             surface_context_width=args.cs_surface_context_width,
             surface_context_gate=args.cs_surface_context_gate,
+            surface_depth_gate=args.cs_surface_depth_gate,
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
             multiplier_skip=args.cs_multiplier_skip,
             log_multiplier_inputs=args.cs_log_multiplier_inputs,

@@ -133,6 +133,16 @@ def build_variant(
         jax.block_until_ready(cached)
 
     if spectral_io:
+        if model.surface_depth_gate and head_kernel is not None:
+            # Fold the fixed-depth gain into the head once, outside the rollout.
+            log_h = jnp.minimum(depth.astype(jnp.float32).reshape(-1, 1), jnp.log(model.h_clip_max)) / 4.0
+            gains = 1.0 + 0.5 * jnp.tanh(
+                jnp.concatenate((log_h, log_h**2), axis=-1)
+                @ loaded.params["eta_depth_gate"]["kernel"]
+            )
+            head_kernel = gains[..., None] * head_kernel[None, ...]
+            if head_kernel.shape[0] == 1:
+                head_kernel = head_kernel[0]
         first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]
         if model.surface_feature_transform is not None:
             first_projection_kernel = jnp.asarray(

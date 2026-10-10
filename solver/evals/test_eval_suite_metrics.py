@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from importlib import import_module
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -165,6 +166,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_surface_feature_transform": (np.eye(7) + 0.1).tolist()},
             {"cs_surface_context_width": 4},
             {"cs_surface_context_width": 4, "cs_surface_context_gate": True},
+            {"cs_surface_depth_gate": True},
             {"cs_surface_polynomial_skip": True},
             {"cs_multiplier_skip": True},
             {"cs_multiplier_skip": True, "cs_nested_blocks": 1},
@@ -198,6 +200,7 @@ class ComputeMetricsTest(unittest.TestCase):
                                  None if transform is None else tuple(map(tuple, transform)))
                 self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
                 self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
+                self.assertEqual(loaded.model.surface_depth_gate, options.get("cs_surface_depth_gate", False))
                 self.assertEqual(loaded.model.surface_polynomial_skip, options.get("cs_surface_polynomial_skip", False))
                 self.assertEqual(loaded.model.multiplier_skip, options.get("cs_multiplier_skip", False))
                 self.assertEqual(loaded.model.log_multiplier_inputs, options.get("cs_log_multiplier_inputs", False))
@@ -259,17 +262,29 @@ class ComputeMetricsTest(unittest.TestCase):
         with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda eta, xi, symbols, **kwargs:
                    symbols * jnp.fft.rfft(eta[:, None, :] * jnp.fft.irfft(
                        symbols * xi[:, None, :], n=nx), n=nx)):
-            for nested, log_inputs, whiten in ((0, False, False), (1, False, False), (0, True, False),
-                                               (1, True, False), (0, False, True), (1, False, True)):
-                with self.subTest(nested=nested, log_inputs=log_inputs, whiten=whiten):
+            cases = [(nested, log_inputs, whiten, False, whiten, 4 if whiten else 0, 2)
+                     for nested, log_inputs, whiten in ((0, False, False), (1, False, False), (0, True, False),
+                                                        (1, True, False), (0, False, True), (1, False, True))]
+            cases += [(0, False, False, True, polynomial, context, batch)
+                      for polynomial, context, batch in product((False, True), (0, 4), (1, 2))]
+            for nested, log_inputs, whiten, depth_gate, polynomial, context, batch in cases:
+                with self.subTest(nested=nested, log_inputs=log_inputs, whiten=whiten,
+                                  depth_gate=depth_gate, polynomial=polynomial, context=context, batch=batch):
+                    fields, log_depth = inputs[:batch], depth[:batch]
                     model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=nested, latent=2,
                                          mult_hidden=4, multiplier_skip=True, baseline_true_depth=True,
                                          log_multiplier_inputs=log_inputs,
                                          surface_feature_transform=tuple(map(tuple, (np.eye(7) + 0.1).tolist())) if whiten else None,
                                          surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3) if whiten else None,
-                                         surface_context_width=4 if whiten else 0,
-                                         surface_polynomial_skip=whiten)
-                    params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
+                                         surface_context_width=context,
+                                         surface_context_gate=depth_gate and bool(context),
+                                         surface_depth_gate=depth_gate, surface_polynomial_skip=polynomial)
+                    params = dict(model.init(jax.random.PRNGKey(0), fields, log_depth)["params"])
+                    if depth_gate:
+                        shape = cast(jax.Array, params["eta_depth_gate"]["kernel"]).shape
+                        params["eta_depth_gate"]["kernel"] = jnp.linspace(
+                            -0.6, 0.7, int(np.prod(shape)), dtype=jnp.float32,
+                        ).reshape(shape)
                     for index in range(2):
                         block = params[f"cs_block_{index}"]
                         for name in ("m_shared", "m_inner") if index >= 2 - nested else ("m_shared",):
@@ -280,18 +295,21 @@ class ComputeMetricsTest(unittest.TestCase):
                         else:
                             block["phi_proj"]["kernel"] = jnp.full_like(cast(jax.Array, block["phi_proj"]["kernel"]), 0.1)
                     loaded = LoadedRun(model, params, {"model": "cs_dno"}, stats, "scale", 1)
-                    expected = build_predict_gxi_batched(loaded)(inputs[..., 0], inputs[..., 1], depth)
-                    transformed = build_variant(loaded, depth, nx, "fourier_round")
+                    expected = build_predict_gxi_batched(loaded)(fields[..., 0], fields[..., 1], log_depth)
+                    transformed = build_variant(loaded, log_depth, nx, "fourier_round")
                     actual = jnp.fft.irfft(transformed(
-                        jnp.fft.rfft(inputs[..., 0].astype(jnp.float64)),
-                        jnp.fft.rfft(inputs[..., 1].astype(jnp.float64)),
+                        jnp.fft.rfft(fields[..., 0].astype(jnp.float64)),
+                        jnp.fft.rfft(fields[..., 1].astype(jnp.float64)),
                     ), n=nx)
                     relative = jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected)
                     self.assertLess(float(relative), 5e-7)
-                    if whiten and not nested:
+                    if (whiten or depth_gate) and not nested:
                         for variant in ("cached", "surface", "front"):
-                            physical = build_variant(loaded, depth, nx, variant)(inputs[..., 0], inputs[..., 1])
-                            np.testing.assert_allclose(physical, expected, rtol=2e-6, atol=1e-7)
+                            physical = build_variant(loaded, log_depth, nx, variant)(fields[..., 0], fields[..., 1])
+                            error = physical - expected
+                            # FP32 regrouping near output zeros is measured against the field scale.
+                            self.assertLess(float(jnp.linalg.norm(error) / jnp.linalg.norm(expected)), 5e-7)
+                            self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
     def test_fast_evaluator_uses_saved_ema_cases_and_exact_spectral_execution(self) -> None:
         from scripts import eval_fast_rollouts as fast
