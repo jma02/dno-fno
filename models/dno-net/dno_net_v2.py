@@ -27,6 +27,7 @@ class DepthAwareMultiplier(nn.Module):
     h_clip_max: float
     hidden: int = 32
     multiplier_skip: bool = False
+    log_multiplier_inputs: bool = False
 
     @nn.compact
     def __call__(self, depth: jnp.ndarray, n_freq: int) -> jnp.ndarray:
@@ -35,6 +36,9 @@ class DepthAwareMultiplier(nn.Module):
         k, h = jnp.broadcast_arrays(k[None, :], h)
         kh = h * k
         features = jnp.stack([k, h, jnp.tanh(kh), k * jnp.tanh(kh)], axis=-1)
+        if self.log_multiplier_inputs:
+            features = jnp.stack([jnp.log1p(k), jnp.log(h), jnp.tanh(kh),
+                                  jnp.log1p(k * jnp.tanh(kh))], axis=-1)
         hidden = nn.tanh(nn.Dense(self.hidden, name="hidden")(features))
         multiplier = nn.Dense(
             self.out_channels, name="out", kernel_init=nn.initializers.lecun_normal(),
@@ -58,6 +62,7 @@ class CraigSulemBlock(nn.Module):
     mult_hidden: int = 32
     nested: bool = False
     multiplier_skip: bool = False
+    log_multiplier_inputs: bool = False
 
     @nn.compact
     def __call__(
@@ -85,6 +90,7 @@ class CraigSulemBlock(nn.Module):
             h_clip_max=self.h_clip_max,
             hidden=self.mult_hidden,
             multiplier_skip=self.multiplier_skip,
+            log_multiplier_inputs=self.log_multiplier_inputs,
             name="m_shared",
         )(depth, grid_size // 2 + 1)
 
@@ -95,7 +101,8 @@ class CraigSulemBlock(nn.Module):
         if self.nested:
             inner_multiplier = DepthAwareMultiplier(
                 self.n_branches, self.domain_length, self.h_clip_max,
-                self.mult_hidden, multiplier_skip=self.multiplier_skip, name="m_inner",
+                self.mult_hidden, multiplier_skip=self.multiplier_skip,
+                log_multiplier_inputs=self.log_multiplier_inputs, name="m_inner",
             )(depth, grid_size // 2 + 1)
             surface = cast(jnp.ndarray, eta_norm)[..., None]
             inner_hat = jnp.fft.rfft(surface * filtered_xi, axis=1, norm="forward")
@@ -132,6 +139,7 @@ class CraigSulemDNO(nn.Module):
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     multiplier_skip: bool = False    # Learn constant, G0, and k^2 symbol coefficients.
+    log_multiplier_inputs: bool = False  # Compress multiplier coordinates before tanh.
     baseline_order: int = 1           # -1: none; otherwise CS sum through this order.
     baseline_true_depth: bool = False  # Analytic terms only; learned filters still clip h.
 
@@ -313,6 +321,7 @@ class CraigSulemDNO(nn.Module):
                 mult_hidden=self.mult_hidden,
                 nested=block_idx >= self.n_blocks - self.nested_blocks,
                 multiplier_skip=self.multiplier_skip,
+                log_multiplier_inputs=self.log_multiplier_inputs,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, clipped_log_depth, eta_norm=nested_surface)
 

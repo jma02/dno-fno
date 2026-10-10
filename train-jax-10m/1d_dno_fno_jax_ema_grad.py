@@ -115,6 +115,8 @@ def main() -> None:
                         help="Append normalized eta squared/cubed directly to the final surface features.")
     parser.add_argument("--cs_multiplier_skip", action="store_true",
                         help="Add a learned linear skip from normalized 1, k*tanh(kh), k squared to each multiplier.")
+    parser.add_argument("--cs_log_multiplier_inputs", action="store_true",
+                        help="Use log1p(k), log(h), tanh(kh), and log1p(k*tanh(kh)) as multiplier inputs.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
     parser.add_argument(
@@ -572,6 +574,7 @@ def main() -> None:
             surface_context_gate=args.cs_surface_context_gate,
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
             multiplier_skip=args.cs_multiplier_skip,
+            log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
@@ -614,6 +617,7 @@ def main() -> None:
         multiplier_model = DepthAwareMultiplier(
             args.latent, domain_length, 5.0, args.cs_mult_hidden,
             multiplier_skip=args.cs_multiplier_skip,
+            log_multiplier_inputs=args.cs_log_multiplier_inputs,
         )
 
         def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],

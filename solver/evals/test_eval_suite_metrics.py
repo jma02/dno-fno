@@ -159,6 +159,8 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_surface_polynomial_skip": True},
             {"cs_multiplier_skip": True},
             {"cs_multiplier_skip": True, "cs_nested_blocks": 1},
+            {"cs_log_multiplier_inputs": True},
+            {"cs_log_multiplier_inputs": True, "cs_nested_blocks": 1},
             {"cs_surface_polynomial_skip": True, "cs_surface_feature_scales": [0.1, 0.02, 0.003, 10.0, 0.3],
              "cs_use_first_deriv": False, "cs_use_hilbert": False},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1],
@@ -186,6 +188,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
                 self.assertEqual(loaded.model.surface_polynomial_skip, options.get("cs_surface_polynomial_skip", False))
                 self.assertEqual(loaded.model.multiplier_skip, options.get("cs_multiplier_skip", False))
+                self.assertEqual(loaded.model.log_multiplier_inputs, options.get("cs_log_multiplier_inputs", False))
                 self.assertEqual(loaded.model.use_first_deriv, options.get("cs_use_first_deriv", True))
                 self.assertEqual(loaded.model.use_hilbert, options.get("cs_use_hilbert", True))
 
@@ -244,10 +247,11 @@ class ComputeMetricsTest(unittest.TestCase):
         with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda eta, xi, symbols, **kwargs:
                    symbols * jnp.fft.rfft(eta[:, None, :] * jnp.fft.irfft(
                        symbols * xi[:, None, :], n=nx), n=nx)):
-            for nested in (0, 1):
-                with self.subTest(nested=nested):
+            for nested, log_inputs in ((0, False), (1, False), (0, True), (1, True)):
+                with self.subTest(nested=nested, log_inputs=log_inputs):
                     model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=nested, latent=2,
-                                         mult_hidden=4, multiplier_skip=True, baseline_true_depth=True)
+                                         mult_hidden=4, multiplier_skip=True, baseline_true_depth=True,
+                                         log_multiplier_inputs=log_inputs)
                     params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
                     for index in range(2):
                         block = params[f"cs_block_{index}"]

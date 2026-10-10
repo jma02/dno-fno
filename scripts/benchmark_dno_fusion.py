@@ -123,7 +123,7 @@ def build_variant(
     ) if enabled])
     if include_correction and variant in ("cached", "all", "batched", "surface", "front"):
         multiplier = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max,
-                                          model.mult_hidden, model.multiplier_skip)
+                                          model.mult_hidden, model.multiplier_skip, model.log_multiplier_inputs)
         # This is a per-checkpoint/grid/depth inference constant, not a training cache.
         cached = jax.jit(lambda d: tuple(multiplier.apply(
             {"params": loaded.params[f"cs_block_{i}"]["m_shared"]}, d, nx // 2 + 1,
@@ -137,7 +137,7 @@ def build_variant(
         inner_filters = gamma = None
         if model.nested_blocks:
             inner = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max,
-                                         model.mult_hidden, model.multiplier_skip)
+                                         model.mult_hidden, model.multiplier_skip, model.log_multiplier_inputs)
             inner_filters = jnp.moveaxis(jax.jit(lambda d: jnp.concatenate(tuple(cast(jax.Array, inner.apply(
                 {"params": loaded.params[f"cs_block_{i}"]["m_inner"]}, d, nx // 2 + 1,
             )) for i in range(ordinary_blocks, model.n_blocks)), axis=-1))(

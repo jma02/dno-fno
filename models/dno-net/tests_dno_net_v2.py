@@ -765,6 +765,57 @@ def test_multiplier_skip_preserves_initialization_and_operator_structure() -> No
         assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
 
 
+def test_log_multiplier_inputs_formula_initialization_and_gradients() -> None:
+    depth = jnp.log(jnp.asarray([[0.02], [0.8], [5.0], [8.0]], dtype=jnp.float64))
+    original = DepthAwareMultiplier(3, 2 * pi, 5.0, 16)
+    variables = original.init(jax.random.PRNGKey(25), depth, 129)
+    model = original.clone(log_multiplier_inputs=True)
+    log_variables = model.init(jax.random.PRNGKey(25), depth, 129)
+    assert jax.tree.structure(variables) == jax.tree.structure(log_variables)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(variables), jax.tree.leaves(log_variables), strict=True,
+    ))
+    k, h = jnp.broadcast_arrays(jnp.arange(129)[None, :], jnp.exp(jnp.minimum(depth, jnp.log(5.0))))
+    hidden, output = (cast(dict[str, jax.Array], variables["params"][name]) for name in ("hidden", "out"))
+    for enabled in (False, True):
+        current = original.clone(log_multiplier_inputs=enabled)
+        features = (jnp.stack((jnp.log1p(k), jnp.log(h), jnp.tanh(k * h),
+                               jnp.log1p(k * jnp.tanh(k * h))), axis=-1) if enabled
+                    else jnp.stack((k, h, jnp.tanh(k * h), k * jnp.tanh(k * h)), axis=-1))
+        expected = nn.tanh(features @ hidden["kernel"] + hidden["bias"]) @ output["kernel"] + output["bias"]
+        actual = cast(jax.Array, current.apply(variables, depth, 129))
+        assert jnp.allclose(actual, expected, rtol=1e-13, atol=1e-14)
+        assert jnp.array_equal(actual[2], actual[3])
+        if not enabled:
+            assert jnp.array_equal(actual, cast(jax.Array, original.apply(variables, depth, 129)))
+        for n_freq in (1, 129):
+            gradients = jax.grad(lambda params, values: jnp.sum(cast(jax.Array, current.apply(
+                {"params": params}, values, n_freq,
+            )) ** 2), argnums=(0, 1))(variables["params"], depth)
+            assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+            assert jnp.all(gradients[1][-1] == 0)
+            assert jnp.linalg.norm(gradients[1][:-1]) > 0
+
+
+def test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    for nested_blocks in (0, 1, 2):
+        original = _model(nested_blocks=nested_blocks, surface_context_width=4)
+        model = original.clone(log_multiplier_inputs=True)
+        variables = original.init(jax.random.PRNGKey(26), inputs, depth)
+        log_variables = model.init(jax.random.PRNGKey(26), inputs, depth)
+        assert jax.tree.structure(variables) == jax.tree.structure(log_variables)
+        assert all(jnp.array_equal(a, b) for a, b in zip(
+            jax.tree.leaves(variables), jax.tree.leaves(log_variables), strict=True,
+        ))
+        assert jnp.array_equal(cast(jax.Array, model.apply(log_variables, inputs, depth)),
+                               cast(jax.Array, original.apply(variables, inputs, depth)))
+        activated = _activate_residual(variables)
+        assert not jnp.allclose(_learned_residual(model, activated, eta, xi, depth),
+                               _learned_residual(original, activated, eta, xi, depth), rtol=1e-3, atol=1e-12)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -790,6 +841,8 @@ def main() -> int:
         test_nested_model_replacement_preserves_structure,
         test_multiplier_skip_symbol_basis_and_grid_independence,
         test_multiplier_skip_preserves_initialization_and_operator_structure,
+        test_log_multiplier_inputs_formula_initialization_and_gradients,
+        test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters,
     )
     for test in tests:
         test()
