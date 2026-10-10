@@ -254,7 +254,7 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad025", "Gradient EMA .25", "#548226", "v"),
             ("lr6_momentum_half_ema995_grad05_head2", "Gradient EMA .5 + head × 2", "#934c79", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05", "Gradient EMA .5 + Adam .5", "#4d58a6", "p"),
-            ("lr6_momentum_half_ema995_grad025_seed1", "Gradient EMA .25 · seed 1", "#548226", "X"),
+            ("lr6_momentum_half_ema995_grad05_adam05_seed1", "Gradient EMA .5 + Adam .5 · seed 1", "#4d58a6", "X"),
             ("lr6_momentum_half_ema995_grad05_lr8", "Gradient EMA .5 + LR 8e−5", "#a4473b", ">"),
             ("lr6_momentum_half_ema995_grad05_teacher20", "Gradient EMA .5 + 20-step teacher", "#967228", "h"),
         )
