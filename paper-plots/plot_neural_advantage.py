@@ -280,6 +280,14 @@ if __name__ == "__main__":
                 continue
             timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
             completed.append((results, timings, label, color, marker))
+            fast_dir = run / "eval_fast_weight_ema"
+            fast_results = fast_dir / "all_summaries.json"
+            fast_timings = fast_dir / "single_rollout_timings.json"
+            if fast_results.exists() and fast_timings.exists():
+                measured = json.loads(fast_timings.read_text())
+                if all(family in measured["families"] for family, _ in FAMILIES):
+                    completed.append((json.loads(fast_results.read_text()), measured,
+                                      label.removeprefix("Gradient EMA .5 + ") + " · fast", color, "D"))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
@@ -335,7 +343,8 @@ if __name__ == "__main__":
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
         fig.suptitle("Figure 12b · One epoch, full data", x=0.10, y=0.965, ha="left", fontsize=19)
         fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
-        fig.text(0.10, 0.891, "Unchanged architectures share measured runtime.", color="#59616a", fontsize=10)
+        fig.text(0.10, 0.891, "Native screens: shared timing proxy. Fast: directly evaluated and timed.",
+                 color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)
         stem = OUT / (args.output_name or "12b-one-epoch-full-data")
