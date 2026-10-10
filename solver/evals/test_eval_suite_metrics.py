@@ -311,39 +311,62 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertLess(float(jnp.linalg.norm(error) / jnp.linalg.norm(expected)), 5e-7)
                             self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
-    def test_fast_evaluator_uses_saved_ema_cases_and_exact_spectral_execution(self) -> None:
+    def test_fast_evaluator_uses_candidate_ics_reference_truth_and_exact_spectral_execution(self) -> None:
         from scripts import eval_fast_rollouts as fast
 
         with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            source = directory / "eval_epoch1_weight_ema_test_stratified_n32_gpu0"
-            source.mkdir()
+            directory = Path(temporary) / "candidate"
+            reference = Path(temporary) / "reference"
+            source = reference / "eval_epoch1_weight_ema_test_stratified_n32_gpu0"
+            source.mkdir(parents=True)
             fields = np.broadcast_to(np.arange(32)[None, :, None], (251, 32, 8)).astype(np.float64)
             for family, cfg in FAMILY_CONFIGS.items():
-                np.savez(source / f"{family}_trajs.npz", pred_eta=fields, pred_xi=fields + 1,
-                         depths=np.ones(32), times=np.arange(251) * cfg.dt)
+                np.savez(source / f"{family}_trajs.npz", pred_eta=fields - 1000,
+                         pred_xi=fields - 2000, truth_eta=fields - 3000,
+                         truth_xi=fields - 4000, depths=np.full(32, 99.0),
+                         times=np.arange(251) * cfg.dt * 2)
+            ics = [IC(fields[0, i], fields[0, i] + 1, 0.1 + i / 32, i + 17)
+                   for i in range(32)]
             loaded = LoadedRun(None, {}, {"dataset": "relative/arrays", "domain_length": 2 * np.pi},
                                {}, "scale", 1)
             execute = Mock(return_value={name: fields for name in ("eta", "xi", "gxi")})
             compiled = Mock()
             compiled.lower.return_value.compile.return_value = execute
             original_boundary = fast.ti._state_to_hat
-            with patch("sys.argv", ["eval_fast_rollouts", "--run-dir", str(directory)]), patch.object(
+            with patch("sys.argv", ["eval_fast_rollouts", "--run-dir", str(directory),
+                                    "--reference-run", str(reference)]), patch.object(
                 fast, "load_run", return_value=loaded,
-            ) as load, patch.object(fast, "build_variant") as build, patch.object(
+            ) as load, patch.object(
+                fast, "_load_paper_dataset_ics", return_value=(ics, {}, 8, 2 * np.pi),
+            ) as load_ics, patch.object(fast, "build_variant") as build, patch.object(
                 fast.jax, "jit", return_value=compiled,
             ) as jit, patch.object(fast.jax, "block_until_ready"), patch.object(
                 fast.jax, "clear_caches",
-            ), patch.object(fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8)), patch.object(
+            ), patch.object(
+                fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8),
+            ) as make_params, patch.object(
                 fast, "run_family", return_value={},
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
                 fast.main()
             load.assert_called_once_with(directory, checkpoint="weight_ema")
+            self.assertFalse(any(directory.glob("eval_epoch*_test_*")))
             self.assertIs(fast.ti._state_to_hat, original_boundary)
+            self.assertEqual(load_ics.call_count, 4)
+            for call, family in zip(load_ics.call_args_list, FAMILY_CONFIGS, strict=True):
+                self.assertEqual(call.args, (fast.ROOT / "relative/arrays", family, 32, "stratified"))
+                self.assertEqual(call.kwargs, {"ic_quantile_offset": 0.5})
+            self.assertEqual(make_params.call_count, 4)
+            for call, cfg in zip(make_params.call_args_list, FAMILY_CONFIGS.values(), strict=True):
+                self.assertEqual(call.args[:2], (8, 2 * np.pi))
+                np.testing.assert_array_equal(call.args[2], np.asarray([ic.depth for ic in ics])[:, None])
+                self.assertEqual(call.kwargs, {"dno_order": 6, "pad_factor": 8,
+                                              "filter_fraction": cfg.filter_fraction})
             self.assertEqual(build.call_count, 4)
             for call in build.call_args_list:
+                self.assertIs(call.args[0], loaded)
+                np.testing.assert_allclose(call.args[1], np.log([ic.depth for ic in ics]), rtol=1e-15)
                 self.assertEqual(call.args[2:], (8, "fourier_fused_features_product_overlap"))
                 self.assertEqual(call.kwargs, {"fft_ept": 8})
             rollouts = [call.args[0] for call in jit.call_args_list
@@ -359,6 +382,7 @@ class ComputeMetricsTest(unittest.TestCase):
             for call, cfg in zip(execute.call_args_list, FAMILY_CONFIGS.values(), strict=True):
                 np.testing.assert_array_equal(call.args[0].eta, fields[0])
                 np.testing.assert_array_equal(call.args[0].xi, fields[0] + 1)
+                self.assertEqual(call.args[0].xi.dtype, jnp.float64)
                 np.testing.assert_array_equal(call.args[1], np.arange(251) * cfg.dt)
             self.assertEqual(evaluate.call_count, 4)
             for call in evaluate.call_args_list:

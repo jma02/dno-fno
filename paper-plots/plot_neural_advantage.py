@@ -260,6 +260,7 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam07", "Adam β₁=.7", "#4d58a6", "v"),
             ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 8e−5", "#994e36", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 · seed 1", "#387a66", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_context16", "Context width 16", "#85569c", "^"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_mbfloor1e5", "Adam β₂=.99 + MB floor × 10", "#2f6d4e", "s"),
@@ -275,19 +276,19 @@ if __name__ == "__main__":
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
                      for family, _ in FAMILIES}
-            if not all(path.exists() for path in paths.values()):
-                print(f"Pending: {label}")
-                continue
-            results = {family: json.loads(path.read_text()) for family, path in paths.items()}
-            timing_path = run / "timing/timings.json"
-            if not timing_path.exists() and suffix in (
-                "polynomial_skip", "even_features", "lr6_momentum_half_ema995_grad05_adam05_b2099_context16",
-                "lr6_momentum_half_ema995_grad05_adam05_b2099_depthgate",
-            ):
-                print(f"Awaiting architecture timing: {label}")
+            if all(path.exists() for path in paths.values()):
+                results = {family: json.loads(path.read_text()) for family, path in paths.items()}
+                timing_path = run / "timing/timings.json"
+                if not timing_path.exists() and suffix in (
+                    "polynomial_skip", "even_features", "lr6_momentum_half_ema995_grad05_adam05_b2099_context16",
+                    "lr6_momentum_half_ema995_grad05_adam05_b2099_depthgate",
+                ):
+                    print(f"Awaiting architecture timing: {label}")
+                else:
+                    timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
+                    completed.append((results, timings, label, color, marker))
             else:
-                timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
-                completed.append((results, timings, label, color, marker))
+                print(f"Pending: {label}")
             fast_dir = run / "eval_fast_weight_ema"
             fast_results = fast_dir / "all_summaries.json"
             fast_timings = fast_dir / "single_rollout_timings.json"

@@ -1,7 +1,8 @@
 """Evaluate weight-EMA accuracy with the timed Fourier-I/O implementation.
 
-Requires completed native epoch-one evaluations. Reported wall times are for
-32 trajectories together, excluding compilation—not single-rollout latency.
+Reuses saved M6 references from this run or --reference-run. Initial conditions
+come from the candidate's dataset, so native candidate rollouts are unnecessary.
+Reported wall times are for 32 trajectories together, excluding compilation.
 Set XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true for G1 overlap.
 """
 from __future__ import annotations
@@ -26,7 +27,8 @@ import numpy as np  # noqa: E402
 
 # Import the evaluation module first; the benchmark modules also depend on it.
 from solver.evals.eval_suite import (  # noqa: E402
-    FAMILY_CONFIGS, RolloutPayload, _write_json, compute_macro_summary, run_family,
+    FAMILY_CONFIGS, RolloutPayload, _load_paper_dataset_ics, _write_json,
+    compute_macro_summary, run_family,
 )
 from solver.evals.model_rollout import load_run  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
@@ -38,9 +40,11 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
+    reference_run = (args.reference_run or run_dir).resolve()
     output_dir = args.output_dir or run_dir / "eval_fast_weight_ema"
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint="weight_ema")
@@ -54,14 +58,18 @@ def main() -> None:
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
-        source = next(run_dir.glob(f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz"))
-        with np.load(source) as saved:
-            times = jnp.asarray(saved["times"])
-            depths = jnp.asarray(saved["depths"])
-            initial = ti.State(jnp.asarray(saved["pred_eta"][0]), jnp.asarray(saved["pred_xi"][0]))
-        nx = initial.eta.shape[-1]
+        source = next(reference_run.glob(f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz"))
+        ics, _, nx, length = _load_paper_dataset_ics(
+            dataset, family, 32, "stratified", ic_quantile_offset=0.5,
+        )
+        times = jnp.asarray(np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64))
+        depths = jnp.asarray([ic.depth for ic in ics], dtype=jnp.float64)
+        initial = ti.State(*(
+            jnp.asarray(np.stack([getattr(ic, field) for ic in ics]), dtype=jnp.float64)
+            for field in ("eta", "xi")
+        ))
         params = ti.make_solver_params(
-            nx, loaded.config["domain_length"], depths[:, None], dno_order=6,
+            nx, length, depths[:, None], dno_order=6,
             pad_factor=8, filter_fraction=cfg.filter_fraction,
         )
         jax.block_until_ready((initial, times, params))
