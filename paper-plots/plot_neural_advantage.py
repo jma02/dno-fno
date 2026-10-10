@@ -267,6 +267,7 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_amp025", "Amplitude targets · full band", "#a15f32", "v"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_amp025k128", "Amplitude targets · ≤128", "#834126", "P"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_depthgate", "Depth-conditioned surface head", "#42688f", "p"),
+            ("lr6_momentum_half_ema995_grad05_adam05_b2099_datum025", "Datum augmentation · 2.5% RMS", "#796235", "h"),
             ("lr6_momentum_half_ema995_grad05_adam05_whiten", "Whitened surface inputs", "#826234", "h"),
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )

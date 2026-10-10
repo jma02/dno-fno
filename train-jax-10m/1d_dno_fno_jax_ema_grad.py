@@ -151,6 +151,9 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=2)
     parser.add_argument("--latent", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--datum_shift_rms", type=float, default=0.0,
+                        help="Training-only vertical-datum shifts on half the rows, relative to eta RMS; "
+                        "shift eta and depth together, capped at one quarter of depth, keeping targets unchanged.")
     parser.add_argument("--reflection_augmentation", action="store_true",
                         help="Reflect eta, xi, and target together for half of training rows.")
     parser.add_argument("--input_noise_rms", type=float, default=0.0,
@@ -429,6 +432,8 @@ def main() -> None:
         parser.error("--rollout_epochs must follow the weight-EMA start; choose later milestones or an earlier --weight_ema_start_fraction")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
+    if not np.isfinite(args.datum_shift_rms) or args.datum_shift_rms < 0:
+        parser.error("--datum_shift_rms must be finite and nonnegative")
     if not np.isfinite(args.input_noise_rms) or args.input_noise_rms < 0:
         parser.error("--input_noise_rms must be finite and nonnegative")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
@@ -984,6 +989,20 @@ def main() -> None:
         batch_depth: jax.Array,
         family: jax.Array,
     ) -> tuple[WeightEMATrainState, jax.Array, dict[str, jax.Array]]:
+        if args.datum_shift_rms > 0:
+            datum_mask_key, datum_shift_key = jax.random.split(jax.random.fold_in(
+                jax.random.fold_in(rng_key, current_state.step),
+                jax.lax.axis_index("batch") + 16381,
+            ))
+            shifted = jax.random.bernoulli(datum_mask_key, shape=(eta.shape[0], 1))
+            eta = eta.astype(jnp.float64)
+            depth = jnp.exp(batch_depth.astype(jnp.float64))
+            datum_shift = jnp.where(shifted, jax.random.uniform(
+                datum_shift_key, (eta.shape[0], 1), dtype=jnp.float64, minval=-1.0, maxval=1.0,
+            ) * jnp.minimum(args.datum_shift_rms * jnp.sqrt(jnp.mean(eta**2, axis=-1, keepdims=True)),
+                            0.25 * depth), 0.0)
+            eta = eta - datum_shift
+            batch_depth = jnp.where(shifted, jnp.log(depth + datum_shift), batch_depth.astype(jnp.float64))
         if args.reflection_augmentation:
             reflection_key = jax.random.fold_in(
                 jax.random.fold_in(rng_key, current_state.step),

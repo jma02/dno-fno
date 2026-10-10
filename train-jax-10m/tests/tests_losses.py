@@ -967,6 +967,91 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
                                    teacher[3] if loss_mode == "full" else 0.0, rtol=1e-12)
 
 
+def test_datum_shift_geometry_clean_rows_rng_and_validation() -> None:
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--datum_shift_rms")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "args.datum_shift_rms" in ast.unparse(node.test))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "datum_option", "exec"), namespace)
+    assert parser.parse_args([]).datum_shift_rms == 0.0
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "datum_validation", "exec")
+    with patch.object(parser, "error", side_effect=ValueError):
+        for scale in (-0.1, np.nan, np.inf, -np.inf):
+            namespace["args"] = SimpleNamespace(datum_shift_rms=scale)
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+        for scale in (0.0, 0.025, 100.0):
+            namespace["args"] = SimpleNamespace(datum_shift_rms=scale)
+            exec(validate, namespace)
+    component = trainer_function("train_step")
+    datum = next(node for node in component.body if isinstance(node, ast.If)
+                 and "args.datum_shift_rms" in ast.unparse(node.test))
+    assert component.body[0] is datum
+    function = ast.parse(
+        "def prepare(step, rng_key, eta, xi, gxi, batch_depth, family):\n"
+        "    current_state = SimpleNamespace(step=step)"
+    ).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += [datum]
+    function.body += ast.parse("return eta, xi, gxi, batch_depth, family, rng_key").body
+    config = SimpleNamespace(datum_shift_rms=0.025)
+    namespace.update(jax=jax, jnp=jnp, SimpleNamespace=SimpleNamespace, args=config)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "trainer_datum", "exec"), namespace)
+    nx, size = 64, 64
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    h = jnp.geomspace(0.01, 100.0, size)[:, None]
+    key = jax.random.PRNGKey(41)
+    for dtype, scale in product((jnp.float32, jnp.float64), (0.025, 100.0)):
+        config.datum_shift_rms = scale
+        prepare = jax.vmap(namespace["prepare"], in_axes=(None, None, 0, 0, 0, 0, 0), axis_name="batch")
+        eta = h * (0.1 + 0.2 * jnp.cos(x))
+        eta = eta.at[:8].set(jnp.broadcast_to(0.1 * h[:8], (8, nx)))
+        fields = (eta.astype(dtype), (0.02 * jnp.sin(x) + eta).astype(dtype),
+                  (0.03 * jnp.cos(2 * x) - eta).astype(dtype), jnp.log(h).astype(dtype),
+                  jnp.tile(jnp.arange(1, 5), size // 4))
+        inputs = tuple(jnp.stack((value, value)) for value in fields)
+        result = prepare(7, key, *inputs)
+        repeated = prepare(7, key, *inputs)
+        compiled = jax.jit(prepare)(7, key, *inputs)
+        changed = prepare(8, key, *inputs)
+        shifted = np.any(np.asarray(result[0]) != np.asarray(inputs[0]), axis=-1)
+        assert size // 2 < np.sum(shifted) < 3 * size // 2
+        assert not np.array_equal(shifted[0], shifted[1])
+        assert not np.array_equal(result[0], changed[0])
+        assert np.any(shifted[:, :8])  # Constant surfaces still have nonzero raw RMS.
+        np.testing.assert_array_equal(np.asarray(result[0])[~shifted], np.asarray(inputs[0])[~shifted])
+        np.testing.assert_array_equal(np.asarray(result[3])[~shifted], np.asarray(inputs[3])[~shifted])
+        depth = np.exp(np.asarray(inputs[3], dtype=np.float64))
+        new_depth = np.exp(np.asarray(result[3]))
+        np.testing.assert_allclose(result[0] + new_depth, inputs[0].astype(jnp.float64) + depth,
+                                   rtol=3e-15, atol=3e-15)
+        assert np.all(new_depth >= 0.75 * depth * (1 - 1e-14))
+        assert np.all(np.asarray(result[0]) + new_depth > 0)
+        shift = np.asarray(inputs[0], dtype=np.float64) - np.asarray(result[0])
+        limit = np.minimum(scale * np.sqrt(np.mean(np.asarray(inputs[0], dtype=np.float64)**2,
+                                                   axis=-1, keepdims=True)), 0.25 * depth)
+        assert np.all(np.abs(shift) <= limit * (1 + 1e-12))
+        for actual, same, traced in zip(result, repeated, compiled):
+            np.testing.assert_array_equal(actual, same)
+            np.testing.assert_allclose(actual, traced, rtol=3e-15, atol=3e-15)
+        for index in (1, 2, 4):
+            np.testing.assert_array_equal(result[index], inputs[index])
+            assert result[index].dtype == inputs[index].dtype
+        np.testing.assert_array_equal(result[-1], jnp.broadcast_to(key, (2,) + key.shape))
+        config.datum_shift_rms = 0.0
+        for actual, original in zip(prepare(7, key, *inputs)[:5], inputs):
+            np.testing.assert_array_equal(actual, original)
+            assert actual.dtype == original.dtype
+    assert "datum_shift_rms" not in ast.unparse(trainer_function("eval_step"))
+    assert "datum_shift_rms" not in ast.unparse(trainer_function("compute_loss_components"))
+
+
 def test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6() -> None:
     component = trainer_function("train_step")
     reflection = next(node for node in component.body
@@ -1115,7 +1200,7 @@ def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
     family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
     fields = (eta, xi, target, depth, family)
     before = tuple(np.array(value) for value in fields)
-    config = SimpleNamespace(reflection_augmentation=False, input_noise_rms=0.0,
+    config = SimpleNamespace(datum_shift_rms=0.0, reflection_augmentation=False, input_noise_rms=0.0,
                              dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
                              rollout_training_weight=0.0)
     namespace: dict[str, Any] = {
@@ -1500,7 +1585,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     family = jnp.arange(1, size + 1)
     fields = (eta, xi, target, depth, family)
     config = SimpleNamespace(
-        reflection_augmentation=False, input_noise_rms=0.0,
+        datum_shift_rms=0.0, reflection_augmentation=False, input_noise_rms=0.0,
         dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
@@ -1798,6 +1883,7 @@ if __name__ == "__main__":
     test_milestone_rollouts_use_only_started_weight_ema()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
+    test_datum_shift_geometry_clean_rows_rng_and_validation()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
