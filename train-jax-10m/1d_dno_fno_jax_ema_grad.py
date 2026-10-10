@@ -195,6 +195,8 @@ def main() -> None:
     )
     parser.add_argument("--lr_hold_fraction", type=float, default=0.0,
                         help="Fraction of planned updates before cosine decay starts; hold peak LR after warmup until this point. 0 starts decay immediately after warmup.")
+    parser.add_argument("--surface_head_lr_multiplier", type=float, default=1.0,
+                        help="Scale post-AdamW updates only for the spatial branch projection kernels.")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument(
         "--gradient_ema_decay", type=float, default=0.9,
@@ -216,6 +218,8 @@ def main() -> None:
     parser.add_argument("--data_normalization", choices=("target", "bounded", "nonlinear", "residual"), default="nonlinear",
                         help="Target-relative loss, bounded inverse-residual weighting (raw weights 1..2), "
                         "nonlinear weighting, or normalization by the model's baseline residual.")
+    parser.add_argument("--data_k_max", type=float, default=None,
+                        help="Optional physical-wavenumber cutoff for data loss and its normalizers; full L2 metrics stay unfiltered.")
     parser.add_argument("--residual_floor", type=float, default=1e-6,
                         help="Residual denominator floor as a fraction of the target norm.")
     parser.add_argument("--metric_interval", type=int, default=16,
@@ -397,6 +401,8 @@ def main() -> None:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if not np.isfinite(args.lr_hold_fraction) or not 0.0 <= args.lr_hold_fraction < 1.0:
         parser.error("--lr_hold_fraction must be finite and in [0, 1)")
+    if not np.isfinite(args.surface_head_lr_multiplier) or args.surface_head_lr_multiplier <= 0:
+        parser.error("--surface_head_lr_multiplier must be finite and positive")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
     if args.rollout_epochs and args.weight_ema_decay == 0.0:
@@ -435,6 +441,8 @@ def main() -> None:
         parser.error("--nonlinear_weight_mean must be in [1, 2]")
     if not np.isfinite(args.residual_floor) or args.residual_floor <= 0.0:
         parser.error("--residual_floor must be finite and positive")
+    if args.data_k_max is not None and (not np.isfinite(args.data_k_max) or args.data_k_max <= 0.0):
+        parser.error("--data_k_max must be finite and positive")
     if args.data_normalization in ("bounded", "residual") and args.model != "cs_dno":
         parser.error("--data_normalization bounded/residual requires --model cs_dno")
     if not 0.0 < args.dirichlet_probe_fraction <= 0.5:
@@ -670,10 +678,18 @@ def main() -> None:
             init_value=args.lr,
             decay_steps=total_steps,
         )
-    optimizer = optax.chain(
+    optimizer_transforms: list[optax.GradientTransformation] = [
         optax.ema(args.gradient_ema_decay, debias=True),
         optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay),
-    )
+    ]
+    if args.surface_head_lr_multiplier != 1.0:
+        head_mask = jax.tree_util.tree_map_with_path(
+            lambda path, _: len(path) == 3 and getattr(path[0], "key").startswith("cs_block_")
+            and path[1:] == (jax.tree_util.DictKey("phi_proj"), jax.tree_util.DictKey("kernel")),
+            params,
+        )
+        optimizer_transforms.append(optax.masked(optax.scale(args.surface_head_lr_multiplier), head_mask))
+    optimizer = optax.chain(*optimizer_transforms)
     print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
     training_state = WeightEMATrainState.create(
         apply_fn=apply_model, params=params, tx=optimizer,
@@ -750,31 +766,48 @@ def main() -> None:
             jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
         )
         residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
-        denominator = target_norm
+        data_error_norm, data_target_norm, data_residual_denominator = error_norm, target_norm, residual_denominator
+        data_mask: jax.Array | bool = True
+        if args.data_k_max is not None:
+            data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
+            data_squared_error = jnp.sum(jnp.abs(jnp.where(
+                data_mask, (pred_hat - target_hat).astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2))
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
+            data_target_norm = jnp.sqrt(jnp.maximum(jnp.sum(jnp.abs(jnp.where(
+                data_mask, target_hat.astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2)), 1e-12))
+            data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
+                data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
+        denominator = data_target_norm
         if args.model == "cs_dno":
             if args.data_normalization == "residual":
-                denominator = residual_denominator
+                denominator = data_residual_denominator
             elif args.data_normalization == "bounded":
-                residual_ratio = residual_denominator / target_norm
+                residual_ratio = data_residual_denominator / data_target_norm
                 row_weight = 1.0 + args.nonlinear_reference / (residual_ratio + args.nonlinear_reference)
-                denominator = target_norm * args.nonlinear_weight_mean / row_weight
+                denominator = data_target_norm * args.nonlinear_weight_mean / row_weight
             elif args.data_normalization == "nonlinear":
                 # Nonlinear weighting uses the M1 correction even with a G2 baseline.
-                m1_hat = jnp.fft.rfft(m1_baseline, axis=1)
+                m1_error_hat = (target_hat - jnp.fft.rfft(m1_baseline, axis=1)).astype(jnp.complex128)
+                if args.data_k_max is not None:
+                    m1_error_hat = jnp.where(data_mask, m1_error_hat, 0.0)
                 residual_ratio = jnp.sqrt(jnp.sum(
-                    jnp.abs((target_hat - m1_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
-                )) / target_norm
+                    jnp.abs(m1_error_hat) ** 2, axis=(1, 2),
+                )) / data_target_norm
                 nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
-                denominator = target_norm * args.nonlinear_weight_mean / nonlinear_weight
+                denominator = data_target_norm * args.nonlinear_weight_mean / nonlinear_weight
         denominator = jax.lax.stop_gradient(denominator)
-        data_loss = jnp.mean(error_norm / denominator)
+        data_loss = jnp.mean(data_error_norm / denominator)
         full_l2_loss = jnp.mean(error_norm / target_norm)
         family_metrics: tuple[jax.Array, ...] = ()
         if collect_family_metrics:
             row_metrics = jnp.stack((
                 jnp.ones_like(error_norm), error_norm / target_norm,
                 error_norm / residual_denominator, squared_error < residual_squared,
-                error_norm / denominator,
+                data_error_norm / denominator,
             ))
             # Masked means, not means of each shard's family means: pmean remains exact.
             family_metrics = tuple(
