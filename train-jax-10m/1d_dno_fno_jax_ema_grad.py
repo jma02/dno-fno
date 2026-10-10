@@ -193,6 +193,8 @@ def main() -> None:
         "Useful when a zero-initialized residual sits on top of a strong "
         "analytic baseline. 0 preserves the original schedule.",
     )
+    parser.add_argument("--lr_hold_fraction", type=float, default=0.0,
+                        help="Fraction of planned updates before cosine decay starts; hold peak LR after warmup until this point. 0 starts decay immediately after warmup.")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument(
         "--gradient_ema_decay", type=float, default=0.9,
@@ -222,6 +224,8 @@ def main() -> None:
     parser.add_argument("--phase_mechanism", choices=("none", "stokes_carrier", "tanaka_momentum", "all_momentum", "bf_sideband"),
                         default="none", help="Coupled phase or momentum-production target; all_momentum uses every family uniformly.")
     parser.add_argument("--phase_mechanism_weight", type=float, default=0.0)
+    parser.add_argument("--phase_mechanism_ramp_epochs", type=float, default=0.0,
+                        help="Ramp the phase/momentum coefficient from zero over this many epochs; 0 uses full weight immediately.")
     parser.add_argument("--jonswap_mode_balanced_scale", type=float, default=1.0,
                         help="Multiply only JONSWAP/TMA rows' mode-balancing penalty by this factor.")
     parser.add_argument(
@@ -378,6 +382,8 @@ def main() -> None:
     args = parser.parse_args()
     if not np.isfinite(args.phase_mechanism_weight) or args.phase_mechanism_weight < 0:
         parser.error("phase_mechanism_weight must be finite and nonnegative")
+    if not np.isfinite(args.phase_mechanism_ramp_epochs) or args.phase_mechanism_ramp_epochs < 0:
+        parser.error("phase_mechanism_ramp_epochs must be finite and nonnegative")
     if not np.isfinite(args.jonswap_mode_balanced_scale) or args.jonswap_mode_balanced_scale < 0:
         parser.error("jonswap_mode_balanced_scale must be finite and nonnegative")
     if (args.phase_mechanism == "none") != (args.phase_mechanism_weight == 0):
@@ -389,6 +395,8 @@ def main() -> None:
         parser.error("--rollout_epochs requires --rollout_truth_run and epochs within the training budget")
     if not 0.0 <= args.gradient_ema_decay < 1.0:
         parser.error("--gradient_ema_decay must be in [0, 1)")
+    if not np.isfinite(args.lr_hold_fraction) or not 0.0 <= args.lr_hold_fraction < 1.0:
+        parser.error("--lr_hold_fraction must be finite and in [0, 1)")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
     if args.rollout_epochs and args.weight_ema_decay == 0.0:
@@ -639,7 +647,17 @@ def main() -> None:
 
     # Set the learning-rate schedule and initialize AdamW's update state.
     total_steps = args.epochs * train_steps_per_epoch
-    if args.lr_warmup_steps > 0:
+    if args.lr_hold_fraction > 0:
+        hold_steps = int(total_steps * args.lr_hold_fraction)
+        if hold_steps < args.lr_warmup_steps:
+            parser.error("--lr_hold_fraction must end at or after --lr_warmup_steps")
+        lr_schedule = optax.join_schedules(
+            [optax.warmup_constant_schedule(0.0, args.lr, args.lr_warmup_steps)
+             if args.lr_warmup_steps > 0 else optax.constant_schedule(args.lr),
+             optax.cosine_decay_schedule(init_value=args.lr, decay_steps=total_steps - hold_steps)],
+            boundaries=[hold_steps],
+        )
+    elif args.lr_warmup_steps > 0:
         lr_schedule = optax.warmup_cosine_decay_schedule(
             init_value=0.0,
             peak_value=args.lr,
@@ -1028,6 +1046,10 @@ def main() -> None:
                 / max(args.mode_balanced_warmup_steps, 1),
                 1.0,
             )
+            mechanism_weight = args.phase_mechanism_weight * (
+                jnp.clip(current_state.step / (args.phase_mechanism_ramp_epochs * train_steps_per_epoch), 0.0, 1.0)
+                if args.phase_mechanism_ramp_epochs > 0 else 1.0
+            )
             metrics: dict[str, jax.Array] = {
                 "train_l2_loss": full_l2_loss, "train_data_loss": data_loss,
             }
@@ -1051,7 +1073,7 @@ def main() -> None:
                 physics_loss += rollout_weight * (
                     mode_weight * rollout_mode_loss
                     + args.translation_tangent_weight * rollout_tangent_loss
-                    + args.phase_mechanism_weight * rollout_mechanism_loss
+                    + mechanism_weight * rollout_mechanism_loss
                 )
                 metrics.update(
                     rollout_data_loss=rollout_loss, rollout_valid_fraction=valid_fraction,
@@ -1068,7 +1090,7 @@ def main() -> None:
                 metrics["translation_tangent_loss"] = tangent_loss
                 metrics["translation_tangent_fraction"] = tangent_fraction
             if args.phase_mechanism_weight > 0.0:
-                physics_loss += args.phase_mechanism_weight * mechanism_loss
+                physics_loss += mechanism_weight * mechanism_loss
                 metrics["phase_mechanism_loss"] = mechanism_loss
             if args.hadamard_weight > 0.0:
                 # Evaluate Hadamard on a small random subset, only on scheduled steps.

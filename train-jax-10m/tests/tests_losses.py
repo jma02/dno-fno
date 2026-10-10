@@ -460,6 +460,56 @@ def trainer_function(name: str) -> ast.FunctionDef:
                 if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
+def test_learning_rate_hold_schedule_and_validation() -> None:
+    import optax
+
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--lr_hold_fraction")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "np.isfinite(args.lr_hold_fraction)" in ast.unparse(node.test))
+    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign)
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "total_steps")
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np, "optax": optax, "train_steps_per_epoch": 10000}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "lr_hold_option", "exec"), namespace)
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "lr_hold_validation", "exec")
+    configure = compile(ast.Module(body=main.body[start:start + 2], type_ignores=[]), "lr_hold_schedule", "exec")
+    steps = jnp.array([0, 250, 500, 4999, 5000, 7500, 10000, 12500])
+    for warmup, fraction in product((0, 500), (0.0, 0.5)):
+        config = parser.parse_args([] if fraction == 0 else ["--lr_hold_fraction", str(fraction)])
+        config.epochs, config.lr, config.lr_warmup_steps = 1, 6e-5, warmup
+        namespace["args"] = config
+        exec(validate, namespace)
+        exec(configure, namespace)
+        actual = jax.jit(jax.vmap(namespace["lr_schedule"]))(steps)
+        if fraction == 0:
+            reference = (optax.warmup_cosine_decay_schedule(0.0, config.lr, warmup, 10000, end_value=0.0)
+                         if warmup else optax.cosine_decay_schedule(config.lr, 10000))
+            np.testing.assert_array_equal(actual, jax.jit(jax.vmap(reference))(steps))
+        else:
+            expected = [0, 0.5, 1, 1, 1, 0.5, 0, 0] if warmup else [1, 1, 1, 1, 1, 0.5, 0, 0]
+            np.testing.assert_allclose(actual, config.lr * np.asarray(expected), rtol=1e-7, atol=1e-12)
+    config = namespace["args"]
+    config.lr_hold_fraction = 0.05
+    exec(configure, namespace)
+    reference = optax.warmup_cosine_decay_schedule(0.0, config.lr, 500, 10000, end_value=0.0)
+    np.testing.assert_array_equal(jax.vmap(namespace["lr_schedule"])(steps), jax.vmap(reference)(steps))
+    with patch.object(parser, "error", side_effect=ValueError) as error:
+        for invalid in (-0.1, 1.0, np.nan, np.inf, -np.inf):
+            namespace["args"] = parser.parse_args([f"--lr_hold_fraction={invalid}"])
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+            assert "finite and in [0, 1)" in error.call_args.args[0]
+        namespace["args"] = config
+        config.lr_hold_fraction = 0.025
+        with np.testing.assert_raises(ValueError):
+            exec(configure, namespace)
+        assert "at or after --lr_warmup_steps" in error.call_args.args[0]
+
+
 def test_milestone_rollouts_use_only_started_weight_ema() -> None:
     main = trainer_function("main")
     validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
@@ -602,7 +652,8 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
     config = SimpleNamespace(
         model="fno", residual_floor=1e-6, mode_balanced_weight=0.0,
         translation_tangent_weight=0.0, phase_mechanism="all_momentum",
-        phase_mechanism_weight=0.03, hadamard_weight=0.0, mode_balanced_warmup_steps=1,
+        phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
+        hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
         rollout_training_loss="full",
     )
@@ -1000,6 +1051,63 @@ def test_fractional_rollout_ramp_parsing_validation_and_weights() -> None:
             assert "finite and nonnegative" in error.call_args.args[0]
 
 
+def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> None:
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--phase_mechanism_ramp_epochs")
+    validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                      and "args.phase_mechanism_ramp_epochs" in ast.unparse(node.test))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "momentum_ramp_option", "exec"), namespace)
+    assert parser.parse_args([]).phase_mechanism_ramp_epochs == 0.0
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "momentum_ramp_validation", "exec")
+    with patch.object(parser, "error", side_effect=ValueError):
+        for invalid in (-0.5, np.nan, np.inf, -np.inf):
+            namespace["args"] = SimpleNamespace(phase_mechanism_ramp_epochs=invalid)
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+    config = parser.parse_args(["--phase_mechanism_ramp_epochs", "0.5"])
+    config.mode_balanced_weight, config.mode_balanced_warmup_steps = 2.0, 1
+    config.translation_tangent_weight, config.phase_mechanism_weight = 3.0, 4.0
+    config.hadamard_weight = 0.0
+    config.rollout_training_weight, config.rollout_training_ramp_epochs = 0.7, 0.0
+    config.rollout_training_loss = "full"
+    namespace["args"] = config
+    exec(validate, namespace)
+
+    def components(params: jax.Array, eta: jax.Array, *unused: Any, **options: Any) -> tuple[Any, ...]:
+        losses = jnp.mean(eta) * jnp.arange(1, 5) * params ** jnp.arange(1, 5)
+        return *losses, jnp.float64(1.0), losses[0], ()
+
+    eta = jnp.ones((2, 4), dtype=jnp.float64)
+    family = jnp.array([1, 4])
+    namespace.update(
+        jax=jax, jnp=jnp, FlatParams=Any, compute_loss_components=components,
+        current_state=SimpleNamespace(step=0), train_steps_per_epoch=100,
+        training_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
+        batch_depth=eta[:, :1], family=family, n_data_only_rows=0,
+    )
+    exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
+                 "momentum_ramp_loss", "exec"), namespace)
+    for ramp, step, generated in product((0.0, 0.5), (0, 25, 50, 100), (None, False, True)):
+        config.phase_mechanism_ramp_epochs = ramp
+        namespace["current_state"].step = step
+        namespace["rollout_batch"] = (generated, eta[:, :1], family, 2 * eta, eta, eta,
+                                       jnp.float32(1.0)) if generated is not None else None
+        weights = jnp.array([1.0, 2.0 * min(step, 1), 3.0,
+                             4.0 * min(step / (100 * ramp), 1.0) if ramp else 4.0])
+        (actual, metrics), gradient = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(jnp.float64(0.6))
+        expected, expected_gradient = jax.value_and_grad(lambda p:
+            jnp.dot(weights, jnp.asarray(components(p, eta)[:4])) * (1 + 1.4 * bool(generated))
+        )(jnp.float64(0.6))
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+        np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-12)
+        np.testing.assert_allclose(metrics["phase_mechanism_loss"], components(jnp.float64(0.6), eta)[3])
+
+
 def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     scheduled = next(node for node in ast.walk(trainer_function("train_step"))
                      if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
@@ -1028,6 +1136,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         translation_tangent_loss_norm="squared", translation_tangent_charbonnier_eps=1e-7,
         translation_tangent_smoothing_scale=1.0, stokes_relative_tangent=False,
         hadamard_weight=0.0, phase_mechanism="none", phase_mechanism_weight=0.0,
+        phase_mechanism_ramp_epochs=0.0,
         jonswap_mode_balanced_scale=1.0,
     )
     nx = 32
@@ -1249,6 +1358,7 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_learning_rate_hold_schedule_and_validation()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
@@ -1257,6 +1367,7 @@ if __name__ == "__main__":
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
     test_fractional_rollout_ramp_parsing_validation_and_weights()
+    test_momentum_ramp_weights_original_and_generated_losses_and_gradients()
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
     print("[PASS] data normalization, finite gradients, and family metric reductions")
