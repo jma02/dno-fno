@@ -319,7 +319,7 @@ class ComputeMetricsTest(unittest.TestCase):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temporary:
                 argv = ["eval_suite", "--run_dir", temporary, "--families", "tanaka"]
                 if enabled:
-                    argv.append("--center_xi")
+                    argv.extend(["--center_xi", "--truth_batch_size", "8"])
                 with patch("sys.argv", argv), patch(
                     "solver.evals.eval_suite.load_run", return_value=loaded,
                 ), patch(
@@ -332,6 +332,7 @@ class ComputeMetricsTest(unittest.TestCase):
                     eval_main()
                 build_predictor.assert_called_once_with(loaded, center_xi=enabled)
                 self.assertEqual(evaluate_family.call_args.kwargs["center_xi"], enabled)
+                self.assertEqual(evaluate_family.call_args.kwargs["truth_batch_size"], 8 if enabled else None)
                 self.assertIs(evaluate_family.call_args.args[3], build_predictor.return_value)
                 self.assertEqual(write_json.call_args_list[0].args[1], {"tanaka": {"center_xi": enabled}})
 
@@ -626,6 +627,42 @@ class ComputeMetricsTest(unittest.TestCase):
         )
         self.assertEqual(np.asarray(result["eta"]).shape, (2, 5, 3))
         self.assertEqual(float(result["wall_s"]), 1.25)
+
+    def test_truth_and_model_chunk_sizes_preserve_all_ordered_cases_and_frames(self) -> None:
+        ics = [IC(np.full(8, index + 1.0), np.zeros(8), 1.0, index + 17) for index in range(32)]
+        loaded = LoadedRun(None, {}, {}, {}, "scale", 1)
+
+        def rollout(chunk: list[IC], times: jnp.ndarray, nx: int, *_: object) -> dict[str, np.ndarray | float]:
+            eta = np.broadcast_to(np.stack([ic.eta for ic in chunk]), (len(times), len(chunk), nx)).copy()
+            return {"eta": eta, "xi": eta * 0, "gxi": eta * 0, "wall_s": 0.25 * len(chunk)}
+
+        for truth_batch_size in (None, 8):
+            with self.subTest(truth_batch_size=truth_batch_size), tempfile.TemporaryDirectory() as temporary, patch(
+                "solver.evals.eval_suite._load_paper_dataset_ics", return_value=(ics, {}, 8, 2 * np.pi),
+            ), patch(
+                "solver.evals.eval_suite.truth_rollout_batched", side_effect=rollout,
+            ) as truth, patch(
+                "solver.evals.eval_suite.surrogate_rollout_batched", side_effect=rollout,
+            ) as model:
+                directory = Path(temporary)
+                summary = run_family(
+                    "stokes", FamilyConfig(1, 0.08, 20.0, 8), loaded, Mock(),
+                    directory, directory, 32, None, {}, 32, truth_batch_size=truth_batch_size,
+                )
+                self.assertEqual([len(call.args[0]) for call in truth.call_args_list],
+                                 [8] * 4 if truth_batch_size == 8 else [32])
+                self.assertEqual([len(call.args[0]) for call in model.call_args_list], [32])
+                self.assertEqual(summary["rollout_batch_size"], 32)
+                with np.load(directory / "stokes_trajs.npz") as archive:
+                    np.testing.assert_array_equal(archive["simulation_ids"], np.arange(17, 49))
+                    np.testing.assert_array_equal(archive["times"], np.arange(251) * 0.08)
+                    for field in ("eta", "xi", "gxi"):
+                        values = archive[f"truth_{field}"]
+                        self.assertEqual(values.shape, (251, 32, 8))
+                        self.assertEqual(values.dtype, np.float64)
+                        np.testing.assert_array_equal(values, archive[f"pred_{field}"])
+                    np.testing.assert_array_equal(archive["truth_eta"][:, :, 0],
+                                                  np.broadcast_to(np.arange(1.0, 33.0), (251, 32)))
 
     def test_nonfinite_predictions_are_failures_and_truth_reasons_are_explicit(
         self,

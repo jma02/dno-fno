@@ -737,6 +737,7 @@ def run_family(
     checkpoint_source: dict[str, object],
     rollout_batch_size: int | None,
     *,
+    truth_batch_size: int | None = None,
     ic_selection: ICSelection = "first",
     ic_quantile_offset: float = 0.5,
     center_xi: bool = False,
@@ -772,7 +773,7 @@ def run_family(
         print(f"[{family}] f64 truth rollout", flush=True)
         truth = _rollout_ic_chunks(
             ics,
-            rollout_batch_size,
+            truth_batch_size if truth_batch_size is not None else rollout_batch_size,
             lambda chunk: truth_rollout_batched(
                 chunk,
                 jnp.asarray(times_np, dtype=jnp.float64),
@@ -901,6 +902,10 @@ def main() -> None:
     parser.add_argument("--truth_cache", default=None)
     parser.add_argument("--rollout_batch_size", type=int, default=None)
     parser.add_argument(
+        "--truth_batch_size", type=int, default=None,
+        help="Chunk size for uncached M6 truth; defaults to rollout_batch_size.",
+    )
+    parser.add_argument(
         "--center_xi", action="store_true",
         help="Remove each physical potential's mean before float32 network conversion.",
     )
@@ -945,6 +950,7 @@ def main() -> None:
             truth_cache_dir,
             checkpoint_source,
             args.rollout_batch_size,
+            truth_batch_size=args.truth_batch_size,
             ic_selection=args.ic_selection,
             ic_quantile_offset=args.ic_quantile_offset,
             center_xi=args.center_xi,
