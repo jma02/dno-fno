@@ -246,6 +246,9 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_hold", "Longer LR plateau", "#517f2f", "v"),
             ("lr6_momentum_half_ema995_momentum_ramp", "Momentum ramp", "#79549e", "s"),
             ("lr6_momentum_half_ema995_grad05", "Gradient EMA .5", "#197b88", "P"),
+            ("lr6_momentum_half_ema995_head2", "Head learning rate × 2", "#934c79", "^"),
+            ("lr6_momentum_half_ema995_band128", "Data modes ≤ 128", "#967228", "h"),
+            ("lr6_momentum_half_ema995_log_inputs", "Log multiplier inputs", "#3e668e", "*"),
         )
         completed = []
         for suffix, label, color, marker in screens:
