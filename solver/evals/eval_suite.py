@@ -81,6 +81,8 @@ def _load_paper_dataset_ics(
     family: str,
     n_ics: int,
     selection: ICSelection = "first",
+    *,
+    ic_quantile_offset: float = 0.5,
 ) -> tuple[list[IC], dict[str, object], int, float]:
     """Load accepted test initial conditions for one family."""
     dataset_path = dataset_path.resolve()
@@ -141,7 +143,7 @@ def _load_paper_dataset_ics(
         for index, group_index in enumerate(group_slots):
             group_rows = rows_by_group[group_index]
             midpoint = int(
-                (offsets[group_index] + 0.5)
+                (offsets[group_index] + ic_quantile_offset)
                 * len(group_rows)
                 / group_counts[group_index]
             )
@@ -190,6 +192,7 @@ def _load_paper_dataset_ics(
     }
     if selected_group_ids is not None:
         source["selected_parameter_group_ids"] = selected_group_ids
+        source["ic_quantile_offset"] = ic_quantile_offset
     return ics, source, nx, length
 
 
@@ -735,11 +738,13 @@ def run_family(
     rollout_batch_size: int | None,
     *,
     ic_selection: ICSelection = "first",
+    ic_quantile_offset: float = 0.5,
     center_xi: bool = False,
     pred: RolloutPayload | None = None,
 ) -> dict[str, Any]:
     ics, source, nx, length = _load_paper_dataset_ics(
-        dataset_path, family, n_ics, ic_selection
+        dataset_path, family, n_ics, ic_selection,
+        ic_quantile_offset=ic_quantile_offset,
     )
     times_np = np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64)
     protocol_json = _truth_protocol(
@@ -888,6 +893,10 @@ def main() -> None:
         default="first",
         help="Select first test ICs or spread them across parameter groups.",
     )
+    parser.add_argument(
+        "--ic_quantile_offset", type=float, default=0.5,
+        help="Within-group quantile offset for stratified IC selection (between 0 and 1).",
+    )
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--truth_cache", default=None)
     parser.add_argument("--rollout_batch_size", type=int, default=None)
@@ -897,6 +906,8 @@ def main() -> None:
     )
     parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
+    if not 0.0 < args.ic_quantile_offset < 1.0:
+        parser.error("ic_quantile_offset must be between 0 and 1")
     if not args.gpu:
         os.environ.setdefault("JAX_PLATFORMS", "cpu")
     jax.config.update("jax_enable_x64", True)
@@ -935,6 +946,7 @@ def main() -> None:
             checkpoint_source,
             args.rollout_batch_size,
             ic_selection=args.ic_selection,
+            ic_quantile_offset=args.ic_quantile_offset,
             center_xi=args.center_xi,
         )
         for family in args.families
