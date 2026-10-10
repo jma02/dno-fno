@@ -540,12 +540,18 @@ files under a fresh `--output` directory. No manuscript or notes are uploaded.
 ### 12b-one-epoch-full-data
 
 [PNG](figures/12b-one-epoch-full-data.png) / [PDF](figures/12b-one-epoch-full-data.pdf).
-The Oct9 screens train from scratch for exactly one epoch on the full training
+The Oct9–10 screens train from scratch for exactly one epoch on the full training
 and validation splits, with gradient and weight EMA. Detached rollout supervision
 ramps up through the epoch. The comparison includes the control, reflection
 augmentation, direct polynomial shortcut, two weaker universal-momentum weights,
 global mode-balancing weight2, reflection-even features, and learning rates
 1e-5/4e-5. Default learning rate is2e-5 with500-update warmup and one-epoch cosine.
+The Oct10 optimizer follow-ups share LR 6e-5, half-strength universal momentum,
+and weight EMA 0.995; gradient EMA, Adam beta1, and LR 8e-5 changes are labeled
+separately. Adam beta1 remains 0.9 unless stated otherwise. The 20-step teacher
+changes only the detached rollout horizon from 0.1 to 0.2, keeping dt=0.01 and
+the same generated-state losses. `Combined` denotes LR 4e-5 plus half momentum;
+`Parent · seed 1` is the LR 6e-5/weight EMA 0.995 recipe with gradient EMA 0.9.
 Runs enter the plot only after all four weight-EMA family evaluations finish.
 Raw-checkpoint results are excluded.
 Each panel reports the median terminal surface relative L2 error over the
