@@ -30,6 +30,7 @@ for variant in "$@"; do
     lr_high_momentum_half) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761) ;;
     lr_high_momentum_quarter) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.0012871749153773805) ;;
     lr6_momentum_half) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761) ;;
+    lr6_momentum_half_ema995) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995) ;;
     lr_high_momentum_half_ema995) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995) ;;
     lr_high_momentum_half_ramp025) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --rollout_training_ramp_epochs 0.25) ;;
     stokes) variant_args=(--phase_mechanism stokes_carrier --phase_mechanism_weight 0.002797671729980144) ;;

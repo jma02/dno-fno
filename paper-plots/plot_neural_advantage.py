@@ -242,10 +242,12 @@ if __name__ == "__main__":
             ("lr6_momentum_half", "LR 6e−5 + momentum × ½", "#9c416a", "H"),
             ("lr_high_momentum_half_ema995", "Combined + EMA 0.995", "#395ea8", "d"),
             ("lr_high_momentum_half_ramp025", "Combined + ¼-epoch ramp", "#66852e", "8"),
+            ("lr6_momentum_half_ema995", "LR 6e−5, ½ momentum, EMA .995", "#b24d24", "D"),
         )
         completed = []
         for suffix, label, color, marker in screens:
-            run = ROOT / f"outputs/c27_phase1_{suffix}_full_20261009"
+            run_date = "20261010" if suffix == "lr6_momentum_half_ema995" else "20261009"
+            run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
                      for family, _ in FAMILIES}
             if not all(path.exists() for path in paths.values()):
