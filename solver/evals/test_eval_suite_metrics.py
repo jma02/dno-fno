@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -37,7 +38,6 @@ from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import optax  # noqa: E402
-from flax.training.train_state import TrainState  # noqa: E402
 from solver.gen_data.pipeline.batch_storage import save_completed_batch  # noqa: E402
 from scripts.build_paper_dataset import build_dataset  # noqa: E402
 from solver.gen_data.pipeline.types import (  # noqa: E402
@@ -47,7 +47,7 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
-    def test_trainer_milestones_evaluate_current_state_without_changing_training(self) -> None:
+    def test_trainer_milestones_evaluate_weight_ema_without_changing_training(self) -> None:
         path = Path(__file__).resolve().parents[2] / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
         milestone = next(
             node for node in ast.walk(ast.parse(path.read_text()))
@@ -58,16 +58,23 @@ class ComputeMetricsTest(unittest.TestCase):
         inputs = 0.01 * jax.random.normal(jax.random.PRNGKey(4), (1, 16, 2), dtype=jnp.float32)
         depth = jnp.zeros((1, 1), dtype=jnp.float32)
         params = model.init(jax.random.PRNGKey(0), inputs, depth)["params"]
-        state = TrainState.create(
+        state = import_module("train-jax-10m.checkpoint_util").WeightEMATrainState.create(
             apply_fn=model.apply, params=params,
             tx=optax.chain(optax.ema(0.9, debias=True), optax.adamw(2e-5)),
+            weight_ema_params=params, weight_ema_decay=0.5,
         )
         gradients = jax.tree_util.tree_map(jnp.ones_like, params)
+        state = state.apply_gradients(grads=gradients)
         state = state.apply_gradients(grads=gradients)
         sharding = jax.sharding.NamedSharding(
             jax.sharding.Mesh(np.asarray(jax.devices()[:1]), ("data",)), jax.sharding.PartitionSpec(),
         )
         state = jax.device_put(state, sharding)
+        self.assertTrue(any(
+            not np.array_equal(raw, averaged)
+            for raw, averaged in zip(jax.tree_util.tree_leaves(state.params),
+                                     jax.tree_util.tree_leaves(state.weight_ema_params), strict=True)
+        ))
         before = jax.tree_util.tree_map(lambda value: np.asarray(value).copy(), state)
         expected_next = state.apply_gradients(grads=gradients)
         config = {"model": "cs_dno"}
@@ -90,13 +97,13 @@ class ComputeMetricsTest(unittest.TestCase):
                         "run_family": evaluate, "FAMILY_CONFIGS": FAMILY_CONFIGS,
                         "compute_macro_summary": macro, "Path": Path, "_write_json": _write_json,
                         "print": Mock(), "train_rng": train_rng,
-                        "epoch_end_step": 1, "epoch_end_optimizer_count": 1,
+                        "epoch_end_step": 2, "epoch_end_optimizer_count": 2,
                     }
                     exec(code, namespace)
                     self.assertIs(namespace["training_state"], state)
                     self.assertIs(namespace["train_rng"], train_rng)
-                    self.assertEqual(namespace["epoch_end_step"], 1)
-                    self.assertEqual(namespace["epoch_end_optimizer_count"], 1)
+                    self.assertEqual(namespace["epoch_end_step"], 2)
+                    self.assertEqual(namespace["epoch_end_optimizer_count"], 2)
                     for actual, expected in zip(jax.tree_util.tree_leaves(state), jax.tree_util.tree_leaves(before)):
                         np.testing.assert_array_equal(actual, expected)
                     if epoch not in (10, 30, 60):
@@ -107,7 +114,8 @@ class ComputeMetricsTest(unittest.TestCase):
                     loaded = build.call_args.args[0]
                     build.assert_called_once_with(loaded)
                     self.assertIs(loaded.model, model)
-                    self.assertIs(loaded.params, state.params)
+                    self.assertIs(loaded.params, state.weight_ema_params)
+                    self.assertIsNot(loaded.params, state.params)
                     self.assertIs(loaded.config, config)
                     self.assertIs(loaded.stats, stats)
                     self.assertEqual((loaded.epoch, loaded.norm_mode), (epoch, "scale"))
@@ -115,15 +123,15 @@ class ComputeMetricsTest(unittest.TestCase):
                     for index, family in enumerate(("stokes", "tanaka", "jonswap_tma", "benjamin_feir")):
                         call = evaluate.call_args_list[index]
                         group = index // 2
-                        out = directory / f"eval_epoch{epoch}_test_stratified_n32_gpu{group}"
+                        out = directory / f"eval_epoch{epoch}_weight_ema_test_stratified_n32_gpu{group}"
                         cache = directory / "truth" / f"eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu{group}"
                         self.assertEqual(call.args[:2], (family, FAMILY_CONFIGS[family]))
                         self.assertIs(call.args[2], loaded)
                         self.assertIs(call.args[3], evaluate.call_args_list[0].args[3])
                         self.assertEqual(call.args[4:], (
                             out, directory / "dataset", 32, cache,
-                            {"run_dir": str(directory), "selection": "latest",
-                             "path": str(directory / "latest_ckpt"), "epoch": epoch}, 32,
+                            {"run_dir": str(directory), "selection": "weight_ema",
+                             "path": str(directory / "weight_ema_ckpt"), "epoch": epoch}, 32,
                         ))
                         self.assertEqual(call.kwargs, {"ic_selection": "stratified"})
                         self.assertEqual(json.loads((out / "all_summaries.json").read_text())[family], {"epoch": epoch})
