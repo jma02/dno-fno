@@ -607,7 +607,7 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
     configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "head_optimizer", "exec")
     for multiplier in (1.0, 2.0):
         config = parser.parse_args([] if multiplier == 1 else ["--surface_head_lr_multiplier", str(multiplier)])
-        config.gradient_ema_decay, config.weight_decay = 0.9, 1e-4
+        config.gradient_ema_decay, config.adam_b1, config.weight_decay = 0.9, 0.9, 1e-4
         namespace["args"] = config
         exec(validate, namespace)
         exec(configure, namespace)
@@ -646,6 +646,80 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
             with np.testing.assert_raises(ValueError):
                 exec(validate, namespace)
             assert "finite and positive" in error.call_args.args[0]
+
+
+def test_adam_first_moment_option_preserves_both_emas() -> None:
+    import optax
+    from checkpoint_util import WeightEMATrainState
+
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--adam_b1")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "args.adam_b1" in ast.unparse(node.test))
+    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.AnnAssign)
+                 and isinstance(node.target, ast.Name) and node.target.id == "optimizer_transforms")
+    parser = argparse.ArgumentParser(add_help=False)
+    params = {"kernel": jnp.array([0.0, 0.1], dtype=jnp.float32)}
+    schedule = optax.constant_schedule(6e-5)
+    namespace: dict[str, Any] = {"parser": parser, "optax": optax, "jax": jax,
+                                 "params": params, "lr_schedule": schedule}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "adam_b1_option", "exec"), namespace)
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "adam_b1_validation", "exec")
+    configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "adam_b1_optimizer", "exec")
+    states = []
+    for b1 in (0.9, 0.5):
+        config = parser.parse_args([] if b1 == 0.9 else ["--adam_b1", str(b1)])
+        assert config.adam_b1 == b1
+        config.gradient_ema_decay, config.weight_decay, config.surface_head_lr_multiplier = 0.5, 1e-4, 1.0
+        namespace["args"] = config
+        exec(validate, namespace)
+        exec(configure, namespace)
+        states.append(WeightEMATrainState.create(
+            apply_fn=Mock(), params=params, tx=namespace["optimizer"], weight_ema_params=params,
+            weight_ema_decay=0.995, weight_ema_start_step=1,
+        ))
+    old_optimizer = optax.chain(optax.ema(0.5, debias=True), optax.adamw(schedule, weight_decay=1e-4))
+    old_params, old_state = params, old_optimizer.init(params)
+    gradient_ema = optax.ema(0.5, debias=True)
+    gradient_state = gradient_ema.init(params)
+    update = jax.jit(lambda state, grads: state.apply_gradients(grads=grads))
+    for step, values in enumerate(((0.0, 0.0), (1.0, -2.0), (-2.0, 0.5), (0.1, -0.3)), start=1):
+        grads = {"kernel": jnp.array(values, dtype=jnp.float32)}
+        previous = states
+        states = [update(state, grads) for state in states]
+        _, gradient_state = gradient_ema.update(grads, gradient_state)
+        old_updates, old_state = old_optimizer.update(grads, old_state, old_params)
+        old_params = optax.apply_updates(old_params, old_updates)
+        for actual, expected in zip(jax.tree.leaves((states[0].params, states[0].opt_state)),
+                                    jax.tree.leaves((old_params, old_state)), strict=True):
+            np.testing.assert_array_equal(actual, expected)
+        for current, prior in zip(states, previous, strict=True):
+            assert int(current.step) == step
+            for actual, expected in zip(jax.tree.leaves(current.opt_state[0]),
+                                        jax.tree.leaves(gradient_state), strict=True):
+                np.testing.assert_array_equal(actual, expected)
+            expected_shadow = (params if step == 1 else current.params if step == 2 else
+                               optax.incremental_update(current.params, prior.weight_ema_params, 0.005))
+            for actual, expected in zip(jax.tree.leaves(current.weight_ema_params),
+                                        jax.tree.leaves(expected_shadow), strict=True):
+                np.testing.assert_allclose(actual, expected, rtol=1e-7, atol=1e-12)
+        adam_default, adam_trial = (state.opt_state[1][0] for state in states)
+        np.testing.assert_array_equal(adam_default.nu["kernel"], adam_trial.nu["kernel"])
+        assert int(adam_default.count) == int(adam_trial.count) == step
+        if step > 1:
+            assert not np.array_equal(adam_default.mu["kernel"], adam_trial.mu["kernel"])
+    assert not np.array_equal(states[0].params["kernel"], states[1].params["kernel"])
+    with patch.object(parser, "error", side_effect=ValueError) as error:
+        for invalid in (-0.1, 1.0, np.nan, np.inf, -np.inf):
+            namespace["args"] = parser.parse_args([f"--adam_b1={invalid}"])
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+            assert "[0, 1)" in error.call_args.args[0]
+        namespace["args"] = parser.parse_args(["--adam_b1=0"])
+        exec(validate, namespace)
 
 
 def test_milestone_rollouts_use_only_started_weight_ema() -> None:
@@ -1509,6 +1583,7 @@ if __name__ == "__main__":
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
+    test_adam_first_moment_option_preserves_both_emas()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()

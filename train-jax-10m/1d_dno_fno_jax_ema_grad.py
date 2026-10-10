@@ -204,6 +204,8 @@ def main() -> None:
         "--gradient_ema_decay", type=float, default=0.9,
         help="Bias-corrected gradient EMA decay before AdamW; must be in [0, 1).",
     )
+    parser.add_argument("--adam_b1", type=float, default=0.9,
+                        help="AdamW first-moment decay after gradient EMA; must be in [0, 1).")
     parser.add_argument("--weight_ema_decay", type=float, default=0.0,
                         help="Inference-only EMA of post-update parameters; 0 disables it.")
     parser.add_argument("--weight_ema_start_fraction", type=float, default=0.8,
@@ -401,6 +403,8 @@ def main() -> None:
         parser.error("--rollout_epochs requires --rollout_truth_run and epochs within the training budget")
     if not 0.0 <= args.gradient_ema_decay < 1.0:
         parser.error("--gradient_ema_decay must be in [0, 1)")
+    if not 0.0 <= args.adam_b1 < 1.0:
+        parser.error("--adam_b1 must be in [0, 1)")
     if not np.isfinite(args.lr_hold_fraction) or not 0.0 <= args.lr_hold_fraction < 1.0:
         parser.error("--lr_hold_fraction must be finite and in [0, 1)")
     if not np.isfinite(args.surface_head_lr_multiplier) or args.surface_head_lr_multiplier <= 0:
@@ -684,7 +688,7 @@ def main() -> None:
         )
     optimizer_transforms: list[optax.GradientTransformation] = [
         optax.ema(args.gradient_ema_decay, debias=True),
-        optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay),
+        optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, weight_decay=args.weight_decay),
     ]
     if args.surface_head_lr_multiplier != 1.0:
         head_mask = jax.tree_util.tree_map_with_path(
@@ -694,7 +698,7 @@ def main() -> None:
         )
         optimizer_transforms.append(optax.masked(optax.scale(args.surface_head_lr_multiplier), head_mask))
     optimizer = optax.chain(*optimizer_transforms)
-    print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True")
+    print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True; AdamW b1={args.adam_b1}")
     training_state = WeightEMATrainState.create(
         apply_fn=apply_model, params=params, tx=optimizer,
         weight_ema_params=params if args.weight_ema_decay > 0.0 else None,
