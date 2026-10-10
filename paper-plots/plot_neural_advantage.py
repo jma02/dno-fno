@@ -261,6 +261,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 · seed 1", "#387a66", "X"),
+            ("lr6_momentum_half_ema995_grad05_adam05_b2099_context16", "Context width 16", "#85569c", "^"),
             ("lr6_momentum_half_ema995_grad05_adam05_whiten", "Whitened surface inputs", "#826234", "h"),
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )
@@ -275,11 +276,13 @@ if __name__ == "__main__":
                 continue
             results = {family: json.loads(path.read_text()) for family, path in paths.items()}
             timing_path = run / "timing/timings.json"
-            if not timing_path.exists() and suffix in ("polynomial_skip", "even_features"):
+            if not timing_path.exists() and suffix in (
+                "polynomial_skip", "even_features", "lr6_momentum_half_ema995_grad05_adam05_b2099_context16",
+            ):
                 print(f"Awaiting architecture timing: {label}")
-                continue
-            timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
-            completed.append((results, timings, label, color, marker))
+            else:
+                timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
+                completed.append((results, timings, label, color, marker))
             fast_dir = run / "eval_fast_weight_ema"
             fast_results = fast_dir / "all_summaries.json"
             fast_timings = fast_dir / "single_rollout_timings.json"
