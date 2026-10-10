@@ -42,6 +42,7 @@ def _model(
     use_relative_elevation: bool = False,
     use_learned_eta_filters: bool = False,
     surface_feature_scales: tuple[float, ...] | None = None,
+    surface_feature_transform: tuple[tuple[float, ...], ...] | None = None,
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
@@ -60,6 +61,7 @@ def _model(
         use_relative_elevation=use_relative_elevation,
         use_learned_eta_filters=use_learned_eta_filters,
         surface_feature_scales=surface_feature_scales,
+        surface_feature_transform=surface_feature_transform,
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
@@ -489,6 +491,52 @@ def test_surface_feature_scaling_folds_into_first_projection() -> None:
         assert jnp.linalg.norm(_learned_residual(normalized, variables, eta, xi, depth)) > 0
 
 
+def test_surface_feature_whitening_folds_and_preserves_operator_structure() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    transform = jnp.diag(jnp.linspace(0.5, 1.5, 7)) + 0.1
+    for polynomial_skip in (False, True):
+        model = _model(
+            surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
+            surface_feature_transform=tuple(map(tuple, transform.tolist())),
+            surface_context_width=8, surface_polynomial_skip=polynomial_skip,
+        )
+        folded = model.clone(surface_feature_transform=None)
+        initial = model.init(jax.random.PRNGKey(27), inputs, depth)
+        original = folded.init(jax.random.PRNGKey(27), inputs, depth)
+        assert all(jnp.array_equal(a, b) for a, b in zip(jax.tree.leaves(initial), jax.tree.leaves(original), strict=True))
+        variables = jax.tree.map(lambda value: value.astype(eta.dtype), _activate_residual(initial))
+        folded_variables = unfreeze(variables)
+        folded_variables["params"]["eta_feat_proj"]["kernel"] = (
+            transform @ folded_variables["params"]["eta_feat_proj"]["kernel"]
+        )
+
+        def residual(surface: jnp.ndarray, potential: jnp.ndarray, log_depth: jnp.ndarray) -> jnp.ndarray:
+            return _learned_residual(model, variables, surface, potential, log_depth)
+
+        actual, derivative = jax.jvp(residual, (eta, xi, depth), (eta, xi, jnp.ones_like(depth)))
+        expected, folded_derivative = jax.jvp(
+            lambda surface, potential, log_depth: _learned_residual(
+                folded, folded_variables, surface, potential, log_depth,
+            ), (eta, xi, depth), (eta, xi, jnp.ones_like(depth)),
+        )
+        assert jnp.linalg.norm(actual) > 1e-10
+        assert jnp.allclose(actual, expected, rtol=1e-11, atol=1e-14)
+        assert jnp.allclose(derivative, folded_derivative, rtol=1e-11, atol=1e-14)
+        zero, first = jax.jvp(lambda surface: residual(surface, xi, depth), (jnp.zeros_like(eta),), (eta,))
+        assert jnp.max(jnp.abs(zero)) < 1e-14
+        assert jnp.max(jnp.abs(first)) < 1e-14
+        sizes = [jnp.linalg.norm(residual(epsilon * eta, xi, depth)) for epsilon in (0.01, 0.005)]
+        assert abs(float(sizes[0] / sizes[1]) - 4.0) < 0.1
+        psi = jnp.roll(xi, 7, axis=-1)
+        response = residual(eta, psi, depth)
+        assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(response, xi), rtol=1e-11, atol=1e-14)
+        assert jnp.allclose(residual(eta, 0.3 * xi - 0.7 * psi, depth),
+                            0.3 * actual - 0.7 * response, rtol=1e-11, atol=1e-14)
+        assert jnp.allclose(residual(jnp.roll(eta, 7, axis=-1), psi, depth),
+                            jnp.roll(actual, 7, axis=-1), rtol=1e-11, atol=1e-14)
+
+
 def test_surface_context_is_nonlocal_and_depth_conditioned() -> None:
     """The learned context transports geometry beyond the support of local features."""
     eta, xi, _ = _state()
@@ -832,6 +880,7 @@ def main() -> int:
         test_true_depth_analytic_baselines_and_returned_components,
         test_experimental_residual_orders,
         test_surface_feature_scaling_folds_into_first_projection,
+        test_surface_feature_whitening_folds_and_preserves_operator_structure,
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,
         test_bounded_context_gate_reuses_context_and_preserves_initialization,

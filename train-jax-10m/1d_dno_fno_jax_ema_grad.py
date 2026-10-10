@@ -107,6 +107,8 @@ def main() -> None:
     )
     parser.add_argument("--cs_normalize_surface_features", action="store_true",
                         help="Fit fixed per-feature RMS scales on up to 65536 training rows.")
+    parser.add_argument("--cs_whiten_surface_features", action="store_true",
+                        help="Decorrelate RMS-scaled features with a fixed, uncentered training-only transform.")
     parser.add_argument("--cs_surface_context_width", type=int, default=0,
                         help="Channels in the depth-conditioned Fourier surface encoder; 0 disables it.")
     parser.add_argument("--cs_surface_context_gate", action="store_true",
@@ -206,6 +208,8 @@ def main() -> None:
     )
     parser.add_argument("--adam_b1", type=float, default=0.9,
                         help="AdamW first-moment decay after gradient EMA; must be in [0, 1).")
+    parser.add_argument("--adam_b2", type=float, default=0.999,
+                        help="AdamW second-moment decay after gradient EMA; must be in [0, 1).")
     parser.add_argument("--weight_ema_decay", type=float, default=0.0,
                         help="Inference-only EMA of post-update parameters; 0 disables it.")
     parser.add_argument("--weight_ema_start_fraction", type=float, default=0.8,
@@ -405,6 +409,8 @@ def main() -> None:
         parser.error("--gradient_ema_decay must be in [0, 1)")
     if not 0.0 <= args.adam_b1 < 1.0:
         parser.error("--adam_b1 must be in [0, 1)")
+    if not 0.0 <= args.adam_b2 < 1.0:
+        parser.error("--adam_b2 must be in [0, 1)")
     if not np.isfinite(args.lr_hold_fraction) or not 0.0 <= args.lr_hold_fraction < 1.0:
         parser.error("--lr_hold_fraction must be finite and in [0, 1)")
     if not np.isfinite(args.surface_head_lr_multiplier) or args.surface_head_lr_multiplier <= 0:
@@ -467,6 +473,8 @@ def main() -> None:
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
     if args.model != "cs_dno" and (args.cs_normalize_surface_features or args.cs_surface_context_width):
         parser.error("Surface-feature experiments require --model cs_dno")
+    if args.cs_whiten_surface_features and not args.cs_normalize_surface_features:
+        parser.error("--cs_whiten_surface_features requires --cs_normalize_surface_features")
     start_time = perf_counter()
 
     training_dtype = jnp.float32
@@ -530,6 +538,7 @@ def main() -> None:
     target_absmax = float(cast(float, stats["target_absmax"]))
     target_scale = target_absmax if target_absmax > 0 else 1.0
     args.cs_surface_feature_scales = None
+    args.cs_surface_feature_transform = None
     if args.cs_normalize_surface_features:
         # Independent RNG: fitting training-only scales must not advance the batch shuffle.
         feature_rows = np.random.default_rng(0).choice(
@@ -543,6 +552,8 @@ def main() -> None:
             (args.cs_use_hilbert, -1j * np.sign(feature_k)),
         ) if enabled]
         feature_energy = np.zeros(args.cs_n_polys + len(feature_symbols) + args.cs_use_relative_elevation)
+        feature_cross = (np.zeros((feature_energy.size, feature_energy.size))
+                         if args.cs_whiten_surface_features else None)
         for start in range(0, feature_rows.size, 256):
             rows = feature_rows[start:start + 256]
             eta_features = np.asarray(dataset["eta"][rows], dtype=np.float32) / np.float32(eta_scale)
@@ -554,11 +565,24 @@ def main() -> None:
             feature_energy += np.array([
                 np.sum(np.square(field, dtype=np.float64)) for field in fields
             ])
+            if feature_cross is not None:
+                field_matrix = np.stack(fields, axis=-1).reshape(-1, feature_energy.size).astype(np.float64)
+                feature_cross += field_matrix.T @ field_matrix
         feature_rms = np.sqrt(feature_energy / (feature_rows.size * nx))
         if not np.all(np.isfinite(feature_rms)):
             raise FloatingPointError("Non-finite training surface-feature RMS")
         args.cs_surface_feature_scales = np.maximum(feature_rms, 1e-12).tolist()
         print(f"Surface-feature RMS ({feature_rows.size} training rows): {args.cs_surface_feature_scales}")
+        if feature_cross is not None:
+            scales = np.asarray(args.cs_surface_feature_scales)
+            second_moment = feature_cross / (feature_rows.size * nx) / scales[:, None] / scales[None, :]
+            eigenvalues, eigenvectors = np.linalg.eigh(second_moment)
+            eigen_floor = max(0.05 * float(np.trace(second_moment)) / feature_energy.size, 1e-12)
+            transform = (eigenvectors / np.sqrt(np.maximum(eigenvalues, eigen_floor))) @ eigenvectors.T
+            if not np.all(np.isfinite(transform)):
+                raise FloatingPointError("Non-finite training surface-feature whitening transform")
+            args.cs_surface_feature_transform = transform.tolist()
+            print(f"Surface-feature second-moment eigenvalues: {eigenvalues}; whitening floor: {eigen_floor}")
     # Construct the selected model and initialize its parameters.
     if args.model == "cs_dno":
         model = CraigSulemDNO(
@@ -574,6 +598,8 @@ def main() -> None:
             use_learned_eta_filters=args.cs_use_learned_eta_filters,
             surface_feature_scales=(tuple(args.cs_surface_feature_scales)
                                     if args.cs_surface_feature_scales is not None else None),
+            surface_feature_transform=(tuple(map(tuple, args.cs_surface_feature_transform))
+                                       if args.cs_surface_feature_transform is not None else None),
             surface_context_width=args.cs_surface_context_width,
             surface_context_gate=args.cs_surface_context_gate,
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
@@ -688,7 +714,8 @@ def main() -> None:
         )
     optimizer_transforms: list[optax.GradientTransformation] = [
         optax.ema(args.gradient_ema_decay, debias=True),
-        optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, weight_decay=args.weight_decay),
+        optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, b2=args.adam_b2,
+                    weight_decay=args.weight_decay),
     ]
     if args.surface_head_lr_multiplier != 1.0:
         head_mask = jax.tree_util.tree_map_with_path(
@@ -698,7 +725,8 @@ def main() -> None:
         )
         optimizer_transforms.append(optax.masked(optax.scale(args.surface_head_lr_multiplier), head_mask))
     optimizer = optax.chain(*optimizer_transforms)
-    print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True; AdamW b1={args.adam_b1}")
+    print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True; "
+          f"AdamW b1={args.adam_b1}, b2={args.adam_b2}")
     training_state = WeightEMATrainState.create(
         apply_fn=apply_model, params=params, tx=optimizer,
         weight_ema_params=params if args.weight_ema_decay > 0.0 else None,

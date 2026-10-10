@@ -257,10 +257,14 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_seed1", "Gradient EMA .5 + Adam β₁=.5 · seed 1", "#4d58a6", "X"),
             ("lr6_momentum_half_ema995_grad05_lr8", "Gradient EMA .5 + LR 8e−5", "#a4473b", ">"),
             ("lr6_momentum_half_ema995_grad05_teacher20", "Gradient EMA .5 + 20-step teacher", "#967228", "h"),
+            ("lr6_momentum_half_ema995_grad05_adam07", "Adam β₁=.7", "#4d58a6", "v"),
+            ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
+            ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
+            ("lr6_momentum_half_ema995_grad05_adam05_whiten", "Whitened surface inputs", "#826234", "h"),
         )
         completed = []
         for suffix, label, color, marker in screens:
-            run_date = "20261010" if suffix.startswith("lr6_momentum_half_ema995") else "20261009"
+            run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995")) else "20261009"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
                      for family, _ in FAMILIES}

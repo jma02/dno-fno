@@ -133,6 +133,11 @@ def build_variant(
         jax.block_until_ready(cached)
 
     if spectral_io:
+        first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]
+        if model.surface_feature_transform is not None:
+            first_projection_kernel = jnp.asarray(
+                model.surface_feature_transform, dtype=first_projection_kernel.dtype,
+            ) @ first_projection_kernel
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
         inner_filters = gamma = None
         if model.nested_blocks:
@@ -252,7 +257,8 @@ def build_variant(
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
             context = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
-                features = nn.gelu(features @ loaded.params[name]["kernel"])
+                kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
+                features = nn.gelu(features @ kernel)
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     context = features @ loaded.params["eta_context_in"]["kernel"]
                     context = jnp.fft.irfft(
@@ -337,12 +343,13 @@ def build_variant(
                     ), axis=1)
                 front_fields = jnp.fft.irfft(packed_hat, n=nx, axis=-1)
             if include_correction and variant in ("surface", "front") and isinstance(module, nn.Dense) and module.name == "eta_feat_proj":
-                features = call_args[0]
-                eta_norm = features[..., 0]
-                transformed = (front_fields[:, :surface_ops.shape[0], :] if front_fields is not None
-                               else jnp.fft.irfft(surface_ops[None, :, :] * jnp.fft.rfft(eta_norm)[:, None, :], n=nx))
-                call_args = (jnp.concatenate((features[..., :model.n_polys],
-                                             jnp.moveaxis(transformed, 1, -1)), axis=-1),)
+                if model.surface_feature_transform is None:
+                    features = call_args[0]
+                    eta_norm = features[..., 0]
+                    transformed = (front_fields[:, :surface_ops.shape[0], :] if front_fields is not None
+                                   else jnp.fft.irfft(surface_ops[None, :, :] * jnp.fft.rfft(eta_norm)[:, None, :], n=nx))
+                    call_args = (jnp.concatenate((features[..., :model.n_polys],
+                                                 jnp.moveaxis(transformed, 1, -1)), axis=-1),)
                 if trial == "cufftdx_dense":
                     hidden = dense(call_args[0], loaded.params["eta_feat_proj"]["kernel"], "gelu")
                     hidden = dense(hidden, loaded.params["eta_feat_mix"]["kernel"], "gelu_lift")

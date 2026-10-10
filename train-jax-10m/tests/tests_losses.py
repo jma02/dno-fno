@@ -607,7 +607,7 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
     configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "head_optimizer", "exec")
     for multiplier in (1.0, 2.0):
         config = parser.parse_args([] if multiplier == 1 else ["--surface_head_lr_multiplier", str(multiplier)])
-        config.gradient_ema_decay, config.adam_b1, config.weight_decay = 0.9, 0.9, 1e-4
+        config.gradient_ema_decay, config.adam_b1, config.adam_b2, config.weight_decay = 0.9, 0.9, 0.999, 1e-4
         namespace["args"] = config
         exec(validate, namespace)
         exec(configure, namespace)
@@ -648,17 +648,18 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
             assert "finite and positive" in error.call_args.args[0]
 
 
-def test_adam_first_moment_option_preserves_both_emas() -> None:
+def test_adam_moment_options_preserve_both_emas() -> None:
     import optax
     from checkpoint_util import WeightEMATrainState
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
-                  and isinstance(node.value, ast.Call) and node.value.args
-                  and isinstance(node.value.args[0], ast.Constant)
-                  and node.value.args[0].value == "--adam_b1")
-    validation = next(node for node in main.body if isinstance(node, ast.If)
-                      and "args.adam_b1" in ast.unparse(node.test))
+    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                              and isinstance(node.value, ast.Call) and node.value.args
+                              and isinstance(node.value.args[0], ast.Constant)
+                              and node.value.args[0].value in ("--adam_b1", "--adam_b2")]
+    validations = {name: next(node for node in main.body if isinstance(node, ast.If)
+                             and f"args.{name}" in ast.unparse(node.test))
+                   for name in ("adam_b1", "adam_b2")}
     start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.AnnAssign)
                  and isinstance(node.target, ast.Name) and node.target.id == "optimizer_transforms")
     parser = argparse.ArgumentParser(add_help=False)
@@ -666,13 +667,14 @@ def test_adam_first_moment_option_preserves_both_emas() -> None:
     schedule = optax.constant_schedule(6e-5)
     namespace: dict[str, Any] = {"parser": parser, "optax": optax, "jax": jax,
                                  "params": params, "lr_schedule": schedule}
-    exec(compile(ast.Module(body=[option], type_ignores=[]), "adam_b1_option", "exec"), namespace)
-    validate = compile(ast.Module(body=[validation], type_ignores=[]), "adam_b1_validation", "exec")
-    configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "adam_b1_optimizer", "exec")
+    exec(compile(ast.Module(body=options, type_ignores=[]), "adam_options", "exec"), namespace)
+    validate = compile(ast.Module(body=list(validations.values()), type_ignores=[]), "adam_validation", "exec")
+    configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "adam_optimizer", "exec")
     states = []
-    for b1 in (0.9, 0.5):
-        config = parser.parse_args([] if b1 == 0.9 else ["--adam_b1", str(b1)])
-        assert config.adam_b1 == b1
+    for arguments, b1, b2 in (([], 0.9, 0.999), (["--adam_b1", "0.5"], 0.5, 0.999),
+                              (["--adam_b2", "0.99"], 0.9, 0.99)):
+        config = parser.parse_args(arguments)
+        assert (config.adam_b1, config.adam_b2) == (b1, b2)
         config.gradient_ema_decay, config.weight_decay, config.surface_head_lr_multiplier = 0.5, 1e-4, 1.0
         namespace["args"] = config
         exec(validate, namespace)
@@ -706,20 +708,24 @@ def test_adam_first_moment_option_preserves_both_emas() -> None:
             for actual, expected in zip(jax.tree.leaves(current.weight_ema_params),
                                         jax.tree.leaves(expected_shadow), strict=True):
                 np.testing.assert_allclose(actual, expected, rtol=1e-7, atol=1e-12)
-        adam_default, adam_trial = (state.opt_state[1][0] for state in states)
-        np.testing.assert_array_equal(adam_default.nu["kernel"], adam_trial.nu["kernel"])
-        assert int(adam_default.count) == int(adam_trial.count) == step
+        adam_default, adam_b1_trial, adam_b2_trial = (state.opt_state[1][0] for state in states)
+        np.testing.assert_array_equal(adam_default.nu["kernel"], adam_b1_trial.nu["kernel"])
+        np.testing.assert_array_equal(adam_default.mu["kernel"], adam_b2_trial.mu["kernel"])
+        assert int(adam_default.count) == int(adam_b1_trial.count) == int(adam_b2_trial.count) == step
         if step > 1:
-            assert not np.array_equal(adam_default.mu["kernel"], adam_trial.mu["kernel"])
-    assert not np.array_equal(states[0].params["kernel"], states[1].params["kernel"])
+            assert not np.array_equal(adam_default.mu["kernel"], adam_b1_trial.mu["kernel"])
+            assert not np.array_equal(adam_default.nu["kernel"], adam_b2_trial.nu["kernel"])
+    for trial in states[1:]:
+        assert not np.array_equal(states[0].params["kernel"], trial.params["kernel"])
     with patch.object(parser, "error", side_effect=ValueError) as error:
-        for invalid in (-0.1, 1.0, np.nan, np.inf, -np.inf):
-            namespace["args"] = parser.parse_args([f"--adam_b1={invalid}"])
-            with np.testing.assert_raises(ValueError):
-                exec(validate, namespace)
-            assert "[0, 1)" in error.call_args.args[0]
-        namespace["args"] = parser.parse_args(["--adam_b1=0"])
-        exec(validate, namespace)
+        for name in validations:
+            for invalid in (-0.1, 1.0, np.nan, np.inf, -np.inf):
+                namespace["args"] = parser.parse_args([f"--{name}={invalid}"])
+                with np.testing.assert_raises(ValueError):
+                    exec(validate, namespace)
+                assert f"--{name} must be in [0, 1)" in error.call_args.args[0]
+            namespace["args"] = parser.parse_args([f"--{name}=0"])
+            exec(validate, namespace)
 
 
 def test_milestone_rollouts_use_only_started_weight_ema() -> None:
@@ -786,13 +792,18 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
     depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
     probe = jax.random.normal(jax.random.PRNGKey(9), (3, nx, 1), dtype=jnp.float32)
-    for nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs in (
-        (0, False, False, False), (1, False, False, False), (2, False, False, False), (1, True, False, False),
-        (0, False, True, False), (1, True, True, False), (0, False, False, True), (1, True, True, True),
+    for nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs, whiten in (
+        (0, False, False, False, False), (1, False, False, False, False),
+        (2, False, False, False, False), (1, True, False, False, False),
+        (0, False, True, False, False), (1, True, True, False, False),
+        (0, False, False, True, False), (1, True, True, True, False),
+        (0, False, False, False, True), (1, True, False, False, True),
     ):
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
+            surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
+                                       if whiten else None),
             surface_context_width=2, baseline_order=1, baseline_true_depth=True,
             surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
             log_multiplier_inputs=log_multiplier_inputs,
@@ -1583,7 +1594,7 @@ if __name__ == "__main__":
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
-    test_adam_first_moment_option_preserves_both_emas()
+    test_adam_moment_options_preserve_both_emas()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from itertools import product
 from pathlib import Path
 import sys
 import tempfile
@@ -226,11 +227,12 @@ def test_surface_feature_rms_uses_normalized_training_rows() -> None:
     nx, wave_number, eta_scale = 64, 3, 2.0
     train_indices = np.arange(0, 1200, 2)
     x = np.arange(nx) * (2 * np.pi / nx)
-    for amplitude in (0.0, 0.25):
+    for amplitude, whiten in product((0.0, 0.25), (False, True)):
         args = SimpleNamespace(
             cs_n_polys=3, cs_use_first_deriv=True, cs_use_second_deriv=True,
             cs_use_half_deriv=True, cs_use_hilbert=True,
             cs_use_relative_elevation=True,
+            cs_whiten_surface_features=whiten, cs_surface_feature_transform=None,
         )
         # Interleaved held-out rows must not affect fitting, including the zero floor.
         eta = np.full((1200, nx), 1e9, dtype=np.float32)
@@ -249,6 +251,25 @@ def test_surface_feature_rms_uses_normalized_training_rows() -> None:
         ], 1e-12)
         np.testing.assert_allclose(args.cs_surface_feature_scales, expected, rtol=1e-6)
         np.testing.assert_array_equal(np.sort(namespace["feature_rows"]), train_indices)
+        if whiten:
+            transform = np.asarray(args.cs_surface_feature_transform)
+            assert np.isfinite(transform).all()
+            np.testing.assert_allclose(transform, transform.T, atol=1e-12)
+            assert np.linalg.eigvalsh(transform).min() > 0
+            field = amplitude * np.cos(wave_number * x)
+            sine = amplitude * np.sin(wave_number * x)
+            features = np.stack((field, field**2, field**3, -wave_number * sine,
+                                 -wave_number**2 * field, np.sqrt(wave_number) * field,
+                                 sine, eta_scale / 0.5 * field), axis=-1) / expected
+            moment = features.T @ features / nx
+            # This is the uncentered second moment, including eta^2's nonzero mean.
+            np.testing.assert_allclose(namespace["second_moment"], moment, rtol=1e-6, atol=1e-7)
+            spectrum = np.linalg.eigvalsh(transform.T @ moment @ transform)
+            assert spectrum.min() > -1e-8 and spectrum.max() < 1 + 1e-6
+            if amplitude:
+                np.testing.assert_allclose(spectrum[-3:], 1, rtol=1e-6)
+        else:
+            assert args.cs_surface_feature_transform is None
 
 
 def main() -> int:

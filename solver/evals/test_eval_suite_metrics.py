@@ -162,6 +162,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
+            {"cs_surface_feature_transform": (np.eye(7) + 0.1).tolist()},
             {"cs_surface_context_width": 4},
             {"cs_surface_context_width": 4, "cs_surface_context_gate": True},
             {"cs_surface_polynomial_skip": True},
@@ -192,6 +193,9 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
+                transform = cast(list[list[float]] | None, options.get("cs_surface_feature_transform"))
+                self.assertEqual(loaded.model.surface_feature_transform,
+                                 None if transform is None else tuple(map(tuple, transform)))
                 self.assertEqual(loaded.model.surface_context_width, options.get("cs_surface_context_width", 0))
                 self.assertEqual(loaded.model.surface_context_gate, options.get("cs_surface_context_gate", False))
                 self.assertEqual(loaded.model.surface_polynomial_skip, options.get("cs_surface_polynomial_skip", False))
@@ -255,11 +259,16 @@ class ComputeMetricsTest(unittest.TestCase):
         with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda eta, xi, symbols, **kwargs:
                    symbols * jnp.fft.rfft(eta[:, None, :] * jnp.fft.irfft(
                        symbols * xi[:, None, :], n=nx), n=nx)):
-            for nested, log_inputs in ((0, False), (1, False), (0, True), (1, True)):
-                with self.subTest(nested=nested, log_inputs=log_inputs):
+            for nested, log_inputs, whiten in ((0, False, False), (1, False, False), (0, True, False),
+                                               (1, True, False), (0, False, True), (1, False, True)):
+                with self.subTest(nested=nested, log_inputs=log_inputs, whiten=whiten):
                     model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=nested, latent=2,
                                          mult_hidden=4, multiplier_skip=True, baseline_true_depth=True,
-                                         log_multiplier_inputs=log_inputs)
+                                         log_multiplier_inputs=log_inputs,
+                                         surface_feature_transform=tuple(map(tuple, (np.eye(7) + 0.1).tolist())) if whiten else None,
+                                         surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3) if whiten else None,
+                                         surface_context_width=4 if whiten else 0,
+                                         surface_polynomial_skip=whiten)
                     params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
                     for index in range(2):
                         block = params[f"cs_block_{index}"]
@@ -279,6 +288,10 @@ class ComputeMetricsTest(unittest.TestCase):
                     ), n=nx)
                     relative = jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected)
                     self.assertLess(float(relative), 5e-7)
+                    if whiten and not nested:
+                        for variant in ("cached", "surface", "front"):
+                            physical = build_variant(loaded, depth, nx, variant)(inputs[..., 0], inputs[..., 1])
+                            np.testing.assert_allclose(physical, expected, rtol=2e-6, atol=1e-7)
 
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)

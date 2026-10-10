@@ -134,6 +134,7 @@ class CraigSulemDNO(nn.Module):
     use_relative_elevation: bool = False  # Append physical eta / actual depth.
     use_learned_eta_filters: bool = False  # Modulate the two even surface filters.
     surface_feature_scales: tuple[float, ...] | None = None  # Fixed training-feature RMS.
+    surface_feature_transform: tuple[tuple[float, ...], ...] | None = None  # Fixed, zero-preserving whitening.
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
@@ -267,6 +268,8 @@ class CraigSulemDNO(nn.Module):
                 self.surface_feature_scales, dtype=eta_features.dtype,
             )
         polynomial_features = eta_features[..., 1:3] if self.surface_polynomial_skip else None
+        if self.surface_feature_transform is not None:
+            eta_features = eta_features @ jnp.asarray(self.surface_feature_transform, dtype=eta_features.dtype)
 
         # With no constant input, zero eta gives zero features.
         context = None
