@@ -1194,6 +1194,8 @@ def main() -> None:
                             jnp.fft.rfft(prediction, axis=1)
                             - jnp.fft.rfft(norm_targets_jax(training_dtype(probe_target)), axis=1)
                         ).astype(jnp.complex128)
+                        # M6 labels stop at 128; G1's out-of-band tail scales as lambda, not lambda squared.
+                        error_hat = jnp.where((k_rfft_jax <= 128.0)[None, :, None], error_hat, 0.0)
                         squared_error = jnp.sum(jnp.abs(error_hat) ** 2, axis=(1, 2))
                         zero_error = squared_error == 0.0
                         error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))

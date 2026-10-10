@@ -263,7 +263,8 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 · seed 1", "#387a66", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_context16", "Context width 16", "#85569c", "^"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_mbfloor1e5", "Adam β₂=.99 + MB floor × 10", "#2f6d4e", "s"),
-            ("lr6_momentum_half_ema995_grad05_adam05_b2099_amp025", "Quarter-amplitude targets", "#a15f32", "v"),
+            ("lr6_momentum_half_ema995_grad05_adam05_b2099_amp025", "Amplitude targets · full band", "#a15f32", "v"),
+            ("lr6_momentum_half_ema995_grad05_adam05_b2099_amp025k128", "Amplitude targets · ≤128", "#834126", "P"),
             ("lr6_momentum_half_ema995_grad05_adam05_whiten", "Whitened surface inputs", "#826234", "h"),
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )

@@ -1670,6 +1670,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
         compute_loss_components=components, apply_model=apply_model,
         norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
         norm_targets_jax=lambda q: q[..., None], depth_sub=depth,
+        k_rfft_jax=jnp.arange(eta.shape[1] // 2 + 1),
         eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family, n_data_only_rows=0,
         amplitude_batch=None,
         rollout_batch=(True, depth, family, 2 * eta, xi, target, jnp.float32(1)),
@@ -1721,6 +1722,55 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
         np.testing.assert_array_equal(jax.value_and_grad(probe_loss)(p), (0.0, 0.0))
 
 
+def test_amplitude_probe_retained_band_values_and_gradients() -> None:
+    function = trainer_function("compute_amplitude_loss")
+    branch = next(node for node in ast.walk(trainer_function("compute_training_loss"))
+                  if isinstance(node, ast.If) and ast.unparse(node.test) == "amplitude_batch is not None")
+    function.body.insert(0, branch.body[0])
+    code = compile(ast.Module(body=[function], type_ignores=[]), "amplitude_band_loss", "exec")
+    nx = 1024
+    spectra = jnp.zeros((3, nx // 2 + 1), jnp.complex128).at[jnp.arange(3), jnp.array([128, 129, 257])].set(nx / 2)
+    modes = jnp.fft.irfft(spectra, n=nx)
+    eta, xi = jnp.ones((1, nx)), jnp.zeros((1, nx))
+
+    def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
+        p, amplitude = variables["params"], inputs[..., :1]
+        return (p[0] * amplitude**2 * modes[0, :, None]
+                + amplitude * (p[1] * modes[1, :, None] + p[2] * modes[2, :, None]))
+
+    namespace: dict[str, Any] = dict(
+        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64,
+        apply_model=apply_model, norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
+        norm_targets_jax=lambda q: q[..., None], depth_sub=jnp.zeros((1, 1)),
+        # The denominator remains the full original-target norm, including mode 257.
+        gxi=(modes[0] + 2 * modes[2])[None],
+    )
+    for scale, length in product((0.25, 0.0625), (2 * np.pi, 4 * np.pi)):
+        namespace.update(
+            args=SimpleNamespace(amplitude_probe_scale=scale),
+            amplitude_batch=(scale * eta, xi, xi, jnp.ones(1, bool)),
+            k_rfft_jax=(2 * np.pi / length) * jnp.arange(nx // 2 + 1),
+        )
+        exec(code, namespace)
+        evaluate = jax.jit(jax.value_and_grad(namespace["compute_amplitude_loss"]))
+        params = jnp.array([0.6, 1.7, 2.3])
+        if length == 2 * np.pi:
+            expected = (params[0] / np.sqrt(5), jnp.array([1 / np.sqrt(5), 0, 0]))
+        else:
+            norm = jnp.sqrt(params[0]**2 + (params[1] / scale)**2)
+            expected = (norm / np.sqrt(5), jnp.array([params[0], params[1] / scale**2, 0]) / (norm * np.sqrt(5)))
+        for actual, reference in zip(evaluate(params), expected):
+            np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-13)
+        # A G1-like O(lambda) tail above the physical cutoff has no loss or gradient.
+        outside_only = jnp.array([0.0, 0.0, 2.3])
+        value, gradient = evaluate(outside_only)
+        np.testing.assert_allclose(value, 0, atol=1e-13)
+        np.testing.assert_allclose(gradient[2], 0, atol=1e-13)
+        assert np.isfinite(gradient).all()
+        for actual, reference in zip(evaluate(params.at[2].set(0)), expected):
+            np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-13)
+
+
 if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
@@ -1747,4 +1797,5 @@ if __name__ == "__main__":
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
     test_amplitude_probe_compensation_schedule_and_off_parity()
+    test_amplitude_probe_retained_band_values_and_gradients()
     print("[PASS] data normalization, finite gradients, and family metric reductions")
