@@ -261,6 +261,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 8e−5", "#994e36", "D"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 · seed 1", "#387a66", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_context16", "Context width 16", "#85569c", "^"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_mbfloor1e5", "Adam β₂=.99 + MB floor × 10", "#2f6d4e", "s"),
