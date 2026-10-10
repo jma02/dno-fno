@@ -188,6 +188,8 @@ def main() -> None:
     parser.add_argument("--rollout_training_microbatch", type=int, default=8)
     parser.add_argument("--rollout_training_steps", type=int, default=10,
                         help="Number of GL2 steps at dt=0.01 used to generate each training endpoint.")
+    parser.add_argument("--amplitude_probe_scale", type=float, default=0.0,
+                        help="Scale original-source eta for extra M6 data supervision on rollout-teacher updates; 0 disables, otherwise must be in (0, 1).")
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument(
         "--lr_warmup_steps",
@@ -434,6 +436,10 @@ def main() -> None:
     if min(args.rollout_training_start_epoch, args.rollout_training_interval,
            args.rollout_training_microbatch, args.rollout_training_steps) < 1:
         parser.error("rollout-training epoch, interval, microbatch and steps must be positive")
+    if not np.isfinite(args.amplitude_probe_scale) or not 0.0 <= args.amplitude_probe_scale < 1.0:
+        parser.error("--amplitude_probe_scale must be 0 (disabled) or in (0, 1)")
+    if args.amplitude_probe_scale > 0 and args.rollout_training_weight == 0:
+        parser.error("--amplitude_probe_scale requires --rollout_training_weight > 0")
     if args.val_hadamard_interval < 1:
         parser.error("--val_hadamard_interval must be positive")
     if args.stokes_relative_tangent and args.translation_tangent_scope != "all":
@@ -1041,6 +1047,7 @@ def main() -> None:
             )
 
         rollout_batch = None
+        amplitude_batch = None
         if args.rollout_training_weight > 0:
             rollout_scheduled = (
                 (current_state.step >= (args.rollout_training_start_epoch - 1) * train_steps_per_epoch)
@@ -1101,6 +1108,30 @@ def main() -> None:
                 rollout_scheduled, rollout_depth, family[:n_rollout],
                 rollout_eta, rollout_xi, rollout_target, rollout_valid,
             )
+            if args.amplitude_probe_scale > 0:
+                def generate_amplitude_batch(_: None) -> tuple[jax.Array, ...]:
+                    depth = jnp.exp(rollout_depth.astype(jnp.float64))
+                    generated = compute_dno_target(
+                        source_fields[0] * args.amplitude_probe_scale, source_fields[1], depth,
+                        nx=nx, length=domain_length, dno_order=6, pad_factor=8,
+                        maximum_wavenumber=128.0,
+                    )
+                    generated_fields = tuple(
+                        field.astype(original.dtype)
+                        for field, original in zip(generated, source_fields)
+                    )
+                    valid = jnp.all(jnp.isfinite(jnp.stack(generated_fields)), axis=(0, 2))
+                    valid &= jnp.all(generated_fields[0] + depth > 0, axis=-1)
+                    fields = tuple(
+                        jax.lax.stop_gradient(cast(jax.Array, jnp.where(valid[:, None], field, original)))
+                        for field, original in zip(generated_fields, source_fields)
+                    )
+                    return *fields, jax.lax.stop_gradient(valid)
+
+                amplitude_batch = jax.lax.cond(
+                    rollout_scheduled, generate_amplitude_batch,
+                    lambda _: (*map(jax.lax.stop_gradient, source_fields), jnp.zeros(n_rollout, dtype=bool)), None,
+                )
 
         def compute_training_loss(
             current_params: FlatParams,
@@ -1151,6 +1182,32 @@ def main() -> None:
                     rollout_phase_mechanism_loss=rollout_mechanism_loss,
                     rollout_active=jnp.float32(scheduled), rollout_weight=rollout_weight * scheduled,
                 )
+                if amplitude_batch is not None:
+                    probe_eta, probe_xi, probe_target, valid = amplitude_batch
+                    def compute_amplitude_loss(p: FlatParams) -> jax.Array:
+                        prediction = apply_model(
+                            {"params": p},
+                            norm_inputs_jax(training_dtype(probe_eta), training_dtype(probe_xi)),
+                            training_dtype(depth_sub),
+                        )
+                        error_hat = (
+                            jnp.fft.rfft(prediction, axis=1)
+                            - jnp.fft.rfft(norm_targets_jax(training_dtype(probe_target)), axis=1)
+                        ).astype(jnp.complex128)
+                        squared_error = jnp.sum(jnp.abs(error_hat) ** 2, axis=(1, 2))
+                        zero_error = squared_error == 0.0
+                        error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
+                        source_hat = jnp.fft.rfft(norm_targets_jax(training_dtype(gxi[:probe_eta.shape[0]])), axis=1)
+                        denominator = jax.lax.stop_gradient(args.amplitude_probe_scale**2 * jnp.sqrt(jnp.maximum(
+                            jnp.sum(jnp.abs(source_hat.astype(jnp.complex128)) ** 2, axis=(1, 2)), 1e-12,
+                        )))
+                        return jnp.mean(cast(jax.Array, jnp.where(valid, error_norm / denominator, 0.0)))
+
+                    amplitude_loss = jax.lax.cond(
+                        scheduled, compute_amplitude_loss, lambda _: jnp.float64(0.0), current_params,
+                    )
+                    data_loss += rollout_weight * amplitude_loss
+                    metrics["amplitude_data_loss"] = amplitude_loss
             if args.mode_balanced_weight > 0.0:
                 physics_loss += mode_weight * mode_loss
                 metrics["mode_balanced_loss"] = mode_loss

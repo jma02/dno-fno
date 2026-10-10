@@ -880,7 +880,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
-        rollout_training_loss="full",
+        rollout_training_loss="full", amplitude_probe_scale=0.0,
     )
 
     def apply_model(
@@ -897,7 +897,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         "log_h_max": np.log(5.0), "k_grid_jax": jnp.fft.fftfreq(nx) * nx,
         "k_rfft_jax": jnp.arange(nx // 2 + 1),
         "compute_phase_mechanism_loss": compute_phase_mechanism_loss, "apply_model": apply_model,
-        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0,
+        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0, "amplitude_batch": None,
     }
     exec(compile(ast.Module(body=[trainer_function("compute_loss_components"),
                                  trainer_function("compute_training_loss")], type_ignores=[]),
@@ -1306,7 +1306,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
     config.translation_tangent_weight, config.phase_mechanism_weight = 3.0, 4.0
     config.hadamard_weight = 0.0
     config.rollout_training_weight, config.rollout_training_ramp_epochs = 0.7, 0.0
-    config.rollout_training_loss = "full"
+    config.rollout_training_loss, config.amplitude_probe_scale = "full", 0.0
     namespace["args"] = config
     exec(validate, namespace)
 
@@ -1320,7 +1320,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
         jax=jax, jnp=jnp, FlatParams=Any, compute_loss_components=components,
         current_state=SimpleNamespace(step=0), train_steps_per_epoch=100,
         training_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
-        batch_depth=eta[:, :1], family=family, n_data_only_rows=0,
+        batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None,
     )
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
                  "momentum_ramp_loss", "exec"), namespace)
@@ -1359,7 +1359,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     config = SimpleNamespace(
         rollout_training_weight=0.75, rollout_training_start_epoch=60,
         rollout_training_ramp_epochs=5, rollout_training_interval=16,
-        rollout_training_loss="full",
+        rollout_training_loss="full", amplitude_probe_scale=0.0,
         model="fno", data_k_max=None, residual_floor=1e-6, mode_balanced_weight=6.0,
         mode_balanced_warmup_steps=4000, mode_balanced_k_max=128.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
@@ -1400,7 +1400,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace, "cast": cast,
         "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64,
-        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId,
+        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
         "denorm_targets_jax": lambda target: target * 4,
@@ -1494,7 +1494,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
-        rollout_training_steps=4, poison=False, poison_target=np.nan,
+        rollout_training_steps=4, amplitude_probe_scale=0.0, poison=False, poison_target=np.nan,
     )
 
     def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
@@ -1580,6 +1580,146 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     assert "rollout" not in ast.unparse(trainer_function("eval_step"))
     assert "compute_dno_target" not in ast.unparse(trainer_function("eval_step"))
 
+    # The extra operator probes use original rows, not detached trajectory endpoints.
+    function.name = "prepare_amplitude"
+    function.body[-1] = ast.parse("return amplitude_batch, source_fields, rollout_depth").body[0]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "trainer_amplitude_batch", "exec"), namespace)
+    prepare_amplitude = namespace["prepare_amplitude"]
+    config.poison, config.amplitude_probe_scale = False, 0.25
+    probe, originals, probe_depth = prepare_amplitude(params, active_step, *fields)
+    expected_probe = compute_dno_target(
+        0.25 * eta, xi, jnp.exp(depth.astype(jnp.float64)), nx=nx, length=2 * np.pi,
+        dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+    )
+    for actual, expected_field in zip(probe[:3], expected_probe):
+        np.testing.assert_allclose(actual, expected_field, rtol=2e-6, atol=2e-8)
+        np.testing.assert_allclose(np.fft.rfft(actual.astype(float))[:, 129:], 0, atol=2e-7)
+    for actual, original in zip(originals, fields[:3]):
+        np.testing.assert_array_equal(actual, original)
+    np.testing.assert_array_equal(probe_depth, depth)
+    assert np.all(probe[3]) and not np.allclose(probe[2], target)
+    np.testing.assert_allclose(probe[1], xi, atol=2e-8)
+    detached = jax.jvp(
+        lambda e, z, q: prepare_amplitude(params, active_step, e, z, q, depth, family)[0][:3],
+        fields[:3], tuple(jnp.ones_like(value) for value in fields[:3]),
+    )[1]
+    for derivative in detached:
+        np.testing.assert_array_equal(derivative, 0)
+    for step in (active_step - 16, active_step + 1):
+        unscheduled = prepare_amplitude(params, step, *fields)[0]
+        assert not np.any(unscheduled[3])
+        for actual, original in zip(unscheduled[:3], fields[:3]):
+            np.testing.assert_array_equal(actual, original)
+    config.poison = True
+    for config.poison_target in (np.nan, 1e40):
+        rejected = prepare_amplitude(params, active_step, *fields)[0]
+        np.testing.assert_array_equal(rejected[3], [True, True, True, False])
+        for actual, clean, original in zip(rejected[:3], probe[:3], fields[:3]):
+            np.testing.assert_array_equal(actual[:3], clean[:3])
+            np.testing.assert_array_equal(actual[3], original[3])
+    config.poison = False
+    namespace["n_devices"] = 2
+    assert prepare_amplitude(params, active_step, *fields)[0][0].shape == (size // 2, nx)
+    config.amplitude_probe_scale = 0.0
+    assert prepare_amplitude(params, active_step, *fields)[0] is None
+
+
+def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--amplitude_probe_scale")
+    validations: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.If)
+                                  and "args.amplitude_probe_scale" in ast.unparse(node.test)]
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "amplitude_option", "exec"), namespace)
+    assert parser.parse_args([]).amplitude_probe_scale == 0.0
+    validate = compile(ast.Module(body=validations, type_ignores=[]), "amplitude_validation", "exec")
+    with patch.object(parser, "error", side_effect=ValueError):
+        for scale, weight in ((-0.1, 1), (1.0, 1), (np.nan, 1), (np.inf, 1), (0.25, 0)):
+            namespace["args"] = SimpleNamespace(amplitude_probe_scale=scale, rollout_training_weight=weight)
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+    config = SimpleNamespace(
+        amplitude_probe_scale=0.0, rollout_training_weight=0.75, rollout_training_loss="full",
+        rollout_training_start_epoch=1, rollout_training_ramp_epochs=1,
+        mode_balanced_weight=6.0, mode_balanced_warmup_steps=1, translation_tangent_weight=10.0,
+        phase_mechanism_weight=0.1, phase_mechanism_ramp_epochs=0.0, hadamard_weight=0.0,
+    )
+    namespace["args"] = config
+    exec(validate, namespace)
+    x = jnp.arange(64, dtype=jnp.float64) * (2 * jnp.pi / 64)
+    eta = jnp.array([0.1, 0.2])[:, None] * jnp.cos(x)
+    xi = jnp.array([0.3, 0.4])[:, None] * jnp.sin(2 * x)
+    target = xi * (1 + eta**2)
+    depth, family = jnp.log(jnp.array([[0.5], [8.0]])), jnp.array([1, 4])
+
+    def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
+        return inputs[..., 1:] * (1 + variables["params"] * inputs[..., :1]**2)
+
+    def components(p: jax.Array, e: jax.Array, *unused: Any, **options: Any) -> tuple[Any, ...]:
+        losses = jnp.mean(e**2) * jnp.arange(1, 5) * p ** jnp.arange(1, 5)
+        return *losses, jnp.float64(1.0), losses[0], ()
+
+    namespace.update(
+        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64,
+        current_state=SimpleNamespace(step=32), train_steps_per_epoch=32,
+        compute_loss_components=components, apply_model=apply_model,
+        norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
+        norm_targets_jax=lambda q: q[..., None], depth_sub=depth,
+        eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family, n_data_only_rows=0,
+        amplitude_batch=None,
+        rollout_batch=(True, depth, family, 2 * eta, xi, target, jnp.float32(1)),
+    )
+    prior = trainer_function("compute_training_loss")
+    prior.name = "prior_loss"
+    for node in ast.walk(prior):
+        if isinstance(node, (ast.If, ast.FunctionDef)):
+            node.body = [item for item in node.body if not (
+                isinstance(item, ast.If) and ast.unparse(item.test) == "amplitude_batch is not None"
+            )]
+    probe_function = trainer_function("compute_amplitude_loss")
+    probe_branch = next(node for node in ast.walk(trainer_function("compute_training_loss"))
+                        if isinstance(node, ast.If) and ast.unparse(node.test) == "amplitude_batch is not None")
+    probe_function.body.insert(0, probe_branch.body[0])
+    exec(compile(ast.Module(body=[prior, trainer_function("compute_training_loss"),
+                                 probe_function], type_ignores=[]),
+                 "amplitude_loss", "exec"), namespace)
+    p = jnp.float64(0.6)
+    actual = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(p)
+    expected = jax.value_and_grad(namespace["prior_loss"], has_aux=True)(p)
+    for a, b in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+        np.testing.assert_array_equal(a, b)
+    for scale in (0.25, 0.0625):
+        config.amplitude_probe_scale = scale
+        namespace["amplitude_batch"] = (scale * eta, xi, xi * (1 + (scale * eta)**2), jnp.ones(2, bool))
+        probe_loss = namespace["compute_amplitude_loss"]
+        expected_probe = jax.value_and_grad(lambda a: relative_l2_loss(
+            (xi * (1 + a * eta**2))[..., None], target[..., None],
+        ))(p)
+        np.testing.assert_allclose(jax.value_and_grad(probe_loss)(p), expected_probe, rtol=1e-10)
+        np.testing.assert_allclose(jax.jit(jax.value_and_grad(probe_loss))(p), expected_probe, rtol=1e-10)
+        np.testing.assert_array_equal(jax.value_and_grad(probe_loss)(jnp.float64(1)), (0.0, 0.0))
+        for step in (0, 16, 32, 33):
+            namespace["current_state"].step = step
+            active, weight = step % 16 == 0, 0.75 * min(step / 32, 1.0)
+            namespace["rollout_batch"] = (active, depth, family, 2 * eta, xi, target, jnp.float32(active))
+            (value, metrics), gradient = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(p)
+            (ordinary, old_metrics), old_gradient = jax.value_and_grad(namespace["prior_loss"], has_aux=True)(p)
+            np.testing.assert_allclose((value, gradient),
+                                       np.asarray((ordinary, old_gradient)) + active * weight * np.asarray(expected_probe),
+                                       rtol=1e-11)
+            for key in old_metrics:
+                np.testing.assert_array_equal(metrics[key], old_metrics[key])
+            np.testing.assert_allclose(metrics["amplitude_data_loss"], active * expected_probe[0], rtol=1e-10)
+        # Rejected rows are finite original inputs with zero contribution, including gradients.
+        clean = namespace["amplitude_batch"]
+        namespace["amplitude_batch"] = (*clean[:3], jnp.zeros(2, bool))
+        np.testing.assert_array_equal(jax.value_and_grad(probe_loss)(p), (0.0, 0.0))
+
 
 if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
@@ -1606,4 +1746,5 @@ if __name__ == "__main__":
     test_momentum_ramp_weights_original_and_generated_losses_and_gradients()
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
+    test_amplitude_probe_compensation_schedule_and_off_parity()
     print("[PASS] data normalization, finite gradients, and family metric reductions")
