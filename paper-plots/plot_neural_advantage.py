@@ -237,6 +237,7 @@ if __name__ == "__main__":
             ("lr_low", "Learning rate 1e−5", "#627b34", "<"),
             ("lr_high", "Learning rate 4e−5", "#a4473b", ">"),
             ("multiplier_skip", "Multiplier skip", "#4169a1", "h"),
+            ("lr_high_momentum_half", "LR 4e−5 + momentum × ½", "#156e55", "*"),
         )
         completed = []
         for suffix, label, color, marker in screens:

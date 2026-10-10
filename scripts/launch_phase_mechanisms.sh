@@ -27,6 +27,7 @@ for variant in "$@"; do
     even_features) variant_args=(--no-cs_use_first_deriv --no-cs_use_hilbert) ;;
     lr_low) variant_args=(--lr 1e-5) ;;
     lr_high) variant_args=(--lr 4e-5) ;;
+    lr_high_momentum_half) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761) ;;
     stokes) variant_args=(--phase_mechanism stokes_carrier --phase_mechanism_weight 0.002797671729980144) ;;
     tanaka) variant_args=(--phase_mechanism tanaka_momentum --phase_mechanism_weight 0.01384754275706006) ;;
     bf) variant_args=(--phase_mechanism bf_sideband --phase_mechanism_weight 0.00013728115168189654) ;;
