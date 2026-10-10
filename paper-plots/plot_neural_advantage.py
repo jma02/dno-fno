@@ -238,6 +238,10 @@ if __name__ == "__main__":
             ("lr_high", "Learning rate 4e−5", "#a4473b", ">"),
             ("multiplier_skip", "Multiplier skip", "#4169a1", "h"),
             ("lr_high_momentum_half", "LR 4e−5 + momentum × ½", "#156e55", "*"),
+            ("lr_high_momentum_quarter", "LR 4e−5 + momentum × ¼", "#bd6b10", "p"),
+            ("lr6_momentum_half", "LR 6e−5 + momentum × ½", "#9c416a", "H"),
+            ("lr_high_momentum_half_ema995", "Combined + EMA 0.995", "#395ea8", "d"),
+            ("lr_high_momentum_half_ramp025", "Combined + ¼-epoch ramp", "#66852e", "8"),
         )
         completed = []
         for suffix, label, color, marker in screens:
@@ -262,7 +266,7 @@ if __name__ == "__main__":
             "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
             "xtick.color": "#59616a", "ytick.color": "#59616a",
         })
-        fig, axes = plt.subplots(2, 2, figsize=(13, 9.5))
+        fig, axes = plt.subplots(2, 2, figsize=(13, max(9.5, 2.5 + 0.9 * len(completed))))
         fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]

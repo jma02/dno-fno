@@ -178,8 +178,8 @@ def main() -> None:
     parser.add_argument("--rollout_training_loss", choices=("data", "full"), default="full",
                         help="Generated targets use data loss alone or data plus mode-balancing and tangent losses; original-data losses are unchanged.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
-    parser.add_argument("--rollout_training_ramp_epochs", type=int, default=5,
-                        help="Linear weight ramp duration; 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
+    parser.add_argument("--rollout_training_ramp_epochs", type=float, default=5.0,
+                        help="Linear weight ramp duration in epochs; fractional values are allowed. 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
     parser.add_argument("--rollout_training_interval", type=int, default=16)
     parser.add_argument("--rollout_training_microbatch", type=int, default=8)
     parser.add_argument("--rollout_training_steps", type=int, default=10,
@@ -403,8 +403,8 @@ def main() -> None:
         parser.error("--input_noise_rms must be finite and nonnegative")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
         parser.error("--rollout_training_weight must be finite and nonnegative")
-    if args.rollout_training_ramp_epochs < 0:
-        parser.error("rollout-training ramp must be nonnegative")
+    if not np.isfinite(args.rollout_training_ramp_epochs) or args.rollout_training_ramp_epochs < 0:
+        parser.error("rollout-training ramp must be finite and nonnegative")
     if min(args.rollout_training_start_epoch, args.rollout_training_interval,
            args.rollout_training_microbatch, args.rollout_training_steps) < 1:
         parser.error("rollout-training epoch, interval, microbatch and steps must be positive")

@@ -1,5 +1,6 @@
 """CPU regressions for data normalization, gradients, and family reductions."""
 
+import argparse
 import ast
 from collections.abc import Callable
 from itertools import product
@@ -959,6 +960,46 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
     )
 
 
+def test_fractional_rollout_ramp_parsing_validation_and_weights() -> None:
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--rollout_training_ramp_epochs")
+    validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                      and "args.rollout_training_ramp_epochs" in ast.unparse(node.test))
+    weight = next(node for node in ast.walk(trainer_function("train_step"))
+                  if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                  and node.targets[0].id == "rollout_weight")
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np, "jnp": jnp,
+                                 "train_steps_per_epoch": 128, "current_state": SimpleNamespace(step=0)}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "ramp_option", "exec"), namespace)
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "ramp_validation", "exec")
+    evaluate = compile(ast.Module(body=[weight], type_ignores=[]), "ramp_weight", "exec")
+    for ramp, fractions in ((0.0, (1, 1, 1, 1, 1)), (0.25, (0, 0.5, 1, 1, 1)),
+                            (1.0, (0, 0.125, 0.25, 1, 1))):
+        config = parser.parse_args(["--rollout_training_ramp_epochs", str(ramp)])
+        namespace["args"] = config
+        exec(validate, namespace)
+        assert config.rollout_training_ramp_epochs == ramp
+        config.rollout_training_weight, config.rollout_training_start_epoch = 0.75, 1
+        for step, fraction in zip((0, 16, 32, 128, 256), fractions, strict=True):
+            namespace["current_state"].step = step
+            exec(evaluate, namespace)
+            np.testing.assert_allclose(namespace["rollout_weight"], 0.75 * fraction)
+        if ramp > 0:
+            namespace["current_state"].step = -16
+            exec(evaluate, namespace)
+            assert namespace["rollout_weight"] == 0.0
+    with patch.object(parser, "error", side_effect=ValueError) as error:
+        for invalid in (-0.25, np.nan, np.inf, -np.inf):
+            namespace["args"] = SimpleNamespace(rollout_training_ramp_epochs=invalid)
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+            assert "finite and nonnegative" in error.call_args.args[0]
+
+
 def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     scheduled = next(node for node in ast.walk(trainer_function("train_step"))
                      if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
@@ -1215,6 +1256,7 @@ if __name__ == "__main__":
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
+    test_fractional_rollout_ramp_parsing_validation_and_weights()
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
     print("[PASS] data normalization, finite gradients, and family metric reductions")
