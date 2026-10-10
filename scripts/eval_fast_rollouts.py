@@ -1,0 +1,101 @@
+"""Evaluate weight-EMA accuracy with the timed Fourier-I/O implementation.
+
+Requires completed native epoch-one evaluations. Reported wall times are for
+32 trajectories together, excluding compilation—not single-rollout latency.
+Set XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true for G1 overlap.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import ExitStack
+from functools import partial
+import os
+from pathlib import Path
+import sys
+from time import perf_counter
+from unittest.mock import patch
+
+os.environ.setdefault("JAX_PLATFORMS", "cuda")
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+
+# Import the evaluation module first; the benchmark modules also depend on it.
+from solver.evals.eval_suite import (  # noqa: E402
+    FAMILY_CONFIGS, RolloutPayload, _write_json, compute_macro_summary, run_family,
+)
+from solver.evals.model_rollout import load_run  # noqa: E402
+from solver.solvers import time_integrator as ti  # noqa: E402
+from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
+from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
+from scripts.time_single_rollouts import packed_boundary  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path)
+    args = parser.parse_args()
+    run_dir = args.run_dir.resolve()
+    output_dir = args.output_dir or run_dir / "eval_fast_weight_ema"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    loaded = load_run(run_dir, checkpoint="weight_ema")
+    dataset = Path(loaded.config["dataset"])
+    dataset = dataset if dataset.is_absolute() else ROOT / dataset
+    variant = "fourier_fused_features_product_overlap"
+    checkpoint_source = {
+        "run_dir": str(run_dir), "selection": "weight_ema",
+        "path": str(run_dir / "weight_ema_ckpt"), "epoch": loaded.epoch,
+        "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
+    }
+    summaries = {}
+    for family, cfg in FAMILY_CONFIGS.items():
+        source = next(run_dir.glob(f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz"))
+        with np.load(source) as saved:
+            times = jnp.asarray(saved["times"])
+            depths = jnp.asarray(saved["depths"])
+            initial = ti.State(jnp.asarray(saved["pred_eta"][0]), jnp.asarray(saved["pred_xi"][0]))
+        nx = initial.eta.shape[-1]
+        params = ti.make_solver_params(
+            nx, loaded.config["domain_length"], depths[:, None], dno_order=6,
+            pad_factor=8, filter_fraction=cfg.filter_fraction,
+        )
+        jax.block_until_ready((initial, times, params))
+        started = perf_counter()
+        spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8)
+        physical = jax.jit(partial(lambda eta, xi, fn, n: jnp.fft.irfft(
+            fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
+        ), fn=spectral, n=nx))
+        function = partial(
+            rollout_if_trial, params=params, substeps=cfg.substeps,
+            carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,
+        )
+        with ExitStack() as patches:
+            patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
+            patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
+            executable = jax.jit(function).lower(initial, times).compile()
+        compiled = perf_counter()
+        result = executable(initial, times)
+        jax.block_until_ready(result)
+        pred: RolloutPayload = {name: np.asarray(result[name]) for name in ("eta", "xi", "gxi")}
+        pred["wall_s"] = perf_counter() - compiled
+        print(f"[{family}] setup+compile={compiled-started:.3f}s; "
+              f"batch32 execution+D2H={pred['wall_s']:.3f}s", flush=True)
+        summaries[family] = run_family(
+            family, cfg, loaded, partial(lambda eta, xi, _depth, fn: fn(eta, xi), fn=physical),
+            output_dir, dataset, 32, source.parent, checkpoint_source, 32,
+            truth_batch_size=8, ic_selection="stratified", ic_quantile_offset=0.5, pred=pred,
+        )
+        del pred, result, executable, function, physical, spectral
+        jax.clear_caches()
+    _write_json(output_dir / "all_summaries.json", summaries)
+    _write_json(output_dir / "macro_summary.json", compute_macro_summary(summaries))
+    print(f"Done. Results written to {output_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

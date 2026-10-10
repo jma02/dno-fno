@@ -293,6 +293,67 @@ class ComputeMetricsTest(unittest.TestCase):
                             physical = build_variant(loaded, depth, nx, variant)(inputs[..., 0], inputs[..., 1])
                             np.testing.assert_allclose(physical, expected, rtol=2e-6, atol=1e-7)
 
+    def test_fast_evaluator_uses_saved_ema_cases_and_exact_spectral_execution(self) -> None:
+        from scripts import eval_fast_rollouts as fast
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "eval_epoch1_weight_ema_test_stratified_n32_gpu0"
+            source.mkdir()
+            fields = np.broadcast_to(np.arange(32)[None, :, None], (251, 32, 8)).astype(np.float64)
+            for family, cfg in FAMILY_CONFIGS.items():
+                np.savez(source / f"{family}_trajs.npz", pred_eta=fields, pred_xi=fields + 1,
+                         depths=np.ones(32), times=np.arange(251) * cfg.dt)
+            loaded = LoadedRun(None, {}, {"dataset": "relative/arrays", "domain_length": 2 * np.pi},
+                               {}, "scale", 1)
+            execute = Mock(return_value={name: fields for name in ("eta", "xi", "gxi")})
+            compiled = Mock()
+            compiled.lower.return_value.compile.return_value = execute
+            original_boundary = fast.ti._state_to_hat
+            with patch("sys.argv", ["eval_fast_rollouts", "--run-dir", str(directory)]), patch.object(
+                fast, "load_run", return_value=loaded,
+            ) as load, patch.object(fast, "build_variant") as build, patch.object(
+                fast.jax, "jit", return_value=compiled,
+            ) as jit, patch.object(fast.jax, "block_until_ready"), patch.object(
+                fast.jax, "clear_caches",
+            ), patch.object(fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8)), patch.object(
+                fast, "run_family", return_value={},
+            ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
+                fast, "_write_json",
+            ):
+                fast.main()
+            load.assert_called_once_with(directory, checkpoint="weight_ema")
+            self.assertIs(fast.ti._state_to_hat, original_boundary)
+            self.assertEqual(build.call_count, 4)
+            for call in build.call_args_list:
+                self.assertEqual(call.args[2:], (8, "fourier_fused_features_product_overlap"))
+                self.assertEqual(call.kwargs, {"fft_ept": 8})
+            rollouts = [call.args[0] for call in jit.call_args_list
+                        if getattr(call.args[0], "func", None) is fast.rollout_if_trial]
+            self.assertEqual(len(rollouts), 4)
+            for function, cfg in zip(rollouts, FAMILY_CONFIGS.values(), strict=True):
+                self.assertIs(function.func, fast.rollout_if_trial)
+                self.assertTrue(function.keywords["carry_spectral"])
+                self.assertTrue(function.keywords["local_if"])
+                self.assertEqual(function.keywords["substeps"], cfg.substeps)
+                self.assertIs(function.keywords["predict_hat"], build.return_value)
+                self.assertIs(function.keywords["predict_gxi"], compiled)
+            for call, cfg in zip(execute.call_args_list, FAMILY_CONFIGS.values(), strict=True):
+                np.testing.assert_array_equal(call.args[0].eta, fields[0])
+                np.testing.assert_array_equal(call.args[0].xi, fields[0] + 1)
+                np.testing.assert_array_equal(call.args[1], np.arange(251) * cfg.dt)
+            self.assertEqual(evaluate.call_count, 4)
+            for call in evaluate.call_args_list:
+                self.assertEqual(call.args[5:8], (fast.ROOT / "relative/arrays", 32, source))
+                self.assertEqual(call.args[8]["selection"], "weight_ema")
+                self.assertIn("spectral carry", call.args[8]["implementation"])
+                self.assertEqual(call.args[9], 32)
+                self.assertEqual(call.kwargs["ic_selection"], "stratified")
+                self.assertEqual(call.kwargs["ic_quantile_offset"], 0.5)
+                self.assertEqual(call.kwargs["truth_batch_size"], 8)
+                for name in ("eta", "xi", "gxi"):
+                    np.testing.assert_array_equal(call.kwargs["pred"][name], fields)
+
     def test_precomputed_predictions_preserve_outputs_and_failure_metrics(self) -> None:
         values = np.ones((2, 2, 8), dtype=np.float64)
         truth = {"eta": values, "xi": values * 0, "gxi": values * 0, "wall_s": 1.0}
