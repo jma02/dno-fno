@@ -546,9 +546,8 @@ ramps up through the epoch. The comparison includes the control, reflection
 augmentation, direct polynomial shortcut, two weaker universal-momentum weights,
 global mode-balancing weight2, reflection-even features, and learning rates
 1e-5/4e-5. Default learning rate is2e-5 with500-update warmup and one-epoch cosine.
-Runs enter the plot only after all four family evaluations finish. Complete
-weight-EMA evaluations replace raw-checkpoint results, which are explicitly
-marked `raw` while their weight-EMA evaluation is pending.
+Runs enter the plot only after all four weight-EMA family evaluations finish.
+Raw-checkpoint results are excluded.
 Each panel reports the median terminal surface relative L2 error over the
 same32 full test trajectories, in percent. The test cases are not subsampled.
 

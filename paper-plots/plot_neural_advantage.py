@@ -253,8 +253,8 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_seed1", "Gradient EMA .5 · seed 1", "#197b88", "X"),
             ("lr6_momentum_half_ema995_grad025", "Gradient EMA .25", "#548226", "v"),
             ("lr6_momentum_half_ema995_grad05_head2", "Gradient EMA .5 + head × 2", "#934c79", "D"),
-            ("lr6_momentum_half_ema995_grad05_adam05", "Gradient EMA .5 + Adam .5", "#4d58a6", "p"),
-            ("lr6_momentum_half_ema995_grad05_adam05_seed1", "Gradient EMA .5 + Adam .5 · seed 1", "#4d58a6", "X"),
+            ("lr6_momentum_half_ema995_grad05_adam05", "Gradient EMA .5 + Adam β₁=.5", "#4d58a6", "p"),
+            ("lr6_momentum_half_ema995_grad05_adam05_seed1", "Gradient EMA .5 + Adam β₁=.5 · seed 1", "#4d58a6", "X"),
             ("lr6_momentum_half_ema995_grad05_lr8", "Gradient EMA .5 + LR 8e−5", "#a4473b", ">"),
             ("lr6_momentum_half_ema995_grad05_teacher20", "Gradient EMA .5 + 20-step teacher", "#967228", "h"),
         )
@@ -282,7 +282,7 @@ if __name__ == "__main__":
             "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
             "xtick.color": "#59616a", "ytick.color": "#59616a",
         })
-        fig, axes = plt.subplots(2, 2, figsize=(13, max(9.5, 2.5 + 0.9 * len(completed))))
+        fig, axes = plt.subplots(2, 2, figsize=(17, max(9.5, 2.5 + 1.2 * len(completed))))
         fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
