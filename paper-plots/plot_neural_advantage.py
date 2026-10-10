@@ -249,6 +249,11 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_head2", "Head learning rate × 2", "#934c79", "^"),
             ("lr6_momentum_half_ema995_band128", "Data modes ≤ 128", "#967228", "h"),
             ("lr6_momentum_half_ema995_log_inputs", "Log multiplier inputs", "#3e668e", "*"),
+            ("lr6_momentum_half_ema995_seed1", "Parent · seed 1", "#b24d24", "s"),
+            ("lr6_momentum_half_ema995_grad05_seed1", "Gradient EMA .5 · seed 1", "#197b88", "X"),
+            ("lr6_momentum_half_ema995_grad025", "Gradient EMA .25", "#548226", "v"),
+            ("lr6_momentum_half_ema995_grad05_head2", "Gradient EMA .5 + head × 2", "#934c79", "D"),
+            ("lr6_momentum_half_ema995_grad05_adam05", "Gradient EMA .5 + Adam .5", "#4d58a6", "p"),
         )
         completed = []
         for suffix, label, color, marker in screens:

@@ -37,6 +37,11 @@ for variant in "$@"; do
     lr6_momentum_half_ema995_head2) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --surface_head_lr_multiplier 2) ;;
     lr6_momentum_half_ema995_band128) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --data_k_max 128) ;;
     lr6_momentum_half_ema995_log_inputs) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --cs_log_multiplier_inputs) ;;
+    lr6_momentum_half_ema995_seed1) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --seed 1) ;;
+    lr6_momentum_half_ema995_grad05_seed1) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --gradient_ema_decay 0.5 --seed 1) ;;
+    lr6_momentum_half_ema995_grad025) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --gradient_ema_decay 0.25) ;;
+    lr6_momentum_half_ema995_grad05_head2) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --gradient_ema_decay 0.5 --surface_head_lr_multiplier 2) ;;
+    lr6_momentum_half_ema995_grad05_adam05) variant_args=(--lr 6e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995 --gradient_ema_decay 0.5 --adam_b1 0.5) ;;
     lr_high_momentum_half_ema995) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --weight_ema_decay 0.995) ;;
     lr_high_momentum_half_ramp025) variant_args=(--lr 4e-5 --phase_mechanism all_momentum --phase_mechanism_weight 0.002574349830754761 --rollout_training_ramp_epochs 0.25) ;;
     stokes) variant_args=(--phase_mechanism stokes_carrier --phase_mechanism_weight 0.002797671729980144) ;;
