@@ -129,6 +129,7 @@ class CraigSulemDNO(nn.Module):
     n_polys: int = 3                  # eta, eta^2, eta^3
     use_first_deriv: bool = True      # First spatial derivative.
     use_second_deriv: bool = True     # Second spatial derivative.
+    curvature_cutoff: float = 0.0     # Physical wavenumber; zero keeps exact curvature.
     use_half_deriv: bool = True       # Fourier multiplier sqrt(abs(k)).
     use_hilbert: bool = True          # Hilbert transform.
     use_relative_elevation: bool = False  # Append physical eta / actual depth.
@@ -236,6 +237,8 @@ class CraigSulemDNO(nn.Module):
         k_op = k_arr[None, :]
         eta_hat = jnp.fft.rfft(eta_norm, axis=-1)
         second_symbol, half_symbol = -(k_op ** 2), jnp.sqrt(k_op)
+        if self.curvature_cutoff > 0:
+            second_symbol = second_symbol / jnp.sqrt(1.0 + (k_op / self.curvature_cutoff) ** 2)
         if self.use_learned_eta_filters:
             surface_k, surface_log_h = jnp.broadcast_arrays(k_op, clipped_log_depth)
             surface_conditioning = jnp.stack((

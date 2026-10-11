@@ -224,44 +224,56 @@ def test_surface_feature_rms_uses_normalized_training_rows() -> None:
         and node.test.attr == "cs_normalize_surface_features"
     )
     code = compile(ast.Module(body=fitting.body, type_ignores=[]), str(path), "exec")
-    nx, wave_number, eta_scale = 64, 3, 2.0
+    nx, eta_scale = 64, 2.0
     train_indices = np.arange(0, 1200, 2)
     x = np.arange(nx) * (2 * np.pi / nx)
-    for amplitude, whiten in product((0.0, 0.25), (False, True)):
+    cases = [(amplitude, whiten, 0.0, 2 * np.pi)
+             for amplitude, whiten in product((0.0, 0.25), (False, True))]
+    cases += [(0.25, whiten, 22.727203594311888, length)
+              for whiten, length in ((False, 2 * np.pi), (True, 4 * np.pi))]
+    for amplitude, whiten, cutoff, length in cases:
         args = SimpleNamespace(
             cs_n_polys=3, cs_use_first_deriv=True, cs_use_second_deriv=True,
             cs_use_half_deriv=True, cs_use_hilbert=True,
             cs_use_relative_elevation=True,
             cs_whiten_surface_features=whiten, cs_surface_feature_transform=None,
+            cs_curvature_cutoff=cutoff,
         )
+        modes = np.asarray([3, 11] if cutoff else [3])
+        amplitudes = amplitude * np.asarray([1.0, 0.4] if cutoff else [1.0])
+        wave_numbers = (2 * np.pi / length) * modes
+        cosine = amplitudes[:, None] * np.cos(modes[:, None] * x)
+        sine = amplitudes[:, None] * np.sin(modes[:, None] * x)
+        field = cosine.sum(axis=0)
+        curvature = -wave_numbers**2
+        if cutoff:
+            curvature /= np.sqrt(1.0 + (wave_numbers / cutoff)**2)
+        features = np.stack((
+            field, field**2, field**3, -(wave_numbers[:, None] * sine).sum(axis=0),
+            (curvature[:, None] * cosine).sum(axis=0),
+            (np.sqrt(wave_numbers)[:, None] * cosine).sum(axis=0),
+            sine.sum(axis=0), eta_scale / 0.5 * field,
+        ), axis=-1)
         # Interleaved held-out rows must not affect fitting, including the zero floor.
         eta = np.full((1200, nx), 1e9, dtype=np.float32)
-        eta[train_indices] = eta_scale * amplitude * np.cos(wave_number * x)
+        eta[train_indices] = eta_scale * field
         namespace = {
             "np": np, "args": args, "dataset": {"eta": eta, "depth": np.full(1200, 0.5)},
             "train_indices": train_indices, "eta_scale": eta_scale,
-            "domain_length": 2 * np.pi, "nx": nx,
+            "domain_length": length, "nx": nx,
         }
         exec(code, namespace)
-        rms = amplitude / np.sqrt(2)
-        expected = np.maximum([
-            rms, amplitude**2 * np.sqrt(3 / 8), amplitude**3 * np.sqrt(5 / 16),
-            wave_number * rms, wave_number**2 * rms, np.sqrt(wave_number) * rms,
-            rms, eta_scale / 0.5 * rms,
-        ], 1e-12)
+        expected = np.maximum(np.sqrt(np.mean(features**2, axis=0)), 1e-12)
         np.testing.assert_allclose(args.cs_surface_feature_scales, expected, rtol=1e-6)
         np.testing.assert_array_equal(np.sort(namespace["feature_rows"]), train_indices)
+        assert args.cs_curvature_cutoff == cutoff
         if whiten:
             transform = np.asarray(args.cs_surface_feature_transform)
             assert np.isfinite(transform).all()
             np.testing.assert_allclose(transform, transform.T, atol=1e-12)
             assert np.linalg.eigvalsh(transform).min() > 0
-            field = amplitude * np.cos(wave_number * x)
-            sine = amplitude * np.sin(wave_number * x)
-            features = np.stack((field, field**2, field**3, -wave_number * sine,
-                                 -wave_number**2 * field, np.sqrt(wave_number) * field,
-                                 sine, eta_scale / 0.5 * field), axis=-1) / expected
-            moment = features.T @ features / nx
+            normalized = features / expected
+            moment = normalized.T @ normalized / nx
             # This is the uncentered second moment, including eta^2's nonzero mean.
             np.testing.assert_allclose(namespace["second_moment"], moment, rtol=1e-6, atol=1e-7)
             spectrum = np.linalg.eigvalsh(transform.T @ moment @ transform)

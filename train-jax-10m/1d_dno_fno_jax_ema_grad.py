@@ -107,6 +107,8 @@ def main() -> None:
     )
     parser.add_argument("--cs_normalize_surface_features", action="store_true",
                         help="Fit fixed per-feature RMS scales on up to 65536 training rows.")
+    parser.add_argument("--cs_curvature_cutoff", type=float, default=0.0,
+                        help="Physical-wavenumber cutoff for softened curvature; 0 keeps the second derivative.")
     parser.add_argument("--cs_whiten_surface_features", action="store_true",
                         help="Decorrelate RMS-scaled features with a fixed, uncentered training-only transform.")
     parser.add_argument("--cs_surface_context_width", type=int, default=0,
@@ -476,6 +478,10 @@ def main() -> None:
         parser.error("CS residual normalization requires --norm scale")
     if args.cs_surface_context_width < 0:
         parser.error("--cs_surface_context_width must be nonnegative")
+    if not np.isfinite(args.cs_curvature_cutoff) or args.cs_curvature_cutoff < 0:
+        parser.error("--cs_curvature_cutoff must be finite and nonnegative")
+    if args.cs_curvature_cutoff > 0 and not args.cs_use_second_deriv:
+        parser.error("--cs_curvature_cutoff requires --cs_use_second_deriv")
     if args.cs_surface_context_gate and args.cs_surface_context_width == 0:
         parser.error("--cs_surface_context_gate requires --cs_surface_context_width > 0")
     if args.cs_surface_polynomial_skip and (args.model != "cs_dno" or args.cs_n_polys < 3 or args.cs_baseline_order != 1):
@@ -484,7 +490,9 @@ def main() -> None:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
-    if args.model != "cs_dno" and (args.cs_normalize_surface_features or args.cs_surface_context_width):
+    if args.model != "cs_dno" and (
+        args.cs_normalize_surface_features or args.cs_surface_context_width or args.cs_curvature_cutoff > 0
+    ):
         parser.error("Surface-feature experiments require --model cs_dno")
     if args.cs_whiten_surface_features and not args.cs_normalize_surface_features:
         parser.error("--cs_whiten_surface_features requires --cs_normalize_surface_features")
@@ -558,9 +566,14 @@ def main() -> None:
             train_indices, size=min(65536, train_indices.size), replace=False,
         )
         feature_k = (2.0 * np.pi / domain_length) * np.arange(nx // 2 + 1)
+        feature_second_symbol = -feature_k**2
+        if args.cs_curvature_cutoff > 0:
+            feature_second_symbol = feature_second_symbol / np.sqrt(
+                1.0 + (feature_k / args.cs_curvature_cutoff) ** 2
+            )
         feature_symbols = [symbol for enabled, symbol in (
             (args.cs_use_first_deriv, 1j * feature_k),
-            (args.cs_use_second_deriv, -feature_k**2),
+            (args.cs_use_second_deriv, feature_second_symbol),
             (args.cs_use_half_deriv, np.sqrt(feature_k)),
             (args.cs_use_hilbert, -1j * np.sign(feature_k)),
         ) if enabled]
@@ -605,6 +618,7 @@ def main() -> None:
             n_polys=args.cs_n_polys,
             use_first_deriv=args.cs_use_first_deriv,
             use_second_deriv=args.cs_use_second_deriv,
+            curvature_cutoff=args.cs_curvature_cutoff,
             use_half_deriv=args.cs_use_half_deriv,
             use_hilbert=args.cs_use_hilbert,
             use_relative_elevation=args.cs_use_relative_elevation,

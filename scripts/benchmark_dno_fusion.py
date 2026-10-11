@@ -119,9 +119,12 @@ def build_variant(
                    if ordinary_blocks else None)
     cached = None
     k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
+    second_symbol = -(k ** 2)
+    if model.curvature_cutoff > 0:
+        second_symbol = second_symbol / jnp.sqrt(1.0 + (k / model.curvature_cutoff) ** 2)
     surface_ops = jnp.stack([symbol for enabled, symbol in (
         (model.use_first_deriv, 1j * k),
-        (model.use_second_deriv, -(k ** 2)),
+        (model.use_second_deriv, second_symbol),
         (model.use_half_deriv, jnp.sqrt(k)),
         (model.use_hilbert, -1j * jnp.sign(k)),
     ) if enabled])

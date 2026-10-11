@@ -37,6 +37,7 @@ def _model(
     n_polys: int = 3,
     use_first_deriv: bool = True,
     use_second_deriv: bool = True,
+    curvature_cutoff: float = 0.0,
     use_half_deriv: bool = True,
     use_hilbert: bool = True,
     use_relative_elevation: bool = False,
@@ -57,6 +58,7 @@ def _model(
         n_polys=n_polys,
         use_first_deriv=use_first_deriv,
         use_second_deriv=use_second_deriv,
+        curvature_cutoff=curvature_cutoff,
         use_half_deriv=use_half_deriv,
         use_hilbert=use_hilbert,
         use_relative_elevation=use_relative_elevation,
@@ -193,14 +195,15 @@ def test_learned_operator_is_self_adjoint_and_linear() -> None:
         ]
     )
     inputs = jnp.stack((eta, xi), axis=-1)
-    for baseline_order, relative_elevation, learned_filters, context_width, context_gate in (
-        (-1, False, False, 0, False), (0, False, False, 0, False), (1, False, False, 0, False),
-        (1, True, False, 0, False), (2, False, False, 0, False), (1, False, True, 0, False),
-        (1, False, False, 8, False), (1, False, False, 8, True),
+    for baseline_order, relative_elevation, learned_filters, context_width, context_gate, cutoff in (
+        (-1, False, False, 0, False, 0.), (0, False, False, 0, False, 0.), (1, False, False, 0, False, 0.),
+        (1, True, False, 0, False, 0.), (2, False, False, 0, False, 0.), (1, False, True, 0, False, 0.),
+        (1, False, False, 8, False, 0.), (1, False, False, 8, True, 0.),
+        (1, False, False, 8, False, 22.727203594311888),
     ):
         model = _model(baseline_order=baseline_order, use_relative_elevation=relative_elevation,
                        use_learned_eta_filters=learned_filters, surface_context_width=context_width,
-                       surface_context_gate=context_gate)
+                       surface_context_gate=context_gate, curvature_cutoff=cutoff)
         variables = _activate_residual(model.init(jax.random.PRNGKey(3), inputs, depth))
         residual_xi = _learned_residual(model, variables, eta, xi, depth)
         residual_psi = _learned_residual(model, variables, eta, psi, depth)
@@ -458,6 +461,8 @@ def test_experimental_residual_orders() -> None:
         (_model(use_learned_eta_filters=True), 2),
         (_model(surface_context_width=8), 2),
         (_model(surface_context_width=8, surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
+        (_model(curvature_cutoff=22.727203594311888, surface_context_width=8,
+                surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
         (_model(surface_context_width=8, surface_context_gate=True,
                 surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)), 2),
         (_model(baseline_order=2, surface_context_width=8, surface_context_gate=True), 3),
@@ -488,8 +493,9 @@ def test_surface_feature_scaling_folds_into_first_projection() -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
     scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
-    for context_width in (0, 8):
-        normalized = _model(surface_feature_scales=scales, surface_context_width=context_width)
+    for context_width, cutoff in ((0, 0.), (8, 0.), (8, 22.727203594311888)):
+        normalized = _model(surface_feature_scales=scales, surface_context_width=context_width,
+                            curvature_cutoff=cutoff)
         folded = normalized.clone(surface_feature_scales=None)
         variables = _activate_residual(normalized.init(jax.random.PRNGKey(15), inputs, depth))
         variables = jax.tree.map(lambda value: value.astype(eta.dtype), variables)
@@ -499,6 +505,43 @@ def test_surface_feature_scaling_folds_into_first_projection() -> None:
         actual = cast(jax.Array, folded.apply(folded_variables, inputs, depth))
         assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-14)
         assert jnp.linalg.norm(_learned_residual(normalized, variables, eta, xi, depth)) > 0
+
+
+def test_softened_curvature_uses_physical_wavenumbers() -> None:
+    """Only curvature changes; its mixed-mode symbol uses physical k, not indices."""
+    _, xi, depth = _state(256)
+    phase = 2 * jnp.pi * jnp.arange(xi.shape[-1]) / xi.shape[-1]
+    eta = (0.01 + 0.02 * jnp.cos(4 * phase) + 0.003 * jnp.cos(96 * phase))[None, :]
+    scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
+    model = _model(curvature_cutoff=22.727203594311888, surface_context_width=8,
+                   surface_feature_scales=scales).clone(domain_length=3 * pi)
+    original = model.clone(curvature_cutoff=0.)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    initial = model.init(jax.random.PRNGKey(31), inputs, depth)
+    assert jnp.array_equal(model.apply(initial, inputs, depth), original.apply(initial, inputs, depth))
+    variables = unfreeze(_activate_residual(initial))
+    kernel = variables["params"]["eta_feat_proj"]["kernel"]
+    variables["params"]["eta_feat_proj"]["kernel"] = jnp.zeros_like(kernel).at[:, :7].set(jnp.eye(7, dtype=kernel.dtype))
+    projections = []
+    for current in (model, original):
+        _, captured = current.apply(
+            variables, inputs, depth,
+            capture_intermediates=lambda module, _: module.name == "eta_feat_proj",
+        )
+        projections.append(cast(jax.Array, captured["intermediates"]["eta_feat_proj"]["__call__"][0]))
+    modes = jnp.asarray([4., 96.])
+    k = (2 * pi / model.domain_length) * modes
+    symbol = -(k**2) / jnp.sqrt(1 + (k / model.curvature_cutoff)**2)
+    expected = jnp.sum(symbol[:, None] * jnp.asarray([0.02, 0.003])[:, None]
+                       * jnp.cos(modes[:, None] * phase), axis=0) / scales[4]
+    assert jnp.allclose(projections[0][..., 4], expected[None, :], rtol=1e-12, atol=1e-12)
+    unchanged = jnp.asarray([0, 1, 2, 3, 5, 6])
+    assert jnp.array_equal(projections[0][..., unchanged], projections[1][..., unchanged])
+    assert jnp.linalg.norm(_learned_residual(model, variables, eta, xi, depth)) > 0
+    actual = cast(jax.Array, model.apply(variables, inputs, depth))
+    shifted = cast(jax.Array, model.apply(variables, jnp.roll(inputs, 11, axis=1), depth))
+    assert jnp.all(jnp.isfinite(actual))
+    assert jnp.allclose(shifted, jnp.roll(actual, 11, axis=1), rtol=1e-11, atol=1e-13)
 
 
 def test_surface_feature_whitening_folds_and_preserves_operator_structure() -> None:
@@ -983,6 +1026,7 @@ def main() -> int:
         test_true_depth_analytic_baselines_and_returned_components,
         test_experimental_residual_orders,
         test_surface_feature_scaling_folds_into_first_projection,
+        test_softened_curvature_uses_physical_wavenumbers,
         test_surface_feature_whitening_folds_and_preserves_operator_structure,
         test_surface_context_is_nonlocal_and_depth_conditioned,
         test_surface_context_has_live_gradients_and_unchanged_shared_initialization,

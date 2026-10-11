@@ -93,6 +93,7 @@ def load_run(
             n_polys=int(config["cs_n_polys"]),
             use_first_deriv=bool(config["cs_use_first_deriv"]),
             use_second_deriv=bool(config["cs_use_second_deriv"]),
+            curvature_cutoff=float(config.get("cs_curvature_cutoff", 0.0)),
             use_half_deriv=bool(config["cs_use_half_deriv"]),
             use_hilbert=bool(config["cs_use_hilbert"]),
             use_relative_elevation=bool(config.get("cs_use_relative_elevation", False)),

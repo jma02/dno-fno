@@ -802,9 +802,15 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     )]
     cases += [(0, polynomial, False, False, False, True, context)
               for polynomial, context in product((False, True), (0, 2))]
-    for nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs, whiten, depth_gate, context in cases:
+    precision_cases = [(*case, 0.0, jnp.float32) for case in cases]
+    precision_cases += [(0, False, False, False, False, False, 2, 22.727203594311888, dtype)
+                        for dtype in (jnp.float32, jnp.float64)]
+    for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
+         whiten, depth_gate, context, cutoff, dtype) in precision_cases:
+        case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
+            curvature_cutoff=cutoff,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
                                        if whiten else None),
@@ -841,11 +847,12 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                      "trainer_packed_apply", "exec"), namespace)
         packed_apply = namespace["apply_model"]
         native = cast(tuple[jax.Array, jax.Array, jax.Array],
-                      model.apply({"params": params}, inputs, depth, return_baseline=True))
+                      model.apply({"params": params}, case_inputs, case_depth, return_baseline=True))
         packed = jax.jit(packed_apply, static_argnames="return_baseline")(
-            {"params": params}, inputs, depth, return_baseline=True,
+            {"params": params}, case_inputs, case_depth, return_baseline=True,
         )
         for actual, expected in zip(packed, native):
+            assert actual.dtype == expected.dtype == case_inputs.dtype
             np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
         np.testing.assert_array_equal(packed[1], packed[2])
 
@@ -855,8 +862,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             return jnp.sum(cast(jax.Array, apply({"params": parameters}, values, log_depth)) * probe)
 
         differentiate = jax.jit(jax.value_and_grad(objective, argnums=(0, 1, 2)), static_argnames="packed")
-        expected_value, expected_grad = differentiate(params, inputs, depth, packed=False)
-        actual_value, actual_grad = differentiate(params, inputs, depth, packed=True)
+        expected_value, expected_grad = differentiate(params, case_inputs, case_depth, packed=False)
+        actual_value, actual_grad = differentiate(params, case_inputs, case_depth, packed=True)
         np.testing.assert_allclose(actual_value, expected_value, rtol=3e-6, atol=2e-7)
         for actual, expected in zip(jax.tree.leaves(actual_grad), jax.tree.leaves(expected_grad)):
             np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-7)

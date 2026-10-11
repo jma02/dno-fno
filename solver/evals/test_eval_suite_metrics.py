@@ -163,6 +163,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_nested_blocks": 1, "cs_baseline_order": 1},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
+            {"cs_curvature_cutoff": 22.727203594311888},
             {"cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
             {"cs_surface_feature_transform": (np.eye(7) + 0.1).tolist()},
             {"cs_surface_context_width": 4},
@@ -191,6 +192,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 loaded = load_run("/tmp/dno-architecture-loader-test")
                 self.assertEqual(loaded.model.use_relative_elevation, options.get("cs_use_relative_elevation", False))
                 self.assertEqual(loaded.model.use_learned_eta_filters, options.get("cs_use_learned_eta_filters", False))
+                self.assertEqual(loaded.model.curvature_cutoff, options.get("cs_curvature_cutoff", 0.0))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
                 self.assertEqual(loaded.model.nested_blocks, options.get("cs_nested_blocks", 0))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
@@ -263,20 +265,23 @@ class ComputeMetricsTest(unittest.TestCase):
         with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda eta, xi, symbols, **kwargs:
                    symbols * jnp.fft.rfft(eta[:, None, :] * jnp.fft.irfft(
                        symbols * xi[:, None, :], n=nx), n=nx)):
-            cases = [(nested, log_inputs, whiten, False, whiten, 4 if whiten else 0, 2)
+            cases = [(nested, log_inputs, whiten, False, whiten, 4 if whiten else 0, 2, 0.0)
                      for nested, log_inputs, whiten in ((0, False, False), (1, False, False), (0, True, False),
                                                         (1, True, False), (0, False, True), (1, False, True))]
-            cases += [(0, False, False, True, polynomial, context, batch)
+            cases += [(0, False, False, True, polynomial, context, batch, 0.0)
                       for polynomial, context, batch in product((False, True), (0, 4), (1, 2))]
-            for nested, log_inputs, whiten, depth_gate, polynomial, context, batch in cases:
+            cases += [(0, False, False, False, False, 4, batch, 22.727203594311888) for batch in (1, 2)]
+            for nested, log_inputs, whiten, depth_gate, polynomial, context, batch, cutoff in cases:
                 with self.subTest(nested=nested, log_inputs=log_inputs, whiten=whiten,
-                                  depth_gate=depth_gate, polynomial=polynomial, context=context, batch=batch):
+                                  depth_gate=depth_gate, polynomial=polynomial, context=context, batch=batch,
+                                  curvature_cutoff=cutoff):
                     fields, log_depth = inputs[:batch], depth[:batch]
                     model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=nested, latent=2,
                                          mult_hidden=4, multiplier_skip=True, baseline_true_depth=True,
+                                         curvature_cutoff=cutoff, domain_length=(3 if cutoff else 2) * np.pi,
                                          log_multiplier_inputs=log_inputs,
                                          surface_feature_transform=tuple(map(tuple, (np.eye(7) + 0.1).tolist())) if whiten else None,
-                                         surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3) if whiten else None,
+                                         surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3) if whiten or cutoff else None,
                                          surface_context_width=context,
                                          surface_context_gate=depth_gate and bool(context),
                                          surface_depth_gate=depth_gate, surface_polynomial_skip=polynomial)
