@@ -333,6 +333,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch256", "LR 8e−5 + batch 256", "#415d94", "p"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch256_seed1", "Batch 256 · seed 1", "#415d94", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128", "LR 8e−5 + batch 128", "#714595", "P"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128_seed1", "Batch 128 · seed 1", "#714595", "X"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
@@ -349,7 +350,7 @@ if __name__ == "__main__":
         completed = []
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
-            if suffix == "lr8_momentum_half_ema995_grad05_adam05_b2099_batch128":
+            if suffix.startswith("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128"):
                 run_date = "20261011"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
