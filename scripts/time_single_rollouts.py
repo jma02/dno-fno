@@ -5,6 +5,7 @@ times one full T=20/200 trajectory for each method and family.
 The fused methods apply inference FFT optimizations to --candidate-run.
 Spectral variants reduce adapter round trips; every classical order shares padded FFT batching.
 The _stages suffix pairs GL2 stages within one trajectory, not separate rollouts.
+The _momentum suffix restores initial momentum after each full spectral step.
 Overlap trials require XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true.
 """
 
@@ -78,7 +79,7 @@ def packed_boundary(
 
 
 def method_base(name: str) -> str:
-    for suffix in ("_half", "_local", "_carry", "_stages", "_boundaries"):
+    for suffix in ("_momentum", "_half", "_local", "_carry", "_stages", "_boundaries"):
         name = name.removesuffix(suffix)
     return name
 
@@ -96,7 +97,7 @@ if __name__ == "__main__":
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
         f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_"))
-        for trial in ("_carry", "_local", "_carry_local", "_carry_local_half")))
+        for trial in ("_carry", "_local", "_carry_local", "_carry_local_half", "_carry_momentum", "_carry_local_momentum")))
     parser.add_argument("--reference", default="M6", help="Method in --methods, or cached_M6 to use the saved reference trajectory.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
@@ -167,7 +168,7 @@ if __name__ == "__main__":
             if method.startswith("M"):
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
-                                    half_spectrum="half" in options)
+                                    half_spectrum="half" in options, project_momentum="momentum" in options)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
                                    implicit_iterations=4, zero_mean_xi=True))
@@ -192,7 +193,8 @@ if __name__ == "__main__":
                         fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
-                                    predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options)
+                                    predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options,
+                                    project_momentum="momentum" in options)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)

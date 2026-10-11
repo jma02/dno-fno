@@ -108,8 +108,14 @@ def rollout_if_trial(
     initial: ti.State, times: jax.Array, *, params: ti.SolverParams, substeps: int,
     carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
     predict_hat: Predictor | None = None, half_spectrum: bool = False,
+    project_momentum: bool = False,
 ) -> dict[str, jax.Array]:
-    """Paired GL2 with optional spectral carry and interval-cached local rotations."""
+    """Paired GL2 with optional spectral carry and interval-cached local rotations.
+
+    Optional post-step momentum projection is not a symplectic map.
+    """
+    if project_momentum and (not carry_spectral or half_spectrum):
+        raise ValueError("Momentum projection requires full spectral carry")
     initial = ti.project_zero_mean_xi(initial)
     flow_params = (params._replace(k=params.k[:params.nx // 2 + 1], g0=params.g0[..., :params.nx // 2 + 1])
                    if half_spectrum else params)
@@ -167,7 +173,26 @@ def rollout_if_trial(
                 else:
                     reflected = jnp.concatenate((fields[..., :1], fields[..., :0:-1]), axis=-1)
                     fields = 0.5 * (fields + jnp.conj(reflected))
-                return ti.SpectralState(*fields.at[..., params.nx // 2].set(0).at[1, ..., 0].set(0))
+                fields = fields.at[..., params.nx // 2].set(0).at[1, ..., 0].set(0)
+                if project_momentum:
+                    eta_x_hat = 1j * momentum_k * fields[0].astype(jnp.complex128)
+                    tangent_hat = jnp.where(momentum_modes, eta_x_hat, 0)
+                    momentum = -jnp.sum(
+                        (jnp.conj(eta_x_hat) * fields[1].astype(jnp.complex128)).real,
+                        axis=-1, dtype=jnp.float64,
+                    ) / params.nx**2
+                    tangent_norm = jnp.sum(
+                        (jnp.conj(tangent_hat) * tangent_hat).real,
+                        axis=-1, dtype=jnp.float64,
+                    ) / params.nx**2
+                    nonflat = tangent_norm > 0
+                    coefficient = jnp.where(
+                        nonflat, (momentum - initial_momentum) / jnp.where(nonflat, tangent_norm, 1.0),
+                        jnp.where(momentum == initial_momentum, 0.0, jnp.nan),
+                    )
+                    correction = jnp.where(momentum_modes, coefficient[..., None] * tangent_hat, 0)
+                    fields = fields.at[1].add(correction)
+                return ti.SpectralState(*fields)
             return ti.project_zero_mean_xi(ti._hat_to_state(next_hat))
 
         next_state = jax.lax.fori_loop(0, substeps, step, carry)
@@ -179,6 +204,16 @@ def rollout_if_trial(
         return next_state, (physical.eta, physical.xi, gxi)
 
     carry = ti._state_to_hat(initial, params.nx) if carry_spectral else initial
+    if project_momentum:
+        momentum_k = params.k.astype(jnp.float64).at[params.nx // 2].set(0)
+        momentum_modes = ((jnp.abs(params.k) <= params.filter_fraction * jnp.max(jnp.abs(params.k)))
+                          & (momentum_k != 0))
+        initial_hat = cast(ti.SpectralState, carry)
+        initial_momentum = -jnp.sum(
+            (jnp.conj(1j * momentum_k * initial_hat.eta_hat.astype(jnp.complex128))
+             * initial_hat.xi_hat.astype(jnp.complex128)).real,
+            axis=-1, dtype=jnp.float64,
+        ) / params.nx**2
     if half_spectrum:
         carry = ti.SpectralState(*(field[..., :params.nx // 2 + 1] for field in carry))
     _, (eta, xi, saved_gxi) = jax.lax.scan(interval_step, carry, (times[:-1], times[1:] - times[:-1]))

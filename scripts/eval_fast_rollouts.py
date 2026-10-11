@@ -42,10 +42,12 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     reference_run = (args.reference_run or run_dir).resolve()
-    output_dir = args.output_dir or run_dir / "eval_fast_weight_ema"
+    output_dir = args.output_dir or run_dir / (
+        "eval_fast_weight_ema_momentum" if args.project_momentum else "eval_fast_weight_ema")
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint="weight_ema")
     dataset = Path(loaded.config["dataset"])
@@ -55,6 +57,7 @@ def main() -> None:
         "run_dir": str(run_dir), "selection": "weight_ema",
         "path": str(run_dir / "weight_ema_ckpt"), "epoch": loaded.epoch,
         "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
+        "project_momentum": args.project_momentum,
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
@@ -81,6 +84,7 @@ def main() -> None:
         function = partial(
             rollout_if_trial, params=params, substeps=cfg.substeps,
             carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,
+            project_momentum=args.project_momentum,
         )
         with ExitStack() as patches:
             patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from functools import partial
 from importlib import import_module
 from itertools import product
 import json
@@ -311,6 +312,60 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertLess(float(jnp.linalg.norm(error) / jnp.linalg.norm(expected)), 5e-7)
                             self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
+    def test_spectral_rollout_projects_batched_momentum_after_each_substep(self) -> None:
+        from scripts.benchmark_surrogate_rhs import rollout_if_trial
+        from solver.solvers import time_integrator as ti
+
+        for nx in (32, 64):
+            with self.subTest(nx=nx):
+                params = ti.make_solver_params(
+                    nx, 2 * np.pi, jnp.asarray([[0.7], [1.4]]), filter_fraction=2 / 3,
+                )
+                x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+                initial = ti.State(
+                    eta=jnp.stack((0.03 + 0.12 * jnp.cos(x) + 0.04 * jnp.sin(2 * x),
+                                   -0.02 + 0.09 * jnp.sin(x) + 0.03 * jnp.cos(3 * x))),
+                    xi=jnp.stack((0.2 + 0.18 * jnp.sin(x) + 0.05 * jnp.cos(2 * x),
+                                  -0.1 + 0.14 * jnp.cos(x) + 0.04 * jnp.sin(3 * x))),
+                )
+
+                def predict_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
+                    return 0.7 * params.g0[..., :nx // 2 + 1] * xi_hat
+
+                run = partial(rollout_if_trial, initial, params=params,
+                              carry_spectral=True, local_if=True, predict_hat=predict_hat)
+                times = jnp.arange(9, dtype=jnp.float64) / 32
+                unprojected = run(times, substeps=1)
+                projected = run(times, substeps=1, project_momentum=True)
+                coarse = run(times[::2], substeps=2, project_momentum=True)
+                momenta = [
+                    np.mean(np.asarray(trajectory["eta"]) * np.fft.irfft(
+                        1j * np.fft.rfftfreq(nx, d=1 / nx)
+                        * np.fft.rfft(np.asarray(trajectory["xi"])), n=nx,
+                    ), axis=-1)
+                    for trajectory in (unprojected, projected)
+                ]
+                self.assertTrue(np.all(np.max(np.abs(momenta[0] - momenta[0][0]), axis=0) > 1e-7))
+                np.testing.assert_allclose(
+                    momenta[1], np.broadcast_to(momenta[1][0], momenta[1].shape),
+                    rtol=0, atol=2e-14,
+                )
+                np.testing.assert_array_equal(projected["eta"][1], unprojected["eta"][1])
+                for field in ("eta", "xi", "gxi"):
+                    np.testing.assert_allclose(coarse[field], projected[field][::2], rtol=0, atol=2e-14)
+                for trajectory in (unprojected, projected, coarse):
+                    np.testing.assert_allclose(
+                        np.mean(trajectory["eta"], axis=-1),
+                        np.broadcast_to(np.mean(initial.eta, axis=-1), trajectory["eta"].shape[:-1]),
+                        rtol=0, atol=2e-14,
+                    )
+                    np.testing.assert_allclose(np.mean(trajectory["xi"], axis=-1), 0, rtol=0, atol=2e-14)
+                for carry_spectral, half_spectrum in ((False, False), (True, True)):
+                    with self.subTest(carry_spectral=carry_spectral, half_spectrum=half_spectrum):
+                        with self.assertRaisesRegex(ValueError, "requires full spectral carry"):
+                            run(times, substeps=1, project_momentum=True,
+                                carry_spectral=carry_spectral, half_spectrum=half_spectrum)
+
     def test_fast_evaluator_uses_candidate_ics_reference_truth_and_exact_spectral_execution(self) -> None:
         from scripts import eval_fast_rollouts as fast
 
@@ -334,7 +389,7 @@ class ComputeMetricsTest(unittest.TestCase):
             compiled.lower.return_value.compile.return_value = execute
             original_boundary = fast.ti._state_to_hat
             with patch("sys.argv", ["eval_fast_rollouts", "--run-dir", str(directory),
-                                    "--reference-run", str(reference)]), patch.object(
+                                    "--reference-run", str(reference), "--project-momentum"]), patch.object(
                 fast, "load_run", return_value=loaded,
             ) as load, patch.object(
                 fast, "_load_paper_dataset_ics", return_value=(ics, {}, 8, 2 * np.pi),
@@ -376,6 +431,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertIs(function.func, fast.rollout_if_trial)
                 self.assertTrue(function.keywords["carry_spectral"])
                 self.assertTrue(function.keywords["local_if"])
+                self.assertTrue(function.keywords["project_momentum"])
                 self.assertEqual(function.keywords["substeps"], cfg.substeps)
                 self.assertIs(function.keywords["predict_hat"], build.return_value)
                 self.assertIs(function.keywords["predict_gxi"], compiled)
@@ -386,8 +442,10 @@ class ComputeMetricsTest(unittest.TestCase):
                 np.testing.assert_array_equal(call.args[1], np.arange(251) * cfg.dt)
             self.assertEqual(evaluate.call_count, 4)
             for call in evaluate.call_args_list:
+                self.assertEqual(call.args[4], directory / "eval_fast_weight_ema_momentum")
                 self.assertEqual(call.args[5:8], (fast.ROOT / "relative/arrays", 32, source))
                 self.assertEqual(call.args[8]["selection"], "weight_ema")
+                self.assertTrue(call.args[8]["project_momentum"])
                 self.assertIn("spectral carry", call.args[8]["implementation"])
                 self.assertEqual(call.args[9], 32)
                 self.assertEqual(call.kwargs["ic_selection"], "stratified")
