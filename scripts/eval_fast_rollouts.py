@@ -1,6 +1,6 @@
 """Evaluate weight-EMA accuracy with the timed Fourier-I/O implementation.
 
-Reuses saved M6 references from this run or --reference-run. Initial conditions
+Reuses saved M6 references from this run, --reference-run, or --reference-dir. Initial conditions
 come from the candidate's dataset, so native candidate rollouts are unnecessary.
 Reported wall times are for 32 trajectories together, excluding compilation.
 Set XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true for G1 overlap.
@@ -40,14 +40,21 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
+    reference = parser.add_mutually_exclusive_group()
+    reference.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
+    reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")
+    parser.add_argument("--ic-quantile-offset", type=float, default=0.5, help="Within-group stratified case quantile offset")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
     args = parser.parse_args()
+    if not 0.0 < args.ic_quantile_offset < 1.0:
+        parser.error("ic-quantile-offset must be between 0 and 1")
     run_dir = args.run_dir.resolve()
-    reference_run = (args.reference_run or run_dir).resolve()
+    reference_dir = (args.reference_dir or args.reference_run or run_dir).resolve()
     output_dir = args.output_dir or run_dir / (
-        "eval_fast_weight_ema_momentum" if args.project_momentum else "eval_fast_weight_ema")
+        "eval_fast_weight_ema"
+        + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
+        + ("_momentum" if args.project_momentum else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint="weight_ema")
     dataset = Path(loaded.config["dataset"])
@@ -61,9 +68,10 @@ def main() -> None:
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
-        source = next(reference_run.glob(f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz"))
+        source = (reference_dir if args.reference_dir else next(reference_dir.glob(
+            f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz")).parent)
         ics, _, nx, length = _load_paper_dataset_ics(
-            dataset, family, 32, "stratified", ic_quantile_offset=0.5,
+            dataset, family, 32, "stratified", ic_quantile_offset=args.ic_quantile_offset,
         )
         times = jnp.asarray(np.arange(0.0, cfg.tmax + 0.5 * cfg.dt, cfg.dt, dtype=np.float64))
         depths = jnp.asarray([ic.depth for ic in ics], dtype=jnp.float64)
@@ -99,8 +107,8 @@ def main() -> None:
               f"batch32 execution+D2H={pred['wall_s']:.3f}s", flush=True)
         summaries[family] = run_family(
             family, cfg, loaded, partial(lambda eta, xi, _depth, fn: fn(eta, xi), fn=physical),
-            output_dir, dataset, 32, source.parent, checkpoint_source, 32,
-            truth_batch_size=8, ic_selection="stratified", ic_quantile_offset=0.5, pred=pred,
+            output_dir, dataset, 32, source, checkpoint_source, 32,
+            truth_batch_size=8, ic_selection="stratified", ic_quantile_offset=args.ic_quantile_offset, pred=pred,
         )
         del pred, result, executable, function, physical, spectral
         jax.clear_caches()

@@ -388,8 +388,7 @@ class ComputeMetricsTest(unittest.TestCase):
             compiled = Mock()
             compiled.lower.return_value.compile.return_value = execute
             original_boundary = fast.ti._state_to_hat
-            with patch("sys.argv", ["eval_fast_rollouts", "--run-dir", str(directory),
-                                    "--reference-run", str(reference), "--project-momentum"]), patch.object(
+            with patch.object(
                 fast, "load_run", return_value=loaded,
             ) as load, patch.object(
                 fast, "_load_paper_dataset_ics", return_value=(ics, {}, 8, 2 * np.pi),
@@ -404,14 +403,29 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
-                fast.main()
+                for reference_args, offset, suffix in (
+                    (["--reference-run", str(reference)], 0.5, ""),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25"),
+                ):
+                    with self.subTest(offset=offset), patch("sys.argv", [
+                        "eval_fast_rollouts", "--run-dir", str(directory), "--project-momentum", *reference_args,
+                    ]):
+                        for mocked in (load, load_ics, build, jit, make_params, execute, evaluate):
+                            mocked.reset_mock()
+                        fast.main()
+                        for call in load_ics.call_args_list:
+                            self.assertEqual(call.kwargs, {"ic_quantile_offset": offset})
+                        for call in evaluate.call_args_list:
+                            self.assertEqual(call.args[4], directory / f"eval_fast_weight_ema{suffix}_momentum")
+                            self.assertEqual(call.args[7], source)
+                            self.assertEqual(call.kwargs["ic_quantile_offset"], offset)
             load.assert_called_once_with(directory, checkpoint="weight_ema")
             self.assertFalse(any(directory.glob("eval_epoch*_test_*")))
             self.assertIs(fast.ti._state_to_hat, original_boundary)
             self.assertEqual(load_ics.call_count, 4)
             for call, family in zip(load_ics.call_args_list, FAMILY_CONFIGS, strict=True):
                 self.assertEqual(call.args, (fast.ROOT / "relative/arrays", family, 32, "stratified"))
-                self.assertEqual(call.kwargs, {"ic_quantile_offset": 0.5})
+                self.assertEqual(call.kwargs, {"ic_quantile_offset": 0.25})
             self.assertEqual(make_params.call_count, 4)
             for call, cfg in zip(make_params.call_args_list, FAMILY_CONFIGS.values(), strict=True):
                 self.assertEqual(call.args[:2], (8, 2 * np.pi))
@@ -442,14 +456,14 @@ class ComputeMetricsTest(unittest.TestCase):
                 np.testing.assert_array_equal(call.args[1], np.arange(251) * cfg.dt)
             self.assertEqual(evaluate.call_count, 4)
             for call in evaluate.call_args_list:
-                self.assertEqual(call.args[4], directory / "eval_fast_weight_ema_momentum")
+                self.assertEqual(call.args[4], directory / "eval_fast_weight_ema_q0.25_momentum")
                 self.assertEqual(call.args[5:8], (fast.ROOT / "relative/arrays", 32, source))
                 self.assertEqual(call.args[8]["selection"], "weight_ema")
                 self.assertTrue(call.args[8]["project_momentum"])
                 self.assertIn("spectral carry", call.args[8]["implementation"])
                 self.assertEqual(call.args[9], 32)
                 self.assertEqual(call.kwargs["ic_selection"], "stratified")
-                self.assertEqual(call.kwargs["ic_quantile_offset"], 0.5)
+                self.assertEqual(call.kwargs["ic_quantile_offset"], 0.25)
                 self.assertEqual(call.kwargs["truth_batch_size"], 8)
                 for name in ("eta", "xi", "gxi"):
                     np.testing.assert_array_equal(call.kwargs["pred"][name], fields)

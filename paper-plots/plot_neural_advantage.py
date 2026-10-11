@@ -220,8 +220,75 @@ if __name__ == "__main__":
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
     parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
     parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
+    parser.add_argument("--momentum-comparison", action="store_true", help="Figure 12c: measured original and momentum-corrected rollouts.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     args = parser.parse_args()
+    if args.momentum_comparison:
+        momentum_dir = ROOT / "outputs/momentum_state_projection_diagnostic_20261010"
+        momentum_neural = ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_full_20261010/eval_fast_weight_ema"
+        momentum_timings = json.loads((momentum_dir / "single_rollout_timings.json").read_text())
+        momentum_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+        momentum_styles = ((0, "New candidate optimized network", "#007da6", "o"),
+                           (2, "Optimized M2", "#c45b22", "s"), (3, "Optimized M3", "#7855ad", "D"))
+        momentum_points = {}
+        for family, _ in FAMILIES:
+            for order, _, _, _ in momentum_styles:
+                records = (momentum_timings["families"][family]["methods"] if order == 0 else json.loads(
+                    (ROOT / f"outputs/momentum_classical_M{order}_timing_20261010/{family}_timing.json").read_text(),
+                )["methods"])
+                paired_points = []
+                for correction in ("none", "state"):
+                    source = ((momentum_neural if correction == "none" else momentum_dir) if order == 0 else
+                              ROOT / f"outputs/momentum_classical_M{order}_{correction}_20261010")
+                    summary = json.loads((source / f"{family}_summary.json").read_text())
+                    timing_key = (momentum_method + ("_momentum" if correction == "state" else "")
+                                  if order == 0 else correction)
+                    paired_points.append((float(np.median(records[timing_key]["seconds"])),
+                                          100 * summary["rel_l2_eta_median_conditional_finite_tfinal"]))
+                momentum_points[family, order] = np.asarray(paired_points)
+        plt.rcParams.update({
+            "font.family": "DejaVu Sans", "font.size": 10, "pdf.fonttype": 42,
+            "axes.spines.top": False, "axes.spines.right": False,
+            "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
+            "xtick.color": "#59616a", "ytick.color": "#59616a",
+        })
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8.5))
+        fig.subplots_adjust(left=0.11, right=0.98, top=0.75, bottom=0.11, hspace=0.38, wspace=0.28)
+        for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
+            for order, _, color, marker in momentum_styles:
+                pair = momentum_points[family, order]
+                ax.plot(pair[:, 0], pair[:, 1], color=color, lw=1.2, zorder=2)
+                ax.plot(*pair[0], marker=marker, color=color, mfc="white", ms=8, ls="none", zorder=3)
+                ax.plot(*pair[1], marker=marker, color=color, ms=5, ls="none", zorder=4)
+            ax.set(yscale="log", xlim=(0, 1.15 * max(momentum_points[family, order][:, 0].max()
+                                                   for order, _, _, _ in momentum_styles)))
+            ax.xaxis.set_major_locator(MaxNLocator(4))
+            ax.yaxis.set_major_locator(LogLocator(subs=(1, 2, 5), numticks=6))
+            ax.yaxis.set_major_formatter(StrMethodFormatter("{x:g}"))
+            ax.yaxis.set_minor_locator(NullLocator())
+            ax.grid(axis="y", lw=0.6)
+            ax.margins(y=0.20)
+            ax.set_title(title, loc="left", fontsize=13, pad=12)
+            ax.set_title(f"T = {momentum_timings['families'][family]['horizon']:g}", loc="right",
+                         fontsize=10, color="#777f86", pad=12)
+        fig.suptitle("Momentum correction · rollout accuracy and runtime", x=0.11, y=0.97, ha="left", fontsize=17)
+        fig.text(0.11, 0.925, "RTX 6000 Ada · Neural: one epoch, weight + gradient EMA, same weights",
+                 color="#59616a", fontsize=10)
+        fig.legend(handles=[Line2D([], [], color=color, marker=marker, ls="none", label=label)
+                            for _, label, color, marker in momentum_styles],
+                   loc="upper left", bbox_to_anchor=(0.10, 0.90), ncols=3, frameon=False)
+        fig.legend(handles=[Line2D([], [], color="#59616a", marker="o", mfc=face, ls="none", label=label)
+                            for face, label in (("white", "Original integrator"),
+                                                ("#59616a", "+ state momentum correction"))],
+                   loc="upper left", bbox_to_anchor=(0.10, 0.86), ncols=2, frameon=False)
+        fig.supxlabel("Full single-rollout runtime (s) · median of 3 warm repeats", y=0.04, fontsize=11)
+        fig.supylabel("Median terminal η error (%) · 32 cases", x=0.025, y=0.43, fontsize=11)
+        stem = OUT / (args.output_name or "12c-momentum-projection")
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        for extension in ("png", "pdf"):
+            fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
+        plt.close(fig)
+        raise SystemExit(0)
     if args.one_epoch:
         classical = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
         neural = json.loads((ROOT / "outputs/rms_context_timing_20261007/ada/timings.json").read_text())
@@ -261,6 +328,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 8e−5", "#994e36", "D"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch512", "LR 8e−5 + batch 512", "#207981", "s"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
