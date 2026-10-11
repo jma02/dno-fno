@@ -339,6 +339,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04", "Batch 64 · Hadamard × 4", "#96574e", "D"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04_seed1", "Batch 64 · Hadamard × 4 · seed 1", "#96574e", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd16", "Batch 64 · Hadamard × 16", "#525d8b", "v"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04_flow", "Batch 64 · Hadamard flow probes", "#447e74", "h"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_softcurv", "Batch 64 · softened curvature", "#86713c", "p"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
