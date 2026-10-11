@@ -261,6 +261,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05", "LR 8e−5 + Adam β₁=.5", "#a4473b", "D"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99", "#387a66", "o"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 8e−5", "#994e36", "D"),
+            ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 · seed 1", "#387a66", "X"),
             ("lr6_momentum_half_ema995_grad05_adam05_b2099_context16", "Context width 16", "#85569c", "^"),
@@ -274,7 +275,7 @@ if __name__ == "__main__":
         )
         completed = []
         for suffix, label, color, marker in screens:
-            run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995")) else "20261009"
+            run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr10_momentum_half_ema995")) else "20261009"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
                      for family, _ in FAMILIES}
