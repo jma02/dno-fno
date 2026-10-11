@@ -46,6 +46,7 @@ def main() -> None:
     parser.add_argument("--ic-quantile-offset", type=float, default=0.5, help="Within-group stratified case quantile offset")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
+    parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     args = parser.parse_args()
     if not 0.0 < args.ic_quantile_offset < 1.0:
         parser.error("ic-quantile-offset must be between 0 and 1")
@@ -54,12 +55,13 @@ def main() -> None:
     output_dir = args.output_dir or run_dir / (
         "eval_fast_weight_ema"
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
-        + ("_momentum" if args.project_momentum else ""))
+        + ("_momentum" if args.project_momentum else "")
+        + ("_exactg0" if args.exact_solver_g0 else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint="weight_ema")
     dataset = Path(loaded.config["dataset"])
     dataset = dataset if dataset.is_absolute() else ROOT / dataset
-    variant = "fourier_fused_features_product_overlap"
+    variant = "fourier_fused_features_product_overlap" + ("_exactg0" if args.exact_solver_g0 else "")
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": "weight_ema",
         "path": str(run_dir / "weight_ema_ckpt"), "epoch": loaded.epoch,
@@ -85,7 +87,8 @@ def main() -> None:
         )
         jax.block_until_ready((initial, times, params))
         started = perf_counter()
-        spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8)
+        spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
+                                 **({"solver_g0": params.g0[..., :nx // 2 + 1]} if args.exact_solver_g0 else {}))
         physical = jax.jit(partial(lambda eta, xi, fn, n: jnp.fft.irfft(
             fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
         ), fn=spectral, n=nx))

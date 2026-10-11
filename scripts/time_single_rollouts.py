@@ -63,6 +63,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
     "fourier_fused_features", "fourier_fused_features_overlap",
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+    "fourier_fused_features_product_overlap_exactg0",
     "fourier_balanced_features_product_overlap",
     *TUNED_TRIALS, *G1_FP32_TRIALS,
 )})
@@ -177,6 +178,7 @@ if __name__ == "__main__":
                     loaded["compact" if method in FUSION_VARIANTS else method], jnp.log(depth), initial.eta.shape[-1],
                     FUSION_VARIANTS.get(method, "original"), include_baselines=not (args.without_baselines or shared_baseline),
                     include_correction=method != "baseline-only", fft_ept=args.ept,
+                    **({"solver_g0": params.g0[..., :params.nx // 2 + 1]} if "_exactg0" in method else {}),
                 )) if method in FUSION_VARIANTS or args.without_baselines
                     else lambda eta, xi: predictors[method](eta, xi, jnp.log(depth)))
                 if shared_baseline:

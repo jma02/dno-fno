@@ -312,6 +312,57 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertLess(float(jnp.linalg.norm(error) / jnp.linalg.norm(expected)), 5e-7)
                             self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
+    def test_exact_solver_g0_uses_original_spectrum_without_rescaling_other_terms(self) -> None:
+        from scripts.benchmark_dno_fusion import build_variant
+        from solver.solvers import time_integrator as ti
+
+        nx = 32
+        x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+        eta = jnp.broadcast_to(0.013 + 0.01 * jnp.cos(x), (2, nx))
+        xi = jnp.stack((0.2 * jnp.sin(x) + 0.1 * jnp.cos(3 * x),
+                        0.13 * jnp.cos(x) - 0.07 * jnp.sin(2 * x))) + 0.123456789
+        xi_hat = jnp.fft.rfft(xi).at[..., -1].set(1e-8 + 2e-8j)
+        depths = jnp.asarray([0.137123456789, 7.0000031415926], dtype=jnp.float64)
+        model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4,
+                             eta_scale=0.3, xi_scale=0.7, target_scale=0.8,
+                             baseline_true_depth=True)
+        params = model.init(jax.random.PRNGKey(7), jnp.zeros((1, nx, 2), jnp.float32),
+                            jnp.zeros((1, 1), jnp.float32))["params"]
+        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
+            params["cs_block_0"]["phi_proj"]["kernel"], 0.2)
+        stats = {"feature_absmax": [0.3, 0.7], "target_absmax": 2.5}
+        loaded = LoadedRun(model, params, {"model": "cs_dno"}, stats, "scale", 1)
+        variant = "fourier_round_exactg0"
+        with patch("scripts.benchmark_dno_fusion.sandwich", side_effect=lambda e, q, symbols, **kwargs:
+                   symbols * jnp.fft.rfft(e[:, None, :] * jnp.fft.irfft(
+                       symbols * q[:, None, :], n=nx), n=nx)):
+            for batch in (1, 2):
+                with self.subTest(batch=batch):
+                    log_depth = jnp.log(depths[:batch])
+                    symbol = ti.make_solver_params(nx, 2 * np.pi, depths[:batch, None]).g0[..., :nx // 2 + 1]
+                    forward = build_variant(loaded, log_depth, nx, variant, solver_g0=symbol)
+                    nonlinear = build_variant(loaded, log_depth, nx, variant, solver_g0=jnp.zeros_like(symbol))
+                    ehat, qhat = jnp.fft.rfft(eta[:batch]), xi_hat[:batch]
+                    exact = (symbol * qhat).at[..., 0].set(0).at[..., -1].set((symbol * qhat)[..., -1].real)
+                    np.testing.assert_allclose(forward(jnp.zeros_like(ehat), qhat), exact, rtol=2e-15, atol=2e-15)
+                    actual, remainder = forward(ehat, qhat), nonlinear(ehat, qhat)
+                    np.testing.assert_allclose(actual - remainder, exact, rtol=2e-14, atol=2e-14)
+                    zero_head = jax.tree.map(jnp.zeros_like, params["cs_block_0"]["phi_proj"])
+                    baseline = loaded._replace(params={**params, "cs_block_0": {
+                        **params["cs_block_0"], "phi_proj": zero_head}})
+                    baseline_forward = build_variant(baseline, log_depth, nx, variant, solver_g0=symbol)
+                    self.assertGreater(float(jnp.linalg.norm(actual - baseline_forward(ehat, qhat))), 1e-8)
+                    np.testing.assert_array_equal(actual[..., 0], 0)
+                    np.testing.assert_array_equal(actual[..., -1].imag, 0)
+            for candidate, name, kwargs in (
+                (loaded, variant, {}),
+                (loaded, "original_exactg0", {"solver_g0": symbol}),
+                (loaded, variant, {"solver_g0": symbol, "include_baselines": False}),
+                (loaded._replace(model=model.clone(baseline_order=2)), variant, {"solver_g0": symbol}),
+            ):
+                with self.subTest(invalid=name, kwargs=kwargs), self.assertRaises(ValueError):
+                    build_variant(candidate, log_depth, nx, name, **kwargs)
+
     def test_spectral_rollout_projects_batched_momentum_after_each_substep(self) -> None:
         from scripts.benchmark_surrogate_rhs import rollout_if_trial
         from solver.solvers import time_integrator as ti
@@ -387,6 +438,7 @@ class ComputeMetricsTest(unittest.TestCase):
             execute = Mock(return_value={name: fields for name in ("eta", "xi", "gxi")})
             compiled = Mock()
             compiled.lower.return_value.compile.return_value = execute
+            solver_g0 = jnp.arange(32 * 8, dtype=jnp.float64).reshape(32, 8)
             original_boundary = fast.ti._state_to_hat
             with patch.object(
                 fast, "load_run", return_value=loaded,
@@ -397,18 +449,20 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as jit, patch.object(fast.jax, "block_until_ready"), patch.object(
                 fast.jax, "clear_caches",
             ), patch.object(
-                fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8),
+                fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8, g0=solver_g0),
             ) as make_params, patch.object(
                 fast, "run_family", return_value={},
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
-                for reference_args, offset, suffix in (
-                    (["--reference-run", str(reference)], 0.5, ""),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25"),
+                for reference_args, offset, suffix, exact_g0 in (
+                    (["--reference-run", str(reference)], 0.5, "", True),
+                    (["--reference-run", str(reference)], 0.5, "", False),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False),
                 ):
                     with self.subTest(offset=offset), patch("sys.argv", [
                         "eval_fast_rollouts", "--run-dir", str(directory), "--project-momentum", *reference_args,
+                        *(["--exact-solver-g0"] if exact_g0 else []),
                     ]):
                         for mocked in (load, load_ics, build, jit, make_params, execute, evaluate):
                             mocked.reset_mock()
@@ -416,9 +470,19 @@ class ComputeMetricsTest(unittest.TestCase):
                         for call in load_ics.call_args_list:
                             self.assertEqual(call.kwargs, {"ic_quantile_offset": offset})
                         for call in evaluate.call_args_list:
-                            self.assertEqual(call.args[4], directory / f"eval_fast_weight_ema{suffix}_momentum")
+                            self.assertEqual(call.args[4], directory / (
+                                f"eval_fast_weight_ema{suffix}_momentum" + ("_exactg0" if exact_g0 else "")))
                             self.assertEqual(call.args[7], source)
                             self.assertEqual(call.kwargs["ic_quantile_offset"], offset)
+                            self.assertEqual("exactg0" in call.args[8]["implementation"], exact_g0)
+                        for call in build.call_args_list:
+                            self.assertEqual(call.args[3], "fourier_fused_features_product_overlap"
+                                             + ("_exactg0" if exact_g0 else ""))
+                            if exact_g0:
+                                self.assertEqual(set(call.kwargs), {"fft_ept", "solver_g0"})
+                                np.testing.assert_array_equal(call.kwargs["solver_g0"], solver_g0[..., :5])
+                            else:
+                                self.assertEqual(call.kwargs, {"fft_ept": 8})
             load.assert_called_once_with(directory, checkpoint="weight_ema")
             self.assertFalse(any(directory.glob("eval_epoch*_test_*")))
             self.assertIs(fast.ti._state_to_hat, original_boundary)

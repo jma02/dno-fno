@@ -334,6 +334,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch256_seed1", "Batch 256 · seed 1", "#415d94", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128", "LR 8e−5 + batch 128", "#714595", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128_seed1", "Batch 128 · seed 1", "#714595", "X"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64", "LR 8e−5 + batch 64", "#935424", "H"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
@@ -350,7 +351,8 @@ if __name__ == "__main__":
         completed = []
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
-            if suffix.startswith("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128"):
+            if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
+                                  "lr8_momentum_half_ema995_grad05_adam05_b2099_batch64")):
                 run_date = "20261011"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
@@ -365,17 +367,22 @@ if __name__ == "__main__":
                     print(f"Awaiting architecture timing: {label}")
                 else:
                     timings = json.loads(timing_path.read_text()) if timing_path.exists() else neural
-                    completed.append((results, timings, label, color, marker))
+                    completed.append((results, timings, label, color, marker, method))
             else:
                 print(f"Pending: {label}")
-            fast_dir = run / "eval_fast_weight_ema"
-            fast_results = fast_dir / "all_summaries.json"
-            fast_timings = fast_dir / "single_rollout_timings.json"
-            if fast_results.exists() and fast_timings.exists():
-                measured = json.loads(fast_timings.read_text())
-                if all(family in measured["families"] for family, _ in FAMILIES):
-                    completed.append((json.loads(fast_results.read_text()), measured,
-                                      label.removeprefix("Gradient EMA .5 + ") + " · fast", color, "D"))
+            for fast_suffix, timing_method, label_suffix in (
+                ("", method, " · fast"),
+                ("_exactg0", method.replace("_spectral_all", "_exactg0_spectral_all"), " · exact G₀"),
+            ):
+                fast_dir = run / f"eval_fast_weight_ema{fast_suffix}"
+                fast_results = fast_dir / "all_summaries.json"
+                fast_timings = fast_dir / "single_rollout_timings.json"
+                if fast_results.exists() and fast_timings.exists():
+                    measured = json.loads(fast_timings.read_text())
+                    if all(family in measured["families"] for family, _ in FAMILIES):
+                        completed.append((json.loads(fast_results.read_text()), measured,
+                                          label.removeprefix("Gradient EMA .5 + ") + label_suffix,
+                                          color, "D", timing_method))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
@@ -398,9 +405,9 @@ if __name__ == "__main__":
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
             points = []
-            for results, timings, label, color, marker in completed:
+            for results, timings, label, color, marker, timing_method in completed:
                 result = results[family]
-                seconds = float(np.median(timings["families"][family]["methods"][method]["seconds"]))
+                seconds = float(np.median(timings["families"][family]["methods"][timing_method]["seconds"]))
                 failures = result["model_nonfinite_any_count_truth_valid"]
                 if failures:
                     label += f" · {failures}/{result['n_truth_valid']} failed"

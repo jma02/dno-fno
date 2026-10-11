@@ -55,9 +55,11 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
 
 def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
-    include_correction: bool = True, fft_ept: int = 8,
+    include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    exact_g0 = variant.endswith("_exactg0")
+    variant = variant.removesuffix("_exactg0")
     variant, _, g1_tuning = variant.partition("_g1e")
     input_fp32 = variant.endswith("_inputfp32")
     variant = variant.removesuffix("_inputfp32")
@@ -96,6 +98,8 @@ def build_variant(
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
+    if exact_g0 and (solver_g0 is None or not spectral_io or not include_baselines or model.baseline_order != 1):
+        raise ValueError("Exact solver G0 requires its symbol and Fourier M1 inference with baselines.")
     if model.nested_blocks:
         if not include_baselines or not include_correction:
             raise ValueError("Nested inference requires the full baseline and correction.")
@@ -314,9 +318,11 @@ def build_variant(
                         spectral=True, ept=sandwich_ept, eta_scale=model.eta_scale if fused_g1 else None,
                     ).sum(axis=1)
             analytic_hat = cast(jax.Array, analytic_hat).astype(jnp.complex128)
-            if model.baseline_order != 2:
+            if model.baseline_order != 2 and not exact_g0:
                 analytic_hat = g0 * xi_phys_hat + analytic_hat
             result = output_scale * (analytic_hat + correction_hat)
+            if exact_g0:
+                result = result + cast(jax.Array, solver_g0) * xi_hat
             if mask_output:
                 return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
             return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
