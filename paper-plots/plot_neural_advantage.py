@@ -340,6 +340,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04_seed1", "Batch 64 · Hadamard × 4 · seed 1", "#96574e", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd16", "Batch 64 · Hadamard × 16", "#525d8b", "v"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04_flow", "Batch 64 · Hadamard flow probes", "#447e74", "h"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04", "Batch 32 · Hadamard × 4", "#a65d82", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_softcurv", "Batch 64 · softened curvature", "#86713c", "p"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
@@ -358,7 +359,8 @@ if __name__ == "__main__":
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
             if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
-                                  "lr8_momentum_half_ema995_grad05_adam05_b2099_batch64")):
+                                  "lr8_momentum_half_ema995_grad05_adam05_b2099_batch64",
+                                  "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32")):
                 run_date = "20261011"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
