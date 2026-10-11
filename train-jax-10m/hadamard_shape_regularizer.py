@@ -83,6 +83,7 @@ def compute_hadamard_loss(
     fd_step_max: float = 3e-3,
     min_surface_rms: float = 1e-3,
     denominator_eps: float = 1e-12,
+    flow_target: Array | None = None,
 ) -> Array:
     """Return the normalized finite-secant Hadamard loss.
 
@@ -98,6 +99,9 @@ def compute_hadamard_loss(
 
     ``fd_step_*`` are dimensionless: the direction is scaled to each surface's
     RMS amplitude, with ``min_surface_rms`` as the physical fallback near flatness.
+    With physical ``flow_target = G(eta)xi``, half the rows in expectation use
+    its retained, mean-zero direction instead of a random probe. Zero-flow rows
+    retain the random probe; validation can omit this target to stay unchanged.
     """
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
@@ -119,6 +123,17 @@ def compute_hadamard_loss(
     unit_probe = probe / jnp.maximum(
         probe_rms[:, None], jnp.asarray(1e-30, dtype=dtype)
     )
+    if flow_target is not None:
+        flow = jnp.fft.ifft(
+            jnp.fft.fft(flow_target.astype(dtype), axis=-1) * projector, axis=-1,
+        ).real
+        flow_rms = jnp.sqrt(jnp.mean(flow**2, axis=-1, keepdims=True))
+        use_flow = jax.random.bernoulli(
+            jax.random.fold_in(rng, 104729), shape=(batch_size, 1),
+        ) & (flow_rms > 1e-30)
+        unit_probe = jnp.where(
+            use_flow, flow / jnp.maximum(flow_rms, 1e-30), unit_probe,
+        )
 
     # Match each direction's RMS to its mean-subtracted surface amplitude.
     eta_centered = eta - jnp.mean(eta, axis=-1, keepdims=True)

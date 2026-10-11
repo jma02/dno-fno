@@ -342,6 +342,11 @@ def main() -> None:
         "or M6 secant with phase/flow-defect directions.",
     )
     parser.add_argument(
+        "--hadamard_flow_probes", action="store_true",
+        help="Mix stored-target surface-flow directions with random self-Hadamard "
+        "training probes; validation keeps random probes.",
+    )
+    parser.add_argument(
         "--hadamard_interval",
         type=int,
         default=4,
@@ -401,6 +406,8 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.hadamard_flow_probes and args.hadamard_mode != "self":
+        parser.error("--hadamard_flow_probes requires --hadamard_mode self")
     if not np.isfinite(args.phase_mechanism_weight) or args.phase_mechanism_weight < 0:
         parser.error("phase_mechanism_weight must be finite and nonnegative")
     if not np.isfinite(args.phase_mechanism_ramp_epochs) or args.phase_mechanism_ramp_epochs < 0:
@@ -964,6 +971,7 @@ def main() -> None:
         eta: jax.Array,
         xi: jax.Array,
         batch_depth: jax.Array,
+        flow_target: jax.Array | None = None,
     ) -> jax.Array:
         rng_perm, rng_probe = jax.random.split(rng)
         sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
@@ -972,7 +980,10 @@ def main() -> None:
         eta_sub = eta.astype(training_dtype)[sample_indices]
         xi_sub = xi.astype(training_dtype)[sample_indices]
         batch_depth_sub = batch_depth.astype(training_dtype)[sample_indices].astype(jnp.float64)
-        response_loss = compute_hadamard_loss if args.hadamard_mode == "self" else partial(
+        response_loss = partial(
+            compute_hadamard_loss,
+            flow_target=flow_target[sample_indices] if flow_target is not None else None,
+        ) if args.hadamard_mode == "self" else partial(
             compute_local_response_loss, mode=args.hadamard_mode, length=domain_length,
         )
         return response_loss(
@@ -1269,6 +1280,7 @@ def main() -> None:
                     lambda rng: hadamard_loss_on_subset(
                         rng, current_params, eta[:n_auxiliary_rows],
                         xi[:n_auxiliary_rows], batch_depth[:n_auxiliary_rows],
+                        flow_target=gxi[:n_auxiliary_rows] if args.hadamard_flow_probes else None,
                     ),
                     lambda _: jnp.float64(0.0),
                     rng_hadamard,

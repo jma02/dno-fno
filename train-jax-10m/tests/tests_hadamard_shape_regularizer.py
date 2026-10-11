@@ -242,19 +242,82 @@ def test_relative_probe_is_scaled_and_bandlimited() -> None:
 
 def test_exact_g01_has_zero_flat_surface_defect() -> None:
     eta, xi, depth, k = _base_inputs()
-    loss = _hadamard_loss(
-        rng=jax.random.PRNGKey(8),
-        apply_fn=_g01_apply,
-        model_params={},
-        eta_phys=eta,
-        xi_phys=xi,
-        batch_depth_local=depth,
-        norm_inputs_fn=_identity_norm_inputs,
-        denorm_targets_fn=_identity_targets,
-        k=k,
-        dtype=jnp.float64,
+    for flow_target in (None, _g01(eta, xi)):
+        loss = _hadamard_loss(
+            rng=jax.random.PRNGKey(8),
+            apply_fn=_g01_apply,
+            model_params={},
+            eta_phys=eta,
+            xi_phys=xi,
+            batch_depth_local=depth,
+            norm_inputs_fn=_identity_norm_inputs,
+            denorm_targets_fn=_identity_targets,
+            k=k,
+            dtype=jnp.float64,
+            flow_target=flow_target,
+        )
+        assert float(loss) < 1e-18
+
+
+def test_mixed_flow_probes_preserve_random_stream_and_physical_scaling() -> None:
+    eta, xi, depth, k = _base_inputs(batch_size=12)
+    x = jnp.arange(eta.shape[-1], dtype=jnp.float64) * (2 * jnp.pi / eta.shape[-1])
+    eta = 0.3 + jnp.linspace(0, 0.04, len(eta))[:, None] * jnp.cos(2 * x)
+    k = k / 2  # L=4π: include physical k=6, exclude k=6.5.
+    key = jax.random.PRNGKey(4)
+    selected = np.asarray(jax.random.bernoulli(jax.random.fold_in(key, 104729), shape=(len(eta),)))
+    assert selected.sum() > 3 and (~selected).any()
+    low = jnp.cos(3 * x) + 0.4 * jnp.sin(12 * x)
+    flow = jnp.broadcast_to(7 + low + 0.7 * jnp.cos(13 * x), eta.shape)
+    invalid = np.flatnonzero(selected)[:3]
+    flow = flow.at[invalid[0]].set(0).at[invalid[1]].set(7).at[invalid[2]].set(1e-32 * low)
+    use_flow = selected.copy()
+    use_flow[invalid] = False
+    evaluations: list[tuple[Array, Array]] = []
+
+    def recording_apply(variables: dict[str, Any], inputs: Array, batch_depth: Array) -> Array:
+        evaluations.append((inputs, batch_depth))
+        return _g01_apply(variables, inputs, batch_depth)
+
+    perturbations, losses = [], []
+    options: tuple[dict[str, Any], ...] = (
+        {}, {"flow_target": None}, {"flow_target": jnp.zeros_like(flow)},
+        {"flow_target": flow}, {"flow_target": flow},
     )
-    assert float(loss) < 1e-18
+    for kwargs in options:
+        evaluations.clear()
+        losses.append(_hadamard_loss(
+            key, recording_apply, {}, eta, xi, depth,
+            _identity_norm_inputs, _identity_targets, k, jnp.float64,
+            k_max=6.0, fd_step_min=1e-3, fd_step_max=3e-3,
+            min_surface_rms=5e-3, **kwargs,
+        ))
+        assert len(evaluations) == 3
+        base, perturbed, forcing = (item[0] for item in evaluations)
+        np.testing.assert_array_equal(base, jnp.stack((eta, xi), axis=-1))
+        np.testing.assert_array_equal(perturbed[..., 1], xi)
+        np.testing.assert_array_equal(forcing[..., 0], eta)
+        for _, actual_depth in evaluations:
+            np.testing.assert_array_equal(actual_depth, depth)
+        perturbations.append(perturbed[..., 0] - eta)
+    for index in (1, 2):
+        np.testing.assert_array_equal(perturbations[index], perturbations[0])
+        np.testing.assert_array_equal(losses[index], losses[0])
+    np.testing.assert_array_equal(perturbations[3], perturbations[4])
+    np.testing.assert_array_equal(losses[3], losses[4])
+    np.testing.assert_array_equal(perturbations[3][~use_flow], perturbations[0][~use_flow])
+    _, key_eps = jax.random.split(key)
+    steps = jnp.clip(jnp.exp(jax.random.uniform(
+        key_eps, (len(eta),), dtype=jnp.float64, minval=jnp.log(1e-3), maxval=jnp.log(3e-3),
+    )), 1e-3, 3e-3)
+    scale = jnp.maximum(jnp.std(eta, axis=-1), 5e-3)
+    expected = steps[:, None] * scale[:, None] * low / jnp.sqrt(jnp.mean(low**2))
+    # The two retained modes keep their relative amplitudes: no H1 whitening.
+    np.testing.assert_allclose(perturbations[3][use_flow], expected[use_flow], rtol=1e-10, atol=3e-17)
+    for delta in (perturbations[0], perturbations[3]):
+        np.testing.assert_allclose(jnp.sqrt(jnp.mean(delta**2, axis=-1)), steps * scale, rtol=1e-11)
+        np.testing.assert_allclose(jnp.mean(delta, axis=-1), 0, atol=2e-17)
+        np.testing.assert_allclose(jnp.fft.fft(delta)[:, jnp.abs(k) > 6], 0, atol=1e-15)
 
 
 def test_g0_only_detects_missing_shape_derivative() -> None:
@@ -325,7 +388,7 @@ def test_loss_is_jittable_and_differentiable() -> None:
         output = _g01(eta_local, xi_local) + alpha * eta_local**2 * xi_local
         return output[..., None]
 
-    def loss_of_params(params: dict[str, Array]) -> Array:
+    def loss_of_params(params: dict[str, Array], flow_target: Array | None) -> Array:
         return _hadamard_loss(
             jax.random.PRNGKey(15),
             perturbed_apply,
@@ -339,13 +402,18 @@ def test_loss_is_jittable_and_differentiable() -> None:
             jnp.float64,
             fd_step_min=2e-3,
             fd_step_max=2e-3,
+            flow_target=flow_target,
         )
 
     params = {"alpha": jnp.asarray(0.4, dtype=jnp.float64)}
-    value, gradient = jax.jit(jax.value_and_grad(loss_of_params))(params)
-    assert np.isfinite(float(value))
-    assert np.isfinite(float(gradient["alpha"]))
-    assert abs(float(gradient["alpha"])) > 1e-10
+    for flow_target in (None, _g01(eta, xi)):
+        eager = jax.value_and_grad(loss_of_params)(params, flow_target)
+        value, gradient = jax.jit(jax.value_and_grad(loss_of_params))(params, flow_target)
+        np.testing.assert_allclose(value, eager[0], rtol=1e-9)
+        np.testing.assert_allclose(gradient["alpha"], eager[1]["alpha"], rtol=1e-8)
+        assert np.isfinite(float(value))
+        assert np.isfinite(float(gradient["alpha"]))
+        assert abs(float(gradient["alpha"])) > 1e-10
 
 
 def test_m6_continuum_anchor_and_truncation_discrepancy() -> None:
@@ -551,6 +619,7 @@ TESTS: list[tuple[str, TestFn]] = [
         test_relative_probe_is_scaled_and_bandlimited,
     ),
     ("identity/exact_g01_flat", test_exact_g01_has_zero_flat_surface_defect),
+    ("probe/mixed_flow", test_mixed_flow_probes_preserve_random_stream_and_physical_scaling),
     ("identity/g0_detects_missing_g1", test_g0_only_detects_missing_shape_derivative),
     (
         "integration/normalizers_and_mean",

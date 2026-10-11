@@ -3,6 +3,7 @@
 import argparse
 import ast
 from collections.abc import Callable
+from functools import partial
 from itertools import product
 from pathlib import Path
 import sys
@@ -1270,6 +1271,77 @@ def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
     ]
 
 
+def test_hadamard_flow_probes_route_only_training_physical_targets() -> None:
+    main = trainer_function("main")
+    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+               and isinstance(node.value, ast.Call) and node.value.args
+               and isinstance(node.value.args[0], ast.Constant)
+               and node.value.args[0].value in ("--hadamard_flow_probes", "--hadamard_mode")]
+    guard = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                 and "args.hadamard_flow_probes" in ast.unparse(node.test))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=options, type_ignores=[]), "hadamard_options", "exec"), namespace)
+    assert parser.parse_args([]).hadamard_flow_probes is False
+    assert parser.parse_args(["--hadamard_flow_probes"]).hadamard_flow_probes is True
+    validate = compile(ast.Module(body=[guard], type_ignores=[]), "hadamard_guard", "exec")
+    for mode, enabled in product(("self", "secant", "teacher", "targeted"), (False, True)):
+        namespace["args"] = SimpleNamespace(hadamard_mode=mode, hadamard_flow_probes=enabled)
+        with patch.object(parser, "error", side_effect=ValueError):
+            if enabled and mode != "self":
+                with np.testing.assert_raises(ValueError):
+                    exec(validate, namespace)
+            else:
+                exec(validate, namespace)
+
+    config = SimpleNamespace(
+        hadamard_mode="self", hadamard_flow_probes=False, hadamard_k_max=12.0,
+        hadamard_sobolev_order=1, hadamard_fd_step_min=1e-3, hadamard_fd_step_max=3e-3,
+        hadamard_min_surface_rms=1e-3, hadamard_denominator_eps=1e-12,
+    )
+    eta = jnp.arange(8 * 32, dtype=jnp.float64).reshape(8, 32) / 17
+    xi, target, depth = 2 * eta, 1000 + 3 * eta, jnp.arange(8, dtype=jnp.float64)[:, None] / 7
+    key = jax.random.PRNGKey(19)
+    hadamard, local = Mock(return_value=jnp.float64(0.125)), Mock(return_value=jnp.float64(0.25))
+    namespace.update(
+        jax=jax, jnp=jnp, partial=partial, FlatParams=Any, args=config,
+        training_dtype=jnp.float32, hadamard_microbatch_local=3, domain_length=2 * np.pi,
+        compute_hadamard_loss=hadamard, compute_local_response_loss=local,
+        apply_model=object(), norm_inputs_jax=object(), denorm_targets_jax=object(),
+        k_grid_jax=jnp.fft.fftfreq(32) * 32, current_params=object(),
+        eta=eta, xi=xi, gxi=target, batch_depth=depth, n_auxiliary_rows=5,
+        rng=key, rng_key=key, batch_index=2,
+    )
+    exec(compile(ast.Module(body=[trainer_function("hadamard_loss_on_subset")], type_ignores=[]),
+                 "hadamard_subset", "exec"), namespace)
+    for route in ("train_step", "eval_step"):
+        call = next(node for node in ast.walk(trainer_function(route)) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "hadamard_loss_on_subset")
+        invoke = compile(ast.Expression(body=call), route, "eval")
+        for enabled in (False, True):
+            config.hadamard_flow_probes = enabled
+            with patch.object(jax.lax, "axis_index", return_value=0):
+                assert eval(invoke, namespace) == 0.125
+            recorded = hadamard.call_args.kwargs
+            rng = key if route == "train_step" else jax.random.fold_in(jax.random.fold_in(key, 2), 0)
+            perm_key, probe_key = jax.random.split(rng)
+            indices = jax.random.permutation(perm_key, 5 if route == "train_step" else 8)[:3]
+            np.testing.assert_array_equal(recorded["rng"], probe_key)
+            for name, original in (("eta_phys", eta), ("xi_phys", xi), ("batch_depth_local", depth)):
+                np.testing.assert_array_equal(recorded[name], original.astype(jnp.float32)[indices])
+            assert recorded["batch_depth_local"].dtype == recorded["dtype"] == jnp.float64
+            assert recorded["model_params"] is namespace["current_params"]
+            if enabled and route == "train_step":
+                np.testing.assert_array_equal(recorded["flow_target"], target[indices])
+            else:
+                assert recorded["flow_target"] is None
+    for mode in ("secant", "teacher", "targeted"):
+        config.hadamard_mode = mode
+        assert namespace["hadamard_loss_on_subset"](key, {}, eta, xi, depth) == 0.25
+        assert local.call_args.kwargs["mode"] == mode
+        assert "flow_target" not in local.call_args.kwargs
+
+
 def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() -> None:
     component = trainer_function("compute_loss_components")
     config = SimpleNamespace(
@@ -1894,6 +1966,7 @@ if __name__ == "__main__":
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()
     test_input_noise_scale_spectrum_rng_and_depth_safety()
     test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels()
+    test_hadamard_flow_probes_route_only_training_physical_targets()
     test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix()
     test_fractional_rollout_ramp_parsing_validation_and_weights()
     test_momentum_ramp_weights_original_and_generated_losses_and_gradients()
