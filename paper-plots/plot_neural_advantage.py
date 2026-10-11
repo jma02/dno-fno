@@ -336,6 +336,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128_seed1", "Batch 128 · seed 1", "#714595", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64", "LR 8e−5 + batch 64", "#935424", "H"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_seed1", "Batch 64 · seed 1", "#935424", "X"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04", "Batch 64 · Hadamard × 4", "#96574e", "D"),
             ("lr8_momentum_full_ema995_grad05_adam05_b2099", "LR 8e−5 + momentum × 2", "#6952a0", "^"),
             ("lr10_momentum_half_ema995_grad05_adam05_b2099", "Adam β₂=.99 + LR 1e−4", "#b46d32", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_seed1", "Adam β₂=.99 + LR 8e−5 · seed 1", "#994e36", "X"),
