@@ -392,6 +392,7 @@ if __name__ == "__main__":
                 ("", method, " · fast"),
                 ("_exactg0", method.replace("_spectral_all", "_exactg0_spectral_all"), " · exact G₀"),
                 ("_grid512", method.replace("_spectral_all", "_grid512_spectral_all"), " · grid512"),
+                ("_nestedfused", method.replace("_spectral_all", "_nestedfused_spectral_all"), " · FFT fusion trial"),
             ):
                 fast_dir = run / f"eval_fast_weight_ema{fast_suffix}"
                 fast_results = fast_dir / "all_summaries.json"
@@ -399,8 +400,9 @@ if __name__ == "__main__":
                 if fast_results.exists() and fast_timings.exists():
                     measured = json.loads(fast_timings.read_text())
                     if all(family in measured["families"] for family, _ in FAMILIES):
+                        display_label = "Nested" if fast_suffix == "_nestedfused" else label.removeprefix("Gradient EMA .5 + ")
                         completed.append((json.loads(fast_results.read_text()), measured,
-                                          label.removeprefix("Gradient EMA .5 + ") + label_suffix,
+                                          display_label + label_suffix,
                                           color, "D", timing_method))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
