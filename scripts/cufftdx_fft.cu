@@ -224,6 +224,46 @@ __global__ void spectral_sandwich_kernel(const void* eta, const void* xi_hat,
 }
 
 template<class Forward, class Inverse>
+__global__ void branch_kernel(const void* xi_hat, const void* weights, const void* filters,
+                             void* out, int branches) {
+    using C = typename Forward::value_type;
+    using T = precision_of_t<Forward>;
+    constexpr int N = size_of<Forward>::value;
+    constexpr int F = N / 2 + 1;
+    int batch = blockIdx.x / branches, branch = blockIdx.x % branches;
+    C data[Forward::storage_size] = {};
+    extern __shared__ __align__(16) unsigned char scratch[];
+    for (int i = 0; i < Inverse::input_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::input_length) {
+            data[i] = static_cast<const C*>(xi_hat)[batch * F + k];
+            data[i] *= static_cast<const T*>(filters)[(batch * F + k) * branches + branch];
+            if (k == 0 || k == N / 2) data[i].y = 0;
+        }
+    }
+    Inverse().execute(data, scratch);
+    for (int i = 0; i < Inverse::output_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::output_length) {
+            int offset = (batch * N + 2 * k) * branches + branch;
+            data[i] *= T(1.0 / N);
+            data[i].x *= static_cast<const T*>(weights)[offset];
+            data[i].y *= static_cast<const T*>(weights)[offset + branches];
+        }
+    }
+    __syncthreads();
+    Forward().execute(data, scratch);
+    for (int i = 0; i < Forward::output_ept; ++i) {
+        int k = threadIdx.x + i * Forward::stride;
+        if (k < Forward::output_length) {
+            data[i] *= T(1.0 / N);
+            data[i] *= static_cast<const T*>(filters)[(batch * F + k) * branches + branch];
+            static_cast<C*>(out)[blockIdx.x * F + k] = data[i];
+        }
+    }
+}
+
+template<class Forward, class Inverse>
 __global__ void joint_kernel(const void* eta, const void* xi, const void* symbols, void* out) {
     using C = typename Forward::value_type;
     constexpr int N = size_of<Forward>::value;
@@ -331,6 +371,14 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
             }
         } else {
             return ffi::Error::InvalidArgument("Spectral G1 supports the 1024-point model grid only.");
+        }
+    } else if (operation == 5) {
+        if constexpr (N == 1024) {
+            int branches = b.dimensions().back();
+            branch_kernel<F, I><<<out->element_count() / F::output_length, F::block_dim, shared, stream>>>(
+                a.untyped_data(), b.untyped_data(), symbols.untyped_data(), out->untyped_data(), branches);
+        } else {
+            return ffi::Error::InvalidArgument("Fused learned branches support the 1024-point model grid only.");
         }
     } else if (operation == 2 || operation == 3) {
         if constexpr (N == 1024) {

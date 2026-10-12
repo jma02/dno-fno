@@ -99,6 +99,21 @@ def sandwich(
     )
 
 
+def branch_sandwich(
+    xi_hat: jax.Array, weights: jax.Array, filters: jax.Array, *, ept: int = 8,
+) -> jax.Array:
+    """Use unnormalized xi_hat[B,F] and real weights[B,N,R]/filters[B,F,R].
+
+    Return each branch's forward-normalized output spectrum with shape [B,R,F].
+    """
+    register()
+    result = jax.ShapeDtypeStruct((*xi_hat.shape[:-1], weights.shape[-1], xi_hat.shape[-1]), xi_hat.dtype)
+    return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all")(
+        xi_hat, weights, filters, size=np.int64(weights.shape[-2]), operation=np.int64(5),
+        multiply=False, ept=np.int64(ept),
+    )
+
+
 def classical_fused_hat(
     eta_hat: jax.Array, xi_hat: jax.Array, k: jax.Array, g0: jax.Array, *,
     nx: int, order: int, pad_factor: int = 8,
@@ -215,10 +230,17 @@ if __name__ == "__main__":
         }
         if n == 1024 and batch == 32:
             outer = jnp.asarray(rng.normal(size=(batch, n // 2 + 1)), dtype=jnp.complex64)
+            branch_filters = outer.real.T[None]
             for ept in args.ept:
                 cases[f"outer_product_rfft_e{ept}"] = (
                     lambda x, y: outer * jnp.fft.rfft(x * y, norm="forward"),
                     lambda x, y, ept=ept: fft(x, n, b=y, outer=outer, ept=ept), a, b,
+                )
+                cases[f"branch_sandwich_e{ept}"] = (
+                    lambda x, y: jnp.moveaxis(branch_filters * jnp.fft.rfft(
+                        y * jnp.fft.irfft(branch_filters * x[..., None], n=n, axis=1),
+                        axis=1, norm="forward"), 1, -1),
+                    lambda x, y, ept=ept: branch_sandwich(x, y, branch_filters, ept=ept), spectrum[:1], b.T[None],
                 )
         if n == 1024 and batch in (1, 2):
             input_pair = jnp.stack((jnp.fft.rfft(a), jnp.fft.rfft(b)), axis=1)
