@@ -152,33 +152,46 @@ def test_weight_ema_preserves_raw_updates_and_checkpoint_continuity() -> None:
             update, mesh=mesh, in_specs=(P(), P(), P("batch")),
             out_specs=(P(), P()), check_rep=False,
         ))
-        for decay, start in ((0.0, 0), (0.9, 0), (0.9, 4)):
+        for decay, secondary_decay, start in (
+            (0.0, 0.0, 0), (0.9, 0.0, 0), (0.9, 0.0, 4),
+            (0.995, 0.995 ** (1 / 32), 0), (0.995, 0.995 ** (1 / 32), 4),
+        ):
             params = {"weight": jnp.asarray(0.8, dtype=jnp.float32)}
-            tx = optax.chain(optax.ema(0.9, debias=True), optax.adamw(2e-5))
+            tx = optax.chain(optax.ema(0.5, debias=True), optax.adamw(8e-5, b1=0.5, b2=0.99))
             raw = train_state.TrainState.create(apply_fn=lambda: None, params=params, tx=tx)
             ema = WeightEMATrainState.create(
                 apply_fn=raw.apply_fn, params=params, tx=tx,
                 weight_ema_params=params if decay else None,
                 weight_ema_decay=decay, weight_ema_start_step=start,
+                weight_ema_secondary_params=params if secondary_decay else None,
+                weight_ema_secondary_decay=secondary_decay,
             )
-            raw, ema = replicate_pytree_from_host((raw, ema), replicated)
+            primary = ema.replace(weight_ema_secondary_params=None, weight_ema_secondary_decay=0.0)
+            raw, ema, primary = replicate_pytree_from_host((raw, ema, primary), replicated)
             key = jax.device_put(jax.random.PRNGKey(17), replicated)
             values = jax.device_put(jnp.arange(1, 9, dtype=jnp.float32), NamedSharding(mesh, P("batch")))
-            expected_shadow = np.asarray(params["weight"])
+            shadows = (("weight_ema_params", decay), ("weight_ema_secondary_params", secondary_decay))
+            expected_shadows = {name: np.asarray(params["weight"]) for name, value in shadows if value}
             for index in range(1, 8):
                 raw, raw_key = step(raw, key, values)
+                primary, primary_key = step(primary, key, values)
                 ema, key = step(ema, key, values)
                 jax.tree_util.tree_map(np.testing.assert_array_equal,
                                        (ema.params, ema.opt_state, ema.step, key),
                                        (raw.params, raw.opt_state, raw.step, raw_key))
-                if decay:
-                    if index == start + 1:
-                        expected_shadow = np.asarray(raw.params["weight"])
-                    elif index > start:
-                        expected_shadow = decay * expected_shadow + (1 - decay) * np.asarray(raw.params["weight"])
-                    np.testing.assert_allclose(ema.weight_ema_params["weight"], expected_shadow, rtol=2e-7)
-                else:
-                    assert ema.weight_ema_params is None
+                jax.tree_util.tree_map(np.testing.assert_array_equal,
+                                       (ema.params, ema.opt_state, ema.step, ema.weight_ema_params, key),
+                                       (primary.params, primary.opt_state, primary.step, primary.weight_ema_params, primary_key))
+                for name, value in shadows:
+                    if value:
+                        if index == start + 1:
+                            expected_shadows[name] = np.asarray(raw.params["weight"])
+                            np.testing.assert_array_equal(getattr(ema, name)["weight"], raw.params["weight"])
+                        elif index > start:
+                            expected_shadows[name] = value * expected_shadows[name] + (1 - value) * np.asarray(raw.params["weight"])
+                        np.testing.assert_allclose(getattr(ema, name)["weight"], expected_shadows[name], rtol=2e-7)
+                    else:
+                        assert getattr(ema, name) is None
                 assert_pytree_replicated(ema, name="weight EMA state")
 
             with TemporaryDirectory() as directory:
@@ -189,6 +202,8 @@ def test_weight_ema_preserves_raw_updates_and_checkpoint_continuity() -> None:
                 target = {"params": ema.params, "opt_state": ema.opt_state, "step": int(ema.step)}
                 if decay:
                     target["weight_ema_params"] = ema.weight_ema_params
+                if secondary_decay:
+                    target["weight_ema_secondary_params"] = ema.weight_ema_secondary_params
                 restored = checkpoints.restore_checkpoint(
                     destination, target=target, step=1, prefix="ckpt_",
                     orbax_checkpointer=ocp.PyTreeCheckpointer(),
@@ -198,18 +213,22 @@ def test_weight_ema_preserves_raw_updates_and_checkpoint_continuity() -> None:
                 next_resumed, resumed_key = step(resumed, key, values)
                 jax.tree_util.tree_map(np.testing.assert_array_equal,
                                        (next_live, live_key), (next_resumed, resumed_key))
-                if decay:
-                    destination = Path(directory) / "weight_ema_ckpt"
-                    save_checkpoint(destination, ema, history, 0.4, 1, {"scale": 2.0}, manager, weight_ema=True)
+                for name, value in shadows:
+                    if not value:
+                        continue
+                    destination = Path(directory) / name.replace("_params", "_ckpt")
+                    export_state = ema.replace(weight_ema_params=getattr(ema, name), weight_ema_decay=value)
+                    save_checkpoint(destination, export_state, history, 0.4, 1, {"scale": 2.0}, manager, weight_ema=True)
                     exported = checkpoints.restore_checkpoint(
                         destination, target=None, step=1, prefix="ckpt_",
                         orbax_checkpointer=ocp.PyTreeCheckpointer(),
                     )
                     assert set(exported) == {"params", "step"}
-                    jax.tree_util.tree_map(np.testing.assert_array_equal, exported["params"], ema.weight_ema_params)
+                    jax.tree_util.tree_map(np.testing.assert_array_equal, exported["params"], getattr(ema, name))
                     metadata = json.loads((destination / "metadata.json").read_text())
                     assert not {"val_loss", "train_loss", "history", "best_val_loss"}.intersection(metadata)
                     assert metadata["params_kind"] == "weight_ema"
+                    assert metadata["weight_ema_decay"] == value and metadata["weight_ema_start_step"] == start
                     assert metadata["epoch"] == 1 and metadata["stats"] == {"scale": 2.0}
 
 

@@ -94,7 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--checkpoint", choices=("best", "latest", "final", "weight_ema"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "latest", "final", "weight_ema", "weight_ema_secondary"), default="best")
     parser.add_argument("--methods", nargs="+", choices=tuple(
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(

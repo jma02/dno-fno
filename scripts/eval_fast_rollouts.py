@@ -40,6 +40,7 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary"), default="weight_ema")
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")
@@ -55,21 +56,21 @@ def main() -> None:
     run_dir = args.run_dir.resolve()
     reference_dir = (args.reference_dir or args.reference_run or run_dir).resolve()
     output_dir = args.output_dir or run_dir / (
-        "eval_fast_weight_ema"
+        f"eval_fast_{args.checkpoint}"
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
         + ("_grid512" if args.correction_grid == 512 else "")
         + ("_exactg0" if args.exact_solver_g0 else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
-    loaded = load_run(run_dir, checkpoint="weight_ema")
+    loaded = load_run(run_dir, checkpoint=args.checkpoint)
     dataset = Path(loaded.config["dataset"])
     dataset = dataset if dataset.is_absolute() else ROOT / dataset
     variant = ("fourier_fused_features_product_overlap"
                + ("_grid512" if args.correction_grid == 512 else "")
                + ("_exactg0" if args.exact_solver_g0 else ""))
     checkpoint_source = {
-        "run_dir": str(run_dir), "selection": "weight_ema",
-        "path": str(run_dir / "weight_ema_ckpt"), "epoch": loaded.epoch,
+        "run_dir": str(run_dir), "selection": args.checkpoint,
+        "path": str(run_dir / f"{args.checkpoint}_ckpt"), "epoch": loaded.epoch,
         "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
     }

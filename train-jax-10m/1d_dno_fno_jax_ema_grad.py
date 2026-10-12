@@ -221,6 +221,8 @@ def main() -> None:
                         help="AdamW second-moment decay after gradient EMA; must be in [0, 1).")
     parser.add_argument("--weight_ema_decay", type=float, default=0.0,
                         help="Inference-only EMA of post-update parameters; 0 disables it.")
+    parser.add_argument("--weight_ema_secondary_decay", type=float, default=0.0,
+                        help="Optional second inference-only EMA sharing the primary start; 0 disables it.")
     parser.add_argument("--weight_ema_start_fraction", type=float, default=0.8,
                         help="Fraction of planned optimizer updates completed before weight averaging starts.")
     parser.add_argument("--early_stopping_patience", type=int, default=0)
@@ -435,6 +437,10 @@ def main() -> None:
         parser.error("--surface_head_lr_multiplier must be finite and positive")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
+    if not 0.0 <= args.weight_ema_secondary_decay < 1.0:
+        parser.error("--weight_ema_secondary_decay must be in [0, 1)")
+    if args.weight_ema_secondary_decay > 0.0 and args.weight_ema_decay == 0.0:
+        parser.error("--weight_ema_secondary_decay requires --weight_ema_decay > 0")
     if args.rollout_epochs and args.weight_ema_decay == 0.0:
         parser.error("--rollout_epochs requires --weight_ema_decay > 0")
     if not 0.0 <= args.weight_ema_start_fraction < 1.0:
@@ -771,9 +777,14 @@ def main() -> None:
         weight_ema_params=params if args.weight_ema_decay > 0.0 else None,
         weight_ema_decay=args.weight_ema_decay,
         weight_ema_start_step=int(total_steps * args.weight_ema_start_fraction),
+        weight_ema_secondary_params=params if args.weight_ema_secondary_decay > 0.0 else None,
+        weight_ema_secondary_decay=args.weight_ema_secondary_decay,
     )
     if args.weight_ema_decay > 0.0:
         print(f"inference-only weight EMA: decay={args.weight_ema_decay}, "
+              f"starts after update {training_state.weight_ema_start_step}")
+    if args.weight_ema_secondary_decay > 0.0:
+        print(f"secondary inference-only weight EMA: decay={args.weight_ema_secondary_decay}, "
               f"starts after update {training_state.weight_ema_start_step}")
 
     training_state = replicate_pytree_from_host(training_state, replicated)
@@ -1411,6 +1422,8 @@ def main() -> None:
         }
         if args.weight_ema_decay > 0.0:
             restore_target["weight_ema_params"] = training_state.weight_ema_params
+        if args.weight_ema_secondary_decay > 0.0:
+            restore_target["weight_ema_secondary_params"] = training_state.weight_ema_secondary_params
         restored = checkpoints.restore_checkpoint(
             ckpt_dir=latest_ckpt_dir,
             target=restore_target,
@@ -1645,6 +1658,14 @@ def main() -> None:
             save_checkpoint(
                 run_dir / "weight_ema_ckpt", state=training_state, history=history,
                 best_val_loss=best_val_loss, best_epoch=best_epoch, stats=stats,
+                async_manager=checkpoint_async_manager, weight_ema=True,
+            )
+        if args.weight_ema_secondary_decay > 0.0 and epoch_end_step > training_state.weight_ema_start_step:
+            save_checkpoint(
+                run_dir / "weight_ema_secondary_ckpt",
+                state=training_state.replace(weight_ema_params=training_state.weight_ema_secondary_params,
+                                             weight_ema_decay=args.weight_ema_secondary_decay),
+                history=history, best_val_loss=best_val_loss, best_epoch=best_epoch, stats=stats,
                 async_manager=checkpoint_async_manager, weight_ema=True,
             )
 

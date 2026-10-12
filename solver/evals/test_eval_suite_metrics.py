@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -210,15 +210,17 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.use_first_deriv, options.get("cs_use_first_deriv", True))
                 self.assertEqual(loaded.model.use_hilbert, options.get("cs_use_hilbert", True))
 
-        with patch("solver.evals.model_rollout.Path.read_text", side_effect=[
-            json.dumps(config), json.dumps({"epoch": 1, "stats": {}}),
-        ]), patch("solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value={
-            "params": {"value": np.array([2.0], dtype=np.float32)},
-        }) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
-            loaded = load_run("/tmp/dno-architecture-loader-test", checkpoint="weight_ema")
-            self.assertEqual(restore.call_args.kwargs["ckpt_dir"].name, "weight_ema_ckpt")
-        np.testing.assert_array_equal(loaded.params["value"], [2.0])
-        self.assertEqual(loaded.epoch, 1)
+        selections: tuple[Literal["weight_ema", "weight_ema_secondary"], ...] = ("weight_ema", "weight_ema_secondary")
+        for selection, value in zip(selections, (2.0, 3.0), strict=True):
+            with patch("solver.evals.model_rollout.Path.read_text", side_effect=[
+                json.dumps(config), json.dumps({"epoch": 1, "stats": {}}),
+            ]), patch("solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value={
+                "params": {"value": np.array([value], dtype=np.float32)},
+            }) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
+                loaded = load_run("/tmp/dno-architecture-loader-test", checkpoint=selection)
+                self.assertEqual(restore.call_args.kwargs["ckpt_dir"].name, f"{selection}_ckpt")
+            np.testing.assert_array_equal(loaded.params["value"], [value])
+            self.assertEqual(loaded.epoch, 1)
 
     def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
@@ -460,23 +462,28 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
-                for reference_args, offset, suffix, exact_g0 in (
-                    (["--reference-run", str(reference)], 0.5, "", True),
-                    (["--reference-run", str(reference)], 0.5, "", False),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False),
+                for reference_args, offset, suffix, exact_g0, selection in (
+                    (["--reference-run", str(reference)], 0.5, "", True, "weight_ema"),
+                    (["--reference-run", str(reference)], 0.5, "", False, "weight_ema"),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, "weight_ema"),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, "weight_ema_secondary"),
                 ):
-                    with self.subTest(offset=offset), patch("sys.argv", [
+                    with self.subTest(offset=offset, selection=selection), patch("sys.argv", [
                         "eval_fast_rollouts", "--run-dir", str(directory), "--project-momentum", *reference_args,
                         *(["--exact-solver-g0"] if exact_g0 else []),
+                        *(["--checkpoint", selection] if selection != "weight_ema" else []),
                     ]):
                         for mocked in (load, load_ics, build, jit, make_params, execute, evaluate):
                             mocked.reset_mock()
                         fast.main()
+                        load.assert_called_once_with(directory, checkpoint=selection)
                         for call in load_ics.call_args_list:
                             self.assertEqual(call.kwargs, {"ic_quantile_offset": offset})
                         for call in evaluate.call_args_list:
                             self.assertEqual(call.args[4], directory / (
-                                f"eval_fast_weight_ema{suffix}_momentum" + ("_exactg0" if exact_g0 else "")))
+                                f"eval_fast_{selection}{suffix}_momentum" + ("_exactg0" if exact_g0 else "")))
+                            self.assertEqual(call.args[8]["selection"], selection)
+                            self.assertEqual(call.args[8]["path"], str(directory / f"{selection}_ckpt"))
                             self.assertEqual(call.args[7], source)
                             self.assertEqual(call.kwargs["ic_quantile_offset"], offset)
                             self.assertEqual("exactg0" in call.args[8]["implementation"], exact_g0)
@@ -487,8 +494,8 @@ class ComputeMetricsTest(unittest.TestCase):
                                 self.assertEqual(set(call.kwargs), {"fft_ept", "solver_g0"})
                                 np.testing.assert_array_equal(call.kwargs["solver_g0"], solver_g0[..., :5])
                             else:
-                                self.assertEqual(call.kwargs, {"fft_ept": 8})
-            load.assert_called_once_with(directory, checkpoint="weight_ema")
+                                self.assertEqual(call.kwargs, {"fft_ept": 8, "solver_g0": None})
+            load.assert_called_once_with(directory, checkpoint="weight_ema_secondary")
             self.assertFalse(any(directory.glob("eval_epoch*_test_*")))
             self.assertIs(fast.ti._state_to_hat, original_boundary)
             self.assertEqual(load_ics.call_count, 4)
@@ -506,7 +513,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertIs(call.args[0], loaded)
                 np.testing.assert_allclose(call.args[1], np.log([ic.depth for ic in ics]), rtol=1e-15)
                 self.assertEqual(call.args[2:], (8, "fourier_fused_features_product_overlap"))
-                self.assertEqual(call.kwargs, {"fft_ept": 8})
+                self.assertEqual(call.kwargs, {"fft_ept": 8, "solver_g0": None})
             rollouts = [call.args[0] for call in jit.call_args_list
                         if getattr(call.args[0], "func", None) is fast.rollout_if_trial]
             self.assertEqual(len(rollouts), 4)
@@ -525,9 +532,9 @@ class ComputeMetricsTest(unittest.TestCase):
                 np.testing.assert_array_equal(call.args[1], np.arange(251) * cfg.dt)
             self.assertEqual(evaluate.call_count, 4)
             for call in evaluate.call_args_list:
-                self.assertEqual(call.args[4], directory / "eval_fast_weight_ema_q0.25_momentum")
+                self.assertEqual(call.args[4], directory / "eval_fast_weight_ema_secondary_q0.25_momentum")
                 self.assertEqual(call.args[5:8], (fast.ROOT / "relative/arrays", 32, source))
-                self.assertEqual(call.args[8]["selection"], "weight_ema")
+                self.assertEqual(call.args[8]["selection"], "weight_ema_secondary")
                 self.assertTrue(call.args[8]["project_momentum"])
                 self.assertIn("spectral carry", call.args[8]["implementation"])
                 self.assertEqual(call.args[9], 32)

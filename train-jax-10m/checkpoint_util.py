@@ -27,6 +27,8 @@ class WeightEMATrainState(train_state.TrainState):
     weight_ema_params: Any = None
     weight_ema_decay: float = struct.field(pytree_node=False, default=0.0)
     weight_ema_start_step: int = struct.field(pytree_node=False, default=0)
+    weight_ema_secondary_params: Any = None
+    weight_ema_secondary_decay: float = struct.field(pytree_node=False, default=0.0)
 
     def apply_gradients(self, *, grads: Any, **kwargs: Any) -> WeightEMATrainState:
         state = cast(WeightEMATrainState, super().apply_gradients(grads=grads, **kwargs))
@@ -43,6 +45,19 @@ class WeightEMATrainState(train_state.TrainState):
                 lambda: self.weight_ema_params,
             )
             state = state.replace(weight_ema_params=shadow)
+        if self.weight_ema_secondary_decay > 0.0:
+            secondary = jax.lax.cond(
+                state.step > self.weight_ema_start_step,
+                lambda: jax.lax.cond(
+                    self.step == self.weight_ema_start_step,
+                    lambda: state.params,
+                    lambda: optax.incremental_update(
+                        state.params, self.weight_ema_secondary_params, 1.0 - self.weight_ema_secondary_decay,
+                    ),
+                ),
+                lambda: self.weight_ema_secondary_params,
+            )
+            state = state.replace(weight_ema_secondary_params=secondary)
         return state
 
 
@@ -74,6 +89,8 @@ def save_checkpoint(
         }
         if isinstance(host_state, WeightEMATrainState) and host_state.weight_ema_params is not None:
             payload["weight_ema_params"] = host_state.weight_ema_params
+        if isinstance(host_state, WeightEMATrainState) and host_state.weight_ema_secondary_params is not None:
+            payload["weight_ema_secondary_params"] = host_state.weight_ema_secondary_params
         metadata = {
             "epoch": int(history[-1]["epoch"]),
             "train_loss": history[-1]["train_loss"], "val_loss": history[-1]["val_loss"],
