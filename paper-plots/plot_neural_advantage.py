@@ -347,6 +347,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_seed1", "Nested · seed 1", "#466d9e", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_zeroinner", "Nested · zero inner", "#6f8245", "v"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32", "Nested · FP32 training gate", "#995b37", "s"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32", "Nested · FP32 gate · batch 16", "#9c7538", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation", "Nested · surface modulation", "#a75b72", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4", "Batch 32 · HD × 4 · xi norm", "#557d91", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4_seed1", "Batch 32 · HD × 4 · xi norm · seed 1", "#557d91", "X"),
@@ -376,6 +377,7 @@ if __name__ == "__main__":
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_seed1",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_zeroinner",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32",
+                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation"):
                 run_date = "20261012"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
