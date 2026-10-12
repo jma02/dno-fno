@@ -384,6 +384,7 @@ if __name__ == "__main__":
             for fast_suffix, timing_method, label_suffix in (
                 ("", method, " · fast"),
                 ("_exactg0", method.replace("_spectral_all", "_exactg0_spectral_all"), " · exact G₀"),
+                ("_grid512", method.replace("_spectral_all", "_grid512_spectral_all"), " · grid512"),
             ):
                 fast_dir = run / f"eval_fast_weight_ema{fast_suffix}"
                 fast_results = fast_dir / "all_summaries.json"
