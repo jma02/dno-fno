@@ -5,6 +5,8 @@
 - A function does not need to return its inputs to the caller if they are not mutated during the function call.
 - Trust invariants established by the main entry points and fixed configuration; do not revalidate them downstream. Keep checks for genuine numerical failures and external-data integrity.
 - Keep bookkeeping minimal. Track values only when computation, recovery, or an intentional output needs them; avoid redundant counters and temporary metric payloads.
+- Absolutely no "provenance checks, provenance gates", or bookkeeping SHAs. 
+- Do not "preserve backward compatibility." Do not preserve legacy behavior.
 
 ## Python
 
