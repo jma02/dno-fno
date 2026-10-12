@@ -344,6 +344,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128", "Batch 32 · HD × 4 · modes ≤128", "#967228", "h"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_seed1", "Batch 32 · HD × 4 · ≤128 · seed 1", "#967228", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1", "Band ≤128 · 4 nested branches", "#596d89", "^"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation", "Nested · surface modulation", "#a75b72", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4", "Batch 32 · HD × 4 · xi norm", "#557d91", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4_seed1", "Batch 32 · HD × 4 · xi norm · seed 1", "#557d91", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_softcurv", "Batch 64 · softened curvature", "#86713c", "p"),
@@ -368,7 +369,8 @@ if __name__ == "__main__":
                                   "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32")):
                 run_date = "20261011"
             if suffix in ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_seed1",
-                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1"):
+                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1",
+                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation"):
                 run_date = "20261012"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
             paths = {family: run / f"eval_epoch1_weight_ema_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json"
