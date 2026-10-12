@@ -290,7 +290,6 @@ if __name__ == "__main__":
         plt.close(fig)
         raise SystemExit(0)
     if args.one_epoch:
-        classical = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
         neural = json.loads((ROOT / "outputs/rms_context_timing_20261007/ada/timings.json").read_text())
         method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
         screens = (
@@ -342,6 +341,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_hd04_flow", "Batch 64 · Hadamard flow probes", "#447e74", "h"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04", "Batch 32 · Hadamard × 4", "#a65d82", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_seed1", "Batch 32 · Hadamard × 4 · seed 1", "#a65d82", "X"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128", "Batch 32 · HD × 4 · modes ≤128", "#967228", "h"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4", "Batch 32 · HD × 4 · xi norm", "#557d91", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4_seed1", "Batch 32 · HD × 4 · xi norm · seed 1", "#557d91", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_softcurv", "Batch 64 · softened curvature", "#86713c", "p"),
@@ -407,12 +407,13 @@ if __name__ == "__main__":
         fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
-            with np.load(ROOT / f"outputs/cs_order_sweep_20260923/{family}.npz") as data:
-                orders = (2, 3)
-                classical_errors = [100 * float(np.median(data["eta_rel_l2"][np.flatnonzero(data["orders"] == order)[0], -1]))
-                                    for order in orders]
-            classical_seconds = [float(np.median(classical["families"][family]["methods"][f"M{order}"]["seconds"]))
-                                 for order in orders]
+            orders = (2, 3)
+            classical_errors = [100 * json.loads(
+                (ROOT / f"outputs/momentum_classical_M{order}_none_20261010/{family}_summary.json").read_text(),
+            )["rel_l2_eta_median_conditional_finite_tfinal"] for order in orders]
+            classical_seconds = [float(np.median(json.loads(
+                (ROOT / f"outputs/momentum_classical_M{order}_timing_20261010/{family}_timing.json").read_text(),
+            )["methods"]["none"]["seconds"])) for order in orders]
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
