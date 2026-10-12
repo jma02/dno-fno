@@ -366,6 +366,16 @@ ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
                     ffi::AnyBuffer symbols, ffi::Result<ffi::AnyBuffer> out,
                     int64_t size, int64_t operation, bool multiply, int64_t ept) {
     bool fp64 = a.element_type() == ffi::F64 || a.element_type() == ffi::C128 || operation == 9 || operation == 10;
+    if (size == 512) {
+        if (ept == 4)
+            return fp64 ? launch<512, double, 4>(stream, a, b, symbols, out, operation, multiply)
+                        : launch<512, float, 4>(stream, a, b, symbols, out, operation, multiply);
+        if (ept == 16)
+            return fp64 ? launch<512, double, 16>(stream, a, b, symbols, out, operation, multiply)
+                        : launch<512, float, 16>(stream, a, b, symbols, out, operation, multiply);
+        return fp64 ? launch<512, double, 8>(stream, a, b, symbols, out, operation, multiply)
+                    : launch<512, float, 8>(stream, a, b, symbols, out, operation, multiply);
+    }
     if (size == 1024) {
         if (ept == 4)
             return fp64 ? launch<1024, double, 4>(stream, a, b, symbols, out, operation, multiply)
@@ -390,7 +400,7 @@ ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         return fp64 ? launch<8192, double, 8>(stream, a, b, symbols, out, operation, multiply)
                     : launch<8192, float, 8>(stream, a, b, symbols, out, operation, multiply);
     }
-    return ffi::Error::InvalidArgument("Benchmark supports FFT lengths 1024, 2048 and 8192.");
+    return ffi::Error::InvalidArgument("Benchmark supports FFT lengths 512, 1024, 2048 and 8192.");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
@@ -399,15 +409,15 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
         .Ret<ffi::AnyBuffer>().Attr<int64_t>("size").Attr<int64_t>("operation").Attr<bool>("multiply").Attr<int64_t>("ept"),
     {ffi::Traits::kCmdBufferCompatible});
 
-template<int EPT, bool balanced = false>
+template<int N, int EPT, bool balanced = false>
 ffi::Error launch_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
                            ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
                            ffi::Result<ffi::AnyBuffer> branches) {
-    using I = decltype(FFTBase<1024, float, EPT>() + Type<fft_type::c2r>() +
+    using I = decltype(FFTBase<N, float, EPT>() + Type<fft_type::c2r>() +
                        RealFFTOptions<complex_layout::natural, real_mode::folded>());
     int surfaces = surface_ops.dimensions()[surface_ops.dimensions().size() - 2];
     int count = filters.dimensions()[filters.dimensions().size() - 2];
-    field_inverse_kernel<I, true, balanced><<<normalized.element_count() / 2048 * (surfaces + count),
+    field_inverse_kernel<I, true, balanced><<<normalized.element_count() / (2 * N) * (surfaces + count),
                                     I::block_dim, I::shared_memory_size, stream>>>(
         inputs.untyped_data(), surface_ops.untyped_data(), filters.untyped_data(),
         branches->untyped_data(), surfaces, count, features->untyped_data(), normalized.untyped_data());
@@ -415,17 +425,29 @@ ffi::Error launch_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyB
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
+template<int N>
+ffi::Error dispatch_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
+                             ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
+                             ffi::Result<ffi::AnyBuffer> branches, int64_t ept, bool balanced) {
+    if (balanced) {
+        if (ept == 4) return launch_features<N, 4, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
+        if (ept == 16) return launch_features<N, 16, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
+        return launch_features<N, 8, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    }
+    if (ept == 4) return launch_features<N, 4>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    if (ept == 16) return launch_features<N, 16>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    return launch_features<N, 8>(stream, inputs, surface_ops, filters, normalized, features, branches);
+}
+
 ffi::Error execute_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
                             ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
                             ffi::Result<ffi::AnyBuffer> branches, int64_t ept, bool balanced) {
-    if (balanced) {
-        if (ept == 4) return launch_features<4, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
-        if (ept == 16) return launch_features<16, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
-        return launch_features<8, true>(stream, inputs, surface_ops, filters, normalized, features, branches);
-    }
-    if (ept == 4) return launch_features<4>(stream, inputs, surface_ops, filters, normalized, features, branches);
-    if (ept == 16) return launch_features<16>(stream, inputs, surface_ops, filters, normalized, features, branches);
-    return launch_features<8>(stream, inputs, surface_ops, filters, normalized, features, branches);
+    const auto size = normalized.dimensions().back();
+    if (size == 512)
+        return dispatch_features<512>(stream, inputs, surface_ops, filters, normalized, features, branches, ept, balanced);
+    if (size == 1024)
+        return dispatch_features<1024>(stream, inputs, surface_ops, filters, normalized, features, branches, ept, balanced);
+    return ffi::Error::InvalidArgument("Fused features support FFT lengths 512 and 1024.");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx_features, execute_features,

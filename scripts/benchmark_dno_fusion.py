@@ -47,10 +47,24 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "fourier_fused_features", "fourier_fused_features_overlap",
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+          "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
           "cufftdx_lowrank16", "cufftdx_lowrank32", "cufftdx_e4", "cufftdx_e16",
           "cufftdx_product_e4", "cufftdx_product_e16", *TUNED_TRIALS, *G1_FP32_TRIALS)
+
+
+def resample_rfft(spectrum: jax.Array, n: int) -> jax.Array:
+    """Resample an even-grid, unnormalized real FFT, merging/splitting Nyquist."""
+    source_n = 2 * (spectrum.shape[-1] - 1)
+    if n == source_n:
+        return spectrum
+    scaled = spectrum * (n / source_n)
+    if n < source_n:
+        result = scaled[..., :n // 2 + 1]
+        return result.at[..., -1].set(2 * result[..., -1].real)
+    result = jnp.pad(scaled, ((0, 0),) * (scaled.ndim - 1) + ((0, (n - source_n) // 2),))
+    return result.at[..., source_n // 2].set(0.5 * result[..., source_n // 2].real)
 
 
 def build_variant(
@@ -60,6 +74,9 @@ def build_variant(
     """Intercept only inference arithmetic; leave the production module untouched."""
     exact_g0 = variant.endswith("_exactg0")
     variant = variant.removesuffix("_exactg0")
+    coarse_correction = variant.endswith("_grid512")
+    variant = variant.removesuffix("_grid512")
+    correction_nx = 512 if coarse_correction else nx
     variant, _, g1_tuning = variant.partition("_g1e")
     input_fp32 = variant.endswith("_inputfp32")
     variant = variant.removesuffix("_inputfp32")
@@ -87,6 +104,8 @@ def build_variant(
     balanced_features = variant.startswith("fourier_balanced_features")
     fused_product = variant.endswith("features_product")
     fused_features = balanced_features or variant in ("fourier_fused_features", "fourier_fused_features_product")
+    if coarse_correction and not (overlap_g1 and fused_features and fused_product):
+        raise ValueError("The 512-point correction requires fused features/product with G1 overlap.")
     fused_fields = fused_features or variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
     fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
     if fused_fields or fused_inputs:
@@ -190,6 +209,14 @@ def build_variant(
             context_multiplier = 0.1 * nn.tanh(context_hidden @ output["kernel"] + output["bias"])
             jax.block_until_ready(context_multiplier)
 
+        if coarse_correction:
+            surface_ops = surface_ops[..., :correction_nx // 2 + 1]
+            filters = filters[..., :correction_nx // 2 + 1]
+            if inner_filters is not None:
+                inner_filters = inner_filters[..., :correction_nx // 2 + 1]
+            if context_multiplier is not None:
+                context_multiplier = context_multiplier[:, :correction_nx // 2 + 1]
+
         @jax.jit
         def m2_hat(inputs: jax.Array) -> jax.Array:
             physical = jnp.stack((inputs[:, 0] * model.eta_scale, inputs[:, 1]), axis=1)
@@ -248,22 +275,28 @@ def build_variant(
                                 spectral=True, ept=sandwich_ept,
                                 eta_scale=model.eta_scale if fused_g1 else None,
                             ).sum(axis=1))((normalized_inputs, xi_phys_hat) if reuse_g1 else (normalized_inputs,))
+            baseline_xi_hat = xi_phys_hat
+            if coarse_correction:
+                normalized_hat = resample_rfft(cast(jax.Array, normalized_hat), correction_nx)
+                normalized_inputs = fft(normalized_hat, correction_nx, inverse=True, ept=input_ept)
+                eta_norm, xi_phys = jnp.moveaxis(normalized_inputs, 1, 0)
+                eta_norm_hat, xi_phys_hat = jnp.moveaxis(normalized_hat, 1, 0)
             if fused_features:
                 features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
-                                                       n=nx, ept=field_ept, normalized_inputs=normalized_inputs,
+                                                       n=correction_nx, ept=field_ept, normalized_inputs=normalized_inputs,
                                                        balanced=balanced_features)
                 features = jnp.moveaxis(features, 1, -1)
             else:
                 if fused_fields:
-                    fields = cast(jax.Array, field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=nx, ept=field_ept))
+                    fields = cast(jax.Array, field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters, n=correction_nx, ept=field_ept))
                 else:
                     field_spectra = jnp.concatenate((
                         surface_ops[None, :, :] * eta_norm_hat[:, None, :],
                         filters * xi_phys_hat[:, None, :],
                     ), axis=1)
-                    fields = (fft(field_spectra, nx, inverse=True, ept=field_ept)
+                    fields = (fft(field_spectra, correction_nx, inverse=True, ept=field_ept)
                               if trial in ("fourier_features", "fourier_allfft", "fourier_fields", "fourier_kernels", "fourier_transforms")
-                              else jnp.fft.irfft(field_spectra, n=nx))
+                              else jnp.fft.irfft(field_spectra, n=correction_nx))
                 features = jnp.concatenate((
                     jnp.stack([eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1),
                     jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
@@ -279,7 +312,7 @@ def build_variant(
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     context = features @ loaded.params["eta_context_in"]["kernel"]
                     context = jnp.fft.irfft(
-                        context_multiplier * jnp.fft.rfft(context, axis=1), n=nx, axis=1,
+                        context_multiplier * jnp.fft.rfft(context, axis=1), n=correction_nx, axis=1,
                     )
                     context = context @ loaded.params["eta_context_expand"]["kernel"]
                     features = features + context
@@ -294,11 +327,11 @@ def build_variant(
                 ordinary_fields = branch_fields[:, :ordinary_branches]
                 ordinary_filters = filters[:, :ordinary_branches]
                 if fused_product:
-                    weighted_hat = fft(weights, nx, b=ordinary_fields, outer=ordinary_filters,
+                    weighted_hat = fft(weights, correction_nx, b=ordinary_fields, outer=ordinary_filters,
                                        ept=fft_ept, channels_last=True)
                 elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
                     weights = jnp.moveaxis(weights, -1, 1)
-                    weighted_hat = nx * fft(weights, nx, b=ordinary_fields,
+                    weighted_hat = correction_nx * fft(weights, correction_nx, b=ordinary_fields,
                                            outer=ordinary_filters.astype(jnp.complex64), ept=fft_ept)
                 else:
                     weighted_hat = ordinary_filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * ordinary_fields)
@@ -306,11 +339,13 @@ def build_variant(
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
                 inner_hat = jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:])
-                middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=nx)
+                middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=correction_nx)
                 nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
                     cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :] * middle)
                 correction_hat = correction_hat + jnp.sum(nested_hat, axis=1)
             correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
+            if coarse_correction:
+                correction_hat = resample_rfft(correction_hat, nx)
             if not overlap_g1:
                 if model.baseline_order == 2:
                     analytic_hat = m2_hat(cast(jax.Array, normalized_inputs))
@@ -322,7 +357,7 @@ def build_variant(
                     ).sum(axis=1)
             analytic_hat = cast(jax.Array, analytic_hat).astype(jnp.complex128)
             if model.baseline_order != 2 and not exact_g0:
-                analytic_hat = g0 * xi_phys_hat + analytic_hat
+                analytic_hat = g0 * baseline_xi_hat + analytic_hat
             result = output_scale * (analytic_hat + correction_hat)
             if exact_g0:
                 result = result + cast(jax.Array, solver_g0) * xi_hat

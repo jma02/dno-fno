@@ -64,6 +64,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features", "fourier_fused_features_overlap",
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
     "fourier_fused_features_product_overlap_exactg0",
+    "fourier_fused_features_product_overlap_grid512",
     "fourier_balanced_features_product_overlap",
     *TUNED_TRIALS, *G1_FP32_TRIALS,
 )})
