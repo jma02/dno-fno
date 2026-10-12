@@ -124,6 +124,7 @@ class CraigSulemDNO(nn.Module):
     n_blocks: int = 4                 # Groups of parallel branches, summed together.
     latent: int = 64                  # Branches per group.
     nested_blocks: int = 0            # Replace this many final groups with M eta N eta M.
+    nested_surface_modulation: bool = False  # Bounded eta/h modulation of both nested factors.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -327,6 +328,11 @@ class CraigSulemDNO(nn.Module):
         # The nested eta factors use the same fixed training-RMS scaling as the trunk.
         nested_surface = (eta_norm / self.surface_feature_scales[0]
                           if self.surface_feature_scales is not None else eta_norm)
+        if self.nested_surface_modulation:
+            gain = self.param("nested_surface_gain", nn.initializers.zeros, ())
+            nested_surface = nested_surface * (
+                1.0 + jnp.tanh(gain) * jnp.tanh(eta_norm * self.eta_scale / jnp.exp(depth))
+            )
         for block_idx in range(self.n_blocks):
             correction = correction + CraigSulemBlock(
                 n_branches=self.latent,

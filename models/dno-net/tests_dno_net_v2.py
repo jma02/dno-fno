@@ -49,6 +49,7 @@ def _model(
     surface_polynomial_skip: bool = False,
     surface_depth_gate: bool = False,
     nested_blocks: int = 0,
+    nested_surface_modulation: bool = False,
     multiplier_skip: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
@@ -70,6 +71,7 @@ def _model(
         surface_polynomial_skip=surface_polynomial_skip,
         surface_depth_gate=surface_depth_gate,
         nested_blocks=nested_blocks,
+        nested_surface_modulation=nested_surface_modulation,
         multiplier_skip=multiplier_skip,
         mult_hidden=16,
         baseline_order=baseline_order,
@@ -895,6 +897,76 @@ def test_nested_model_replacement_preserves_structure() -> None:
         assert jnp.allclose(shifted, jnp.roll(actual, 7, axis=-1), rtol=1e-10, atol=1e-14)
 
 
+def test_nested_surface_modulation_identity_depth_and_gradient() -> None:
+    eta, xi, _ = _state()
+    inputs = jnp.broadcast_to(jnp.stack((eta + 0.03, xi), axis=-1), (2, eta.shape[-1], 2))
+    depth = jnp.log(jnp.asarray([[0.08], [12.0]], dtype=eta.dtype))
+    scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
+    original = _model(nested_blocks=1, surface_context_width=8, surface_feature_scales=scales).clone(
+        eta_scale=0.17, xi_scale=0.08, target_scale=0.13,
+    )
+    model = original.clone(nested_surface_modulation=True)
+    original_variables = original.init(jax.random.PRNGKey(34), inputs, depth)
+    variables = unfreeze(model.init(jax.random.PRNGKey(34), inputs, depth))
+    gain = cast(jax.Array, variables["params"].pop("nested_surface_gain"))
+    assert gain.shape == () and gain == 0
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(original_variables), jax.tree.leaves(variables), strict=True,
+    ))
+    for active in (False, True):
+        control = _activate_residual(original_variables) if active else original_variables
+        variables = unfreeze(control)
+        variables["params"]["nested_surface_gain"] = gain
+        assert jnp.array_equal(cast(jax.Array, model.apply(variables, inputs, depth)),
+                               cast(jax.Array, original.apply(control, inputs, depth)))
+    for value in (0.0, 0.7):
+        variables["params"]["nested_surface_gain"] = jnp.asarray(value, dtype=gain.dtype)
+        gradient = jax.grad(lambda params: jnp.mean(cast(jax.Array, model.apply(
+            {"params": params}, inputs, depth,
+        )) ** 2))(variables["params"])
+        assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradient))
+        assert jnp.abs(gradient["nested_surface_gain"]) > 0
+    _, captured = model.apply(variables, inputs, depth, capture_intermediates=lambda module, _: module.name == "cs_block_1")
+    actual = cast(jax.Array, captured["intermediates"]["cs_block_1"]["__call__"][0])
+    surface = inputs[..., 0] / scales[0] * (
+        1 + jnp.tanh(variables["params"]["nested_surface_gain"])
+        * jnp.tanh(inputs[..., 0] * model.eta_scale / jnp.exp(depth))
+    )
+    block = CraigSulemBlock(model.latent, model.domain_length, model.h_clip_max, model.mult_hidden, nested=True)
+    expected = cast(jax.Array, block.apply(
+        {"params": variables["params"]["cs_block_1"]}, inputs, inputs[..., 1] * model.xi_scale,
+        jnp.minimum(depth, jnp.log(model.h_clip_max)), eta_norm=surface,
+    ))
+    assert jnp.array_equal(actual, expected)
+
+
+def test_nested_surface_modulation_preserves_structure_and_adds_cubic_response() -> None:
+    eta, xi, depth = _state()
+    model = _model(nested_blocks=2, nested_surface_modulation=True, surface_context_width=8,
+                   surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3))
+    unmodulated = _activate_residual(model.init(jax.random.PRNGKey(35), jnp.stack((eta, xi), axis=-1), depth))
+    variables = unfreeze(unmodulated)
+    variables["params"]["nested_surface_gain"] = jnp.asarray(0.7, dtype=jnp.float32)
+    psi = jnp.roll(xi, 9, axis=-1)
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+    assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+    zero, first = jax.jvp(lambda surface: _learned_residual(model, variables, surface, xi, depth),
+                          (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(zero == 0) and jnp.linalg.norm(first) < 1e-14
+    quadratic, cubic = [], []
+    for amplitude in (0.25, 0.125, 0.0625):
+        correction = _learned_residual(model, variables, amplitude * eta, xi, depth)
+        reference = _learned_residual(model, unmodulated, amplitude * eta, xi, depth)
+        quadratic.append(jnp.linalg.norm(correction))
+        cubic.append(jnp.linalg.norm(correction - reference))
+    assert jnp.all(jnp.asarray(cubic) > 0)
+    assert jnp.allclose(jnp.asarray(quadratic[:-1]) / jnp.asarray(quadratic[1:]), 4.0, rtol=0.01)
+    assert jnp.allclose(jnp.asarray(cubic[:-1]) / jnp.asarray(cubic[1:]), 8.0, rtol=0.01)
+
+
 def test_multiplier_skip_symbol_basis_and_grid_independence() -> None:
     depth = jnp.log(jnp.asarray([[0.08], [8.0]], dtype=jnp.float64))
     for length in (2 * pi, 8 * pi):
@@ -1038,6 +1110,8 @@ def main() -> int:
         test_even_surface_features_enforce_reflection_covariance,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
+        test_nested_surface_modulation_identity_depth_and_gradient,
+        test_nested_surface_modulation_preserves_structure_and_adds_cubic_response,
         test_multiplier_skip_symbol_basis_and_grid_independence,
         test_multiplier_skip_preserves_initialization_and_operator_structure,
         test_log_multiplier_inputs_formula_initialization_and_gradients,

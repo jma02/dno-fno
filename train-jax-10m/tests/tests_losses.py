@@ -916,14 +916,17 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     )]
     cases += [(0, polynomial, False, False, False, True, context)
               for polynomial, context in product((False, True), (0, 2))]
-    precision_cases = [(*case, 0.0, jnp.float32) for case in cases]
-    precision_cases += [(0, False, False, False, False, False, 2, 22.727203594311888, dtype)
+    precision_cases = [(*case, 0.0, jnp.float32, False) for case in cases]
+    precision_cases += [(0, False, False, False, False, False, 2, 22.727203594311888, dtype, False)
                         for dtype in (jnp.float32, jnp.float64)]
+    precision_cases += [(1, False, False, False, False, False, 2, 0.0, dtype, True)
+                       for dtype in (jnp.float32, jnp.float64)]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
-         whiten, depth_gate, context, cutoff, dtype) in precision_cases:
+         whiten, depth_gate, context, cutoff, dtype, nested_modulation) in precision_cases:
         case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
+            nested_surface_modulation=nested_modulation,
             curvature_cutoff=cutoff,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
@@ -935,6 +938,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        if nested_modulation:
+            params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
         if depth_gate:
             shape = cast(jax.Array, params["eta_depth_gate"]["kernel"]).shape
             params["eta_depth_gate"]["kernel"] = jnp.linspace(-0.6, 0.7, int(np.prod(shape)), dtype=jnp.float32).reshape(shape)
@@ -990,6 +995,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][-2:])) > 0
         if depth_gate:
             assert float(jnp.linalg.norm(actual_grad[0]["eta_depth_gate"]["kernel"])) > 0
+        if nested_modulation:
+            assert float(jnp.abs(actual_grad[0]["nested_surface_gain"])) > 0
         if multiplier_skip:
             for index in range(2):
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):

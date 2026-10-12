@@ -125,6 +125,8 @@ def main() -> None:
                         help="Use log1p(k), log(h), tanh(kh), and log1p(k*tanh(kh)) as multiplier inputs.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
+    parser.add_argument("--cs_nested_surface_modulation", action="store_true",
+                        help="Apply a shared bounded eta/h modulation to both nested surface factors.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -507,6 +509,8 @@ def main() -> None:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
+    if args.cs_nested_surface_modulation and not args.cs_nested_blocks:
+        parser.error("--cs_nested_surface_modulation requires --cs_nested_blocks > 0")
     if args.model != "cs_dno" and (
         args.cs_normalize_surface_features or args.cs_surface_context_width or args.cs_curvature_cutoff > 0
     ):
@@ -651,6 +655,7 @@ def main() -> None:
             multiplier_skip=args.cs_multiplier_skip,
             log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,
+            nested_surface_modulation=args.cs_nested_surface_modulation,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,

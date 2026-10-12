@@ -161,6 +161,7 @@ class ComputeMetricsTest(unittest.TestCase):
         for options in (
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
             {"cs_nested_blocks": 1, "cs_baseline_order": 1},
+            {"cs_nested_blocks": 1, "cs_nested_surface_modulation": True},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
             {"cs_curvature_cutoff": 22.727203594311888},
@@ -195,6 +196,8 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.curvature_cutoff, options.get("cs_curvature_cutoff", 0.0))
                 self.assertEqual(loaded.model.baseline_order, options.get("cs_baseline_order", 1))
                 self.assertEqual(loaded.model.nested_blocks, options.get("cs_nested_blocks", 0))
+                self.assertEqual(loaded.model.nested_surface_modulation,
+                                 options.get("cs_nested_surface_modulation", False))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
@@ -224,11 +227,12 @@ class ComputeMetricsTest(unittest.TestCase):
 
     def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
-                             baseline_order=1, baseline_true_depth=True)
+                             baseline_order=1, nested_surface_modulation=True)
         inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(4), (2, 32, 2), dtype=jnp.float32)
         depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float32))
         params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
         params["cs_block_0"]["gamma"] = jnp.full((2,), 0.1, dtype=jnp.float32)
+        params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
         prediction, baseline, m1 = cast(tuple[jax.Array, jax.Array, jax.Array],
                                        model.apply({"params": params}, inputs, depth, return_baseline=True))
         np.testing.assert_array_equal(baseline, m1)
@@ -236,9 +240,10 @@ class ComputeMetricsTest(unittest.TestCase):
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
             "cs_nested_blocks": 1, "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
+            "cs_nested_surface_modulation": True,
             "cs_use_first_deriv": True, "cs_use_second_deriv": True,
             "cs_use_half_deriv": True, "cs_use_hilbert": True,
-            "cs_baseline_order": 1, "cs_baseline_true_depth": True,
+            "cs_baseline_order": 1, "cs_baseline_true_depth": False,
             "domain_length": 2 * np.pi, "xi_scale": 1.0, "eta_scale": 1.0, "target_scale": 1.0,
         }
         stats = {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0}
@@ -253,6 +258,8 @@ class ComputeMetricsTest(unittest.TestCase):
         np.testing.assert_allclose(actual, expected - expected.mean(axis=-1, keepdims=True),
                                    rtol=2e-6, atol=1e-7)
         self.assertEqual(restored.model.nested_blocks, 1)
+        self.assertTrue(restored.model.nested_surface_modulation)
+        np.testing.assert_array_equal(restored.params["nested_surface_gain"], params["nested_surface_gain"])
         self.assertEqual(restored.model.baseline_order, 1)
         self.assertEqual(restored.epoch, 40)
 
@@ -346,12 +353,14 @@ class ComputeMetricsTest(unittest.TestCase):
             )
 
         model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=1, latent=2, mult_hidden=4,
-                             eta_scale=0.3, xi_scale=0.7, target_scale=0.8, baseline_true_depth=True,
+                             eta_scale=0.3, xi_scale=0.7, target_scale=0.8,
+                             nested_surface_modulation=True,
                              surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
                              surface_context_width=4)
         params = cast(dict[str, Any], model.init(
             jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
             jnp.zeros((1, 1), jnp.float32))["params"])
+        params["nested_surface_gain"] = jnp.asarray(0.6, jnp.float32)
         params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
             params["cs_block_0"]["phi_proj"]["kernel"], 0.1)
         block = params["cs_block_1"]
@@ -383,12 +392,17 @@ class ComputeMetricsTest(unittest.TestCase):
                     eta_hat, xi_hat = jnp.fft.rfft(eta), jnp.fft.rfft(xi)
                     expected, actual = forward(eta_hat, xi_hat), fused(eta_hat, xi_hat)
                     np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
+                    native = build_predict_gxi_batched(loaded)(eta, xi, depth)
+                    self.assertLess(float(jnp.linalg.norm(jnp.fft.irfft(expected, n=nx) - native)
+                                          / jnp.linalg.norm(native)), 3e-6)
                     multiplier = fusion.DepthAwareMultiplier(2, model.domain_length, model.h_clip_max, 4)
                     outer, inner = (jnp.moveaxis(cast(jax.Array, multiplier.apply(
                         {"params": block[key]}, depth, nx // 2 + 1)), -1, 1)
                         for key in ("m_shared", "m_inner"))
-                    surface = (jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / np.float32(0.3)
-                               / np.float32(0.2))[:, None, :]
+                    eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / np.float32(0.3)
+                    surface = (eta_norm / np.float32(0.2) * (
+                        1 + jnp.tanh(params["nested_surface_gain"])
+                        * jnp.tanh(eta_norm * model.eta_scale / jnp.exp(depth))))[:, None, :]
                     potential = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32)
                                  / np.float32(0.7)) * model.xi_scale
                     middle = jnp.fft.irfft(inner * jnp.fft.rfft(
@@ -399,13 +413,13 @@ class ComputeMetricsTest(unittest.TestCase):
                     self.assertGreater(float(jnp.linalg.norm(nested)), 1e-3)
                     for result in (expected - without(eta_hat, xi_hat), actual - fused_without(eta_hat, xi_hat)):
                         self.assertLess(float(jnp.linalg.norm(result - nested) / jnp.linalg.norm(nested)), 3e-6)
-                    stages_eta = jnp.stack((eta_hat, 0.8 * eta_hat))
+                    stages_eta = jnp.stack((eta_hat, eta_hat))
                     stages_xi = jnp.stack((xi_hat, 1.3 * xi_hat))
                     stages = jax.jit(jax.vmap(fused))(stages_eta, stages_xi)
                     np.testing.assert_allclose(stages, jax.jit(jax.vmap(forward))(stages_eta, stages_xi),
                                                rtol=3e-6, atol=2e-7)
                     isolated = stages - jax.jit(jax.vmap(fused_without))(stages_eta, stages_xi)
-                    reference = jnp.stack((nested, 0.8**2 * 1.3 * nested))
+                    reference = jnp.stack((nested, 1.3 * nested))
                     self.assertLess(float(jnp.linalg.norm(isolated - reference) / jnp.linalg.norm(reference)), 3e-6)
 
     def test_exact_solver_g0_uses_original_spectrum_without_rescaling_other_terms(self) -> None:

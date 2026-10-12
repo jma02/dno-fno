@@ -200,6 +200,8 @@ def build_variant(
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
         log_depth = depth.astype(jnp.float32).reshape(-1, 1)
+        nested_modulation = ((jnp.tanh(loaded.params["nested_surface_gain"]), jnp.exp(log_depth))
+                             if model.nested_surface_modulation else None)
         h = jnp.exp(log_depth if model.baseline_true_depth else jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
         g0 = k[None, :] * jnp.tanh(h * k[None, :])
         k64 = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
@@ -348,6 +350,11 @@ def build_variant(
                 correction_hat = jnp.sum(weighted_hat, axis=1)
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
+                if nested_modulation is not None:
+                    gain, actual_depth = nested_modulation
+                    nested_eta = nested_eta * (
+                        1.0 + gain * jnp.tanh(eta_norm * model.eta_scale / actual_depth)
+                    )
                 inner_hat = jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:])
                 if nested_fused:
                     inner_hat = cast(jax.Array, inner_filters) * inner_hat
