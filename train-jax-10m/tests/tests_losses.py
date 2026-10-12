@@ -43,6 +43,7 @@ TrainerLoss = Callable[
 
 def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> TrainerLoss:
     # Exercise the trainer's inline arithmetic, not a second implementation.
+    config.data_xi_projection_weight = 0.0
     path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
     source = ast.parse(path.read_text())
     component = next(node for node in ast.walk(source)
@@ -169,6 +170,118 @@ def test_target_normalization_matches_unweighted_relative_l2() -> None:
                 assert bool(jnp.isfinite(value) & jnp.all(jnp.isfinite(gradients[0])))
                 for gradient in gradients[1:]:
                     np.testing.assert_array_equal(gradient, 0)
+
+
+def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> None:
+    config = SimpleNamespace(
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
+        mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none",
+    )
+    nx = 1024
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    family = jnp.arange(1, 5)
+    amplitude = jnp.arange(1, 5)[:, None]
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array, *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        prediction = variables["params"][..., None] / 4
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "PhysicalFamilyId": PhysicalFamilyId, "apply_model": apply_model, "log_h_max": np.log(5),
+        "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
+        "norm_targets_jax": lambda q: q[..., None] / 4, "denorm_targets_jax": lambda q: q * 4,
+    }
+    exec(compile(ast.Module(body=[trainer_function("compute_loss_components")], type_ignores=[]),
+                 "xi_projection_components", "exec"), namespace)
+
+    def evaluate(prediction: jax.Array, xi: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        parts = namespace["compute_loss_components"](
+            prediction, jnp.zeros_like(xi), xi, target, jnp.zeros((4, 1)), family,
+            collect_family_metrics=True,
+        )
+        return parts[0], (parts[5], jnp.asarray(parts[6]).reshape(4, 5))
+
+    for dtype in (jnp.float32, jnp.float64):
+        namespace["training_dtype"] = dtype
+        target = (amplitude * (jnp.cos(3 * x) + 0.3 * jnp.sin(7 * x))).astype(dtype)
+        cases = (
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.cos(4 * x), np.sqrt(5)),
+            (2 * np.pi, None, -3 * jnp.cos(4 * x), jnp.cos(4 * x), np.sqrt(5)),
+            (2 * np.pi, None, 1e-8 * jnp.cos(4 * x), jnp.cos(4 * x), np.sqrt(5)),
+            (2 * np.pi, None, 3 + jnp.cos(4 * x), jnp.cos(4 * x), np.sqrt(5)),
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.sin(4 * x), 1.0),
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.cos(5 * x), 1.0),
+            (2 * np.pi, None, jnp.zeros_like(x), jnp.cos(4 * x), 1.0),
+            (2 * np.pi, None, jnp.ones_like(x), jnp.cos(4 * x), 1.0),
+            # Suppress roundoff in a mathematically absent retained direction.
+            (2 * np.pi, None, jnp.cos(200 * x), jnp.cos(4 * x), 1.0),
+            (4 * np.pi, None, jnp.cos(200 * x), jnp.cos(200 * x), np.sqrt(5)),
+            (4 * np.pi, 5.0, jnp.cos(8 * x), jnp.cos(8 * x), np.sqrt(5)),
+            (4 * np.pi, 5.0, jnp.cos(12 * x), jnp.cos(4 * x) + 0.3 * jnp.cos(12 * x), 1.0),
+        )
+        for length, cutoff, direction, error, factor in cases:
+            config.data_k_max = cutoff
+            namespace["k_rfft_jax"] = (2 * jnp.pi / length) * jnp.arange(nx // 2 + 1)
+            xi = jnp.broadcast_to(direction, target.shape).astype(dtype)
+            prediction = (target + 0.013 * amplitude * error).astype(dtype)
+            results = []
+            for weight in (0.0, 4.0):
+                config.data_xi_projection_weight = weight
+                differentiate = jax.jit(jax.value_and_grad(lambda p, z: evaluate(p, z), has_aux=True))
+                results.append(differentiate(prediction, xi))
+                (zero, _), zero_gradient = differentiate(target, xi)
+                assert zero == 0 and bool(jnp.all(jnp.isfinite(zero_gradient)))
+                np.testing.assert_array_equal(zero_gradient, 0)
+            (ordinary, ordinary_aux), ordinary_gradient = results[0]
+            (weighted, weighted_aux), weighted_gradient = results[1]
+            tolerance = 2e-6 if dtype == jnp.float32 else 3e-12
+            np.testing.assert_allclose(weighted, factor * ordinary, rtol=tolerance)
+            assert ordinary * (1 - tolerance) <= weighted <= np.sqrt(5) * ordinary * (1 + tolerance)
+            assert bool(jnp.all(jnp.isfinite(weighted_gradient)))
+            np.testing.assert_array_equal(weighted_aux[0], ordinary_aux[0])
+            np.testing.assert_array_equal(weighted_aux[1][:, :4], ordinary_aux[1][:, :4])
+            if cutoff is None:
+                reference, reference_gradient = jax.jit(jax.value_and_grad(
+                    lambda p: relative_l2_loss(p[..., None] / 4, target[..., None] / 4),
+                ))(prediction)
+                np.testing.assert_array_equal(ordinary, reference)
+                np.testing.assert_array_equal(ordinary_gradient, reference_gradient)
+
+    config.data_k_max = None
+    namespace["k_rfft_jax"] = jnp.arange(nx // 2 + 1)
+    coefficients = jnp.array([0.013, 0.021])
+    (value, _), gradient = jax.value_and_grad(lambda c: evaluate(
+        target + amplitude * (c[0] * jnp.cos(4 * x) + c[1] * jnp.cos(5 * x)),
+        jnp.broadcast_to(jnp.cos(4 * x), target.shape),
+    ), has_aux=True)(coefficients)
+    norm = jnp.sqrt(5 * coefficients[0]**2 + coefficients[1]**2)
+    np.testing.assert_allclose(value, norm / np.sqrt(1.09), rtol=1e-12)
+    np.testing.assert_allclose(gradient, coefficients * jnp.array([5, 1]) / (norm * np.sqrt(1.09)), rtol=1e-12)
+    target = jnp.zeros_like(target)
+    (value, _), gradient = jax.value_and_grad(evaluate, has_aux=True)(target, jnp.ones_like(target))
+    assert value == 0 and bool(jnp.all(jnp.isfinite(gradient)))
+    np.testing.assert_array_equal(gradient, 0)
+
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--data_xi_projection_weight")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "args.data_xi_projection_weight" in ast.unparse(node.test))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "xi_projection_option", "exec"), namespace)
+    assert parser.parse_args([]).data_xi_projection_weight == 0.0
+    assert parser.parse_args(["--data_xi_projection_weight", "4"]).data_xi_projection_weight == 4.0
+    with patch.object(parser, "error", side_effect=ValueError):
+        for invalid in (-1.0, np.nan, np.inf, -np.inf):
+            namespace["args"] = SimpleNamespace(data_xi_projection_weight=invalid)
+            with np.testing.assert_raises(ValueError):
+                exec(compile(ast.Module(body=[validation], type_ignores=[]), "xi_projection_validation", "exec"), namespace)
 
 
 def test_retained_band_normalizers_gradients_and_full_metrics() -> None:
@@ -433,7 +546,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
     component = next(node for node in ast.walk(ast.parse(path.read_text()))
                      if isinstance(node, ast.FunctionDef) and node.name == "compute_loss_components")
     config = SimpleNamespace(
-        model="fno", data_k_max=None, residual_floor=1e-6, mode_balanced_weight=0.0,
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=0.0,
         translation_tangent_weight=0.3, translation_tangent_scope="tanaka",
         translation_tangent_geometry="coupled_modal", translation_tangent_k_max=1,
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
@@ -893,7 +1006,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
     depth = jnp.log(jnp.linspace(0.2, 8.0, size))[:, None]
     family = jnp.array([1, 2, 3, 4, 1, 2, 3, 4])
     config = SimpleNamespace(
-        model="fno", data_k_max=None, residual_floor=1e-6, mode_balanced_weight=0.0,
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=0.0,
         translation_tangent_weight=0.0, phase_mechanism="all_momentum",
         phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
@@ -947,9 +1060,10 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
     generated = (1.5 * eta, 1.2 * xi, 0.8 * target, depth, family)
     base, teacher = components(params, *fields), components(params, *generated)
     namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family)
-    for cutoff, loss_mode in product((None, 1.5), ("full", "data")):
+    for cutoff, loss_mode, projection_weight in product((None, 1.5), ("full", "data"), (0.0, 4.0)):
         config.data_k_max = cutoff
-        if cutoff is not None:
+        config.data_xi_projection_weight = projection_weight
+        if cutoff is not None or projection_weight > 0:
             for inputs, ordinary in ((fields, base), (generated, teacher)):
                 band = components(params, *inputs)
                 assert not np.isclose(band[0], ordinary[0])
@@ -1345,7 +1459,7 @@ def test_hadamard_flow_probes_route_only_training_physical_targets() -> None:
 def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() -> None:
     component = trainer_function("compute_loss_components")
     config = SimpleNamespace(
-        model="fno", data_k_max=None, residual_floor=1e-6, mode_balanced_weight=6.0,
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=6.0,
         mode_balanced_k_max=128.0, mode_balanced_activity_threshold=1e-4,
         mode_balanced_denominator_eps=1e-6, translation_tangent_weight=10.0,
         translation_tangent_scope="tanaka", translation_tangent_geometry="local",
@@ -1534,7 +1648,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         rollout_training_weight=0.75, rollout_training_start_epoch=60,
         rollout_training_ramp_epochs=5, rollout_training_interval=16,
         rollout_training_loss="full", amplitude_probe_scale=0.0,
-        model="fno", data_k_max=None, residual_floor=1e-6, mode_balanced_weight=6.0,
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=6.0,
         mode_balanced_warmup_steps=4000, mode_balanced_k_max=128.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
         translation_tangent_weight=10.0, translation_tangent_scope="tanaka",
@@ -1638,6 +1752,36 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
             )(params)
             np.testing.assert_allclose((loss, gradient), expected, rtol=1e-10)
             assert metrics["rollout_active"] == 1 and metrics["rollout_weight"] == 0.75
+
+    # The new data norm must not change original/generated MB or tangent gradients.
+    config.rollout_training_loss = "full"
+    config.rollout_training_start_epoch, config.rollout_training_ramp_epochs = 1, 0
+    fields = tuple(value[None] for value in (eta, xi, target, jnp.log(depth)[:, None], family))
+    mapped = jax.vmap(namespace["evaluate"], in_axes=(None, None, None, 0, 0, 0, 0, 0), axis_name="batch")
+    controls = []
+    for weight in (0.0, 4.0):
+        config.data_xi_projection_weight = weight
+        (loss, metrics), gradient = jax.value_and_grad(lambda p: jax.tree.map(
+            jnp.mean, mapped(p, 32, True, *fields),
+        ), has_aux=True)(params)
+        metric_gradients = jax.jacfwd(lambda p: jax.tree.map(
+            jnp.mean, mapped(p, 32, True, *fields),
+        )[1])(params)
+        controls.append((loss, metrics, gradient, metric_gradients))
+    old_loss, old_metrics, old_gradient, old_derivatives = controls[0]
+    new_loss, new_metrics, new_gradient, new_derivatives = controls[1]
+    np.testing.assert_allclose(new_loss - old_loss, sum(
+        factor * (new_metrics[key] - old_metrics[key])
+        for key, factor in (("train_data_loss", 1), ("rollout_data_loss", 0.75))
+    ), rtol=1e-10)
+    np.testing.assert_allclose(new_gradient - old_gradient, sum(
+        factor * (new_derivatives[key] - old_derivatives[key])
+        for key, factor in (("train_data_loss", 1), ("rollout_data_loss", 0.75))
+    ), rtol=1e-10)
+    for key in ("mode_balanced_loss", "translation_tangent_loss", "train_l2_loss",
+                "rollout_mode_balanced_loss", "rollout_translation_tangent_loss"):
+        np.testing.assert_array_equal(new_metrics[key], old_metrics[key])
+        np.testing.assert_array_equal(new_derivatives[key], old_derivatives[key])
 
 
 def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
@@ -1949,6 +2093,7 @@ if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_target_normalization_matches_unweighted_relative_l2()
+    test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
     test_retained_band_normalizers_gradients_and_full_metrics()
     test_retained_band_zero_error_and_cutoff_validation()
     test_bounded_weights_decrease_and_have_stopped_scale_invariant_gradients()

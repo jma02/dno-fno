@@ -237,6 +237,8 @@ def main() -> None:
                         "nonlinear weighting, or normalization by the model's baseline residual.")
     parser.add_argument("--data_k_max", type=float, default=None,
                         help="Optional physical-wavenumber cutoff for data loss and its normalizers; full L2 metrics stay unfiltered.")
+    parser.add_argument("--data_xi_projection_weight", type=float, default=0.0,
+                        help="Extra weight inside the data-error norm along xi on 0<k<=128; ordinary L2 metrics stay unchanged.")
     parser.add_argument("--residual_floor", type=float, default=1e-6,
                         help="Residual denominator floor as a fraction of the target norm.")
     parser.add_argument("--metric_interval", type=int, default=16,
@@ -477,6 +479,8 @@ def main() -> None:
         parser.error("--residual_floor must be finite and positive")
     if args.data_k_max is not None and (not np.isfinite(args.data_k_max) or args.data_k_max <= 0.0):
         parser.error("--data_k_max must be finite and positive")
+    if not np.isfinite(args.data_xi_projection_weight) or args.data_xi_projection_weight < 0.0:
+        parser.error("--data_xi_projection_weight must be finite and nonnegative")
     if args.data_normalization in ("bounded", "residual") and args.model != "cs_dno":
         parser.error("--data_normalization bounded/residual requires --model cs_dno")
     if not 0.0 < args.dirichlet_probe_fraction <= 0.5:
@@ -838,6 +842,7 @@ def main() -> None:
         )
         residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
         data_error_norm, data_target_norm, data_residual_denominator = error_norm, target_norm, residual_denominator
+        data_squared_error = squared_error
         data_mask: jax.Array | bool = True
         if args.data_k_max is not None:
             data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
@@ -852,6 +857,29 @@ def main() -> None:
             data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
                 data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
             )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
+        if args.data_xi_projection_weight > 0.0:
+            xi_hat = jnp.fft.rfft(xi, axis=1).astype(jnp.complex128)
+            projection_mask = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
+            xi_direction = jnp.where(projection_mask[..., 0], xi_hat, 0.0)
+            projection_error = jnp.where(
+                projection_mask, (pred_hat - target_hat).astype(jnp.complex128), 0.0,
+            )[..., 0]
+            direction_squared = jnp.sum(jnp.abs(xi_direction) ** 2, axis=1)
+            projection_dot = jnp.real(jnp.sum(jnp.conj(xi_direction) * projection_error, axis=1))
+            direction_active = direction_squared > jnp.finfo(xi.dtype).eps * jnp.sum(
+                jnp.abs(xi_hat[:, 1:]) ** 2, axis=1,
+            )
+            projection_squared = jnp.where(
+                direction_active,
+                projection_dot**2 / jnp.where(direction_active, direction_squared, 1.0),
+                0.0,
+            )
+            emphasized_squared_error: jax.Array = data_squared_error + args.data_xi_projection_weight * projection_squared
+            emphasized_zero_error = emphasized_squared_error == 0.0
+            data_error_norm = jnp.where(
+                emphasized_zero_error, 0.0,
+                jnp.sqrt(jnp.where(emphasized_zero_error, 1.0, emphasized_squared_error)),
+            )
         denominator = data_target_norm
         if args.model == "cs_dno":
             if args.data_normalization == "residual":
