@@ -839,6 +839,7 @@ def test_nested_branch_formula_and_gradients() -> None:
     block = CraigSulemBlock(4, 2 * pi, 5.0, 16, nested=True)
     variables = unfreeze(block.init(jax.random.PRNGKey(19), features, xi, depth, eta_norm=eta))
     assert set(variables["params"]) == {"m_shared", "m_inner", "gamma"}
+    assert variables["params"]["gamma"].dtype == jnp.float32
     assert jnp.all(block.apply(variables, features, xi, depth, eta_norm=eta) == 0)
     variables["params"]["gamma"] = jnp.asarray([0.1, -0.2, 0.3, -0.4], dtype=jnp.float32)
     multiplier = DepthAwareMultiplier(4, 2 * pi, 5.0, 16)

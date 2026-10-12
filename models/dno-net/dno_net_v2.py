@@ -109,7 +109,7 @@ class CraigSulemBlock(nn.Module):
             inner_field = jnp.fft.irfft(
                 inner_multiplier * inner_hat, n=grid_size, axis=1, norm="forward",
             )
-            gamma = self.param("gamma", nn.initializers.zeros, (self.n_branches,))
+            gamma = self.param("gamma", nn.initializers.zeros, (self.n_branches,), jnp.float32)
             weighted_xi = gamma * surface * inner_field
         else:
             weighted_xi = cast(jnp.ndarray, spatial_weights) * filtered_xi
