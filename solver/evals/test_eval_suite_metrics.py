@@ -319,6 +319,95 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertLess(float(jnp.linalg.norm(error) / jnp.linalg.norm(expected)), 5e-7)
                             self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
+    def test_nested_fused_fourier_path_preserves_signed_nested_contribution(self) -> None:
+        from contextlib import nullcontext
+        from scripts import benchmark_dno_fusion as fusion
+
+        nx = 1024
+
+        def fft_cpu(a: jax.Array, n: int, *, inverse: bool = False,
+                    b: jax.Array | None = None, outer: jax.Array | None = None,
+                    channels_last: bool = False, **_: Any) -> jax.Array:
+            if b is not None:
+                a = (jnp.moveaxis(a, -1, -2) if channels_last else a) * b
+            result = jnp.fft.irfft(a, n=n) if inverse else jnp.fft.rfft(a, n=n)
+            return result if outer is None else result * outer
+
+        def fields_cpu(inputs_hat: jax.Array, operators: jax.Array, filters: jax.Array,
+                       *, n: int, normalized_inputs: jax.Array, **_: Any) -> tuple[jax.Array, jax.Array]:
+            eta = normalized_inputs[:, 0]
+            features = jnp.concatenate((jnp.stack((eta, eta**2, eta**3), axis=1),
+                                        jnp.fft.irfft(operators * inputs_hat[:, :1], n=n)), axis=1)
+            return features, jnp.fft.irfft(filters * inputs_hat[:, 1:2], n=n)
+
+        def sandwich_cpu(eta: jax.Array, xi: jax.Array, symbols: jax.Array, **_: Any) -> jax.Array:
+            return symbols * jnp.fft.rfft(
+                eta[:, None, :] * jnp.fft.irfft(symbols * xi[:, None, :], n=nx), n=nx,
+            )
+
+        model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=1, latent=2, mult_hidden=4,
+                             eta_scale=0.3, xi_scale=0.7, target_scale=0.8, baseline_true_depth=True,
+                             surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
+                             surface_context_width=4)
+        params = cast(dict[str, Any], model.init(
+            jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
+            jnp.zeros((1, 1), jnp.float32))["params"])
+        params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
+            params["cs_block_0"]["phi_proj"]["kernel"], 0.1)
+        block = params["cs_block_1"]
+        block["gamma"] = jnp.asarray([0.13, -0.19], jnp.float32)
+        for name, bias in (("m_shared", [0.6, -0.45]), ("m_inner", [-0.4, 0.7])):
+            block[name]["out"]["kernel"] *= 0.03
+            block[name]["out"]["bias"] = jnp.asarray(bias, jnp.float32)
+        zero_params = {**params, "cs_block_1": {**block, "gamma": jnp.zeros_like(block["gamma"])}}
+        stats = {"feature_absmax": [0.3, 0.7], "target_absmax": 1.1}
+        loaded = LoadedRun(model, params, {"model": "cs_dno"}, stats, "scale", 1)
+        zero = LoadedRun(model, zero_params, loaded.config, stats, "scale", 1)
+        name = "fourier_fused_features_product_overlap"
+        x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+        with patch.object(fusion, "fft", side_effect=fft_cpu), patch.object(
+            fusion, "field_irfft", side_effect=fields_cpu,
+        ), patch.object(fusion, "sandwich", side_effect=sandwich_cpu), patch.object(
+            fusion, "compute_on", return_value=nullcontext(),
+        ):
+            for batch in (1, 32):
+                with self.subTest(batch=batch):
+                    phase = jnp.arange(batch, dtype=jnp.float64)[:, None] / 7
+                    eta = 0.015 + 0.04 * jnp.cos(2 * x + phase) + 0.01 * jnp.sin(5 * x - phase)
+                    xi = 0.2 * jnp.sin(x + phase) - 0.05 * jnp.cos(3 * x - phase)
+                    depth = jnp.log(jnp.linspace(0.08, 8., batch, dtype=jnp.float32))[:, None]
+                    forward = fusion.build_variant(loaded, depth, nx, name)
+                    fused = fusion.build_variant(loaded, depth, nx, name + "_nestedfused")
+                    without = fusion.build_variant(zero, depth, nx, name)
+                    fused_without = fusion.build_variant(zero, depth, nx, name + "_nestedfused")
+                    eta_hat, xi_hat = jnp.fft.rfft(eta), jnp.fft.rfft(xi)
+                    expected, actual = forward(eta_hat, xi_hat), fused(eta_hat, xi_hat)
+                    np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
+                    multiplier = fusion.DepthAwareMultiplier(2, model.domain_length, model.h_clip_max, 4)
+                    outer, inner = (jnp.moveaxis(cast(jax.Array, multiplier.apply(
+                        {"params": block[key]}, depth, nx // 2 + 1)), -1, 1)
+                        for key in ("m_shared", "m_inner"))
+                    surface = (jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / np.float32(0.3)
+                               / np.float32(0.2))[:, None, :]
+                    potential = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32)
+                                 / np.float32(0.7)) * model.xi_scale
+                    middle = jnp.fft.irfft(inner * jnp.fft.rfft(
+                        surface * jnp.fft.irfft(outer * jnp.fft.rfft(potential)[:, None], n=nx)), n=nx)
+                    nested = jnp.sum(outer * jnp.fft.rfft(block["gamma"][None, :, None] * surface * middle), axis=1)
+                    nested = (nested / 2).astype(jnp.complex128) * (1.1 / model.target_scale)
+                    nested = nested.at[:, 0].set(0).at[:, -1].set(nested[:, -1].real)
+                    self.assertGreater(float(jnp.linalg.norm(nested)), 1e-3)
+                    for result in (expected - without(eta_hat, xi_hat), actual - fused_without(eta_hat, xi_hat)):
+                        self.assertLess(float(jnp.linalg.norm(result - nested) / jnp.linalg.norm(nested)), 3e-6)
+                    stages_eta = jnp.stack((eta_hat, 0.8 * eta_hat))
+                    stages_xi = jnp.stack((xi_hat, 1.3 * xi_hat))
+                    stages = jax.jit(jax.vmap(fused))(stages_eta, stages_xi)
+                    np.testing.assert_allclose(stages, jax.jit(jax.vmap(forward))(stages_eta, stages_xi),
+                                               rtol=3e-6, atol=2e-7)
+                    isolated = stages - jax.jit(jax.vmap(fused_without))(stages_eta, stages_xi)
+                    reference = jnp.stack((nested, 0.8**2 * 1.3 * nested))
+                    self.assertLess(float(jnp.linalg.norm(isolated - reference) / jnp.linalg.norm(reference)), 3e-6)
+
     def test_exact_solver_g0_uses_original_spectrum_without_rescaling_other_terms(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant
         from solver.solvers import time_integrator as ti

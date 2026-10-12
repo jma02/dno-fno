@@ -47,6 +47,7 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_fields_overlap", "fourier_fused_g1_overlap",
           "fourier_fused_features", "fourier_fused_features_overlap",
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
+          "fourier_fused_features_product_overlap_nestedfused",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
@@ -72,6 +73,8 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    nested_fused = variant.endswith("_nestedfused")
+    variant = variant.removesuffix("_nestedfused")
     exact_g0 = variant.endswith("_exactg0")
     variant = variant.removesuffix("_exactg0")
     coarse_correction = variant.endswith("_grid512")
@@ -117,6 +120,8 @@ def build_variant(
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
+    if nested_fused and (nx != 1024 or coarse_correction or not model.nested_blocks or not spectral_io):
+        raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
     if exact_g0 and (solver_g0 is None or not spectral_io or not include_baselines or model.baseline_order != 1):
         raise ValueError("Exact solver G0 requires its symbol and Fourier M1 inference with baselines.")
     if model.nested_blocks:
@@ -175,7 +180,7 @@ def build_variant(
                 model.surface_feature_transform, dtype=first_projection_kernel.dtype,
             ) @ first_projection_kernel
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
-        inner_filters = gamma = None
+        inner_filters = gamma = nested_symbols = None
         if model.nested_blocks:
             inner = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max,
                                          model.mult_hidden, model.multiplier_skip, model.log_multiplier_inputs)
@@ -187,6 +192,11 @@ def build_variant(
             gamma = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["gamma"]
                                          for i in range(ordinary_blocks, model.n_blocks)))
             jax.block_until_ready((inner_filters, gamma))
+            if nested_fused:
+                nested_symbols = jnp.ones(
+                    (inner_filters.shape[0] * inner_filters.shape[1], 1, nx // 2 + 1), dtype=jnp.complex64,
+                )
+                jax.block_until_ready(nested_symbols)
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
         log_depth = depth.astype(jnp.float32).reshape(-1, 1)
@@ -339,9 +349,18 @@ def build_variant(
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
                 inner_hat = jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:])
-                middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=correction_nx)
-                nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
-                    cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :] * middle)
+                if nested_fused:
+                    inner_hat = cast(jax.Array, inner_filters) * inner_hat
+                    # Preserve the first FFT; unit symbols fuse IFFT/product/FFT with unnormalized output.
+                    surface = cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :]
+                    nested_hat = filters[:, ordinary_branches:] * sandwich(
+                        surface.reshape(-1, correction_nx), inner_hat.reshape(-1, inner_hat.shape[-1]),
+                        cast(jax.Array, nested_symbols), spectral=True, ept=fft_ept,
+                    ).reshape(inner_hat.shape)
+                else:
+                    middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=correction_nx)
+                    nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
+                        cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :] * middle)
                 correction_hat = correction_hat + jnp.sum(nested_hat, axis=1)
             correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if coarse_correction:
