@@ -342,7 +342,7 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04", "Batch 32 · Hadamard × 4", "#a65d82", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_seed1", "Batch 32 · Hadamard × 4 · seed 1", "#a65d82", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128", "Batch 32 · HD × 4 · modes ≤128", "#967228", "h"),
-            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_seed1", "Batch 32 · HD × 4 · modes ≤128 · seed 1", "#967228", "X"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_seed1", "Batch 32 · HD × 4 · ≤128 · seed 1", "#967228", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4", "Batch 32 · HD × 4 · xi norm", "#557d91", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4_seed1", "Batch 32 · HD × 4 · xi norm · seed 1", "#557d91", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch64_softcurv", "Batch 64 · softened curvature", "#86713c", "p"),
