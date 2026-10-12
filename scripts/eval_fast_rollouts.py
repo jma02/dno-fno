@@ -48,6 +48,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
+    parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--correction-grid", type=int, choices=(512, 1024), default=1024,
                         help="Learned correction grid; the analytic baseline and solver stay at 1024.")
     args = parser.parse_args()
@@ -60,14 +61,16 @@ def main() -> None:
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
         + ("_grid512" if args.correction_grid == 512 else "")
-        + ("_exactg0" if args.exact_solver_g0 else ""))
+        + ("_exactg0" if args.exact_solver_g0 else "")
+        + ("_nestedfused" if args.fuse_nested_fft else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = load_run(run_dir, checkpoint=args.checkpoint)
     dataset = Path(loaded.config["dataset"])
     dataset = dataset if dataset.is_absolute() else ROOT / dataset
     variant = ("fourier_fused_features_product_overlap"
                + ("_grid512" if args.correction_grid == 512 else "")
-               + ("_exactg0" if args.exact_solver_g0 else ""))
+               + ("_exactg0" if args.exact_solver_g0 else "")
+               + ("_nestedfused" if args.fuse_nested_fft else ""))
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,
         "path": str(run_dir / f"{args.checkpoint}_ckpt"), "epoch": loaded.epoch,

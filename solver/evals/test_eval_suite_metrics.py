@@ -551,15 +551,17 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
-                for reference_args, offset, suffix, exact_g0, selection in (
-                    (["--reference-run", str(reference)], 0.5, "", True, "weight_ema"),
-                    (["--reference-run", str(reference)], 0.5, "", False, "weight_ema"),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, "weight_ema"),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, "weight_ema_secondary"),
+                for reference_args, offset, suffix, exact_g0, fuse_nested, selection in (
+                    (["--reference-run", str(reference)], 0.5, "", True, True, "weight_ema"),
+                    (["--reference-run", str(reference)], 0.5, "", True, False, "weight_ema"),
+                    (["--reference-run", str(reference)], 0.5, "", False, False, "weight_ema"),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema"),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema_secondary"),
                 ):
                     with self.subTest(offset=offset, selection=selection), patch("sys.argv", [
                         "eval_fast_rollouts", "--run-dir", str(directory), "--project-momentum", *reference_args,
                         *(["--exact-solver-g0"] if exact_g0 else []),
+                        *(["--fuse-nested-fft"] if fuse_nested else []),
                         *(["--checkpoint", selection] if selection != "weight_ema" else []),
                     ]):
                         for mocked in (load, load_ics, build, jit, make_params, execute, evaluate):
@@ -570,15 +572,18 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertEqual(call.kwargs, {"ic_quantile_offset": offset})
                         for call in evaluate.call_args_list:
                             self.assertEqual(call.args[4], directory / (
-                                f"eval_fast_{selection}{suffix}_momentum" + ("_exactg0" if exact_g0 else "")))
+                                f"eval_fast_{selection}{suffix}_momentum" + ("_exactg0" if exact_g0 else "")
+                                + ("_nestedfused" if fuse_nested else "")))
                             self.assertEqual(call.args[8]["selection"], selection)
                             self.assertEqual(call.args[8]["path"], str(directory / f"{selection}_ckpt"))
                             self.assertEqual(call.args[7], source)
                             self.assertEqual(call.kwargs["ic_quantile_offset"], offset)
                             self.assertEqual("exactg0" in call.args[8]["implementation"], exact_g0)
+                            self.assertEqual("nestedfused" in call.args[8]["implementation"], fuse_nested)
                         for call in build.call_args_list:
                             self.assertEqual(call.args[3], "fourier_fused_features_product_overlap"
-                                             + ("_exactg0" if exact_g0 else ""))
+                                             + ("_exactg0" if exact_g0 else "")
+                                             + ("_nestedfused" if fuse_nested else ""))
                             if exact_g0:
                                 self.assertEqual(set(call.kwargs), {"fft_ept", "solver_g0"})
                                 np.testing.assert_array_equal(call.kwargs["solver_g0"], solver_g0[..., :5])
