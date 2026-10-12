@@ -125,6 +125,8 @@ def main() -> None:
                         help="Use log1p(k), log(h), tanh(kh), and log1p(k*tanh(kh)) as multiplier inputs.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
+    parser.add_argument("--cs_nested_zero_inner", action="store_true",
+                        help="Initialize nested gates at one and inner output weights at zero.")
     parser.add_argument("--cs_nested_surface_modulation", action="store_true",
                         help="Apply a shared bounded eta/h modulation to both nested surface factors.")
     parser.add_argument(
@@ -509,6 +511,8 @@ def main() -> None:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
+    if args.cs_nested_zero_inner and not args.cs_nested_blocks:
+        parser.error("--cs_nested_zero_inner requires --cs_nested_blocks > 0")
     if args.cs_nested_surface_modulation and not args.cs_nested_blocks:
         parser.error("--cs_nested_surface_modulation requires --cs_nested_blocks > 0")
     if args.model != "cs_dno" and (
@@ -679,6 +683,11 @@ def main() -> None:
             jnp.zeros((1, nx, 2), dtype=training_dtype),
             jnp.zeros((1, 1), dtype=training_dtype),
         )["params"]
+        if args.cs_nested_zero_inner:
+            for block_idx in range(args.n_blocks - args.cs_nested_blocks, args.n_blocks):
+                group = params[f"cs_block_{block_idx}"]
+                group["gamma"] = jnp.ones_like(cast(jax.Array, group["gamma"]))
+                group["m_inner"]["out"] = jax.tree.map(jnp.zeros_like, group["m_inner"]["out"])
         if args.init_checkpoint and not (run_dir / "latest_ckpt" / "metadata.json").exists():
             restored_weights = checkpoints.restore_checkpoint(
                 ckpt_dir=Path(args.init_checkpoint).resolve(), target=None,

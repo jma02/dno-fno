@@ -901,6 +901,79 @@ def test_milestone_rollouts_use_only_started_weight_ema() -> None:
                                 "path": str(namespace["run_dir"] / "weight_ema_ckpt"), "epoch": 1}
 
 
+def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
+    main = trainer_function("main")
+    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                              and isinstance(node.value, ast.Call) and node.value.args
+                              and isinstance(node.value.args[0], ast.Constant)
+                              and node.value.args[0].value in ("--cs_nested_blocks", "--cs_nested_zero_inner")]
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "args.cs_nested_zero_inner" in ast.unparse(node.test))
+    initialization = next(node for node in main.body if isinstance(node, ast.With)
+                          and any(isinstance(child, ast.Assign) and isinstance(child.targets[0], ast.Name)
+                                  and child.targets[0].id == "params" for child in node.body))
+    replacement = next(node for node in initialization.body if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == "args.cs_nested_zero_inner")
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "jax": jax, "jnp": jnp, "cast": cast}
+    exec(compile(ast.Module(body=options, type_ignores=[]), "nested_zero_inner_options", "exec"), namespace)
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "nested_zero_inner_validation", "exec")
+    initialize = compile(ast.Module(body=[initialization.body[0], replacement], type_ignores=[]),
+                         "nested_zero_inner_initialization", "exec")
+    assert parser.parse_args([]).cs_nested_zero_inner is False
+    namespace["args"] = parser.parse_args(["--cs_nested_zero_inner"])
+    with patch.object(parser, "error", side_effect=ValueError):
+        with np.testing.assert_raises(ValueError):
+            exec(validate, namespace)
+    nx = 32
+    inputs = 0.05 * jax.random.normal(jax.random.PRNGKey(41), (2, nx, 2), dtype=jnp.float32)
+    depth = jnp.log(jnp.asarray([[0.8], [8.0]], dtype=jnp.float32))
+    for nested_blocks in (1, 2):
+        model = CraigSulemDNO(
+            width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
+            surface_context_width=2, surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
+            baseline_true_depth=True, eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
+        )
+        namespace.update(model=model, nx=nx, training_dtype=jnp.float32)
+        reference = model.init(jax.random.PRNGKey(0), jnp.zeros((1, nx, 2), dtype=jnp.float32),
+                               jnp.zeros((1, 1), dtype=jnp.float32))["params"]
+        baseline = cast(tuple[jax.Array, jax.Array, jax.Array],
+                        model.apply({"params": reference}, inputs, depth, return_baseline=True))[1]
+        target = baseline + 0.02 * jax.random.normal(jax.random.PRNGKey(42), baseline.shape, dtype=baseline.dtype)
+        for enabled in (False, True):
+            config = parser.parse_args(["--cs_nested_blocks", str(nested_blocks)]
+                                       + (["--cs_nested_zero_inner"] if enabled else []))
+            config.seed, config.n_blocks = 0, 2
+            namespace["args"] = config
+            exec(validate, namespace)
+            exec(initialize, namespace)
+            params = namespace["params"]
+            assert jax.tree.structure(params) == jax.tree.structure(reference)
+            assert sum(leaf.size for leaf in jax.tree.leaves(params)) == sum(leaf.size for leaf in jax.tree.leaves(reference))
+            for (path, actual), expected in zip(jax.tree.flatten_with_path(params)[0], jax.tree.leaves(reference), strict=True):
+                assert actual.dtype == expected.dtype
+                names = tuple(key.key for key in path)
+                nested = names[0] in tuple(f"cs_block_{i}" for i in range(2 - nested_blocks, 2))
+                if enabled and nested and names[1:] == ("gamma",):
+                    np.testing.assert_array_equal(actual, jnp.ones_like(expected))
+                elif enabled and nested and names[1:3] == ("m_inner", "out"):
+                    np.testing.assert_array_equal(actual, jnp.zeros_like(expected))
+                else:
+                    np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(model.apply({"params": params}, inputs, depth), baseline)
+            value, gradient = jax.value_and_grad(lambda parameters: relative_l2_loss(
+                cast(jax.Array, model.apply({"params": parameters}, inputs, depth)), target,
+            ))(params)
+            assert value > 0 and all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(gradient))
+            for index in range(2 - nested_blocks, 2):
+                group = gradient[f"cs_block_{index}"]
+                assert (float(jnp.linalg.norm(group["gamma"])) == 0) == enabled
+                for leaf in jax.tree.leaves((group["m_shared"], group["m_inner"]["hidden"])):
+                    np.testing.assert_array_equal(leaf, 0)
+                for leaf in jax.tree.leaves(group["m_inner"]["out"]):
+                    assert (float(jnp.linalg.norm(leaf)) > 0) == enabled
+
+
 def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     nx = 32
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
@@ -2112,6 +2185,7 @@ if __name__ == "__main__":
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()
     test_milestone_rollouts_use_only_started_weight_ema()
+    test_nested_zero_inner_initialization_and_gradient_activation()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
