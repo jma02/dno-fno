@@ -1,4 +1,4 @@
-"""Evaluate weight-EMA accuracy with the timed Fourier-I/O implementation.
+"""Evaluate checkpoint accuracy with the timed Fourier-I/O implementation.
 
 Reuses saved M6 references from this run, --reference-run, or --reference-dir. Initial conditions
 come from the candidate's dataset, so native candidate rollouts are unnecessary.
@@ -40,7 +40,7 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary"), default="weight_ema")
+    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary", "latest"), default="weight_ema")
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")

@@ -1514,6 +1514,9 @@ def main() -> None:
         if args.stop_after_epoch and epoch > args.stop_after_epoch:
             break
         if 0 < args.early_stopping_patience <= epoch - 1 - best_epoch:
+            print(f"Early stopping after epoch {epoch - 1}: no validation improvement for "
+                  f"{args.early_stopping_patience} epochs; best epoch {best_epoch}, "
+                  f"validation loss {best_val_loss:.8g}", flush=True)
             break
         epoch_start_step, epoch_start_optimizer_count = training_counter_values(
             training_state.replace(opt_state=training_state.opt_state[1]),
