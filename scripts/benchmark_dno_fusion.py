@@ -48,6 +48,7 @@ TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_fused_features", "fourier_fused_features_overlap",
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
           "fourier_fused_features_product_overlap_nestedfused",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
@@ -73,6 +74,8 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    context_batch = variant.endswith("_contextbatch")
+    variant = variant.removesuffix("_contextbatch")
     nested_fused = variant.endswith("_nestedfused")
     variant = variant.removesuffix("_nestedfused")
     exact_g0 = variant.endswith("_exactg0")
@@ -122,6 +125,8 @@ def build_variant(
     model = loaded.model
     if nested_fused and (nx != 1024 or coarse_correction or not model.nested_blocks or not spectral_io):
         raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
+    if context_batch and not model.surface_context_width:
+        raise ValueError("Context/nested FFT batching requires surface context channels.")
     if exact_g0 and (solver_g0 is None or not spectral_io or not include_baselines or model.baseline_order != 1):
         raise ValueError("Exact solver G0 requires its symbol and Fourier M1 inference with baselines.")
     if model.nested_blocks:
@@ -314,17 +319,36 @@ def build_variant(
                     jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
                 ), axis=-1)
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
+            nested_eta = eta_norm
+            if model.nested_blocks:
+                nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
+                if nested_modulation is not None:
+                    gain, actual_depth = nested_modulation
+                    nested_eta = nested_eta * (
+                        1.0 + gain * jnp.tanh(eta_norm * model.eta_scale / actual_depth)
+                    )
             if model.surface_feature_scales is not None:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
             context = None
+            nested_inner_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
                 features = nn.gelu(features @ kernel)
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     context = features @ loaded.params["eta_context_in"]["kernel"]
+                    if context_batch:
+                        # Independent fields share one FFT batch, not Fourier modes.
+                        combined_hat = jnp.fft.rfft(jnp.concatenate((
+                            jnp.moveaxis(context, -1, 1),
+                            nested_eta[:, None, :] * branch_fields[:, ordinary_branches:],
+                        ), axis=1))
+                        context_hat = jnp.moveaxis(combined_hat[:, :model.surface_context_width], 1, -1)
+                        nested_inner_hat = combined_hat[:, model.surface_context_width:]
+                    else:
+                        context_hat = jnp.fft.rfft(context, axis=1)
                     context = jnp.fft.irfft(
-                        context_multiplier * jnp.fft.rfft(context, axis=1), n=correction_nx, axis=1,
+                        context_multiplier * context_hat, n=correction_nx, axis=1,
                     )
                     context = context @ loaded.params["eta_context_expand"]["kernel"]
                     features = features + context
@@ -349,13 +373,8 @@ def build_variant(
                     weighted_hat = ordinary_filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * ordinary_fields)
                 correction_hat = jnp.sum(weighted_hat, axis=1)
             if model.nested_blocks:
-                nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
-                if nested_modulation is not None:
-                    gain, actual_depth = nested_modulation
-                    nested_eta = nested_eta * (
-                        1.0 + gain * jnp.tanh(eta_norm * model.eta_scale / actual_depth)
-                    )
-                inner_hat = jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:])
+                inner_hat = (cast(jax.Array, nested_inner_hat) if context_batch else
+                             jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:]))
                 if nested_fused:
                     inner_hat = cast(jax.Array, inner_filters) * inner_hat
                     # Preserve the first FFT; unit symbols fuse IFFT/product/FFT with unnormalized output.
@@ -653,6 +672,8 @@ if __name__ == "__main__":
                   fourier_fused_fields="Fuse field multipliers + inverse FFT",
                   fourier_balanced_features_overlap="Balance surface-feature stores + G₁ overlap",
                   fourier_fused_features_product_overlap="Fused head product FFT + G₁ overlap",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch="Batch context + nested first FFT",
+                  fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",
                   fourier_fused_inputs="Fuse input inverse FFT + normalization",

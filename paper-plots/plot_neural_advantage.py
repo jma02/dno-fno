@@ -405,13 +405,14 @@ if __name__ == "__main__":
                 ("_exactg0", method.replace("_spectral_all", "_exactg0_spectral_all"), " · exact G₀"),
                 ("_grid512", method.replace("_spectral_all", "_grid512_spectral_all"), " · grid512"),
                 ("_nestedfused", method.replace("_spectral_all", "_nestedfused_spectral_all"), " · FFT fusion trial"),
+                ("_nestedfused_contextbatch", method.replace("_spectral_all", "_nestedfused_contextbatch_spectral_all"), " · batched FFTs"),
             ):
                 fast_dir = run / f"eval_fast_weight_ema{fast_suffix}"
                 fast_results = fast_dir / "all_summaries.json"
                 fast_timings = fast_dir / "single_rollout_timings.json"
                 if fast_results.exists() and fast_timings.exists():
                     measured = json.loads(fast_timings.read_text())
-                    if all(family in measured["families"] for family, _ in FAMILIES):
+                    if any(family in measured["families"] for family, _ in FAMILIES):
                         display_label = "Nested" if fast_suffix == "_nestedfused" and suffix.endswith("_nested1") else label.removeprefix("Gradient EMA .5 + ")
                         completed.append((json.loads(fast_results.read_text()), measured,
                                           display_label + label_suffix,
@@ -435,11 +436,20 @@ if __name__ == "__main__":
             classical_seconds = [float(np.median(json.loads(
                 (ROOT / f"outputs/momentum_classical_M{order}_timing_20261010/{family}_timing.json").read_text(),
             )["methods"]["none"]["seconds"])) for order in orders]
+            for _, measured, *_ in completed:
+                if measured.get("classical_backend") != "interleaved_cufftdx":
+                    continue
+                for index, order in enumerate(orders):
+                    direct = measured["families"].get(family, {}).get("methods", {}).get(f"M{order}_boundaries_stages_carry_local")
+                    if direct is not None:
+                        classical_seconds[index] = float(np.median(direct["seconds"]))
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
             points = []
             for results, timings, label, color, marker, timing_method in completed:
+                if family not in timings["families"]:
+                    continue
                 result = results[family]
                 seconds = float(np.median(timings["families"][family]["methods"][timing_method]["seconds"]))
                 failures = result["model_nonfinite_any_count_truth_valid"]

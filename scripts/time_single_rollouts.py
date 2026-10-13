@@ -32,6 +32,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from scripts.benchmark_dno_fusion import G1_FP32_TRIALS, TUNED_TRIALS, build_variant  # noqa: E402
+from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, rollout_if_trial, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
@@ -64,6 +65,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features", "fourier_fused_features_overlap",
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
     "fourier_fused_features_product_overlap_nestedfused",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch",
     "fourier_fused_features_product_overlap_exactg0",
     "fourier_fused_features_product_overlap_grid512",
     "fourier_balanced_features_product_overlap",
@@ -94,6 +96,7 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
+    parser.add_argument("--classical-backend", choices=("cufft", "interleaved_cufftdx"), default="cufft")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
     parser.add_argument("--checkpoint", choices=("best", "latest", "final", "weight_ema", "weight_ema_secondary"), default="best")
     parser.add_argument("--methods", nargs="+", choices=tuple(
@@ -111,6 +114,10 @@ if __name__ == "__main__":
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
+    if args.classical_backend != "cufft" and any(
+        name.startswith("M") and "carry" not in name and "local" not in name for name in methods
+    ):
+        parser.error("optimized classical timing requires a carry or local method")
     base_methods = set(map(method_base, methods))
     if (args.reference != "cached_M6" and args.reference not in methods) or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
         parser.error("methods must include the reference unless cached_M6; candidate methods require --candidate-run")
@@ -126,6 +133,7 @@ if __name__ == "__main__":
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
+        "classical_backend": args.classical_backend,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
@@ -169,9 +177,17 @@ if __name__ == "__main__":
                 pad_factor=args.pad_factor, filter_fraction=cfg.filter_fraction,
             )
             if method.startswith("M"):
+                if args.classical_backend == "interleaved_cufftdx":
+                    spectral_predict = partial(
+                        classical_hat, k=params.k[:params.nx // 2 + 1],
+                        g0=params.g0[..., :params.nx // 2 + 1], nx=params.nx,
+                        order=params.dno_order, pad_factor=args.pad_factor,
+                        backend="interleaved_cufftdx", precision="fp64", ept=args.ept,
+                    )
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
-                                    half_spectrum="half" in options, project_momentum="momentum" in options)
+                                    half_spectrum="half" in options, project_momentum="momentum" in options,
+                                    predict_hat=spectral_predict)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
                                    implicit_iterations=4, zero_mean_xi=True))

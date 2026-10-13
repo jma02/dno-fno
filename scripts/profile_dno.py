@@ -57,7 +57,7 @@ def summarize_jax_trace(path: Path, names: set[str]) -> dict[str, Any]:
             kernel, duration = event["name"], event["dur"]
             kind = "Other kernels"
             if "sandwich_kernel" in kernel:
-                kind = "FP64 cuFFTDx G1"
+                kind = "FP64 cuFFTDx G1" if "double" in kernel else "FP32 FFTs"
             elif "fft" in kernel.lower() or "scal_kernel" in kernel:
                 kind = "FP64 FFTs" if "double" in kernel else "FP32 FFTs"
             elif "gemm" in kernel or "matmul" in kernel:
@@ -89,10 +89,13 @@ def summarize_jax_trace(path: Path, names: set[str]) -> dict[str, Any]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
+    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary"), default="weight_ema")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_profile_20260924")
     parser.add_argument("--depth-mode", choices=("fixed", "dynamic"), default="fixed")
     parser.add_argument("--variant", choices=("original", "cufftdx", "fourier_round",
-        "fourier_fused_features_product_overlap", "classical_m2", "classical_m6"), default="original")
+        "fourier_fused_features_product_overlap", "fourier_fused_features_product_overlap_nestedfused",
+        "fourier_fused_features_product_overlap_nestedfused_contextbatch",
+        "classical_m2", "classical_m6"), default="original")
     parser.add_argument("--stages", type=int, choices=(1, 2), default=1,
                         help="One forward or two vmap-paired GL2 stage forwards; trajectory batch stays one.")
     parser.add_argument("--capture", type=int, default=0, help="Capture this many warmed calls instead of benchmarking.")
@@ -338,7 +341,7 @@ if __name__ == "__main__":
             fig.savefig(ROOT / "paper-plots/figures" / f"13-model-roofline.{suffix}", dpi=180)
         print(f"Saved measured forward analysis to {args.output / 'analysis.json'}", flush=True)
         raise SystemExit(0)
-    loaded = load_run(args.run)
+    loaded = load_run(args.run, checkpoint=args.checkpoint)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
         "eval_best_current_test_stratified_n32*/stokes_trajs.npz"
     ))
@@ -450,7 +453,7 @@ if __name__ == "__main__":
     nx = eta.shape[-1]
     classical_order = int(args.variant[-1]) if args.variant.startswith("classical_") else None
     spectral_io = args.variant.startswith(("fourier", "classical_"))
-    current = classical_order is not None or args.variant == "fourier_fused_features_product_overlap"
+    current = classical_order is not None or args.variant.startswith("fourier_fused_features_product_overlap")
     # Rollouts hold depth fixed: its multiplier MLPs can be constant-folded.
     function = jax.jit((lambda eta, xi: predict(eta, xi, depth)) if args.depth_mode == "fixed" else predict)
     reference_function = jax.jit(lambda e, x: predict(e, x, depth))
@@ -516,6 +519,7 @@ if __name__ == "__main__":
             durations.append(time.perf_counter() - started)
         report = {
             "run": None if classical_order else str(args.run), "checkpoint_epoch": None if classical_order else loaded.epoch,
+            "checkpoint": None if classical_order else args.checkpoint,
             "parameters": 0 if classical_order else sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
             "device": jax.devices()[0].device_kind, "jax_version": jax.__version__,
             "batch_size": 1, "stages": args.stages, "nx": nx, "depth_mode": args.depth_mode,
