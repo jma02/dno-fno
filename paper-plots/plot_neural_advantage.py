@@ -347,7 +347,9 @@ if __name__ == "__main__":
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_seed1", "Nested · seed 1", "#466d9e", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_zeroinner", "Nested · zero inner", "#6f8245", "v"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32", "Nested · FP32 training gate", "#995b37", "s"),
-            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32", "Nested · FP32 gate · batch 16", "#9c7538", "s"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32_seed1", "Nested · FP32 · B32 · seed 1", "#995b37", "X"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32", "Nested · FP32 · B16", "#9c7538", "s"),
+            ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_seed1", "Nested · FP32 · B16 · seed 1", "#9c7538", "X"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation", "Nested · surface modulation", "#a75b72", "P"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4", "Batch 32 · HD × 4 · xi norm", "#557d91", "s"),
             ("lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_xiproj4_seed1", "Batch 32 · HD × 4 · xi norm · seed 1", "#557d91", "X"),
@@ -377,7 +379,9 @@ if __name__ == "__main__":
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_seed1",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_zeroinner",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32",
+                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_gamma32_seed1",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32",
+                          "lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_seed1",
                           "lr8_momentum_half_ema995_grad05_adam05_b2099_batch32_hd04_band128_nested1_modulation"):
                 run_date = "20261012"
             run = ROOT / f"outputs/c27_phase1_{suffix}_full_{run_date}"
@@ -408,10 +412,10 @@ if __name__ == "__main__":
                 if fast_results.exists() and fast_timings.exists():
                     measured = json.loads(fast_timings.read_text())
                     if all(family in measured["families"] for family, _ in FAMILIES):
-                        display_label = "Nested" if fast_suffix == "_nestedfused" else label.removeprefix("Gradient EMA .5 + ")
+                        display_label = "Nested" if fast_suffix == "_nestedfused" and suffix.endswith("_nested1") else label.removeprefix("Gradient EMA .5 + ")
                         completed.append((json.loads(fast_results.read_text()), measured,
                                           display_label + label_suffix,
-                                          color, "D", timing_method))
+                                          color, "X" if suffix.endswith("_seed1") else "D", timing_method))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
