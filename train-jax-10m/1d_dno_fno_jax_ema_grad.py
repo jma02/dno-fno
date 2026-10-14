@@ -177,9 +177,10 @@ def main() -> None:
         "--epochs",
         type=int,
         default=1,
-        help="Final epoch number and learning-rate schedule length. "
-        "Keep the same value when resuming; completed epochs are not repeated.",
+        help="Final epoch number; also the default schedule horizon. Completed epochs are not repeated.",
     )
+    parser.add_argument("--schedule_epochs", type=int, default=0,
+                        help="Initial LR schedule and weight-EMA start horizon, independent of final epoch; 0 uses --epochs.")
     parser.add_argument(
         "--stop_after_epoch", type=int, default=1,
         help="Stop after this epoch without shortening the learning-rate schedule; 0 runs all epochs.",
@@ -202,6 +203,8 @@ def main() -> None:
     parser.add_argument("--amplitude_probe_scale", type=float, default=0.0,
                         help="Scale original-source eta for extra M6 data supervision on rollout-teacher updates; 0 disables, otherwise must be in (0, 1).")
     parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--lr_continuation", type=float, default=0.0,
+                        help="LR after the initial schedule: ramp from zero over --lr_warmup_steps, then hold constant.")
     parser.add_argument(
         "--lr_warmup_steps",
         type=int,
@@ -228,7 +231,7 @@ def main() -> None:
     parser.add_argument("--weight_ema_secondary_decay", type=float, default=0.0,
                         help="Optional second inference-only EMA sharing the primary start; 0 disables it.")
     parser.add_argument("--weight_ema_start_fraction", type=float, default=0.8,
-                        help="Fraction of planned optimizer updates completed before weight averaging starts.")
+                        help="Fraction of the initial schedule completed before weight averaging starts.")
     parser.add_argument("--early_stopping_patience", type=int, default=0)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--run_name", default=None)
@@ -414,6 +417,11 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.schedule_epochs < 0 or args.epochs < 1:
+        parser.error("--schedule_epochs must be nonnegative and --epochs must be positive")
+    schedule_epochs = args.schedule_epochs or args.epochs
+    if not np.isfinite(args.lr_continuation) or args.lr_continuation < 0:
+        parser.error("--lr_continuation must be finite and nonnegative")
     if args.hadamard_flow_probes and args.hadamard_mode != "self":
         parser.error("--hadamard_flow_probes requires --hadamard_mode self")
     if not np.isfinite(args.phase_mechanism_weight) or args.phase_mechanism_weight < 0:
@@ -449,7 +457,7 @@ def main() -> None:
         parser.error("--rollout_epochs requires --weight_ema_decay > 0")
     if not 0.0 <= args.weight_ema_start_fraction < 1.0:
         parser.error("--weight_ema_start_fraction must be in [0, 1)")
-    if args.rollout_epochs and min(args.rollout_epochs) <= args.epochs * args.weight_ema_start_fraction:
+    if args.rollout_epochs and min(args.rollout_epochs) <= schedule_epochs * args.weight_ema_start_fraction:
         parser.error("--rollout_epochs must follow the weight-EMA start; choose later milestones or an earlier --weight_ema_start_fraction")
     if args.metric_interval < 1:
         parser.error("--metric_interval must be positive")
@@ -747,15 +755,15 @@ def main() -> None:
             return model.apply(variables, inputs, depth, return_baseline=return_baseline)
 
     # Set the learning-rate schedule and initialize AdamW's update state.
-    total_steps = args.epochs * train_steps_per_epoch
+    schedule_steps = schedule_epochs * train_steps_per_epoch
     if args.lr_hold_fraction > 0:
-        hold_steps = int(total_steps * args.lr_hold_fraction)
+        hold_steps = int(schedule_steps * args.lr_hold_fraction)
         if hold_steps < args.lr_warmup_steps:
             parser.error("--lr_hold_fraction must end at or after --lr_warmup_steps")
         lr_schedule = optax.join_schedules(
             [optax.warmup_constant_schedule(0.0, args.lr, args.lr_warmup_steps)
              if args.lr_warmup_steps > 0 else optax.constant_schedule(args.lr),
-             optax.cosine_decay_schedule(init_value=args.lr, decay_steps=total_steps - hold_steps)],
+             optax.cosine_decay_schedule(init_value=args.lr, decay_steps=schedule_steps - hold_steps)],
             boundaries=[hold_steps],
         )
     elif args.lr_warmup_steps > 0:
@@ -763,14 +771,23 @@ def main() -> None:
             init_value=0.0,
             peak_value=args.lr,
             warmup_steps=args.lr_warmup_steps,
-            decay_steps=total_steps,
+            decay_steps=schedule_steps,
             end_value=0.0,
         )
     else:
         lr_schedule = optax.cosine_decay_schedule(
             init_value=args.lr,
-            decay_steps=total_steps,
+            decay_steps=schedule_steps,
         )
+    if args.lr_continuation > 0:
+        lr_schedule = optax.join_schedules(
+            [lr_schedule,
+             optax.warmup_constant_schedule(0.0, args.lr_continuation, args.lr_warmup_steps)
+             if args.lr_warmup_steps > 0 else optax.constant_schedule(args.lr_continuation)],
+            boundaries=[schedule_steps],
+        )
+        print(f"LR continuation after update {schedule_steps}: "
+              f"{args.lr_warmup_steps}-update ramp to {args.lr_continuation}, then constant")
     optimizer_transforms: list[optax.GradientTransformation] = [
         optax.ema(args.gradient_ema_decay, debias=True),
         optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, b2=args.adam_b2,
@@ -790,7 +807,7 @@ def main() -> None:
         apply_fn=apply_model, params=params, tx=optimizer,
         weight_ema_params=params if args.weight_ema_decay > 0.0 else None,
         weight_ema_decay=args.weight_ema_decay,
-        weight_ema_start_step=int(total_steps * args.weight_ema_start_fraction),
+        weight_ema_start_step=int(schedule_steps * args.weight_ema_start_fraction),
         weight_ema_secondary_params=params if args.weight_ema_secondary_decay > 0.0 else None,
         weight_ema_secondary_decay=args.weight_ema_secondary_decay,
     )
