@@ -2,6 +2,8 @@
 
 The approved continuation and both primary-EMA rollout evaluations finished at 06:12; launcher/session59927 exited successfully. No epoch beyond 3 was launched. Epoch 3 is the strongest aggregate checkpoint of this pilot, but a 60–120-epoch transfer remains unverified.
 
+CPU resume-readiness check: epoch3 TrainState, gradient-EMA, Adam and schedule counters all equal2211885. All52 raw-parameter,159 optimizer-state and52 weight-EMA leaves are finite; every saved EMA leaf exactly equals the primary inference export. Full optimizer and both EMA states are therefore retained, not just inference weights. No restore or new training was launched.
+
 Epoch-3 Stokes tail follow-up, saved fields only: aligned median/p95 improve from epoch1 .000239/.003187% to .000157/.002550%, despite the worse unaligned p95. Simulations2247813 and1209885 account for the main regressions: raw errors .003778/.009395% become .034032/.033055%, while aligned errors are .001774/.001875%. Translation accounts for99.73/99.68% of their epoch-3 squared error. This diagnoses phase-dominated tails, not their training cause; periodic multi-crest shifts are nonunique and were not interpreted as unique travel distances.
 
 CPU checks of the actual schedule code passed: all737295 first-epoch LR values match the original exactly; final budgets3 and120 leave the fixed-horizon schedule unchanged. The tail is0 at step737295,4e-6 after250 updates, and8e-6 after500. A resumed EMA state blends its saved shadow instead of reinitializing it; optimizer construction is unchanged.
