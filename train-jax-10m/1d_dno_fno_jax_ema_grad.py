@@ -1484,21 +1484,6 @@ def main() -> None:
     )
     assert_pytree_replicated(training_state, name="training startup state")
 
-    # Repair a best checkpoint interrupted after its latest checkpoint was saved.
-    if history and history[-1]["epoch"] == best_epoch and np.isfinite(best_val_loss):
-        save_checkpoint(
-            run_dir / "best_val_ckpt",
-            state=training_state,
-            history=history,
-            best_val_loss=best_val_loss,
-            best_epoch=best_epoch,
-            stats=stats,
-            async_manager=checkpoint_async_manager,
-        )
-    # Discard log rows not backed by the restored checkpoint, including partial rows.
-    with open(run_dir / "train_log.jsonl", "w", encoding="utf-8") as handle:
-        handle.writelines(json.dumps(row) + "\n" for row in history)
-
     # Load batches and copy the next one to GPUs in the background.
     def prefetch_batches(
         indices: np.ndarray, rng: np.random.Generator | None
@@ -1524,6 +1509,89 @@ def main() -> None:
     # Hadamard folds this fixed key with the GPU index and restored optimizer step.
     train_rng = replicate_pytree_from_host(jax.random.PRNGKey(args.seed + 1), replicated)
     validation_rng = replicate_pytree_from_host(jax.random.PRNGKey(args.seed + 2), replicated)
+
+    def evaluate_validation(current_params: FlatParams) -> dict[str, float]:
+        # Full validation, fixed probes, and the same buffered metric reads as training.
+        val_batch_losses: list[tuple[float, ...]] = []
+        val_batch_sizes: list[int] = []
+        pending_val_losses: list[tuple[jax.Array, ...]] = []
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(
+            prefetch_batches(val_indices, None)
+        ):
+            val_batch_sizes.append(int(eta_b.shape[0]))
+            compiled_eval_step = eval_steps[
+                P("batch") if eta_b.shape[0] % n_devices == 0 else P(),
+                args.hadamard_weight > 0.0 and batch_index % args.val_hadamard_interval == 0,
+            ]
+            batch_val_losses = compiled_eval_step(
+                current_params, validation_rng, batch_index,
+                eta_b, xi_b, gxi_b, depth_b, family_b,
+            )
+            pending_val_losses.append(batch_val_losses)
+            if len(pending_val_losses) == args.metric_interval:
+                val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
+                pending_val_losses.clear()
+        if pending_val_losses:
+            val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
+
+        losses = np.asarray(val_batch_losses)
+        means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
+        tangent_counts = losses[:, 4] * val_batch_sizes
+        means[2] = np.dot(losses[:, 2], tangent_counts) / max(tangent_counts.sum(), 1.0)
+        hadamard_selected = np.arange(len(losses)) % args.val_hadamard_interval == 0
+        means[3] = np.average(losses[hadamard_selected, 3], weights=np.asarray(val_batch_sizes)[hadamard_selected])
+        data, mode, tangent, hadamard = map(float, means)
+        mechanism = float(np.average(losses[:, 6], weights=val_batch_sizes))
+        score = data + args.mode_balanced_weight * mode + args.translation_tangent_weight * tangent + args.phase_mechanism_weight * mechanism
+        if not np.isfinite(score):
+            raise FloatingPointError("Non-finite validation selection score")
+        metrics = {
+            "val_loss": score,
+            "val_l2_loss": float(np.average(losses[:, 5], weights=val_batch_sizes)),
+            "val_data_loss": data,
+            "val_mode_balanced_loss": mode,
+            "val_translation_tangent_loss": tangent,
+            "val_hadamard_loss": hadamard,
+            "val_phase_mechanism_loss": mechanism,
+        }
+        family_totals = np.sum(losses[:, 7:] * np.asarray(val_batch_sizes)[:, None], axis=0).reshape(-1, 5)
+        for family_id, (count, relative, residual, wins, data_sum) in zip(PhysicalFamilyId, family_totals):
+            prefix = f"val_{family_id.name.lower()}"
+            metrics[f"{prefix}_l2_loss"] = float(relative / count)
+            metrics[f"{prefix}_baseline_ratio_floored"] = float(residual / count)
+            metrics[f"{prefix}_baseline_win_fraction"] = float(wins / count)
+            metrics[f"{prefix}_data_loss_share"] = float(data_sum / family_totals[:, 4].sum())
+        return metrics
+
+    # A raw-scored checkpoint must be re-scored before EMA-based early stopping.
+    # Subsequent resumes retain their EMA score and patience history unchanged.
+    if (history and args.weight_ema_decay > 0.0
+            and int(training_state.step) > training_state.weight_ema_start_step
+            and not history[-1].get("val_weight_ema", 0.0)):
+        print(f"Revalidating epoch {start_epoch - 1} weight EMA before continuation", flush=True)
+        history[-1].update(evaluate_validation(training_state.weight_ema_params))
+        history[-1]["val_weight_ema"] = 1.0
+        best_val_loss = history[-1]["val_loss"]
+        best_epoch = start_epoch - 1
+        # Only scores changed; do not overwrite the restored checkpoint payload.
+        metadata_tmp = latest_ckpt_dir / "metadata.json.tmp"
+        metadata_tmp.write_text(json.dumps({
+            "epoch": start_epoch - 1, "train_loss": train_loss,
+            "val_loss": best_val_loss, "history": history,
+            "best_val_loss": best_val_loss, "best_epoch": best_epoch, "stats": stats,
+        }, indent=2), encoding="utf-8")
+        metadata_tmp.replace(metadata_path)
+        print(f"EMA validation baseline: epoch {best_epoch}, loss {best_val_loss:.8g}", flush=True)
+
+    # Retain the full training state and EMA shadow of the selected best epoch.
+    if history and history[-1]["epoch"] == best_epoch and np.isfinite(best_val_loss):
+        save_checkpoint(
+            run_dir / "best_val_ckpt", state=training_state, history=history,
+            best_val_loss=best_val_loss, best_epoch=best_epoch, stats=stats,
+            async_manager=checkpoint_async_manager,
+        )
+    with open(run_dir / "train_log.jsonl", "w", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(row) + "\n" for row in history)
 
     # Train on every sample once per epoch, in a newly shuffled order.
     epoch_bar = tqdm(range(start_epoch, args.epochs + 1), desc="Epochs", leave=False)
@@ -1597,69 +1665,17 @@ def main() -> None:
             )
         train_loss = float(np.average(batch_losses, weights=train_batch_sizes))
 
-        # Evaluate validation samples without shuffling or changing model parameters.
-        val_batch_losses: list[tuple[float, ...]] = []
-        val_batch_sizes: list[int] = []
-        pending_val_losses: list[tuple[jax.Array, ...]] = []
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(
-            prefetch_batches(val_indices, None)
-        ):
-            val_batch_sizes.append(int(eta_b.shape[0]))
-            compiled_eval_step = eval_steps[
-                P("batch") if eta_b.shape[0] % n_devices == 0 else P(),
-                args.hadamard_weight > 0.0 and batch_index % args.val_hadamard_interval == 0,
-            ]
-            batch_val_losses = compiled_eval_step(
-                training_state.params, validation_rng, batch_index,
-                eta_b, xi_b, gxi_b, depth_b, family_b,
-            )
-            pending_val_losses.append(batch_val_losses)
-            if len(pending_val_losses) == args.metric_interval:
-                val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
-                pending_val_losses.clear()
-        if pending_val_losses:
-            val_batch_losses.extend(tuple(map(float, losses)) for losses in jax.device_get(pending_val_losses))
-
-        # Ordinary losses use every batch; HD is a diagnostic on fixed sampled batches.
-        val_data_loss = val_mode_loss = val_tangent_loss = val_hadamard_loss = float("inf")
-        val_full_l2_loss = float("inf")
-        val_mechanism_loss = float("inf")
-        losses = np.asarray(val_batch_losses)
-        if val_batch_losses:
-            means = np.average(losses[:, :4], axis=0, weights=val_batch_sizes)
-            # Weight translation loss by its selected nonflat rows across batches.
-            tangent_counts = losses[:, 4] * val_batch_sizes
-            means[2] = np.dot(losses[:, 2], tangent_counts) / max(tangent_counts.sum(), 1.0)
-            hadamard_selected = np.arange(len(losses)) % args.val_hadamard_interval == 0
-            means[3] = np.average(losses[hadamard_selected, 3], weights=np.asarray(val_batch_sizes)[hadamard_selected])
-            val_data_loss, val_mode_loss, val_tangent_loss, val_hadamard_loss = map(float, means)
-            val_full_l2_loss = float(np.average(losses[:, 5], weights=val_batch_sizes))
-            val_mechanism_loss = float(np.average(losses[:, 6], weights=val_batch_sizes))
-        val_loss = (
-            val_data_loss
-            + args.mode_balanced_weight * val_mode_loss
-            + args.translation_tangent_weight * val_tangent_loss
-            + args.phase_mechanism_weight * val_mechanism_loss
-        )
+        ema_validation = args.weight_ema_decay > 0.0 and epoch_end_step > training_state.weight_ema_start_step
+        validation = evaluate_validation(training_state.weight_ema_params if ema_validation else training_state.params)
+        if ema_validation and history and not history[-1].get("val_weight_ema", 0.0):
+            best_val_loss = float("inf")
+        val_loss = validation["val_loss"]
         epoch_record = {
             "epoch": epoch,
             "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_l2_loss": val_full_l2_loss,
-            "val_data_loss": val_data_loss,
-            "val_mode_balanced_loss": val_mode_loss,
-            "val_translation_tangent_loss": val_tangent_loss,
-            "val_hadamard_loss": val_hadamard_loss,
-            "val_phase_mechanism_loss": val_mechanism_loss,
+            **validation,
+            "val_weight_ema": float(ema_validation),
         }
-        if val_batch_losses:
-            family_totals = np.sum(losses[:, 7:] * np.asarray(val_batch_sizes)[:, None], axis=0).reshape(-1, 5)
-            for family_id, (count, relative, residual, wins, data_sum) in zip(PhysicalFamilyId, family_totals):
-                prefix = f"val_{family_id.name.lower()}"
-                epoch_record[f"{prefix}_l2_loss"] = float(relative / count)
-                epoch_record[f"{prefix}_baseline_ratio_floored"] = float(residual / count)
-                epoch_record[f"{prefix}_baseline_win_fraction"] = float(wins / count)
-                epoch_record[f"{prefix}_data_loss_share"] = float(data_sum / family_totals[:, 4].sum())
         # Ordinary losses: total / samples. Hadamard: total / evaluated batches.
         for name, total in loss_sums.items():
             epoch_record[name] = total / sum(train_batch_sizes)

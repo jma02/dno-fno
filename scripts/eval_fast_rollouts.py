@@ -40,7 +40,7 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary", "latest"), default="weight_ema")
+    parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary", "best_weight_ema", "latest"), default="weight_ema")
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")
@@ -78,7 +78,8 @@ def main() -> None:
                + ("_contextbatch" if args.batch_context_fft else ""))
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,
-        "path": str(run_dir / f"{args.checkpoint}_ckpt"), "epoch": loaded.epoch,
+        "path": str(run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
+                               else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
     }

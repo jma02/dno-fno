@@ -47,7 +47,9 @@ class LoadedRun(NamedTuple):
 def load_run(
     run_dir: str | Path,
     *,
-    checkpoint: Literal["best", "latest", "final", "weight_ema", "weight_ema_secondary"] = "best",
+    checkpoint: Literal[
+        "best", "best_weight_ema", "latest", "final", "weight_ema", "weight_ema_secondary"
+    ] = "best",
     domain_length_override: float | None = None,
 ) -> LoadedRun:
     """Restore a JAX FNO or fixed CS-DNO training checkpoint."""
@@ -59,6 +61,7 @@ def load_run(
         run_dir
         / {
             "best": "best_val_ckpt",
+            "best_weight_ema": "best_val_ckpt",
             "latest": "latest_ckpt",
             "final": "final_ckpt",
             "weight_ema": "weight_ema_ckpt",
@@ -80,7 +83,8 @@ def load_run(
         orbax_checkpointer=ocp.PyTreeCheckpointer(),
     )
     params = jax.tree_util.tree_map(
-        lambda value: jnp.asarray(value, dtype=jnp.float32), restored["params"]
+        lambda value: jnp.asarray(value, dtype=jnp.float32),
+        restored["weight_ema_params" if checkpoint == "best_weight_ema" else "params"],
     )
 
     if model_name in ("cs_dno", "cs_dno_g0", "cs_dno_no_baseline"):
