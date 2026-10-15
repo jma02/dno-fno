@@ -433,6 +433,21 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
+Figure 12c contains only the Ada classical solver and epoch-7 EMA candidate,
+with the same measurements as Figure 12 and no historical timing annotations:
+
+```sh
+UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
+  --single-case --timings outputs/classical_all_orders_20260928/ada/classical.json \
+  --candidate-timings \
+    outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
+    outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
+  --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 7 EMA" \
+  --hide-timing-changes --output-name 12c-ada-runtime-vs-error
+```
+
 To time the spectral transformer locally, point `DNO_TORCH_WORKTREE` at its
 worktree and select an idle GPU. Use an isolated environment: otherwise the
 repository's installed PyTorch can override the requested version.

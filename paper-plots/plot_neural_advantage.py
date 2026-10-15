@@ -118,7 +118,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                         color="#606970", fontsize=8,
                         bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.15})
         ax.axvline(seconds[-1], color="#aab2b9", ls=":", lw=1.2, zorder=1)
-        if interleaved_m6 and not compact:
+        if interleaved_m6 and not compact and not args.hide_timing_changes:
             previous_seconds = float(np.median(warm["families"][family]["methods"]["M6"]["previous_seconds"]))
             savings = 100 * (1 - seconds[-1] / previous_seconds)
             ax.text(0.43, 0.035, f"M6: {previous_seconds:.2f} → {seconds[-1]:.2f} s  (−{savings:.1f}%)",
@@ -142,7 +142,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                            color=color, marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
             else:
                 ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
-            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6 and not compact:
+            if comparison is candidate and method == args.candidate_method and args.candidate_previous_method and not interleaved_m6 and not compact and not args.hide_timing_changes:
                 previous = methods[args.candidate_previous_method]
                 previous_seconds = float(np.median(previous["seconds"]))
                 savings = 100 * (1 - new_seconds / previous_seconds)
@@ -229,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
     parser.add_argument("--momentum-comparison", action="store_true", help="Figure 12c: measured original and momentum-corrected rollouts.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
+    parser.add_argument("--hide-timing-changes", action="store_true", help="Omit before/after runtime annotations.")
     args = parser.parse_args()
     if args.momentum_comparison:
         momentum_dir = ROOT / "outputs/momentum_state_projection_diagnostic_20261010"
