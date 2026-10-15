@@ -66,6 +66,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hero", action="store_true", help="Plot saved hero-run epochs 1, 6 and 7 only.")
     parser.add_argument("--phase-example", action="store_true", help="Show actual phase drift in a representative epoch-7 Stokes wave.")
+    parser.add_argument("--phase-training", action="store_true", help="Plot terminal phase error across saved EMA epochs 1–7.")
     args = parser.parse_args()
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 11,
@@ -73,6 +74,45 @@ def main() -> None:
         "ytick.color": "#626c76", "axes.titlesize": 13,
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
+    if args.phase_training:
+        epochs = np.arange(1, 8)
+        evaluations = [
+            ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch",
+            *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_continue_20261014/eval_epoch{epoch}_weight_ema" for epoch in (2, 3)),
+            *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch{epoch}_weight_ema" for epoch in range(4, 8)),
+        ]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+        for family, title, ax in zip(FAMILIES, TITLES, axes.flat, strict=True):
+            medians = []
+            for directory in evaluations:
+                path = directory / f"{family}_trajs.npz"
+                with np.load(path) as data:
+                    reference = np.fft.rfft(data["truth_eta"][-1], axis=-1)
+                    prediction = np.fft.rfft(data["pred_eta"][-1], axis=-1)
+                    final_time = data["times"][-1]
+                weights = np.full(reference.shape[-1], 2.)
+                weights[[0, -1]] = 1
+                total = np.sum(weights * np.abs(prediction - reference)**2, axis=-1)
+                amplitude = np.sum(weights * (np.abs(prediction) - np.abs(reference))**2, axis=-1)
+                norm = np.sum(weights * np.abs(reference)**2, axis=-1)
+                phase_error = 100 * np.sqrt(np.maximum(total - amplitude, 0) / norm)
+                if not np.isfinite(phase_error).all():
+                    raise ValueError(f"Undefined phase decomposition: {path}")
+                medians.append(float(np.median(phase_error)))
+            ax.plot(epochs, medians, "o-", color="#c45b22", linewidth=1.8,
+                    markersize=5, label="Median of 32 cases · weight EMA")
+            ax.set_title(title, loc="left")
+            ax.set_title(f"T = {final_time:g}", loc="right", fontsize=11, color="#808a94")
+            ax.set(xlabel="Training epoch", xticks=epochs, xlim=(0.8, 7.2), ylim=(0, 1.25 * max(medians)))
+            ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+            ax.locator_params(axis="y", nbins=5)
+            reduction = 100 * (1 - medians[-1] / medians[0])
+            ax.text(0.97, 0.92, f"{reduction:.0f}% lower than epoch 1", transform=ax.transAxes,
+                    ha="right", va="top", color="#c45b22", fontsize=11)
+            print(f"{family}: phase-error medians (%)={medians}; reduction={reduction:.3f}%", flush=True)
+        save_figure(fig, "22-phase-error-vs-training", "Phase-related surface error across training",
+                    "Final relative surface error from phase mismatch (%)")
+        return
     if args.phase_example:
         path = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema/stokes_trajs.npz"
         with np.load(path) as data:
