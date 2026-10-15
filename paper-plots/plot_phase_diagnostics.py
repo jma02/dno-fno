@@ -141,8 +141,8 @@ def main() -> None:
         drift_axes[0, 0].set_ylabel("Absolute translation drift\n(% of domain length)")
         drift_axes[1, 0].set_ylabel("Squared error removed\nby translation alignment (%)")
         save_figure(drift_fig, "19-hero-translation-drift", "Translation drift during the hero run", "")
-        save_figure(phase_fig, "20-hero-fourier-phase", "Fourier-phase error",
-                    "Phase-error component / reference surface norm (%)")
+        save_figure(phase_fig, "20-hero-fourier-phase", "Surface error from phase mismatch",
+                    "Relative surface error from phase mismatch (%)")
         save_figure(share_fig, "20b-hero-fourier-phase-share", "How much surface error comes from phase?",
                     "Phase share of squared surface error (%)")
         return

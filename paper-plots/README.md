@@ -706,8 +706,10 @@ wavelength to resolve equivalent periodic alignments. These are accumulated
 displacements, not instantaneous speed errors.
 
 **20:** Include all 32 cases per family and every saved nonzero time, in four
-larger panels. Plot `100*sqrt(phase_energy/reference_energy)`, the phase
-component of relative surface L2 error, on logarithmic y axes.
+larger panels. The y axis, “Relative surface error from phase mismatch (%)”,
+measures `100*sqrt(phase_energy/reference_energy)` on a logarithmic scale.
+For example, 0.01% means the phase-related surface mismatch is 0.01% of the
+reference wave's L2 size, not 0.01% of the total prediction error.
 
 **20b:** Plot `100*phase_energy/total_error_energy`, the phase share of squared
 surface error, separately on linear 0–100% axes for the same cases and times.
