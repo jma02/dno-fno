@@ -731,3 +731,23 @@ not as an additional rollout-endpoint calculation.
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
   uv run --no-sync paper-plots/plot_phase_diagnostics.py --hero
 ```
+
+### 21: Actual phase drift in one wave
+
+[PNG](figures/21-phase-drift-example.png) / [PDF](figures/21-phase-drift-example.pdf)
+
+Epoch-7 EMA Stokes case 1901833, the case nearest the 32-case median terminal
+Fourier-phase error. At time 20, the first two panels show the actual reference,
+prediction and translation-aligned prediction, then a tight zoom around a
+reference zero crossing. Fourier interpolation resolves the sub-grid offset;
+the prediction's displacement is not artificially enlarged. The local crossing
+offset is 7.21735e-7 spatial units, versus a globally fitted shift of 7.09653e-7.
+
+The third panel shows pointwise error before and after alignment; alignment
+removes 99.8039% of this case's squared surface error. No Fourier-angle panel
+is included.
+
+```sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync paper-plots/plot_phase_diagnostics.py --phase-example
+```

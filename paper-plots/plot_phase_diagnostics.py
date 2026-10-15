@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
+from scipy.optimize import brentq
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -64,6 +65,7 @@ def save_figure(fig: Figure, name: str, title: str, ylabel: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hero", action="store_true", help="Plot saved hero-run epochs 1, 6 and 7 only.")
+    parser.add_argument("--phase-example", action="store_true", help="Show actual phase drift in a representative epoch-7 Stokes wave.")
     args = parser.parse_args()
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 11,
@@ -71,6 +73,56 @@ def main() -> None:
         "ytick.color": "#626c76", "axes.titlesize": 13,
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
+    if args.phase_example:
+        path = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema/stokes_trajs.npz"
+        with np.load(path) as data:
+            case = np.flatnonzero(data["simulation_ids"] == 1901833).item()
+            reference, prediction = data["truth_eta"][-1, case], data["pred_eta"][-1, case]
+            final_time = data["times"][-1]
+        length, size = 2 * np.pi, reference.size
+        k = np.fft.fftfreq(size, d=length / size) * 2 * np.pi
+        reference_hat = np.fft.fft(reference)
+        carrier = np.argmax(np.abs(reference_hat[1:size // 2])) + 1
+        wavelength = length / carrier
+        shift = optimal_displacement(prediction, reference, length)
+        shift = (shift + wavelength / 2) % wavelength - wavelength / 2
+        aligned = aligned_fields(prediction[None], np.array([shift]), length)[0]
+        coefficients = np.fft.fft(np.stack((reference, prediction, aligned))) / size
+        crossings = np.flatnonzero((reference <= 0) & (np.roll(reference, -1) > 0))
+        left = crossings[np.argmin(np.abs(crossings - size / 2))] * length / size
+        crossing = brentq(lambda x: (np.exp(1j * k * x) @ coefficients[0]).real,
+                         left, left + length / size, xtol=1e-14)
+        predicted_crossing = brentq(lambda x: (np.exp(1j * k * x) @ coefficients[1]).real,
+                                   crossing - 5 * abs(shift), crossing + 5 * abs(shift), xtol=1e-14)
+        positions = crossing + np.linspace(-wavelength / 2, wavelength / 2, 2048)
+        zoom = crossing + np.linspace(-4 * abs(shift), 5 * abs(shift), 512)
+        fields = (np.exp(1j * positions[:, None] * k) @ coefficients.T).real
+        zoom_fields = (np.exp(1j * zoom[:, None] * k) @ coefficients.T).real
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        for index, (label, color, style) in enumerate((
+            ("Reference", "#687580", "-"), ("Prediction", "#c45b22", "--"),
+            ("Aligned prediction", "#007da6", ":"),
+        )):
+            axes[0].plot(positions - crossing, fields[:, index], color=color, linestyle=style, label=label)
+            axes[1].plot(zoom - crossing, zoom_fields[:, index], color=color, linestyle=style)
+        axes[0].set(title="Actual wave profiles", xlabel="Position relative to reference crossing", ylabel="Surface elevation")
+        axes[1].set(title="Zoom: the horizontal offset", xlabel="Position relative to reference crossing", ylabel="Surface elevation")
+        axes[1].ticklabel_format(axis="both", style="sci", scilimits=(0, 0), useMathText=True, useOffset=False)
+        crossing_shift = predicted_crossing - crossing
+        axes[1].annotate("", xy=(0, 0), xytext=(crossing_shift, 0),
+                            arrowprops={"arrowstyle": "<->", "color": "#343a40"})
+        axes[1].annotate("Horizontal shift", xy=(crossing_shift / 2, 0),
+                            xytext=(0, -16), textcoords="offset points", ha="center", fontsize=10)
+        raw_error, aligned_error = prediction - reference, aligned - reference
+        removed = 100 * (1 - np.dot(aligned_error, aligned_error) / np.dot(raw_error, raw_error))
+        for index, color in ((1, "#c45b22"), (2, "#007da6")):
+            axes[2].plot(positions - crossing, fields[:, index] - fields[:, 0], color=color)
+        axes[2].set(title=f"Alignment removes {removed:.1f}% of squared error",
+                       xlabel="Position relative to reference crossing", ylabel="Prediction minus reference")
+        axes[2].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True, useOffset=False)
+        save_figure(fig, "21-phase-drift-example", f"Stokes phase drift · epoch 7 · time {final_time:g}", "")
+        print(f"Stokes ID 1901833: fitted shift={shift:.9g}, crossing shift={crossing_shift:.9g}; alignment removes {removed:.6f}% of squared error", flush=True)
+        return
     if args.hero:
         run = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014"
         evaluations = (
