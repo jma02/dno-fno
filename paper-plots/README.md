@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-10 EMA candidate, and older
 rollout-supervised network. Epoch 10 is the best overall evaluated checkpoint
-through epoch 14 by pooled paired terminal surface error across the 128 cases;
+through epoch 15 by pooled paired terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,15 +760,16 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 14, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 15, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. At epoch 14, the reductions versus epoch 1 are 44.9%, 64.1%, 24.6% and
-65.0% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All fourteen measurements
-are shown; the curves are not monotonic. From epoch 13 to 14, all four medians
-decrease, by 17.1%, 6.4%, 42.3% and 10.2%, respectively. Epoch-14 median errors
-are 0.000961534%, 0.0114518%, 0.0405422% and 0.00760663% in the family order
-above; the BF rebound does not recover its smaller epoch-11/12 errors.
+time. At epoch 15, the reductions versus epoch 1 are 54.3%, 64.4%, 2.8% and
+67.7% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All fifteen measurements
+are shown; the curves are not monotonic. From epoch 14 to 15, the Stokes, Tanaka
+and JONSWAP/TMA medians decrease by 17.0%, 0.9% and 7.7%, while Benjamin–Feir
+increases by 29.0%. Epoch-15 median errors are 0.000798205%, 0.0113509%,
+0.0522900% and 0.00701770% in the family order above. These are family medians;
+epoch 10 remains best by pooled paired terminal surface error across all cases.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
