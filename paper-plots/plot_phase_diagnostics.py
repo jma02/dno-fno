@@ -34,11 +34,13 @@ MODELS = (
 
 
 def median_band(
-    ax: Axes, times: np.ndarray, values: np.ndarray, label: str, color: str
+    ax: Axes, times: np.ndarray, values: np.ndarray, label: str, color: str,
+    *, shade: bool = True, linestyle: str = "-",
 ) -> None:
     low, median, high = np.quantile(values, [0.25, 0.5, 0.75], axis=1)
-    ax.fill_between(times, low, high, color=color, alpha=0.12, linewidth=0)
-    ax.plot(times, median, label=label, color=color, linewidth=1.8)
+    if shade:
+        ax.fill_between(times, low, high, color=color, alpha=0.12, linewidth=0)
+    ax.plot(times, median, label=label, color=color, linewidth=1.8, linestyle=linestyle)
 
 
 def save_figure(fig: Figure, name: str, title: str, ylabel: str) -> None:
@@ -77,7 +79,8 @@ def main() -> None:
             (run / "eval_epoch7_weight_ema", "Epoch 7", "#c45b22"),
         )
         drift_fig, drift_axes = plt.subplots(2, 2, figsize=(11, 8), sharex="col")
-        phase_fig, phase_axes = plt.subplots(2, 4, figsize=(14, 8), sharex="col")
+        phase_fig, phase_axes = plt.subplots(2, 2, figsize=(11, 8))
+        share_fig, share_axes = plt.subplots(2, 2, figsize=(11, 8))
         for family_index, family in enumerate(FAMILIES):
             for directory, label, color in evaluations:
                 path = directory / f"{family}_trajs.npz"
@@ -98,11 +101,14 @@ def main() -> None:
                 phase_share = 100 * phase / total
                 if not (np.isfinite(phase_error).all() and np.isfinite(phase_share).all()):
                     raise ValueError(f"Undefined phase decomposition: {path}")
-                median_band(phase_axes[0, family_index], times[1:], phase_error, label, color)
-                median_band(phase_axes[1, family_index], times[1:], phase_share, label, color)
-                phase_axes[0, family_index].set_title(f"{TITLES[family_index]} · {truth.shape[1]} cases", loc="left")
-                phase_axes[0, family_index].set_yscale("log")
-                phase_axes[1, family_index].set(ylim=(0, 100), yticks=[0, 25, 50, 75, 100], xlabel="Time", xlim=(0, times[-1]))
+                for axes, values in ((phase_axes, phase_error), (share_axes, phase_share)):
+                    ax = axes.flat[family_index]
+                    median_band(ax, times[1:], values, label, color,
+                                shade=label == "Epoch 7", linestyle="--" if label == "Epoch 1" else "-")
+                    ax.set_title(f"{TITLES[family_index]} · {truth.shape[1]} cases", loc="left")
+                    ax.set(xlabel="Time", xlim=(0, times[-1]))
+                phase_axes.flat[family_index].set_yscale("log")
+                share_axes.flat[family_index].set(ylim=(0, 100), yticks=[0, 25, 50, 75, 100])
                 print(f"{label}, {family}: median terminal phase error={np.median(phase_error[-1]):.6g}%; phase share={np.median(phase_share[-1]):.3f}%", flush=True)
                 if family_index >= 2:
                     continue
@@ -134,10 +140,11 @@ def main() -> None:
                 print(f"{label}, {family}: median terminal absolute shift={np.median(100 * np.abs(shifts[-1]) / (2 * np.pi)):.6g}% of domain; alignment removes={np.median(removed[-1]):.3f}% of squared error", flush=True)
         drift_axes[0, 0].set_ylabel("Absolute translation drift\n(% of domain length)")
         drift_axes[1, 0].set_ylabel("Squared error removed\nby translation alignment (%)")
-        phase_axes[0, 0].set_ylabel("Fourier-phase error\n(% of reference surface norm)")
-        phase_axes[1, 0].set_ylabel("Fourier-phase share\nof squared surface error (%)")
         save_figure(drift_fig, "19-hero-translation-drift", "Translation drift during the hero run", "")
-        save_figure(phase_fig, "20-hero-fourier-phase", "Fourier-phase error during the hero run", "")
+        save_figure(phase_fig, "20-hero-fourier-phase", "Fourier-phase error",
+                    "Phase-error component / reference surface norm (%)")
+        save_figure(share_fig, "20b-hero-fourier-phase-share", "How much surface error comes from phase?",
+                    "Phase share of squared surface error (%)")
         return
     speed_fig, speed_axes = plt.subplots(1, 2, figsize=(11, 4.9))
     phase_fig, phase_axes = plt.subplots(2, 2, figsize=(11, 8))

@@ -433,8 +433,9 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c contains only the Ada classical solver and epoch-7 EMA candidate,
-with the same measurements as Figure 12 and no historical timing annotations:
+Figure 12c compares the Ada classical solver, epoch-7 EMA candidate, and older
+rollout-supervised network using the same measurements as Figure 12. It omits
+the RMS/context and spectral-DNO models and historical timing annotations:
 
 ```sh
 UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
@@ -445,6 +446,7 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
   --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
   --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema \
   --candidate-label "New candidate optimized network · epoch 7 EMA" \
+  --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --hide-timing-changes --output-name 12c-ada-runtime-vs-error
 ```
 
@@ -684,14 +686,16 @@ OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 UV_CACHE_DIR=/tmp/dno-uv-cache \
   uv run --no-sync paper-plots/plot_phase_diagnostics.py
 ```
 
-### 19–20: Hero-run phase drift
+### 19–20b: Hero-run phase drift
 
 - [Translation drift PNG](figures/19-hero-translation-drift.png) / [PDF](figures/19-hero-translation-drift.pdf)
 - [Fourier phase PNG](figures/20-hero-fourier-phase.png) / [PDF](figures/20-hero-fourier-phase.pdf)
+- [Fourier phase share PNG](figures/20b-hero-fourier-phase-share.png) / [PDF](figures/20b-hero-fourier-phase-share.pdf)
 
 Compare primary weight-EMA rollouts at epochs 1, 6 and 7 of the current nested
 candidate/low-LR continuation. Lines are case medians; shading is the
-interquartile range. No models, solvers or GPUs are invoked.
+interquartile range. Figures 20 and 20b shade only epoch 7; epoch 1 is dashed.
+No models, solvers or GPUs are invoked.
 
 **19:** The top row shows absolute continuous translation displacement as a
 percentage of domain length. The bottom row shows the percentage of squared
@@ -701,10 +705,12 @@ Stokes displacements are unwrapped modulo the initial dominant carrier
 wavelength to resolve equivalent periodic alignments. These are accumulated
 displacements, not instantaneous speed errors.
 
-**20:** Include all 32 cases per family and every saved nonzero time. The top
-row is `100*sqrt(phase_energy/reference_energy)`, the phase component of
-relative surface L2 error. The bottom row is
-`100*phase_energy/total_error_energy`, its share of squared surface error.
+**20:** Include all 32 cases per family and every saved nonzero time, in four
+larger panels. Plot `100*sqrt(phase_energy/reference_energy)`, the phase
+component of relative surface L2 error, on logarithmic y axes.
+
+**20b:** Plot `100*phase_energy/total_error_energy`, the phase share of squared
+surface error, separately on linear 0–100% axes for the same cases and times.
 Use the same Hermitian-weighted Parseval decomposition as Figure 16.
 Translation-removable and Fourier-phase shares overlap; they must not be
 added. A larger share alone does not mean a larger absolute error.

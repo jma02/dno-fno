@@ -508,8 +508,8 @@ if __name__ == "__main__":
         parser.error("--stack-hardware requires local --timings and --candidate-timings without --single-case")
     if args.spectral_timings and not (args.single_case or args.stack_hardware):
         parser.error("--spectral-timings requires --single-case or --stack-hardware")
-    if args.trained_timings and not args.stack_hardware:
-        parser.error("--trained-timings requires --stack-hardware")
+    if args.trained_timings and not (args.single_case or args.stack_hardware):
+        parser.error("--trained-timings requires --single-case or --stack-hardware")
     if args.candidate_eval and not (args.single_case or args.stack_hardware):
         parser.error("--candidate-eval requires --single-case or --stack-hardware")
     if args.stack_hardware:
