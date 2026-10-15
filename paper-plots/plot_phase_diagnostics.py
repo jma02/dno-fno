@@ -75,7 +75,7 @@ def main() -> None:
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
     if args.phase_training:
-        epochs = np.arange(1, 13)
+        epochs = np.arange(1, 14)
         evaluations = [
             ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch",
             *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_continue_20261014/eval_epoch{epoch}_weight_ema" for epoch in (2, 3)),
@@ -107,7 +107,7 @@ def main() -> None:
             ax.ticklabel_format(axis="y", style="plain", useOffset=False)
             ax.locator_params(axis="y", nbins=5)
             reduction = 100 * (1 - medians[-1] / medians[0])
-            ax.text(0.97, 0.92, f"{reduction:.0f}% lower than epoch 1", transform=ax.transAxes,
+            ax.text(0.97, 0.92, f"{abs(reduction):.0f}% {'lower' if reduction >= 0 else 'higher'} than epoch 1", transform=ax.transAxes,
                     ha="right", va="top", color="#c45b22", fontsize=11)
             print(f"{family}: phase-error medians (%)={medians}; reduction={reduction:.3f}%", flush=True)
         save_figure(fig, "22-phase-error-vs-training", "Phase-related surface error across training",
