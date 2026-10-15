@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-10 EMA candidate, and older
 rollout-supervised network. Epoch 10 is the best overall evaluated checkpoint
-through epoch 13 by pooled paired terminal surface error across the 128 cases;
+through epoch 14 by pooled paired terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,15 +760,15 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 13, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 14, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. At epoch 13, Stokes, Tanaka and JONSWAP/TMA are 33.6%, 61.6% and 61.0%
-lower than epoch 1, while Benjamin–Feir is 30.7% higher. All thirteen measurements
-are shown; the curves are not monotonic. From epoch 12 to 13, Tanaka decreases
-by 22.4%, while Stokes, BF and JONSWAP increase by 51.8%, 148.1% and 14.3%.
-Epoch-13 median errors are 0.00115919%, 0.0122403%, 0.0702711% and 0.00847339%
-for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively.
+time. At epoch 14, the reductions versus epoch 1 are 44.9%, 64.1%, 24.6% and
+65.0% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All fourteen measurements
+are shown; the curves are not monotonic. From epoch 13 to 14, all four medians
+decrease, by 17.1%, 6.4%, 42.3% and 10.2%, respectively. Epoch-14 median errors
+are 0.000961534%, 0.0114518%, 0.0405422% and 0.00760663% in the family order
+above; the BF rebound does not recover its smaller epoch-11/12 errors.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
