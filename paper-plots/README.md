@@ -683,3 +683,43 @@ All four figures are CPU-only reductions of existing saved results:
 OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 UV_CACHE_DIR=/tmp/dno-uv-cache \
   uv run --no-sync paper-plots/plot_phase_diagnostics.py
 ```
+
+### 19–20: Hero-run phase drift
+
+- [Translation drift PNG](figures/19-hero-translation-drift.png) / [PDF](figures/19-hero-translation-drift.pdf)
+- [Fourier phase PNG](figures/20-hero-fourier-phase.png) / [PDF](figures/20-hero-fourier-phase.pdf)
+
+Compare primary weight-EMA rollouts at epochs 1, 6 and 7 of the current nested
+candidate/low-LR continuation. Lines are case medians; shading is the
+interquartile range. No models, solvers or GPUs are invoked.
+
+**19:** The top row shows absolute continuous translation displacement as a
+percentage of domain length. The bottom row shows the percentage of squared
+surface error removed by that alignment. Include all 32 Stokes cases and the
+11 isolated Tanaka cases; evaluate every tenth saved frame after time zero.
+Stokes displacements are unwrapped modulo the initial dominant carrier
+wavelength to resolve equivalent periodic alignments. These are accumulated
+displacements, not instantaneous speed errors.
+
+**20:** Include all 32 cases per family and every saved nonzero time. The top
+row is `100*sqrt(phase_energy/reference_energy)`, the phase component of
+relative surface L2 error. The bottom row is
+`100*phase_energy/total_error_energy`, its share of squared surface error.
+Use the same Hermitian-weighted Parseval decomposition as Figure 16.
+Translation-removable and Fourier-phase shares overlap; they must not be
+added. A larger share alone does not mean a larger absolute error.
+
+The current hero recipe has a direct local translation-tangent term only on
+Tanaka (weight 10). All-family momentum-production matching (weight
+0.002574349830754761) provides indirect phase control; mode balancing (weight
+6) penalizes complex coefficient errors but does not isolate phase. Explicit
+Stokes-carrier, BF-sideband and coupled-modal phase penalties are inactive.
+Rollout-generated states receive the same data/MB/TG/momentum objective,
+with unchanged family masks and no backpropagation through trajectories.
+Hadamard self-consistency remains active on its scheduled training subset,
+not as an additional rollout-endpoint calculation.
+
+```sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync paper-plots/plot_phase_diagnostics.py --hero
+```

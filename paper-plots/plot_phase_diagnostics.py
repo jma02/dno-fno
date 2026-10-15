@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -59,12 +60,85 @@ def save_figure(fig: Figure, name: str, title: str, ylabel: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hero", action="store_true", help="Plot saved hero-run epochs 1, 6 and 7 only.")
+    args = parser.parse_args()
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 11,
         "axes.edgecolor": "#bfc6cc", "xtick.color": "#626c76",
         "ytick.color": "#626c76", "axes.titlesize": 13,
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
+    if args.hero:
+        run = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014"
+        evaluations = (
+            (ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch", "Epoch 1", "#687580"),
+            (run / "eval_epoch6_weight_ema", "Epoch 6", "#007da6"),
+            (run / "eval_epoch7_weight_ema", "Epoch 7", "#c45b22"),
+        )
+        drift_fig, drift_axes = plt.subplots(2, 2, figsize=(11, 8), sharex="col")
+        phase_fig, phase_axes = plt.subplots(2, 4, figsize=(14, 8), sharex="col")
+        for family_index, family in enumerate(FAMILIES):
+            for directory, label, color in evaluations:
+                path = directory / f"{family}_trajs.npz"
+                with np.load(path) as data:
+                    times = data["times"]
+                    truth, pred = data["truth_eta"], data["pred_eta"]
+                if not (np.isfinite(truth).all() and np.isfinite(pred).all()):
+                    raise ValueError(f"Nonfinite saved trajectory: {path}")
+                reference_hat = np.fft.rfft(truth[1:], axis=-1)
+                prediction_hat = np.fft.rfft(pred[1:], axis=-1)
+                weights = np.full(reference_hat.shape[-1], 2.)
+                weights[[0, -1]] = 1
+                total = np.sum(weights * np.abs(prediction_hat - reference_hat)**2, axis=-1)
+                amplitude = np.sum(weights * (np.abs(prediction_hat) - np.abs(reference_hat))**2, axis=-1)
+                phase = np.maximum(total - amplitude, 0)
+                norm = np.sum(weights * np.abs(reference_hat)**2, axis=-1)
+                phase_error = 100 * np.sqrt(phase / norm)
+                phase_share = 100 * phase / total
+                if not (np.isfinite(phase_error).all() and np.isfinite(phase_share).all()):
+                    raise ValueError(f"Undefined phase decomposition: {path}")
+                median_band(phase_axes[0, family_index], times[1:], phase_error, label, color)
+                median_band(phase_axes[1, family_index], times[1:], phase_share, label, color)
+                phase_axes[0, family_index].set_title(f"{TITLES[family_index]} · {truth.shape[1]} cases", loc="left")
+                phase_axes[0, family_index].set_yscale("log")
+                phase_axes[1, family_index].set(ylim=(0, 100), yticks=[0, 25, 50, 75, 100], xlabel="Time", xlim=(0, times[-1]))
+                print(f"{label}, {family}: median terminal phase error={np.median(phase_error[-1]):.6g}%; phase share={np.median(phase_share[-1]):.3f}%", flush=True)
+                if family_index >= 2:
+                    continue
+                groups = json.loads(path.with_name(f"{family}_summary.json").read_text())["evaluation_source"]["selected_parameter_group_ids"]
+                selected = np.array([family == "stokes" or "_m1_" in group for group in groups])
+                reference = truth[10::10, selected].reshape(-1, truth.shape[-1])
+                prediction = pred[10::10, selected].reshape(reference.shape)
+                shifts = np.array([optimal_displacement(p, r, 2 * np.pi)
+                                   for p, r in zip(prediction, reference, strict=True)])
+                aligned = aligned_fields(prediction, shifts, 2 * np.pi)
+                raw_error = np.sum((prediction - reference)**2, axis=-1)
+                aligned_error = np.minimum(raw_error, np.sum((aligned - reference)**2, axis=-1))
+                removed = (100 * (1 - aligned_error / raw_error)).reshape(-1, selected.sum())
+                shifts = shifts.reshape(removed.shape)
+                carrier = (np.argmax(np.abs(np.fft.rfft(truth[0, selected]))[:, 1:], axis=-1) + 1
+                           if family == "stokes" else np.ones(selected.sum()))
+                period = 2 * np.pi / carrier
+                shifts = (shifts + period / 2) % period - period / 2
+                shifts = np.unwrap(shifts * carrier, axis=0) / carrier
+                if not (np.isfinite(shifts).all() and np.isfinite(removed).all()
+                        and np.all(removed <= phase_share[9::10, selected] + 1e-5)):
+                    raise ValueError(f"Inconsistent translation decomposition: {path}")
+                median_band(drift_axes[0, family_index], times[10::10], 100 * np.abs(shifts) / (2 * np.pi), label, color)
+                median_band(drift_axes[1, family_index], times[10::10], removed, label, color)
+                title = "Stokes" if family == "stokes" else "Isolated Tanaka"
+                drift_axes[0, family_index].set_title(f"{title} · {selected.sum()} cases", loc="left")
+                drift_axes[0, family_index].set_yscale("log")
+                drift_axes[1, family_index].set(ylim=(0, 100), yticks=[0, 25, 50, 75, 100], xlabel="Time", xlim=(0, times[-1]))
+                print(f"{label}, {family}: median terminal absolute shift={np.median(100 * np.abs(shifts[-1]) / (2 * np.pi)):.6g}% of domain; alignment removes={np.median(removed[-1]):.3f}% of squared error", flush=True)
+        drift_axes[0, 0].set_ylabel("Absolute translation drift\n(% of domain length)")
+        drift_axes[1, 0].set_ylabel("Squared error removed\nby translation alignment (%)")
+        phase_axes[0, 0].set_ylabel("Fourier-phase error\n(% of reference surface norm)")
+        phase_axes[1, 0].set_ylabel("Fourier-phase share\nof squared surface error (%)")
+        save_figure(drift_fig, "19-hero-translation-drift", "Translation drift during the hero run", "")
+        save_figure(phase_fig, "20-hero-fourier-phase", "Fourier-phase error during the hero run", "")
+        return
     speed_fig, speed_axes = plt.subplots(1, 2, figsize=(11, 4.9))
     phase_fig, phase_axes = plt.subplots(2, 2, figsize=(11, 8))
     for family_index, family in enumerate(FAMILIES):
