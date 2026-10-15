@@ -66,7 +66,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hero", action="store_true", help="Plot saved hero-run epochs 1, 6 and 7 only.")
     parser.add_argument("--phase-example", action="store_true", help="Show actual phase drift in a representative epoch-7 Stokes wave.")
-    parser.add_argument("--phase-training", action="store_true", help="Plot terminal phase error across saved EMA epochs 1–7.")
+    parser.add_argument("--phase-training", action="store_true", help="Plot terminal phase error across saved EMA training epochs.")
     args = parser.parse_args()
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 11,
@@ -75,11 +75,11 @@ def main() -> None:
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
     if args.phase_training:
-        epochs = np.arange(1, 8)
+        epochs = np.arange(1, 9)
         evaluations = [
             ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch",
             *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_continue_20261014/eval_epoch{epoch}_weight_ema" for epoch in (2, 3)),
-            *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch{epoch}_weight_ema" for epoch in range(4, 8)),
+            *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch{epoch}_weight_ema" for epoch in epochs[3:]),
         ]
         fig, axes = plt.subplots(2, 2, figsize=(11, 8))
         for family, title, ax in zip(FAMILIES, TITLES, axes.flat, strict=True):
@@ -103,7 +103,7 @@ def main() -> None:
                     markersize=5, label="Median of 32 cases · weight EMA")
             ax.set_title(title, loc="left")
             ax.set_title(f"T = {final_time:g}", loc="right", fontsize=11, color="#808a94")
-            ax.set(xlabel="Training epoch", xticks=epochs, xlim=(0.8, 7.2), ylim=(0, 1.25 * max(medians)))
+            ax.set(xlabel="Training epoch", xticks=epochs, xlim=(0.8, epochs[-1] + 0.2), ylim=(0, 1.25 * max(medians)))
             ax.ticklabel_format(axis="y", style="plain", useOffset=False)
             ax.locator_params(axis="y", nbins=5)
             reduction = 100 * (1 - medians[-1] / medians[0])

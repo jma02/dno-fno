@@ -757,12 +757,13 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 7, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 8, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. The plotted epoch-7 reductions versus epoch 1 are 35.1%, 48.0%, 25.3% and
-55.4% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All seven measurements
-are shown, including the increase from epoch 6 to 7 in each family.
+time. The plotted epoch-8 reductions versus epoch 1 are 53.7%, 48.7%, 24.4% and
+60.9% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All eight measurements
+are shown: the increase from epoch 6 to 7 is followed by a recovery in Stokes
+and JONSWAP, a small decrease in Tanaka, and a small increase in Benjamin–Feir.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
