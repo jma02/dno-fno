@@ -433,9 +433,12 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c compares the Ada classical solver, epoch-7 EMA candidate, and older
-rollout-supervised network using the same measurements as Figure 12. It omits
-the RMS/context and spectral-DNO models and historical timing annotations:
+Figure 12c compares the Ada classical solver, epoch-10 EMA candidate, and older
+rollout-supervised network. Epoch 10 is the best overall evaluated checkpoint
+through epoch 13 by pooled paired terminal surface error across the 128 cases;
+each panel still displays the fixed timed case, not the family median. Runtime
+measurements are unchanged for the same inference path. It omits the RMS/context
+and spectral-DNO models and historical timing annotations:
 
 ```sh
 UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
@@ -444,8 +447,8 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
     outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
     outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
   --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
-  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema \
-  --candidate-label "New candidate optimized network · epoch 7 EMA" \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch10_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 10 EMA" \
   --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --hide-timing-changes --output-name 12c-ada-runtime-vs-error
 ```
