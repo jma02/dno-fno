@@ -60,7 +60,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
                 parser.error(f"{path}: {family} spectral trajectory does not match the classical comparison")
             spectral[family] = timing["methods"]["spectral_ema"]
     overlays = (
-        (candidate, "#c45b22", "New candidate optimized network", args.candidate_method, "--", 1.3),
+        (candidate, "#c45b22", args.candidate_label, args.candidate_method, "--", 1.3),
         (baseline_free, "#178178", "New candidate optimized network without G₀+G₁", "fused", "--", 1.3),
     )
     interleaved_m6 = bool(warm and "previous_seconds" in warm["families"]["stokes"]["methods"]["M6"])
@@ -133,7 +133,12 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
             if comparison is candidate:
-                ax.scatter(new_seconds, 100 * record["cached_reference_terminal_eta_error"],
+                candidate_error = record["cached_reference_terminal_eta_error"]
+                if args.candidate_eval:
+                    with np.load(args.candidate_eval / f"{family}_trajs.npz") as data:
+                        case = np.flatnonzero(data["simulation_ids"] == comparison["families"][family]["simulation_id"]).item()
+                        candidate_error = float(data["rel_l2_eta"][-1, case])
+                ax.scatter(new_seconds, 100 * candidate_error,
                            color=color, marker="o", s=65, edgecolors="white", linewidths=0.8, zorder=3)
             else:
                 ax.axvline(new_seconds, color=color, ls=style, lw=width, zorder=1)
@@ -212,6 +217,8 @@ if __name__ == "__main__":
     parser.add_argument("--timings", type=Path, help="Use fresh single-rollout timings instead of archived batch-32 times.")
     parser.add_argument("--classical-timings", type=Path, nargs="+", help="Replace classical runtimes with these full-rollout measurements.")
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
+    parser.add_argument("--candidate-eval", type=Path, help="Use saved rollout errors for the timed simulation IDs; applies only to Ada in the hardware stack.")
+    parser.add_argument("--candidate-label", default="New candidate optimized network")
     parser.add_argument("--trained-timings", type=Path, nargs="+", help="Add measured trained-model comparisons to the Ada panels.")
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
@@ -502,6 +509,8 @@ if __name__ == "__main__":
         parser.error("--spectral-timings requires --single-case or --stack-hardware")
     if args.trained_timings and not args.stack_hardware:
         parser.error("--trained-timings requires --stack-hardware")
+    if args.candidate_eval and not (args.single_case or args.stack_hardware):
+        parser.error("--candidate-eval requires --single-case or --stack-hardware")
     if args.stack_hardware:
         modal = argparse.Namespace(**vars(args))
         modal.single_case = True
@@ -515,12 +524,14 @@ if __name__ == "__main__":
             }[hardware]
             config.timings = classical
             config.classical_timings = [classical]
-            config.candidate_timings = [ROOT / "outputs" / {
-                "ada": "ema_grad_timing_20260928/ada/timings.json",
-                "blackwell": "ema_grad_timing_20261001/blackwell/timings.json",
-                "a100": "ema_grad_timing_20261001/a100_sxm/timings.json",
-            }[hardware]]
-            config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+            if hardware != "ada":
+                config.candidate_timings = [ROOT / "outputs" / {
+                    "blackwell": "ema_grad_timing_20261001/blackwell/timings.json",
+                    "a100": "ema_grad_timing_20261001/a100_sxm/timings.json",
+                }[hardware]]
+                config.candidate_method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
+                config.candidate_eval = None
+                config.candidate_label = "New candidate optimized network"
             config.candidate_previous_method = None
             config.no_baseline_timings = None
             config.trained_timings = args.trained_timings if hardware == "ada" else None

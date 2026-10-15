@@ -409,13 +409,23 @@ XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
 ```
 
 The selected records populate `classical.json`; the preceding `neural.json`
-files are unchanged. Render the figure with:
+files are unchanged. For the epoch-7 Ada refresh, render after the epoch's
+EMA rollouts and `fig12_epoch7_timings.json` are complete. Stokes and Tanaka
+reuse the clean timings of the same nested/context-batched inference path;
+BF and JONSWAP use fresh full-rollout measurements. The Ada errors come from
+epoch 7 at the timed simulation IDs. Blackwell and A100 retain their saved
+measurements and accuracies.
 
 ```sh
 UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
   --stack-hardware \
   --timings outputs/single_rollout_timing_20260923.json \
-  --candidate-timings outputs/ema_grad_timing_20260928/ada/timings.json \
+  --candidate-timings \
+    outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
+    outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
+  --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch7_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 7 EMA" \
   --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
     outputs/rms_context_timing_20261007/ada/timings.json \
   --spectral-timings outputs/torch_ema_20260926/blackwell_timing/timings.json \
