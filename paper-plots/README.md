@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-18 EMA candidate, and older
 rollout-supervised network. Epoch 18 is the best overall evaluated checkpoint
-through epoch 18 by pooled geometric-mean terminal surface error across the 128 cases;
+through epoch 19 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,17 +760,17 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 18, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 19, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. At epoch 18, the reductions versus epoch 1 are 59.7%, 66.2%, 69.2% and
-65.5% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All eighteen measurements
-are shown; the curves are not monotonic. From epoch 17 to 18, the family medians
-decrease by 20.3%, 7.9%, 40.3% and 1.1%, respectively. Epoch-18 median errors are
-0.000704441%, 0.0107682%, 0.0165870% and 0.00748206% in the family order above.
-These are family medians; Tanaka's paired geometric-mean phase error instead
-increases by 32.9% versus epoch 17. Epoch 18 is best by pooled geometric-mean
-terminal surface error across all cases.
+time. At epoch 19, Stokes, Tanaka and JONSWAP/TMA are 53.0%, 68.5% and 64.1%
+below epoch 1; Benjamin–Feir is 5.4% higher. All nineteen measurements are shown;
+the curves are not monotonic. From epoch 18 to 19, the family medians change by
++16.6%, -6.7%, +241.6% and +4.1%, respectively. Epoch-19 median errors are
+0.000821428%, 0.0100435%, 0.0566659% and 0.00778604% for Stokes, Tanaka,
+Benjamin–Feir and JONSWAP/TMA. Epoch 18 remains best by pooled geometric-mean
+terminal surface error across all 128 cases; epoch 19 is 52.5% worse by that
+criterion, so Figure 12c retains epoch 18.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
