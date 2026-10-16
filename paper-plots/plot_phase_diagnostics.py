@@ -75,7 +75,7 @@ def main() -> None:
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
     if args.phase_training:
-        epochs = np.arange(1, 24)
+        epochs = np.arange(1, 25)
         evaluations = [
             ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch",
             *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_continue_20261014/eval_epoch{epoch}_weight_ema" for epoch in (2, 3)),
