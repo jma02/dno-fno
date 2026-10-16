@@ -75,7 +75,7 @@ def main() -> None:
         "pdf.fonttype": 42, "ps.fonttype": 42,
     })
     if args.phase_training:
-        epochs = np.arange(1, 22)
+        epochs = np.arange(1, 23)
         evaluations = [
             ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch",
             *(ROOT / f"outputs/c27_nested_b16_ema_low_lr_continue_20261014/eval_epoch{epoch}_weight_ema" for epoch in (2, 3)),
@@ -103,7 +103,8 @@ def main() -> None:
                     markersize=5, label="Median of 32 cases · weight EMA")
             ax.set_title(title, loc="left")
             ax.set_title(f"T = {final_time:g}", loc="right", fontsize=11, color="#808a94")
-            ax.set(xlabel="Training epoch", xticks=epochs, xlim=(0.8, epochs[-1] + 0.2), ylim=(0, 1.25 * max(medians)))
+            ax.set(xlabel="Training epoch", xticks=np.unique(np.r_[1, epochs[4::5], epochs[-1]]),
+                   xlim=(0.8, epochs[-1] + 0.2), ylim=(0, 1.25 * max(medians)))
             ax.ticklabel_format(axis="y", style="plain", useOffset=False)
             ax.locator_params(axis="y", nbins=5)
             reduction = 100 * (1 - medians[-1] / medians[0])

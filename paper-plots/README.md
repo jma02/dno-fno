@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-18 EMA candidate, and older
 rollout-supervised network. Epoch 18 is the best overall evaluated checkpoint
-through epoch 21 by pooled geometric-mean terminal surface error across the 128 cases;
+through epoch 22 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,15 +760,15 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 21, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 22, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All twenty-one measurements are shown; the curves are not monotonic.
-Epoch-21 median errors are 0.000952254%, 0.00996794%, 0.0377282% and
-0.00730791% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. Relative to
-epoch 18, these medians change by +35.2%, -7.4%, +127.5% and -2.3%.
-Epoch 21 improves pooled geometric-mean terminal surface error by 6.2%
-against epoch 20, but remains 16.9% worse than epoch 18. Figure 12c therefore
+time. All twenty-two measurements are shown; the curves are not monotonic.
+Epoch-22 median errors are 0.00120302%, 0.0107386%, 0.0225594% and
+0.00684896% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. Relative to
+epoch 18, these medians change by +70.8%, -0.3%, +36.0% and -8.5%.
+Epoch 22 improves pooled geometric-mean terminal surface error by 6.2%
+against epoch 21, but remains 9.7% worse than epoch 18. Figure 12c therefore
 retains epoch 18, selected using all 128 cases rather than the four plotted cases.
 
 ```sh
