@@ -433,9 +433,9 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c compares the Ada classical solver, epoch-17 EMA candidate, and older
-rollout-supervised network. Epoch 17 is the best overall evaluated checkpoint
-through epoch 17 by pooled geometric-mean terminal surface error across the 128 cases;
+Figure 12c compares the Ada classical solver, epoch-18 EMA candidate, and older
+rollout-supervised network. Epoch 18 is the best overall evaluated checkpoint
+through epoch 18 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -447,8 +447,8 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
     outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
     outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
   --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
-  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch17_weight_ema \
-  --candidate-label "New candidate optimized network · epoch 17 EMA" \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch18_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 18 EMA" \
   --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --hide-timing-changes --output-name 12c-ada-runtime-vs-error
 ```
@@ -760,16 +760,17 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 17, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 18, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. At epoch 17, the reductions versus epoch 1 are 49.4%, 63.4%, 48.4% and
-65.2% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All seventeen measurements
-are shown; the curves are not monotonic. From epoch 16 to 17, the Stokes and
-Benjamin–Feir medians increase by 5.9% and 21.5%, while Tanaka and JONSWAP/TMA
-decrease by 11.6% and 2.8%. Epoch-17 median errors are 0.000883854%, 0.0116878%,
-0.0277743% and 0.00756582% in the family order above. These are family medians;
-epoch 17 is best by pooled geometric-mean terminal surface error across all cases.
+time. At epoch 18, the reductions versus epoch 1 are 59.7%, 66.2%, 69.2% and
+65.5% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. All eighteen measurements
+are shown; the curves are not monotonic. From epoch 17 to 18, the family medians
+decrease by 20.3%, 7.9%, 40.3% and 1.1%, respectively. Epoch-18 median errors are
+0.000704441%, 0.0107682%, 0.0165870% and 0.00748206% in the family order above.
+These are family medians; Tanaka's paired geometric-mean phase error instead
+increases by 32.9% versus epoch 17. Epoch 18 is best by pooled geometric-mean
+terminal surface error across all cases.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
