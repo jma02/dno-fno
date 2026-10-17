@@ -433,9 +433,9 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c compares the Ada classical solver, epoch-31 EMA candidate, and older
-rollout-supervised network. Epoch 31 is the best overall evaluated checkpoint
-through epoch 36 by pooled geometric-mean terminal surface error across the 128 cases;
+Figure 12c compares the Ada classical solver, epoch-37 EMA candidate, and older
+rollout-supervised network. Epoch 37 is the best overall evaluated checkpoint
+through epoch 37 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -447,8 +447,8 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
     outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
     outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
   --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
-  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch31_weight_ema \
-  --candidate-label "New candidate optimized network · epoch 31 EMA" \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch37_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 37 EMA" \
   --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --hide-timing-changes --output-name 12c-ada-runtime-vs-error
 ```
@@ -760,22 +760,23 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 36, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 37, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All thirty-six measurements are shown; the curves are not monotonic.
-Epoch-36 median errors are 0.000895036%, 0.0123864%, 0.0232028% and
-0.00528563% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
-48.7%, 61.2%, 56.9% and 75.7% below epoch 1. Epoch 36's terminal surface-error
-geometric mean is 19.7% above epoch 31 and 11.3% above epoch 35, although its
-pooled median improves. Against epoch 31, whole-trajectory surface error rises
-19.4%, phase-related error rises 21.7%, and amplitude-related error rises 3.0%.
-JONSWAP improves 9.1% in terminal surface-error geometric mean, while Stokes,
-Tanaka and BF regress by 22.3%, 21.8% and 51.7%.
-Figure 12c retains epoch 31, selected using all 128 cases rather than the four
-plotted cases. Epoch 36's validation loss improves 1.80% over epoch 35,
-making 36 the validation-best checkpoint and resetting early-stopping
-patience to 0/5.
+time. All thirty-seven measurements are shown; the curves are not monotonic.
+Epoch-37 median errors are 0.000344274%, 0.00979437%, 0.0206011% and
+0.00538658% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
+80.3%, 69.3%, 61.7% and 75.2% below epoch 1. Epoch 37 is the new rollout best:
+its terminal surface-error geometric mean is 0.00551048%, 4.4% below epoch 31
+and 67.9% below epoch 1. Against epoch 31, whole-trajectory surface error falls
+2.8%, phase-related error falls 5.3%, and amplitude-related error falls 3.7%.
+Stokes and JONSWAP improve 27.9% and 10.0% in terminal surface-error geometric
+mean, while Tanaka and BF regress by 18.6% and 8.4%; pooled p95 rises from
+0.0543181% to 0.0688254%.
+Figure 12c now uses epoch 37, selected using all 128 cases rather than the four
+plotted cases. The fixed Tanaka example worsens from 0.0306843% to 0.300970%.
+Epoch 37's validation loss rises 0.97% over epoch 36, which remains the
+validation-best checkpoint; early-stopping patience is 1/5.
 Validation loss alone does not select the rollout checkpoint.
 
 As a separate trend diagnostic, terminal surface-error geometric mean over all
