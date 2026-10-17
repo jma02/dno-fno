@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-31 EMA candidate, and older
 rollout-supervised network. Epoch 31 is the best overall evaluated checkpoint
-through epoch 31 by pooled geometric-mean terminal surface error across the 128 cases;
+through epoch 32 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,21 +760,21 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 31, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 32, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All thirty-one measurements are shown; the curves are not monotonic.
-Epoch-31 median errors are 0.000667450%, 0.00948786%, 0.0150623% and
-0.00563504% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
-61.8%, 70.3%, 72.0% and 74.0% below epoch 1. Against epoch 23, pooled
-geometric-mean terminal surface error falls 10.3%, whole-trajectory surface error
-falls 14.3%, and phase-related error falls 10.0%. All four families improve
-terminal surface-error geometric means, although the pooled terminal median
-and Stokes' 95th percentile increase. Stokes' phase-error geometric mean rises
-2.1%; the other three families improve. Figure 12c now shows epoch 31, selected
-using all 128 cases rather than the four plotted cases. Epoch 31 also improves
-validation loss 3.46% over the previous best at 29, resetting early-stopping
-patience to 0/5. Validation loss alone does not select the rollout checkpoint.
+time. All thirty-two measurements are shown; the curves are not monotonic.
+Epoch-32 median errors are 0.000666176%, 0.0103470%, 0.0220222% and
+0.00600297% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
+61.8%, 67.6%, 59.0% and 72.4% below epoch 1. Against epoch 31, pooled
+geometric-mean terminal surface error rises 18.2%, whole-trajectory surface error
+rises 22.5%, and phase-related error rises 21.6%, while amplitude-related error
+falls 2.2%. Stokes and BF drive the regression; JONSWAP improves 4.3% in terminal
+surface-error geometric mean. Stokes' median and 95th percentile improve despite
+its worse geometric mean. Figure 12c retains epoch 31, selected using all 128
+cases rather than the four plotted cases. Epoch 32 improves validation loss
+1.80% over 31 and becomes validation-best, with early-stopping patience at 0/5.
+Validation loss alone does not select the rollout checkpoint.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
