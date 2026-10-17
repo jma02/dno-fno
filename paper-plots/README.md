@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-23 EMA candidate, and older
 rollout-supervised network. Epoch 23 is the best overall evaluated checkpoint
-through epoch 28 by pooled geometric-mean terminal surface error across the 128 cases;
+through epoch 29 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,18 +760,17 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 28, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 29, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All twenty-eight measurements are shown; the curves are not monotonic.
-Epoch-28 median errors are 0.000633389%, 0.011529%, 0.0401569% and
-0.00701778% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
-63.7%, 63.9%, 25.3% and 67.7% below epoch 1. Against epoch 23, pooled
-geometric-mean terminal surface error rises 23.5% and phase-related error rises
-27.8%; terminal surface error also rises 5.4% over epoch 27. Figure 12c therefore
+time. All twenty-nine measurements are shown; the curves are not monotonic.
+Epoch-29 median errors are 0.000731801%, 0.00910498%, 0.0207304% and
+0.00639245% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
+58.1%, 71.5%, 61.5% and 70.6% below epoch 1. Against epoch 23, pooled
+geometric-mean terminal surface error rises 4.7% and phase-related error rises
+8.1%; terminal surface error improves 15.2% over epoch 28. Figure 12c therefore
 retains epoch 23, the best checkpoint selected using all 128 cases rather than
-the four plotted cases, even though all four timed cases improve at epoch 28.
-Validation loss rises 1.47% from epoch 27, which remains the validation best;
+the four plotted cases. Epoch 29 sets a new validation best, 0.74% below epoch 27;
 validation loss does not select the best rollout checkpoint.
 
 ```sh
