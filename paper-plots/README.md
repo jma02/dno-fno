@@ -435,7 +435,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
 
 Figure 12c compares the Ada classical solver, epoch-23 EMA candidate, and older
 rollout-supervised network. Epoch 23 is the best overall evaluated checkpoint
-through epoch 26 by pooled geometric-mean terminal surface error across the 128 cases;
+through epoch 27 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -760,17 +760,18 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 26, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 27, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All twenty-six measurements are shown; the curves are not monotonic.
-Epoch-26 median errors are 0.000617493%, 0.0107353%, 0.0547775% and
-0.00621253% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA. Stokes,
-Tanaka and JONSWAP/TMA are 64.6%, 66.3% and 71.4% below epoch 1;
-Benjamin–Feir is 1.9% higher. Against epoch 23, pooled geometric-mean terminal
-surface error rises 47.2% and phase-related error rises 51.3%. Figure 12c therefore
+time. All twenty-seven measurements are shown; the curves are not monotonic.
+Epoch-27 median errors are 0.000545994%, 0.00730732%, 0.0371675% and
+0.00690798% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
+68.7%, 77.1%, 30.9% and 68.2% below epoch 1. Against epoch 23, pooled
+geometric-mean terminal surface error rises 17.2% and phase-related error rises
+20.9%, despite improving over epoch 26. Figure 12c therefore
 retains epoch 23, the best checkpoint selected using all 128 cases rather than
-the four plotted cases. Epoch 26's validation loss is 0.95% higher than epoch 25's.
+the four plotted cases. Epoch 27 sets a new validation best, 1.75% below epoch 25;
+validation loss does not select the best rollout checkpoint.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
