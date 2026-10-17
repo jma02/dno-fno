@@ -433,9 +433,9 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c compares the Ada classical solver, epoch-23 EMA candidate, and older
-rollout-supervised network. Epoch 23 is the best overall evaluated checkpoint
-through epoch 30 by pooled geometric-mean terminal surface error across the 128 cases;
+Figure 12c compares the Ada classical solver, epoch-31 EMA candidate, and older
+rollout-supervised network. Epoch 31 is the best overall evaluated checkpoint
+through epoch 31 by pooled geometric-mean terminal surface error across the 128 cases;
 each panel still displays the fixed timed case, not the family median. Runtime
 measurements are unchanged for the same inference path. It omits the RMS/context
 and spectral-DNO models and historical timing annotations:
@@ -447,8 +447,8 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
     outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
     outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
   --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
-  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch23_weight_ema \
-  --candidate-label "New candidate optimized network · epoch 23 EMA" \
+  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch31_weight_ema \
+  --candidate-label "New candidate optimized network · epoch 31 EMA" \
   --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
   --hide-timing-changes --output-name 12c-ada-runtime-vs-error
 ```
@@ -760,19 +760,21 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 30, using the same 32 cases per family. The y axis uses Figure 20's
+from 1 through 31, using the same 32 cases per family. The y axis uses Figure 20's
 relative-error magnitude, not the percentage of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
-time. All thirty measurements are shown; the curves are not monotonic.
-Epoch-30 median errors are 0.000548724%, 0.0116292%, 0.0477034% and
-0.00687164% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
-68.6%, 63.5%, 11.3% and 68.4% below epoch 1. Against epoch 23, pooled
-geometric-mean terminal surface error rises 35.6% and phase-related error rises
-41.3%; terminal surface error rises 29.5% over epoch 29. Figure 12c therefore
-retains epoch 23, the best checkpoint selected using all 128 cases rather than
-the four plotted cases. Epoch 29 remains validation-best; epoch 30's validation
-loss rises 1.46%, with early-stopping patience at 1/5. Validation loss does not
-select the best rollout checkpoint.
+time. All thirty-one measurements are shown; the curves are not monotonic.
+Epoch-31 median errors are 0.000667450%, 0.00948786%, 0.0150623% and
+0.00563504% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively
+61.8%, 70.3%, 72.0% and 74.0% below epoch 1. Against epoch 23, pooled
+geometric-mean terminal surface error falls 10.3%, whole-trajectory surface error
+falls 14.3%, and phase-related error falls 10.0%. All four families improve
+terminal surface-error geometric means, although the pooled terminal median
+and Stokes' 95th percentile increase. Stokes' phase-error geometric mean rises
+2.1%; the other three families improve. Figure 12c now shows epoch 31, selected
+using all 128 cases rather than the four plotted cases. Epoch 31 also improves
+validation loss 3.46% over the previous best at 29, resetting early-stopping
+patience to 0/5. Validation loss alone does not select the rollout checkpoint.
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
