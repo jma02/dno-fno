@@ -225,6 +225,23 @@ class ComputeMetricsTest(unittest.TestCase):
             np.testing.assert_array_equal(loaded.params["value"], [value])
             self.assertEqual(loaded.epoch, 1)
 
+        for checkpoint_dir in (None, Path("/tmp/dno-preserved-epoch37")):
+            with self.subTest(checkpoint_dir=checkpoint_dir), patch(
+                "solver.evals.model_rollout.Path.read_text", side_effect=[
+                    json.dumps(config), json.dumps({"epoch": 37, "stats": {}}),
+                ],
+            ), patch("solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value={
+                "params": {"value": np.array([-1.0], dtype=np.float32)},
+                "weight_ema_params": {"value": np.array([2.0], dtype=np.float32)},
+            }) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
+                loaded = load_run("/tmp/dno-architecture-loader-test", checkpoint="best_weight_ema",
+                                  checkpoint_dir=checkpoint_dir)
+                self.assertEqual(restore.call_args.kwargs["ckpt_dir"], checkpoint_dir or
+                                 Path("/tmp/dno-architecture-loader-test/best_val_ckpt"))
+                self.assertEqual(restore.call_args.kwargs["step"], 37)
+                np.testing.assert_array_equal(loaded.params["value"], [2.0])
+                self.assertEqual(loaded.epoch, 37)
+
     def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
                              baseline_order=1, nested_surface_modulation=True)
@@ -566,31 +583,36 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as evaluate, patch.object(fast, "compute_macro_summary", return_value={}), patch.object(
                 fast, "_write_json",
             ):
-                for reference_args, offset, suffix, exact_g0, fuse_nested, selection in (
-                    (["--reference-run", str(reference)], 0.5, "", True, True, "weight_ema"),
-                    (["--reference-run", str(reference)], 0.5, "", True, False, "weight_ema"),
-                    (["--reference-run", str(reference)], 0.5, "", False, False, "weight_ema"),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema"),
-                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema_secondary"),
+                for reference_args, offset, suffix, exact_g0, fuse_nested, selection, checkpoint_dir in (
+                    (["--reference-run", str(reference)], 0.5, "", True, True, "best_weight_ema", directory / "rollout_best_epoch37_ckpt"),
+                    (["--reference-run", str(reference)], 0.5, "", True, True, "weight_ema", None),
+                    (["--reference-run", str(reference)], 0.5, "", True, False, "weight_ema", None),
+                    (["--reference-run", str(reference)], 0.5, "", False, False, "weight_ema", None),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema", None),
+                    (["--reference-dir", str(source), "--ic-quantile-offset", "0.25"], 0.25, "_q0.25", False, False, "weight_ema_secondary", None),
                 ):
                     with self.subTest(offset=offset, selection=selection), patch("sys.argv", [
                         "eval_fast_rollouts", "--run-dir", str(directory), "--project-momentum", *reference_args,
                         *(["--exact-solver-g0"] if exact_g0 else []),
                         *(["--fuse-nested-fft"] if fuse_nested else []),
+                        *(["--checkpoint-dir", str(checkpoint_dir), "--batch-context-fft"] if checkpoint_dir else []),
                         *(["--checkpoint", selection] if selection != "weight_ema" else []),
                     ]):
                         for mocked in (load, load_ics, build, jit, make_params, execute, evaluate):
                             mocked.reset_mock()
+                        load.return_value = loaded._replace(epoch=37) if checkpoint_dir else loaded
                         fast.main()
-                        load.assert_called_once_with(directory, checkpoint=selection)
+                        load.assert_called_once_with(directory, checkpoint=selection, checkpoint_dir=checkpoint_dir)
                         for call in load_ics.call_args_list:
                             self.assertEqual(call.kwargs, {"ic_quantile_offset": offset})
                         for call in evaluate.call_args_list:
                             self.assertEqual(call.args[4], directory / (
                                 f"eval_fast_{selection}{suffix}_momentum" + ("_exactg0" if exact_g0 else "")
-                                + ("_nestedfused" if fuse_nested else "")))
+                                + ("_nestedfused" if fuse_nested else "")
+                                + ("_contextbatch" if checkpoint_dir else "")))
                             self.assertEqual(call.args[8]["selection"], selection)
-                            self.assertEqual(call.args[8]["path"], str(directory / f"{selection}_ckpt"))
+                            self.assertEqual(call.args[8]["epoch"], 37 if checkpoint_dir else 1)
+                            self.assertEqual(call.args[8]["path"], str(checkpoint_dir or directory / f"{selection}_ckpt"))
                             self.assertEqual(call.args[7], source)
                             self.assertEqual(call.kwargs["ic_quantile_offset"], offset)
                             self.assertEqual("exactg0" in call.args[8]["implementation"], exact_g0)
@@ -598,13 +620,14 @@ class ComputeMetricsTest(unittest.TestCase):
                         for call in build.call_args_list:
                             self.assertEqual(call.args[3], "fourier_fused_features_product_overlap"
                                              + ("_exactg0" if exact_g0 else "")
-                                             + ("_nestedfused" if fuse_nested else ""))
+                                             + ("_nestedfused" if fuse_nested else "")
+                                             + ("_contextbatch" if checkpoint_dir else ""))
                             if exact_g0:
                                 self.assertEqual(set(call.kwargs), {"fft_ept", "solver_g0"})
                                 np.testing.assert_array_equal(call.kwargs["solver_g0"], solver_g0[..., :5])
                             else:
                                 self.assertEqual(call.kwargs, {"fft_ept": 8, "solver_g0": None})
-            load.assert_called_once_with(directory, checkpoint="weight_ema_secondary")
+            load.assert_called_once_with(directory, checkpoint="weight_ema_secondary", checkpoint_dir=None)
             self.assertFalse(any(directory.glob("eval_epoch*_test_*")))
             self.assertIs(fast.ti._state_to_hat, original_boundary)
             self.assertEqual(load_ics.call_count, 4)

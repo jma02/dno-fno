@@ -41,6 +41,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary", "best_weight_ema", "latest"), default="weight_ema")
+    parser.add_argument("--checkpoint-dir", type=Path, help="Directory containing metadata.json and ckpt_<epoch>; use --checkpoint best_weight_ema for EMA from a full state.")
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument("--reference-run", type=Path, help="Run with saved epoch-one M6 reference trajectories")
     reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")
@@ -68,7 +69,8 @@ def main() -> None:
         + ("_nestedfused" if args.fuse_nested_fft else "")
         + ("_contextbatch" if args.batch_context_fft else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
-    loaded = load_run(run_dir, checkpoint=args.checkpoint)
+    checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
+    loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
     dataset = Path(loaded.config["dataset"])
     dataset = dataset if dataset.is_absolute() else ROOT / dataset
     variant = ("fourier_fused_features_product_overlap"
@@ -78,7 +80,7 @@ def main() -> None:
                + ("_contextbatch" if args.batch_context_fft else ""))
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,
-        "path": str(run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
+        "path": str(checkpoint_dir or run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,

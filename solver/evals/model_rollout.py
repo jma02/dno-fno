@@ -50,6 +50,7 @@ def load_run(
     checkpoint: Literal[
         "best", "best_weight_ema", "latest", "final", "weight_ema", "weight_ema_secondary"
     ] = "best",
+    checkpoint_dir: str | Path | None = None,
     domain_length_override: float | None = None,
 ) -> LoadedRun:
     """Restore a JAX FNO or fixed CS-DNO training checkpoint."""
@@ -58,7 +59,7 @@ def load_run(
     if domain_length_override is not None:
         config["domain_length"] = float(domain_length_override)
     checkpoint_dir = (
-        run_dir
+        Path(checkpoint_dir).resolve() if checkpoint_dir is not None else run_dir
         / {
             "best": "best_val_ckpt",
             "best_weight_ema": "best_val_ckpt",
@@ -79,6 +80,7 @@ def load_run(
     restored = checkpoints.restore_checkpoint(
         ckpt_dir=checkpoint_dir,
         target=None,
+        step=int(metadata["epoch"]),
         prefix="ckpt_",
         orbax_checkpointer=ocp.PyTreeCheckpointer(),
     )
