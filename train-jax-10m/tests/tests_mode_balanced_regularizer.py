@@ -175,6 +175,50 @@ def test_prediction_gradient_is_finite_and_nonzero() -> None:
     assert float(jnp.linalg.norm(gradient)) > 0.0
 
 
+def test_subtract_before_fft_preserves_fp64_loss_and_gradients() -> None:
+    x, k = _grid(128)
+    eta = jnp.stack((jnp.cos(5 * x), .2 * jnp.cos(11 * x)))
+    target = jnp.stack((jnp.sin(5 * x), .3 * jnp.sin(11 * x)))
+    prediction = target + .03 * eta + .01 * jnp.cos(29 * x)
+    depth = jnp.array([.2, .8])
+    evaluate = jax.value_and_grad(compute_mode_balanced_loss, argnums=1)
+    options = dict(k_max=16.0, dispersion_weighting=True,
+                   sample_weight=jnp.array([1.0, .3]))
+    ordinary = evaluate(eta, prediction, target, depth, k, **options)
+    disabled = evaluate(eta, prediction, target, depth, k,
+                        subtract_before_fft=False, **options)
+    clean = evaluate(eta, prediction, target, depth, k,
+                     subtract_before_fft=True, **options)
+    for original, control, changed in zip(ordinary, disabled, clean):
+        np.testing.assert_array_equal(control, original)
+        np.testing.assert_allclose(changed, original, rtol=1e-11, atol=1e-14)
+    zero, gradient = evaluate(eta, target, target, depth, k,
+                              subtract_before_fft=True, **options)
+    assert zero == 0
+    np.testing.assert_array_equal(gradient, 0.0)
+
+
+def test_subtract_before_fft_reduces_fp32_small_residual_gradient_error() -> None:
+    x, k = _grid()
+    eta = (jnp.cos(5 * x) + .1 * jnp.cos(13 * x))[None, :].astype(jnp.float32)
+    target = (jnp.sin(5 * x) + .1 * jnp.sin(13 * x))[None, :].astype(jnp.float32)
+    prediction = target + (2e-6 * jnp.cos(5 * x) + 1e-6 * jnp.cos(13 * x)).astype(jnp.float32)
+    depth = jnp.array([.3], dtype=jnp.float32)
+    evaluate = jax.value_and_grad(compute_mode_balanced_loss, argnums=1)
+    ordinary = evaluate(eta, prediction, target, depth, k.astype(jnp.float32))
+    clean = evaluate(eta, prediction, target, depth, k.astype(jnp.float32),
+                     subtract_before_fft=True)
+    # Promote the same rounded fields, rather than regenerating the wave in FP64.
+    reference = evaluate(*(field.astype(jnp.float64) for field in
+                           (eta, prediction, target, depth, k)), subtract_before_fft=True)
+    for actual, expected in zip(clean, reference):
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-12)
+    reference_gradient = np.asarray(reference[1])
+    clean_error = np.linalg.norm(np.asarray(clean[1]) - reference_gradient)
+    ordinary_error = np.linalg.norm(np.asarray(ordinary[1]) - reference_gradient)
+    assert clean_error < .01 * ordinary_error
+
+
 def test_dispersion_weighting_scales_single_mode_by_frequency_squared() -> None:
     x, _ = _grid()
     depth_value = 0.3
@@ -334,6 +378,8 @@ if __name__ == "__main__":
         test_zero_and_out_of_band_modes_are_finite_and_inactive,
         test_loss_is_translation_invariant,
         test_prediction_gradient_is_finite_and_nonzero,
+        test_subtract_before_fft_preserves_fp64_loss_and_gradients,
+        test_subtract_before_fft_reduces_fp32_small_residual_gradient_error,
         test_dispersion_weighting_scales_single_mode_by_frequency_squared,
         test_dispersion_weighting_is_applied_before_batch_average,
         test_effective_frequency_uses_scored_band_and_parseval_weights,

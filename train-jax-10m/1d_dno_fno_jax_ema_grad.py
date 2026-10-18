@@ -241,6 +241,8 @@ def main() -> None:
                         help="Relative correction beyond G0+G1 at which the nonlinear weight is 1.5.")
     parser.add_argument("--nonlinear_weight_mean", type=float, default=1.463313,
                         help="Fixed training mean of the selected row weight; default is for nonlinear weighting.")
+    parser.add_argument("--subtract_before_fft", action="store_true",
+                        help="Transform the physical prediction error directly in data and mode-balancing losses.")
     parser.add_argument("--data_normalization", choices=("target", "bounded", "nonlinear", "residual"), default="nonlinear",
                         help="Target-relative loss, bounded inverse-residual weighting (raw weights 1..2), "
                         "nonlinear weighting, or normalization by the model's baseline residual.")
@@ -873,7 +875,9 @@ def main() -> None:
         pred_hat = jnp.fft.rfft(predictions, axis=1)
         target_hat = jnp.fft.rfft(batch_targets, axis=1)
         baseline_hat = jnp.fft.rfft(baseline, axis=1)
-        squared_error = jnp.sum(jnp.abs((pred_hat - target_hat).astype(jnp.complex128)) ** 2, axis=(1, 2))
+        error_hat = (jnp.fft.rfft(predictions - batch_targets, axis=1)
+                     if args.subtract_before_fft else pred_hat - target_hat)
+        squared_error = jnp.sum(jnp.abs(error_hat.astype(jnp.complex128)) ** 2, axis=(1, 2))
         zero_error = squared_error == 0.0
         error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
         target_norm = jnp.sqrt(jnp.maximum(
@@ -889,7 +893,7 @@ def main() -> None:
         if args.data_k_max is not None:
             data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
             data_squared_error = jnp.sum(jnp.abs(jnp.where(
-                data_mask, (pred_hat - target_hat).astype(jnp.complex128), 0.0,
+                data_mask, error_hat.astype(jnp.complex128), 0.0,
             )) ** 2, axis=(1, 2))
             data_zero_error = data_squared_error == 0.0
             data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
@@ -904,7 +908,7 @@ def main() -> None:
             projection_mask = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
             xi_direction = jnp.where(projection_mask[..., 0], xi_hat, 0.0)
             projection_error = jnp.where(
-                projection_mask, (pred_hat - target_hat).astype(jnp.complex128), 0.0,
+                projection_mask, error_hat.astype(jnp.complex128), 0.0,
             )[..., 0]
             direction_squared = jnp.sum(jnp.abs(xi_direction) ** 2, axis=1)
             projection_dot = jnp.real(jnp.sum(jnp.conj(xi_direction) * projection_error, axis=1))
@@ -979,6 +983,7 @@ def main() -> None:
                 k_max=args.mode_balanced_k_max,
                 activity_threshold=args.mode_balanced_activity_threshold,
                 denominator_eps=args.mode_balanced_denominator_eps,
+                subtract_before_fft=args.subtract_before_fft,
                 sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
                                                        training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
             )

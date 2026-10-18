@@ -44,6 +44,7 @@ TrainerLoss = Callable[
 def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> TrainerLoss:
     # Exercise the trainer's inline arithmetic, not a second implementation.
     config.data_xi_projection_weight = 0.0
+    config.subtract_before_fft = getattr(config, "subtract_before_fft", False)
     path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
     source = ast.parse(path.read_text())
     component = next(node for node in ast.walk(source)
@@ -172,10 +173,50 @@ def test_target_normalization_matches_unweighted_relative_l2() -> None:
                     np.testing.assert_array_equal(gradient, 0)
 
 
+def test_subtract_before_fft_changes_only_residual_arithmetic() -> None:
+    nx = 1024
+    x = np.arange(nx) * (2 * np.pi / nx)
+    family = jnp.array([PhysicalFamilyId.STOKES])
+    for dtype, cutoff, enabled in product((jnp.float32, jnp.float64), (None, 128.0), (False, True)):
+        config = SimpleNamespace(model="cs_dno", data_normalization="target", data_k_max=cutoff,
+                                 residual_floor=1e-6, subtract_before_fft=enabled)
+        losses = trainer_loss(config)
+        target = jnp.asarray(np.sin(3 * x) + 0.3 * np.cos(7 * x), dtype=dtype)[None, :, None]
+        prediction = target + jnp.asarray(1e-7 * (np.cos(11 * x) + np.sin(160 * x)), dtype=dtype)[None, :, None]
+        baseline = 0.9 * target
+        target_hat = jnp.fft.rfft(target, axis=1)
+        mask = jnp.ones(nx // 2 + 1, bool) if cutoff is None else jnp.arange(nx // 2 + 1) <= cutoff
+        denominator = jnp.sqrt(jnp.sum(jnp.abs(target_hat[:, mask].astype(jnp.complex128)) ** 2))
+
+        def expected_loss(pred: jax.Array) -> jax.Array:
+            residual = (jnp.fft.rfft(pred - target, axis=1) if enabled
+                        else jnp.fft.rfft(pred, axis=1) - target_hat)
+            return jnp.sqrt(jnp.sum(jnp.abs(residual[:, mask].astype(jnp.complex128)) ** 2)) / denominator
+
+        evaluate = jax.jit(jax.value_and_grad(losses, has_aux=True))
+        (value, (full, _)), gradient = evaluate(prediction, target, baseline, baseline, family)
+        expected, expected_gradient = jax.jit(jax.value_and_grad(expected_loss))(prediction)
+        np.testing.assert_allclose(value, expected, rtol=1e-12)
+        np.testing.assert_allclose(value, expected_loss(prediction), rtol=1e-12)
+        np.testing.assert_allclose(gradient, expected_gradient, rtol=2e-6, atol=1e-9)
+        if cutoff is None:
+            np.testing.assert_array_equal(value, full)
+        (zero, (zero_full, _)), zero_gradient = evaluate(target, target, baseline, baseline, family)
+        np.testing.assert_array_equal((zero, zero_full), (0.0, 0.0))
+        np.testing.assert_array_equal(zero_gradient, jnp.zeros_like(target))
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+        if dtype == jnp.float32 and enabled:
+            # Compare both FFT orders with an FP64 transform of the same rounded fields.
+            reference = jnp.fft.rfft(prediction.astype(jnp.float64) - target.astype(jnp.float64), axis=1)
+            before = jnp.fft.rfft(prediction - target, axis=1)
+            after = jnp.fft.rfft(prediction, axis=1) - target_hat
+            assert float(jnp.linalg.norm(before - reference)) < 0.01 * float(jnp.linalg.norm(after - reference))
+
+
 def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> None:
     config = SimpleNamespace(
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
-        mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none",
+        mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
     )
     nx = 1024
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -491,17 +532,16 @@ def test_family_metrics_recombine_uneven_counts_and_isolate_nan() -> None:
 
     # Extract the actual host epoch reduction, including sample counts and data shares.
     path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
-    source = ast.parse(path.read_text())
-    reduction = next(node for node in ast.walk(source) if isinstance(node, ast.If)
-                     and isinstance(node.test, ast.Name) and node.test.id == "val_batch_losses"
-                     and any(isinstance(child, ast.Assign) and isinstance(child.targets[0], ast.Name)
-                             and child.targets[0].id == "family_totals" for child in node.body))
+    reduction = trainer_function("evaluate_validation")
+    start = next(index for index, node in enumerate(reduction.body)
+                 if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                 and node.targets[0].id == "family_totals")
     function = ast.parse(
         "def aggregate(losses: np.ndarray, val_batch_sizes: list[int]) "
-        "-> dict[str, float]: epoch_record = {}"
+        "-> dict[str, float]: metrics = {}"
     ).body[0]
     assert isinstance(function, ast.FunctionDef)
-    function.body += reduction.body + ast.parse("return epoch_record").body
+    function.body += reduction.body[start:]
     namespace: dict[str, Any] = {"np": np, "PhysicalFamilyId": PhysicalFamilyId}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
     aggregate = namespace["aggregate"]
@@ -551,7 +591,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         translation_tangent_geometry="coupled_modal", translation_tangent_k_max=1,
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
-        stokes_relative_tangent=False, phase_mechanism="none",
+        stokes_relative_tangent=False, phase_mechanism="none", subtract_before_fft=False,
     )
 
     def apply_model(
@@ -654,9 +694,10 @@ def test_learning_rate_hold_schedule_and_validation() -> None:
     validation = next(node for node in main.body if isinstance(node, ast.If)
                       and "np.isfinite(args.lr_hold_fraction)" in ast.unparse(node.test))
     start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign)
-                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "total_steps")
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "schedule_steps")
     parser = argparse.ArgumentParser(add_help=False)
-    namespace: dict[str, Any] = {"parser": parser, "np": np, "optax": optax, "train_steps_per_epoch": 10000}
+    namespace: dict[str, Any] = {"parser": parser, "np": np, "optax": optax,
+                                 "train_steps_per_epoch": 10000, "schedule_epochs": 1}
     exec(compile(ast.Module(body=[option], type_ignores=[]), "lr_hold_option", "exec"), namespace)
     validate = compile(ast.Module(body=[validation], type_ignores=[]), "lr_hold_validation", "exec")
     configure = compile(ast.Module(body=main.body[start:start + 2], type_ignores=[]), "lr_hold_schedule", "exec")
@@ -847,7 +888,7 @@ def test_milestone_rollouts_use_only_started_weight_ema() -> None:
     validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
                       and ast.unparse(node.test) == "args.rollout_epochs and args.weight_ema_decay == 0.0")
     schedule_validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
-                               and ast.unparse(node.test) == "args.rollout_epochs and min(args.rollout_epochs) <= args.epochs * args.weight_ema_start_fraction")
+                               and ast.unparse(node.test) == "args.rollout_epochs and min(args.rollout_epochs) <= schedule_epochs * args.weight_ema_start_fraction")
     milestone = next(node for node in ast.walk(main) if isinstance(node, ast.If)
                      and ast.unparse(node.test) == "epoch in args.rollout_epochs")
     checkpoint = next(node for node in ast.walk(main) if isinstance(node, ast.If)
@@ -859,7 +900,7 @@ def test_milestone_rollouts_use_only_started_weight_ema() -> None:
     families = ("stokes", "tanaka", "jonswap_tma", "benjamin_feir")
     loaded, predict, evaluate, save, write = (Mock() for _ in range(5))
     namespace: dict[str, Any] = {
-        "args": config, "training_state": state, "epoch": 1, "epoch_end_step": 100,
+        "args": config, "training_state": state, "epoch": 1, "epoch_end_step": 100, "schedule_epochs": 1,
         "run_dir": Path("/tmp/ema-milestone-run"), "dataset_path": Path("/tmp/ema-milestone-data"),
         "model": object(), "config_payload": {}, "stats": {}, "history": [],
         "best_val_loss": 0.0, "best_epoch": 1, "checkpoint_async_manager": object(),
@@ -877,6 +918,7 @@ def test_milestone_rollouts_use_only_started_weight_ema() -> None:
     assert "requires --weight_ema_decay" in namespace["parser"].error.call_args.args[0]
     config.weight_ema_decay = 0.999
     config.epochs = 5
+    namespace["schedule_epochs"] = 5
     for milestones in ([3], [4], [4, 5]):
         config.rollout_epochs = milestones
         with np.testing.assert_raises(ValueError):
@@ -1091,7 +1133,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
-        rollout_training_loss="full", amplitude_probe_scale=0.0,
+        rollout_training_loss="full", amplitude_probe_scale=0.0, subtract_before_fft=False,
     )
 
     def apply_model(
@@ -1546,6 +1588,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="squared",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
+        subtract_before_fft=False,
     )
     nx = 64
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -1737,7 +1780,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         translation_tangent_smoothing_scale=1.0, stokes_relative_tangent=False,
         hadamard_weight=0.0, phase_mechanism="none", phase_mechanism_weight=0.0,
         phase_mechanism_ramp_epochs=0.0,
-        jonswap_mode_balanced_scale=1.0,
+        jonswap_mode_balanced_scale=1.0, subtract_before_fft=False,
     )
     nx = 32
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -2173,6 +2216,7 @@ if __name__ == "__main__":
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_target_normalization_matches_unweighted_relative_l2()
+    test_subtract_before_fft_changes_only_residual_arithmetic()
     test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
     test_retained_band_normalizers_gradients_and_full_metrics()
     test_retained_band_zero_error_and_cutoff_validation()

@@ -22,6 +22,7 @@ def compute_mode_balanced_loss(
     ratio_cap: float = 100.0,
     dispersion_weighting: bool = False,
     sample_weight: jax.Array | None = None,
+    subtract_before_fft: bool = False,
 ) -> jax.Array:
     """Compare complex DNO coefficients with soft balance over active modes.
 
@@ -52,6 +53,8 @@ def compute_mode_balanced_loss(
 
     Optional sample weights multiply rows before the ordinary batch mean, so
     ablating one family does not increase the other families' coefficients.
+    Subtracting before the FFT changes only error arithmetic, not target scales
+    or activity weights.
     """
     real_dtype = eta.dtype
     eta_hat, prediction_hat, target_hat = (
@@ -81,7 +84,9 @@ def compute_mode_balanced_loss(
     soft_activity = physical_scale / (physical_scale + activity_floor)
     mode_weight = jax.lax.stop_gradient(jnp.where(band[None, :], soft_activity, 0.0))
 
-    squared_error = jnp.abs(prediction_hat - target_hat) ** 2
+    error_hat = (jnp.fft.rfft(gxi_prediction - gxi_target, axis=-1, norm="forward")
+                 if subtract_before_fft else prediction_hat - target_hat)
+    squared_error = jnp.abs(error_hat) ** 2
     squared_ratio = squared_error / (physical_scale + denominator_floor)
     clipped_ratio = jnp.minimum(squared_ratio, jnp.asarray(ratio_cap, dtype=real_dtype))
     scaled_ratio = clipped_ratio / jnp.asarray(huber_delta, dtype=real_dtype) ** 2
