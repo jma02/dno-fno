@@ -233,9 +233,10 @@ class ComputeMetricsTest(unittest.TestCase):
         params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
         params["cs_block_0"]["gamma"] = jnp.full((2,), 0.1, dtype=jnp.float32)
         params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
-        prediction, baseline, m1 = cast(tuple[jax.Array, jax.Array, jax.Array],
+        prediction, baseline, m1, correction = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                                        model.apply({"params": params}, inputs, depth, return_baseline=True))
         np.testing.assert_array_equal(baseline, m1)
+        np.testing.assert_array_equal(prediction, baseline + correction)
         self.assertGreater(float(jnp.linalg.norm(prediction - baseline)), 1e-7)
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,

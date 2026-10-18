@@ -202,7 +202,7 @@ class CraigSulemDNO(nn.Module):
     @nn.compact
     def __call__(
         self, inputs: jnp.ndarray, depth: jnp.ndarray, *, return_baseline: bool = False,
-    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
         batch_size, grid_size, _ = inputs.shape
         clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
@@ -350,5 +350,5 @@ class CraigSulemDNO(nn.Module):
         correction = correction / self.target_scale
         prediction = (baseline + correction)[..., None]
         if return_baseline:
-            return prediction, baseline[..., None], m1_baseline[..., None]
+            return prediction, baseline[..., None], m1_baseline[..., None], correction[..., None]
         return prediction

@@ -45,6 +45,7 @@ def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> T
     # Exercise the trainer's inline arithmetic, not a second implementation.
     config.data_xi_projection_weight = 0.0
     config.subtract_before_fft = getattr(config, "subtract_before_fft", False)
+    config.fp64_residual = False
     path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
     source = ast.parse(path.read_text())
     component = next(node for node in ast.walk(source)
@@ -62,7 +63,7 @@ def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> T
     ).body + component.body[assignments["pred_hat"]:assignments["h_phys"]]
     function.body += ast.parse("return data_loss, (full_l2_loss, family_metrics)").body
     namespace: dict[str, Any] = {
-        "jax": jax, "jnp": jnp, "args": config,
+        "jax": jax, "jnp": jnp, "args": config, "target_residual64": None,
         "PhysicalFamilyId": PhysicalFamilyId, "collect_family_metrics": True, "domain_length": domain_length,
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
@@ -213,10 +214,121 @@ def test_subtract_before_fft_changes_only_residual_arithmetic() -> None:
             assert float(jnp.linalg.norm(before - reference)) < 0.01 * float(jnp.linalg.norm(after - reference))
 
 
+def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> None:
+    from util import make_normalizers
+
+    nx = 64
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    eta = (0.02 * jnp.cos(2 * x))[None]
+    xi = (0.03 * jnp.sin(3 * x))[None]
+    depth = jnp.log(jnp.asarray([[0.4]], dtype=jnp.float64))
+    family = jnp.array([PhysicalFamilyId.STOKES])
+    model = CraigSulemDNO(width=8, n_blocks=1, latent=2, mult_hidden=4,
+                         eta_scale=2.0, xi_scale=3.0, target_scale=4.0,
+                         baseline_true_depth=True)
+    config = SimpleNamespace(
+        model="cs_dno", data_normalization="target", data_k_max=16.0, residual_floor=1e-6,
+        data_xi_projection_weight=0.0, mode_balanced_weight=6.0, mode_balanced_k_max=16.0,
+        mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
+        translation_tangent_weight=0.0, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
+        subtract_before_fft=False, fp64_residual=True, subtract_before_centering=False,
+    )
+    mode = jnp.cos(5 * x).astype(jnp.float32)[None, :, None]
+    calls = []
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, log_depth: jax.Array, *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        calls.append(inputs.dtype)
+        baseline = (cast(jax.Array, model.apply({}, inputs[..., 1], log_depth, method=model._linear_baseline))
+                    + cast(jax.Array, model.apply({}, inputs[..., 0], inputs[..., 1], log_depth,
+                                                method=model._g1_baseline)))[..., None]
+        correction = variables["params"] * mode
+        return baseline + correction, baseline, baseline, correction
+
+    baseline64 = (
+        cast(jax.Array, model.apply({}, xi / 3, depth, method=model._linear_baseline))
+        + cast(jax.Array, model.apply({}, eta / 2, xi / 3, depth, method=model._g1_baseline))
+    )[..., None]
+    target = 4 * (baseline64[..., 0] + 3e-11 * mode[..., 0].astype(jnp.float64))
+    target32 = target.astype(jnp.float32)
+    target_hat = jnp.fft.rfft(target32[..., None] / 4, axis=1).astype(jnp.complex128)
+    denominator = jax.lax.stop_gradient(jnp.sqrt(jnp.sum(jnp.abs(target_hat[:, :17])**2)))
+    normalize_inputs, normalize_targets, denormalize_targets = make_normalizers(
+        {"feature_absmax": [2.0, 3.0], "target_absmax": 4.0}, mode="scale",
+    )
+    namespace: dict[str, Any] = dict(
+        jax=jax, jnp=jnp, FlatParams=Any, cast=cast, args=config, model=model,
+        training_dtype=jnp.float32, PhysicalFamilyId=PhysicalFamilyId, apply_model=apply_model,
+        norm_inputs_jax=normalize_inputs, norm_targets_jax=normalize_targets,
+        denorm_targets_jax=denormalize_targets,
+        log_h_max=np.log(5), k_rfft_jax=jnp.arange(nx // 2 + 1, dtype=jnp.float32),
+        compute_mode_balanced_loss=compute_mode_balanced_loss,
+    )
+    exec(compile(ast.Module(body=[trainer_function("compute_loss_components")], type_ignores=[]),
+                 "fp64_residual_components", "exec"), namespace)
+    parts = namespace["compute_loss_components"]
+
+    def objective(p: jax.Array) -> jax.Array:
+        values = parts(p, eta, xi, target, depth, family)
+        return values[0] + 6 * values[1]
+
+    def expected(p: jax.Array) -> jax.Array:
+        residual = p.astype(jnp.float64) * mode - (target[..., None] / 4 - baseline64)
+        error_hat = jnp.fft.rfft(residual, axis=1)
+        data_loss = jnp.sqrt(jnp.sum(jnp.abs(error_hat[:, :17])**2)) / denominator
+        mb = compute_mode_balanced_loss(
+            eta.astype(jnp.float32), jnp.zeros_like(target32), target32,
+            jnp.exp(depth.astype(jnp.float32)[:, 0]), jnp.arange(nx // 2 + 1, dtype=jnp.float32),
+            k_max=16, gxi_error=4 * residual[..., 0],
+        )
+        return data_loss + 6 * mb
+
+    p = jnp.float32(1e-10)
+    calls.clear()
+    objective(p)
+    assert calls == [jnp.dtype(jnp.float32)]
+    for actual, reference in zip(jax.jit(jax.value_and_grad(objective))(p),
+                                 jax.jit(jax.value_and_grad(expected))(p)):
+        np.testing.assert_allclose(actual, reference, rtol=2e-6, atol=1e-13)
+    # Validation/family metrics and generated labeled rows use this same function.
+    ordinary = parts(p, eta, xi, target, depth, family)
+    collected = parts(p, eta, xi, target, depth, family, collect_family_metrics=True)
+    for actual, reference in zip(collected[:6], ordinary[:6]):
+        np.testing.assert_array_equal(actual, reference)
+    generated = parts(p, eta, xi, target, depth, family, n_data_only_rows=1)
+    np.testing.assert_array_equal(generated[0], ordinary[0])
+    np.testing.assert_array_equal(generated[1:5], jnp.zeros(4))
+    config.__dict__.update(mode_balanced_warmup_steps=1, phase_mechanism_weight=0.0,
+                           phase_mechanism_ramp_epochs=0.0, rollout_training_weight=0.7,
+                           rollout_training_ramp_epochs=0.0, rollout_training_loss="full", hadamard_weight=0.0)
+    namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family,
+                     current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None,
+                     rollout_batch=(True, depth, family, eta, xi, target, jnp.float32(1.0)))
+    exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
+                 "fp64_residual_teacher_loss", "exec"), namespace)
+    (combined, metrics), combined_grad = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(p)
+    expected_value, expected_grad = jax.value_and_grad(expected)(p)
+    np.testing.assert_allclose(combined, 1.7 * expected_value, rtol=2e-6)
+    np.testing.assert_allclose(combined_grad, 1.7 * expected_grad, rtol=2e-6)
+    np.testing.assert_allclose(metrics["rollout_data_loss"], ordinary[0], rtol=2e-6)
+    np.testing.assert_allclose(metrics["rollout_mode_balanced_loss"], ordinary[1], rtol=2e-6)
+    # Disabling the arm retains the old full-output FFT numerator, even when the
+    # direct component is much smaller than a ULP of the full prediction.
+    config.fp64_residual = False
+    pred, _, _, direct = apply_model({"params": p}, jnp.stack((eta, xi), axis=-1).astype(jnp.float32)
+                                     / jnp.asarray([2, 3]), depth.astype(jnp.float32), return_baseline=True)
+    error = jnp.fft.rfft(pred, axis=1) - jnp.fft.rfft(target32[..., None] / 4, axis=1)
+    expected_old = jnp.sqrt(jnp.sum(jnp.abs(error[:, :17].astype(jnp.complex128))**2)) / denominator
+    np.testing.assert_allclose(parts(p, eta, xi, target, depth, family)[0], expected_old, rtol=1e-12)
+    assert jnp.any(direct != 0)
+
+
 def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> None:
     config = SimpleNamespace(
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
         mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
+        fp64_residual=False, subtract_before_centering=False,
     )
     nx = 1024
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -225,9 +337,9 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
 
     def apply_model(
         variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array, *, return_baseline: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         prediction = variables["params"][..., None] / 4
-        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
@@ -592,14 +704,15 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", subtract_before_fft=False,
+        fp64_residual=False, subtract_before_centering=False,
     )
 
     def apply_model(
         variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array,
         *, return_baseline: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         prediction = (variables["params"][..., None] - 7.0) / 4.0
-        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction
 
     nx = 32
     phase = jnp.arange(nx) * (2 * jnp.pi / nx)
@@ -979,7 +1092,7 @@ def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
         namespace.update(model=model, nx=nx, training_dtype=jnp.float32)
         reference = model.init(jax.random.PRNGKey(0), jnp.zeros((1, nx, 2), dtype=jnp.float32),
                                jnp.zeros((1, 1), dtype=jnp.float32))["params"]
-        baseline = cast(tuple[jax.Array, jax.Array, jax.Array],
+        baseline = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                         model.apply({"params": reference}, inputs, depth, return_baseline=True))[1]
         target = baseline + 0.02 * jax.random.normal(jax.random.PRNGKey(42), baseline.shape, dtype=baseline.dtype)
         for enabled in (False, True):
@@ -1080,7 +1193,7 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
         exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
                      "trainer_packed_apply", "exec"), namespace)
         packed_apply = namespace["apply_model"]
-        native = cast(tuple[jax.Array, jax.Array, jax.Array],
+        native = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                       model.apply({"params": params}, case_inputs, case_depth, return_baseline=True))
         packed = jax.jit(packed_apply, static_argnames="return_baseline")(
             {"params": params}, case_inputs, case_depth, return_baseline=True,
@@ -1134,13 +1247,14 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
         rollout_training_loss="full", amplitude_probe_scale=0.0, subtract_before_fft=False,
+        fp64_residual=False, subtract_before_centering=False,
     )
 
     def apply_model(
         variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array, *, return_baseline: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         prediction = variables["params"][:, None, None] * jnp.sum(inputs, axis=-1, keepdims=True)
-        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "Any": Any, "cast": cast, "FlatParams": Any, "args": config,
@@ -1588,7 +1702,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="squared",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
-        subtract_before_fft=False,
+        subtract_before_fft=False, fp64_residual=False, subtract_before_centering=False,
     )
     nx = 64
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -1603,9 +1717,9 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
     def apply_model(
         variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array,
         *, return_baseline: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         result = variables["params"][..., None] / 4
-        return result, jnp.zeros_like(result), jnp.zeros_like(result)
+        return result, jnp.zeros_like(result), jnp.zeros_like(result), result
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config, "cast": cast,
@@ -1781,6 +1895,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         hadamard_weight=0.0, phase_mechanism="none", phase_mechanism_weight=0.0,
         phase_mechanism_ramp_epochs=0.0,
         jonswap_mode_balanced_scale=1.0, subtract_before_fft=False,
+        fp64_residual=False, subtract_before_centering=False,
     )
     nx = 32
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -1795,9 +1910,9 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     def apply_model(
         variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array,
         *, return_baseline: bool,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         prediction = variables["params"] * jnp.sum(inputs, axis=-1, keepdims=True) / 4
-        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction
 
     def expected_components(params: jax.Array, scale: float) -> jax.Array:
         e, z, truth = scale * eta, (scale + 1) / 2 * xi, (scale + 3) / 4 * target
@@ -2217,6 +2332,7 @@ if __name__ == "__main__":
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_target_normalization_matches_unweighted_relative_l2()
     test_subtract_before_fft_changes_only_residual_arithmetic()
+    test_fp64_residual_uses_direct_correction_and_preserves_loss_scales()
     test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
     test_retained_band_normalizers_gradients_and_full_metrics()
     test_retained_band_zero_error_and_cutoff_validation()

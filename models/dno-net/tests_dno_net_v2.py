@@ -119,10 +119,10 @@ def _learned_residual(
     depth: jnp.ndarray,
 ) -> jnp.ndarray:
     inputs = jnp.stack((eta, xi), axis=-1)
-    output, baseline, _ = cast(tuple[jax.Array, jax.Array, jax.Array], model.apply(
+    _, _, _, correction = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], model.apply(
         variables, inputs, depth, return_baseline=True,
     ))
-    return (output - baseline)[..., 0]
+    return correction[..., 0]
 
 
 def test_default_matches_original_forward() -> None:
@@ -423,7 +423,7 @@ def test_true_depth_analytic_baselines_and_returned_components() -> None:
             inputs = jnp.broadcast_to(jnp.stack((eta, xi), axis=-1), (2, eta.shape[-1], 2)).astype(dtype)
             depth = jnp.log(jnp.asarray([[0.8], [12.0]], dtype=dtype))
             variables = model.init(jax.random.PRNGKey(12), inputs, depth)
-            prediction, baseline, m1 = cast(tuple[jax.Array, jax.Array, jax.Array], model.apply(
+            prediction, baseline, m1, correction = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], model.apply(
                 variables, inputs, depth, return_baseline=True,
             ))
             physical = (
@@ -436,6 +436,7 @@ def test_true_depth_analytic_baselines_and_returned_components() -> None:
             expected_m1 = dno_series_eval(*physical, order=min(order, 1))[..., None] / model.target_scale
             assert jnp.array_equal(prediction, cast(jax.Array, model.apply(variables, inputs, depth)))
             assert jnp.array_equal(prediction, baseline)
+            assert jnp.array_equal(correction, jnp.zeros_like(correction))
             tolerance = 2e-6 if dtype == jnp.float32 else 1e-11
             assert float(jnp.linalg.norm(baseline - expected) / jnp.linalg.norm(expected)) < tolerance
             assert float(jnp.linalg.norm(m1 - expected_m1) / jnp.linalg.norm(expected_m1)) < tolerance

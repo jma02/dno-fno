@@ -243,6 +243,10 @@ def main() -> None:
                         help="Fixed training mean of the selected row weight; default is for nonlinear weighting.")
     parser.add_argument("--subtract_before_fft", action="store_true",
                         help="Transform the physical prediction error directly in data and mode-balancing losses.")
+    parser.add_argument("--fp64_residual", action="store_true",
+                        help="Fit the direct FP32 correction against the physical target minus FP64 M1 in data and MB losses.")
+    parser.add_argument("--subtract_before_centering", action="store_true",
+                        help="Subtract prediction and target before centering in tangent and phase losses.")
     parser.add_argument("--data_normalization", choices=("target", "bounded", "nonlinear", "residual"), default="nonlinear",
                         help="Target-relative loss, bounded inverse-residual weighting (raw weights 1..2), "
                         "nonlinear weighting, or normalization by the model's baseline residual.")
@@ -521,6 +525,10 @@ def main() -> None:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
+    if args.fp64_residual and (
+        args.model != "cs_dno" or args.norm != "scale" or args.cs_baseline_order != 1 or not args.cs_baseline_true_depth
+    ):
+        parser.error("--fp64_residual requires cs_dno, scale normalization, and true-depth G0+G1")
     if args.cs_nested_zero_inner and not args.cs_nested_blocks:
         parser.error("--cs_nested_zero_inner requires --cs_nested_blocks > 0")
     if args.cs_nested_surface_modulation and not args.cs_nested_blocks:
@@ -712,7 +720,7 @@ def main() -> None:
                     *, return_baseline: bool = False) -> Any:
         if args.model != "cs_dno":
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
-            return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction)) if return_baseline else prediction
+            return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction) if return_baseline else prediction
         multiplier_model = DepthAwareMultiplier(
             args.latent, domain_length, 5.0, args.cs_mult_hidden,
             multiplier_skip=args.cs_multiplier_skip,
@@ -866,9 +874,20 @@ def main() -> None:
         if args.phase_mechanism == "bf_sideband":
             carrier_modes, sideband_offsets = family[:, 1], family[:, 2]
             family = family[:, 0]
+        target_residual64 = None
+        if args.fp64_residual:
+            physical_inputs64 = norm_inputs_jax(eta.astype(jnp.float64), xi.astype(jnp.float64))
+            physical_depth64 = batch_depth.astype(jnp.float64)
+            baseline64 = (
+                cast(jax.Array, model.apply({}, physical_inputs64[..., 1], physical_depth64,
+                                           method=model._linear_baseline))
+                + cast(jax.Array, model.apply({}, physical_inputs64[..., 0], physical_inputs64[..., 1],
+                                             physical_depth64, method=model._g1_baseline))
+            )[..., None]
+            target_residual64 = norm_targets_jax(gxi.astype(jnp.float64)) - baseline64
         eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
-        predictions, baseline, m1_baseline = apply_model(
+        predictions, baseline, m1_baseline, correction = apply_model(
             {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
             return_baseline=True,
         )
@@ -877,6 +896,11 @@ def main() -> None:
         baseline_hat = jnp.fft.rfft(baseline, axis=1)
         error_hat = (jnp.fft.rfft(predictions - batch_targets, axis=1)
                      if args.subtract_before_fft else pred_hat - target_hat)
+        physical_error64 = None
+        if target_residual64 is not None:
+            residual64 = correction.astype(jnp.float64) - target_residual64
+            error_hat = jnp.fft.rfft(residual64, axis=1)
+            physical_error64 = denorm_targets_jax(residual64)[..., 0]
         squared_error = jnp.sum(jnp.abs(error_hat.astype(jnp.complex128)) ** 2, axis=(1, 2))
         zero_error = squared_error == 0.0
         error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
@@ -984,6 +1008,7 @@ def main() -> None:
                 activity_threshold=args.mode_balanced_activity_threshold,
                 denominator_eps=args.mode_balanced_denominator_eps,
                 subtract_before_fft=args.subtract_before_fft,
+                gxi_error=None if physical_error64 is None else physical_error64[:n_auxiliary_rows],
                 sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
                                                        training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
             )
@@ -995,6 +1020,7 @@ def main() -> None:
                 denominator_eps=args.translation_tangent_denominator_eps,
                 loss_norm=args.translation_tangent_loss_norm,
                 charbonnier_eps=args.translation_tangent_charbonnier_eps,
+                subtract_before_centering=args.subtract_before_centering,
             )
             if args.translation_tangent_geometry == "coupled_modal":
                 tangent_loss, local_selected = compute_modal_phase_loss(
@@ -1021,12 +1047,14 @@ def main() -> None:
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
                 mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
+                subtract_before_centering=args.subtract_before_centering,
             )
             mechanism_loss *= mechanism_count / full_batch_size
         elif args.phase_mechanism in ("tanaka_momentum", "all_momentum"):
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
                 mechanism="momentum", horizon=200.0,
+                subtract_before_centering=args.subtract_before_centering,
                 sample_mask=family == PhysicalFamilyId.TANAKA if args.phase_mechanism == "tanaka_momentum" else None,
             )
             mechanism_loss *= mechanism_count / full_batch_size
@@ -1034,6 +1062,7 @@ def main() -> None:
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
                 mechanism="sideband", sample_mask=family == PhysicalFamilyId.BENJAMIN_FEIR, horizon=200.0,
+                subtract_before_centering=args.subtract_before_centering,
                 carrier_mode=cast(jax.Array, carrier_modes)[:n_auxiliary_rows],
                 sideband_offset=cast(jax.Array, sideband_offsets)[:n_auxiliary_rows],
             )

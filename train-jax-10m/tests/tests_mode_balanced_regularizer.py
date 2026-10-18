@@ -369,6 +369,36 @@ def test_dispersion_weighting_is_finite_for_flat_surface() -> None:
     np.testing.assert_allclose(gradient, 0.0, atol=1e-15)
 
 
+def test_direct_residual_preserves_activity_scales_and_prediction_independence() -> None:
+    x, k = _grid()
+    eta = (0.1 * jnp.cos(3 * x))[None].astype(jnp.float32)
+    target = jnp.sin(3 * x)[None].astype(jnp.float32)
+    depth = jnp.asarray([0.3], dtype=jnp.float32)
+    residual = (1e-10 * jnp.cos(5 * x))[None].astype(jnp.float64)
+    def direct(error: jax.Array, prediction: jax.Array) -> jax.Array:
+        return compute_mode_balanced_loss(eta, prediction, target, depth, k, gxi_error=error)
+    # Preserve exactly the detached FP32 target scales while supplying only the
+    # error numerator in FP64; an unrelated prediction cannot affect the result.
+    value, (error_grad, prediction_grad) = jax.value_and_grad(direct, argnums=(0, 1))(residual, target)
+    np.testing.assert_array_equal(value, direct(residual, target * 2))
+    np.testing.assert_array_equal(prediction_grad, jnp.zeros_like(target))
+    assert bool(jnp.all(jnp.isfinite(error_grad)))
+    assert float(jnp.linalg.norm(error_grad)) > 0
+    np.testing.assert_array_equal(compute_mode_balanced_loss(eta, target, target, depth, k),
+                                  direct(jnp.zeros_like(residual), target))
+    # With FP64 inputs, the direct and subtract-first forms agree in value and gradient.
+    target64, eta64, depth64 = target.astype(jnp.float64), eta.astype(jnp.float64), depth.astype(jnp.float64)
+    prediction = target64 + 0.01 * jnp.cos(5 * x)[None]
+    supplied = jax.value_and_grad(lambda p: compute_mode_balanced_loss(
+        eta64, p, target64, depth64, k, gxi_error=p - target64,
+    ))(prediction)
+    reference = jax.value_and_grad(lambda p: compute_mode_balanced_loss(
+        eta64, p, target64, depth64, k, subtract_before_fft=True,
+    ))(prediction)
+    for actual, expected in zip(supplied, reference):
+        np.testing.assert_array_equal(actual, expected)
+
+
 if __name__ == "__main__":
     tests = (
         test_exact_prediction_has_zero_loss,
@@ -380,6 +410,7 @@ if __name__ == "__main__":
         test_prediction_gradient_is_finite_and_nonzero,
         test_subtract_before_fft_preserves_fp64_loss_and_gradients,
         test_subtract_before_fft_reduces_fp32_small_residual_gradient_error,
+        test_direct_residual_preserves_activity_scales_and_prediction_independence,
         test_dispersion_weighting_scales_single_mode_by_frequency_squared,
         test_dispersion_weighting_is_applied_before_batch_average,
         test_effective_frequency_uses_scored_band_and_parseval_weights,

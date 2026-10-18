@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 import sys
 from typing import Any
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from translation_tangent_regularizer import (  # noqa: E402
+    _centered_error,
     compute_modal_phase_loss,
     compute_phase_mechanism_loss,
     compute_translation_tangent_loss,
@@ -25,6 +27,63 @@ from solver.solvers.time_integrator import (  # noqa: E402
 
 
 jax.config.update("jax_enable_x64", True)
+
+
+def test_subtract_before_centering_preserves_losses_and_gradients() -> None:
+    for dtype in (jnp.float32, jnp.float64):
+        n = 128
+        x = jnp.arange(n, dtype=dtype) * (2.0 * jnp.pi / n)
+        k = jnp.fft.fftfreq(n, d=1.0 / n).astype(dtype)
+        eta = (0.03 * jnp.cos(3.0 * x) + 0.01 * jnp.sin(5.0 * x))[None, :]
+        xi = 0.04 * jnp.sin(3.0 * x)[None, :]
+        target = 0.1 + 0.05 * jnp.cos(3.0 * x)[None, :]
+        prediction = target + (0.01 * jnp.sin(5.0 * x) + 0.003 * jnp.cos(3.0 * x))[None, :] + 0.2
+        depth = jnp.asarray([0.2], dtype=dtype)
+        for objective in (
+            partial(compute_translation_tangent_loss, eta),
+            partial(compute_modal_phase_loss, eta, xi),
+            partial(compute_phase_mechanism_loss, eta, xi, mechanism="momentum"),
+        ):
+            evaluate = jax.jit(
+                jax.value_and_grad(objective, has_aux=True),
+                static_argnames=("subtract_before_centering",),
+            )
+            if dtype == jnp.float64:
+                (expected, count), expected_gradient = evaluate(
+                    prediction, target, depth, k, subtract_before_centering=False,
+                )
+                (actual, actual_count), gradient = evaluate(
+                    prediction, target, depth, k, subtract_before_centering=True,
+                )
+                np.testing.assert_array_equal(actual_count, count)
+                np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-17)
+                np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-10, atol=1e-14)
+            for scale in (0.0, 1e-6):
+                (loss, count), gradient = evaluate(
+                    target + scale * (prediction - target), target, depth, k,
+                    subtract_before_centering=True,
+                )
+                assert np.isfinite(np.asarray(loss))
+                assert np.all(np.isfinite(gradient))
+                np.testing.assert_array_equal(count, 1.0)
+                if scale == 0.0:
+                    np.testing.assert_array_equal(loss, 0.0)
+                    np.testing.assert_array_equal(gradient, 0.0)
+
+
+def test_subtract_before_centering_reduces_float32_residual_roundoff() -> None:
+    rng = np.random.default_rng(42)
+    target = jnp.asarray(rng.normal(0.1, 0.2, (4, 256)), dtype=jnp.float32)
+    prediction = target + jnp.asarray(rng.normal(0.0, 1e-6, target.shape), dtype=jnp.float32)
+    difference64 = prediction.astype(jnp.float64) - target.astype(jnp.float64)
+    reference = difference64 - jnp.mean(difference64, axis=-1, keepdims=True)
+    evaluate = jax.jit(_centered_error, static_argnames=("subtract_before_centering",))
+    old_error, old_target = evaluate(prediction, target, subtract_before_centering=False)
+    new_error, new_target = evaluate(prediction, target, subtract_before_centering=True)
+    np.testing.assert_array_equal(new_target, old_target)
+    old_roundoff = np.linalg.norm(np.asarray(old_error, dtype=np.float64) - reference)
+    new_roundoff = np.linalg.norm(np.asarray(new_error, dtype=np.float64) - reference)
+    assert new_roundoff < 0.01 * old_roundoff
 
 
 def _inputs() -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:

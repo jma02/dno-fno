@@ -13,6 +13,18 @@ from solver.solvers.time_integrator import (
 )
 
 
+def _centered_error(
+    prediction: jax.Array, target: jax.Array, subtract_before_centering: bool,
+) -> tuple[jax.Array, jax.Array]:
+    centered_target = target - jnp.mean(target, axis=-1, keepdims=True)
+    if subtract_before_centering:
+        error = prediction - target
+        error = error - jnp.mean(error, axis=-1, keepdims=True)
+    else:
+        error = prediction - jnp.mean(prediction, axis=-1, keepdims=True) - centered_target
+    return error, centered_target
+
+
 def _bernoulli_rhs_defect(
     eta_x: jax.Array, xi_x: jax.Array, target: jax.Array, error: jax.Array,
 ) -> jax.Array:
@@ -45,6 +57,7 @@ def compute_phase_mechanism_loss(
     charbonnier_eps: float = 1e-7,
     gravity: float = 1.0,
     k_max: float = 128.0,
+    subtract_before_centering: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Match a signed RHS defect, with smooth absolute loss.
 
@@ -65,8 +78,7 @@ def compute_phase_mechanism_loss(
     solver evaluation, trajectory differentiation, or new network call occurs.
     """
     nx, dtype = eta.shape[-1], eta.dtype
-    target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
-    error = gxi_prediction - jnp.mean(gxi_prediction, axis=-1, keepdims=True) - target
+    error, target = _centered_error(gxi_prediction, gxi_target, subtract_before_centering)
     eta_hat, xi_hat, error_hat = (
         jnp.fft.rfft(field, axis=-1, norm="forward").at[..., -1].set(0)
         for field in (eta, xi, error)
@@ -138,6 +150,7 @@ def compute_modal_phase_loss(
     gravity: float = 1.0,
     loss_norm: Literal["squared", "charbonnier"] = "squared",
     charbonnier_eps: float = 1e-7,
+    subtract_before_centering: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Match the two traveling-mode phase rates of the coupled water-wave RHS.
 
@@ -159,11 +172,9 @@ def compute_modal_phase_loss(
     """
     dtype = eta.dtype
     nx = eta.shape[-1]
-    centered_prediction = gxi_prediction - jnp.mean(
-        gxi_prediction, axis=-1, keepdims=True
+    error, centered_target = _centered_error(
+        gxi_prediction, gxi_target, subtract_before_centering,
     )
-    centered_target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
-    error = centered_prediction - centered_target
     eta_hat, xi_hat, error_hat = (
         jnp.fft.rfft(field, axis=-1, norm="forward").at[..., -1].set(0)
         for field in (eta, xi, error)
@@ -237,6 +248,7 @@ def compute_translation_tangent_loss(
     gravity: float = 1.0,
     loss_norm: Literal["squared", "charbonnier"] = "squared",
     charbonnier_eps: float = 1e-7,
+    subtract_before_centering: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Return the translation loss and count of selected nonflat samples.
 
@@ -260,11 +272,9 @@ def compute_translation_tangent_loss(
     dtype = eta.dtype
     eta_hat = jnp.fft.fft(eta, axis=-1)
     eta_x = jnp.real(jnp.fft.ifft(1j * k[None, :] * eta_hat, axis=-1)).astype(dtype)
-    centered_prediction = gxi_prediction - jnp.mean(
-        gxi_prediction, axis=-1, keepdims=True
+    error, centered_target = _centered_error(
+        gxi_prediction, gxi_target, subtract_before_centering,
     )
-    centered_target = gxi_target - jnp.mean(gxi_target, axis=-1, keepdims=True)
-    error = centered_prediction - centered_target
     fields = jnp.stack((eta_x * error, eta_x**2), axis=1)
     k_rfft = jnp.abs(k[: eta.shape[-1] // 2 + 1])
     sigma = jnp.asarray(smoothing_scale, dtype=fields.dtype) * depth
