@@ -50,6 +50,7 @@ def _model(
     surface_depth_gate: bool = False,
     nested_blocks: int = 0,
     nested_surface_modulation: bool = False,
+    nested_surface_features: bool = False,
     multiplier_skip: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
@@ -72,6 +73,7 @@ def _model(
         surface_depth_gate=surface_depth_gate,
         nested_blocks=nested_blocks,
         nested_surface_modulation=nested_surface_modulation,
+        nested_surface_features=nested_surface_features,
         multiplier_skip=multiplier_skip,
         mult_hidden=16,
         baseline_order=baseline_order,
@@ -942,6 +944,86 @@ def test_nested_surface_modulation_identity_depth_and_gradient() -> None:
     assert jnp.array_equal(actual, expected)
 
 
+def test_nested_surface_features_initialization_and_channel_order() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    scales = (0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)
+    original = _model(nested_blocks=1, surface_context_width=8, surface_feature_scales=scales).clone(
+        width=320, n_blocks=8, latent=4, mult_hidden=80,
+    )
+    model = original.clone(nested_surface_features=True)
+    control = unfreeze(original.init(jax.random.PRNGKey(36), inputs, depth))
+    variables = unfreeze(model.init(jax.random.PRNGKey(36), inputs, depth))
+    assert sum(leaf.size for leaf in jax.tree.leaves(control)) == 40384
+    assert sum(leaf.size for leaf in jax.tree.leaves(variables)) == 40392
+    mix = variables["params"]["cs_block_7"].pop("surface_mix")
+    assert mix.shape == (2, 4) and mix.dtype == jnp.float32 and jnp.all(mix == 0)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(control), jax.tree.leaves(variables), strict=True,
+    ))
+    variables["params"]["cs_block_7"]["surface_mix"] = mix
+    for state in (control, variables):
+        state["params"]["cs_block_7"]["gamma"] = jnp.asarray([.1, -.2, .3, -.4], jnp.float32)
+    for dtype in (jnp.float32, jnp.float64):
+        assert jnp.array_equal(cast(jax.Array, original.apply(control, inputs.astype(dtype), depth.astype(dtype))),
+                               cast(jax.Array, model.apply(variables, inputs.astype(dtype), depth.astype(dtype))))
+    # Capture before whitening and the nonlinear trunk, with two channel layouts.
+    for first_derivative in (False, True):
+        current_scales = scales if first_derivative else (*scales[:3], *scales[4:])
+        transform = 1.1 * jnp.eye(len(current_scales)) + .1
+        current = _model(nested_blocks=1, nested_surface_features=True,
+                         use_first_deriv=first_derivative, surface_feature_scales=current_scales,
+                         surface_feature_transform=tuple(map(tuple, transform.tolist())))
+        captured_features = []
+
+        def intercept(next_fun: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any], context: Any) -> Any:
+            if isinstance(context.module, CraigSulemBlock) and context.module.nested:
+                captured_features.append(kwargs["nested_features"])
+            return next_fun(*args, **kwargs)
+
+        with nn.intercept_methods(intercept):
+            current.init(jax.random.PRNGKey(37), inputs, depth)
+        k = jnp.arange(eta.shape[-1] // 2 + 1, dtype=eta.dtype)
+        expected = jnp.stack((
+            jnp.fft.irfft(jnp.sqrt(k) * jnp.fft.rfft(eta), n=eta.shape[-1]) / scales[5],
+            jnp.fft.irfft(-k**2 * jnp.fft.rfft(eta), n=eta.shape[-1]) / scales[4],
+        ), axis=-1)
+        assert len(captured_features) == 1
+        assert jnp.allclose(captured_features[0], expected, rtol=1e-12, atol=1e-14)
+
+
+def test_nested_surface_features_preserve_structure_and_trainable_quadratic() -> None:
+    eta, xi, depth = _state()
+    model = _model(nested_blocks=2, nested_surface_features=True,
+                   surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3)).clone(latent=4)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = unfreeze(_activate_residual(model.init(jax.random.PRNGKey(38), inputs, depth)))
+    before = _learned_residual(model, variables, eta, xi, depth)
+    for index in range(2):
+        variables["params"][f"cs_block_{index}"]["surface_mix"] = jnp.asarray(
+            [[.1, -.1, .05, .1], [.05, .1, -.1, .05]], dtype=jnp.float32,
+        )
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    assert jnp.linalg.norm(actual - before) > 1e-10
+    psi = jnp.roll(xi, 9, axis=-1)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, .3 * xi - .7 * psi, depth)
+    assert jnp.allclose(mixed, .3 * actual - .7 * other, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+    for amplitude in (.5, .25, .0625):
+        assert jnp.allclose(_learned_residual(model, variables, amplitude * eta, xi, depth),
+                            amplitude**2 * actual, rtol=1e-11, atol=1e-14)
+    zero, first = jax.jvp(lambda surface: _learned_residual(model, variables, surface, xi, depth),
+                          (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(zero == 0) and jnp.all(first == 0)
+    gradients = jax.grad(lambda params, fields, log_depth: jnp.sum(cast(jax.Array, model.apply(
+        {"params": params}, fields, log_depth,
+    )) ** 2), argnums=(0, 1, 2))(variables["params"], inputs, depth)
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+    for index in range(2):
+        assert jnp.all(jnp.abs(gradients[0][f"cs_block_{index}"]["surface_mix"]) > 0)
+
+
 def test_nested_surface_modulation_preserves_structure_and_adds_cubic_response() -> None:
     eta, xi, depth = _state()
     model = _model(nested_blocks=2, nested_surface_modulation=True, surface_context_width=8,
@@ -1113,6 +1195,8 @@ def main() -> int:
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
         test_nested_surface_modulation_identity_depth_and_gradient,
+        test_nested_surface_features_initialization_and_channel_order,
+        test_nested_surface_features_preserve_structure_and_trainable_quadratic,
         test_nested_surface_modulation_preserves_structure_and_adds_cubic_response,
         test_multiplier_skip_symbol_basis_and_grid_independence,
         test_multiplier_skip_preserves_initialization_and_operator_structure,

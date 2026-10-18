@@ -129,6 +129,8 @@ def main() -> None:
                         help="Initialize nested gates at one and inner output weights at zero.")
     parser.add_argument("--cs_nested_surface_modulation", action="store_true",
                         help="Apply a shared bounded eta/h modulation to both nested surface factors.")
+    parser.add_argument("--cs_nested_surface_features", action="store_true",
+                        help="Learn per-branch mixtures of eta and its even linear features for nested factors.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -254,6 +256,8 @@ def main() -> None:
                         help="Optional physical-wavenumber cutoff for data loss and its normalizers; full L2 metrics stay unfiltered.")
     parser.add_argument("--data_xi_projection_weight", type=float, default=0.0,
                         help="Extra weight inside the data-error norm along xi on 0<k<=128; ordinary L2 metrics stay unchanged.")
+    parser.add_argument("--data_phase_projection_weight", type=float, default=0.0,
+                        help="Extra weight inside the data-error norm perpendicular to each active eta Fourier mode.")
     parser.add_argument("--residual_floor", type=float, default=1e-6,
                         help="Residual denominator floor as a fraction of the target norm.")
     parser.add_argument("--metric_interval", type=int, default=16,
@@ -505,6 +509,8 @@ def main() -> None:
         parser.error("--data_k_max must be finite and positive")
     if not np.isfinite(args.data_xi_projection_weight) or args.data_xi_projection_weight < 0.0:
         parser.error("--data_xi_projection_weight must be finite and nonnegative")
+    if not np.isfinite(args.data_phase_projection_weight) or args.data_phase_projection_weight < 0.0:
+        parser.error("--data_phase_projection_weight must be finite and nonnegative")
     if args.data_normalization in ("bounded", "residual") and args.model != "cs_dno":
         parser.error("--data_normalization bounded/residual requires --model cs_dno")
     if not 0.0 < args.dirichlet_probe_fraction <= 0.5:
@@ -533,6 +539,13 @@ def main() -> None:
         parser.error("--cs_nested_zero_inner requires --cs_nested_blocks > 0")
     if args.cs_nested_surface_modulation and not args.cs_nested_blocks:
         parser.error("--cs_nested_surface_modulation requires --cs_nested_blocks > 0")
+    if args.cs_nested_surface_features and (
+        not args.cs_nested_blocks or not args.cs_normalize_surface_features
+        or not args.cs_use_half_deriv or not args.cs_use_second_deriv
+        or args.cs_use_learned_eta_filters or args.cs_nested_surface_modulation
+    ):
+        parser.error("--cs_nested_surface_features requires nested blocks, RMS-scaled half/second derivatives, "
+                     "and no learned eta filters or nested surface modulation")
     if args.model != "cs_dno" and (
         args.cs_normalize_surface_features or args.cs_surface_context_width or args.cs_curvature_cutoff > 0
     ):
@@ -678,6 +691,7 @@ def main() -> None:
             log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,
             nested_surface_modulation=args.cs_nested_surface_modulation,
+            nested_surface_features=args.cs_nested_surface_features,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,
@@ -747,6 +761,11 @@ def main() -> None:
                 weighted = weights * filtered[..., :ordinary_branches]
                 if args.cs_nested_blocks:
                     nested_eta = call_kwargs["eta_norm"][..., None]
+                    if args.cs_nested_surface_features:
+                        surface_mix = jnp.concatenate([
+                            group["surface_mix"] for group in groups[ordinary_groups:]
+                        ], axis=-1)
+                        nested_eta = nested_eta + call_kwargs["nested_features"] @ surface_mix
                     inner_filters = jnp.concatenate([
                         cast(jax.Array, multiplier_model.apply({"params": group["m_inner"]}, log_depth, nx // 2 + 1))
                         for group in groups[ordinary_groups:]
@@ -912,7 +931,7 @@ def main() -> None:
         )
         residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
         data_error_norm, data_target_norm, data_residual_denominator = error_norm, target_norm, residual_denominator
-        data_squared_error = squared_error
+        data_squared_error: jax.Array = squared_error
         data_mask: jax.Array | bool = True
         if args.data_k_max is not None:
             data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
@@ -927,6 +946,24 @@ def main() -> None:
             data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
                 data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
             )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
+        if args.data_phase_projection_weight > 0.0:
+            eta_hat = jnp.fft.rfft(eta, axis=1).astype(jnp.complex128)
+            phase_band = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
+            eta_power = jnp.abs(eta_hat) ** 2
+            phase_active = phase_band[..., 0] & (
+                eta_power > 1e-12 * jnp.max(eta_power[:, 1:], axis=1, keepdims=True)
+            )
+            phase_error = jnp.where(
+                phase_active,
+                jnp.imag(error_hat[..., 0].astype(jnp.complex128) * jnp.conj(eta_hat))
+                / jnp.sqrt(jnp.where(phase_active, eta_power, 1.0)),
+                0.0,
+            )
+            data_squared_error = data_squared_error + args.data_phase_projection_weight * jnp.sum(
+                phase_error**2, axis=1,
+            )
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
         if args.data_xi_projection_weight > 0.0:
             xi_hat = jnp.fft.rfft(xi, axis=1).astype(jnp.complex128)
             projection_mask = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask

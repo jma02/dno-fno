@@ -97,6 +97,7 @@ def load_run(
             n_blocks=int(config["n_blocks"]),
             nested_blocks=int(config.get("cs_nested_blocks", 0)),
             nested_surface_modulation=bool(config.get("cs_nested_surface_modulation", False)),
+            nested_surface_features=bool(config.get("cs_nested_surface_features", False)),
             latent=int(config["latent"]),
             n_polys=int(config["cs_n_polys"]),
             use_first_deriv=bool(config["cs_use_first_deriv"]),

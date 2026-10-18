@@ -185,7 +185,7 @@ def build_variant(
                 model.surface_feature_transform, dtype=first_projection_kernel.dtype,
             ) @ first_projection_kernel
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
-        inner_filters = gamma = nested_symbols = None
+        inner_filters = gamma = nested_symbols = surface_mix = None
         if model.nested_blocks:
             inner = DepthAwareMultiplier(model.latent, model.domain_length, model.h_clip_max,
                                          model.mult_hidden, model.multiplier_skip, model.log_multiplier_inputs)
@@ -196,6 +196,9 @@ def build_variant(
             ), -1, 1)
             gamma = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["gamma"]
                                          for i in range(ordinary_blocks, model.n_blocks)))
+            if model.nested_surface_features:
+                surface_mix = jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["surface_mix"]
+                                                    for i in range(ordinary_blocks, model.n_blocks)), axis=-1)
             jax.block_until_ready((inner_filters, gamma))
             if nested_fused:
                 nested_symbols = jnp.ones(
@@ -329,6 +332,13 @@ def build_variant(
                     )
             if model.surface_feature_scales is not None:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
+            nested_eta = nested_eta[:, None, :]
+            if model.nested_surface_features:
+                second_index = model.n_polys + int(model.use_first_deriv)
+                half_index = second_index + int(model.use_second_deriv)
+                nested_eta = nested_eta + jnp.moveaxis(
+                    features[..., jnp.asarray([half_index, second_index])] @ cast(jax.Array, surface_mix), -1, 1,
+                )
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
             context = None
             nested_inner_hat = None
@@ -341,7 +351,7 @@ def build_variant(
                         # Independent fields share one FFT batch, not Fourier modes.
                         combined_hat = jnp.fft.rfft(jnp.concatenate((
                             jnp.moveaxis(context, -1, 1),
-                            nested_eta[:, None, :] * branch_fields[:, ordinary_branches:],
+                            nested_eta * branch_fields[:, ordinary_branches:],
                         ), axis=1))
                         context_hat = jnp.moveaxis(combined_hat[:, :model.surface_context_width], 1, -1)
                         nested_inner_hat = combined_hat[:, model.surface_context_width:]
@@ -374,11 +384,11 @@ def build_variant(
                 correction_hat = jnp.sum(weighted_hat, axis=1)
             if model.nested_blocks:
                 inner_hat = (cast(jax.Array, nested_inner_hat) if context_batch else
-                             jnp.fft.rfft(nested_eta[:, None, :] * branch_fields[:, ordinary_branches:]))
+                             jnp.fft.rfft(nested_eta * branch_fields[:, ordinary_branches:]))
                 if nested_fused:
                     inner_hat = cast(jax.Array, inner_filters) * inner_hat
                     # Preserve the first FFT; unit symbols fuse IFFT/product/FFT with unnormalized output.
-                    surface = cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :]
+                    surface = cast(jax.Array, gamma)[None, :, None] * nested_eta
                     nested_hat = filters[:, ordinary_branches:] * sandwich(
                         surface.reshape(-1, correction_nx), inner_hat.reshape(-1, inner_hat.shape[-1]),
                         cast(jax.Array, nested_symbols), spectral=True, ept=fft_ept,
@@ -386,7 +396,7 @@ def build_variant(
                 else:
                     middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=correction_nx)
                     nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
-                        cast(jax.Array, gamma)[None, :, None] * nested_eta[:, None, :] * middle)
+                        cast(jax.Array, gamma)[None, :, None] * nested_eta * middle)
                 correction_hat = correction_hat + jnp.sum(nested_hat, axis=1)
             correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if coarse_correction:

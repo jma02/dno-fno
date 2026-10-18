@@ -44,6 +44,7 @@ TrainerLoss = Callable[
 def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> TrainerLoss:
     # Exercise the trainer's inline arithmetic, not a second implementation.
     config.data_xi_projection_weight = 0.0
+    config.data_phase_projection_weight = 0.0
     config.subtract_before_fft = getattr(config, "subtract_before_fft", False)
     config.fp64_residual = False
     path = REPO_ROOT / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
@@ -228,7 +229,8 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
                          baseline_true_depth=True)
     config = SimpleNamespace(
         model="cs_dno", data_normalization="target", data_k_max=16.0, residual_floor=1e-6,
-        data_xi_projection_weight=0.0, mode_balanced_weight=6.0, mode_balanced_k_max=16.0,
+        data_xi_projection_weight=0.0, data_phase_projection_weight=0.0,
+        mode_balanced_weight=6.0, mode_balanced_k_max=16.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
         translation_tangent_weight=0.0, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
         subtract_before_fft=False, fp64_residual=True, subtract_before_centering=False,
@@ -328,7 +330,7 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
     config = SimpleNamespace(
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
         mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
-        fp64_residual=False, subtract_before_centering=False,
+        fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
     )
     nx = 1024
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -435,6 +437,124 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
             namespace["args"] = SimpleNamespace(data_xi_projection_weight=invalid)
             with np.testing.assert_raises(ValueError):
                 exec(compile(ast.Module(body=[validation], type_ignores=[]), "xi_projection_validation", "exec"), namespace)
+
+
+def test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmetries() -> None:
+    config = SimpleNamespace(
+        model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
+        data_phase_projection_weight=0.0, mode_balanced_weight=0.0,
+        translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
+        fp64_residual=False, subtract_before_centering=False,
+    )
+    nx = 512
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    family = jnp.arange(1, 5)
+    amplitude = jnp.arange(1, 5)[:, None]
+
+    def apply_model(
+        variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array, *, return_baseline: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        prediction = variables["params"][..., None] / 4
+        return prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction
+
+    namespace: dict[str, Any] = {
+        "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config,
+        "PhysicalFamilyId": PhysicalFamilyId, "apply_model": apply_model, "log_h_max": np.log(5),
+        "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
+        "norm_targets_jax": lambda q: q[..., None] / 4, "denorm_targets_jax": lambda q: q * 4,
+    }
+    exec(compile(ast.Module(body=[trainer_function("compute_loss_components")], type_ignores=[]),
+                 "phase_projection_components", "exec"), namespace)
+    components = namespace["compute_loss_components"]
+
+    def evaluate(prediction: jax.Array, eta: jax.Array, truth: jax.Array) -> tuple[jax.Array, jax.Array]:
+        values = components(prediction, eta, jnp.zeros_like(eta), truth, jnp.zeros((4, 1)), family,
+                            collect_family_metrics=True)
+        return values[0], jnp.asarray((values[5], *values[6]))
+
+    for dtype in (jnp.float32, jnp.float64):
+        namespace["training_dtype"] = dtype
+        tolerance = 5e-6 if dtype == jnp.float32 else 3e-12
+        target = (amplitude * (jnp.cos(3 * x) + 0.3 * jnp.sin(7 * x))).astype(dtype)
+        cases = (
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.sin(4 * x), 2.0),
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.cos(4 * x), 1.0),
+            (2 * np.pi, None, -3 * jnp.cos(4 * x), jnp.sin(4 * x), 2.0),
+            (2 * np.pi, None, 1e-8 * jnp.cos(4 * x), jnp.sin(4 * x), 2.0),
+            (2 * np.pi, None, 3 + jnp.cos(4 * x), jnp.sin(4 * x), 2.0),
+            (2 * np.pi, None, jnp.cos(4 * x), jnp.sin(5 * x), 1.0),
+            (2 * np.pi, None, jnp.cos(4 * x) + 1e-8 * jnp.cos(5 * x), jnp.sin(5 * x), 1.0),
+            (2 * np.pi, None, jnp.zeros_like(x), jnp.sin(4 * x), 1.0),
+            (2 * np.pi, None, jnp.ones_like(x), jnp.sin(4 * x), 1.0),
+            (2 * np.pi, None, jnp.cos(200 * x), jnp.sin(4 * x), 1.0),
+            (2 * np.pi, None, jnp.cos(4 * x) + jnp.cos(200 * x), jnp.sin(200 * x), 1.0),
+            (4 * np.pi, None, jnp.cos(200 * x), jnp.sin(200 * x), 2.0),
+            (4 * np.pi, 5.0, jnp.cos(8 * x), jnp.sin(8 * x), 2.0),
+            (4 * np.pi, 5.0, jnp.cos(4 * x) + jnp.cos(12 * x),
+             jnp.cos(4 * x) + 0.3 * jnp.sin(12 * x), 1.0),
+        )
+        for length, cutoff, direction, error, factor in cases:
+            config.data_k_max = cutoff
+            namespace["k_rfft_jax"] = (2 * jnp.pi / length) * jnp.arange(nx // 2 + 1)
+            eta = jnp.broadcast_to(direction, target.shape).astype(dtype)
+            prediction = (target + 0.013 * amplitude * error).astype(dtype)
+            results = []
+            for weight in (0.0, 3.0):
+                config.data_phase_projection_weight = weight
+                differentiate = jax.jit(jax.value_and_grad(evaluate, argnums=(0, 1), has_aux=True))
+                results.append(differentiate(prediction, eta, target))
+                (zero, _), zero_gradients = differentiate(target, eta, target)
+                assert zero == 0
+                for gradient in zero_gradients:
+                    np.testing.assert_array_equal(gradient, 0)
+            (ordinary, ordinary_aux), ordinary_gradients = results[0]
+            (weighted, weighted_aux), gradients = results[1]
+            np.testing.assert_allclose(weighted, factor * ordinary, rtol=tolerance)
+            assert ordinary * (1 - tolerance) <= weighted <= 2 * ordinary * (1 + tolerance)
+            assert all(bool(jnp.all(jnp.isfinite(gradient))) for gradient in gradients)
+            np.testing.assert_array_equal(weighted_aux[0], ordinary_aux[0])
+            np.testing.assert_array_equal(weighted_aux[1:].reshape(4, 5)[:, :4],
+                                          ordinary_aux[1:].reshape(4, 5)[:, :4])
+            if cutoff is None:
+                reference, reference_gradient = jax.value_and_grad(
+                    lambda p: relative_l2_loss(p[..., None] / 4, target[..., None] / 4),
+                )(prediction)
+                np.testing.assert_allclose(ordinary, reference, rtol=tolerance)
+                np.testing.assert_allclose(ordinary_gradients[0], reference_gradient, rtol=tolerance, atol=1e-9)
+
+        config.data_k_max = 128.0
+        namespace["k_rfft_jax"] = jnp.arange(nx // 2 + 1)
+        eta = (amplitude * (jnp.cos(4 * x) + 0.3 * jnp.sin(7 * x))).astype(dtype)
+        prediction = target + (amplitude * (0.013 * jnp.sin(4 * x) + 0.021 * jnp.cos(7 * x))).astype(dtype)
+        (value, _), gradient = jax.value_and_grad(evaluate, has_aux=True)(prediction, eta, target)
+        for indices in (jnp.roll(jnp.arange(nx), 37), (-jnp.arange(nx)) % nx):
+            (transformed, _), transformed_gradient = jax.value_and_grad(evaluate, has_aux=True)(
+                prediction[:, indices], eta[:, indices], target[:, indices],
+            )
+            np.testing.assert_allclose(transformed, value, rtol=tolerance)
+            np.testing.assert_allclose(transformed_gradient, gradient[:, indices], rtol=3e-5,
+                                       atol=1e-8 if dtype == jnp.float32 else 1e-12)
+        original = components(prediction, eta, eta, target, jnp.zeros((4, 1)), family)
+        relabeled = components(prediction, eta, eta, target, jnp.zeros((4, 1)), jnp.full_like(family, 99))
+        np.testing.assert_array_equal(original[:6], relabeled[:6])
+
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--data_phase_projection_weight")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and "args.data_phase_projection_weight" in ast.unparse(node.test))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "phase_projection_option", "exec"), namespace)
+    assert parser.parse_args([]).data_phase_projection_weight == 0.0
+    assert parser.parse_args(["--data_phase_projection_weight", "1"]).data_phase_projection_weight == 1.0
+    with patch.object(parser, "error", side_effect=ValueError):
+        for invalid in (-1.0, np.nan, np.inf, -np.inf):
+            namespace["args"] = SimpleNamespace(data_phase_projection_weight=invalid)
+            with np.testing.assert_raises(ValueError):
+                exec(compile(ast.Module(body=[validation], type_ignores=[]), "phase_projection_validation", "exec"), namespace)
 
 
 def test_retained_band_normalizers_gradients_and_full_metrics() -> None:
@@ -704,7 +824,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         translation_tangent_denominator_eps=1e-3, translation_tangent_loss_norm="charbonnier",
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", subtract_before_fft=False,
-        fp64_residual=False, subtract_before_centering=False,
+        fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
     )
 
     def apply_model(
@@ -1130,6 +1250,21 @@ def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
 
 
 def test_packed_nested_branches_match_native_values_and_gradients() -> None:
+    validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
+                      and "args.cs_nested_surface_features" in ast.unparse(node.test))
+    valid_config = dict(cs_nested_surface_features=True, cs_nested_blocks=1, cs_normalize_surface_features=True,
+                        cs_use_half_deriv=True, cs_use_second_deriv=True, cs_use_learned_eta_filters=False,
+                        cs_nested_surface_modulation=False)
+    parser = SimpleNamespace(error=Mock(side_effect=ValueError))
+    validation_namespace: dict[str, Any] = {"args": SimpleNamespace(**valid_config), "parser": parser}
+    validation_code = compile(ast.Module(body=[validation], type_ignores=[]), "nested_features_validation", "exec")
+    exec(validation_code, validation_namespace)
+    for field, invalid in (("cs_nested_blocks", 0), ("cs_normalize_surface_features", False),
+                           ("cs_use_half_deriv", False), ("cs_use_second_deriv", False),
+                           ("cs_use_learned_eta_filters", True), ("cs_nested_surface_modulation", True)):
+        validation_namespace["args"] = SimpleNamespace(**(valid_config | {field: invalid}))
+        with np.testing.assert_raises(ValueError):
+            exec(validation_code, validation_namespace)
     nx = 32
     inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (3, nx, 2), dtype=jnp.float32)
     depth = jnp.log(jnp.asarray([[0.1], [2.3], [8.0]], dtype=jnp.float32))
@@ -1149,12 +1284,16 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                         for dtype in (jnp.float32, jnp.float64)]
     precision_cases += [(1, False, False, False, False, False, 2, 0.0, dtype, True)
                        for dtype in (jnp.float32, jnp.float64)]
+    precision_cases = [(*case, False) for case in precision_cases]
+    precision_cases += [(1, False, False, False, whiten, False, 2, 0.0, dtype, False, True)
+                       for dtype, whiten in product((jnp.float32, jnp.float64), (False, True))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
-         whiten, depth_gate, context, cutoff, dtype, nested_modulation) in precision_cases:
+         whiten, depth_gate, context, cutoff, dtype, nested_modulation, nested_features) in precision_cases:
         case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
             nested_surface_modulation=nested_modulation,
+            nested_surface_features=nested_features,
             curvature_cutoff=cutoff,
             surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
             surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
@@ -1178,6 +1317,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
                 group["phi_proj"]["kernel"] = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape) * 0.02 - 0.07
             else:
                 group["gamma"] = jnp.array([0.2, -0.3], dtype=jnp.float32)
+                if nested_features:
+                    group["surface_mix"] = jnp.array([[0.1, -0.1], [0.05, 0.1]], dtype=jnp.float32)
             if multiplier_skip:
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
                     shape = cast(jax.Array, group[part]["symbol_skip"]["kernel"]).shape
@@ -1188,7 +1329,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             "nx": nx, "domain_length": float(model.domain_length),
             "args": SimpleNamespace(model="cs_dno", n_blocks=2, cs_nested_blocks=nested_blocks,
                                     latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
-                                    cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs),
+                                    cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs,
+                                    cs_nested_surface_features=nested_features),
         }
         exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
                      "trainer_packed_apply", "exec"), namespace)
@@ -1219,6 +1361,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
                 assert sum(float(jnp.linalg.norm(value)) for value in jax.tree.leaves(group_grad[part])) > 0
+            if nested_features:
+                assert bool(jnp.all(jnp.abs(group_grad["surface_mix"]) > 0))
         if polynomial_skip:
             assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][-2:])) > 0
         if depth_gate:
@@ -1247,7 +1391,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
         rollout_training_loss="full", amplitude_probe_scale=0.0, subtract_before_fft=False,
-        fp64_residual=False, subtract_before_centering=False,
+        fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
     )
 
     def apply_model(
@@ -1296,10 +1440,13 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
     generated = (1.5 * eta, 1.2 * xi, 0.8 * target, depth, family)
     base, teacher = components(params, *fields), components(params, *generated)
     namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family)
-    for cutoff, loss_mode, projection_weight in product((None, 1.5), ("full", "data"), (0.0, 4.0)):
+    for cutoff, loss_mode, projection_weight, phase_weight in product(
+        (None, 1.5), ("full", "data"), (0.0, 4.0), (0.0, 3.0),
+    ):
         config.data_k_max = cutoff
         config.data_xi_projection_weight = projection_weight
-        if cutoff is not None or projection_weight > 0:
+        config.data_phase_projection_weight = phase_weight
+        if cutoff is not None or projection_weight > 0 or phase_weight > 0:
             for inputs, ordinary in ((fields, base), (generated, teacher)):
                 band = components(params, *inputs)
                 assert not np.isclose(band[0], ordinary[0])
@@ -1703,6 +1850,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
         subtract_before_fft=False, fp64_residual=False, subtract_before_centering=False,
+        data_phase_projection_weight=0.0,
     )
     nx = 64
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -1895,7 +2043,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         hadamard_weight=0.0, phase_mechanism="none", phase_mechanism_weight=0.0,
         phase_mechanism_ramp_epochs=0.0,
         jonswap_mode_balanced_scale=1.0, subtract_before_fft=False,
-        fp64_residual=False, subtract_before_centering=False,
+        fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
     )
     nx = 32
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -2334,6 +2482,7 @@ if __name__ == "__main__":
     test_subtract_before_fft_changes_only_residual_arithmetic()
     test_fp64_residual_uses_direct_correction_and_preserves_loss_scales()
     test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
+    test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmetries()
     test_retained_band_normalizers_gradients_and_full_metrics()
     test_retained_band_zero_error_and_cutoff_validation()
     test_bounded_weights_decrease_and_have_stopped_scale_invariant_gradients()

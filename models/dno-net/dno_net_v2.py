@@ -72,6 +72,7 @@ class CraigSulemBlock(nn.Module):
         depth: jnp.ndarray,
         *,
         eta_norm: jnp.ndarray | None = None,
+        nested_features: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         grid_size = eta_features.shape[1]
 
@@ -105,6 +106,11 @@ class CraigSulemBlock(nn.Module):
                 log_multiplier_inputs=self.log_multiplier_inputs, name="m_inner",
             )(depth, grid_size // 2 + 1)
             surface = cast(jnp.ndarray, eta_norm)[..., None]
+            if nested_features is not None:
+                surface_mix = self.param(
+                    "surface_mix", nn.initializers.zeros, (2, self.n_branches), jnp.float32,
+                )
+                surface = surface + nested_features @ surface_mix
             inner_hat = jnp.fft.rfft(surface * filtered_xi, axis=1, norm="forward")
             inner_field = jnp.fft.irfft(
                 inner_multiplier * inner_hat, n=grid_size, axis=1, norm="forward",
@@ -125,6 +131,7 @@ class CraigSulemDNO(nn.Module):
     latent: int = 64                  # Branches per group.
     nested_blocks: int = 0            # Replace this many final groups with M eta N eta M.
     nested_surface_modulation: bool = False  # Bounded eta/h modulation of both nested factors.
+    nested_surface_features: bool = False  # Mix even linear surface features per nested branch.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -272,6 +279,12 @@ class CraigSulemDNO(nn.Module):
             eta_features = eta_features / jnp.asarray(
                 self.surface_feature_scales, dtype=eta_features.dtype,
             )
+        nested_features = None
+        if self.nested_surface_features:
+            curvature_index = self.n_polys + int(self.baseline_order == -1) + int(self.use_first_deriv)
+            nested_features = jnp.stack((
+                eta_features[..., curvature_index + 1], eta_features[..., curvature_index],
+            ), axis=-1)
         polynomial_features = eta_features[..., 1:3] if self.surface_polynomial_skip else None
         if self.surface_feature_transform is not None:
             eta_features = eta_features @ jnp.asarray(self.surface_feature_transform, dtype=eta_features.dtype)
@@ -343,7 +356,8 @@ class CraigSulemDNO(nn.Module):
                 multiplier_skip=self.multiplier_skip,
                 log_multiplier_inputs=self.log_multiplier_inputs,
                 name=f"cs_block_{block_idx}",
-            )(eta_features, xi_phys, clipped_log_depth, eta_norm=nested_surface)
+            )(eta_features, xi_phys, clipped_log_depth,
+              eta_norm=nested_surface, nested_features=nested_features)
 
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5

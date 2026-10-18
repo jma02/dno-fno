@@ -162,6 +162,8 @@ class ComputeMetricsTest(unittest.TestCase):
             {}, {"cs_use_relative_elevation": True}, {"cs_baseline_order": 2},
             {"cs_nested_blocks": 1, "cs_baseline_order": 1},
             {"cs_nested_blocks": 1, "cs_nested_surface_modulation": True},
+            {"cs_nested_blocks": 1, "cs_nested_surface_features": True,
+             "cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
             {"cs_curvature_cutoff": 22.727203594311888},
@@ -198,6 +200,8 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.nested_blocks, options.get("cs_nested_blocks", 0))
                 self.assertEqual(loaded.model.nested_surface_modulation,
                                  options.get("cs_nested_surface_modulation", False))
+                self.assertEqual(loaded.model.nested_surface_features,
+                                 options.get("cs_nested_surface_features", False))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
@@ -386,10 +390,7 @@ class ComputeMetricsTest(unittest.TestCase):
         for name, bias in (("m_shared", [0.6, -0.45]), ("m_inner", [-0.4, 0.7])):
             block[name]["out"]["kernel"] *= 0.03
             block[name]["out"]["bias"] = jnp.asarray(bias, jnp.float32)
-        zero_params = {**params, "cs_block_1": {**block, "gamma": jnp.zeros_like(block["gamma"])}}
         stats = {"feature_absmax": [0.3, 0.7], "target_absmax": 1.1}
-        loaded = LoadedRun(model, params, {"model": "cs_dno"}, stats, "scale", 1)
-        zero = LoadedRun(model, zero_params, loaded.config, stats, "scale", 1)
         name = "fourier_fused_features_product_overlap"
         x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
         with patch.object(fusion, "fft", side_effect=fft_cpu), patch.object(
@@ -397,19 +398,29 @@ class ComputeMetricsTest(unittest.TestCase):
         ), patch.object(fusion, "sandwich", side_effect=sandwich_cpu), patch.object(
             fusion, "compute_on", return_value=nullcontext(),
         ):
-            for batch in (1, 32):
-                with self.subTest(batch=batch):
+            for surface_features, batch in product((False, True), (1, 32)):
+                with self.subTest(surface_features=surface_features, batch=batch):
+                    case_model = model.clone(nested_surface_features=surface_features,
+                                             nested_surface_modulation=not surface_features)
+                    case_block = {**block, "surface_mix": jnp.asarray([[0.17, -0.11], [-0.09, 0.23]], jnp.float32)} if surface_features else block
+                    case_params = {**params, "cs_block_1": case_block}
+                    zero_params = {**case_params, "cs_block_1": {**case_block, "gamma": jnp.zeros_like(block["gamma"])}}
+                    loaded = LoadedRun(case_model, case_params, {"model": "cs_dno"}, stats, "scale", 1)
+                    zero = loaded._replace(params=zero_params)
                     phase = jnp.arange(batch, dtype=jnp.float64)[:, None] / 7
                     eta = 0.015 + 0.04 * jnp.cos(2 * x + phase) + 0.01 * jnp.sin(5 * x - phase)
                     xi = 0.2 * jnp.sin(x + phase) - 0.05 * jnp.cos(3 * x - phase)
                     depth = jnp.log(jnp.linspace(0.08, 8., batch, dtype=jnp.float32))[:, None]
                     forward = fusion.build_variant(loaded, depth, nx, name)
                     fused = fusion.build_variant(loaded, depth, nx, name + "_nestedfused")
+                    context_fused = fusion.build_variant(loaded, depth, nx, name + "_nestedfused_contextbatch")
                     without = fusion.build_variant(zero, depth, nx, name)
                     fused_without = fusion.build_variant(zero, depth, nx, name + "_nestedfused")
+                    context_without = fusion.build_variant(zero, depth, nx, name + "_nestedfused_contextbatch")
                     eta_hat, xi_hat = jnp.fft.rfft(eta), jnp.fft.rfft(xi)
                     expected, actual = forward(eta_hat, xi_hat), fused(eta_hat, xi_hat)
                     np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
+                    np.testing.assert_allclose(context_fused(eta_hat, xi_hat), expected, rtol=3e-6, atol=2e-7)
                     native = build_predict_gxi_batched(loaded)(eta, xi, depth)
                     self.assertLess(float(jnp.linalg.norm(jnp.fft.irfft(expected, n=nx) - native)
                                           / jnp.linalg.norm(native)), 3e-6)
@@ -417,10 +428,19 @@ class ComputeMetricsTest(unittest.TestCase):
                     outer, inner = (jnp.moveaxis(cast(jax.Array, multiplier.apply(
                         {"params": block[key]}, depth, nx // 2 + 1)), -1, 1)
                         for key in ("m_shared", "m_inner"))
-                    eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / np.float32(0.3)
-                    surface = (eta_norm / np.float32(0.2) * (
-                        1 + jnp.tanh(params["nested_surface_gain"])
-                        * jnp.tanh(eta_norm * model.eta_scale / jnp.exp(depth))))[:, None, :]
+                    eta_norm = jax.jit(lambda value: jnp.fft.irfft(value, n=nx).astype(jnp.float32)
+                                       / np.float32(0.3))(eta_hat)
+                    surface = (eta_norm / np.float32(0.2))[:, None, :]
+                    if surface_features:
+                        k = jnp.arange(nx // 2 + 1, dtype=jnp.float32)
+                        raw_features = jnp.stack((
+                            jnp.fft.irfft(jnp.sqrt(k) * jnp.fft.rfft(eta_norm), n=nx) / np.float32(0.7),
+                            jnp.fft.irfft(-k**2 * jnp.fft.rfft(eta_norm), n=nx) / np.float32(8.),
+                        ), axis=-1)
+                        surface = surface + jnp.moveaxis(raw_features @ case_block["surface_mix"], -1, 1)
+                    else:
+                        surface = surface * (1 + jnp.tanh(params["nested_surface_gain"])
+                                             * jnp.tanh(eta_norm * model.eta_scale / jnp.exp(depth)))[:, None, :]
                     potential = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32)
                                  / np.float32(0.7)) * model.xi_scale
                     middle = jnp.fft.irfft(inner * jnp.fft.rfft(
@@ -429,16 +449,30 @@ class ComputeMetricsTest(unittest.TestCase):
                     nested = (nested / 2).astype(jnp.complex128) * (1.1 / model.target_scale)
                     nested = nested.at[:, 0].set(0).at[:, -1].set(nested[:, -1].real)
                     self.assertGreater(float(jnp.linalg.norm(nested)), 1e-3)
-                    for result in (expected - without(eta_hat, xi_hat), actual - fused_without(eta_hat, xi_hat)):
+                    for result in (expected - without(eta_hat, xi_hat), actual - fused_without(eta_hat, xi_hat),
+                                   context_fused(eta_hat, xi_hat) - context_without(eta_hat, xi_hat)):
                         self.assertLess(float(jnp.linalg.norm(result - nested) / jnp.linalg.norm(nested)), 3e-6)
                     stages_eta = jnp.stack((eta_hat, eta_hat))
                     stages_xi = jnp.stack((xi_hat, 1.3 * xi_hat))
                     stages = jax.jit(jax.vmap(fused))(stages_eta, stages_xi)
                     np.testing.assert_allclose(stages, jax.jit(jax.vmap(forward))(stages_eta, stages_xi),
                                                rtol=3e-6, atol=2e-7)
+                    np.testing.assert_allclose(stages, jax.jit(jax.vmap(context_fused))(stages_eta, stages_xi),
+                                               rtol=3e-6, atol=2e-7)
                     isolated = stages - jax.jit(jax.vmap(fused_without))(stages_eta, stages_xi)
                     reference = jnp.stack((nested, 1.3 * nested))
                     self.assertLess(float(jnp.linalg.norm(isolated - reference) / jnp.linalg.norm(reference)), 3e-6)
+                    if surface_features:
+                        np.testing.assert_array_equal(
+                            context_fused(jnp.zeros_like(eta_hat), xi_hat),
+                            context_without(jnp.zeros_like(eta_hat), xi_hat),
+                        )
+                        other_xi = 0.7 * xi + 0.1 * jnp.cos(4 * x - phase)
+                        other_hat = jnp.fft.rfft(other_xi)
+                        other_nested = context_fused(eta_hat, other_hat) - context_without(eta_hat, other_hat)
+                        left = jnp.sum(other_xi * jnp.fft.irfft(nested, n=nx))
+                        right = jnp.sum(xi * jnp.fft.irfft(other_nested, n=nx))
+                        np.testing.assert_allclose(left, right, rtol=3e-6, atol=2e-7)
 
     def test_exact_solver_g0_uses_original_spectrum_without_rescaling_other_terms(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant
