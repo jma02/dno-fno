@@ -11,15 +11,29 @@ control_dir=outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batc
 reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
-for arm in phase_direction nested_features; do
+if (( $# == 0 )); then
+    printf 'Usage: %s phase_direction|nested_features|cs_terms [...]\n' "$0" >&2
+    exit 2
+fi
+for arm in "$@"; do
+    export JAX_PLATFORMS=cuda
+    eval_args=(--fuse-nested-fft --batch-context-fft)
     case "$arm" in
         phase_direction) arm_args=(--data_phase_projection_weight 1) ;;
         nested_features) arm_args=(--cs_nested_surface_features) ;;
+        cs_terms)
+            arm_args=(--cs_terms_residual --cs_terms_cpu_prefetch --cs_nested_blocks 0)
+            eval_args=()
+            export JAX_PLATFORMS=cuda,cpu
+            ;;
+        *) printf 'Unknown experiment: %s\n' "$arm" >&2; exit 2 ;;
     esac
     run_name=c27_${arm}_scratch1_${run_date}
     run_dir=outputs/$run_name
     mkdir "$run_dir"
-    while [[ -n "$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid --format=csv,noheader)" ]]; do
+    while :; do
+        gpu_pids=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid --format=csv,noheader)
+        [[ -z "$gpu_pids" ]] && break
         sleep 30
     done
     printf '%s starting %s from scratch\n' "$(date +%H:%M)" "$arm"
@@ -45,7 +59,7 @@ for arm in phase_direction nested_features; do
         --run_name "$run_name" "${arm_args[@]}" > "$run_dir/console.log" 2>&1
     XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
         uv run --no-sync python scripts/eval_fast_rollouts.py \
-        --run-dir "$run_dir" --checkpoint weight_ema --fuse-nested-fft --batch-context-fft \
+        --run-dir "$run_dir" --checkpoint weight_ema "${eval_args[@]}" \
         --reference-dir "$reference_dir" --output-dir "$run_dir/eval_weight_ema_standard" \
         > "$run_dir/eval_weight_ema_standard.log" 2>&1
     printf '%s finished %s and weight-EMA rollouts\n' "$(date +%H:%M)" "$arm"
