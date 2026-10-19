@@ -124,7 +124,7 @@ def upload_dataset(dataset: str) -> None:
     memory=(256 * 1024, 256 * 1024),
     retries=0,
     max_containers=1,
-    scaledown_window=1,
+    scaledown_window=2,
 )
 def run_training(
     *,
