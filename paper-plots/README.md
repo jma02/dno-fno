@@ -134,11 +134,12 @@ M3/M4 now use FP64 interleaved cuFFTDx with padding 1; the M6 reference-runtime
 line retains the validated padding-2 measurement. The padding-1 M6 trial is
 excluded because its BF trajectory differs from the reference.
 
-Figure 10's batch-32 refresh is queued until Ada GPU0 is free. The original plot
-remains in place; measurements interrupted by other GPU jobs are excluded.
-The clean run will write
+Figure 10's batch-32 classical timings were refreshed on October 19 from
 `outputs/classical_plot_refresh_20261019/ada_batch32_{pad1,pad2}.json`
-and regenerate Figure 10 automatically.
+using FP64 interleaved cuFFTDx: M1–M5 use padding 1 and M6 uses padding 2.
+All four families have 32 finite, positive-depth trajectories with matching
+case IDs and horizons. The existing median errors and archived neural timings
+are retained; measurements interrupted by other GPU jobs are excluded.
 Figures 8–9 have separately refreshed CPU measurements in `plot-data.npz`;
 their neural measurements are retained. The cloud plots use the newest saved
 hardware-specific sweeps in
