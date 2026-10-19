@@ -30,7 +30,7 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier, phase_rank_one_hat  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
 TUNED_TRIALS = tuple("fourier_tuned_" + "_".join(map(str, epts)) + suffix
@@ -123,6 +123,8 @@ def build_variant(
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
+    if model.phase_rank_one and (trial == "fourier" or (not spectral_io and variant != "original")):
+        raise ValueError("Phase rank-one inference requires original or physically rounded Fourier I/O.")
     if nested_fused and (nx != 1024 or coarse_correction or not model.nested_blocks or not spectral_io):
         raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
     if context_batch and not model.surface_context_width:
@@ -296,6 +298,10 @@ def build_variant(
                                 eta_scale=model.eta_scale if fused_g1 else None,
                             ).sum(axis=1))((normalized_inputs, xi_phys_hat) if reuse_g1 else (normalized_inputs,))
             baseline_xi_hat = xi_phys_hat
+            phase_hat = (phase_rank_one_hat(
+                eta_norm_hat * model.eta_scale, xi_phys_hat, log_depth,
+                loaded.params["phase_rank_one_coefficients"], model.domain_length,
+            ) if model.phase_rank_one else None)
             if coarse_correction:
                 normalized_hat = resample_rfft(cast(jax.Array, normalized_hat), correction_nx)
                 normalized_inputs = fft(normalized_hat, correction_nx, inverse=True, ept=input_ept)
@@ -401,6 +407,8 @@ def build_variant(
             correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if coarse_correction:
                 correction_hat = resample_rfft(correction_hat, nx)
+            if phase_hat is not None:
+                correction_hat = correction_hat + phase_hat
             if not overlap_g1:
                 if model.baseline_order == 2:
                     analytic_hat = m2_hat(cast(jax.Array, normalized_inputs))

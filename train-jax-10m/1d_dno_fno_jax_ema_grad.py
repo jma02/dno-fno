@@ -135,6 +135,8 @@ def main() -> None:
                         help="Apply a shared bounded eta/h modulation to both nested surface factors.")
     parser.add_argument("--cs_nested_surface_features", action="store_true",
                         help="Learn per-branch mixtures of eta and its even linear features for nested factors.")
+    parser.add_argument("--cs_phase_rank_one", action="store_true",
+                        help="Add a learned signed rank-one correction along the half derivative of eta_x.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2), default=1,
         help="Analytic baseline order: G0+G1 or G0+G1+G2.",
@@ -431,6 +433,10 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.cs_phase_rank_one and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.cs_baseline_order != 1
+    ):
+        parser.error("--cs_phase_rank_one requires the tied-filter cs_dno model with a G0+G1 baseline")
     if args.cs_terms_residual:
         if args.model != "cs_dno" or args.norm != "scale" or not args.cs_normalize_surface_features:
             parser.error("--cs_terms_residual requires cs_dno, scale normalization, and RMS-scaled surface features")
@@ -714,6 +720,7 @@ def main() -> None:
             nested_blocks=args.cs_nested_blocks,
             nested_surface_modulation=args.cs_nested_surface_modulation,
             nested_surface_features=args.cs_nested_surface_features,
+            phase_rank_one=args.cs_phase_rank_one,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,
@@ -801,7 +808,10 @@ def main() -> None:
                     gains = jnp.concatenate([group["gamma"] for group in groups[ordinary_groups:]])
                     weighted = jnp.concatenate((weighted, nested_eta * inner * gains), axis=-1)
                 weighted_hat = jnp.fft.rfft(weighted, axis=1, norm="forward")
-                return jnp.fft.irfft(jnp.sum(filters * weighted_hat, axis=-1), n=nx, axis=-1, norm="forward")
+                correction_hat = jnp.sum(filters * weighted_hat, axis=-1)
+                if call_kwargs["correction_hat_addition"] is not None:
+                    correction_hat = correction_hat + call_kwargs["correction_hat_addition"]
+                return jnp.fft.irfft(correction_hat, n=nx, axis=-1, norm="forward")
             return next_fun(*call_args, **call_kwargs)
 
         with nn.intercept_methods(intercept):

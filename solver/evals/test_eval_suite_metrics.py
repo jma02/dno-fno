@@ -165,6 +165,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_nested_blocks": 1, "cs_nested_surface_modulation": True},
             {"cs_nested_blocks": 1, "cs_nested_surface_features": True,
              "cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
+            {"cs_phase_rank_one": True},
             {"cs_baseline_true_depth": True},
             {"cs_use_learned_eta_filters": True},
             {"cs_curvature_cutoff": 22.727203594311888},
@@ -203,6 +204,7 @@ class ComputeMetricsTest(unittest.TestCase):
                                  options.get("cs_nested_surface_modulation", False))
                 self.assertEqual(loaded.model.nested_surface_features,
                                  options.get("cs_nested_surface_features", False))
+                self.assertEqual(loaded.model.phase_rank_one, options.get("cs_phase_rank_one", False))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
                 scales = cast(list[float] | None, options.get("cs_surface_feature_scales"))
                 self.assertEqual(loaded.model.surface_feature_scales, None if scales is None else tuple(scales))
@@ -249,12 +251,13 @@ class ComputeMetricsTest(unittest.TestCase):
 
     def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
-                             baseline_order=1, nested_surface_modulation=True)
+                             baseline_order=1, nested_surface_modulation=True, phase_rank_one=True)
         inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(4), (2, 32, 2), dtype=jnp.float32)
         depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float32))
         params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
         params["cs_block_0"]["gamma"] = jnp.full((2,), 0.1, dtype=jnp.float32)
         params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
+        params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], dtype=jnp.float32)
         prediction, baseline, m1, correction = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                                        model.apply({"params": params}, inputs, depth, return_baseline=True))
         np.testing.assert_array_equal(baseline, m1)
@@ -263,7 +266,7 @@ class ComputeMetricsTest(unittest.TestCase):
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
             "cs_nested_blocks": 1, "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
-            "cs_nested_surface_modulation": True,
+            "cs_nested_surface_modulation": True, "cs_phase_rank_one": True,
             "cs_use_first_deriv": True, "cs_use_second_deriv": True,
             "cs_use_half_deriv": True, "cs_use_hilbert": True,
             "cs_baseline_order": 1, "cs_baseline_true_depth": False,
@@ -283,6 +286,8 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(restored.model.nested_blocks, 1)
         self.assertTrue(restored.model.nested_surface_modulation)
         np.testing.assert_array_equal(restored.params["nested_surface_gain"], params["nested_surface_gain"])
+        self.assertTrue(restored.model.phase_rank_one)
+        np.testing.assert_array_equal(restored.params["phase_rank_one_coefficients"], params["phase_rank_one_coefficients"])
         self.assertEqual(restored.model.baseline_order, 1)
         self.assertEqual(restored.epoch, 40)
 
@@ -480,13 +485,14 @@ class ComputeMetricsTest(unittest.TestCase):
 
         model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=1, latent=2, mult_hidden=4,
                              eta_scale=0.3, xi_scale=0.7, target_scale=0.8,
-                             nested_surface_modulation=True,
+                             nested_surface_modulation=True, phase_rank_one=True, domain_length=3 * np.pi,
                              surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
                              surface_context_width=4)
         params = cast(dict[str, Any], model.init(
             jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
             jnp.zeros((1, 1), jnp.float32))["params"])
         params["nested_surface_gain"] = jnp.asarray(0.6, jnp.float32)
+        params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], jnp.float32)
         params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
             params["cs_block_0"]["phi_proj"]["kernel"], 0.1)
         block = params["cs_block_1"]
@@ -513,7 +519,7 @@ class ComputeMetricsTest(unittest.TestCase):
                     zero = loaded._replace(params=zero_params)
                     phase = jnp.arange(batch, dtype=jnp.float64)[:, None] / 7
                     eta = 0.015 + 0.04 * jnp.cos(2 * x + phase) + 0.01 * jnp.sin(5 * x - phase)
-                    xi = 0.2 * jnp.sin(x + phase) - 0.05 * jnp.cos(3 * x - phase)
+                    xi = 0.2 * jnp.sin(x + phase) - 0.05 * jnp.cos(3 * x - phase) + 0.12 * jnp.sin(2 * x + phase)
                     depth = jnp.log(jnp.linspace(0.08, 8., batch, dtype=jnp.float32))[:, None]
                     forward = fusion.build_variant(loaded, depth, nx, name)
                     fused = fusion.build_variant(loaded, depth, nx, name + "_nestedfused")
@@ -535,8 +541,8 @@ class ComputeMetricsTest(unittest.TestCase):
                     eta_norm = jax.jit(lambda value: jnp.fft.irfft(value, n=nx).astype(jnp.float32)
                                        / np.float32(0.3))(eta_hat)
                     surface = (eta_norm / np.float32(0.2))[:, None, :]
+                    k = (2 * np.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
                     if surface_features:
-                        k = jnp.arange(nx // 2 + 1, dtype=jnp.float32)
                         raw_features = jnp.stack((
                             jnp.fft.irfft(jnp.sqrt(k) * jnp.fft.rfft(eta_norm), n=nx) / np.float32(0.7),
                             jnp.fft.irfft(-k**2 * jnp.fft.rfft(eta_norm), n=nx) / np.float32(8.),
@@ -547,6 +553,50 @@ class ComputeMetricsTest(unittest.TestCase):
                                              * jnp.tanh(eta_norm * model.eta_scale / jnp.exp(depth)))[:, None, :]
                     potential = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32)
                                  / np.float32(0.7)) * model.xi_scale
+                    no_phase = loaded._replace(params={
+                        **case_params, "phase_rank_one_coefficients": jnp.zeros((2,), jnp.float32),
+                    })
+                    phase_free = fusion.build_variant(no_phase, depth, nx, name + "_nestedfused_contextbatch")
+                    u_hat = (1j * k * jnp.sqrt(k) * jnp.fft.rfft(eta_norm) * model.eta_scale).at[:, -1].set(0)
+                    u = jnp.fft.irfft(u_hat, n=nx)
+                    beta = 0.3 - 0.4 * (depth + jnp.log(2 * jnp.pi / model.domain_length))
+                    rank_one = beta * u * jnp.mean(u * potential, axis=-1, keepdims=True)
+                    rank_one *= 1.1 / model.target_scale
+                    phase_increment = jnp.fft.irfft(context_fused(eta_hat, xi_hat) - phase_free(eta_hat, xi_hat), n=nx)
+                    # Inspect native correction directly; subtracting full FP32 outputs loses its small signal.
+                    isolated_params = {
+                        **case_params,
+                        "cs_block_0": {**case_params["cs_block_0"], "phi_proj": {
+                            "kernel": jnp.zeros_like(case_params["cs_block_0"]["phi_proj"]["kernel"]),
+                        }},
+                        "cs_block_1": {**case_block, "gamma": jnp.zeros_like(block["gamma"])},
+                    }
+                    normalized = jax.jit(lambda e, q: jnp.stack(
+                        (e.astype(jnp.float32), q.astype(jnp.float32)), axis=-1,
+                    ) / jnp.asarray([0.3, 0.7], jnp.float32))(eta, xi)
+                    native_increment = jax.jit(lambda values: cast(tuple[jax.Array, ...], case_model.apply(
+                        {"params": isolated_params}, values, depth, return_baseline=True,
+                    ))[3][..., 0] * 1.1)(normalized)
+                    native_u_hat = (1j * k * jnp.sqrt(k) * jnp.fft.rfft(normalized[..., 0])
+                                    * model.eta_scale).at[:, -1].set(0)
+                    native_u = jnp.fft.irfft(native_u_hat, n=nx)
+                    native_rank_one = beta * native_u * jnp.mean(
+                        native_u * normalized[..., 1] * model.xi_scale, axis=-1, keepdims=True,
+                    ) * (1.1 / model.target_scale)
+                    self.assertGreater(float(jnp.linalg.norm(rank_one)), 1e-5)
+                    for increment, reference_phase in ((phase_increment, rank_one), (native_increment, native_rank_one)):
+                        self.assertLess(float(jnp.linalg.norm(increment - reference_phase)
+                                              / jnp.linalg.norm(reference_phase)), 1e-6)
+                    if batch == 1 and not surface_features:
+                        for unsupported in ("fourier", "packed", "front"):
+                            with self.assertRaisesRegex(ValueError, "physically rounded Fourier"):
+                                fusion.build_variant(loaded, depth, nx, unsupported)
+                        original = fusion.build_variant(loaded, depth, nx, "original")
+                        self.assertLess(float(jnp.linalg.norm(original(eta, xi) - native) / jnp.linalg.norm(native)), 5e-7)
+                        coarse = fusion.build_variant(loaded, depth, nx, name + "_grid512")
+                        coarse_without = fusion.build_variant(no_phase, depth, nx, name + "_grid512")
+                        coarse_increment = jnp.fft.irfft(coarse(eta_hat, xi_hat) - coarse_without(eta_hat, xi_hat), n=nx)
+                        self.assertLess(float(jnp.linalg.norm(coarse_increment - rank_one) / jnp.linalg.norm(rank_one)), 1e-6)
                     middle = jnp.fft.irfft(inner * jnp.fft.rfft(
                         surface * jnp.fft.irfft(outer * jnp.fft.rfft(potential)[:, None], n=nx)), n=nx)
                     nested = jnp.sum(outer * jnp.fft.rfft(block["gamma"][None, :, None] * surface * middle), axis=1)

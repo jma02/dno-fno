@@ -23,7 +23,10 @@ from flax import linen as nn
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier
+from dno_net_v2 import (
+    CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
+    phase_rank_one_hat,
+)
 from solver.solvers.dno_series_jax import dno_series_eval
 
 jax.config.update("jax_enable_x64", True)
@@ -1358,6 +1361,131 @@ def test_terms_residual_can_learn_at_surface_zero_crossings() -> None:
     assert jnp.ptp(residual[:, nodes]) > 1e-10
 
 
+def _phase_rank_one_state(nx: int = 64) -> tuple[jax.Array, jax.Array, jax.Array]:
+    phase = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+    nyquist = (-1.0) ** jnp.arange(nx)
+    eta = jnp.asarray([[1.0], [0.7]]) * (
+        0.01 + 0.04 * jnp.cos(3 * phase) + 0.015 * jnp.sin(5 * phase) + 0.003 * nyquist
+    )
+    xi = jnp.broadcast_to(
+        0.3 + 0.07 * jnp.sin(3 * phase) - 0.02 * jnp.cos(5 * phase)
+        + 0.03 * jnp.sin(7 * phase) + 0.005 * nyquist, eta.shape,
+    )
+    return eta, xi, jnp.log(jnp.asarray([[0.2], [12.0]]))
+
+
+def test_phase_rank_one_spectrum_matches_physical_definition() -> None:
+    length = 3 * pi
+    coefficients = jnp.asarray([0.2, -0.3], dtype=jnp.float32)
+    for nx in (64, 96):
+        eta, xi, depth = _phase_rank_one_state(nx)
+        phase = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+        k0 = 2 * pi / length
+        # Analytic derivative ignores the deliberately nonzero DC/Nyquist modes.
+        u = jnp.asarray([[1.0], [0.7]]) * (
+            -0.04 * (3 * k0) ** 1.5 * jnp.sin(3 * phase)
+            + 0.015 * (5 * k0) ** 1.5 * jnp.cos(5 * phase)
+        )
+        beta = coefficients[0] + coefficients[1] * jnp.log(k0 * jnp.exp(depth))
+        expected = beta * u * jnp.mean(u * xi, axis=-1, keepdims=True)
+        actual_hat = phase_rank_one_hat(
+            jnp.fft.rfft(eta), jnp.fft.rfft(xi), depth, coefficients, length,
+        )
+        assert jnp.all(actual_hat[..., 0] == 0) and jnp.all(actual_hat[..., -1] == 0)
+        assert jnp.allclose(jnp.fft.irfft(actual_hat, n=nx), expected, rtol=1e-11, atol=1e-13)
+        assert jnp.allclose(actual_hat, jnp.fft.rfft(expected), rtol=1e-11, atol=1e-12)
+
+
+def test_phase_rank_one_preserves_operator_structure_and_quadratic_order() -> None:
+    eta, xi, depth = _phase_rank_one_state()
+    coefficients = jnp.asarray([0.2, -0.3], dtype=jnp.float32)
+
+    def response(surface: jax.Array, potential: jax.Array, log_depth: jax.Array = depth) -> jax.Array:
+        return jnp.fft.irfft(phase_rank_one_hat(
+            jnp.fft.rfft(surface), jnp.fft.rfft(potential), log_depth, coefficients, 3 * pi,
+        ), n=surface.shape[-1])
+
+    actual = response(eta, xi)
+    psi = jnp.roll(xi, 3, axis=-1)
+    other = response(eta, psi)
+    assert jnp.all(jnp.linalg.norm(actual, axis=-1) > 1e-5)
+    assert jnp.allclose(response(eta, 0.3 * xi - 0.7 * psi),
+                        0.3 * actual - 0.7 * other, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(jnp.mean(psi * actual, axis=-1),
+                        jnp.mean(xi * other, axis=-1), rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(response(eta, xi + 2.3), actual, rtol=1e-11, atol=1e-13)
+    assert jnp.max(jnp.abs(jnp.mean(actual, axis=-1))) < 1e-14
+    reflected = (-jnp.arange(eta.shape[-1])) % eta.shape[-1]
+    assert jnp.allclose(response(eta[:, reflected], xi[:, reflected]),
+                        actual[:, reflected], rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(response(jnp.roll(eta, 7, axis=-1), jnp.roll(xi, 7, axis=-1)),
+                        jnp.roll(actual, 7, axis=-1), rtol=1e-11, atol=1e-13)
+    for scale in (-0.5, 0.3):
+        assert jnp.allclose(response(scale * eta, xi), scale**2 * actual, rtol=1e-11, atol=1e-13)
+    _, eta_tangent = jax.jvp(lambda surface: response(surface, xi), (eta,), (eta,))
+    _, xi_tangent = jax.jvp(lambda potential: response(eta, potential), (xi,), (xi,))
+    _, depth_tangent = jax.jvp(lambda log_h: response(eta, xi, log_h), (depth,), (jnp.ones_like(depth),))
+    phase = 2 * jnp.pi * jnp.arange(eta.shape[-1], dtype=jnp.float64) / eta.shape[-1]
+    u = jnp.asarray([[1.0], [0.7]]) * (
+        -0.04 * 2**1.5 * jnp.sin(3 * phase) + 0.015 * (10 / 3)**1.5 * jnp.cos(5 * phase)
+    )
+    assert jnp.allclose(eta_tangent, 2 * actual, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(xi_tangent, actual, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(depth_tangent, coefficients[1] * u * jnp.mean(u * xi, axis=-1, keepdims=True),
+                        rtol=1e-11, atol=1e-13)
+    zero, first = jax.jvp(lambda surface: response(surface, xi), (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(zero == 0) and jnp.all(first == 0)
+    assert jnp.all(response(jnp.full_like(eta, 0.2), xi) == 0)
+
+
+def test_phase_rank_one_zero_head_parity_normalization_and_trainability() -> None:
+    eta, xi, log_depth = _phase_rank_one_state()
+    for dtype in (jnp.float32, jnp.float64):
+        for nested_blocks in (0, 1):
+            original = _model(nested_blocks=nested_blocks, surface_context_width=8).clone(
+                domain_length=3 * pi, eta_scale=0.3, xi_scale=1.7, target_scale=0.4,
+            )
+            model = original.clone(phase_rank_one=True)
+            inputs = jnp.stack((eta / original.eta_scale, xi / original.xi_scale), axis=-1).astype(dtype)
+            depth = log_depth.astype(dtype)
+            plain = original.init(jax.random.PRNGKey(41), inputs, depth)
+            enabled = unfreeze(model.init(jax.random.PRNGKey(41), inputs, depth))
+            head = enabled["params"].pop("phase_rank_one_coefficients")
+            assert head.shape == (2,) and head.dtype == jnp.float32 and jnp.all(head == 0)
+            assert jax.tree.structure(plain) == jax.tree.structure(enabled)
+            assert all(jnp.array_equal(a, b) for a, b in zip(
+                jax.tree.leaves(plain), jax.tree.leaves(enabled), strict=True,
+            ))
+            shared = _activate_residual(plain)
+            enabled = unfreeze(shared)
+            enabled["params"]["phase_rank_one_coefficients"] = head
+            expected_zero = cast(tuple[jax.Array, ...], original.apply(shared, inputs, depth, return_baseline=True))
+            actual_zero = cast(tuple[jax.Array, ...], model.apply(enabled, inputs, depth, return_baseline=True))
+            assert all(jnp.array_equal(a, b) for a, b in zip(expected_zero, actual_zero, strict=True))
+            gradients = jax.grad(lambda params: jnp.mean(cast(tuple[jax.Array, ...], model.apply(
+                {"params": params}, inputs, depth, return_baseline=True,
+            ))[3][..., 0] * xi))(enabled["params"])
+            assert jnp.all(jnp.abs(gradients["phase_rank_one_coefficients"]) > 1e-8)
+            assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+            coefficients = jnp.asarray([0.2, -0.3], dtype=jnp.float32)
+            enabled["params"]["phase_rank_one_coefficients"] = coefficients
+            actual = cast(tuple[jax.Array, ...], model.apply(enabled, inputs, depth, return_baseline=True))
+            increment = jnp.fft.irfft(phase_rank_one_hat(
+                jnp.fft.rfft(inputs[..., 0]) * model.eta_scale,
+                jnp.fft.rfft(inputs[..., 1] * model.xi_scale), depth, coefficients, model.domain_length,
+            ), n=eta.shape[-1])[..., None] / model.target_scale
+            tolerance = 2e-7 if dtype == jnp.float32 else 2e-13
+            assert jnp.allclose(actual[0] - actual_zero[0], increment, rtol=2e-5, atol=tolerance)
+            assert jnp.allclose(actual[3] - actual_zero[3], increment, rtol=2e-5, atol=tolerance)
+            assert jnp.array_equal(actual[1], actual_zero[1]) and jnp.array_equal(actual[2], actual_zero[2])
+            clipped = phase_rank_one_hat(
+                jnp.fft.rfft(eta), jnp.fft.rfft(xi), jnp.minimum(log_depth, jnp.log(5.0)),
+                coefficients, model.domain_length,
+            )
+            assert not jnp.allclose(increment[-1, :, 0] * model.target_scale,
+                                    jnp.fft.irfft(clipped, n=eta.shape[-1])[-1], rtol=1e-3, atol=1e-8)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -1400,6 +1528,9 @@ def main() -> int:
         test_terms_residual_formula_linearity_gauge_and_mean,
         test_terms_residual_has_fourth_order_onset,
         test_terms_residual_can_learn_at_surface_zero_crossings,
+        test_phase_rank_one_spectrum_matches_physical_definition,
+        test_phase_rank_one_preserves_operator_structure_and_quadratic_order,
+        test_phase_rank_one_zero_head_parity_normalization_and_trainability,
     )
     for test in tests:
         test()

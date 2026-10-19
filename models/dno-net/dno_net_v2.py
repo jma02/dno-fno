@@ -17,6 +17,26 @@ from flax import linen as nn
 from solver.solvers.dno_series_jax import dno_series_eval
 
 
+def phase_rank_one_hat(
+    eta_hat: jnp.ndarray, xi_hat: jnp.ndarray, log_depth: jnp.ndarray,
+    coefficients: jnp.ndarray, domain_length: float,
+) -> jnp.ndarray:
+    """Physical, unnormalized even-grid rFFT of beta(h) u mean(u xi), u = |D|^.5 eta_x."""
+    grid_size = 2 * (eta_hat.shape[-1] - 1)
+    k = (2.0 * jnp.pi / domain_length) * jnp.arange(
+        eta_hat.shape[-1], dtype=eta_hat.real.dtype,
+    )
+    u_hat = (1j * k * jnp.sqrt(k) * eta_hat).at[..., -1].set(0)
+    weights = jnp.full(k.shape, 2, dtype=k.dtype).at[0].set(1).at[-1].set(1)
+    moment = jnp.sum(
+        weights * jnp.real(jnp.conj(u_hat) * xi_hat), axis=-1, keepdims=True,
+    ) / grid_size**2
+    beta = coefficients[0] + coefficients[1] * (
+        log_depth + jnp.log(2.0 * jnp.pi / domain_length)
+    )
+    return beta * moment * u_hat
+
+
 class DepthAwareMultiplier(nn.Module):
     """Learn a real Fourier multiplier for each wavenumber and branch.
 
@@ -73,6 +93,7 @@ class CraigSulemBlock(nn.Module):
         *,
         eta_norm: jnp.ndarray | None = None,
         nested_features: jnp.ndarray | None = None,
+        correction_hat_addition: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         grid_size = eta_features.shape[1]
 
@@ -121,6 +142,8 @@ class CraigSulemBlock(nn.Module):
             weighted_xi = cast(jnp.ndarray, spatial_weights) * filtered_xi
         weighted_xi_hat = jnp.fft.rfft(weighted_xi, axis=1, norm="forward")
         correction_hat = jnp.sum(multiplier * weighted_xi_hat, axis=-1)
+        if correction_hat_addition is not None:
+            correction_hat = correction_hat + correction_hat_addition
         return jnp.fft.irfft(correction_hat, n=grid_size, axis=-1, norm="forward")
 
 
@@ -132,6 +155,7 @@ class CraigSulemDNO(nn.Module):
     nested_blocks: int = 0            # Replace this many final groups with M eta N eta M.
     nested_surface_modulation: bool = False  # Bounded eta/h modulation of both nested factors.
     nested_surface_features: bool = False  # Mix even linear surface features per nested branch.
+    phase_rank_one: bool = False      # Signed quadratic correction along |D|^.5 eta_x.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -355,6 +379,18 @@ class CraigSulemDNO(nn.Module):
             nested_surface = nested_surface * (
                 1.0 + jnp.tanh(gain) * jnp.tanh(eta_norm * self.eta_scale / jnp.exp(depth))
             )
+        phase_hat = None
+        if self.phase_rank_one:
+            coefficients = self.param(
+                "phase_rank_one_coefficients", nn.initializers.zeros, (2,), jnp.float32,
+            )
+            phase_hat = phase_rank_one_hat(
+                jnp.fft.rfft(eta_norm, axis=-1) * self.eta_scale,
+                jnp.fft.rfft(xi_phys, axis=-1), depth, coefficients, self.domain_length,
+            )
+            # Inject before the existing inverse FFT, compensating its forward norm
+            # and the outer branch normalization; this head is not another tied branch.
+            phase_hat = phase_hat * (float(self.n_blocks * self.latent) ** 0.5 / grid_size)
         for block_idx in range(self.n_blocks):
             correction = correction + CraigSulemBlock(
                 n_branches=self.latent,
@@ -366,7 +402,8 @@ class CraigSulemDNO(nn.Module):
                 log_multiplier_inputs=self.log_multiplier_inputs,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, clipped_log_depth,
-              eta_norm=nested_surface, nested_features=nested_features)
+              eta_norm=nested_surface, nested_features=nested_features,
+              correction_hat_addition=phase_hat if block_idx == self.n_blocks - 1 else None)
 
         # Divide by sqrt(total branches), then convert to the target's normalized units.
         correction = correction / float(self.n_blocks * self.latent) ** 0.5

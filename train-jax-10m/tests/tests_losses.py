@@ -1474,6 +1474,32 @@ def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
                     assert (float(jnp.linalg.norm(leaf)) > 0) == enabled
 
 
+def test_phase_rank_one_option_requires_m1_cs_network() -> None:
+    main = trainer_function("main")
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_phase_rank_one")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test).startswith("args.cs_phase_rank_one"))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "phase_rank_one_option", "exec"), namespace)
+    assert not parser.parse_args([]).cs_phase_rank_one
+    assert parser.parse_args(["--cs_phase_rank_one"]).cs_phase_rank_one
+    valid = dict(cs_phase_rank_one=True, model="cs_dno", cs_terms_residual=False, cs_baseline_order=1)
+    code = compile(ast.Module(body=[validation], type_ignores=[]), "phase_rank_one_validation", "exec")
+    namespace["args"] = SimpleNamespace(**valid)
+    exec(code, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for name, value in (("model", "fno"), ("cs_terms_residual", True), ("cs_baseline_order", 2)):
+            namespace["args"] = SimpleNamespace(**(valid | {name: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+            namespace["args"].cs_phase_rank_one = False
+            exec(code, namespace)
+
+
 def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
                       and "args.cs_nested_surface_features" in ast.unparse(node.test))
@@ -1512,8 +1538,11 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(1, False, False, False, whiten, False, 2, 0.0, dtype, False, True)
                        for dtype, whiten in product((jnp.float32, jnp.float64), (False, True))]
+    precision_cases = [(*case, False) for case in precision_cases]
+    precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
+                       for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
-         whiten, depth_gate, context, cutoff, dtype, nested_modulation, nested_features) in precision_cases:
+         whiten, depth_gate, context, cutoff, dtype, nested_modulation, nested_features, phase_rank_one) in precision_cases:
         case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
         model = CraigSulemDNO(
             width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
@@ -1526,10 +1555,13 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             surface_context_width=context, surface_context_gate=depth_gate and bool(context),
             surface_depth_gate=depth_gate, baseline_order=1, baseline_true_depth=True,
             surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
-            log_multiplier_inputs=log_multiplier_inputs,
+            log_multiplier_inputs=log_multiplier_inputs, phase_rank_one=phase_rank_one,
+            domain_length=5 * np.pi if phase_rank_one else 2 * np.pi,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        if phase_rank_one:
+            params["phase_rank_one_coefficients"] = jnp.array([0.25, -0.07], dtype=jnp.float32)
         if nested_modulation:
             params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
         if depth_gate:
@@ -1562,13 +1594,31 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
         packed_apply = namespace["apply_model"]
         native = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                       model.apply({"params": params}, case_inputs, case_depth, return_baseline=True))
-        packed = jax.jit(packed_apply, static_argnames="return_baseline")(
+        evaluate_packed = jax.jit(packed_apply, static_argnames="return_baseline")
+        packed = evaluate_packed(
             {"params": params}, case_inputs, case_depth, return_baseline=True,
         )
         for actual, expected in zip(packed, native):
             assert actual.dtype == expected.dtype == case_inputs.dtype
             np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
         np.testing.assert_array_equal(packed[1], packed[2])
+        if phase_rank_one:
+            disabled = evaluate_packed(
+                {"params": params | {"phase_rank_one_coefficients": jnp.zeros(2, dtype=jnp.float32)}},
+                case_inputs, case_depth, return_baseline=True,
+            )
+            k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=dtype)
+            u = jnp.fft.irfft(
+                (1j * k * jnp.sqrt(k) * jnp.fft.rfft(case_inputs[..., 0] * model.eta_scale)).at[:, -1].set(0),
+                n=nx,
+            )
+            coefficients = cast(jax.Array, params["phase_rank_one_coefficients"])
+            beta = coefficients[0] + coefficients[1] * (case_depth + jnp.log(2 * jnp.pi / model.domain_length))
+            expected_phase = beta * u * jnp.mean(u * case_inputs[..., 1] * model.xi_scale, axis=1, keepdims=True)
+            expected_phase = expected_phase[..., None] / model.target_scale
+            np.testing.assert_allclose(packed[3] - disabled[3], expected_phase, rtol=3e-5, atol=2e-7)
+            np.testing.assert_allclose(packed[0] - disabled[0], expected_phase, rtol=3e-5, atol=2e-7)
+            np.testing.assert_array_equal(packed[1], disabled[1])
 
         def objective(parameters: dict[str, Any], values: jax.Array, log_depth: jax.Array,
                       *, packed: bool) -> jax.Array:
@@ -1594,6 +1644,8 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             assert float(jnp.linalg.norm(actual_grad[0]["eta_depth_gate"]["kernel"])) > 0
         if nested_modulation:
             assert float(jnp.abs(actual_grad[0]["nested_surface_gain"])) > 0
+        if phase_rank_one:
+            assert bool(jnp.all(jnp.abs(actual_grad[0]["phase_rank_one_coefficients"]) > 0))
         if multiplier_skip:
             for index in range(2):
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
@@ -2743,6 +2795,7 @@ if __name__ == "__main__":
     test_adam_moment_options_preserve_both_emas()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_nested_zero_inner_initialization_and_gradient_activation()
+    test_phase_rank_one_option_requires_m1_cs_network()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
