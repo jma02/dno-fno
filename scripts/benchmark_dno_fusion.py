@@ -30,7 +30,7 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier, phase_rank_one_hat  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier, phase_rank_one_hat  # noqa: E402
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
 TUNED_TRIALS = tuple("fourier_tuned_" + "_".join(map(str, epts)) + suffix
@@ -39,7 +39,7 @@ G1_FP32_BASE = "fourier_fused_features_product_overlap_g1fp32"
 G1_FP32_TRIALS = tuple(G1_FP32_BASE + suffix + tuning
     for suffix in ("", "_reuse", "_inputfp32", "_reuse_inputfp32")
     for tuning in ("", *(f"_g1e{a}x{b}" for a, b in product((4, 8, 16), repeat=2))))
-TRIALS = ("fourier", "fourier_round", "fourier_reuse", "fourier_input",
+TRIALS = ("terms_interleaved", "terms_interleaved_features", "fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
           "fourier_transforms", "fourier_transforms_e4", "fourier_transforms_e16",
@@ -74,6 +74,75 @@ def build_variant(
     include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
 ) -> Wrapped:
     """Intercept only inference arithmetic; leave the production module untouched."""
+    model = loaded.model
+    if isinstance(model, CraigSulemTermsResidual):
+        if not include_baselines or not include_correction or loaded.norm_mode != "scale":
+            raise ValueError("CS-field inference requires the complete scale-normalized decoder.")
+        if variant == "original":
+            predict = build_predict_gxi_batched(loaded)
+            return jax.jit(lambda eta, xi: predict(eta, xi, depth))
+        if variant not in ("terms_interleaved", "terms_interleaved_features"):
+            raise ValueError("CS-field inference requires an original or terms_interleaved variant.")
+        batch_features = variant.endswith("_features")
+        if batch_features and (model.use_learned_eta_filters or model.surface_feature_transform is not None):
+            raise ValueError("Batched decoder features require fixed, unwhitened surface filters.")
+        log_depth = depth.astype(jnp.float64).reshape(-1, 1)
+        scales = jnp.asarray((model.eta_scale, model.xi_scale), dtype=jnp.float64)
+        k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
+        g0 = k * jnp.tanh(jnp.exp(log_depth) * k)
+        feature_k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
+        curvature = -(feature_k ** 2)
+        if model.curvature_cutoff > 0:
+            curvature /= jnp.sqrt(1.0 + (feature_k / model.curvature_cutoff) ** 2)
+        feature_ops = jnp.stack([symbol for enabled, symbol in (
+            (model.use_first_deriv, 1j * feature_k), (model.use_second_deriv, curvature),
+            (model.use_half_deriv, jnp.sqrt(feature_k)), (model.use_hilbert, -1j * jnp.sign(feature_k)),
+        ) if enabled])
+
+        @jax.jit
+        def forward_terms(eta: jax.Array, xi: jax.Array) -> jax.Array:
+            inputs = jnp.stack((eta.astype(jnp.float64), xi.astype(jnp.float64)), axis=-1) / scales
+            if batch_features:
+                eta_norm = inputs[..., 0].astype(jnp.float32)
+                derived = jnp.moveaxis(jnp.fft.irfft(
+                    feature_ops[None, :, :] * jnp.fft.rfft(eta_norm)[:, None, :],
+                    n=nx,
+                ), 1, -1)
+                features = jnp.concatenate((jnp.stack(
+                    [eta_norm ** p for p in range(1, model.n_polys + 1)], axis=-1,
+                ), derived), axis=-1)
+                if model.use_relative_elevation:
+                    features = jnp.concatenate((features, (eta_norm * model.eta_scale
+                        / jnp.exp(log_depth.astype(jnp.float32)))[..., None]), axis=-1)
+                if model.surface_feature_scales is not None:
+                    features /= jnp.asarray(model.surface_feature_scales, dtype=jnp.float32)
+
+                def intercept_features(next_fun: Callable, call_args: tuple, call_kwargs: dict, context: Any) -> Any:
+                    if isinstance(context.module, nn.Dense) and context.module.name == "eta_feat_proj":
+                        call_args = (features,)
+                    return next_fun(*call_args, **call_kwargs)
+
+                with nn.intercept_methods(intercept_features):
+                    coefficients = model.apply({"params": loaded.params}, inputs, log_depth,
+                                               method=model.encode_geometry)
+            else:
+                coefficients = model.apply({"params": loaded.params}, inputs, log_depth,
+                                           method=model.encode_geometry)
+            # Preserve the native decoder's FP64 normalization round trip and pad2 projections.
+            physical = jnp.moveaxis(inputs * scales, -1, -2)
+            eta_hat, xi_hat = jnp.moveaxis(jnp.fft.rfft(physical).at[..., -1].set(0), -2, 0)
+            terms_hat = classical_hat(
+                eta_hat, xi_hat, k, g0, nx=nx, order=3, pad_factor=2,
+                backend="interleaved_cufftdx", precision="fp64", ept=fft_ept, return_terms=True,
+            )
+            terms = jnp.fft.irfft(terms_hat, n=nx)
+            prediction = cast(jax.Array, model.apply({}, coefficients, terms, method=model.decode_terms))
+            output = (prediction[..., 0] * model.target_scale).astype(eta.dtype)
+            return output - output.mean(axis=-1, keepdims=True)
+
+        return forward_terms
+    if variant.startswith("terms_"):
+        raise ValueError("CS-field inference variants require a CS-field decoder.")
     context_batch = variant.endswith("_contextbatch")
     variant = variant.removesuffix("_contextbatch")
     nested_fused = variant.endswith("_nestedfused")
@@ -680,7 +749,9 @@ if __name__ == "__main__":
         "Original", "Combine G₁ inverse FFTs", "Pack branch FFTs", "Cache depth multipliers",
         "Previous combined", "Batch G₁ FFTs", "Batch surface-feature FFTs", "Pack input-side FFTs", "cuFFTDx G₁",
     )))
-    labels.update(fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
+    labels.update(terms_interleaved="CS-field decoder · batched recurrence",
+                  terms_interleaved_features="CS-field decoder · batched recurrence + features",
+                  fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
                   fourier_reuse="Reuse FP32 input spectrum for G₁",
                   fourier_input="cuFFTDx FP64 input inverse FFT",
                   fourier_g1fft="cuFFTDx FP64 G₁ input FFT", fourier_features="cuFFTDx feature FFTs",

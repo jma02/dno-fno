@@ -35,7 +35,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     run_family,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from solver.solvers.dno_series_jax import dno_series_eval  # noqa: E402
+from solver.solvers.dno_series_jax import _dno_series_hat, dno_series_eval  # noqa: E402
 from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
@@ -50,6 +50,61 @@ from solver.gen_data.pipeline.types import (  # noqa: E402
 
 
 class ComputeMetricsTest(unittest.TestCase):
+    def test_classical_terms_match_native_fields_and_preserve_sum(self) -> None:
+        from scripts.benchmark_classical import classical_hat
+
+        nx, length = 64, 3 * np.pi
+        phase = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+        nyquist = (-1.0) ** jnp.arange(nx)
+        for batch in (1, 3):
+            with self.subTest(batch=batch):
+                eta = jnp.arange(1, batch + 1)[:, None] * (
+                    0.015 * jnp.cos(3 * phase) + 0.007 * jnp.sin(5 * phase)
+                    + 0.004 * jnp.cos(13 * phase) + 0.001 * nyquist
+                )
+                xi = jnp.broadcast_to(0.1 * jnp.sin(2 * phase) - 0.04 * jnp.cos(7 * phase)
+                                      + 0.02 * nyquist, eta.shape)
+                depth = jnp.asarray([0.04, 1.2, 12.0])[:batch, None]
+                k = (2 * jnp.pi / length) * jnp.arange(nx // 2 + 1, dtype=jnp.float64)
+                g0 = k * jnp.tanh(depth * k)
+                # Spectral callers zero input Nyquist; the physical API does so itself.
+                eta_hat = jnp.fft.rfft(eta).at[..., -1].set(0)
+                xi_hat = jnp.fft.rfft(xi).at[..., -1].set(0)
+                reference = _dno_series_hat(eta_hat, xi_hat, k, g0, nx=nx, order=3,
+                                            pad_factor=2, return_terms=True)
+                physical = dno_series_eval(eta, xi, k, depth, order=3, pad_factor=2, return_terms=True)
+                for backend in ("cufft", "interleaved"):
+                    evaluate = jax.jit(partial(classical_hat, k=k, g0=g0, nx=nx, order=3,
+                                               pad_factor=2, backend=backend, precision="fp64"))
+                    terms = jax.jit(partial(classical_hat, k=k, g0=g0, nx=nx, order=3,
+                                           pad_factor=2, backend=backend, precision="fp64",
+                                           return_terms=True))(eta_hat, xi_hat)
+                    self.assertEqual(terms.shape, (batch, 4, nx // 2 + 1))
+                    self.assertEqual(terms.dtype, jnp.complex128)
+                    np.testing.assert_array_equal(terms[..., -1], 0)
+                    for term in range(4):
+                        self.assertGreater(float(jnp.linalg.norm(reference[:, term])), 1e-10)
+                        np.testing.assert_allclose(terms[:, term], reference[:, term], rtol=1e-11, atol=1e-13)
+                        np.testing.assert_allclose(jnp.fft.irfft(terms[:, term], n=nx),
+                                                   physical[:, term], rtol=1e-11, atol=1e-13)
+                    summed = evaluate(eta_hat, xi_hat)
+                    np.testing.assert_allclose(jnp.sum(terms, axis=-2), summed, rtol=1e-12, atol=1e-13)
+                    np.testing.assert_allclose(summed, _dno_series_hat(
+                        eta_hat, xi_hat, k, g0, nx=nx, order=3, pad_factor=2,
+                    ), rtol=1e-12, atol=1e-13)
+
+    def test_classical_terms_reject_unsupported_modes(self) -> None:
+        from scripts.benchmark_classical import classical_hat
+
+        spectrum = jnp.ones((1, 33), dtype=jnp.complex128)
+        symbol = jnp.arange(33, dtype=jnp.float64)
+        for options in ({"backend": "specialized"}, {"backend": "cufftdx_all"},
+                        {"precision": "fp32"}, {"precision": "mixed"},
+                        {"pad_factor": 1}, {"g1_fp32": True}):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "return_terms requires"):
+                classical_hat(spectrum, spectrum, symbol, symbol, nx=64, order=3,
+                              return_terms=True, **cast(dict[str, Any], options))
+
     def test_trainer_milestones_evaluate_weight_ema_without_changing_training(self) -> None:
         path = Path(__file__).resolve().parents[2] / "train-jax-10m" / "1d_dno_fno_jax_ema_grad.py"
         milestone = next(
@@ -292,6 +347,8 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(restored.epoch, 40)
 
     def test_terms_checkpoint_restores_active_primary_ema_and_native_predictor(self) -> None:
+        from scripts.benchmark_dno_fusion import build_variant
+
         surface_scales = (0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1)
         model = CraigSulemTermsResidual(
             width=8, n_blocks=1, nested_blocks=0, latent=2, mult_hidden=4,
@@ -308,9 +365,9 @@ class ComputeMetricsTest(unittest.TestCase):
         raw_params = dict(model.init(jax.random.PRNGKey(29), inputs, depth)["params"])
         self.assertTrue(all(value.dtype == jnp.float32 for value in jax.tree.leaves(raw_params)))
         kernel = cast(jax.Array, raw_params["terms_head"]["kernel"])
-        ema_params = {**raw_params, "terms_head": {"kernel": jnp.linspace(
-            -0.1, 0.2, kernel.size, dtype=jnp.float32,
-        ).reshape(kernel.shape)}}
+        ema_params = {**raw_params, "terms_head": {"kernel": 0.1 * jax.random.normal(
+            jax.random.PRNGKey(30), kernel.shape, dtype=jnp.float32,
+        )}}
         expected_components = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], model.apply(
             {"params": ema_params}, inputs, depth, return_baseline=True,
         ))
@@ -393,6 +450,22 @@ class ComputeMetricsTest(unittest.TestCase):
             expected = cast(jax.Array, jax.jit(model.apply)({"params": ema_params}, inputs, depth))[..., 0] * model.target_scale
             np.testing.assert_allclose(actual, expected - expected.mean(axis=-1, keepdims=True),
                                        rtol=3e-12, atol=3e-14)
+
+        loaded = LoadedRun(model, ema_params, config, stats, "scale", 17)
+        expected = reference(physical[..., 0], physical[..., 1], depth)
+        baseline = build_predict_gxi_batched(loaded._replace(params=raw_params))(
+            physical[..., 0], physical[..., 1], depth,
+        )
+        correction_norm = float(jnp.linalg.norm(expected - baseline))
+        self.assertGreater(correction_norm, 1e-7)
+        self.assertTrue(bool(jnp.all(jnp.linalg.norm(terms, axis=(0, 2)) > 1e-10)))
+        with patch("scripts.benchmark_classical.fft", side_effect=lambda values, n, inverse=False, **kwargs:
+                   (jnp.fft.irfft if inverse else jnp.fft.rfft)(values, n=n)):
+            for variant in ("terms_interleaved", "terms_interleaved_features"):
+                with self.subTest(variant=variant):
+                    actual = build_variant(loaded, depth, 32, variant)(physical[..., 0], physical[..., 1])
+                    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=3e-13)
+                    self.assertLess(float(jnp.linalg.norm(actual - expected)) / correction_norm, 2e-6)
 
     def test_cached_fourier_multiplier_skip_matches_nonzero_native_branches(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant
@@ -732,6 +805,67 @@ class ComputeMetricsTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "requires full spectral carry"):
                             run(times, substeps=1, project_momentum=True,
                                 carry_spectral=carry_spectral, half_spectrum=half_spectrum)
+
+    def test_fast_evaluator_selects_native_or_interleaved_cs_terms(self) -> None:
+        from scripts import eval_fast_rollouts as fast
+
+        directory = Path("/tmp/dno-cs-evaluator-test")
+        reference = directory / "reference"
+        fields = np.zeros((2, 32, 8), dtype=np.float64)
+        ics = [IC(fields[0, i], fields[0, i], 0.1 + i / 32, i) for i in range(32)]
+        loaded = LoadedRun(None, {}, {"dataset": "arrays", "cs_terms_residual": True}, {}, "scale", 1)
+        compiled = Mock()
+        compiled.lower.return_value.compile.return_value.return_value = {
+            name: fields for name in ("eta", "xi", "gxi")
+        }
+        with patch.object(fast, "load_run", return_value=loaded) as load, patch.object(
+            fast, "_load_paper_dataset_ics", return_value=(ics, {}, 8, 2 * np.pi),
+        ) as load_ics, patch.object(fast, "build_variant") as build, patch.object(
+            fast, "build_predict_gxi_batched",
+        ) as native, patch.object(fast.jax, "jit", return_value=compiled) as jit, patch.object(
+            fast.jax, "block_until_ready",
+        ), patch.object(fast.jax, "clear_caches"), patch.object(
+            fast.ti, "make_solver_params", return_value=SimpleNamespace(nx=8),
+        ), patch.object(fast, "run_family", return_value={}) as evaluate, patch.object(
+            fast, "compute_macro_summary", return_value={},
+        ), patch.object(fast, "_write_json"), patch.object(Path, "mkdir") as mkdir, patch("builtins.print"):
+            for decoder, variant in ((True, None), (True, "terms_interleaved"),
+                                     (True, "terms_interleaved_features"), (False, "terms_interleaved"),
+                                     (False, "terms_interleaved_features")):
+                with self.subTest(decoder=decoder, variant=variant), patch("sys.argv", [
+                    "eval_fast_rollouts", "--run-dir", str(directory), "--reference-dir", str(reference),
+                    *(["--cs-terms-variant", variant] if variant else []),
+                ]):
+                    for mocked in (load_ics, build, native, jit, evaluate, mkdir):
+                        mocked.reset_mock()
+                    load.return_value = loaded._replace(config={**loaded.config, "cs_terms_residual": decoder})
+                    if not decoder:
+                        with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+                            fast.main()
+                        self.assertEqual(error.exception.code, 2)
+                        mkdir.assert_not_called()
+                        load_ics.assert_not_called()
+                        continue
+                    fast.main()
+                    self.assertEqual(load_ics.call_count, 4)
+                    self.assertEqual(build.call_count, 4 if variant else 0)
+                    self.assertEqual(native.call_count, 0 if variant else 4)
+                    for call in build.call_args_list:
+                        self.assertEqual(call.args[2:], (8, variant))
+                        self.assertEqual(call.kwargs, {"fft_ept": 8})
+                    for call in jit.call_args_list:
+                        self.assertIs(call.args[0].keywords["predict_hat"], None)
+                        self.assertTrue(call.args[0].keywords["carry_spectral"])
+                        self.assertTrue(call.args[0].keywords["local_if"])
+                        if variant:
+                            self.assertIs(call.args[0].keywords["predict_gxi"], build.return_value)
+                    for call in evaluate.call_args_list:
+                        self.assertEqual(call.args[4], directory / (
+                            "eval_fast_weight_ema" + (f"_{variant}" if variant else "")))
+                        self.assertEqual(call.args[6:8], (32, reference))
+                        self.assertEqual(call.args[9], 32)
+                        self.assertIn(f"{variant}; cuFFTDx FP64 CS fields, pad2, ept8" if variant
+                                      else "terms_m3_jax; native CS fields", call.args[8]["implementation"])
 
     def test_fast_evaluator_uses_candidate_ics_reference_truth_and_exact_spectral_execution(self) -> None:
         from scripts import eval_fast_rollouts as fast

@@ -51,6 +51,8 @@ def main() -> None:
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
+    parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features"),
+                        help="Use optimized FP64 pad2 CS-field inference; decoder only. Default: native.")
     parser.add_argument("--correction-grid", type=int, choices=(512, 1024), default=1024,
                         help="Learned correction grid; the analytic baseline and solver stay at 1024.")
     args = parser.parse_args()
@@ -67,8 +69,8 @@ def main() -> None:
         + ("_grid512" if args.correction_grid == 512 else "")
         + ("_exactg0" if args.exact_solver_g0 else "")
         + ("_nestedfused" if args.fuse_nested_fft else "")
-        + ("_contextbatch" if args.batch_context_fft else ""))
-    output_dir.mkdir(parents=True, exist_ok=True)
+        + ("_contextbatch" if args.batch_context_fft else "")
+        + (f"_{args.cs_terms_variant}" if args.cs_terms_variant else ""))
     checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
     loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
     dataset = Path(loaded.config["dataset"])
@@ -79,15 +81,20 @@ def main() -> None:
                + ("_nestedfused" if args.fuse_nested_fft else "")
                + ("_contextbatch" if args.batch_context_fft else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
+    if args.cs_terms_variant and not terms_decoder:
+        parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
         if args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0 or args.correction_grid != 1024:
-            parser.error("CS-field decoder evaluation uses its native terms path, not branch-specific FFT variants")
-        variant = "terms_m3_jax"
+            parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
+        variant = args.cs_terms_variant or "terms_m3_jax"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    implementation = ("cuFFTDx FP64 CS fields, pad2, ept8" if args.cs_terms_variant
+                      else "native CS fields" if terms_decoder else "ept8")
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,
         "path": str(checkpoint_dir or run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
-        "implementation": f"{variant}; {'native CS fields' if terms_decoder else 'ept8'}; spectral carry; local IF; packed boundaries",
+        "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
     }
     summaries = {}
@@ -111,8 +118,11 @@ def main() -> None:
         started = perf_counter()
         if terms_decoder:
             spectral = None
-            physical = partial(lambda eta, xi, fn, depth: fn(eta, xi, depth),
-                               fn=build_predict_gxi_batched(loaded), depth=jnp.log(depths))
+            if args.cs_terms_variant:
+                physical = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8)
+            else:
+                physical = partial(lambda eta, xi, fn, depth: fn(eta, xi, depth),
+                                   fn=build_predict_gxi_batched(loaded), depth=jnp.log(depths))
         else:
             spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
                                      solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)

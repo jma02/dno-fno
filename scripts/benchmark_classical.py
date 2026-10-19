@@ -47,6 +47,7 @@ def classical_hat(
     eta_hat: jax.Array, xi_hat: jax.Array, k: jax.Array, g0: jax.Array, *,
     nx: int, order: int, pad_factor: int = 2, backend: Backend = "cufft",
     precision: Precision = "fp64", ept: int = 8, g1_fp32: bool = False,
+    return_terms: bool = False,
 ) -> jax.Array:
     """Mixed uses FP32 physical FFT/products, FP64 spectral arithmetic and exact G0.
 
@@ -54,7 +55,11 @@ def classical_hat(
     promoted result feeds the otherwise FP64 G2 recurrence.
     All modes through N/2 are retained; only the Nyquist mode is zeroed.
     Return complex128 so the surrounding time integrator remains FP64.
+    With return_terms, retain individual spectra on axis -2 (FP64 pad2 only).
     """
+    if return_terms and (precision != "fp64" or pad_factor != 2 or g1_fp32
+                         or backend not in ("cufft", "interleaved", "interleaved_cufftdx")):
+        raise ValueError("return_terms requires FP64 pad2 cufft/interleaved without g1_fp32")
     spectral = jnp.complex64 if precision == "fp32" else jnp.complex128
     eta_hat, xi_hat = eta_hat.astype(spectral), xi_hat.astype(spectral)
     k, g0 = (value.astype(jnp.float32 if precision == "fp32" else jnp.float64) for value in (k, g0))
@@ -148,9 +153,11 @@ def classical_hat(
                     (gm_hat, product_hats[..., -1, :] / (m + 1)), axis=-2), padded_nx, inverse=True), -2, 0)
                 gm_padded.append(gm)
                 eta_powers.append(power)
-        result = sum(gm_hats, start=jnp.zeros_like(gm_hats[0]))
+        result = (jnp.stack(gm_hats, axis=-2) if return_terms
+                  else sum(gm_hats, start=jnp.zeros_like(gm_hats[0])))
     elif backend == "cufft" and precision == "fp64":
-        result = _dno_series_hat(eta_hat, xi_hat, k, g0, nx=nx, order=order, pad_factor=pad_factor)
+        result = _dno_series_hat(eta_hat, xi_hat, k, g0, nx=nx, order=order,
+                                 pad_factor=pad_factor, return_terms=return_terms)
     else:
         source = classical_fused_hat if fused_products else _dno_series_hat
         # Private FFT bindings preserve the recurrence without process-global patches.

@@ -73,6 +73,8 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
 )})
 FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
+FUSION_VARIANTS["terms_interleaved"] = "terms_interleaved"
+FUSION_VARIANTS["terms_interleaved_features"] = "terms_interleaved_features"
 METHODS = ("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS)
 
 
@@ -102,7 +104,7 @@ if __name__ == "__main__":
     parser.add_argument("--methods", nargs="+", choices=tuple(
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
-        f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_")) or method == "compact"
+        f"{method}_boundaries_stages{trial}" for method in METHODS if method.startswith(("M", "fourier_", "terms_")) or method == "compact"
         for trial in ("_carry", "_local", "_carry_local", "_carry_local_half", "_carry_momentum", "_carry_local_momentum")))
     parser.add_argument("--reference", default="M6", help="Method in --methods, or cached_M6 to use the saved reference trajectory.")
     parser.add_argument("--reference-once", action="store_true", help="Run the numerical reference once while repeating the timing candidates.")

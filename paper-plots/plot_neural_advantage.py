@@ -425,6 +425,21 @@ if __name__ == "__main__":
                         completed.append((json.loads(fast_results.read_text()), measured,
                                           display_label + label_suffix,
                                           color, "X" if suffix.endswith("_seed1") else "D", timing_method))
+        decoder_run = ROOT / "outputs/c27_cs_terms_scratch1_20261019"
+        for evaluation, timing_file, timing_method, label in (
+            ("eval_weight_ema_standard", "single_rollout_timing.json",
+             "compact_boundaries_stages_carry_local", "CS-field decoder · native"),
+            ("eval_fast_weight_ema_terms_interleaved_features", "interleaved_features_rollout_timing.json",
+             "terms_interleaved_features_boundaries_stages_carry_local", "CS-field decoder · optimized"),
+        ):
+            result_path = decoder_run / evaluation / "all_summaries.json"
+            timing_path = decoder_run / timing_file
+            if result_path.exists() and timing_path.exists():
+                results = json.loads(result_path.read_text())
+                timings = json.loads(timing_path.read_text())
+                if all(family in results and timing_method in timings.get("families", {}).get(family, {}).get("methods", {})
+                       for family, _ in FAMILIES):
+                    completed.append((results, timings, label, "#d25232", "o", timing_method))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
@@ -455,19 +470,32 @@ if __name__ == "__main__":
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
             points = []
+            decoder_points = {}
             for results, timings, label, color, marker, timing_method in completed:
                 if family not in timings["families"]:
                     continue
                 result = results[family]
                 seconds = float(np.median(timings["families"][family]["methods"][timing_method]["seconds"]))
+                error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
+                if label.startswith("CS-field decoder ·"):
+                    decoder_points[label] = (seconds, error)
+                native_decoder = label == "CS-field decoder · native"
                 failures = result["model_nonfinite_any_count_truth_valid"]
                 if failures:
                     label += f" · {failures}/{result['n_truth_valid']} failed"
-                error = 100 * result["rel_l2_eta_median_conditional_finite_tfinal"]
                 points.append((error, seconds, label, color))
-                ax.scatter(seconds, error, s=45, marker=marker, color=color, edgecolors="white", linewidths=0.7, zorder=4)
+                ax.scatter(seconds, error, s=45, marker=marker,
+                           facecolors="white" if native_decoder else color,
+                           edgecolors=color if native_decoder else "white", linewidths=0.7, zorder=4)
                 print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "
                       f"finite {result['n_model_finite_truth_valid']}/{result['n_truth_valid']}")
+            if len(decoder_points) == 2:
+                native = decoder_points["CS-field decoder · native"]
+                optimized = decoder_points["CS-field decoder · optimized"]
+                ax.annotate("", xy=optimized, xytext=native,
+                            arrowprops={"arrowstyle": "->", "color": "#d25232", "lw": 1}, zorder=3)
+                ax.text(0.03, 0.025, f"Decoder: {native[0]:.2f} → {optimized[0]:.2f} s ({100 * (optimized[0] / native[0] - 1):+.1f}%)",
+                        transform=ax.transAxes, color="#d25232", fontsize=9)
             label_positions = np.linspace(0.90, max(0.08, 0.90 - 0.0975 * (len(points) - 1)), len(points))
             for (error, seconds, label, color), label_y in zip(sorted(points, reverse=True), label_positions, strict=True):
                 ax.annotate(f"{label}\n{error:.4g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
@@ -490,7 +518,7 @@ if __name__ == "__main__":
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
         fig.suptitle("Figure 12b · One epoch, full data", x=0.10, y=0.965, ha="left", fontsize=19)
         fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
-        fig.text(0.10, 0.891, "Native screens: shared timing proxy. Fast: directly evaluated and timed.",
+        fig.text(0.10, 0.891, "Fast paths and both decoder paths: measured timings. Other native screens: shared timing proxy.",
                  color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)
