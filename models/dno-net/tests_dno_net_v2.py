@@ -1333,6 +1333,31 @@ def test_terms_residual_has_fourth_order_onset() -> None:
     assert jnp.all(first_variation == 0)
 
 
+def test_terms_residual_can_learn_at_surface_zero_crossings() -> None:
+    nx = 64
+    x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+    nodes = jnp.arange(8, nx, 16)
+    eta = (0.04 * jnp.cos(2 * x)).at[nodes].set(0.0)[None, :]
+    xi = jnp.sin(2 * x)[None, :]
+    depth = jnp.zeros((1, 1), dtype=jnp.float64)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    model = _terms_model()
+    variables = model.init(jax.random.PRNGKey(27), inputs, depth)
+    terms = _physical_terms(model, inputs, depth)
+    # Pointwise eta powers kill channels 0..2 here, and parity kills G3.
+    assert jnp.max(jnp.abs(terms[:, 3, nodes])) < 1e-12
+    probe = xi[:, nodes, None]
+    gradients = jax.grad(lambda params: jnp.sum(probe * cast(tuple[jax.Array, ...], model.apply(
+        {"params": params}, inputs, depth, terms_phys=terms, return_baseline=True,
+    ))[3][:, nodes]))(variables["params"])
+    assert jnp.linalg.norm(gradients["terms_head"]["kernel"][:, 0]) > 1e-10
+    active = _active_terms_variables(model, inputs, depth)
+    residual = cast(tuple[jax.Array, ...], model.apply(
+        active, inputs, depth, terms_phys=terms, return_baseline=True,
+    ))[3]
+    assert jnp.ptp(residual[:, nodes]) > 1e-10
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -1374,6 +1399,7 @@ def main() -> int:
         test_terms_residual_split_forward_and_all_gradients,
         test_terms_residual_formula_linearity_gauge_and_mean,
         test_terms_residual_has_fourth_order_onset,
+        test_terms_residual_can_learn_at_surface_zero_crossings,
     )
     for test in tests:
         test()

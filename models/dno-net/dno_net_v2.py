@@ -392,13 +392,15 @@ class CraigSulemTermsResidual(CraigSulemDNO):
         """Return (batch, grid, 4) geometry-only coefficients, independent of xi."""
         eta_norm = inputs[..., 0].astype(jnp.float32)
         features, _, _, _ = self._encode_surface(eta_norm, depth.astype(jnp.float32))
-        coefficients = nn.Dense(
-            4, use_bias=False, kernel_init=nn.initializers.zeros, name="terms_head",
-        )(features)
-        surface = (eta_norm / self.surface_feature_scales[0]
-                   if self.surface_feature_scales is not None else eta_norm)
-        gates = jnp.stack((surface**3, surface**2, surface, jnp.ones_like(surface)), axis=-1)
-        return coefficients * gates
+        # Column i starts at order 4-i without forcing zeros wherever eta(x)=0.
+        gate = jnp.tanh(features)
+        lifted = features[..., None] * jnp.stack(
+            (gate**3, gate**2, gate, jnp.ones_like(gate)), axis=-1,
+        )
+        return nn.Einsum(
+            shape=(features.shape[-1], 4), einsum_str="...fc,fc->...c",
+            use_bias=False, kernel_init=nn.initializers.zeros, name="terms_head",
+        )(lifted)
 
     def decode_terms(
         self, coefficients: jnp.ndarray, terms_phys: jnp.ndarray, *, return_baseline: bool = False,
