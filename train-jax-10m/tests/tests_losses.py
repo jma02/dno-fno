@@ -305,7 +305,7 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
                            phase_mechanism_ramp_epochs=0.0, rollout_training_weight=0.7,
                            rollout_training_ramp_epochs=0.0, rollout_training_loss="full", hadamard_weight=0.0)
     namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family,
-                     current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None,
+                     current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None, terms_phys=None,
                      rollout_batch=(True, depth, family, eta, xi, target, jnp.float32(1.0)))
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
                  "fp64_residual_teacher_loss", "exec"), namespace)
@@ -960,6 +960,27 @@ def test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks() -> None:
             with np.testing.assert_raises(ValueError):
                 exec(code, namespace)
 
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_terms_cpu_prefetch")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test).startswith("args.cs_terms_cpu_prefetch and"))
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "cpu_terms_option", "exec"), namespace)
+    assert not parser.parse_args([]).cs_terms_cpu_prefetch
+    code = compile(ast.Module(body=[validation], type_ignores=[]), "cpu_terms_validation", "exec")
+    valid_cpu = dict(cs_terms_cpu_prefetch=True, cs_terms_residual=True, datum_shift_rms=0.0,
+                     reflection_augmentation=False, input_noise_rms=0.0, dirichlet_probe_mode="off")
+    namespace["args"] = SimpleNamespace(**valid_cpu)
+    exec(code, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for name, value in (("cs_terms_residual", False), ("datum_shift_rms", 0.01),
+                            ("reflection_augmentation", True), ("input_noise_rms", 0.01),
+                            ("dirichlet_probe_mode", "scrambled")):
+            namespace["args"] = SimpleNamespace(**(valid_cpu | {name: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+
 
 def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
     from hadamard_shape_regularizer import compute_hadamard_loss
@@ -1013,6 +1034,8 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
 
 
 def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
+    import optax
+    from checkpoint_util import WeightEMATrainState
     from hadamard_shape_regularizer import compute_hadamard_loss
     from solver.evals.model_rollout import rollout_surrogate
     from solver.solvers import time_integrator as ti
@@ -1072,9 +1095,20 @@ def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
     )))
     assert all(value.dtype == jnp.float64 for value in generated)
 
-    def loss(parameters: dict[str, Any]) -> jax.Array:
+    params["terms_head"]["kernel"] = 0.01 * jax.random.normal(
+        jax.random.PRNGKey(19), cast(jax.Array, params["terms_head"]["kernel"]).shape, dtype=jnp.float32,
+    )
+    cached_terms = jax.lax.stop_gradient(dno_series_eval(
+        eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=3, pad_factor=2, return_terms=True,
+    ))
+
+    def loss(parameters: dict[str, Any], supplied_terms: jax.Array | None = None) -> jax.Array:
         data, mode, tangent, momentum, _, _, _ = components(
             parameters, *(value[None] for value in (*generated, depth, family)),
+        )
+        ordinary = components(
+            parameters, *(value[None] for value in (eta, xi, target, depth, family)),
+            **({"terms_phys": supplied_terms[None]} if supplied_terms is not None else {}),
         )
         hadamard = compute_hadamard_loss(
             rng=jax.random.PRNGKey(11), apply_fn=namespace["apply_model"], model_params=parameters,
@@ -1082,13 +1116,29 @@ def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
             norm_inputs_fn=norm_inputs, denorm_targets_fn=denorm_targets,
             k=namespace["k_grid_jax"], dtype=jnp.float64, k_max=12,
         )
-        return jnp.sum(data + 6 * mode + 10 * tangent + 0.002574349830754761 * momentum) + 0.04 * hadamard
+        return jnp.sum(data + ordinary[0] + 6 * (mode + ordinary[1]) + 10 * (tangent + ordinary[2])
+                       + 0.002574349830754761 * (momentum + ordinary[3])) + 0.04 * hadamard
 
-    value, gradients = jax.jit(jax.value_and_grad(loss))(params)
+    evaluate = jax.jit(jax.value_and_grad(loss))
+    value, gradients = evaluate(params)
+    prefetched = evaluate(params, cached_terms)
+    for actual, expected in zip(jax.tree.leaves(prefetched), jax.tree.leaves((value, gradients)), strict=True):
+        np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=1e-10)
     assert jnp.isfinite(value) and value > 0
     assert all(jnp.all(jnp.isfinite(gradient)) for gradient in jax.tree.leaves(gradients))
     assert float(jnp.linalg.norm(gradients["terms_head"]["kernel"])) > 0
     assert all(gradient.dtype == jnp.float32 for gradient in jax.tree.leaves(gradients))
+    state = WeightEMATrainState.create(
+        apply_fn=model.apply, params=params,
+        tx=optax.chain(optax.ema(0.5, debias=True), optax.adamw(8e-5, b1=0.5, b2=0.99, weight_decay=1e-4)),
+        weight_ema_params=params, weight_ema_decay=0.995,
+    )
+    update = jax.jit(lambda current, gradient: current.apply_gradients(grads=gradient))
+    state = update(state, jax.tree.map(lambda parameter: jnp.full_like(parameter, 0.01), params))
+    native_state, prefetched_state = update(state, gradients), update(state, prefetched[1])
+    assert int(native_state.step) == int(prefetched_state.step) == 2
+    for actual, expected in zip(jax.tree.leaves(prefetched_state), jax.tree.leaves(native_state), strict=True):
+        np.testing.assert_allclose(actual, expected, rtol=5e-6, atol=1e-9)
 
 
 def test_learning_rate_hold_schedule_and_validation() -> None:
@@ -1583,7 +1633,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         "log_h_max": np.log(5.0), "k_grid_jax": jnp.fft.fftfreq(nx) * nx,
         "k_rfft_jax": jnp.arange(nx // 2 + 1),
         "compute_phase_mechanism_loss": compute_phase_mechanism_loss, "apply_model": apply_model,
-        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0, "amplitude_batch": None,
+        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0, "amplitude_batch": None, "terms_phys": None,
     }
     exec(compile(ast.Module(body=[trainer_function("compute_loss_components"),
                                  trainer_function("compute_training_loss")], type_ignores=[]),
@@ -1654,7 +1704,7 @@ def test_datum_shift_geometry_clean_rows_rng_and_validation() -> None:
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--datum_shift_rms")
     validation = next(node for node in main.body if isinstance(node, ast.If)
-                      and "args.datum_shift_rms" in ast.unparse(node.test))
+                      and ast.unparse(node.test).startswith("not np.isfinite(args.datum_shift_rms)"))
     parser = argparse.ArgumentParser(add_help=False)
     namespace: dict[str, Any] = {"parser": parser, "np": np}
     exec(compile(ast.Module(body=[option], type_ignores=[]), "datum_option", "exec"), namespace)
@@ -2174,7 +2224,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
         jax=jax, jnp=jnp, FlatParams=Any, compute_loss_components=components,
         current_state=SimpleNamespace(step=0), train_steps_per_epoch=100,
         training_dtype=jnp.float64, physical_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
-        batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None,
+        batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None, terms_phys=None,
     )
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
                  "momentum_ramp_loss", "exec"), namespace)
@@ -2255,7 +2305,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace, "cast": cast,
         "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64, "physical_dtype": jnp.float64,
-        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None,
+        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None, "terms_phys": None,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
         "denorm_targets_jax": lambda target: target * 4,
@@ -2570,7 +2620,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
         norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
         norm_targets_jax=lambda q: q[..., None], depth_sub=depth,
         k_rfft_jax=jnp.arange(eta.shape[1] // 2 + 1),
-        eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family, n_data_only_rows=0,
+        eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family, n_data_only_rows=0, terms_phys=None,
         amplitude_batch=None,
         rollout_batch=(True, depth, family, 2 * eta, xi, target, jnp.float32(1)),
     )

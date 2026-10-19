@@ -7,8 +7,9 @@ from itertools import product
 from pathlib import Path
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,7 @@ from solver.gen_data.pipeline.types import (
     PhysicalFamilyId,
     SimulationRows,
 )
+from solver.solvers.dno_series_jax import dno_series_eval
 
 TRAIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAIN_DIR))
@@ -260,6 +262,76 @@ def test_prefetch_preserves_batches_and_producer_exceptions() -> None:
             raise AssertionError("Producer failure did not reach the consumer")
 
 
+def test_cpu_terms_prefetch_preserves_rows_tails_and_background_execution() -> None:
+    main = next(node for node in ast.parse((TRAIN_DIR / "1d_dno_fno_jax_ema_grad.py").read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    start = next(index for index, node in enumerate(main.body) if isinstance(node, ast.Assign)
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "cpu_terms")
+    code = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "cpu_terms_prefetch", "exec")
+    devices = jax.local_devices()
+    mesh = jax.sharding.Mesh(np.asarray(devices), axis_names=("batch",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
+    rows, nx = 5 * len(devices) + 1, 16
+    x = 2 * np.pi * np.arange(nx) / nx
+    amplitude = np.arange(1, rows + 1)[:, None]
+    dataset = dict(eta=(0.001 * amplitude * np.cos(x)).astype(np.float32),
+                   xi=(0.002 * amplitude * np.sin(x) + 0.1).astype(np.float32),
+                   gxi=(0.003 * amplitude * np.sin(x)).astype(np.float32),
+                   depth=np.linspace(0.1234567890123, 0.8, rows))
+    indices = np.arange(rows)
+    expected_order = np.random.default_rng(17).permutation(indices)
+    main_thread = threading.get_ident()
+    for enabled, modes in product((False, True), (False, True)):
+        with jax.enable_x64(True):
+            namespace: dict[str, Any] = dict(
+                jax=jax, jnp=jnp, np=np, Iterator=Iterator, get_batches=get_batches,
+                device_prefetch=device_prefetch, dno_series_eval=dno_series_eval,
+                args=SimpleNamespace(cs_terms_cpu_prefetch=enabled, cs_terms_residual=True,
+                                     batch_size=2 * len(devices)),
+                dataset=dataset, family_ids=indices,
+                phase_modes=np.column_stack((indices * 2, indices * 3)) if modes else None,
+                n_devices=len(devices), physical_dtype=jnp.float64, data_sharding=sharding,
+                cpu_sharding=jax.sharding.SingleDeviceSharding(jax.devices("cpu")[0]),
+                nx=nx, _k_grid=np.fft.fftfreq(nx) * nx,
+            )
+            exec(code, namespace)
+            calls = []
+            if enabled:
+                cpu_terms = namespace["cpu_terms"]
+
+                def tracked_terms(eta: np.ndarray, xi: np.ndarray, depth: np.ndarray) -> jax.Array:
+                    result = cpu_terms(eta, xi, depth)
+                    calls.append(threading.get_ident())
+                    assert all(device.platform == "cpu" for device in result.devices())
+                    return result
+
+                namespace["cpu_terms"] = tracked_terms
+            batches = list(namespace["prefetch_batches"](indices, np.random.default_rng(17)))
+            order = np.concatenate([np.asarray(batch[4])[:, 0] if modes else np.asarray(batch[4]) for batch in batches])
+            np.testing.assert_array_equal(order, expected_order)
+            for batch in batches:
+                selected = np.asarray(batch[4])[:, 0] if modes else np.asarray(batch[4])
+                np.testing.assert_array_equal(batch[0], dataset["eta"][selected].astype(np.float64))
+                expected_xi = dataset["xi"][selected].astype(np.float64)
+                expected_xi -= expected_xi.mean(axis=-1, keepdims=True)
+                np.testing.assert_array_equal(batch[1], expected_xi)
+                np.testing.assert_array_equal(batch[2], dataset["gxi"][selected].astype(np.float64))
+                np.testing.assert_array_equal(batch[3], np.log(dataset["depth"][selected])[:, None])
+                if enabled:
+                    assert batch[5].dtype == jnp.float64 and batch[5].shape == (selected.size, 4, nx)
+                    expected = dno_series_eval(batch[0], batch[1], jnp.arange(nx // 2 + 1),
+                                               jnp.exp(batch[3]), order=3, pad_factor=2, return_terms=True)
+                    np.testing.assert_allclose(batch[5], expected, rtol=1e-12, atol=1e-15)
+                    expected_spec = jax.sharding.PartitionSpec("batch") if selected.size % len(devices) == 0 else jax.sharding.PartitionSpec()
+                    assert batch[5].sharding.spec == expected_spec
+                else:
+                    assert len(batch) == 5
+            if enabled:
+                assert len(calls) == len(batches) and all(thread != main_thread for thread in calls)
+            if len(devices) > 1:
+                assert batches[-1][0].shape[0] == 1
+
+
 def test_surface_feature_rms_uses_normalized_training_rows() -> None:
     path = TRAIN_DIR / "1d_dno_fno_jax_ema_grad.py"
     fitting = next(
@@ -333,6 +405,7 @@ def main() -> int:
     test_normalizers_preserve_both_modes_and_constant_fields()
     test_physical_batches_and_normalizers_keep_fp64_arithmetic()
     test_prefetch_preserves_batches_and_producer_exceptions()
+    test_cpu_terms_prefetch_preserves_rows_tails_and_background_execution()
     test_surface_feature_rms_uses_normalized_training_rows()
     print(
         "[PASS] dataset splits, epoch shuffles, train-only/cache stats, both normalizers, prefetch"

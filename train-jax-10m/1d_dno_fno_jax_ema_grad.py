@@ -20,7 +20,7 @@ import optax
 from flax import linen as nn
 from flax.training import checkpoints
 from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding, SingleDeviceSharding, PartitionSpec as P
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
@@ -44,7 +44,7 @@ from util import (  # noqa: E402
     make_normalizers,
     replicate_pytree_from_host,
 )
-from solver.solvers.dno_series_jax import build_grid  # noqa: E402
+from solver.solvers.dno_series_jax import build_grid, dno_series_eval  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
@@ -88,6 +88,8 @@ def main() -> None:
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
     parser.add_argument("--cs_terms_residual", action="store_true",
                         help="Decode all four CS fields with the surface encoder; always uses true-depth M3.")
+    parser.add_argument("--cs_terms_cpu_prefetch", action="store_true",
+                        help="Prepare the next ordinary batch's CS fields on CPU while the GPU trains; use JAX_PLATFORMS=cuda,cpu.")
     parser.add_argument(
         "--cs_n_polys",
         type=int,
@@ -439,6 +441,11 @@ def main() -> None:
             parser.error("--cs_terms_residual does not use nested branches, post-trunk gates/skips, or block multipliers")
         args.cs_baseline_order = 3
         args.cs_baseline_true_depth = True
+    if args.cs_terms_cpu_prefetch and (
+        not args.cs_terms_residual or args.datum_shift_rms > 0 or args.reflection_augmentation
+        or args.input_noise_rms > 0 or args.dirichlet_probe_mode != "off"
+    ):
+        parser.error("--cs_terms_cpu_prefetch requires --cs_terms_residual and unmodified ordinary inputs")
     if args.schedule_epochs < 0 or args.epochs < 1:
         parser.error("--schedule_epochs must be nonnegative and --epochs must be positive")
     schedule_epochs = args.schedule_epochs or args.epochs
@@ -573,6 +580,7 @@ def main() -> None:
     backend = jax.default_backend()
     if backend != "gpu":
         raise RuntimeError(f"JAX GPU backend is required. Found {backend!r}.")
+    cpu_sharding = SingleDeviceSharding(jax.devices("cpu")[0]) if args.cs_terms_cpu_prefetch else None
     devices = jax.local_devices()
     n_devices = len(devices)
     if args.rollout_training_weight > 0 and args.rollout_training_microbatch % n_devices:
@@ -745,12 +753,12 @@ def main() -> None:
             print(f"Initialized weights from {args.init_checkpoint}; optimizer starts fresh")
 
     def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array,
-                    *, return_baseline: bool = False) -> Any:
+                    *, return_baseline: bool = False, terms_phys: jax.Array | None = None) -> Any:
         if args.model != "cs_dno":
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
             return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction) if return_baseline else prediction
         if args.cs_terms_residual:
-            return model.apply(variables, inputs, depth, return_baseline=return_baseline)
+            return model.apply(variables, inputs, depth, return_baseline=return_baseline, terms_phys=terms_phys)
         multiplier_model = DepthAwareMultiplier(
             args.latent, domain_length, 5.0, args.cs_mult_hidden,
             multiplier_skip=args.cs_multiplier_skip,
@@ -904,6 +912,7 @@ def main() -> None:
         *,
         collect_family_metrics: bool = False,
         n_data_only_rows: int = 0,
+        terms_phys: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
         carrier_modes = sideband_offsets = None
         if args.phase_mechanism == "bf_sideband":
@@ -925,6 +934,7 @@ def main() -> None:
         predictions, baseline, m1_baseline, correction = apply_model(
             {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
             return_baseline=True,
+            **({"terms_phys": terms_phys} if terms_phys is not None else {}),
         )
         pred_hat = jnp.fft.rfft(predictions, axis=1)
         target_hat = jnp.fft.rfft(batch_targets, axis=1)
@@ -1170,6 +1180,7 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
         family: jax.Array,
+        terms_phys: jax.Array | None = None,
     ) -> tuple[WeightEMATrainState, jax.Array, dict[str, jax.Array]]:
         if args.datum_shift_rms > 0:
             datum_mask_key, datum_shift_key = jax.random.split(jax.random.fold_in(
@@ -1343,6 +1354,7 @@ def main() -> None:
             data_loss, mode_loss, tangent_loss, mechanism_loss, tangent_fraction, full_l2_loss, _ = compute_loss_components(
                 current_params, eta, xi, gxi, batch_depth, family,
                 n_data_only_rows=n_data_only_rows,
+                terms_phys=terms_phys,
             )
             physics_loss = jnp.asarray(0.0, dtype=training_dtype)
             mode_weight = args.mode_balanced_weight * jnp.minimum(
@@ -1472,7 +1484,8 @@ def main() -> None:
             shard_map(
                 train_step,
                 mesh=mesh,
-                in_specs=(P(), P(), partition, partition, partition, partition, partition),
+                in_specs=(P(), P(), partition, partition, partition, partition, partition,
+                          *((partition,) if args.cs_terms_cpu_prefetch else ())),
                 out_specs=(P(), P(), P()),
                 check_rep=False,
             )
@@ -1490,6 +1503,7 @@ def main() -> None:
         gxi: jax.Array,
         batch_depth: jax.Array,
         family: jax.Array,
+        terms_phys: jax.Array | None = None,
         *,
         run_hadamard: bool,
     ) -> tuple[jax.Array, ...]:
@@ -1501,6 +1515,7 @@ def main() -> None:
             ))
         data_loss, mode_loss, tangent_loss, mechanism_loss, tangent_fraction, full_l2_loss, family_metrics = compute_loss_components(
             current_params, eta, xi, gxi, batch_depth, family, collect_family_metrics=True,
+            terms_phys=terms_phys,
         )
         return jax.lax.pmean(
             (data_loss, mode_loss, tangent_loss, hadamard_loss, tangent_fraction, full_l2_loss, mechanism_loss, *family_metrics),
@@ -1512,7 +1527,8 @@ def main() -> None:
             shard_map(
                 partial(eval_step, run_hadamard=run_hadamard),
                 mesh=mesh,
-                in_specs=(P(), P(), P(), partition, partition, partition, partition, partition),
+                in_specs=(P(), P(), P(), partition, partition, partition, partition, partition,
+                          *((partition,) if args.cs_terms_cpu_prefetch else ())),
                 out_specs=(P(),) * (7 + 5 * len(PhysicalFamilyId)),
                 check_rep=False,
             )
@@ -1571,7 +1587,16 @@ def main() -> None:
     )
     assert_pytree_replicated(training_state, name="training startup state")
 
-    # Load batches and copy the next one to GPUs in the background.
+    cpu_terms = None
+    if args.cs_terms_cpu_prefetch:
+        cpu_k = jax.device_put(np.abs(_k_grid[:nx // 2 + 1]), cpu_sharding)
+        cpu_terms = jax.jit(
+            lambda eta, xi, log_depth: dno_series_eval(
+                eta, xi, cpu_k, jnp.exp(log_depth), order=3, pad_factor=2, return_terms=True,
+            ), in_shardings=(cpu_sharding,) * 3, out_shardings=cpu_sharding,
+        )
+
+    # The producer optionally prepares CPU terms while the current GPU update runs.
     def prefetch_batches(
         indices: np.ndarray, rng: np.random.Generator | None
     ) -> Iterator[tuple[jax.Array, ...]]:
@@ -1588,7 +1613,9 @@ def main() -> None:
         )
         return device_prefetch(
             ((*batch[:4], family_ids[batch[4]] if phase_modes is None else
-              np.column_stack((family_ids[batch[4]], phase_modes[batch[4]]))) for batch in batches),
+              np.column_stack((family_ids[batch[4]], phase_modes[batch[4]])),
+              *((cpu_terms(batch[0], batch[1], batch[3]),) if cpu_terms is not None else ()))
+             for batch in batches),
             sharding=data_sharding,
         )
 
@@ -1603,7 +1630,7 @@ def main() -> None:
         val_batch_losses: list[tuple[float, ...]] = []
         val_batch_sizes: list[int] = []
         pending_val_losses: list[tuple[jax.Array, ...]] = []
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b, *terms_b) in enumerate(
             prefetch_batches(val_indices, None)
         ):
             val_batch_sizes.append(int(eta_b.shape[0]))
@@ -1613,7 +1640,7 @@ def main() -> None:
             ]
             batch_val_losses = compiled_eval_step(
                 current_params, validation_rng, batch_index,
-                eta_b, xi_b, gxi_b, depth_b, family_b,
+                eta_b, xi_b, gxi_b, depth_b, family_b, *terms_b,
             )
             pending_val_losses.append(batch_val_losses)
             if len(pending_val_losses) == args.metric_interval:
@@ -1709,12 +1736,12 @@ def main() -> None:
             desc=f"Train {epoch:03d}",
             leave=False,
         )
-        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b) in enumerate(train_bar, 1):
+        for batch_index, (eta_b, xi_b, gxi_b, depth_b, family_b, *terms_b) in enumerate(train_bar, 1):
             batch_size = int(eta_b.shape[0])
             compiled_train_step = train_steps[P("batch") if batch_size % n_devices == 0 else P()]
             # Apply one optimizer update; the returned metrics are only for logging.
             training_state, batch_loss, batch_metrics = compiled_train_step(
-                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, family_b
+                training_state, train_rng, eta_b, xi_b, gxi_b, depth_b, family_b, *terms_b,
             )
             pending_train_metrics.append((batch_loss, batch_metrics, batch_size))
             if len(pending_train_metrics) < args.metric_interval and batch_index < train_steps_per_epoch:
