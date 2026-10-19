@@ -62,6 +62,10 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_fieldstride",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
           "fourier_fused_features_product_overlap_grid512",
@@ -182,6 +186,12 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    transpose_mix = variant.endswith("_mixtranspose")
+    variant = variant.removesuffix("_mixtranspose")
+    branch_major = variant.endswith("_branchmajor")
+    variant = variant.removesuffix("_branchmajor")
+    reuse_first_gelu = variant.endswith("_gelureuse")
+    variant = variant.removesuffix("_gelureuse")
     split_g1 = variant.endswith("_splitg1")
     variant = variant.removesuffix("_splitg1")
     field_stride = variant.endswith("_fieldstride")
@@ -516,7 +526,10 @@ def build_variant(
                 if name == "eta_feat_mix" and amplitude is not None:
                     features = features * (1.0 + jnp.log(amplitude)[..., None]
                                            * loaded.params["eta_amplitude_gain"])
-                features = nn.gelu(features @ kernel)
+                features = nn.gelu(transposed_matmul(features, kernel)
+                                   if transpose_mix and name == "eta_feat_mix" else features @ kernel)
+                if reuse_first_gelu and name == "eta_feat_proj":
+                    features = jax.lax.optimization_barrier(features)
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     if context_fold:
                         joint = features @ cast(jax.Array, context_joint_kernel)
@@ -561,7 +574,8 @@ def build_variant(
                 ordinary_filters = filters[:, :ordinary_branches]
                 if fused_product:
                     weighted_hat = fft(weights, correction_nx, b=ordinary_fields, outer=ordinary_filters,
-                                       ept=fft_ept, channels_last=True, field_stride=field_stride)
+                                       ept=fft_ept, channels_last=True, field_stride=field_stride,
+                                       branch_major=branch_major)
                 elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
                     weights = jnp.moveaxis(weights, -1, 1)
                     weighted_hat = correction_nx * fft(weights, correction_nx, b=ordinary_fields,
@@ -838,7 +852,7 @@ if __name__ == "__main__":
                        if "lowrank" not in variant else None),
         }
         if variant.endswith(("_contextfold", "_contextinverse", "_headtranspose",
-                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1")):
+                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1", "_gelureuse", "_branchmajor", "_mixtranspose")):
             correction_outputs = []
             instrumented_exact = True
             for name, original in ((args.reference, expected), (variant, actual)):
@@ -920,6 +934,10 @@ if __name__ == "__main__":
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose="Transposed head + context GEMMs",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_fieldstride="Direct strided branch fields",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride="Transposed projections + strided fields",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse="Reuse first surface GELU",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor="Branch-major product FFT",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor="Branch-major FFT and reused GELU",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose="Transposed second surface projection",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1="Separate G₁ input arguments",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",

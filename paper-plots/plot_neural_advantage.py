@@ -47,8 +47,8 @@ def refresh_classical_timings(report: dict[str, Any]) -> None:
                     report["families"][family]["methods"].setdefault(name.split("_", 1)[0], record)["seconds"] = record["seconds"]
         return
     for filename, orders in (
-        ("hero_speed_20261019/fused_final_rollouts.json", (1, 2, 3, 4, 5)),
-        ("hero_speed_20261019/fused_final_m6_rollouts.json", (6,)),
+        ("hero_speed_20261019/layout_final_rollouts.json", (1, 2, 3, 4, 5)),
+        ("hero_speed_20261019/layout_final_m6_rollouts.json", (6,)),
     ):
         measured = json.loads((ROOT / "outputs" / filename).read_text())
         for family, result in measured["families"].items():
@@ -455,11 +455,12 @@ if __name__ == "__main__":
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
             hero_speed = ROOT / "outputs/hero_speed_20261019"
-            hero_before = (json.loads((hero_speed / "graphfft_unroll_all_rollouts.json").read_text()), phase_method)
-            completed.append((json.loads((hero_speed / "fused_final_eval/all_summaries.json").read_text()),
-                              json.loads((hero_speed / "fused_final_rollouts.json").read_text()),
+            hero_before = (json.loads((hero_speed / "fused_final_rollouts.json").read_text()),
+                           phase_method.replace("_spectral_all", "_projectiontranspose_fieldstride_spectral_all"))
+            completed.append((json.loads((hero_speed / "layout_final_eval/all_summaries.json").read_text()),
+                              json.loads((hero_speed / "layout_final_rollouts.json").read_text()),
                               "Trained hero · epoch 37", "#222831", "*",
-                              phase_method.replace("_spectral_all", "_projectiontranspose_fieldstride_spectral_all")))
+                              phase_method.replace("_spectral_all", "_projectiontranspose_fieldstride_gelureuse_branchmajor_spectral_all")))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))

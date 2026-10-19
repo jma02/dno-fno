@@ -1,13 +1,21 @@
 """Benchmark-only spectral adapter and shared FFT-packing trials."""
 
+from functools import partial
 from typing import Literal, cast
-
 import jax
 import jax.numpy as jnp
 
 from solver.evals.model_rollout import Predictor
 from solver.solvers import time_integrator as ti
 from solver.solvers.dno_series_jax import _dno_series_hat
+
+
+def physical_from_spectral(
+    eta: jax.Array, xi: jax.Array, *, predict_hat: Predictor,
+) -> jax.Array:
+    """Evaluate saved DNO fields with one packed input FFT."""
+    spectra = jnp.fft.rfft(jnp.stack((eta, xi), axis=-2), axis=-1)
+    return jnp.fft.irfft(predict_hat(spectra[..., 0, :], spectra[..., 1, :]), n=eta.shape[-1])
 
 
 def rotate_spectrum(
@@ -49,7 +57,7 @@ def rhs_nonlinear_if_spectral(
     rotation: tuple[jax.Array, jax.Array] | None = None,
     ramp_time: float | jax.Array | None = None,
     half_spectrum: bool = False,
-    bernoulli_fft: Literal["cufft", "cufftdx_forward"] = "cufft",
+    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both"] = "cufft",
     materialize_spectra: bool = False,
 ) -> ti.SpectralState:
     physical_hat = (ti.apply_linear_flow_hat(state_hat, time_value, params) if rotation is None
@@ -81,18 +89,22 @@ def rhs_nonlinear_if_spectral(
         gxi_hat = jnp.fft.rfft(predict_gxi(eta, xi), axis=-1)
         gxi_hat = gxi_hat.at[..., nx // 2].set(0)
 
+    inverse_fft = jnp.fft.irfft
+    if bernoulli_fft == "cufftdx_both":
+        from scripts.benchmark_cufftdx import fft
+        inverse_fft = partial(fft, inverse=True, ept=8)
     if pack_ffts == "all":
-        eta_x, xi_x, gxi = jnp.moveaxis(2.0 * jnp.fft.irfft(
+        eta_x, xi_x, gxi = jnp.moveaxis(2.0 * inverse_fft(
             jnp.stack((1j * k * eta_hat, 1j * k * xi_hat, gxi_hat), axis=-2),
-            n=2 * nx, axis=-1,
+            n=2 * nx,
         ), -2, 0)
     else:
-        eta_x = 2.0 * jnp.fft.irfft(1j * k * eta_hat, n=2 * nx, axis=-1)
-        xi_x = 2.0 * jnp.fft.irfft(1j * k * xi_hat, n=2 * nx, axis=-1)
-        gxi = 2.0 * jnp.fft.irfft(gxi_hat, n=2 * nx, axis=-1)
+        eta_x = 2.0 * inverse_fft(1j * k * eta_hat, n=2 * nx)
+        xi_x = 2.0 * inverse_fft(1j * k * xi_hat, n=2 * nx)
+        gxi = 2.0 * inverse_fft(gxi_hat, n=2 * nx)
     numerator = gxi + eta_x * xi_x
     xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
-    if bernoulli_fft == "cufftdx_forward":
+    if bernoulli_fft != "cufft":
         from scripts.benchmark_cufftdx import fft
         xi_t_spectrum = fft(xi_t, 2 * nx)
     else:
@@ -118,7 +130,7 @@ def rollout_if_trial(
     carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
     predict_hat: Predictor | None = None, half_spectrum: bool = False,
     project_momentum: bool = False, unroll_stages: bool = False, unroll_substeps: int = 1,
-    bernoulli_fft: Literal["cufft", "cufftdx_forward"] = "cufft",
+    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both"] = "cufft",
     materialize_spectra: bool = False,
     batch_saved_dno: bool = False,
 ) -> dict[str, jax.Array]:

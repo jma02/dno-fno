@@ -126,11 +126,11 @@ Short-horizon CPU benchmark on one held-out Stokes initial condition, Fourier-re
 
 The CPU and single-rollout comparisons were refreshed on October 19. Ada batch-one plots share
 `refresh_classical_timings` in `plot_neural_advantage.py`: M1–M5 come from
-`outputs/hero_speed_20261019/fused_final_rollouts.json` and M6 from
-`outputs/hero_speed_20261019/fused_final_m6_rollouts.json`.
+`outputs/hero_speed_20261019/layout_final_rollouts.json` and M6 from
+`outputs/hero_speed_20261019/layout_final_m6_rollouts.json`.
 All orders use FP64 interleaved cuFFTDx, graph-compatible cuFFT for the remaining
-real FFTs, materialized stage-input spectra, and the shared FP64 cuFFTDx Bernoulli
-forward transform. The four GL2 iterations are unrolled without changing their
+real FFTs, materialized stage-input spectra, and shared FP64 cuFFTDx Bernoulli
+inverse and forward transforms. The four GL2 iterations are unrolled without changing their
 count. M1–M5 use padding 1 and M6 retains padding 2. The padding-1 M6 trial remains
 excluded because its BF trajectory differs from the reference.
 
@@ -617,11 +617,12 @@ is the median terminal surface error over the same 32 cases per family;
 the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
 epoch37 model. Black stars separately show `Trained hero · epoch 37`, using
-`outputs/hero_speed_20261019/fused_final_eval` for its own 128-case evaluation
-and `fused_final_rollouts.json` for fresh full-horizon, batch-one timings.
+`outputs/hero_speed_20261019/layout_final_eval` for its own 128-case evaluation
+and `layout_final_rollouts.json` for fresh full-horizon, batch-one timings.
 The weights are unchanged. The optimized execution retains graph-compatible
 cuFFT and four unrolled GL2 iterations, materializes reused stage-input spectra,
-changes the learned projection/field layouts, and uses a cuFFTDx forward FFT for
+changes the learned projection/field layouts, reuses the first surface activation,
+packs saved-state input transforms, and uses cuFFTDx inverse and forward FFTs for
 the FP64 Bernoulli term. Equations, precision, timestep and iteration count are
 unchanged; the shared RHS optimizations also apply to the classical measurements.
 Compilation, graph capture, warm-up and transfers are excluded. Each timing is
@@ -631,40 +632,46 @@ The original one-epoch hero retains its existing accuracy and
 Other neural points remain one-epoch experiments.
 
 The hero's before/after annotation uses fresh epoch-37 measurements from
-`graphfft_unroll_all_rollouts.json` and `fused_final_rollouts.json` in that same
+`fused_final_rollouts.json` and `layout_final_rollouts.json` in that same
 directory, not timings borrowed from the one-epoch control:
 
 | Family | Previous (s) | Optimized execution (s) | Time saved |
 | --- | ---: | ---: | ---: |
-| Stokes | 1.301794 | 1.053539 | 19.07% |
-| Tanaka | 12.267328 | 10.254260 | 16.41% |
-| Benjamin–Feir | 12.272578 | 10.260169 | 16.40% |
-| JONSWAP/TMA | 1.251901 | 1.053588 | 15.84% |
+| Stokes | 1.053539 | 0.975186 | 7.44% |
+| Tanaka | 10.254260 | 9.620791 | 6.18% |
+| Benjamin–Feir | 10.260169 | 9.637787 | 6.07% |
+| JONSWAP/TMA | 1.053588 | 0.989491 | 6.08% |
 
 M1–M6 use the freshly measured shared-RHS paths listed above; each order's
 selected path is used for all four families, rather than selecting individual
-family minima. M3 now takes 1.043514/10.328536/10.330598/1.041252 seconds on
+family minima. M3 now takes 0.981624/9.759309/9.752981/0.983787 seconds on
 Stokes/Tanaka/Benjamin–Feir/JONSWAP-TMA.
 Cloud results, batch-32 timings and the original one-epoch neural points are
 unchanged. The hero's accuracy is taken from this optimized execution's own
 128-case evaluation, not copied from the previous implementation.
-All 128 trajectories remain finite with positive fluid depth, and their case
-IDs, saved times and reference fields match the preceding evaluation exactly.
-The new median surface errors are 0.000410577%, 0.010117844%, 0.021946676% and
-0.006764663% for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively.
-Each median changes by less than 0.04% relative to the previous execution;
-individual trajectories are not bit-identical, and the largest paired increase
-in terminal surface error is 0.901%.
+All 128 evaluated trajectories remain finite with positive fluid depth. The new
+median surface errors are 0.000410541%, 0.010115862%, 0.021913915% and 0.006764379%
+for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively: changes of
+−0.009%, −0.020%, −0.149% and −0.004% relative to the preceding execution.
+Individual trajectories are not bit-identical. The pooled geometric mean of
+paired terminal surface-error ratios is 1.00008584, with 64 cases improving and
+64 worsening. The largest increase is a Stokes case from 0.000031529% to
+0.000034842% (1.105×). DNO-output errors change more: Tanaka's median terminal
+Gxi error rises from 0.02848249% to 0.03068513%, and the worst paired Gxi error
+ratio is 1.358. These results support retained surface accuracy at the measured
+speed, not invariance of every predicted quantity. The detailed comparison is
+`outputs/hero_speed_20261019/layout_final_eval_audit.json`.
 
 To reproduce this inference trial, use the
-`fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_spectral_all_boundaries_stages_carry_local`
-method, add `--graph-fft --unroll-stages --materialize-spectra --bernoulli-fft cufftdx_forward`
+`fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_spectral_all_boundaries_stages_carry_local`
+method, add `--graph-fft --unroll-stages --materialize-spectra --pack-saved-inputs --bernoulli-fft cufftdx_both`
 to the timing/evaluation commands and set
 `XLA_FLAGS='--xla_gpu_experimental_stream_annotation=true --xla_gpu_enable_command_buffer=+WHILE --xla_gpu_command_buffer_unroll_loops=false'`.
 For the evaluator, select the same predictor with `--fuse-nested-fft --batch-context-fft
---transpose-projections --field-stride` instead of the timer's method name.
-Build the additional strided-field library with
-`uv run --no-sync scripts/benchmark_cufftdx.py --build --build-only --field-stride`.
+--transpose-projections --field-stride --reuse-first-gelu --branch-major` instead of the timer's method name.
+Build the isolated strided-field and branch-major libraries with
+`uv run --no-sync scripts/benchmark_cufftdx.py --build-only --field-stride` and
+`uv run --no-sync scripts/benchmark_cufftdx.py --build-only --branch-major`.
 Build the native library if needed with `scripts/benchmark_cufft_library.py --build-ffi NEW_SO`.
 The timer expects `outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_state.so`.
 Input aliasing and endpoint-mask trials are disabled. Training and default

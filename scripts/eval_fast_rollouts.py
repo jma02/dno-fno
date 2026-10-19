@@ -34,7 +34,7 @@ from solver.evals.model_rollout import build_predict_gxi_batched, load_run  # no
 from solver.solvers import time_integrator as ti  # noqa: E402
 from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
 from scripts.benchmark_cufft_library import graph_fft  # noqa: E402
-from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
+from scripts.benchmark_surrogate_rhs import physical_from_spectral, rollout_if_trial  # noqa: E402
 from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 
 
@@ -59,8 +59,11 @@ def main() -> None:
     parser.add_argument("--materialize-spectra", action="store_true", help="Compute shared rotated spectra once.")
     parser.add_argument("--transpose-projections", action="store_true", help="Use context/head operand layouts from the timing trial.")
     parser.add_argument("--field-stride", action="store_true", help="Read ordinary branch fields without an intermediate copy.")
-    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward"), default="cufft")
+    parser.add_argument("--reuse-first-gelu", action="store_true", help="Reuse the first surface activation across its two consumers.")
+    parser.add_argument("--branch-major", action="store_true", help="Consume the head projection without a paired-stage layout copy.")
+    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
+    parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
     parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features",
                                                     "terms_interleaved_features_cufftdx",
                                                     "terms_interleaved_features_cufftdx_spectral"),
@@ -91,8 +94,11 @@ def main() -> None:
         + ("_spectra" if args.materialize_spectra else "")
         + ("_projections" if args.transpose_projections else "")
         + ("_fieldstride" if args.field_stride else "")
-        + ("_bernoullidx" if args.bernoulli_fft != "cufft" else "")
+        + ("_gelureuse" if args.reuse_first_gelu else "")
+        + ("_branchmajor" if args.branch_major else "")
+        + ("_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
+        + ("_savedpacked" if args.pack_saved_inputs else "")
         + (f"_{args.cs_terms_variant}" if args.cs_terms_variant else ""))
     checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
     loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
@@ -105,13 +111,16 @@ def main() -> None:
                + ("_contextbatch" if args.batch_context_fft else "")
                + ("_contextfold" if args.fold_context else "")
                + ("_projectiontranspose" if args.transpose_projections else "")
-               + ("_fieldstride" if args.field_stride else ""))
+               + ("_fieldstride" if args.field_stride else "")
+               + ("_gelureuse" if args.reuse_first_gelu else "")
+               + ("_branchmajor" if args.branch_major else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
         if (args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0
-                or args.correction_grid != 1024 or args.transpose_projections or args.field_stride):
+                or args.correction_grid != 1024 or args.transpose_projections or args.field_stride
+                or args.reuse_first_gelu or args.branch_major):
             parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
         variant = args.cs_terms_variant or f"terms_m{loaded.config['cs_baseline_order']}_jax"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +138,7 @@ def main() -> None:
         "materialize_spectra": args.materialize_spectra,
         "bernoulli_fft": args.bernoulli_fft,
         "batch_saved_dno": args.batch_saved_dno,
+        "pack_saved_inputs": args.pack_saved_inputs,
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
@@ -159,9 +169,10 @@ def main() -> None:
         else:
             spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
                                      solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)
-            physical = jax.jit(partial(lambda eta, xi, fn, n: jnp.fft.irfft(
-                fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
-            ), fn=spectral, n=nx))
+            physical = jax.jit(partial(physical_from_spectral, predict_hat=spectral)
+                               if args.pack_saved_inputs else partial(lambda eta, xi, fn, n: jnp.fft.irfft(
+                                   fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
+                               ), fn=spectral, n=nx))
         function = partial(
             rollout_if_trial, params=params, substeps=cfg.substeps,
             carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,

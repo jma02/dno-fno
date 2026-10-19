@@ -25,27 +25,61 @@ sys.path.insert(0, str(ROOT))
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+from jax.custom_batching import custom_vmap  # noqa: E402
 from jax.stages import Compiled  # noqa: E402
 
 OUTPUT = ROOT / "outputs/cufftdx_20260925"
 
 
 @cache
-def register(field_stride: bool = False) -> ctypes.CDLL:
-    library = ctypes.CDLL(str(OUTPUT / ("cufftdx_fieldstride.so" if field_stride else "cufftdx.so")))
-    targets = (("dno_cufftdx_fieldstride", "dno_cufftdx"),) if field_stride else tuple(
+def register(field_stride: bool = False, branch_major: bool = False) -> ctypes.CDLL:
+    stem = "cufftdx_branchmajor" if branch_major else "cufftdx_fieldstride" if field_stride else "cufftdx"
+    library = ctypes.CDLL(str(OUTPUT / f"{stem}.so"))
+    targets = ((f"dno_{stem}", "dno_cufftdx"),) if field_stride or branch_major else tuple(
         (name, name) for name in ("dno_cufftdx", "dno_cufftdx_features"))
     for name, symbol in targets:
         jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, symbol)), platform="CUDA")
     return library
 
 
+def _branch_major_fft(a: jax.Array, b: jax.Array, outer: jax.Array, n: int, ept: int) -> jax.Array:
+    """Flatten stage/batch axes before imposing the GEMM's branch-major storage."""
+    a_flat = a.reshape((-1, *a.shape[-2:]))
+    result = jax.ShapeDtypeStruct((a_flat.shape[0], a.shape[-1], n // 2 + 1), jnp.complex64)
+    spectrum = jax.ffi.ffi_call(
+        "dno_cufftdx_branchmajor", result, vmap_method="broadcast_all",
+        input_layouts=((2, 0, 1), None, None),
+    )(
+        a_flat, b.reshape((-1, *b.shape[-2:])), outer.reshape((-1, *outer.shape[-2:])),
+        size=np.int64(n), operation=np.int64(13), multiply=True, ept=np.int64(ept),
+    )
+    return spectrum.reshape((*a.shape[:-2], a.shape[-1], n // 2 + 1))
+
+
 def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
     outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
     promote: bool = False, channels_last: bool = False, field_stride: bool = False,
+    branch_major: bool = False,
 ) -> jax.Array:
     """Fuse FFT loads/stores; channels_last consumes a column-major [B,N,R] head with real outer filters."""
+    if branch_major:
+        if not channels_last or not field_stride or b is None or outer is None or a.dtype != jnp.float32:
+            raise ValueError("Branch-major FFT requires an FP32 column-major head, strided fields, and real filters.")
+        register(branch_major=True)
+
+        @custom_vmap
+        def product(x: jax.Array, y: jax.Array, filters: jax.Array) -> jax.Array:
+            return _branch_major_fft(x, y, filters, n, ept)
+
+        @product.def_vmap
+        def product_vmap(axis_size: int, batched: list[bool], x: jax.Array,
+                         y: jax.Array, filters: jax.Array) -> tuple[jax.Array, bool]:
+            x, y, filters = tuple(value if mapped else jnp.broadcast_to(value, (axis_size, *value.shape))
+                                  for value, mapped in zip((x, y, filters), batched))
+            return _branch_major_fft(x, y, filters, n, ept), True
+
+        return product(a, b, outer)
     if field_stride:
         register(True)
     else:
@@ -201,6 +235,7 @@ if __name__ == "__main__":
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--field-stride", action="store_true", help="Build/check the isolated strided-field product FFT.")
+    parser.add_argument("--branch-major", action="store_true", help="Build/check the isolated branch-major product FFT against strided fields.")
     parser.add_argument("--sm", type=int, default=89)
     parser.add_argument("--ept", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--output", type=Path, default=OUTPUT)
@@ -218,37 +253,40 @@ if __name__ == "__main__":
             f"-arch=sm_{args.sm}", f"-DDNO_SM={args.sm * 10}", "--shared",
             "-Xcompiler", "-fPIC", "-DCUFFTDX_DISABLE_CUTLASS_DEPENDENCY",
             f"-I{mathdx}", f"-I{jax.ffi.include_dir()}",
-            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
+            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_branchmajor.so" if args.branch_major else "cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
         ], check=True)
     if args.build_only:
         raise SystemExit(0)
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(42)
     records = {}
-    if args.field_stride:
+    if args.field_stride or args.branch_major:
         for batch in (1, 2, 32):
             filters = jnp.asarray(rng.normal(size=(batch, 28, 513)), dtype=jnp.float32)
             for stage_pair in (False, True):
                 weights = jnp.asarray(rng.normal(size=(batch, 1024, 28)), dtype=jnp.float32)
                 fields = jnp.asarray(rng.normal(size=(batch, 32, 1024)), dtype=jnp.float32)
                 if stage_pair:
-                    weights, fields = jnp.stack((weights, -weights)), jnp.stack((fields, -fields))
+                    weights = jnp.asarray(rng.normal(size=(2, batch, 1024, 28)), dtype=jnp.float32)
+                    fields = jnp.asarray(rng.normal(size=(2, batch, 32, 1024)), dtype=jnp.float32)
                 for ept in args.ept:
                     functions = []
-                    for strided in (False, True):
-                        candidate = lambda x, y, strided=strided: fft(  # noqa: E731
+                    for trial in (False, True):
+                        strided = args.branch_major or trial
+                        candidate = lambda x, y, strided=strided, trial=trial: fft(  # noqa: E731
                             x, 1024, b=y if strided else y[..., :28, :], outer=filters,
                             ept=ept, channels_last=True, field_stride=strided,
+                            branch_major=args.branch_major and trial,
                         )
                         if stage_pair:
                             candidate = jax.vmap(candidate)
                         functions.append(jax.jit(candidate).lower(weights, fields).compile())
                     np.testing.assert_array_equal(np.asarray(functions[0](weights, fields)),
                                                   np.asarray(functions[1](weights, fields)))
-                    name = f"fieldstride_batch{batch}_{'paired' if stage_pair else 'direct'}_e{ept}"
+                    name = f"{'branchmajor' if args.branch_major else 'fieldstride'}_batch{batch}_{'paired' if stage_pair else 'direct'}_e{ept}"
                     records[name] = measure(functions, weights, fields, args.repeats)
                     print(name, json.dumps(records[name]), flush=True)
-        (args.output / "fieldstride_native.json").write_text(json.dumps(records, indent=2) + "\n")
+        (args.output / ("branchmajor_native.json" if args.branch_major else "fieldstride_native.json")).write_text(json.dumps(records, indent=2) + "\n")
         raise SystemExit(0)
     for n, batch, dtype in (() if args.classical or args.classical_fused else (
         (1024, 1, jnp.float64), (1024, 2, jnp.float64), (8192, 3, jnp.float64), (1024, 32, jnp.float32),

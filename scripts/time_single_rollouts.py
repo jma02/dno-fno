@@ -36,7 +36,7 @@ import numpy as np  # noqa: E402
 from scripts.benchmark_dno_fusion import G1_FP32_TRIALS, TUNED_TRIALS, build_variant  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_cufft_library import graph_fft  # noqa: E402
-from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, rollout_if_trial, shared_m1_hat  # noqa: E402
+from scripts.benchmark_surrogate_rhs import physical_from_spectral, rhs_nonlinear_if_spectral, rollout_if_trial, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
@@ -74,6 +74,10 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_contexttranspose",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
     "fourier_fused_features_product_overlap_exactg0",
@@ -127,10 +131,11 @@ if __name__ == "__main__":
     parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation into an elementwise mask; requires --graph-fft.")
     parser.add_argument("--unroll-stages", action="store_true", help="Unroll the four fixed-point iterations without changing their count.")
     parser.add_argument("--unroll-substeps", type=int, default=1, help="Unroll this many existing time steps together.")
-    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward"), default="cufft",
-                        help="Shared Bernoulli forward transform backend; neural and classical.")
+    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both"), default="cufft",
+                        help="Shared Bernoulli transform backend; neural and classical.")
     parser.add_argument("--materialize-spectra", action="store_true", help="Avoid cloning rotated spectra into multiple consumers.")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Evaluate saved-frame DNO diagnostics together after single-trajectory integration.")
+    parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
     parser.add_argument("--profile", action="store_true", help="Save compiled HLO and trace the measured execution; profiling timings are not clean latency measurements.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
@@ -190,6 +195,7 @@ if __name__ == "__main__":
         "bernoulli_fft": args.bernoulli_fft,
         "materialize_spectra": args.materialize_spectra,
         "batch_saved_dno": args.batch_saved_dno,
+        "pack_saved_inputs": args.pack_saved_inputs,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
@@ -276,8 +282,10 @@ if __name__ == "__main__":
                     )
                 if method.startswith("fourier_") or method == "terms_interleaved_features_cufftdx_spectral":
                     spectral_predict = predict
-                    predict = partial(lambda eta, xi, fn: jnp.fft.irfft(
-                        fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)
+                    predict = (partial(physical_from_spectral, predict_hat=spectral_predict)
+                               if args.pack_saved_inputs and ("carry" in options or "local" in options)
+                               else partial(lambda eta, xi, fn: jnp.fft.irfft(
+                                   fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict))
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
                                     predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options,
