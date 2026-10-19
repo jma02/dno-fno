@@ -1,7 +1,8 @@
-"""Time one trajectory at a time after compilation and an untimed warm-up.
+"""Time trajectories after compilation and an untimed warm-up.
 
 Use --steps 320 --repeats 3 for a short per-step benchmark; the default
 times one full T=20/200 trajectory for each method and family.
+--batch-size 32 times the complete saved cohort together, not one trajectory.
 The fused methods apply inference FFT optimizations to --candidate-run.
 Spectral variants reduce adapter round trips; every classical order shares padded FFT batching.
 The _stages suffix pairs GL2 stages within one trajectory, not separate rollouts.
@@ -17,6 +18,7 @@ from functools import partial
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Any, Callable, cast
@@ -93,11 +95,25 @@ def method_base(name: str) -> str:
     return name
 
 
+def check_exclusive_gpu(enabled: bool) -> None:
+    if enabled:
+        pids = subprocess.check_output([
+            "nvidia-smi", "-i", os.environ["CUDA_VISIBLE_DEVICES"],
+            "--query-compute-apps=pid", "--format=csv,noheader",
+        ], text=True, timeout=10).split()
+        foreign = [pid for pid in pids if int(pid) != os.getpid()]
+        if foreign:
+            print(f"GPU busy with other processes {foreign}; deferring timing", flush=True)
+            raise SystemExit(75)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, choices=range(1, 33), default=1)
+    parser.add_argument("--require-idle-gpu", action="store_true", help="Exit 75 if another process uses the selected GPU before or during timings.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--classical-backend", choices=("cufft", "interleaved_cufftdx"), default="cufft")
@@ -115,6 +131,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1 or args.pad_factor < 1:
         parser.error("steps must be nonnegative; repeats and pad-factor must be positive")
+    if args.require_idle_gpu and (not os.environ.get("CUDA_VISIBLE_DEVICES", "").startswith("GPU-")
+                                 or "," in os.environ["CUDA_VISIBLE_DEVICES"]):
+        parser.error("--require-idle-gpu requires one GPU UUID in CUDA_VISIBLE_DEVICES")
+    check_exclusive_gpu(args.require_idle_gpu)
     if args.candidate_run:
         RUNS["compact"] = args.candidate_run.resolve()
     methods = args.methods or ["M6", "M1", "M2", "M3", "M4", "M5", *reversed(RUNS)]
@@ -135,7 +155,7 @@ if __name__ == "__main__":
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
         "device": jax.devices()[0].device_kind, "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "batch_size": 1, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
+        "batch_size": args.batch_size, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "classical_backend": args.classical_backend,
         "precision": "FP64 classical/integration; FP32 learned inference",
@@ -156,19 +176,25 @@ if __name__ == "__main__":
             parser.error("steps must fit the saved trajectory and be divisible by the family's substeps")
         source = next(RUNS["full"].glob(f"eval_best_current_test_stratified_n32*/{family}_trajs.npz"))
         with np.load(source) as saved:
+            if len(saved["simulation_ids"]) < args.batch_size:
+                parser.error(f"{family} has fewer than {args.batch_size} saved cases")
             frames = args.steps // cfg.substeps + 1 if args.steps else len(saved["times"])
             times = jnp.asarray(saved["times"][:frames])
-            initial = ti.State(jnp.asarray(saved["truth_eta"][0, :1]), jnp.asarray(saved["truth_xi"][0, :1]))
-            depth = jnp.asarray(saved["depths"][:1])
-            simulation_id = int(saved["simulation_ids"][0])
-            saved_reference = {key: saved[f"truth_{key}"][:frames, :1] for key in ("eta", "xi", "gxi")}
+            initial = ti.State(jnp.asarray(saved["truth_eta"][0, :args.batch_size]),
+                               jnp.asarray(saved["truth_xi"][0, :args.batch_size]))
+            depth = jnp.asarray(saved["depths"][:args.batch_size])
+            simulation_ids = saved["simulation_ids"][:args.batch_size].tolist()
+            saved_reference = {key: saved[f"truth_{key}"][:frames, :args.batch_size]
+                               for key in ("eta", "xi", "gxi")}
         records: dict[str, dict[str, Any]] = {}
         report["families"][family] = {
-            "simulation_id": simulation_id, "steps": (frames - 1) * cfg.substeps,
+            "simulation_ids": simulation_ids, "steps": (frames - 1) * cfg.substeps,
+            **({"simulation_id": simulation_ids[0]} if args.batch_size == 1 else {}),
             "horizon": float(times[-1]), "saved_frames": frames, "methods": records,
         }
         compiled, outputs = {}, {}
         for label in methods:
+            check_exclusive_gpu(args.require_idle_gpu)
             method = method_base(label)
             options = label[len(method):].split("_")
             started = time.perf_counter()
@@ -266,16 +292,20 @@ if __name__ == "__main__":
                 compile_seconds = time.perf_counter() - started
             started = time.perf_counter()
             jax.block_until_ready(compiled[label](initial, times))
+            warmup_seconds = time.perf_counter() - started
+            check_exclusive_gpu(args.require_idle_gpu)
             records[label] = {"setup_s": setup_seconds, "compile_s": compile_seconds,
-                               "warmup_s": time.perf_counter() - started, "seconds": []}
-            print(f"{family} {label}: ready; batch=1, {report['families'][family]['steps']} steps", flush=True)
+                               "warmup_s": warmup_seconds, "seconds": []}
+            print(f"{family} {label}: ready; batch={args.batch_size}, {report['families'][family]['steps']} steps", flush=True)
         for repeat in range(args.repeats):
             for method in list(compiled)[::1 if repeat % 2 == 0 else -1]:
                 if args.reference_once and repeat > 0 and method == args.reference:
                     continue
+                check_exclusive_gpu(args.require_idle_gpu)
                 started = time.perf_counter()
                 outputs[method] = jax.block_until_ready(compiled[method](initial, times))
                 duration = time.perf_counter() - started
+                check_exclusive_gpu(args.require_idle_gpu)
                 records[method]["seconds"].append(duration)
                 print(f"{family} {method}: repeat {repeat + 1}: {duration:.4f}s", flush=True)
         for method, result in outputs.items():
@@ -294,6 +324,11 @@ if __name__ == "__main__":
                 records[method][f"terminal_{key}_error"] = float(error[-1] / scale[-1])
                 records[method][f"max_{key}_error"] = float((error / scale).max())
                 records[method][f"trajectory_{key}_error"] = float(np.linalg.norm(error) / np.linalg.norm(scale))
+                if key == "eta" and args.batch_size > 1:
+                    records[method]["terminal_eta_errors"] = (
+                        np.linalg.norm(actual[-1] - reference[-1], axis=-1)
+                        / np.linalg.norm(reference[-1], axis=-1)
+                    ).tolist()
                 cached = saved_reference[key].reshape(frames, -1)
                 cached_error = np.linalg.norm(actual.reshape(frames, -1) - cached, axis=-1)
                 records[method][f"cached_reference_max_{key}_error"] = float((cached_error / np.linalg.norm(cached, axis=-1)).max())

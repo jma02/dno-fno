@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/dno-fno-mpl")
 
@@ -26,8 +27,44 @@ TRAINED_STYLES = (("c27_rollout_teacher_m6_ep120_gpu0_20261001", "Rollout-superv
                   ("c27_surface_rms_context8_rollout_ep120_gpu0_20261006", "RMS + Fourier context", "#007da6", "s"))
 
 
+def refresh_classical_timings(report: dict[str, Any]) -> None:
+    """Use the latest measured times for the report's hardware, workload and errors."""
+    if report["device"] != "NVIDIA RTX 6000 Ada Generation":
+        hardware = {"NVIDIA RTX PRO 6000 Blackwell Server Edition": "blackwell",
+                    "NVIDIA A100-SXM4-80GB": "a100_sxm"}.get(report["device"])
+        if hardware is not None:
+            measured = json.loads((ROOT / f"outputs/classical_all_orders_20260928/{hardware}/classical.json").read_text())
+            for family, result in report["families"].items():
+                for name, record in result["methods"].items():
+                    if name.startswith("M"):
+                        record["seconds"] = measured["families"][family]["methods"][name]["seconds"]
+        return
+    if report.get("batch_size", 1) == 32:
+        for filename in ("ada_batch32_pad1.json", "ada_batch32_pad2.json"):
+            measured = json.loads((ROOT / "outputs/classical_plot_refresh_20261019" / filename).read_text())
+            for family, result in measured["families"].items():
+                for name, record in result["methods"].items():
+                    report["families"][family]["methods"].setdefault(name.split("_", 1)[0], record)["seconds"] = record["seconds"]
+        return
+    for filename, orders in (
+        ("classical_all_orders_20260928/ada/classical.json", (1, 6)),
+        ("c27_cs_terms_scratch1_20261019/single_rollout_timing.json", (3, 4)),
+        ("c27_cs_terms_m1_scratch1_20261019/single_rollout_timing.json", (5,)),
+    ):
+        measured = json.loads((ROOT / "outputs" / filename).read_text())
+        for family, result in measured["families"].items():
+            for name, record in result["methods"].items():
+                if name.split("_", 1)[0] in {f"M{order}" for order in orders}:
+                    report["families"][family]["methods"][name.split("_", 1)[0]]["seconds"] = record["seconds"]
+    for family, _ in FAMILIES:
+        measured = json.loads((ROOT / f"outputs/momentum_classical_M2_timing_20261010/{family}_timing.json").read_text())
+        report["families"][family]["methods"]["M2"]["seconds"] = measured["methods"]["none"]["seconds"]
+
+
 def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
     warm = json.loads(args.timings.read_text()) if args.timings else {}
+    if not warm:
+        warm = json.loads((ROOT / "outputs/classical_plot_refresh_20261019/ada_batch32_pad1.json").read_text())
     if warm:
         for path in args.classical_timings or ():
             for family, result in json.loads(path.read_text())["families"].items():
@@ -35,6 +72,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         for result in warm["families"].values():
             result["methods"] = {name.split("_", 1)[0] if name.startswith("M") else name: record
                                  for name, record in result["methods"].items()}
+        refresh_classical_timings(warm)
     candidate = {"families": {}} if args.candidate_timings else {}
     for path in args.candidate_timings or ():
         for family, result in json.loads(path.read_text())["families"].items():
@@ -132,7 +170,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             methods = comparison["families"][family]["methods"]
             record = methods[method]
             new_seconds = float(np.median(record["seconds"]))
-            if comparison is candidate:
+            if comparison is candidate and not args.candidate_timing_only:
                 candidate_error = record["cached_reference_terminal_eta_error"]
                 if args.candidate_eval:
                     with np.load(args.candidate_eval / f"{family}_trajs.npz") as data:
@@ -152,6 +190,18 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
             right = max(right, new_seconds)
             left = min(left, new_seconds)
             print(f"{title}, {label}: {new_seconds:.3f}s; finite={record['finite']}")
+        if args.archived_neural:
+            for run, method, color, marker in (
+                ("c27_branches16_tanaka_hard128_20260923", "small", "#087eaa", "o"),
+                ("c27_tanaka_hard128_full_equal_local_20260918", "full", "#8b5ea8", "s"),
+            ):
+                source = next((ROOT / "outputs" / run).glob(f"eval_best_current_test_stratified_n32*/{family}_summary.json"))
+                result = json.loads(source.read_text())
+                runtime = (float(result["surrogate_wall_s"]) if warm.get("batch_size", 1) == 32
+                           else float(np.median(warm["families"][family]["methods"][method]["seconds"])))
+                ax.scatter(runtime, 100 * result["rel_l2_eta_median_conditional_finite_tfinal"],
+                           color=color, marker=marker, s=65, edgecolors="white", linewidths=0.8, zorder=3)
+                right = max(right, runtime)
         for run, label, color, marker in TRAINED_STYLES:
             if family not in trained.get(run, {}):
                 continue
@@ -188,7 +238,8 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
         ax.set_title(title, loc="left", fontsize=12, pad=12)
         ax.set_title(f"T = {horizon:g}", loc="right", fontsize=9, color="#777f86", pad=12)
 
-    fig.suptitle(heading or ("Single-rollout runtime vs error" if warm else "Batch runtime vs error"),
+    batched = warm.get("batch_size", 1) == 32
+    fig.suptitle(heading or ("Batch runtime vs error" if batched else "Single-rollout runtime vs error"),
                  y=0.97 if compact else 0.94 if heading else 0.96, fontsize=14 if heading else 18,
                  ha="left", x=0.065 if compact else 0.10)
     if args.single_case and not heading:
@@ -196,9 +247,12 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
     fig.legend(handles=[
         Line2D([], [], color="#606970", marker="o", markerfacecolor="white", ms=4, lw=1, label="Classical"),
         Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
-        *[Line2D([], [], color=color, marker="o" if comparison is candidate else None,
-                  ls="none" if comparison is candidate else style, ms=7, lw=width, label=label)
+        *[Line2D([], [], color=color, marker="o" if comparison is candidate and not args.candidate_timing_only else None,
+                  ls="none" if comparison is candidate and not args.candidate_timing_only else style, ms=7, lw=width, label=label)
           for comparison, color, label, _method, style, width in overlays if comparison],
+        *([Line2D([], [], color=color, marker=marker, ls="none", ms=7, label=label)
+           for color, marker, label in (("#087eaa", "o", "Neural — small"), ("#8b5ea8", "s", "Neural — full"))]
+          if args.archived_neural else []),
         *([Line2D([], [], color="#7444a5", marker="D" if args.single_case else None, ls="none" if args.single_case else "-.", ms=6, lw=1.3,
                   label="Spectral DNO — weight EMA (PyTorch)" if args.single_case else
                   "Spectral DNO — weight EMA (runtime only)")] if spectral else []),
@@ -206,7 +260,7 @@ def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: 
           for run, label, color, marker in TRAINED_STYLES if run in trained],
     ], loc="upper left", bbox_to_anchor=(0.06, 0.90) if compact else (0.09, 0.895 if args.single_case and not heading else 0.91),
         ncols=3 if compact else 2 if candidate or baseline_free else 4, frameon=False, fontsize=10)
-    xlabel = "Time per step (ms)" if per_step else "One rollout (seconds)" if warm else "32 rollouts together (seconds)"
+    xlabel = "Time per step (ms)" if per_step else "32 rollouts together (seconds)" if batched else "One rollout (seconds)"
     if not compact:
         fig.supxlabel(xlabel, y=0.06, fontsize=11)
         fig.supylabel("Final surface error (%)" if args.single_case else "Median final surface error (%)", x=0.015, y=0.50, fontsize=11)
@@ -219,6 +273,8 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-timings", type=Path, nargs="+", help="Overlay measured fused-model runtimes from these files; requires --timings.")
     parser.add_argument("--candidate-eval", type=Path, help="Use saved rollout errors for the timed simulation IDs; applies only to Ada in the hardware stack.")
     parser.add_argument("--candidate-label", default="New candidate optimized network")
+    parser.add_argument("--candidate-timing-only", action="store_true", help="Keep the historical candidate as a runtime line.")
+    parser.add_argument("--archived-neural", action="store_true", help="Retain the original small/full references in Figures 10/11.")
     parser.add_argument("--trained-timings", type=Path, nargs="+", help="Add measured trained-model comparisons to the Ada panels.")
     parser.add_argument("--candidate-method", default="fused")
     parser.add_argument("--candidate-previous-method", help="Show the runtime reduction against this method in the same timing files.")
@@ -227,6 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
     parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
     parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
+    parser.add_argument("--subset40", action="store_true", help="Figure 12b: saved 40-epoch subset screens.")
     parser.add_argument("--recent-one-epoch", action="store_true", help="Figure 12d: recent full-data, one-epoch models with measured runtimes.")
     parser.add_argument("--momentum-comparison", action="store_true", help="Figure 12c: measured original and momentum-corrected rollouts.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
@@ -298,8 +355,10 @@ if __name__ == "__main__":
             fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
         plt.close(fig)
         raise SystemExit(0)
-    if args.one_epoch or args.recent_one_epoch:
+    if args.one_epoch or args.recent_one_epoch or args.subset40:
         neural = json.loads((ROOT / "outputs/rms_context_timing_20261007/ada/timings.json").read_text())
+        classical = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
+        refresh_classical_timings(classical)
         method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
         screens = (
             ("control", "Control", "#343b43", "o"),
@@ -377,6 +436,19 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )
         completed = []
+        if args.subset40:
+            screens = ()
+            for suffix, label, color, marker in (
+                ("control_subset16_gpu0", "Control", "#343b43", "o"),
+                ("stokes_subset16", "Stokes phase", "#cf6327", "s"),
+                ("tanaka_subset16", "Tanaka momentum", "#008772", "D"),
+                ("bf_subset16", "BF sideband phase", "#7855ad", "^"),
+                ("jonswap_subset16", "JONSWAP MB off", "#007da6", "P"),
+            ):
+                run = ROOT / f"outputs/c27_phase40_{suffix}_20261008"
+                results = {family: json.loads((run / f"eval_epoch40_test_stratified_n32_gpu{0 if family in ('stokes', 'tanaka') else 1}/{family}_summary.json").read_text())
+                           for family, _ in FAMILIES}
+                completed.append((results, neural, label, color, marker, method))
         if args.recent_one_epoch:
             screens = ()
             phase_run = ROOT / "outputs/c27_phase_rank_one_scratch1_20261019"
@@ -446,12 +518,12 @@ if __name__ == "__main__":
                                           display_label + label_suffix,
                                           color, "X" if suffix.endswith("_seed1") else "D", timing_method))
         decoder_run = ROOT / "outputs/c27_cs_terms_scratch1_20261019"
-        for evaluation, timing_file, timing_method, label in (
+        for evaluation, timing_file, timing_method, label in (() if args.subset40 else (
             ("eval_weight_ema_standard", "single_rollout_timing.json",
              "compact_boundaries_stages_carry_local", "CS-field decoder · native"),
             ("eval_fast_weight_ema_terms_interleaved_features_cufftdx", "cufftdx_boundaries_rollout_timing.json",
              "terms_interleaved_features_cufftdx_boundaries_stages_carry_local", "CS-field decoder · optimized"),
-        ):
+        )):
             result_path = decoder_run / evaluation / "all_summaries.json"
             timing_path = decoder_run / timing_file
             if result_path.exists() and timing_path.exists():
@@ -461,7 +533,6 @@ if __name__ == "__main__":
                        for family, _ in FAMILIES):
                     completed.append((results, timings, label, "#d25232", "o", timing_method))
         m1_run = ROOT / "outputs/c27_cs_terms_m1_scratch1_20261019"
-        m1_timings = json.loads((m1_run / "single_rollout_timing.json").read_text()) if args.recent_one_epoch else {}
         if args.recent_one_epoch:
             for evaluation, timing_file, timing_method, label, marker in (
                 ("eval_weight_ema_standard", "single_rollout_timing.json",
@@ -486,9 +557,10 @@ if __name__ == "__main__":
             "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
             "xtick.color": "#59616a", "ytick.color": "#59616a",
         })
-        fig, axes = plt.subplots(2, 2, figsize=(12, 9) if args.recent_one_epoch
+        compact_screens = args.recent_one_epoch or args.subset40
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9) if compact_screens
                                  else (17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if args.recent_one_epoch else 0.83,
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if compact_screens else 0.83,
                             bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
@@ -496,32 +568,20 @@ if __name__ == "__main__":
             classical_errors = [100 * json.loads(
                 (ROOT / f"outputs/momentum_classical_M{order}_none_{'20261019' if order == 4 else '20261010'}/{family}_summary.json").read_text(),
             )["rel_l2_eta_median_conditional_finite_tfinal"] for order in orders]
-            classical_seconds = [float(np.median(json.loads(
-                (ROOT / f"outputs/momentum_classical_M{order}_timing_20261010/{family}_timing.json").read_text(),
-            )["methods"]["none"]["seconds"])) for order in (2, 3)]
-            classical_seconds.append(float(np.median(json.loads(
-                (decoder_run / "single_rollout_timing.json").read_text(),
-            )["families"][family]["methods"]["M4_boundaries_stages_carry_local"]["seconds"])))
-            for _, measured, *_ in completed:
-                if measured.get("classical_backend") != "interleaved_cufftdx":
-                    continue
-                for index, order in enumerate(orders):
-                    direct = measured["families"].get(family, {}).get("methods", {}).get(f"M{order}_boundaries_stages_carry_local")
-                    if direct is not None:
-                        classical_seconds[index] = float(np.median(direct["seconds"]))
             if args.recent_one_epoch:
                 with np.load(ROOT / f"outputs/cs_order_sweep_20260923/{family}.npz") as sweep:
                     extra_errors = {order: 100 * float(np.median(sweep["eta_rel_l2"][
                         np.flatnonzero(sweep["orders"] == order).item(), -1,
                     ])) for order in (1, 5)}
-                recorded = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
-                recorded_methods = recorded["families"][family]["methods"]
                 orders = (1, *orders, 5)
                 classical_errors = [extra_errors[1], *classical_errors, extra_errors[5]]
-                classical_seconds = [float(np.median(recorded_methods["M1"]["seconds"])),
-                                     *classical_seconds, float(np.median(m1_timings["families"][family]["methods"]
-                                         ["M5_boundaries_stages_carry_local"]["seconds"]))]
-                ax.axvline(float(np.median(recorded_methods["M6"]["seconds"])),
+            if args.subset40:
+                orders = (2, 3)
+                classical_errors = classical_errors[:2]
+            classical_seconds = [float(np.median(classical["families"][family]["methods"][f"M{order}"]["seconds"]))
+                                 for order in orders]
+            if args.recent_one_epoch:
+                ax.axvline(float(np.median(classical["families"][family]["methods"]["M6"]["seconds"])),
                            color="#aab2b9", ls=":", lw=1.2, zorder=1)
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
@@ -555,7 +615,7 @@ if __name__ == "__main__":
                         transform=ax.transAxes, color="#d25232", fontsize=9)
             label_positions = np.linspace(0.90, max(0.08, 0.90 - 0.0975 * (len(points) - 1)), len(points))
             for (error, seconds, label, color), label_y in zip(
-                [] if args.recent_one_epoch else sorted(points, reverse=True), label_positions, strict=False,
+                [] if compact_screens else sorted(points, reverse=True), label_positions, strict=False,
             ):
                 ax.annotate(f"{label}\n{error:.4g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
                             ha="left", va="center", color=color, fontsize=9,
@@ -564,7 +624,7 @@ if __name__ == "__main__":
             values = classical_errors + [point[0] for point in points]
             log_low, log_high = np.log10([min(values), max(values)])
             span = max(log_high - log_low, 0.5)
-            ax.set(yscale="log", xlim=(0, (1.12 if args.recent_one_epoch else 2.0)
+            ax.set(yscale="log", xlim=(0, (1.12 if compact_screens else 2.0)
                                       * max(*classical_seconds, *(point[1] for point in points))),
                    ylim=(10**(log_low - 0.13 * span), 10**(log_high + 0.20 * span)))
             ax.xaxis.set_major_locator(MaxNLocator(4))
@@ -577,15 +637,17 @@ if __name__ == "__main__":
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
         fig.suptitle("Figure 12d · One epoch, full data" if args.recent_one_epoch
+                     else "Figure 12b · 40-epoch training screens" if args.subset40
                      else "Figure 12b · One epoch, full data",
                      x=0.10, y=0.965, ha="left", fontsize=19)
-        fig.text(0.10, 0.91 if args.recent_one_epoch else 0.923,
-                 "RTX 6000 Ada · 32-case median error · Single-rollout timing · Weight EMA" if args.recent_one_epoch
+        fig.text(0.10, 0.91 if compact_screens else 0.923,
+                 "1/16 training data · RTX 6000 Ada · 32-case median error · Shared neural runtime" if args.subset40
+                 else "RTX 6000 Ada · 32-case median error · Single-rollout timing · Weight EMA" if args.recent_one_epoch
                  else "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
-        if args.recent_one_epoch:
+        if compact_screens:
             fig.legend(handles=[
                 Line2D([], [], color="#899198", marker="o", mfc="white", lw=1, label="Classical"),
-                Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
+                *([Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time")] if args.recent_one_epoch else []),
                 *[Line2D([], [], color=color, marker=marker, ls="none", ms=7,
                          mfc="white" if label.endswith("· native") else color,
                          label=label.replace("CS-field decoder", "Encoder–decoder (M3)"))
@@ -596,7 +658,8 @@ if __name__ == "__main__":
                      color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)
-        stem = OUT / (args.output_name or ("12d-one-epoch-full-data" if args.recent_one_epoch else "12b-one-epoch-full-data"))
+        stem = OUT / (args.output_name or ("12d-one-epoch-full-data" if args.recent_one_epoch
+                                         else "12b-subsampled-40-epochs" if args.subset40 else "12b-one-epoch-full-data"))
         stem.parent.mkdir(parents=True, exist_ok=True)
         for extension in ("png", "pdf"):
             fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")

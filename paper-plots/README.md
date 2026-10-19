@@ -124,9 +124,30 @@ Short-horizon CPU benchmark on one held-out Stokes initial condition, Fourier-re
 
 ## Additional neural-versus-classical comparison (outside the draft bundle)
 
+The CPU and single-rollout comparisons were refreshed on October 19. Ada batch-one plots share
+`refresh_classical_timings` in `plot_neural_advantage.py`: M1/M6 come from
+`outputs/classical_all_orders_20260928/ada/classical.json`, M2 from
+`outputs/momentum_classical_M2_timing_20261010/*_timing.json`, M3/M4 from
+`outputs/c27_cs_terms_scratch1_20261019/single_rollout_timing.json`, and M5 from
+`outputs/c27_cs_terms_m1_scratch1_20261019/single_rollout_timing.json`.
+M3/M4 now use FP64 interleaved cuFFTDx with padding 1; the M6 reference-runtime
+line retains the validated padding-2 measurement. The padding-1 M6 trial is
+excluded because its BF trajectory differs from the reference.
+
+Figure 10's batch-32 refresh is queued until Ada GPU0 is free. The original plot
+remains in place; measurements interrupted by other GPU jobs are excluded.
+The clean run will write
+`outputs/classical_plot_refresh_20261019/ada_batch32_{pad1,pad2}.json`
+and regenerate Figure 10 automatically.
+Figures 8–9 have separately refreshed CPU measurements in `plot-data.npz`;
+their neural measurements are retained. The cloud plots use the newest saved
+hardware-specific sweeps in
+`outputs/classical_all_orders_20260928/{blackwell,a100_sxm}/classical.json`.
+No Ada timing is substituted for a cloud GPU or a batch-32 workload.
+
 [10-neural-vs-classical.png](figures/10-neural-vs-classical.png) and its
-[vector PDF](figures/10-neural-vs-classical.pdf) show the archived **batch-32**
-runtimes against median terminal surface relative-L2 error (%). Lower and left
+[vector PDF](figures/10-neural-vs-classical.pdf) show **batch-32** runtimes
+against median terminal surface relative-L2 error (%). Lower and left
 is better. The small neural model uses 16 branches per group (172,608 parameters);
 the full model uses 320 (1,342,400 parameters). All errors use the same 32 test
 cases per wave family. M6 is the reference, so its zero error is omitted from
@@ -139,20 +160,20 @@ speed differences. It is retained separately from the single-rollout benchmark.
 The single-rollout benchmark uses the first case in each saved test panel,
 with shape `(1, 1024)`, not a batch time divided by 32. Every method runs the full
 T=20 (Stokes/JONSWAP-TMA) or T=200 (Tanaka/Benjamin–Feir) trajectory, saving the
-same 251 states. It uses the same dt=0.01, four-iteration GL2 integrator, hard
-mode-128 cutoff and CS padding 8. Classical arithmetic and integration are FP64;
-learned inference is FP32. Each whole rollout is compiled explicitly and warmed
-using four output intervals before one synchronized timing measurement. Loading,
-compilation, warm-up, transfers and error calculations are outside that timer.
+same 251 states. It uses dt=0.01, four-iteration GL2 integration and a hard
+mode-128 cutoff. Classical arithmetic and integration are FP64; learned inference
+is FP32. Current CS timings use the optimized backends listed above; saved
+neural timings retain their original execution path. Loading, compilation,
+warm-up, transfers and error calculations are outside the single-rollout timer.
 These are individual timing samples, not averages across the full test panel.
 
 Render the simple batch plot, or collect and render the single-rollout version
 (`11-single-rollout-warm.png` and `.pdf`) on an idle GPU:
 
 ```sh
-UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py
+UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --archived-neural
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/time_single_rollouts.py
-UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --timings outputs/single_rollout_timing_20260923.json
+UV_CACHE_DIR=/tmp/dno-fno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --timings outputs/single_rollout_timing_20260923.json --archived-neural --hide-timing-changes
 ```
 
 The second plot combines the new single-case timings with the existing 32-case
@@ -161,11 +182,10 @@ Neither figure changes the manuscript or its ZIP. No data are uploaded.
 
 Completed single-rollout figure: [PNG](figures/11-single-rollout-warm.png) /
 [PDF](figures/11-single-rollout-warm.pdf). On the RTX 6000 Ada, the full neural
-model takes about 15.2 seconds for T=20 and 150.3 seconds for T=200, versus
-48.2 and 480.3 seconds for M6. It beats M3 in both runtime and median final
-surface error on Benjamin–Feir; the small model also beats M2 on Benjamin–Feir
-and Tanaka. M2 is faster and more accurate than the full neural model on
-Stokes and JONSWAP/TMA. These conclusions use one timing sample per method/family.
+model retains its approximately 15.2 seconds for T=20 and 150.3 seconds for
+T=200. Updated M3 takes about 1.17/11.60 seconds and M6 about 2.57/25.59 seconds
+on the Stokes/Tanaka cases. The former speed comparisons against the archived
+CS implementation no longer apply; neural accuracy values are unchanged.
 
 ### 12-potential-new-nn
 
@@ -274,9 +294,8 @@ Spectral carry and local propagators also apply to every classical order M1–M6
 alongside the previous stage pairing and boundary FFT packing. FP64 integration/G1,
 FP32 learned inference, weights and iteration count are unchanged.
 
-Classical timings come from
-`outputs/classical_all_orders_20260928/{ada,blackwell,a100_sxm}/classical.json`.
-Ada uses a fresh all-order sweep. Cloud M3–M5 use new `sciml-at-ud` runs;
+Classical timings use the shared loader described above. Cloud M3–M5 use
+the saved `sciml-at-ud` runs;
 M1/M2 retain `outputs/classical_figure12_20260927/` measurements, and M6
 retains `outputs/classical_interleaved_20260927/` measurements. These cloud
 points therefore span multiple allocations. Each M3–M6 optimization comparison
@@ -540,7 +559,7 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/modal_rtx6000_20260925_classical_bf/classical_rollouts.json \
   --candidate-timings outputs/modal_rtx6000_20260925_tuning/rollouts.json \
     outputs/modal_rtx6000_20260925_repeat_stokes/rollouts.json \
-  --candidate-method fused_cufftdx --candidate-previous-method fused_front
+  --candidate-method fused_cufftdx --candidate-timing-only --hide-timing-changes
 ```
 
 `scripts/modal_benchmark.py` honors the selected `MODAL_PROFILE`,
@@ -578,11 +597,12 @@ their own `timing/timings.json` before appearing; the shared-GPU training queue
 does not generate isolated timings. Other runs also use their own timings when
 available. The ordinary-inference32-case errors are separate from
 those optimized single-case timing measurements. M2/M3 errors use the same
-32-case medians from `outputs/cs_order_sweep_20260923`, with their measured
-single-rollout times from `outputs/classical_all_orders_20260928/ada/classical.json`.
+32-case medians from `outputs/cs_order_sweep_20260923`, with current measured
+single-rollout times selected by the shared timing loader.
 All timings use dt.01, four GL2 iterations, FP64 integration, and T20/200;
 the learned path is FP32. No forty-epoch subset or120-epoch model accuracies enter
-this figure. The old subset40 PNG/PDF remain separate historical artifacts.
+this figure. The subset40 PNG/PDF remain separate, with their original neural
+results and refreshed CS timings. Regenerate them with `--subset40`.
 
 ```sh
 UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --one-epoch

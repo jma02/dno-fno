@@ -262,24 +262,30 @@ def collect_snapshots(samples: int) -> None:
               {"samples_per_family_per_split": samples, "structures": structures, "seconds": time.perf_counter() - start})
 
 
-def benchmarks() -> None:
+def benchmarks(cs_only: bool = False) -> None:
     from solver.evals.model_rollout import build_predict_gxi_batched, load_run, rollout_surrogate
     from solver.solvers import time_integrator as ti
 
     start = time.perf_counter()
-    predict = build_predict_gxi_batched(load_run(RUN, checkpoint="best"))
+    saved = {}
+    if cs_only:
+        with np.load(OUT / "plot-data.npz") as archive:
+            saved = json.loads(str(archive["benchmark_metadata"]))
+    predict = None if cs_only else build_predict_gxi_batched(load_run(RUN, checkpoint="best"))
     with np.load(archive_path("stokes")) as archive:
         eta0 = archive["truth_eta"][0, 0].astype(float)
         xi0 = archive["truth_xi"][0, 0].astype(float)
         depth = float(archive["depths"][0])
     xi0 -= xi0.mean()
     orders = (2, 4, 6, 8)
-    latency = []
+    latency = [row for row in saved.get("latency", []) if row["method"] == "C27"]
     for nx in (128, 256, 512, 1024, 2048):
         eta = jnp.asarray(resample(eta0, nx))[None]
         xi = jnp.asarray(resample(xi0, nx))[None]
         _, k = build_grid(nx, LENGTH)
-        methods = {"C27": jax.jit(lambda e, x: predict(e, x, jnp.log(jnp.array([depth]))))}
+        methods = {}
+        if predict is not None:
+            methods["C27"] = jax.jit(lambda e, x: predict(e, x, jnp.log(jnp.array([depth]))))
         for order in orders:
             methods[f"CS-{order}"] = jax.jit(
                 lambda e, x, order=order: dno_series_eval(e, x, k, depth, order, pad_factor=8)
@@ -301,11 +307,12 @@ def benchmarks() -> None:
     initial = ti.State(eta=eta, xi=xi)
     params = ti.make_solver_params(nx, LENGTH, depth, dno_order=10, pad_factor=8, filter_fraction=0.5)
     records, solutions = [], {}
-    for order in (10, 2, 4, 6, 8, 0):
+    for order in ((10, 2, 4, 6, 8) if cs_only else (10, 2, 4, 6, 8, 0)):
         name = f"CS-{order}" if order else "C27"
         if order:
             action = jax.jit(lambda e, x, order=order: dno_series_eval(e, x, params.k, depth, order, pad_factor=8))
         else:
+            assert predict is not None
             action = jax.jit(lambda e, x: predict(e, x, jnp.log(jnp.array([depth]))))
         integrate = jax.jit(lambda: rollout_surrogate(initial, times, params, action, substeps=2))
         solution = jax.block_until_ready(integrate())
@@ -323,12 +330,14 @@ def benchmarks() -> None:
         reference = solutions["CS-10"]
         record["eta_trajectory_error"] = float(np.linalg.norm(solution - reference) / np.linalg.norm(reference))
         record["eta_terminal_error"] = float(relative_error(solution[-1], reference[-1])[0])
+    records.extend(row for row in saved.get("rollouts", []) if row["method"] == "C27")
     save_data("benchmark", {}, {
         "latency": latency, "rollouts": records, "nx_rollout": nx, "dt": dt, "T": final,
         "depth": depth, "rollout_cutoff_mode": 64, "pad_factor": 8,
         "precision": "FP32 learned inference; FP64 CS and integration",
         "device": str(jax.devices()[0]), "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "seconds": time.perf_counter() - start,
+        "neural_measurements": "preserved from the saved benchmark" if cs_only else "measured in this benchmark",
     })
 
 
@@ -336,10 +345,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("rollouts", "snapshots", "benchmarks"))
     parser.add_argument("--samples", type=int, default=256)
+    parser.add_argument("--cs-only", action="store_true", help="Refresh benchmarks without restoring or rerunning the neural model.")
     args = parser.parse_args()
     if args.stage == "rollouts":
         collect_rollouts()
     elif args.stage == "snapshots":
         collect_snapshots(args.samples)
     else:
-        benchmarks()
+        benchmarks(cs_only=args.cs_only)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -37,16 +38,18 @@ plt.rcParams.update({
 })
 NAMES: list[str] = []
 CAPTIONS: dict[str, str] = {}
+RUNTIME_ONLY = False
 
 
 def finish(fig: Figure, name: str, caption: str, footer: str) -> None:
     fig.text(0.01, 0.008, footer, fontsize=7, color="#65717f", va="bottom")
-    fig.savefig(FIGURES / f"{name}.pdf", bbox_inches="tight", pad_inches=0.12)
-    fig.savefig(FIGURES / f"{name}.png", bbox_inches="tight", pad_inches=0.12)
+    if not RUNTIME_ONLY or name.startswith(("08-", "09-")):
+        fig.savefig(FIGURES / f"{name}.pdf", bbox_inches="tight", pad_inches=0.12)
+        fig.savefig(FIGURES / f"{name}.png", bbox_inches="tight", pad_inches=0.12)
+        print(f"rendered {name}", flush=True)
     plt.close(fig)
     NAMES.append(name)
     CAPTIONS[name] = caption
-    print(f"rendered {name}", flush=True)
 
 
 def median_band(ax: Axes, x: np.ndarray, values: np.ndarray, color: str, label: str) -> None:
@@ -56,6 +59,11 @@ def median_band(ax: Axes, x: np.ndarray, values: np.ndarray, color: str, label: 
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runtime-only", action="store_true",
+                        help="Render only 08/09 and combined previews; leave README and ZIP bundles unchanged.")
+    args = parser.parse_args()
+    RUNTIME_ONLY = args.runtime_only
     with np.load(OUT / "plot-data.npz") as archive:
         roll = {key.removeprefix("rollout_"): archive[key] for key in archive.files if key.startswith("rollout_")}
         snapshot = {key.removeprefix("snapshot_"): archive[key] for key in archive.files if key.startswith("snapshot_")}
@@ -245,6 +253,8 @@ if __name__ == "__main__":
            "Independent physical Hamiltonian check: order-6 Craig–Sulem with padding factor 8 is evaluated on both the reference and learned-DNO predicted states at 26 saved times per case. The pooled panel shows signed median and interquartile range on a symmetric-log scale with linear threshold 1e-8; the four examples use linear signed axes. Saved states and Hamiltonian evaluation use float64. Energy drift is not assumed to equal the CS numerical floor; the underlying arrays are included in plot-data.npz.",
            "H evaluated with CS-6 at predicted states · 26 times × 128 cases · shaded bands = IQR")
 
+    timing_note = ("\nCS timings refreshed; saved neural measurements retained"
+                   if benchmark.get("neural_measurements") == "preserved from the saved benchmark" else "")
     fig, ax = plt.subplots(figsize=(6.8, 4.15), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.07, 1, 0.93))
     resolutions = np.asarray(sorted({row["nx"] for row in benchmark["latency"]}))
@@ -263,7 +273,7 @@ if __name__ == "__main__":
     ax.legend(frameon=False, ncols=2, loc="upper left")
     finish(fig, "08-dno-complexity-scaling",
            "CPU-only, batch-one DNO latency on an AMD EPYC 9124 host with an eight-logical-CPU affinity. Learned inference uses FP32; CS and physics use FP64. Seven synchronized measurements follow JIT warm-up at each resolution and order. One held-out Stokes initial condition is Fourier-resampled. CS padding is 8. Fitted log-log exponents over N=128..2048 are empirical finite-range summaries, not asymptotic proofs. The learned DNO does not depend on truncation order M. These CPU measurements do not establish GPU performance.",
-           "AMD EPYC 9124 CPU · 8 logical CPUs · FP32 net / FP64 physics · batch 1 · 7 repeats · JIT excluded")
+           "AMD EPYC 9124 CPU · 8 logical CPUs · FP32 net / FP64 physics · batch 1 · 7 repeats · JIT excluded" + timing_note)
 
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.8), layout="constrained")
     fig.set_layout_engine("constrained", rect=(0, 0.08, 1, 0.92))
@@ -288,12 +298,13 @@ if __name__ == "__main__":
         ax.grid(alpha=0.6)
     finish(fig, "09-runtime-tradeoff",
            "Short-horizon CPU benchmark on one held-out Stokes initial condition, Fourier-resampled to N=256: T=1, dt=0.01, GL2 with four fixed-point iterations, hard cutoff at mode 64, g=1 and padding factor 8. All methods use the same surrogate-callback integration path, including CS actions, and save the same 51 states. Learned inference uses FP32 with FP64 CS and integration. Timings are medians of three warmed synchronized runs. Errors compare surface trajectories with CS-10; the CS-10 zero self-error is omitted from the log error plot. This illustration is distinct from the long-horizon evaluation panel.",
-           "CPU · same GL2 integration path · N = 256 · T = 1 · Δt = 0.01 · 3 repeats · compile time excluded")
+           "CPU · same GL2 integration path · N = 256 · T = 1 · Δt = 0.01 · 3 repeats · compile time excluded" + timing_note)
 
-    readme, _, captions = (OUT / "README.md").read_text().partition("\n## Figure captions")
-    _, heading, remaining_sections = captions.partition("\n## ")
-    (OUT / "README.md").write_text(readme.rstrip() + "\n\n## Figure captions\n\n" +
-        "\n\n".join(f"### {name}\n\n{text}" for name, text in CAPTIONS.items()) + "\n" + heading + remaining_sections)
+    if not args.runtime_only:
+        readme, _, captions = (OUT / "README.md").read_text().partition("\n## Figure captions")
+        _, heading, remaining_sections = captions.partition("\n## ")
+        (OUT / "README.md").write_text(readme.rstrip() + "\n\n## Figure captions\n\n" +
+            "\n\n".join(f"### {name}\n\n{text}" for name, text in CAPTIONS.items()) + "\n" + heading + remaining_sections)
     with PdfWriter() as writer:
         for name in NAMES:
             writer.append(FIGURES / f"{name}.pdf")
@@ -306,6 +317,9 @@ if __name__ == "__main__":
     fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.97, wspace=0.08, hspace=0.18)
     fig.savefig(OUT / "overview.png", dpi=150, facecolor="#f3f5f7")
     plt.close(fig)
+    if args.runtime_only:
+        print("Wrote preview.pdf and overview.png; README and ZIP bundles unchanged", flush=True)
+        raise SystemExit(0)
     with zipfile.ZipFile(OUT / "c27-hard128-plot-pack.zip", "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(OUT.rglob("*")):
             if path.is_file() and path.suffix in (".pdf", ".png", ".md", ".npz", ".py", ".tex"):
