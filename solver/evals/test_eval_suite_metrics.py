@@ -35,7 +35,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     run_family,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from dno_net_v2 import CraigSulemDNO  # noqa: E402
+from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -284,6 +284,81 @@ class ComputeMetricsTest(unittest.TestCase):
         np.testing.assert_array_equal(restored.params["nested_surface_gain"], params["nested_surface_gain"])
         self.assertEqual(restored.model.baseline_order, 1)
         self.assertEqual(restored.epoch, 40)
+
+    def test_terms_checkpoint_restores_active_primary_ema_and_native_predictor(self) -> None:
+        surface_scales = (0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1)
+        model = CraigSulemTermsResidual(
+            width=8, n_blocks=1, nested_blocks=0, latent=2, mult_hidden=4,
+            surface_context_width=4, surface_feature_scales=surface_scales,
+            domain_length=4 * np.pi, eta_scale=0.5, xi_scale=0.25, target_scale=0.75,
+        )
+        x = 2 * jnp.pi * jnp.arange(32, dtype=jnp.float32) / 32
+        inputs = jnp.stack((
+            jnp.stack((0.1 * jnp.cos(x), 0.08 * jnp.sin(2 * x)), axis=0),
+            jnp.stack((0.2 * jnp.sin(3 * x), 0.15 * jnp.cos(x)), axis=0),
+        ), axis=-1)
+        depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float64))
+        model_depth = depth.astype(jnp.float32)
+        raw_params = model.init(jax.random.PRNGKey(29), inputs, model_depth)["params"]
+        kernel = cast(jax.Array, raw_params["terms_head"]["kernel"])
+        ema_params = {**raw_params, "terms_head": {"kernel": jnp.linspace(
+            -0.1, 0.2, kernel.size, dtype=jnp.float32,
+        ).reshape(kernel.shape)}}
+        expected_components = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], model.apply(
+            {"params": ema_params}, inputs, model_depth, return_baseline=True,
+        ))
+        prediction, baseline, m1, correction = expected_components
+        np.testing.assert_array_equal(prediction, baseline + correction)
+        self.assertGreater(float(jnp.linalg.norm(correction)), 1e-7)
+        self.assertGreater(float(jnp.linalg.norm(baseline - m1)), 1e-7)
+        config = {
+            "model": "cs_dno", "cs_terms_residual": True, "norm": "scale",
+            "width": 8, "n_blocks": 1, "cs_nested_blocks": 0, "latent": 2,
+            "cs_n_polys": 3, "cs_mult_hidden": 4, "cs_surface_context_width": 4,
+            "cs_surface_feature_scales": list(surface_scales),
+            "cs_use_first_deriv": True, "cs_use_second_deriv": True,
+            "cs_use_half_deriv": True, "cs_use_hilbert": True,
+            "cs_baseline_order": 3, "cs_baseline_true_depth": True,
+            "domain_length": 4 * np.pi, "eta_scale": 0.5, "xi_scale": 0.25, "target_scale": 0.75,
+        }
+        stats = {"feature_absmax": [0.5, 0.25], "target_absmax": 0.75}
+        physical = inputs.astype(jnp.float64) * jnp.asarray(stats["feature_absmax"])
+        reference = build_predict_gxi_batched(LoadedRun(model, ema_params, config, stats, "scale", 17))
+        selections: tuple[Literal["weight_ema", "best_weight_ema"], ...] = ("weight_ema", "best_weight_ema")
+        for selection in selections:
+            checkpoint = ({"params": ema_params} if selection == "weight_ema" else
+                          {"params": raw_params, "weight_ema_params": ema_params})
+            with self.subTest(selection=selection), patch(
+                "solver.evals.model_rollout.Path.read_text", side_effect=[
+                    json.dumps(config), json.dumps({"epoch": 17, "stats": stats}),
+                ],
+            ), patch(
+                "solver.evals.model_rollout.checkpoints.restore_checkpoint", return_value=checkpoint,
+            ) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
+                loaded = load_run("/tmp/dno-terms-loader-test", checkpoint=selection)
+            self.assertIsInstance(loaded.model, CraigSulemTermsResidual)
+            self.assertEqual(loaded.model.baseline_order, 3)
+            self.assertTrue(loaded.model.baseline_true_depth)
+            self.assertEqual(loaded.model.nested_blocks, 0)
+            self.assertEqual(loaded.epoch, 17)
+            self.assertEqual(restore.call_args.kwargs["step"], 17)
+            self.assertEqual(restore.call_args.kwargs["ckpt_dir"].name,
+                             "weight_ema_ckpt" if selection == "weight_ema" else "best_val_ckpt")
+            np.testing.assert_array_equal(loaded.params["terms_head"]["kernel"], ema_params["terms_head"]["kernel"])
+            self.assertFalse(any(name.startswith("cs_block_") for name in loaded.params))
+            actual_components = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], loaded.model.apply(
+                {"params": loaded.params}, inputs, model_depth, return_baseline=True,
+            ))
+            for actual, expected in zip(actual_components, expected_components, strict=True):
+                np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(
+                loaded.model.apply({"params": loaded.params}, inputs, model_depth), prediction,
+            )
+            actual = build_predict_gxi_batched(loaded)(physical[..., 0], physical[..., 1], depth)
+            np.testing.assert_array_equal(actual, reference(physical[..., 0], physical[..., 1], depth))
+            expected = prediction[..., 0] * stats["target_absmax"]
+            np.testing.assert_allclose(actual, expected - expected.mean(axis=-1, keepdims=True),
+                                       rtol=2e-6, atol=1e-8)
 
     def test_cached_fourier_multiplier_skip_matches_nonzero_native_branches(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant

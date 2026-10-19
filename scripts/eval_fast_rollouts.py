@@ -30,7 +30,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     FAMILY_CONFIGS, RolloutPayload, _load_paper_dataset_ics, _write_json,
     compute_macro_summary, run_family,
 )
-from solver.evals.model_rollout import load_run  # noqa: E402
+from solver.evals.model_rollout import build_predict_gxi_batched, load_run  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
@@ -78,11 +78,16 @@ def main() -> None:
                + ("_exactg0" if args.exact_solver_g0 else "")
                + ("_nestedfused" if args.fuse_nested_fft else "")
                + ("_contextbatch" if args.batch_context_fft else ""))
+    terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
+    if terms_decoder:
+        if args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0 or args.correction_grid != 1024:
+            parser.error("CS-field decoder evaluation uses its native terms path, not branch-specific FFT variants")
+        variant = "terms_m3_jax"
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,
         "path": str(checkpoint_dir or run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
-        "implementation": f"{variant}; ept8; spectral carry; local IF; packed boundaries",
+        "implementation": f"{variant}; {'native CS fields' if terms_decoder else 'ept8'}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
     }
     summaries = {}
@@ -104,11 +109,16 @@ def main() -> None:
         )
         jax.block_until_ready((initial, times, params))
         started = perf_counter()
-        spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
-                                 solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)
-        physical = jax.jit(partial(lambda eta, xi, fn, n: jnp.fft.irfft(
-            fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
-        ), fn=spectral, n=nx))
+        if terms_decoder:
+            spectral = None
+            physical = partial(lambda eta, xi, fn, depth: fn(eta, xi, depth),
+                               fn=build_predict_gxi_batched(loaded), depth=jnp.log(depths))
+        else:
+            spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
+                                     solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)
+            physical = jax.jit(partial(lambda eta, xi, fn, n: jnp.fft.irfft(
+                fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
+            ), fn=spectral, n=nx))
         function = partial(
             rollout_if_trial, params=params, substeps=cfg.substeps,
             carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,

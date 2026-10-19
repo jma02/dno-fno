@@ -24,7 +24,7 @@ for _directory in (
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 
-from dno_net_v2 import CraigSulemDNO  # noqa: E402
+from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from solver.solvers.dno_series_jax import myfft, myifft  # noqa: E402
@@ -92,7 +92,9 @@ def load_run(
     if model_name in ("cs_dno", "cs_dno_g0", "cs_dno_no_baseline"):
         surface_scales = config.get("cs_surface_feature_scales")
         surface_transform = config.get("cs_surface_feature_transform")
-        model = CraigSulemDNO(
+        model_class = (CraigSulemTermsResidual
+                       if model_name == "cs_dno" and config.get("cs_terms_residual", False) else CraigSulemDNO)
+        model = model_class(
             width=int(config["width"]),
             n_blocks=int(config["n_blocks"]),
             nested_blocks=int(config.get("cs_nested_blocks", 0)),

@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "models" / "dno-net"))
 sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier  # noqa: E402
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
@@ -916,6 +916,97 @@ def trainer_function(name: str) -> ast.FunctionDef:
                 if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
+def test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks() -> None:
+    main = trainer_function("main")
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_terms_residual")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "args.cs_terms_residual")
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "terms_option", "exec"), namespace)
+    assert not parser.parse_args([]).cs_terms_residual
+    assert parser.parse_args(["--cs_terms_residual"]).cs_terms_residual
+    valid = dict(
+        cs_terms_residual=True, model="cs_dno", norm="scale", cs_normalize_surface_features=True,
+        cs_nested_blocks=0, cs_nested_zero_inner=False, cs_nested_surface_modulation=False,
+        cs_nested_surface_features=False, cs_surface_context_gate=False, cs_surface_depth_gate=False,
+        cs_surface_polynomial_skip=False, cs_multiplier_skip=False, cs_log_multiplier_inputs=False,
+        surface_head_lr_multiplier=1.0, cs_baseline_order=1, cs_baseline_true_depth=False,
+    )
+    code = compile(ast.Module(body=[validation], type_ignores=[]), "terms_validation", "exec")
+    namespace["args"] = SimpleNamespace(**valid)
+    exec(code, namespace)
+    assert namespace["args"].cs_baseline_order == 3
+    assert namespace["args"].cs_baseline_true_depth
+    namespace["args"] = SimpleNamespace(**(valid | {"cs_terms_residual": False}))
+    before = vars(namespace["args"]).copy()
+    exec(code, namespace)
+    assert vars(namespace["args"]) == before
+    with patch.object(parser, "error", side_effect=ValueError):
+        for name, value in (
+            ("model", "fno"), ("norm", "minmax"), ("cs_normalize_surface_features", False),
+            ("cs_nested_blocks", 1), ("cs_nested_zero_inner", True),
+            ("cs_nested_surface_modulation", True), ("cs_nested_surface_features", True),
+            ("cs_surface_context_gate", True), ("cs_surface_depth_gate", True),
+            ("cs_surface_polynomial_skip", True), ("cs_multiplier_skip", True),
+            ("cs_log_multiplier_inputs", True), ("surface_head_lr_multiplier", 2.0),
+        ):
+            namespace["args"] = SimpleNamespace(**(valid | {name: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+
+
+def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
+    from hadamard_shape_regularizer import compute_hadamard_loss
+
+    nx = 16
+    x = 2 * jnp.pi * jnp.arange(nx) / nx
+    inputs = jnp.stack((0.02 * jnp.cos(x), 0.03 * jnp.sin(2 * x)), axis=-1)[None].astype(jnp.float32)
+    depth = jnp.log(jnp.asarray([[0.7]], dtype=jnp.float32))
+    model = CraigSulemTermsResidual(width=8, surface_context_width=2,
+                                   surface_feature_scales=(1.0,) * 7)
+    params = dict(model.init(jax.random.PRNGKey(7), inputs, depth)["params"])
+    kernel = cast(jax.Array, params["terms_head"]["kernel"])
+    params["terms_head"]["kernel"] = 0.1 * jax.random.normal(
+        jax.random.PRNGKey(8), kernel.shape, dtype=kernel.dtype,
+    )
+    namespace: dict[str, Any] = dict(
+        jax=jax, jnp=jnp, Any=Any, cast=cast, model=model,
+        args=SimpleNamespace(model="cs_dno", cs_terms_residual=True),
+    )
+    exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
+                 "terms_trainer_apply", "exec"), namespace)
+    apply_model = namespace["apply_model"]
+    actual = apply_model({"params": params}, inputs, depth, return_baseline=True)
+    expected = model.apply({"params": params}, inputs, depth, return_baseline=True)
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(value, reference)
+
+    def loss(parameters: dict[str, Any], *, wrapped: bool) -> jax.Array:
+        apply = cast(Callable[..., jax.Array], apply_model if wrapped else model.apply)
+        prediction = cast(jax.Array, apply({"params": parameters}, inputs, depth))
+        hadamard = compute_hadamard_loss(
+            rng=jax.random.PRNGKey(9), apply_fn=apply, model_params=parameters,
+            eta_phys=inputs[..., 0], xi_phys=inputs[..., 1], batch_depth_local=depth,
+            norm_inputs_fn=lambda eta, xi: jnp.stack((eta, xi), axis=-1),
+            denorm_targets_fn=lambda values: values,
+            k=jnp.fft.fftfreq(nx) * nx, dtype=jnp.float64, k_max=5,
+        )
+        return jnp.sum(prediction**2) + 0.04 * hadamard
+
+    evaluate = jax.jit(jax.value_and_grad(loss), static_argnames="wrapped")
+    native = evaluate(params, wrapped=False)
+    through_trainer = evaluate(params, wrapped=True)
+    for value, reference in zip(jax.tree.leaves(through_trainer), jax.tree.leaves(native), strict=True):
+        assert bool(jnp.all(jnp.isfinite(value)))
+        np.testing.assert_array_equal(value, reference)
+    assert float(jnp.linalg.norm(through_trainer[1]["terms_head"]["kernel"])) > 0
+    assert float(jnp.linalg.norm(through_trainer[1]["eta_feat_proj"]["kernel"])) > 0
+
+
 def test_learning_rate_hold_schedule_and_validation() -> None:
     import optax
 
@@ -1327,7 +1418,7 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             "jax": jax, "jnp": jnp, "nn": nn, "Any": Any, "cast": cast, "model": model,
             "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
             "nx": nx, "domain_length": float(model.domain_length),
-            "args": SimpleNamespace(model="cs_dno", n_blocks=2, cs_nested_blocks=nested_blocks,
+            "args": SimpleNamespace(model="cs_dno", cs_terms_residual=False, n_blocks=2, cs_nested_blocks=nested_blocks,
                                     latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
                                     cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs,
                                     cs_nested_surface_features=nested_features),
@@ -2490,6 +2581,8 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
+    test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks()
+    test_terms_trainer_apply_preserves_native_and_hadamard_gradients()
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()

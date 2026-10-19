@@ -59,7 +59,7 @@ from translation_tangent_regularizer import (  # noqa: E402
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier  # noqa: E402
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier  # noqa: E402
 from fno1d import FNO1d  # noqa: E402
 from checkpoint_util import (  # noqa: E402
     CheckpointMetadata,
@@ -86,6 +86,8 @@ def main() -> None:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate with gradient EMA.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
+    parser.add_argument("--cs_terms_residual", action="store_true",
+                        help="Decode all four CS fields with the surface encoder; always uses true-depth M3.")
     parser.add_argument(
         "--cs_n_polys",
         type=int,
@@ -427,6 +429,16 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.cs_terms_residual:
+        if args.model != "cs_dno" or args.norm != "scale" or not args.cs_normalize_surface_features:
+            parser.error("--cs_terms_residual requires cs_dno, scale normalization, and RMS-scaled surface features")
+        if (args.cs_nested_blocks or args.cs_nested_zero_inner or args.cs_nested_surface_modulation
+                or args.cs_nested_surface_features or args.cs_surface_context_gate or args.cs_surface_depth_gate
+                or args.cs_surface_polynomial_skip or args.cs_multiplier_skip or args.cs_log_multiplier_inputs
+                or args.surface_head_lr_multiplier != 1.0):
+            parser.error("--cs_terms_residual does not use nested branches, post-trunk gates/skips, or block multipliers")
+        args.cs_baseline_order = 3
+        args.cs_baseline_true_depth = True
     if args.schedule_epochs < 0 or args.epochs < 1:
         parser.error("--schedule_epochs must be nonnegative and --epochs must be positive")
     schedule_epochs = args.schedule_epochs or args.epochs
@@ -667,7 +679,8 @@ def main() -> None:
             print(f"Surface-feature second-moment eigenvalues: {eigenvalues}; whitening floor: {eigen_floor}")
     # Construct the selected model and initialize its parameters.
     if args.model == "cs_dno":
-        model = CraigSulemDNO(
+        model_class = CraigSulemTermsResidual if args.cs_terms_residual else CraigSulemDNO
+        model = model_class(
             width=args.width,
             n_blocks=args.n_blocks,
             latent=args.latent,
@@ -735,6 +748,8 @@ def main() -> None:
         if args.model != "cs_dno":
             prediction = cast(jax.Array, model.apply(variables, inputs, depth))
             return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction) if return_baseline else prediction
+        if args.cs_terms_residual:
+            return model.apply(variables, inputs, depth, return_baseline=return_baseline)
         multiplier_model = DepthAwareMultiplier(
             args.latent, domain_length, 5.0, args.cs_mult_hidden,
             multiplier_skip=args.cs_multiplier_skip,
