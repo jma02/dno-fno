@@ -433,26 +433,6 @@ UV_CACHE_DIR=/tmp/codex-uv-cache uv run --no-sync paper-plots/plot_neural_advant
     outputs/torch_ema_20260926/ada_timing/timings.json
 ```
 
-Figure 12c compares the Ada classical solver, epoch-37 EMA candidate, and older
-rollout-supervised network. Epoch 37 is the best overall evaluated checkpoint
-through epoch 38 by pooled geometric-mean terminal surface error across the 128 cases;
-each panel still displays the fixed timed case, not the family median. Runtime
-measurements are unchanged for the same inference path. It omits the RMS/context
-and spectral-DNO models and historical timing annotations:
-
-```sh
-UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py \
-  --single-case --timings outputs/classical_all_orders_20260928/ada/classical.json \
-  --candidate-timings \
-    outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch/single_rollout_timings.json \
-    outputs/c27_nested_b16_ema_low_lr_ep60_20261014/fig12_epoch7_timings.json \
-  --candidate-method fourier_fused_features_product_overlap_nestedfused_contextbatch_spectral_all_boundaries_stages_carry_local \
-  --candidate-eval outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch37_weight_ema \
-  --candidate-label "New candidate optimized network · epoch 37 EMA" \
-  --trained-timings outputs/rollout_teacher_timing_20261002/ada/timings.json \
-  --hide-timing-changes --output-name 12c-ada-runtime-vs-error
-```
-
 To time the spectral transformer locally, point `DNO_TORCH_WORKTREE` at its
 worktree and select an idle GPU. Use an isolated environment: otherwise the
 repository's installed PyTorch can override the requested version.
@@ -617,7 +597,7 @@ the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
 epoch37 model. No longer-trained checkpoints enter this comparison.
 
-The original Figures12/12c used the particular timed case's error, a different
+The original Figure12 used the particular timed case's error, a different
 statistic. For Tanaka, the one-epoch hero/M3 errors are 0.152511%/0.548683% on
 that case but 0.038876%/0.012373% as family medians. Do not infer a family-wide
 accuracy win from the original single-case plot.
@@ -641,56 +621,12 @@ show separate JAX-traced kernel times; clean forward latencies, replay settings,
 and raw per-kernel metrics are in `outputs/model_roofline_20260926/analysis.json`.
 Rebuild with `uv run --no-sync scripts/profile_dno.py --analyze --output outputs/model_roofline_20260926`.
 
-### 15–18: Phase and local-potential diagnostics
+### 18: Local-potential perturbation examples
 
-- [Translation-drift share PNG](figures/15-phase-speed-error.png) / [PDF](figures/15-phase-speed-error.pdf)
-- [Fourier-phase PNG](figures/16-fourier-phase-error.png) / [PDF](figures/16-fourier-phase-error.pdf)
-- [Local-perturbation PNG](figures/17-local-perturbation-error.png) / [PDF](figures/17-local-perturbation-error.pdf)
-- [Perturbation examples PNG](figures/18-local-perturbation-examples.png) / [PDF](figures/18-local-perturbation-examples.pdf)
+[PNG](figures/18-local-perturbation-examples.png) / [PDF](figures/18-local-perturbation-examples.pdf)
 
-These show the original epoch-120 EMA model, labeled “Neural network”:
-`outputs/c27_w320_b4_h80_ema_grad09_20260927`, using its uncentered
-`eval_best_current_test_stratified_n32_fp32net_fp64solver_gpu*` rollouts.
-Lines/points are case medians; shading/error bars are interquartile ranges.
-M2 is included in the local-perturbation comparison.
-
-**15:** Plot the percentage of squared surface error removed by one rigid
-translation: `100*(1 - min_s ||pred(x+s)-ref(x)||^2 / ||pred-ref||^2)`.
-Use continuous Fourier alignment, including zero shift as a candidate, on
-every fifth saved frame after the initial state. All 32 Stokes cases and the
-11 isolated Tanaka cases (groups containing `_m1_`) are included. This
-diagnoses accumulated translation drift; it does not divide a speed error
-by a surface error. A value of 100% means translation alone removes all
-surface error, while 0% means alignment cannot improve it.
-
-**16:** Split squared surface error into Fourier-amplitude and phase parts.
-With predicted/reference Fourier coefficients P/R, the phase share is
-`100*(1 - sum(w*(abs(P)-abs(R))^2) / sum(w*abs(P-R)^2))`.
-All rFFT coefficients are included with Hermitian weights (1 at DC/Nyquist,
-2 elsewhere), so the denominator equals physical squared L2 error up to
-the common FFT normalization. Equivalently, each mode's phase component is
-`2*abs(P)*abs(R)*(1-cos(arg(P*conj(R))))`. Each family has 32 cases.
-Both figures compute shares per case before taking median/IQR, use a 0–100%
-axis, and omit the zero-error initial frame where the ratio is undefined.
-Translation-removable error cannot exceed Fourier-phase error: the former
-allows one common shift, the latter independent phase correction per mode.
-These are overlapping decompositions, not percentages to add together.
-
-**17:** Reuses `outputs/operator_probe_a100_20261001/operator_probes.npz`.
-At fixed surface and depth compare original xi with `xi + 0.1*zeta`, where
-zeta preserves xi's retained Fourier amplitudes but randomizes its phases.
-Thus `norm(0.1*zeta)/norm(xi) = 0.1`. For each of 32 cases per family,
-divide the median DNO relative L2 error over four perturbations by that case's
-original error, then compute the family median/IQR of these paired ratios.
-The dashed 1x line means unchanged error; 10x means ten times the original
-relative error. Each input has its own FP64 M6/padding-8 reference output
-and denominator; M2 is included as a baseline. These are error multipliers,
-not absolute accuracy rankings: a small original error can yield a large
-multiplier. This measures nearby-input sensitivity, not surface-shape
-derivatives or error in the incremental response. Fully scrambled
-potentials are excluded.
-
-**18:** The actual first perturbation direction from the audit, reconstructed
+The actual first perturbation direction from
+`outputs/operator_probe_a100_20261001/operator_probes.npz`, reconstructed
 with its saved seed and original full-array random-draw order. Show the first
 case of each family (simulation IDs 517582, 3686647, 3714872, 3735800), with
 original and perturbed potential above, and the added change below. Each
@@ -698,60 +634,7 @@ column uses the same vertical scale in both rows, in units of the original
 potential's RMS. The added change is not magnified; its RMS is exactly 10%
 of the original. Surface eta and depth h are unchanged. “Local” here means
 nearby in function space, not a spatially confined bump. These are four
-actual examples from the probes summarized in Figure 17, not new experiments.
-
-All four figures are CPU-only reductions of existing saved results:
-
-```sh
-OPENBLAS_NUM_THREADS=2 OMP_NUM_THREADS=2 UV_CACHE_DIR=/tmp/dno-uv-cache \
-  uv run --no-sync paper-plots/plot_phase_diagnostics.py
-```
-
-### 19–20b: Hero-run phase drift
-
-- [Translation drift PNG](figures/19-hero-translation-drift.png) / [PDF](figures/19-hero-translation-drift.pdf)
-- [Fourier phase PNG](figures/20-hero-fourier-phase.png) / [PDF](figures/20-hero-fourier-phase.pdf)
-- [Fourier phase share PNG](figures/20b-hero-fourier-phase-share.png) / [PDF](figures/20b-hero-fourier-phase-share.pdf)
-
-Compare primary weight-EMA rollouts at epochs 1, 6 and 7 of the current nested
-candidate/low-LR continuation. Lines are case medians; shading is the
-interquartile range. Figures 20 and 20b shade only epoch 7; epoch 1 is dashed.
-No models, solvers or GPUs are invoked.
-
-**19:** The top row shows absolute continuous translation displacement as a
-percentage of domain length. The bottom row shows the percentage of squared
-surface error removed by that alignment. Include all 32 Stokes cases and the
-11 isolated Tanaka cases; evaluate every tenth saved frame after time zero.
-Stokes displacements are unwrapped modulo the initial dominant carrier
-wavelength to resolve equivalent periodic alignments. These are accumulated
-displacements, not instantaneous speed errors.
-
-**20:** Include all 32 cases per family and every saved nonzero time, in four
-larger panels. The y axis, “Relative surface error from phase mismatch (%)”,
-measures `100*sqrt(phase_energy/reference_energy)` on a logarithmic scale.
-For example, 0.01% means the phase-related surface mismatch is 0.01% of the
-reference wave's L2 size, not 0.01% of the total prediction error.
-
-**20b:** Plot `100*phase_energy/total_error_energy`, the phase share of squared
-surface error, separately on linear 0–100% axes for the same cases and times.
-Use the same Hermitian-weighted Parseval decomposition as Figure 16.
-Translation-removable and Fourier-phase shares overlap; they must not be
-added. A larger share alone does not mean a larger absolute error.
-
-The current hero recipe has a direct local translation-tangent term only on
-Tanaka (weight 10). All-family momentum-production matching (weight
-0.002574349830754761) provides indirect phase control; mode balancing (weight
-6) penalizes complex coefficient errors but does not isolate phase. Explicit
-Stokes-carrier, BF-sideband and coupled-modal phase penalties are inactive.
-Rollout-generated states receive the same data/MB/TG/momentum objective,
-with unchanged family masks and no backpropagation through trajectories.
-Hadamard self-consistency remains active on its scheduled training subset,
-not as an additional rollout-endpoint calculation.
-
-```sh
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
-  uv run --no-sync paper-plots/plot_phase_diagnostics.py --hero
-```
+actual examples from the saved probes, not new experiments.
 
 ### 21: Actual phase drift in one wave
 
@@ -778,8 +661,8 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
 [PNG](figures/22-phase-error-vs-training.png) / [PDF](figures/22-phase-error-vs-training.pdf)
 
 Terminal Fourier-phase error for primary weight-EMA checkpoints at every epoch
-from 1 through 38, using the same 32 cases per family. The y axis uses Figure 20's
-relative-error magnitude, not the percentage of total squared error. Each point
+from 1 through 38, using the same 32 cases per family. The y axis shows relative
+surface error from Fourier phase mismatch, not its share of total squared error. Each point
 is the median of `100*sqrt(phase_energy/reference_energy)` at the final rollout
 time. All thirty-eight measurements are shown; the curves are not monotonic.
 Epoch-38 median errors are 0.000616383%, 0.0102795%, 0.0157305% and
@@ -790,8 +673,8 @@ Against epoch 37, whole-trajectory surface error rises 8.2%, phase-related error
 rises 11.3%, and amplitude-related error rises 5.2%. Stokes and JONSWAP regress
 58.8% and 1.3% in terminal surface-error geometric mean, while Tanaka and BF
 improve 0.1% and 6.3%. Pooled p95 improves from 0.0688254% to 0.0616486%.
-Figure 12c retains epoch 37, selected using all 128 cases rather than the four
-plotted cases; its terminal surface-error geometric mean is 0.00551048%.
+The selected epoch 37 has terminal surface-error geometric mean 0.00551048%
+across all 128 cases.
 Epoch 38's validation loss rises 0.68% over epoch 37 and 1.66% over epoch 36,
 which remains the validation-best checkpoint; early-stopping patience is 2/5.
 Validation loss alone does not select the rollout checkpoint.

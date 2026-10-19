@@ -1349,9 +1349,8 @@ and numerical precision, leaving the training run untouched.
 
 ## Current epoch-120 Ada kernel profile — September 28
 
-[Current profile PNG](../paper-plots/figures/14-current-ada-profile.png) /
-[PDF](../paper-plots/figures/14-current-ada-profile.pdf). Raw measurements and
-the compact `analysis.json` are in `outputs/model_roofline_20260928/`.
+Raw measurements and the compact `analysis.json` are in
+`outputs/model_roofline_20260928/`.
 Figure12 and the earlier three-chip Figure13 are unchanged.
 
 The counter-access probe again failed with `ERR_NVGPUCTRPERM`; the user selected
