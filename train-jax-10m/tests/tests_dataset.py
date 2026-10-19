@@ -281,13 +281,13 @@ def test_cpu_terms_prefetch_preserves_rows_tails_and_background_execution() -> N
     indices = np.arange(rows)
     expected_order = np.random.default_rng(17).permutation(indices)
     main_thread = threading.get_ident()
-    for enabled, modes in product((False, True), (False, True)):
+    for enabled, modes, baseline_order in product((False, True), (False, True), (1, 3)):
         with jax.enable_x64(True):
             namespace: dict[str, Any] = dict(
                 jax=jax, jnp=jnp, np=np, Iterator=Iterator, get_batches=get_batches,
                 device_prefetch=device_prefetch, dno_series_eval=dno_series_eval,
                 args=SimpleNamespace(cs_terms_cpu_prefetch=enabled, cs_terms_residual=True,
-                                     batch_size=2 * len(devices)),
+                                     cs_baseline_order=baseline_order, batch_size=2 * len(devices)),
                 dataset=dataset, family_ids=indices,
                 phase_modes=np.column_stack((indices * 2, indices * 3)) if modes else None,
                 n_devices=len(devices), physical_dtype=jnp.float64, data_sharding=sharding,
@@ -318,9 +318,9 @@ def test_cpu_terms_prefetch_preserves_rows_tails_and_background_execution() -> N
                 np.testing.assert_array_equal(batch[2], dataset["gxi"][selected].astype(np.float64))
                 np.testing.assert_array_equal(batch[3], np.log(dataset["depth"][selected])[:, None])
                 if enabled:
-                    assert batch[5].dtype == jnp.float64 and batch[5].shape == (selected.size, 4, nx)
+                    assert batch[5].dtype == jnp.float64 and batch[5].shape == (selected.size, baseline_order + 1, nx)
                     expected = dno_series_eval(batch[0], batch[1], jnp.arange(nx // 2 + 1),
-                                               jnp.exp(batch[3]), order=3, pad_factor=2, return_terms=True)
+                                               jnp.exp(batch[3]), order=baseline_order, pad_factor=2, return_terms=True)
                     np.testing.assert_allclose(batch[5], expected, rtol=1e-12, atol=1e-15)
                     expected_spec = jax.sharding.PartitionSpec("batch") if selected.size % len(devices) == 0 else jax.sharding.PartitionSpec()
                     assert batch[5].sharding.spec == expected_spec

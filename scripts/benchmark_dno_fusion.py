@@ -135,7 +135,7 @@ def build_variant(
             physical_hat = fft(physical, nx, ept=fft_ept) if boundary_cufftdx else jnp.fft.rfft(physical)
             eta_hat, xi_hat = jnp.moveaxis(physical_hat.at[..., -1].set(0), -2, 0)
             terms_hat = classical_hat(
-                eta_hat, xi_hat, k, g0, nx=nx, order=3, pad_factor=2,
+                eta_hat, xi_hat, k, g0, nx=nx, order=model.baseline_order, pad_factor=2,
                 backend="interleaved_cufftdx", precision="fp64", ept=fft_ept, return_terms=True,
             )
             terms = (fft(terms_hat, nx, inverse=True, ept=fft_ept) if boundary_cufftdx

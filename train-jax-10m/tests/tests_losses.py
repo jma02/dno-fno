@@ -918,18 +918,19 @@ def trainer_function(name: str) -> ast.FunctionDef:
                 if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
-def test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks() -> None:
+def test_terms_selector_preserves_order_and_rejects_unused_blocks() -> None:
     main = trainer_function("main")
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
-                  and isinstance(node.value, ast.Call) and node.value.args
-                  and isinstance(node.value.args[0], ast.Constant)
-                  and node.value.args[0].value == "--cs_terms_residual")
+    options: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.Expr)
+                             and isinstance(node.value, ast.Call) and node.value.args
+                             and isinstance(node.value.args[0], ast.Constant)
+                             and node.value.args[0].value in ("--cs_terms_residual", "--cs_baseline_order")]
     validation = next(node for node in main.body if isinstance(node, ast.If)
                       and ast.unparse(node.test) == "args.cs_terms_residual")
     parser = argparse.ArgumentParser(add_help=False)
     namespace: dict[str, Any] = {"parser": parser}
-    exec(compile(ast.Module(body=[option], type_ignores=[]), "terms_option", "exec"), namespace)
+    exec(compile(ast.Module(body=options, type_ignores=[]), "terms_option", "exec"), namespace)
     assert not parser.parse_args([]).cs_terms_residual
+    assert parser.parse_args([]).cs_baseline_order == 1
     assert parser.parse_args(["--cs_terms_residual"]).cs_terms_residual
     valid = dict(
         cs_terms_residual=True, model="cs_dno", norm="scale", cs_normalize_surface_features=True,
@@ -939,17 +940,27 @@ def test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks() -> None:
         surface_head_lr_multiplier=1.0, cs_baseline_order=1, cs_baseline_true_depth=False,
     )
     code = compile(ast.Module(body=[validation], type_ignores=[]), "terms_validation", "exec")
-    namespace["args"] = SimpleNamespace(**valid)
-    exec(code, namespace)
-    assert namespace["args"].cs_baseline_order == 3
-    assert namespace["args"].cs_baseline_true_depth
-    namespace["args"] = SimpleNamespace(**(valid | {"cs_terms_residual": False}))
-    before = vars(namespace["args"]).copy()
-    exec(code, namespace)
-    assert vars(namespace["args"]) == before
+    for baseline_order in (1, 3):
+        assert parser.parse_args(["--cs_terms_residual", "--cs_baseline_order", str(baseline_order)]).cs_baseline_order == baseline_order
+        namespace["args"] = SimpleNamespace(**(valid | {"cs_baseline_order": baseline_order}))
+        exec(code, namespace)
+        assert namespace["args"].cs_baseline_order == baseline_order
+        assert namespace["args"].cs_baseline_true_depth
+    for baseline_order in (1, 2):
+        namespace["args"] = SimpleNamespace(**(valid | {"cs_terms_residual": False, "cs_baseline_order": baseline_order}))
+        before = vars(namespace["args"]).copy()
+        exec(code, namespace)
+        assert vars(namespace["args"]) == before
     with patch.object(parser, "error", side_effect=ValueError):
+        namespace["args"] = SimpleNamespace(**(valid | {"cs_terms_residual": False, "cs_baseline_order": 3}))
+        with np.testing.assert_raises(ValueError):
+            exec(code, namespace)
+        for baseline_order in (0, 4):
+            with np.testing.assert_raises(ValueError):
+                parser.parse_args(["--cs_baseline_order", str(baseline_order)])
         for name, value in (
             ("model", "fno"), ("norm", "minmax"), ("cs_normalize_surface_features", False),
+            ("cs_baseline_order", 2),
             ("cs_nested_blocks", 1), ("cs_nested_zero_inner", True),
             ("cs_nested_surface_modulation", True), ("cs_nested_surface_features", True),
             ("cs_surface_context_gate", True), ("cs_surface_depth_gate", True),
@@ -982,14 +993,14 @@ def test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks() -> None:
                 exec(code, namespace)
 
 
-def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
+def test_terms_trainer_apply_preserves_native_and_hadamard_gradients(baseline_order: int = 1) -> None:
     from hadamard_shape_regularizer import compute_hadamard_loss
 
     nx = 16
     x = 2 * jnp.pi * jnp.arange(nx) / nx
     inputs = jnp.stack((0.02 * jnp.cos(x), 0.03 * jnp.sin(2 * x)), axis=-1)[None].astype(jnp.float64)
     depth = jnp.log(jnp.asarray([[0.712345678901]], dtype=jnp.float64))
-    model = CraigSulemTermsResidual(width=8, surface_context_width=2,
+    model = CraigSulemTermsResidual(width=8, baseline_order=baseline_order, surface_context_width=2,
                                    surface_feature_scales=(1.0,) * 7,
                                    eta_scale=0.134123456789, xi_scale=0.317123456789,
                                    target_scale=0.797123456789)
@@ -1033,7 +1044,7 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
     assert float(jnp.linalg.norm(through_trainer[1]["eta_feat_proj"]["kernel"])) > 0
 
 
-def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
+def test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(baseline_order: int = 1) -> None:
     import optax
     from checkpoint_util import WeightEMATrainState
     from hadamard_shape_regularizer import compute_hadamard_loss
@@ -1047,7 +1058,7 @@ def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
     eta, xi = (0.012 * jnp.cos(x))[None], (0.021 * jnp.sin(x))[None]
     depth = jnp.log(jnp.asarray([[0.712345678901]], dtype=jnp.float64))
     model = CraigSulemTermsResidual(
-        width=8, surface_context_width=2, surface_feature_scales=(1.0,) * 7,
+        width=8, baseline_order=baseline_order, surface_context_width=2, surface_feature_scales=(1.0,) * 7,
         eta_scale=0.134123456789, xi_scale=0.317123456789, target_scale=0.797123456789,
     )
     norm_inputs, norm_targets, denorm_targets = make_normalizers(
@@ -1079,7 +1090,7 @@ def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
     exec(compile(ast.Module(body=[trainer_function("apply_model"), trainer_function("compute_loss_components")],
                             type_ignores=[]), "terms_physical_loss", "exec"), namespace)
     components = jax.vmap(namespace["compute_loss_components"], in_axes=(None, 0, 0, 0, 0, 0), axis_name="batch")
-    target = dno_series_eval(eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=3, pad_factor=2)
+    target = dno_series_eval(eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=baseline_order, pad_factor=2)
     family = jnp.asarray([PhysicalFamilyId.TANAKA])
     exact = components(params, *(value[None] for value in (eta, xi, target, depth, family)))
     assert float(exact[0][0]) < 1e-12 and float(exact[5][0]) < 1e-12
@@ -1099,8 +1110,9 @@ def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
         jax.random.PRNGKey(19), cast(jax.Array, params["terms_head"]["kernel"]).shape, dtype=jnp.float32,
     )
     cached_terms = jax.lax.stop_gradient(dno_series_eval(
-        eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=3, pad_factor=2, return_terms=True,
+        eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=baseline_order, pad_factor=2, return_terms=True,
     ))
+    assert cached_terms.shape == (1, baseline_order + 1, nx)
 
     def loss(parameters: dict[str, Any], supplied_terms: jax.Array | None = None) -> jax.Array:
         data, mode, tangent, momentum, _, _, _ = components(
@@ -2787,9 +2799,10 @@ if __name__ == "__main__":
     test_data_normalization_uses_the_intended_baseline()
     test_family_metrics_recombine_uneven_counts_and_isolate_nan()
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
-    test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks()
-    test_terms_trainer_apply_preserves_native_and_hadamard_gradients()
-    test_terms_full_loss_preserves_physical_m3_and_teacher_precision()
+    test_terms_selector_preserves_order_and_rejects_unused_blocks()
+    for baseline_order in (1, 3):
+        test_terms_trainer_apply_preserves_native_and_hadamard_gradients(baseline_order)
+        test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(baseline_order)
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()

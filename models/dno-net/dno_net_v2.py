@@ -415,34 +415,34 @@ class CraigSulemDNO(nn.Module):
 
 
 class CraigSulemTermsResidual(CraigSulemDNO):
-    """M3 plus a geometry-conditioned linear decoder of the four physical CS fields.
+    """A CS baseline plus a geometry-conditioned linear decoder of its term fields.
 
-    The residual starts at fourth order in eta and has zero spatial mean. Unlike
-    the tied-filter model, its spatially varying coefficients do not guarantee
-    self-adjointness. Split encoding/decoding permits a concurrent CPU term producer.
+    The residual starts one surface order beyond the baseline and has zero spatial
+    mean. Unlike the tied-filter model, its spatially varying coefficients do not
+    guarantee self-adjointness. Split encoding/decoding permits CPU term production.
     """
     baseline_order: int = 3
     baseline_true_depth: bool = True
 
     @nn.compact
     def encode_geometry(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
-        """Return (batch, grid, 4) geometry-only coefficients, independent of xi."""
+        """Return (batch, grid, order+1) coefficients independent of xi."""
         eta_norm = inputs[..., 0].astype(jnp.float32)
         features, _, _, _ = self._encode_surface(eta_norm, depth.astype(jnp.float32))
-        # Column i starts at order 4-i without forcing zeros wherever eta(x)=0.
+        # Column i starts at order baseline_order+1-i, without forcing nodal zeros.
         gate = jnp.tanh(features)
         lifted = features[..., None] * jnp.stack(
-            (gate**3, gate**2, gate, jnp.ones_like(gate)), axis=-1,
+            [gate ** power for power in range(self.baseline_order, -1, -1)], axis=-1,
         )
         return nn.Einsum(
-            shape=(features.shape[-1], 4), einsum_str="...fc,fc->...c",
+            shape=(features.shape[-1], self.baseline_order + 1), einsum_str="...fc,fc->...c",
             use_bias=False, kernel_init=nn.initializers.zeros, name="terms_head",
         )(lifted)
 
     def decode_terms(
         self, coefficients: jnp.ndarray, terms_phys: jnp.ndarray, *, return_baseline: bool = False,
     ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Join encoded geometry with differentiable physical terms (batch, 4, grid)."""
+        """Join encoded geometry with physical terms (batch, order+1, grid)."""
         terms_phys = terms_phys.astype(jnp.float64)
         baseline = jnp.sum(terms_phys, axis=-2) / self.target_scale
         m1_baseline = jnp.sum(terms_phys[..., :2, :], axis=-2) / self.target_scale
@@ -465,6 +465,7 @@ class CraigSulemTermsResidual(CraigSulemDNO):
             terms_phys = dno_series_eval(
                 inputs[..., 0].astype(jnp.float64) * self.eta_scale,
                 inputs[..., 1].astype(jnp.float64) * self.xi_scale,
-                k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
+                k, jnp.exp(depth.astype(jnp.float64)), order=self.baseline_order,
+                pad_factor=2, return_terms=True,
             )
         return self.decode_terms(coefficients, terms_phys, return_baseline=return_baseline)

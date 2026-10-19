@@ -87,7 +87,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate with gradient EMA.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
     parser.add_argument("--cs_terms_residual", action="store_true",
-                        help="Decode all four CS fields with the surface encoder; always uses true-depth M3.")
+                        help="Decode CS fields through baseline order 1 or 3 with the surface encoder, at true depth.")
     parser.add_argument("--cs_terms_cpu_prefetch", action="store_true",
                         help="Prepare the next ordinary batch's CS fields on CPU while the GPU trains; use JAX_PLATFORMS=cuda,cpu.")
     parser.add_argument(
@@ -138,8 +138,8 @@ def main() -> None:
     parser.add_argument("--cs_phase_rank_one", action="store_true",
                         help="Add a learned signed rank-one correction along the half derivative of eta_x.")
     parser.add_argument(
-        "--cs_baseline_order", type=int, choices=(1, 2), default=1,
-        help="Analytic baseline order: G0+G1 or G0+G1+G2.",
+        "--cs_baseline_order", type=int, choices=(1, 2, 3), default=1,
+        help="Highest analytic CS term; order 3 is available only for the CS-field decoder.",
     )
     parser.add_argument("--cs_baseline_true_depth", action="store_true",
                         help="Use the actual depth for the analytic baseline, without clipping at h=5.")
@@ -440,13 +440,16 @@ def main() -> None:
     if args.cs_terms_residual:
         if args.model != "cs_dno" or args.norm != "scale" or not args.cs_normalize_surface_features:
             parser.error("--cs_terms_residual requires cs_dno, scale normalization, and RMS-scaled surface features")
+        if args.cs_baseline_order not in (1, 3):
+            parser.error("--cs_terms_residual requires --cs_baseline_order 1 or 3")
         if (args.cs_nested_blocks or args.cs_nested_zero_inner or args.cs_nested_surface_modulation
                 or args.cs_nested_surface_features or args.cs_surface_context_gate or args.cs_surface_depth_gate
                 or args.cs_surface_polynomial_skip or args.cs_multiplier_skip or args.cs_log_multiplier_inputs
                 or args.surface_head_lr_multiplier != 1.0):
             parser.error("--cs_terms_residual does not use nested branches, post-trunk gates/skips, or block multipliers")
-        args.cs_baseline_order = 3
         args.cs_baseline_true_depth = True
+    elif args.cs_baseline_order == 3:
+        parser.error("--cs_baseline_order 3 requires --cs_terms_residual")
     if args.cs_terms_cpu_prefetch and (
         not args.cs_terms_residual or args.datum_shift_rms > 0 or args.reflection_augmentation
         or args.input_noise_rms > 0 or args.dirichlet_probe_mode != "off"
@@ -1602,7 +1605,7 @@ def main() -> None:
         cpu_k = jax.device_put(np.abs(_k_grid[:nx // 2 + 1]), cpu_sharding)
         cpu_terms = jax.jit(
             lambda eta, xi, log_depth: dno_series_eval(
-                eta, xi, cpu_k, jnp.exp(log_depth), order=3, pad_factor=2, return_terms=True,
+                eta, xi, cpu_k, jnp.exp(log_depth), order=args.cs_baseline_order, pad_factor=2, return_terms=True,
             ), in_shardings=(cpu_sharding,) * 3, out_shardings=cpu_sharding,
         )
 

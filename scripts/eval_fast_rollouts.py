@@ -87,9 +87,9 @@ def main() -> None:
     if terms_decoder:
         if args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0 or args.correction_grid != 1024:
             parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
-        variant = args.cs_terms_variant or "terms_m3_jax"
+        variant = args.cs_terms_variant or f"terms_m{loaded.config['cs_baseline_order']}_jax"
     output_dir.mkdir(parents=True, exist_ok=True)
-    implementation = ("cuFFTDx FP64 CS fields, pad2, ept8" if args.cs_terms_variant
+    implementation = (f"cuFFTDx FP64 CS fields, M{loaded.config['cs_baseline_order']}, pad2, ept8" if args.cs_terms_variant
                       else "native CS fields" if terms_decoder else "ept8")
     checkpoint_source = {
         "run_dir": str(run_dir), "selection": args.checkpoint,

@@ -90,7 +90,7 @@ def main() -> None:
     recipe = (
         "--model cs_dno --cs_terms_residual --norm scale --width 320 --n_blocks 8 --latent 4 "
         "--cs_mult_hidden 80 --cs_n_polys 3 --cs_normalize_surface_features --cs_surface_context_width 8 "
-        "--cs_baseline_true_depth --batch_size 16 --epochs 1 --schedule_epochs 1 --seed 0 --lr 8e-5 "
+        "--cs_baseline_order 3 --cs_baseline_true_depth --batch_size 16 --epochs 1 --schedule_epochs 1 --seed 0 --lr 8e-5 "
         "--lr_warmup_steps 500 --gradient_ema_decay .5 --adam_b1 .5 --adam_b2 .99 "
         "--weight_ema_decay .995 --weight_ema_start_fraction .8 --data_normalization target --data_k_max 128 "
         "--mode_balanced_weight 6 --mode_balanced_warmup_steps 500 --translation_tangent_weight 10 "

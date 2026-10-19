@@ -1192,9 +1192,9 @@ def test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters() ->
                                _learned_residual(original, activated, eta, xi, depth), rtol=1e-3, atol=1e-12)
 
 
-def _terms_model() -> CraigSulemTermsResidual:
+def _terms_model(baseline_order: int = 3) -> CraigSulemTermsResidual:
     return CraigSulemTermsResidual(
-        width=32, surface_context_width=4,
+        width=32, surface_context_width=4, baseline_order=baseline_order,
         surface_feature_scales=(0.1, 0.01, 0.001, 0.2, 1.0, 0.3, 0.1),
         eta_scale=0.7, xi_scale=0.4, target_scale=0.6,
     )
@@ -1216,18 +1216,19 @@ def _physical_terms(model: CraigSulemTermsResidual, inputs: jax.Array, depth: ja
     return dno_series_eval(
         inputs[..., 0].astype(jnp.float64) * model.eta_scale,
         inputs[..., 1].astype(jnp.float64) * model.xi_scale,
-        k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
+        k, jnp.exp(depth.astype(jnp.float64)), order=model.baseline_order, pad_factor=2, return_terms=True,
     )
 
 
-def test_terms_residual_zero_head_exact_m3_and_split_initialization() -> None:
+def test_terms_residual_zero_head_exact_baseline_and_split_initialization(baseline_order: int = 3) -> None:
     eta, xi, _ = _state()
     inputs = jnp.repeat(jnp.stack((eta, xi), axis=-1), 2, axis=0)
     depth = jnp.log(jnp.asarray([[0.8], [8.0]], dtype=jnp.float64))
-    model = _terms_model()
+    model = _terms_model(baseline_order)
     terms = _physical_terms(model, inputs, depth)
     key = jax.random.PRNGKey(27)
     variables = model.init(key, inputs, depth)
+    assert cast(jax.Array, variables["params"]["terms_head"]["kernel"]).shape == (model.width // 2, baseline_order + 1)
     encoded_variables = model.init(key, inputs, depth, method=model.encode_geometry)
     assert jax.tree.structure(variables) == jax.tree.structure(encoded_variables)
     assert all(jnp.array_equal(a, b) for a, b in zip(
@@ -1251,10 +1252,10 @@ def test_terms_residual_zero_head_exact_m3_and_split_initialization() -> None:
     )))
 
 
-def test_terms_residual_split_forward_and_all_gradients() -> None:
+def test_terms_residual_split_forward_and_all_gradients(baseline_order: int = 3) -> None:
     eta, xi, depth = _state(32)
     inputs = jnp.stack((eta, xi), axis=-1)
-    model = _terms_model()
+    model = _terms_model(baseline_order)
     variables = _active_terms_variables(model, inputs, depth)
 
     def split(params: Any, values: jax.Array, log_h: jax.Array) -> jax.Array:
@@ -1281,6 +1282,19 @@ def test_terms_residual_split_forward_and_all_gradients() -> None:
     assert jnp.linalg.norm(native_grads[1][..., 0]) > 0
     assert jnp.linalg.norm(native_grads[1][..., 1]) > 0
     assert jnp.linalg.norm(native_grads[2]) > 0
+    provided_grads = jax.grad(lambda params, values, log_h: jnp.sum(cast(jax.Array, model.apply(
+        {"params": params}, values, log_h, terms_phys=_physical_terms(model, values, log_h),
+    )) ** 2), argnums=(0, 1, 2))(*args)
+    for expected, actual in zip(jax.tree.leaves(native_grads), jax.tree.leaves(provided_grads), strict=True):
+        assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-13)
+    direction = jnp.stack((jnp.roll(eta, 3, axis=-1), jnp.zeros_like(xi)), axis=-1)
+    native_tangent = jax.jvp(lambda values: cast(jax.Array, model.apply(variables, values, depth)),
+                             (inputs,), (direction,))[1]
+    provided_tangent = jax.jvp(lambda values: cast(jax.Array, model.apply(
+        variables, values, depth, terms_phys=_physical_terms(model, values, depth),
+    )), (inputs,), (direction,))[1]
+    assert jnp.linalg.norm(native_tangent) > 0
+    assert jnp.allclose(provided_tangent, native_tangent, rtol=1e-12, atol=1e-13)
     terms = _physical_terms(model, inputs, depth)
     term_grads = jax.grad(lambda q: jnp.sum(cast(tuple[jax.Array, ...], model.apply(
         variables, inputs, depth, terms_phys=q, return_baseline=True,
@@ -1289,10 +1303,10 @@ def test_terms_residual_split_forward_and_all_gradients() -> None:
     assert jnp.all(jnp.linalg.norm(term_grads, axis=-1) > 0)
 
 
-def test_terms_residual_formula_linearity_gauge_and_mean() -> None:
+def test_terms_residual_formula_linearity_gauge_and_mean(baseline_order: int = 3) -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
-    model = _terms_model()
+    model = _terms_model(baseline_order)
     variables = _active_terms_variables(model, inputs, depth)
     coefficients = cast(jax.Array, model.apply(variables, inputs, depth, method=model.encode_geometry))
     assert jnp.all(jnp.linalg.norm(coefficients, axis=1) > 0)
@@ -1317,23 +1331,39 @@ def test_terms_residual_formula_linearity_gauge_and_mean() -> None:
         variables, jnp.stack((eta, 0.3 * xi - 0.7 * psi), axis=-1), depth,
     ))
     assert jnp.allclose(combined, 0.3 * prediction - 0.7 * other, rtol=1e-11, atol=1e-13)
+    constant = cast(jax.Array, model.apply(variables, inputs.at[..., 1].set(0.3), depth))
+    assert jnp.max(jnp.abs(constant)) < 1e-13
 
 
-def test_terms_residual_has_fourth_order_onset() -> None:
+def test_terms_residual_has_baseline_plus_one_order_onset(baseline_order: int = 3) -> None:
     eta, xi, depth = _state()
     inputs = jnp.stack((eta, xi), axis=-1)
-    model = _terms_model()
+    model = _terms_model(baseline_order)
     variables = _active_terms_variables(model, inputs, depth)
     norms = [jnp.linalg.norm(_learned_residual(model, variables, scale * eta, xi, depth))
              for scale in (0.04, 0.02, 0.01)]
     assert all(float(value) > 1e-16 for value in norms)
-    assert all(14 < float(first / second) < 18 for first, second in zip(norms[:-1], norms[1:], strict=True))
+    assert all(abs(float(first / second) / 2 ** (baseline_order + 1) - 1) < 0.125
+               for first, second in zip(norms[:-1], norms[1:], strict=True))
+    terms = _physical_terms(model, inputs, depth)
+    for scale in (-0.37, 0.37):
+        scaled_terms = _physical_terms(model, inputs.at[..., 0].multiply(scale), depth)
+        expected = terms * scale ** jnp.arange(baseline_order + 1)[None, :, None]
+        assert jnp.allclose(scaled_terms, expected, rtol=1e-8, atol=1e-12)
     value, first_variation = jax.jvp(
         lambda surface: _learned_residual(model, variables, surface, xi, depth),
         (jnp.zeros_like(eta),), (eta,),
     )
     assert jnp.all(value == 0)
     assert jnp.all(first_variation == 0)
+
+
+def test_terms_residual_m1_invariants() -> None:
+    for test in (test_terms_residual_zero_head_exact_baseline_and_split_initialization,
+                 test_terms_residual_split_forward_and_all_gradients,
+                 test_terms_residual_formula_linearity_gauge_and_mean,
+                 test_terms_residual_has_baseline_plus_one_order_onset):
+        test(1)
 
 
 def test_terms_residual_can_learn_at_surface_zero_crossings() -> None:
@@ -1523,10 +1553,11 @@ def main() -> int:
         test_multiplier_skip_preserves_initialization_and_operator_structure,
         test_log_multiplier_inputs_formula_initialization_and_gradients,
         test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters,
-        test_terms_residual_zero_head_exact_m3_and_split_initialization,
+        test_terms_residual_zero_head_exact_baseline_and_split_initialization,
         test_terms_residual_split_forward_and_all_gradients,
         test_terms_residual_formula_linearity_gauge_and_mean,
-        test_terms_residual_has_fourth_order_onset,
+        test_terms_residual_has_baseline_plus_one_order_onset,
+        test_terms_residual_m1_invariants,
         test_terms_residual_can_learn_at_surface_zero_crossings,
         test_phase_rank_one_spectrum_matches_physical_definition,
         test_phase_rank_one_preserves_operator_structure_and_quadratic_order,

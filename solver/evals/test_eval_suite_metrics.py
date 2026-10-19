@@ -347,11 +347,17 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(restored.epoch, 40)
 
     def test_terms_checkpoint_restores_active_primary_ema_and_native_predictor(self) -> None:
+        self._check_terms_checkpoint(3)
+
+    def test_m1_terms_checkpoint_restores_active_primary_ema_and_native_predictor(self) -> None:
+        self._check_terms_checkpoint(1)
+
+    def _check_terms_checkpoint(self, order: int) -> None:
         from scripts.benchmark_dno_fusion import build_variant
 
         surface_scales = (0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1)
         model = CraigSulemTermsResidual(
-            width=8, n_blocks=1, nested_blocks=0, latent=2, mult_hidden=4,
+            width=8, n_blocks=1, nested_blocks=0, latent=2, mult_hidden=4, baseline_order=order,
             surface_context_width=4, surface_feature_scales=surface_scales,
             domain_length=4 * np.pi, eta_scale=0.13719012345,
             xi_scale=0.873501234567, target_scale=0.06123984567,
@@ -374,7 +380,10 @@ class ComputeMetricsTest(unittest.TestCase):
         prediction, baseline, m1, correction = expected_components
         np.testing.assert_array_equal(prediction, baseline + correction)
         self.assertGreater(float(jnp.linalg.norm(correction)), 1e-7)
-        self.assertGreater(float(jnp.linalg.norm(baseline - m1)), 1e-7)
+        if order == 1:
+            np.testing.assert_array_equal(baseline, m1)
+        else:
+            self.assertGreater(float(jnp.linalg.norm(baseline - m1)), 1e-7)
         config = {
             "model": "cs_dno", "cs_terms_residual": True, "norm": "scale",
             "width": 8, "n_blocks": 1, "cs_nested_blocks": 0, "latent": 2,
@@ -382,7 +391,7 @@ class ComputeMetricsTest(unittest.TestCase):
             "cs_surface_feature_scales": list(surface_scales),
             "cs_use_first_deriv": True, "cs_use_second_deriv": True,
             "cs_use_half_deriv": True, "cs_use_hilbert": True,
-            "cs_baseline_order": 3, "cs_baseline_true_depth": True,
+            "cs_baseline_order": order, "cs_baseline_true_depth": True,
             "domain_length": model.domain_length, "eta_scale": model.eta_scale,
             "xi_scale": model.xi_scale, "target_scale": model.target_scale,
         }
@@ -395,14 +404,14 @@ class ComputeMetricsTest(unittest.TestCase):
             if center_xi:
                 potential = potential - potential.mean(axis=-1, keepdims=True)
             terms = dno_series_eval(physical[..., 0], potential, k, jnp.exp(depth),
-                                    order=3, pad_factor=2, return_terms=True)
-            expected_m3 = terms.sum(axis=-2)
-            expected_m3 -= expected_m3.mean(axis=-1, keepdims=True)
+                                    order=order, pad_factor=2, return_terms=True)
+            expected_baseline = terms.sum(axis=-2)
+            expected_baseline -= expected_baseline.mean(axis=-1, keepdims=True)
             zero_head = build_predict_gxi_batched(
                 LoadedRun(model, raw_params, config, stats, "scale", 0), center_xi=center_xi,
             )(physical[..., 0], physical[..., 1], depth)
             self.assertEqual(zero_head.dtype, jnp.float64)
-            np.testing.assert_allclose(zero_head, expected_m3, rtol=3e-12, atol=3e-14)
+            np.testing.assert_allclose(zero_head, expected_baseline, rtol=3e-12, atol=3e-14)
             normalized = jnp.stack((physical[..., 0] / model.eta_scale, potential / model.xi_scale), axis=-1)
             encoded = cast(jax.Array, jax.jit(partial(
                 model.apply, {"params": ema_params}, method=model.encode_geometry,
@@ -428,7 +437,7 @@ class ComputeMetricsTest(unittest.TestCase):
             ) as restore, patch("solver.evals.model_rollout.ocp.PyTreeCheckpointer"):
                 loaded = load_run("/tmp/dno-terms-loader-test", checkpoint=selection)
             self.assertIsInstance(loaded.model, CraigSulemTermsResidual)
-            self.assertEqual(loaded.model.baseline_order, 3)
+            self.assertEqual(loaded.model.baseline_order, order)
             self.assertTrue(loaded.model.baseline_true_depth)
             self.assertEqual(loaded.model.nested_blocks, 0)
             self.assertEqual(loaded.epoch, 17)
@@ -815,7 +824,8 @@ class ComputeMetricsTest(unittest.TestCase):
         reference = directory / "reference"
         fields = np.zeros((2, 32, 8), dtype=np.float64)
         ics = [IC(fields[0, i], fields[0, i], 0.1 + i / 32, i) for i in range(32)]
-        loaded = LoadedRun(None, {}, {"dataset": "arrays", "cs_terms_residual": True}, {}, "scale", 1)
+        loaded = LoadedRun(None, {}, {"dataset": "arrays", "cs_terms_residual": True,
+                                     "cs_baseline_order": 3}, {}, "scale", 1)
         compiled = Mock()
         compiled.lower.return_value.compile.return_value.return_value = {
             name: fields for name in ("eta", "xi", "gxi")
@@ -867,7 +877,7 @@ class ComputeMetricsTest(unittest.TestCase):
                             "eval_fast_weight_ema" + (f"_{variant}" if variant else "")))
                         self.assertEqual(call.args[6:8], (32, reference))
                         self.assertEqual(call.args[9], 32)
-                        self.assertIn(f"{variant}; cuFFTDx FP64 CS fields, pad2, ept8" if variant
+                        self.assertIn(f"{variant}; cuFFTDx FP64 CS fields, M3, pad2, ept8" if variant
                                       else "terms_m3_jax; native CS fields", call.args[8]["implementation"])
 
     def test_fast_evaluator_uses_candidate_ics_reference_truth_and_exact_spectral_execution(self) -> None:
