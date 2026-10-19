@@ -66,6 +66,7 @@ image = (
     .add_local_dir(REPO_ROOT / "models" / "fno-jax", remote_path="/repo/models/fno-jax")
     .add_local_dir(REPO_ROOT / "models" / "dno-net", remote_path="/repo/models/dno-net")
     .add_local_dir(REPO_ROOT / "solver", remote_path="/repo/solver")
+    .add_local_file(REPO_ROOT / "scripts" / "benchmark_cs_features.py", remote_path="/repo/scripts/benchmark_cs_features.py")
 )
 
 app = modal.App(APP_NAME, image=image)
@@ -143,6 +144,7 @@ def run_training(
     cs_mult_hidden: int,
     trainer_args: str,
     deadline_unix: float,
+    feature_overlap: bool,
 ) -> dict[str, object]:
     import json
     import os
@@ -203,6 +205,16 @@ def run_training(
     print("$", " ".join(cmd))
     if time.time() >= deadline_unix:
         raise TimeoutError("Training dispatch deadline has already elapsed")
+    if feature_overlap:
+        subprocess.run(
+            [sys.executable, "/repo/scripts/benchmark_cs_features.py", "--overlap",
+             "--dataset", dataset, "--pads", "2", "--batches", "2", "16", "64",
+             "--output", str(out_dir / run_name / "feature_overlap.json")],
+            cwd="/repo", env=os.environ.copy(), check=True,
+            timeout=min(300.0, max(0.0, deadline_unix - time.time())),
+        )
+        if time.time() >= deadline_unix:
+            raise TimeoutError("Training dispatch deadline elapsed during feature benchmark")
     started = perf_counter()
     # Commit completed artifacts periodically; the independent deadline also holds
     # while a volume commit is blocked.
@@ -278,6 +290,7 @@ def train(
     cs_mult_hidden: int = 32,
     trainer_args: str = "",
     spawn: bool = False,
+    feature_overlap: bool = False,
 ) -> None:
     """Local entrypoint: dispatch a training run on a Modal GPU worker.
 
@@ -309,6 +322,7 @@ def train(
         cs_mult_hidden=cs_mult_hidden,
         trainer_args=trainer_args,
         deadline_unix=time() + TIMEOUT_SECONDS,
+        feature_overlap=feature_overlap,
     )
     remote_training = cast(_ModalTrainingFunction, run_training)
     if spawn:

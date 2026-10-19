@@ -3,7 +3,7 @@
 Here eta is surface elevation and xi is surface velocity potential.
 Ordinary branches apply M[spatial_weights(eta) * M[xi]]; optional nested
 branches apply gamma M[eta N[eta M[xi]]], with real depth-dependent filters.
-The correction is self-adjoint,
+The tied-filter correction is self-adjoint,
 linear in xi. It starts at order eta^3 with G0+G1+G2, eta^2 with G0+G1,
 eta with G0 alone, or uses a constant feature to learn the full DNO.
 """
@@ -206,35 +206,12 @@ class CraigSulemDNO(nn.Module):
 
         return ((g0_term + dx_term) / self.target_scale).astype(xi_norm.dtype)
 
-    @nn.compact
-    def __call__(
-        self, inputs: jnp.ndarray, depth: jnp.ndarray, *, return_baseline: bool = False,
-    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
-        batch_size, grid_size, _ = inputs.shape
+    def _encode_surface(
+        self, eta_norm: jnp.ndarray, depth: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None]:
+        """Shared geometry trunk before the baseline-dependent Taylor gate."""
+        grid_size = eta_norm.shape[1]
         clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
-
-        eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
-        xi_phys = xi_norm * self.xi_scale
-
-        # Compute the analytic baseline in physical units, then normalize its output.
-        baseline = jnp.zeros_like(xi_norm)
-        if self.baseline_order >= 0:
-            baseline = self._linear_baseline(xi_norm, depth)
-        if self.baseline_order >= 1:
-            baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
-        m1_baseline = baseline
-        if self.baseline_order == 2:
-            # Retain M1 separately for training objectives that use fixed sample weights.
-            k64 = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
-                grid_size // 2 + 1, dtype=jnp.float64,
-            )
-            baseline = dno_series_eval(
-                (eta_norm * self.eta_scale).astype(jnp.float64),
-                xi_phys.astype(jnp.float64), k64,
-                jnp.exp(depth if self.baseline_true_depth else clipped_log_depth).astype(jnp.float64), order=2,
-            ) / self.target_scale
-
         # Build polynomial and spatial derivative features from eta.
         features = [eta_norm ** p for p in range(1, self.n_polys + 1)]
         if self.baseline_order == -1:
@@ -318,6 +295,38 @@ class CraigSulemDNO(nn.Module):
                     self.width // 2, name="eta_context_expand", use_bias=False,
                 )(context)
                 eta_features = eta_features + context
+        return eta_features, nested_features, polynomial_features, context
+
+    @nn.compact
+    def __call__(
+        self, inputs: jnp.ndarray, depth: jnp.ndarray, *, return_baseline: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        # Inputs: (batch, grid, 2) normalized [eta, xi]; depth: (batch, 1) log(h).
+        batch_size, grid_size, _ = inputs.shape
+        clipped_log_depth = jnp.minimum(depth, jnp.log(self.h_clip_max))
+
+        eta_norm, xi_norm = inputs[..., 0], inputs[..., 1]
+        xi_phys = xi_norm * self.xi_scale
+
+        # Compute the analytic baseline in physical units, then normalize its output.
+        baseline = jnp.zeros_like(xi_norm)
+        if self.baseline_order >= 0:
+            baseline = self._linear_baseline(xi_norm, depth)
+        if self.baseline_order >= 1:
+            baseline = baseline + self._g1_baseline(eta_norm, xi_norm, depth)
+        m1_baseline = baseline
+        if self.baseline_order == 2:
+            # Retain M1 separately for training objectives that use fixed sample weights.
+            k64 = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
+                grid_size // 2 + 1, dtype=jnp.float64,
+            )
+            baseline = dno_series_eval(
+                (eta_norm * self.eta_scale).astype(jnp.float64),
+                xi_phys.astype(jnp.float64), k64,
+                jnp.exp(depth if self.baseline_true_depth else clipped_log_depth).astype(jnp.float64), order=2,
+            ) / self.target_scale
+
+        eta_features, nested_features, polynomial_features, context = self._encode_surface(eta_norm, depth)
         # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
         # Preserve the analytic Taylor terms; a constant input removes this constraint.
         if self.baseline_order == 2:
@@ -366,3 +375,57 @@ class CraigSulemDNO(nn.Module):
         if return_baseline:
             return prediction, baseline[..., None], m1_baseline[..., None], correction[..., None]
         return prediction
+
+
+class CraigSulemTermsResidual(CraigSulemDNO):
+    """M3 plus a geometry-conditioned linear decoder of the four physical CS fields.
+
+    The residual starts at fourth order in eta and has zero spatial mean. Unlike
+    the tied-filter model, its spatially varying coefficients do not guarantee
+    self-adjointness. Split encoding/decoding permits a concurrent CPU term producer.
+    """
+    baseline_order: int = 3
+    baseline_true_depth: bool = True
+
+    @nn.compact
+    def encode_geometry(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
+        """Return (batch, grid, 4) geometry-only coefficients, independent of xi."""
+        eta_norm = inputs[..., 0]
+        features, _, _, _ = self._encode_surface(eta_norm, depth)
+        coefficients = nn.Dense(
+            4, use_bias=False, kernel_init=nn.initializers.zeros, name="terms_head",
+        )(features)
+        surface = (eta_norm / self.surface_feature_scales[0]
+                   if self.surface_feature_scales is not None else eta_norm)
+        gates = jnp.stack((surface**3, surface**2, surface, jnp.ones_like(surface)), axis=-1)
+        return coefficients * gates
+
+    def decode_terms(
+        self, coefficients: jnp.ndarray, terms_phys: jnp.ndarray, *, return_baseline: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Join encoded geometry with differentiable physical terms (batch, 4, grid)."""
+        terms_phys = terms_phys.astype(jnp.float64)
+        baseline = jnp.sum(terms_phys, axis=-2) / self.target_scale
+        m1_baseline = jnp.sum(terms_phys[..., :2, :], axis=-2) / self.target_scale
+        correction = jnp.sum(coefficients * jnp.swapaxes(terms_phys, -2, -1), axis=-1)
+        correction = (correction - jnp.mean(correction, axis=-1, keepdims=True)) / self.target_scale
+        prediction = (baseline + correction)[..., None]
+        if return_baseline:
+            return prediction, baseline[..., None], m1_baseline[..., None], correction[..., None]
+        return prediction
+
+    def __call__(
+        self, inputs: jnp.ndarray, depth: jnp.ndarray, *, terms_phys: jnp.ndarray | None = None,
+        return_baseline: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        coefficients = self.encode_geometry(inputs, depth)
+        if terms_phys is None:
+            k = (2.0 * jnp.pi / self.domain_length) * jnp.arange(
+                inputs.shape[1] // 2 + 1, dtype=jnp.float64,
+            )
+            terms_phys = dno_series_eval(
+                (inputs[..., 0] * self.eta_scale).astype(jnp.float64),
+                (inputs[..., 1] * self.xi_scale).astype(jnp.float64),
+                k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
+            )
+        return self.decode_terms(coefficients, terms_phys, return_baseline=return_baseline)

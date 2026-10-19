@@ -23,7 +23,7 @@ from flax import linen as nn
 from flax.core import freeze, unfreeze
 from flax.typing import FrozenVariableDict
 
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, DepthAwareMultiplier
+from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier
 from solver.solvers.dno_series_jax import dno_series_eval
 
 jax.config.update("jax_enable_x64", True)
@@ -1189,6 +1189,146 @@ def test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters() ->
                                _learned_residual(original, activated, eta, xi, depth), rtol=1e-3, atol=1e-12)
 
 
+def _terms_model() -> CraigSulemTermsResidual:
+    return CraigSulemTermsResidual(
+        width=32, surface_context_width=4,
+        surface_feature_scales=(0.1, 0.01, 0.001, 0.2, 1.0, 0.3, 0.1),
+        eta_scale=0.7, xi_scale=0.4, target_scale=0.6,
+    )
+
+
+def _active_terms_variables(
+    model: CraigSulemTermsResidual, inputs: jax.Array, depth: jax.Array,
+) -> FrozenVariableDict:
+    variables = unfreeze(model.init(jax.random.PRNGKey(27), inputs, depth))
+    kernel = variables["params"]["terms_head"]["kernel"]
+    variables["params"]["terms_head"]["kernel"] = 0.2 * jax.random.normal(
+        jax.random.PRNGKey(28), kernel.shape, dtype=kernel.dtype,
+    )
+    return freeze(variables)
+
+
+def _physical_terms(model: CraigSulemTermsResidual, inputs: jax.Array, depth: jax.Array) -> jax.Array:
+    k = (2 * jnp.pi / model.domain_length) * jnp.arange(inputs.shape[1] // 2 + 1, dtype=jnp.float64)
+    return dno_series_eval(
+        (inputs[..., 0] * model.eta_scale).astype(jnp.float64),
+        (inputs[..., 1] * model.xi_scale).astype(jnp.float64),
+        k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
+    )
+
+
+def test_terms_residual_zero_head_exact_m3_and_split_initialization() -> None:
+    eta, xi, _ = _state()
+    inputs = jnp.repeat(jnp.stack((eta, xi), axis=-1), 2, axis=0)
+    depth = jnp.log(jnp.asarray([[0.8], [8.0]], dtype=jnp.float64))
+    model = _terms_model()
+    terms = _physical_terms(model, inputs, depth)
+    key = jax.random.PRNGKey(27)
+    variables = model.init(key, inputs, depth)
+    encoded_variables = model.init(key, inputs, depth, method=model.encode_geometry)
+    assert jax.tree.structure(variables) == jax.tree.structure(encoded_variables)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(variables), jax.tree.leaves(encoded_variables), strict=True,
+    ))
+    assert not any(name.startswith("cs_block_") for name in variables["params"])
+    prediction, baseline, m1, correction = cast(tuple[jax.Array, ...], model.apply(
+        variables, inputs, depth, return_baseline=True,
+    ))
+    assert prediction.dtype == jnp.float64
+    assert jnp.array_equal(prediction, jnp.sum(terms, axis=-2)[..., None] / model.target_scale)
+    assert jnp.array_equal(prediction, baseline)
+    assert jnp.array_equal(m1, jnp.sum(terms[..., :2, :], axis=-2)[..., None] / model.target_scale)
+    assert jnp.all(correction == 0)
+    assert jnp.array_equal(prediction, cast(jax.Array, model.apply(
+        variables, inputs, depth, terms_phys=terms,
+    )))
+
+
+def test_terms_residual_split_forward_and_all_gradients() -> None:
+    eta, xi, depth = _state(32)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    model = _terms_model()
+    variables = _active_terms_variables(model, inputs, depth)
+
+    def split(params: Any, values: jax.Array, log_h: jax.Array) -> jax.Array:
+        coefficients = model.apply({"params": params}, values, log_h, method=model.encode_geometry)
+        return cast(jax.Array, model.apply(
+            {}, coefficients, _physical_terms(model, values, log_h), method=model.decode_terms,
+        ))
+
+    def native_loss(params: Any, values: jax.Array, log_h: jax.Array) -> jax.Array:
+        return jnp.sum(cast(jax.Array, model.apply({"params": params}, values, log_h)) ** 2)
+
+    def split_loss(params: Any, values: jax.Array, log_h: jax.Array) -> jax.Array:
+        return jnp.sum(split(params, values, log_h) ** 2)
+
+    args = (variables["params"], inputs, depth)
+    native = cast(jax.Array, model.apply(variables, inputs, depth))
+    assert jnp.array_equal(native, split(*args))
+    native_grads = jax.grad(native_loss, argnums=(0, 1, 2))(*args)
+    split_grads = jax.grad(split_loss, argnums=(0, 1, 2))(*args)
+    for expected, actual in zip(jax.tree.leaves(native_grads), jax.tree.leaves(split_grads), strict=True):
+        assert jnp.all(jnp.isfinite(actual))
+        assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-13)
+    assert jnp.linalg.norm(native_grads[0]["eta_feat_proj"]["kernel"]) > 0
+    assert jnp.linalg.norm(native_grads[1][..., 0]) > 0
+    assert jnp.linalg.norm(native_grads[1][..., 1]) > 0
+    assert jnp.linalg.norm(native_grads[2]) > 0
+    terms = _physical_terms(model, inputs, depth)
+    term_grads = jax.grad(lambda q: jnp.sum(cast(tuple[jax.Array, ...], model.apply(
+        variables, inputs, depth, terms_phys=q, return_baseline=True,
+    ))[3] ** 2))(terms)
+    assert jnp.all(jnp.isfinite(term_grads))
+    assert jnp.all(jnp.linalg.norm(term_grads, axis=-1) > 0)
+
+
+def test_terms_residual_formula_linearity_gauge_and_mean() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    model = _terms_model()
+    variables = _active_terms_variables(model, inputs, depth)
+    coefficients = cast(jax.Array, model.apply(variables, inputs, depth, method=model.encode_geometry))
+    assert jnp.all(jnp.linalg.norm(coefficients, axis=1) > 0)
+    terms = _physical_terms(model, inputs, depth)
+    raw = jnp.sum(coefficients * jnp.swapaxes(terms, -2, -1), axis=-1)
+    expected = (raw - jnp.mean(raw, axis=-1, keepdims=True)) / model.target_scale
+    prediction, _, _, residual = cast(tuple[jax.Array, ...], model.apply(
+        variables, inputs, depth, return_baseline=True,
+    ))
+    assert jnp.array_equal(residual[..., 0], expected)
+    assert jnp.linalg.norm(residual) > 1e-10
+    assert jnp.max(jnp.abs(jnp.mean(prediction, axis=1))) < 1e-14
+    assert jnp.max(jnp.abs(jnp.mean(residual, axis=1))) < 1e-14
+    shifted = inputs.at[..., 1].add(0.3)
+    assert jnp.array_equal(coefficients, cast(jax.Array, model.apply(
+        variables, shifted, depth, method=model.encode_geometry,
+    )))
+    assert jnp.allclose(prediction, cast(jax.Array, model.apply(variables, shifted, depth)), rtol=1e-11, atol=1e-13)
+    psi = jnp.roll(xi, 9, axis=-1)
+    other = cast(jax.Array, model.apply(variables, jnp.stack((eta, psi), axis=-1), depth))
+    combined = cast(jax.Array, model.apply(
+        variables, jnp.stack((eta, 0.3 * xi - 0.7 * psi), axis=-1), depth,
+    ))
+    assert jnp.allclose(combined, 0.3 * prediction - 0.7 * other, rtol=1e-11, atol=1e-13)
+
+
+def test_terms_residual_has_fourth_order_onset() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    model = _terms_model()
+    variables = _active_terms_variables(model, inputs, depth)
+    norms = [jnp.linalg.norm(_learned_residual(model, variables, scale * eta, xi, depth))
+             for scale in (0.04, 0.02, 0.01)]
+    assert all(float(value) > 1e-16 for value in norms)
+    assert all(14 < float(first / second) < 18 for first, second in zip(norms[:-1], norms[1:], strict=True))
+    value, first_variation = jax.jvp(
+        lambda surface: _learned_residual(model, variables, surface, xi, depth),
+        (jnp.zeros_like(eta),), (eta,),
+    )
+    assert jnp.all(value == 0)
+    assert jnp.all(first_variation == 0)
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -1226,6 +1366,10 @@ def main() -> int:
         test_multiplier_skip_preserves_initialization_and_operator_structure,
         test_log_multiplier_inputs_formula_initialization_and_gradients,
         test_log_multiplier_inputs_preserve_zero_head_prediction_and_parameters,
+        test_terms_residual_zero_head_exact_m3_and_split_initialization,
+        test_terms_residual_split_forward_and_all_gradients,
+        test_terms_residual_formula_linearity_gauge_and_mean,
+        test_terms_residual_has_fourth_order_onset,
     )
     for test in tests:
         test()
