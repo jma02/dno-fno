@@ -460,8 +460,10 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertGreater(correction_norm, 1e-7)
         self.assertTrue(bool(jnp.all(jnp.linalg.norm(terms, axis=(0, 2)) > 1e-10)))
         with patch("scripts.benchmark_classical.fft", side_effect=lambda values, n, inverse=False, **kwargs:
-                   (jnp.fft.irfft if inverse else jnp.fft.rfft)(values, n=n)):
-            for variant in ("terms_interleaved", "terms_interleaved_features"):
+                   (jnp.fft.irfft if inverse else jnp.fft.rfft)(values, n=n)) as native_fft, patch(
+            "scripts.benchmark_dno_fusion.fft", side_effect=native_fft,
+        ):
+            for variant in ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_features_cufftdx"):
                 with self.subTest(variant=variant):
                     actual = build_variant(loaded, depth, 32, variant)(physical[..., 0], physical[..., 1])
                     np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=3e-13)
@@ -830,8 +832,9 @@ class ComputeMetricsTest(unittest.TestCase):
             fast, "compute_macro_summary", return_value={},
         ), patch.object(fast, "_write_json"), patch.object(Path, "mkdir") as mkdir, patch("builtins.print"):
             for decoder, variant in ((True, None), (True, "terms_interleaved"),
-                                     (True, "terms_interleaved_features"), (False, "terms_interleaved"),
-                                     (False, "terms_interleaved_features")):
+                                     (True, "terms_interleaved_features"), (True, "terms_interleaved_features_cufftdx"),
+                                     (False, "terms_interleaved"), (False, "terms_interleaved_features"),
+                                     (False, "terms_interleaved_features_cufftdx")):
                 with self.subTest(decoder=decoder, variant=variant), patch("sys.argv", [
                     "eval_fast_rollouts", "--run-dir", str(directory), "--reference-dir", str(reference),
                     *(["--cs-terms-variant", variant] if variant else []),

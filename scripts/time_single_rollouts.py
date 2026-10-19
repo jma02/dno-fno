@@ -75,6 +75,7 @@ FUSION_VARIANTS["baseline-only"] = "cufftdx"
 FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 FUSION_VARIANTS["terms_interleaved"] = "terms_interleaved"
 FUSION_VARIANTS["terms_interleaved_features"] = "terms_interleaved_features"
+FUSION_VARIANTS["terms_interleaved_features_cufftdx"] = "terms_interleaved_features_cufftdx"
 METHODS = ("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS)
 
 

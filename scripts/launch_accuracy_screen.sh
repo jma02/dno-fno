@@ -12,7 +12,7 @@ reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s phase_direction|nested_features|cs_terms [...]\n' "$0" >&2
+    printf 'Usage: %s phase_direction|nested_features|cs_terms|cs_terms_w160 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
@@ -21,9 +21,13 @@ for arm in "$@"; do
     case "$arm" in
         phase_direction) arm_args=(--data_phase_projection_weight 1) ;;
         nested_features) arm_args=(--cs_nested_surface_features) ;;
-        cs_terms)
+        cs_terms|cs_terms_w160)
             arm_args=(--cs_terms_residual --cs_terms_cpu_prefetch --cs_nested_blocks 0)
             eval_args=()
+            if [[ "$arm" == cs_terms_w160 ]]; then
+                arm_args+=(--width 160)
+                eval_args=(--cs-terms-variant terms_interleaved_features_cufftdx)
+            fi
             export JAX_PLATFORMS=cuda,cpu
             ;;
         *) printf 'Unknown experiment: %s\n' "$arm" >&2; exit 2 ;;

@@ -51,7 +51,8 @@ def main() -> None:
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
-    parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features"),
+    parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features",
+                                                    "terms_interleaved_features_cufftdx"),
                         help="Use optimized FP64 pad2 CS-field inference; decoder only. Default: native.")
     parser.add_argument("--correction-grid", type=int, choices=(512, 1024), default=1024,
                         help="Learned correction grid; the analytic baseline and solver stay at 1024.")
