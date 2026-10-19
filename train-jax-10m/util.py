@@ -166,22 +166,24 @@ ArrayNormalizer = Callable[[jax.Array], jax.Array]
 NormalizerFunctions = tuple[InputNormalizer, ArrayNormalizer, ArrayNormalizer]
 
 
-def compute_log_depth(depth: np.ndarray) -> np.ndarray:
-    """Convert physical depth (B,) -> log-depth (B, 1) float32 for FiLM input."""
-    arr = np.asarray(depth, dtype=np.float32).reshape(-1, 1)
-    return np.log(np.clip(arr, 1e-12, None)).astype(np.float32)
+def compute_log_depth(depth: np.ndarray, dtype: np.dtype = np.dtype(np.float32)) -> np.ndarray:
+    """Convert physical depth (B,) to log-depth (B, 1)."""
+    arr = np.asarray(depth, dtype=dtype).reshape(-1, 1)
+    return np.log(np.clip(arr, 1e-12, None)).astype(dtype)
 
 
-def make_normalizers(stats: StatsDict, mode: str = "minmax") -> NormalizerFunctions:
+def make_normalizers(
+    stats: StatsDict, mode: str = "minmax", *, dtype: np.dtype = np.dtype(np.float32),
+) -> NormalizerFunctions:
     """Return (norm_inputs, norm_targets, denorm_targets) jit-compatible functions
-    that bake the stats as constants. Inputs/targets stay in fp32."""
+    that bake the stats as constants in the requested precision."""
     if mode == "scale":
         feature_absmax = np.asarray(
-            cast(Sequence[float], stats["feature_absmax"]), dtype=np.float32
+            cast(Sequence[float], stats["feature_absmax"]), dtype=dtype
         ).reshape((1, 1, 2))
         feat_scale = jnp.asarray(np.where(feature_absmax > 0, feature_absmax, 1.0))
         target_absmax = float(cast(float, stats["target_absmax"]))
-        tgt_scale = jnp.float32(target_absmax if target_absmax > 0 else 1.0)
+        tgt_scale = jnp.asarray(target_absmax if target_absmax > 0 else 1.0, dtype=dtype)
 
         def norm_inputs(eta: jax.Array, xi: jax.Array) -> jax.Array:
             stacked = jnp.stack((eta, xi), axis=-1)
@@ -195,7 +197,7 @@ def make_normalizers(stats: StatsDict, mode: str = "minmax") -> NormalizerFuncti
 
     else:
         feature_min, feature_max = (
-            np.asarray(cast(Sequence[float], stats[name]), dtype=np.float32).reshape(
+            np.asarray(cast(Sequence[float], stats[name]), dtype=dtype).reshape(
                 (1, 1, 2)
             )
             for name in ("feature_min", "feature_max")
@@ -204,8 +206,8 @@ def make_normalizers(stats: StatsDict, mode: str = "minmax") -> NormalizerFuncti
         feat_range = jnp.asarray(feature_max - feature_min + 1e-8)
         target_min = float(cast(float, stats["target_min"]))
         target_max = float(cast(float, stats["target_max"]))
-        tgt_min = jnp.float32(target_min)
-        tgt_range = jnp.float32(target_max - target_min + 1e-8)
+        tgt_min = jnp.asarray(target_min, dtype=dtype)
+        tgt_range = jnp.asarray(target_max - target_min + 1e-8, dtype=dtype)
 
         def norm_inputs(eta: jax.Array, xi: jax.Array) -> jax.Array:
             stacked = jnp.stack((eta, xi), axis=-1)
@@ -230,6 +232,7 @@ def get_batches(
     rng: np.random.Generator | None,
     *,
     device_count: int = 1,
+    physical_dtype: np.dtype | None = None,
 ) -> Iterator[RawBatchTuple]:
     """Yield raw (eta, xi, gxi, depth_log, indices) batches. Normalization happens
     on-device inside the jitted step. An indivisible tail is split into a sharded
@@ -247,10 +250,10 @@ def get_batches(
         ):
             if batch_indices.size:
                 yield (
-                    eta[batch_indices],
-                    _zero_mean_xi(xi[batch_indices]),
-                    gxi[batch_indices],
-                    compute_log_depth(depth[batch_indices]),
+                    np.asarray(eta[batch_indices], dtype=physical_dtype),
+                    _zero_mean_xi(np.asarray(xi[batch_indices], dtype=physical_dtype)),
+                    np.asarray(gxi[batch_indices], dtype=physical_dtype),
+                    compute_log_depth(depth[batch_indices], physical_dtype or np.dtype(np.float32)),
                     batch_indices,
                 )
 

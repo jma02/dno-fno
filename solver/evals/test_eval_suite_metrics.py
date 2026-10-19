@@ -35,6 +35,7 @@ from solver.evals.eval_suite import (  # noqa: E402
     run_family,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
+from solver.solvers.dno_series_jax import dno_series_eval  # noqa: E402
 from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
@@ -290,22 +291,23 @@ class ComputeMetricsTest(unittest.TestCase):
         model = CraigSulemTermsResidual(
             width=8, n_blocks=1, nested_blocks=0, latent=2, mult_hidden=4,
             surface_context_width=4, surface_feature_scales=surface_scales,
-            domain_length=4 * np.pi, eta_scale=0.5, xi_scale=0.25, target_scale=0.75,
+            domain_length=4 * np.pi, eta_scale=0.13719012345,
+            xi_scale=0.873501234567, target_scale=0.06123984567,
         )
-        x = 2 * jnp.pi * jnp.arange(32, dtype=jnp.float32) / 32
+        x = 2 * jnp.pi * jnp.arange(32, dtype=jnp.float64) / 32
         inputs = jnp.stack((
             jnp.stack((0.1 * jnp.cos(x), 0.08 * jnp.sin(2 * x)), axis=0),
-            jnp.stack((0.2 * jnp.sin(3 * x), 0.15 * jnp.cos(x)), axis=0),
+            jnp.stack((0.2 * jnp.sin(3 * x) + 4.25, 0.15 * jnp.cos(x) - 3.75), axis=0),
         ), axis=-1)
-        depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float64))
-        model_depth = depth.astype(jnp.float32)
-        raw_params = model.init(jax.random.PRNGKey(29), inputs, model_depth)["params"]
+        depth = jnp.log(jnp.asarray([[0.047123456789], [8.123456789]], dtype=jnp.float64))
+        raw_params = dict(model.init(jax.random.PRNGKey(29), inputs, depth)["params"])
+        self.assertTrue(all(value.dtype == jnp.float32 for value in jax.tree.leaves(raw_params)))
         kernel = cast(jax.Array, raw_params["terms_head"]["kernel"])
         ema_params = {**raw_params, "terms_head": {"kernel": jnp.linspace(
             -0.1, 0.2, kernel.size, dtype=jnp.float32,
         ).reshape(kernel.shape)}}
         expected_components = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], model.apply(
-            {"params": ema_params}, inputs, model_depth, return_baseline=True,
+            {"params": ema_params}, inputs, depth, return_baseline=True,
         ))
         prediction, baseline, m1, correction = expected_components
         np.testing.assert_array_equal(prediction, baseline + correction)
@@ -319,10 +321,37 @@ class ComputeMetricsTest(unittest.TestCase):
             "cs_use_first_deriv": True, "cs_use_second_deriv": True,
             "cs_use_half_deriv": True, "cs_use_hilbert": True,
             "cs_baseline_order": 3, "cs_baseline_true_depth": True,
-            "domain_length": 4 * np.pi, "eta_scale": 0.5, "xi_scale": 0.25, "target_scale": 0.75,
+            "domain_length": model.domain_length, "eta_scale": model.eta_scale,
+            "xi_scale": model.xi_scale, "target_scale": model.target_scale,
         }
-        stats = {"feature_absmax": [0.5, 0.25], "target_absmax": 0.75}
-        physical = inputs.astype(jnp.float64) * jnp.asarray(stats["feature_absmax"])
+        stats = {"feature_absmax": np.asarray([model.eta_scale, model.xi_scale], dtype=np.float32).tolist(),
+                 "target_absmax": float(np.float32(model.target_scale))}
+        physical = inputs * jnp.asarray([model.eta_scale, model.xi_scale], dtype=jnp.float64)
+        k = (2 * jnp.pi / model.domain_length) * jnp.arange(17, dtype=jnp.float64)
+        for center_xi in (False, True):
+            potential = physical[..., 1]
+            if center_xi:
+                potential = potential - potential.mean(axis=-1, keepdims=True)
+            terms = dno_series_eval(physical[..., 0], potential, k, jnp.exp(depth),
+                                    order=3, pad_factor=2, return_terms=True)
+            expected_m3 = terms.sum(axis=-2)
+            expected_m3 -= expected_m3.mean(axis=-1, keepdims=True)
+            zero_head = build_predict_gxi_batched(
+                LoadedRun(model, raw_params, config, stats, "scale", 0), center_xi=center_xi,
+            )(physical[..., 0], physical[..., 1], depth)
+            self.assertEqual(zero_head.dtype, jnp.float64)
+            np.testing.assert_allclose(zero_head, expected_m3, rtol=3e-12, atol=3e-14)
+            normalized = jnp.stack((physical[..., 0] / model.eta_scale, potential / model.xi_scale), axis=-1)
+            encoded = cast(jax.Array, jax.jit(partial(
+                model.apply, {"params": ema_params}, method=model.encode_geometry,
+            ))(normalized, depth))
+            self.assertEqual(encoded.dtype, jnp.float32)
+            split = cast(jax.Array, model.apply({}, encoded, terms, method=model.decode_terms))[..., 0] * model.target_scale
+            split -= split.mean(axis=-1, keepdims=True)
+            actual = build_predict_gxi_batched(
+                LoadedRun(model, ema_params, config, stats, "scale", 17), center_xi=center_xi,
+            )(physical[..., 0], physical[..., 1], depth)
+            np.testing.assert_allclose(actual, split, rtol=3e-12, atol=3e-14)
         reference = build_predict_gxi_batched(LoadedRun(model, ema_params, config, stats, "scale", 17))
         selections: tuple[Literal["weight_ema", "best_weight_ema"], ...] = ("weight_ema", "best_weight_ema")
         for selection in selections:
@@ -347,18 +376,18 @@ class ComputeMetricsTest(unittest.TestCase):
             np.testing.assert_array_equal(loaded.params["terms_head"]["kernel"], ema_params["terms_head"]["kernel"])
             self.assertFalse(any(name.startswith("cs_block_") for name in loaded.params))
             actual_components = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], loaded.model.apply(
-                {"params": loaded.params}, inputs, model_depth, return_baseline=True,
+                {"params": loaded.params}, inputs, depth, return_baseline=True,
             ))
             for actual, expected in zip(actual_components, expected_components, strict=True):
                 np.testing.assert_array_equal(actual, expected)
             np.testing.assert_array_equal(
-                loaded.model.apply({"params": loaded.params}, inputs, model_depth), prediction,
+                loaded.model.apply({"params": loaded.params}, inputs, depth), prediction,
             )
             actual = build_predict_gxi_batched(loaded)(physical[..., 0], physical[..., 1], depth)
             np.testing.assert_array_equal(actual, reference(physical[..., 0], physical[..., 1], depth))
-            expected = prediction[..., 0] * stats["target_absmax"]
+            expected = cast(jax.Array, jax.jit(model.apply)({"params": ema_params}, inputs, depth))[..., 0] * model.target_scale
             np.testing.assert_allclose(actual, expected - expected.mean(axis=-1, keepdims=True),
-                                       rtol=2e-6, atol=1e-8)
+                                       rtol=3e-12, atol=3e-14)
 
     def test_cached_fourier_multiplier_skip_matches_nonzero_native_branches(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant

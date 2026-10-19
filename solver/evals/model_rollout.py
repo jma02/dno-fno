@@ -159,15 +159,20 @@ def build_predict_gxi_batched(
     ``(batch,)`` or ``(batch, 1)``. The returned field is mean-free per sample.
     With ``center_xi``, remove the physical potential's mean before conversion
     to float32, so a gauge offset cannot change the network's rounded inputs.
+    The CS-term decoder keeps physical normalization in float64; only its
+    geometry encoder uses float32.
     """
-    model_dtype = jnp.float32
+    terms_residual = bool(loaded.config.get("cs_terms_residual", False))
+    model_dtype = jnp.float64 if terms_residual else jnp.float32
     feature_min = target_min = 0.0
     if loaded.norm_mode == "scale":
         feature_scale = jnp.asarray(
+            (loaded.model.eta_scale, loaded.model.xi_scale) if terms_residual else
             loaded.stats["feature_absmax"], dtype=model_dtype
         ).reshape(1, 1, 2)
         feature_scale = jnp.where(feature_scale > 0, feature_scale, 1.0)
-        target_scale = float(loaded.stats["target_absmax"]) or 1.0
+        target_scale = (float(loaded.model.target_scale) if terms_residual else
+                        float(loaded.stats["target_absmax"]) or 1.0)
 
     elif loaded.norm_mode == "minmax":
         feature_min = jnp.asarray(

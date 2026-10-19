@@ -261,7 +261,7 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
     )
     namespace: dict[str, Any] = dict(
         jax=jax, jnp=jnp, FlatParams=Any, cast=cast, args=config, model=model,
-        training_dtype=jnp.float32, PhysicalFamilyId=PhysicalFamilyId, apply_model=apply_model,
+        training_dtype=jnp.float32, physical_dtype=jnp.float32, PhysicalFamilyId=PhysicalFamilyId, apply_model=apply_model,
         norm_inputs_jax=normalize_inputs, norm_targets_jax=normalize_targets,
         denorm_targets_jax=denormalize_targets,
         log_h_max=np.log(5), k_rfft_jax=jnp.arange(nx // 2 + 1, dtype=jnp.float32),
@@ -361,6 +361,7 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
 
     for dtype in (jnp.float32, jnp.float64):
         namespace["training_dtype"] = dtype
+        namespace["physical_dtype"] = dtype
         target = (amplitude * (jnp.cos(3 * x) + 0.3 * jnp.sin(7 * x))).astype(dtype)
         cases = (
             (2 * np.pi, None, jnp.cos(4 * x), jnp.cos(4 * x), np.sqrt(5)),
@@ -474,6 +475,7 @@ def test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmet
 
     for dtype in (jnp.float32, jnp.float64):
         namespace["training_dtype"] = dtype
+        namespace["physical_dtype"] = dtype
         tolerance = 5e-6 if dtype == jnp.float32 else 3e-12
         target = (amplitude * (jnp.cos(3 * x) + 0.3 * jnp.sin(7 * x))).astype(dtype)
         cases = (
@@ -847,7 +849,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
                         PhysicalFamilyId.TANAKA, PhysicalFamilyId.TANAKA, PhysicalFamilyId.STOKES])
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config, "cast": cast,
-        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "training_dtype": jnp.float64, "physical_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: (target[..., None] - 7.0) / 4.0,
         "denorm_targets_jax": lambda target: target * 4.0 + 7.0,
@@ -964,10 +966,12 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
 
     nx = 16
     x = 2 * jnp.pi * jnp.arange(nx) / nx
-    inputs = jnp.stack((0.02 * jnp.cos(x), 0.03 * jnp.sin(2 * x)), axis=-1)[None].astype(jnp.float32)
-    depth = jnp.log(jnp.asarray([[0.7]], dtype=jnp.float32))
+    inputs = jnp.stack((0.02 * jnp.cos(x), 0.03 * jnp.sin(2 * x)), axis=-1)[None].astype(jnp.float64)
+    depth = jnp.log(jnp.asarray([[0.712345678901]], dtype=jnp.float64))
     model = CraigSulemTermsResidual(width=8, surface_context_width=2,
-                                   surface_feature_scales=(1.0,) * 7)
+                                   surface_feature_scales=(1.0,) * 7,
+                                   eta_scale=0.134123456789, xi_scale=0.317123456789,
+                                   target_scale=0.797123456789)
     params = dict(model.init(jax.random.PRNGKey(7), inputs, depth)["params"])
     kernel = cast(jax.Array, params["terms_head"]["kernel"])
     params["terms_head"]["kernel"] = 0.1 * jax.random.normal(
@@ -990,9 +994,10 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
         prediction = cast(jax.Array, apply({"params": parameters}, inputs, depth))
         hadamard = compute_hadamard_loss(
             rng=jax.random.PRNGKey(9), apply_fn=apply, model_params=parameters,
-            eta_phys=inputs[..., 0], xi_phys=inputs[..., 1], batch_depth_local=depth,
-            norm_inputs_fn=lambda eta, xi: jnp.stack((eta, xi), axis=-1),
-            denorm_targets_fn=lambda values: values,
+            eta_phys=inputs[..., 0] * model.eta_scale, xi_phys=inputs[..., 1] * model.xi_scale,
+            batch_depth_local=depth,
+            norm_inputs_fn=lambda eta, xi: jnp.stack((eta / model.eta_scale, xi / model.xi_scale), axis=-1),
+            denorm_targets_fn=lambda values: values * model.target_scale,
             k=jnp.fft.fftfreq(nx) * nx, dtype=jnp.float64, k_max=5,
         )
         return jnp.sum(prediction**2) + 0.04 * hadamard
@@ -1005,6 +1010,85 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients() -> None:
         np.testing.assert_array_equal(value, reference)
     assert float(jnp.linalg.norm(through_trainer[1]["terms_head"]["kernel"])) > 0
     assert float(jnp.linalg.norm(through_trainer[1]["eta_feat_proj"]["kernel"])) > 0
+
+
+def test_terms_full_loss_preserves_physical_m3_and_teacher_precision() -> None:
+    from hadamard_shape_regularizer import compute_hadamard_loss
+    from solver.evals.model_rollout import rollout_surrogate
+    from solver.solvers import time_integrator as ti
+    from solver.solvers.dno_series_jax import dno_series_eval
+    from util import make_normalizers
+
+    nx = 32
+    x = 2 * jnp.pi * jnp.arange(nx, dtype=jnp.float64) / nx
+    eta, xi = (0.012 * jnp.cos(x))[None], (0.021 * jnp.sin(x))[None]
+    depth = jnp.log(jnp.asarray([[0.712345678901]], dtype=jnp.float64))
+    model = CraigSulemTermsResidual(
+        width=8, surface_context_width=2, surface_feature_scales=(1.0,) * 7,
+        eta_scale=0.134123456789, xi_scale=0.317123456789, target_scale=0.797123456789,
+    )
+    norm_inputs, norm_targets, denorm_targets = make_normalizers(
+        {"feature_absmax": [model.eta_scale, model.xi_scale], "target_absmax": model.target_scale},
+        "scale", dtype=np.dtype(np.float64),
+    )
+    params = model.init(jax.random.PRNGKey(7), norm_inputs(eta, xi), depth)["params"]
+    config = SimpleNamespace(
+        model="cs_dno", cs_terms_residual=True, fp64_residual=False,
+        data_k_max=128, data_normalization="target", residual_floor=1e-6,
+        data_xi_projection_weight=0.0, data_phase_projection_weight=0.0, subtract_before_fft=False,
+        mode_balanced_weight=6.0, mode_balanced_k_max=128,
+        mode_balanced_activity_threshold=1e-6, mode_balanced_denominator_eps=1e-12,
+        jonswap_mode_balanced_scale=1.0, translation_tangent_weight=10.0,
+        translation_tangent_scope="tanaka", translation_tangent_geometry="local",
+        translation_tangent_denominator_eps=1e-12, translation_tangent_loss_norm="l2",
+        translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
+        stokes_relative_tangent=False, subtract_before_centering=False, phase_mechanism="all_momentum",
+    )
+    namespace: dict[str, Any] = dict(
+        jax=jax, jnp=jnp, cast=cast, Any=Any, FlatParams=Any, args=config, model=model,
+        training_dtype=jnp.float32, physical_dtype=jnp.float64, PhysicalFamilyId=PhysicalFamilyId,
+        norm_inputs_jax=norm_inputs, norm_targets_jax=norm_targets, denorm_targets_jax=denorm_targets,
+        k_grid_jax=jnp.fft.fftfreq(nx) * nx, k_rfft_jax=jnp.arange(nx // 2 + 1), log_h_max=np.log(5),
+        compute_mode_balanced_loss=compute_mode_balanced_loss,
+        compute_translation_tangent_loss=compute_translation_tangent_loss,
+        compute_phase_mechanism_loss=compute_phase_mechanism_loss,
+    )
+    exec(compile(ast.Module(body=[trainer_function("apply_model"), trainer_function("compute_loss_components")],
+                            type_ignores=[]), "terms_physical_loss", "exec"), namespace)
+    components = jax.vmap(namespace["compute_loss_components"], in_axes=(None, 0, 0, 0, 0, 0), axis_name="batch")
+    target = dno_series_eval(eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=3, pad_factor=2)
+    family = jnp.asarray([PhysicalFamilyId.TANAKA])
+    exact = components(params, *(value[None] for value in (eta, xi, target, depth, family)))
+    assert float(exact[0][0]) < 1e-12 and float(exact[5][0]) < 1e-12
+
+    trajectory = rollout_surrogate(
+        ti.State(eta, xi), jnp.asarray([0.0, 0.02]), ti.make_solver_params(nx, 2 * np.pi, jnp.exp(depth)),
+        lambda e, z: denorm_targets(cast(jax.Array, model.apply({"params": params}, norm_inputs(e, z), depth)))[..., 0],
+        substeps=2,
+    )
+    generated = tuple(map(jax.lax.stop_gradient, compute_dno_target(
+        trajectory["eta"][-1], trajectory["xi"][-1], jnp.exp(depth), nx=nx, length=2 * np.pi,
+        dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+    )))
+    assert all(value.dtype == jnp.float64 for value in generated)
+
+    def loss(parameters: dict[str, Any]) -> jax.Array:
+        data, mode, tangent, momentum, _, _, _ = components(
+            parameters, *(value[None] for value in (*generated, depth, family)),
+        )
+        hadamard = compute_hadamard_loss(
+            rng=jax.random.PRNGKey(11), apply_fn=namespace["apply_model"], model_params=parameters,
+            eta_phys=generated[0], xi_phys=generated[1], batch_depth_local=depth,
+            norm_inputs_fn=norm_inputs, denorm_targets_fn=denorm_targets,
+            k=namespace["k_grid_jax"], dtype=jnp.float64, k_max=12,
+        )
+        return jnp.sum(data + 6 * mode + 10 * tangent + 0.002574349830754761 * momentum) + 0.04 * hadamard
+
+    value, gradients = jax.jit(jax.value_and_grad(loss))(params)
+    assert jnp.isfinite(value) and value > 0
+    assert all(jnp.all(jnp.isfinite(gradient)) for gradient in jax.tree.leaves(gradients))
+    assert float(jnp.linalg.norm(gradients["terms_head"]["kernel"])) > 0
+    assert all(gradient.dtype == jnp.float32 for gradient in jax.tree.leaves(gradients))
 
 
 def test_learning_rate_hold_schedule_and_validation() -> None:
@@ -1493,7 +1577,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "Any": Any, "cast": cast, "FlatParams": Any, "args": config,
-        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "training_dtype": jnp.float64, "physical_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda e, p: jnp.stack((e, p), axis=-1),
         "norm_targets_jax": lambda q: q[..., None], "denorm_targets_jax": lambda q: q,
         "log_h_max": np.log(5.0), "k_grid_jax": jnp.fft.fftfreq(nx) * nx,
@@ -1893,7 +1977,7 @@ def test_hadamard_flow_probes_route_only_training_physical_targets() -> None:
     hadamard, local = Mock(return_value=jnp.float64(0.125)), Mock(return_value=jnp.float64(0.25))
     namespace.update(
         jax=jax, jnp=jnp, partial=partial, FlatParams=Any, args=config,
-        training_dtype=jnp.float32, hadamard_microbatch_local=3, domain_length=2 * np.pi,
+        training_dtype=jnp.float32, physical_dtype=jnp.float32, hadamard_microbatch_local=3, domain_length=2 * np.pi,
         compute_hadamard_loss=hadamard, compute_local_response_loss=local,
         apply_model=object(), norm_inputs_jax=object(), denorm_targets_jax=object(),
         k_grid_jax=jnp.fft.fftfreq(32) * 32, current_params=object(),
@@ -1928,6 +2012,12 @@ def test_hadamard_flow_probes_route_only_training_physical_targets() -> None:
         assert namespace["hadamard_loss_on_subset"](key, {}, eta, xi, depth) == 0.25
         assert local.call_args.kwargs["mode"] == mode
         assert "flow_target" not in local.call_args.kwargs
+    namespace["physical_dtype"] = jnp.float64
+    config.hadamard_mode = "self"
+    namespace["hadamard_loss_on_subset"](key, {}, eta, xi, depth)
+    indices = jax.random.permutation(jax.random.split(key)[0], eta.shape[0])[:3]
+    for name, original in (("eta_phys", eta), ("xi_phys", xi), ("batch_depth_local", depth)):
+        np.testing.assert_array_equal(hadamard.call_args.kwargs[name], original[indices])
 
 
 def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() -> None:
@@ -1962,7 +2052,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "args": config, "cast": cast,
-        "training_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
+        "training_dtype": jnp.float64, "physical_dtype": jnp.float64, "PhysicalFamilyId": PhysicalFamilyId,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
         "denorm_targets_jax": lambda target: target * 4,
@@ -2083,7 +2173,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
     namespace.update(
         jax=jax, jnp=jnp, FlatParams=Any, compute_loss_components=components,
         current_state=SimpleNamespace(step=0), train_steps_per_epoch=100,
-        training_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
+        training_dtype=jnp.float64, physical_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
         batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None,
     )
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
@@ -2164,7 +2254,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
 
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace, "cast": cast,
-        "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64,
+        "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64, "physical_dtype": jnp.float64,
         "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
@@ -2319,7 +2409,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "SimpleNamespace": SimpleNamespace, "args": config,
         "nx": nx, "domain_length": 2 * np.pi, "n_devices": 1, "train_steps_per_epoch": 16,
-        "training_dtype": jnp.float32, "apply_model": apply_model, "ti": ti, "cast": cast,
+        "training_dtype": jnp.float32, "physical_dtype": jnp.float32, "apply_model": apply_model, "ti": ti, "cast": cast,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "denorm_targets_jax": lambda prediction: prediction * 4,
         "rollout_surrogate": rollout, "compute_dno_target": teacher,
@@ -2416,6 +2506,20 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     config.poison = False
     namespace["n_devices"] = 2
     assert prepare_amplitude(params, active_step, *fields)[0][0].shape == (size // 2, nx)
+    namespace.update(n_devices=1, physical_dtype=jnp.float64)
+    fields64 = (*map(jnp.float64, fields[:4]), family)
+    output64 = prepare(params, active_step, *fields64)
+    assert all(value.dtype == jnp.float64 for value in output64[:3])
+    reference64 = compute_dno_target(
+        output64[0], output64[1], jnp.exp(fields64[3]), nx=nx, length=2 * np.pi,
+        dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+    )[2]
+    np.testing.assert_allclose(output64[2], reference64, rtol=1e-11, atol=1e-13)
+    assert np.any(np.asarray(output64[2]) != np.asarray(output64[2].astype(jnp.float32)))
+    for derivative in jax.jvp(
+        lambda p: prepare(p, active_step, *fields64)[:3], (params,), (jnp.ones_like(params),),
+    )[1]:
+        np.testing.assert_array_equal(derivative, 0)
     config.amplitude_probe_scale = 0.0
     assert prepare_amplitude(params, active_step, *fields)[0] is None
 
@@ -2460,7 +2564,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
         return *losses, jnp.float64(1.0), losses[0], ()
 
     namespace.update(
-        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64,
+        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64, physical_dtype=jnp.float64,
         current_state=SimpleNamespace(step=32), train_steps_per_epoch=32,
         compute_loss_components=components, apply_model=apply_model,
         norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
@@ -2534,7 +2638,7 @@ def test_amplitude_probe_retained_band_values_and_gradients() -> None:
                 + amplitude * (p[1] * modes[1, :, None] + p[2] * modes[2, :, None]))
 
     namespace: dict[str, Any] = dict(
-        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64,
+        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, training_dtype=jnp.float64, physical_dtype=jnp.float64,
         apply_model=apply_model, norm_inputs_jax=lambda e, z: jnp.stack((e, z), axis=-1),
         norm_targets_jax=lambda q: q[..., None], depth_sub=jnp.zeros((1, 1)),
         # The denominator remains the full original-target norm, including mode 257.
@@ -2583,6 +2687,7 @@ if __name__ == "__main__":
     test_tangent_geometry_wiring_and_uneven_shard_reduction()
     test_terms_selector_canonicalizes_m3_and_rejects_unused_blocks()
     test_terms_trainer_apply_preserves_native_and_hadamard_gradients()
+    test_terms_full_loss_preserves_physical_m3_and_teacher_precision()
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()

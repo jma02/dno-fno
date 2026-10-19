@@ -567,6 +567,7 @@ def main() -> None:
     start_time = perf_counter()
 
     training_dtype = jnp.float32
+    physical_dtype = jnp.float64 if args.cs_terms_residual else training_dtype
 
     # Split batches across GPUs, but keep a full model/optimizer copy on each GPU.
     backend = jax.default_backend()
@@ -621,7 +622,7 @@ def main() -> None:
     domain_length = float(dataset["domain_length"])
     # Physical-unit scaling for both models' analytic DNO terms, matched to norm=scale.
     feature_scale = np.asarray(
-        cast(list[float], stats["feature_absmax"]), dtype=np.float32
+        cast(list[float], stats["feature_absmax"]), dtype=physical_dtype
     )
     eta_scale, xi_scale = map(float, np.where(feature_scale > 0, feature_scale, 1.0))
     target_absmax = float(cast(float, stats["target_absmax"]))
@@ -883,13 +884,13 @@ def main() -> None:
         json.dump(config_payload, handle, indent=2)
 
     norm_inputs_jax, norm_targets_jax, denorm_targets_jax = make_normalizers(
-        stats, args.norm
+        stats, args.norm, dtype=np.dtype(physical_dtype),
     )
 
     log_h_max = float(np.log(5.0))
     hadamard_microbatch_local = args.hadamard_microbatch // n_devices
     _, _k_grid = build_grid(nx, domain_length)
-    k_grid_jax = jnp.asarray(_k_grid, dtype=training_dtype)
+    k_grid_jax = jnp.asarray(_k_grid, dtype=physical_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
 
     # Full-batch losses shared by training and validation.
@@ -919,7 +920,7 @@ def main() -> None:
                                              physical_depth64, method=model._g1_baseline))
             )[..., None]
             target_residual64 = norm_targets_jax(gxi.astype(jnp.float64)) - baseline64
-        eta, xi, gxi, batch_depth = map(training_dtype, (eta, xi, gxi, batch_depth))
+        eta, xi, gxi, batch_depth = map(physical_dtype, (eta, xi, gxi, batch_depth))
         batch_targets = norm_targets_jax(gxi)
         predictions, baseline, m1_baseline, correction = apply_model(
             {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
@@ -1133,9 +1134,9 @@ def main() -> None:
         sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
             :hadamard_microbatch_local
         ]
-        eta_sub = eta.astype(training_dtype)[sample_indices]
-        xi_sub = xi.astype(training_dtype)[sample_indices]
-        batch_depth_sub = batch_depth.astype(training_dtype)[sample_indices].astype(jnp.float64)
+        eta_sub = eta.astype(physical_dtype)[sample_indices]
+        xi_sub = xi.astype(physical_dtype)[sample_indices]
+        batch_depth_sub = batch_depth.astype(physical_dtype)[sample_indices].astype(jnp.float64)
         response_loss = partial(
             compute_hadamard_loss,
             flow_target=flow_target[sample_indices] if flow_target is not None else None,
@@ -1267,8 +1268,8 @@ def main() -> None:
                 def predict_frozen(eta_phys: jax.Array, xi_phys: jax.Array) -> jax.Array:
                     prediction = apply_model(
                         {"params": frozen_params},
-                        norm_inputs_jax(training_dtype(eta_phys), training_dtype(xi_phys)),
-                        training_dtype(rollout_depth),
+                        norm_inputs_jax(physical_dtype(eta_phys), physical_dtype(xi_phys)),
+                        physical_dtype(rollout_depth),
                     )
                     physical = denorm_targets_jax(prediction)[..., 0].astype(jnp.float64)
                     return physical - jnp.mean(physical, axis=-1, keepdims=True)
@@ -1390,19 +1391,19 @@ def main() -> None:
                     def compute_amplitude_loss(p: FlatParams) -> jax.Array:
                         prediction = apply_model(
                             {"params": p},
-                            norm_inputs_jax(training_dtype(probe_eta), training_dtype(probe_xi)),
-                            training_dtype(depth_sub),
+                            norm_inputs_jax(physical_dtype(probe_eta), physical_dtype(probe_xi)),
+                            physical_dtype(depth_sub),
                         )
                         error_hat = (
                             jnp.fft.rfft(prediction, axis=1)
-                            - jnp.fft.rfft(norm_targets_jax(training_dtype(probe_target)), axis=1)
+                            - jnp.fft.rfft(norm_targets_jax(physical_dtype(probe_target)), axis=1)
                         ).astype(jnp.complex128)
                         # M6 labels stop at 128; G1's out-of-band tail scales as lambda, not lambda squared.
                         error_hat = jnp.where((k_rfft_jax <= 128.0)[None, :, None], error_hat, 0.0)
                         squared_error = jnp.sum(jnp.abs(error_hat) ** 2, axis=(1, 2))
                         zero_error = squared_error == 0.0
                         error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
-                        source_hat = jnp.fft.rfft(norm_targets_jax(training_dtype(gxi[:probe_eta.shape[0]])), axis=1)
+                        source_hat = jnp.fft.rfft(norm_targets_jax(physical_dtype(gxi[:probe_eta.shape[0]])), axis=1)
                         denominator = jax.lax.stop_gradient(args.amplitude_probe_scale**2 * jnp.sqrt(jnp.maximum(
                             jnp.sum(jnp.abs(source_hat.astype(jnp.complex128)) ** 2, axis=(1, 2)), 1e-12,
                         )))
@@ -1583,6 +1584,7 @@ def main() -> None:
             args.batch_size,
             rng,
             device_count=n_devices,
+            physical_dtype=np.dtype(physical_dtype) if args.cs_terms_residual else None,
         )
         return device_prefetch(
             ((*batch[:4], family_ids[batch[4]] if phase_modes is None else

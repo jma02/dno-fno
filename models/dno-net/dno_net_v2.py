@@ -390,8 +390,8 @@ class CraigSulemTermsResidual(CraigSulemDNO):
     @nn.compact
     def encode_geometry(self, inputs: jnp.ndarray, depth: jnp.ndarray) -> jnp.ndarray:
         """Return (batch, grid, 4) geometry-only coefficients, independent of xi."""
-        eta_norm = inputs[..., 0]
-        features, _, _, _ = self._encode_surface(eta_norm, depth)
+        eta_norm = inputs[..., 0].astype(jnp.float32)
+        features, _, _, _ = self._encode_surface(eta_norm, depth.astype(jnp.float32))
         coefficients = nn.Dense(
             4, use_bias=False, kernel_init=nn.initializers.zeros, name="terms_head",
         )(features)
@@ -424,8 +424,8 @@ class CraigSulemTermsResidual(CraigSulemDNO):
                 inputs.shape[1] // 2 + 1, dtype=jnp.float64,
             )
             terms_phys = dno_series_eval(
-                (inputs[..., 0] * self.eta_scale).astype(jnp.float64),
-                (inputs[..., 1] * self.xi_scale).astype(jnp.float64),
+                inputs[..., 0].astype(jnp.float64) * self.eta_scale,
+                inputs[..., 1].astype(jnp.float64) * self.xi_scale,
                 k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
             )
         return self.decode_terms(coefficients, terms_phys, return_baseline=return_baseline)

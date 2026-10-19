@@ -188,6 +188,50 @@ def test_normalizers_preserve_both_modes_and_constant_fields() -> None:
             )
 
 
+def test_physical_batches_and_normalizers_keep_fp64_arithmetic() -> None:
+    eta = np.asarray([[0.031, -0.019, 0.047], [0.008, -0.013, 0.023]], dtype=np.float32)
+    xi = np.asarray([[1.0, 1.00000012, 0.99999976], [0.31, -0.17, 0.11]], dtype=np.float32)
+    target = eta * np.float32(0.37)
+    depth = np.asarray([0.1234567890123, 7.1234567890123], dtype=np.float64)
+    rows = np.arange(2)
+    original = tuple(array.copy() for array in (eta, xi, target, depth))
+    for dtype in (None, np.dtype(np.float64)):
+        batch = next(get_batches(eta, xi, target, depth, rows, 2, None, physical_dtype=dtype))
+        expected_dtype = np.float32 if dtype is None else np.float64
+        expected_xi = xi.astype(expected_dtype)
+        expected_xi -= expected_xi.mean(axis=1, keepdims=True)
+        expected_depth = np.log(np.clip(depth.astype(expected_dtype), 1e-12, None))[:, None]
+        np.testing.assert_array_equal(batch[0], eta.astype(expected_dtype))
+        np.testing.assert_array_equal(batch[1], expected_xi)
+        np.testing.assert_array_equal(batch[2], target.astype(expected_dtype))
+        np.testing.assert_array_equal(batch[3], expected_depth)
+        assert all(field.dtype == expected_dtype for field in batch[:4])
+    assert np.linalg.norm(batch[1] - (xi - xi.mean(axis=1, keepdims=True))) > 0
+    assert np.linalg.norm(batch[3] - np.log(depth.astype(np.float32))[:, None]) > 0
+    for actual, expected in zip((eta, xi, target, depth), original, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    feature_scales, target_scale = np.asarray([0.134123456789, 0.317123456789]), 0.797123456789
+    stats = {"feature_absmax": feature_scales.tolist(), "target_absmax": target_scale}
+    normalize32, normalize_target32, denormalize32 = make_normalizers(stats, "scale")
+    scales32 = jnp.asarray(feature_scales, dtype=jnp.float32).reshape(1, 1, 2)
+    target_scale32 = jnp.float32(target_scale)
+    expected32 = jax.jit(lambda e, z: jnp.stack((e, z), axis=-1) / scales32)(eta, xi)
+    np.testing.assert_array_equal(jax.jit(normalize32)(eta, xi), expected32)
+    expected_target32 = jax.jit(lambda q: q[..., None] / target_scale32)(target)
+    np.testing.assert_array_equal(jax.jit(normalize_target32)(target), expected_target32)
+    np.testing.assert_array_equal(jax.jit(denormalize32)(expected_target32), expected_target32 * target_scale32)
+    with jax.enable_x64(True):
+        normalize, normalize_target, denormalize = make_normalizers(stats, "scale", dtype=np.dtype(np.float64))
+        features = jax.jit(normalize)(jnp.asarray(batch[0]), jnp.asarray(batch[1]))
+        targets = jax.jit(normalize_target)(jnp.asarray(batch[2]))
+        expected_features = np.stack(batch[:2], axis=-1) / feature_scales
+        expected_targets = batch[2][..., None] / target_scale
+        assert features.dtype == targets.dtype == jnp.float64
+        np.testing.assert_allclose(features, expected_features, rtol=2e-16, atol=1e-17)
+        np.testing.assert_allclose(targets, expected_targets, rtol=2e-16, atol=1e-17)
+        np.testing.assert_allclose(jax.jit(denormalize)(targets)[..., 0], batch[2], rtol=3e-16)
+
+
 def test_prefetch_preserves_batches_and_producer_exceptions() -> None:
     mesh = jax.sharding.Mesh(np.asarray(jax.local_devices()), axis_names=("batch",))
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
@@ -287,6 +331,7 @@ def test_surface_feature_rms_uses_normalized_training_rows() -> None:
 def main() -> int:
     test_loads_readonly_arrays_and_keeps_simulation_splits()
     test_normalizers_preserve_both_modes_and_constant_fields()
+    test_physical_batches_and_normalizers_keep_fp64_arithmetic()
     test_prefetch_preserves_batches_and_producer_exceptions()
     test_surface_feature_rms_uses_normalized_training_rows()
     print(

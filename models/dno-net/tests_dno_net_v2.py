@@ -1211,8 +1211,8 @@ def _active_terms_variables(
 def _physical_terms(model: CraigSulemTermsResidual, inputs: jax.Array, depth: jax.Array) -> jax.Array:
     k = (2 * jnp.pi / model.domain_length) * jnp.arange(inputs.shape[1] // 2 + 1, dtype=jnp.float64)
     return dno_series_eval(
-        (inputs[..., 0] * model.eta_scale).astype(jnp.float64),
-        (inputs[..., 1] * model.xi_scale).astype(jnp.float64),
+        inputs[..., 0].astype(jnp.float64) * model.eta_scale,
+        inputs[..., 1].astype(jnp.float64) * model.xi_scale,
         k, jnp.exp(depth.astype(jnp.float64)), order=3, pad_factor=2, return_terms=True,
     )
 
@@ -1231,6 +1231,10 @@ def test_terms_residual_zero_head_exact_m3_and_split_initialization() -> None:
         jax.tree.leaves(variables), jax.tree.leaves(encoded_variables), strict=True,
     ))
     assert not any(name.startswith("cs_block_") for name in variables["params"])
+    assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(variables))
+    assert cast(jax.Array, model.apply(
+        variables, inputs, depth, method=model.encode_geometry,
+    )).dtype == jnp.float32
     prediction, baseline, m1, correction = cast(tuple[jax.Array, ...], model.apply(
         variables, inputs, depth, return_baseline=True,
     ))
