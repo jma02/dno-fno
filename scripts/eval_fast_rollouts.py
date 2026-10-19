@@ -33,6 +33,7 @@ from solver.evals.eval_suite import (  # noqa: E402
 from solver.evals.model_rollout import build_predict_gxi_batched, load_run  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from scripts.benchmark_dno_fusion import build_variant  # noqa: E402
+from scripts.benchmark_cufft_library import graph_fft  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rollout_if_trial  # noqa: E402
 from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 
@@ -51,6 +52,8 @@ def main() -> None:
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
+    parser.add_argument("--fold-context", action="store_true", help="Reassociate and batch the fixed context projections.")
+    parser.add_argument("--graph-fft", action="store_true", help="Trial graph-compatible cuFFT calls throughout the rollout.")
     parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features",
                                                     "terms_interleaved_features_cufftdx",
                                                     "terms_interleaved_features_cufftdx_spectral"),
@@ -72,6 +75,8 @@ def main() -> None:
         + ("_exactg0" if args.exact_solver_g0 else "")
         + ("_nestedfused" if args.fuse_nested_fft else "")
         + ("_contextbatch" if args.batch_context_fft else "")
+        + ("_contextfold" if args.fold_context else "")
+        + ("_graphfft" if args.graph_fft else "")
         + (f"_{args.cs_terms_variant}" if args.cs_terms_variant else ""))
     checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
     loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
@@ -81,12 +86,13 @@ def main() -> None:
                + ("_grid512" if args.correction_grid == 512 else "")
                + ("_exactg0" if args.exact_solver_g0 else "")
                + ("_nestedfused" if args.fuse_nested_fft else "")
-               + ("_contextbatch" if args.batch_context_fft else ""))
+               + ("_contextbatch" if args.batch_context_fft else "")
+               + ("_contextfold" if args.fold_context else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
-        if args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0 or args.correction_grid != 1024:
+        if args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0 or args.correction_grid != 1024:
             parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
         variant = args.cs_terms_variant or f"terms_m{loaded.config['cs_baseline_order']}_jax"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -98,6 +104,7 @@ def main() -> None:
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
+        "graph_fft": args.graph_fft,
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
@@ -137,6 +144,9 @@ def main() -> None:
             project_momentum=args.project_momentum,
         )
         with ExitStack() as patches:
+            if args.graph_fft:
+                patches.enter_context(patch.object(jnp.fft, "rfft", graph_fft))
+                patches.enter_context(patch.object(jnp.fft, "irfft", partial(graph_fft, inverse=True)))
             patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
             patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
             executable = jax.jit(function).lower(initial, times).compile()

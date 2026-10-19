@@ -54,6 +54,7 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
           "fourier_fused_features_product_overlap_nestedfused",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
@@ -77,8 +78,9 @@ def resample_rfft(spectrum: jax.Array, n: int) -> jax.Array:
 def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
     include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
+    return_components: bool = False,
 ) -> Wrapped:
-    """Intercept only inference arithmetic; leave the production module untouched."""
+    """Intercept inference arithmetic; optionally return full and learned Fourier outputs."""
     model = loaded.model
     if isinstance(model, CraigSulemTermsResidual):
         if not include_baselines or not include_correction or loaded.norm_mode != "scale":
@@ -166,6 +168,8 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    context_fold = variant.endswith("_contextfold")
+    variant = variant.removesuffix("_contextfold")
     context_batch = variant.endswith("_contextbatch")
     variant = variant.removesuffix("_contextbatch")
     nested_fused = variant.endswith("_nestedfused")
@@ -225,6 +229,9 @@ def build_variant(
         raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
     if context_batch and not model.surface_context_width:
         raise ValueError("Context/nested FFT batching requires surface context channels.")
+    if context_fold and (not spectral_io or not model.surface_context_width
+                         or model.surface_context_gate or model.surface_amplitude_reference > 0):
+        raise ValueError("Context folding requires ungated Fourier-I/O surface context.")
     if exact_g0 and (solver_g0 is None or not spectral_io or not include_baselines or model.baseline_order != 1):
         raise ValueError("Exact solver G0 requires its symbol and Fourier M1 inference with baselines.")
     if model.nested_blocks:
@@ -321,7 +328,7 @@ def build_variant(
         operators = jnp.stack((g0_64, jnp.broadcast_to(1j * k64, g0_64.shape)), axis=1)
         if g1_fp32:
             operators = operators.astype(jnp.complex64)
-        context_multiplier = None
+        context_multiplier = context_joint_kernel = context_folded_kernel = None
         if model.surface_context_width:
             context_k, context_log_h = jnp.broadcast_arrays(k[None, :], jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
             conditioning = jnp.stack((
@@ -332,6 +339,13 @@ def build_variant(
             output = loaded.params["eta_context_out"]
             context_multiplier = 0.1 * nn.tanh(context_hidden @ output["kernel"] + output["bias"])
             jax.block_until_ready(context_multiplier)
+            if context_fold:
+                mixing = loaded.params["eta_feat_mix"]["kernel"]
+                context_joint_kernel = jnp.concatenate((mixing, loaded.params["eta_context_in"]["kernel"]), axis=-1)
+                context_folded_kernel = jnp.matmul(
+                    loaded.params["eta_context_expand"]["kernel"], mixing, precision=jax.lax.Precision.HIGHEST,
+                )
+                jax.block_until_ready((context_joint_kernel, context_folded_kernel))
 
         if coarse_correction:
             surface_ops = surface_ops[..., :correction_nx // 2 + 1]
@@ -353,7 +367,7 @@ def build_variant(
             )
 
         @jax.jit
-        def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array:
+        def forward_hat(eta_hat: jax.Array, xi_hat: jax.Array) -> jax.Array | tuple[jax.Array, jax.Array]:
             analytic_hat = None
             # Preserve the trained surface features' physical-space FP32 rounding.
             eta_norm = jnp.fft.irfft(eta_hat, n=nx).astype(jnp.float32) / scales[0]
@@ -464,13 +478,20 @@ def build_variant(
             context = None
             nested_inner_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
+                if context_fold and name == "eta_feat_mix":
+                    features = nn.gelu(features)
+                    continue
                 kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
                 if name == "eta_feat_mix" and amplitude is not None:
                     features = features * (1.0 + jnp.log(amplitude)[..., None]
                                            * loaded.params["eta_amplitude_gain"])
                 features = nn.gelu(features @ kernel)
                 if name == "eta_feat_proj" and context_multiplier is not None:
-                    context = features @ loaded.params["eta_context_in"]["kernel"]
+                    if context_fold:
+                        joint = features @ cast(jax.Array, context_joint_kernel)
+                        features, context = joint[..., :-model.surface_context_width], joint[..., -model.surface_context_width:]
+                    else:
+                        context = features @ loaded.params["eta_context_in"]["kernel"]
                     if context_batch:
                         # Independent fields share one FFT batch, not Fourier modes.
                         combined_hat = jnp.fft.rfft(jnp.concatenate((
@@ -484,7 +505,8 @@ def build_variant(
                     context = jnp.fft.irfft(
                         context_multiplier * context_hat, n=correction_nx, axis=1,
                     )
-                    context = context @ loaded.params["eta_context_expand"]["kernel"]
+                    context = context @ (cast(jax.Array, context_folded_kernel) if context_fold
+                                         else loaded.params["eta_context_expand"]["kernel"])
                     features = features + context
             features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             if model.surface_context_gate and context is not None:
@@ -545,8 +567,14 @@ def build_variant(
             if exact_g0:
                 result = result + cast(jax.Array, solver_g0) * xi_hat
             if mask_output:
-                return cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
-            return result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
+                result = cast(jax.Array, jnp.where(k64 == 0, 0, jnp.where(k64 == k64[-1], result.real, result)))
+            else:
+                result = result.at[..., 0].set(0).at[..., -1].set(result[..., -1].real)
+            if return_components:
+                correction = output_scale * correction_hat
+                correction = correction.at[..., 0].set(0).at[..., -1].set(correction[..., -1].real)
+                return result, correction
+            return result
 
         return forward_hat
 
@@ -675,7 +703,8 @@ def build_variant(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, default=ROOT / "outputs/c27_w320_b4_h80_tanaka_hard128_20260924")
-    parser.add_argument("--checkpoint", choices=("best", "latest", "weight_ema"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "best_weight_ema", "latest", "weight_ema"), default="best")
+    parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/dno_fusion_20260924")
     parser.add_argument("--repeats", type=int, default=600)
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
@@ -686,7 +715,9 @@ if __name__ == "__main__":
     variants = args.variants
     if not args.capture and args.reference not in variants:
         parser.error("include the numerical reference in variants")
-    loaded = load_run(args.run, checkpoint=args.checkpoint)
+    if any(name.endswith("_contextfold") for name in variants) and not args.reference.startswith("fourier"):
+        parser.error("context folding requires a Fourier-I/O reference for direct-correction checks")
+    loaded = load_run(args.run, checkpoint=args.checkpoint, checkpoint_dir=args.checkpoint_dir)
     source = next((ROOT / "outputs/c27_tanaka_hard128_full_equal_local_20260918").glob(
         "eval_best_current_test_stratified_n32*/stokes_trajs.npz"
     ))
@@ -764,6 +795,25 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
+        if variant.endswith("_contextfold"):
+            correction_outputs = []
+            instrumented_exact = True
+            for name, original in ((args.reference, expected), (variant, actual)):
+                components = build_variant(loaded, check_depth, eta.shape[-1], name,
+                                           fft_ept=args.ept, return_components=True)
+                full_hat, correction_hat = components(jnp.fft.rfft(check_eta), jnp.fft.rfft(check_xi))
+                instrumented_full = np.asarray(jnp.fft.irfft(full_hat, n=eta.shape[-1]))
+                instrumented_exact &= bool(np.array_equal(instrumented_full, original))
+                correction_outputs.append(np.asarray(jnp.fft.irfft(correction_hat, n=eta.shape[-1])))
+            correction_expected, correction_actual = correction_outputs
+            correction_relative = np.linalg.norm(correction_actual - correction_expected, axis=-1) / np.maximum(
+                np.linalg.norm(correction_expected, axis=-1), 1e-30,
+            )
+            records[variant]["validation"]["correction_max_relative_l2"] = float(correction_relative.max())
+            records[variant]["validation"]["instrumented_full_exact"] = instrumented_exact
+            records[variant]["validation"]["passed"] &= bool(
+                instrumented_exact and np.isfinite(correction_actual).all() and correction_relative.max() <= 3e-6,
+            )
         if variant.startswith("fourier") or variant == "terms_interleaved_features_cufftdx_spectral":
             other_xi = jnp.roll(check_xi, 1, axis=0)
             other = np.asarray(candidate(check_eta, other_xi))
@@ -786,7 +836,9 @@ if __name__ == "__main__":
             records[variant]["validation"]["passed"] &= mixed_error <= 1e-5 and flat_error <= 1e-5 and zero_error == 0
         print(f"{variant}: 48-state max relative difference {relative.max():.3g}; "
               f"passed={records[variant]['validation']['passed']}", flush=True)
-    report = {"run": str(args.run), "batch_size_timing": 1, "nx": eta.shape[-1],
+    report = {"run": str(args.run), "checkpoint": args.checkpoint, "epoch": loaded.epoch,
+              "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
+              "batch_size_timing": 1, "nx": eta.shape[-1],
               "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
               "device": jax.devices()[0].device_kind, "reference": args.reference, "variants": records,
               "scope": "Model-only inference prototypes; production model and checkpoints unchanged."}
@@ -815,6 +867,7 @@ if __name__ == "__main__":
                   fourier_balanced_features_overlap="Balance surface-feature stores + G₁ overlap",
                   fourier_fused_features_product_overlap="Fused head product FFT + G₁ overlap",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch="Batch context + nested first FFT",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold="Fold context projections",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",

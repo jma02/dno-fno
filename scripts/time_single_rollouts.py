@@ -35,6 +35,7 @@ import numpy as np  # noqa: E402
 
 from scripts.benchmark_dno_fusion import G1_FP32_TRIALS, TUNED_TRIALS, build_variant  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
+from scripts.benchmark_cufft_library import graph_fft  # noqa: E402
 from scripts.benchmark_surrogate_rhs import rhs_nonlinear_if_spectral, rollout_if_trial, shared_m1_hat  # noqa: E402
 from solver.evals.eval_suite import FAMILY_CONFIGS  # noqa: E402
 from solver.evals.model_rollout import Predictor, build_predict_gxi_batched, load_run, rollout_surrogate  # noqa: E402
@@ -68,6 +69,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
     "fourier_fused_features_product_overlap_nestedfused",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
     "fourier_fused_features_product_overlap_exactg0",
     "fourier_fused_features_product_overlap_grid512",
     "fourier_balanced_features_product_overlap",
@@ -114,11 +116,13 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--batch-size", type=int, choices=range(1, 33), default=1)
     parser.add_argument("--require-idle-gpu", action="store_true", help="Exit 75 if another process uses the selected GPU before or during timings.")
+    parser.add_argument("--graph-fft", action="store_true", help="Trial graph-compatible cuFFT calls in both neural and classical rollout paths.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--classical-backend", choices=("cufft", "interleaved_cufftdx"), default="cufft")
     parser.add_argument("--candidate-run", type=Path, help="Include another checkpoint as the compact model.")
-    parser.add_argument("--checkpoint", choices=("best", "latest", "final", "weight_ema", "weight_ema_secondary"), default="best")
+    parser.add_argument("--checkpoint", choices=("best", "best_weight_ema", "latest", "final", "weight_ema", "weight_ema_secondary"), default="best")
+    parser.add_argument("--checkpoint-dir", type=Path, help="Preserved candidate checkpoint directory; best_weight_ema reads its primary EMA.")
     parser.add_argument("--methods", nargs="+", choices=tuple(
         f"{method}{boundary}{stages}" for method in METHODS
         for boundary in ("", "_boundaries") for stages in ("", "_stages")) + tuple(
@@ -150,7 +154,8 @@ if __name__ == "__main__":
     if args.without_baselines and (base_methods & {"baseline-only", "shared_m1_spectral_all"}
                                    or any(method.startswith("fourier_") for method in methods)):
         parser.error("baseline-only, shared_m1_spectral_all and Fourier-I/O methods require analytic baselines")
-    loaded = {name: load_run(run, checkpoint=args.checkpoint) for name, run in RUNS.items()
+    loaded = {name: load_run(run, checkpoint=args.checkpoint,
+                             checkpoint_dir=args.checkpoint_dir if name == "compact" else None) for name, run in RUNS.items()
               if name in base_methods or (name == "compact" and base_methods & FUSION_VARIANTS.keys())}
     predictors = {name: build_predict_gxi_batched(run) for name, run in loaded.items()}
     report: dict[str, Any] = {
@@ -158,8 +163,10 @@ if __name__ == "__main__":
         "batch_size": args.batch_size, "nx": 1024, "internal_dt": 0.01, "gl2_iterations": 4,
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "classical_backend": args.classical_backend,
+        "graph_fft": args.graph_fft,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
+        "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
         "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
@@ -262,6 +269,9 @@ if __name__ == "__main__":
                     rhs_nonlinear_if_spectral, pack_ffts=packing if packing in ("inputs", "all") else "none",
                     predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
             with ExitStack() as patches:
+                if args.graph_fft:
+                    patches.enter_context(patch.object(jnp.fft, "rfft", graph_fft))
+                    patches.enter_context(patch.object(jnp.fft, "irfft", partial(graph_fft, inverse=True)))
                 patches.enter_context(rhs_patch)
                 if "boundaries" in options:
                     patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
