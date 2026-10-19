@@ -608,6 +608,24 @@ this figure. The old subset40 PNG/PDF remain separate historical artifacts.
 UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --one-epoch
 ```
 
+### 12d-one-epoch-full-data
+
+[PNG](figures/12d-one-epoch-full-data.png) / [PDF](figures/12d-one-epoch-full-data.pdf).
+Recent full-data, one-epoch weight-EMA candidates on Ada. Every accuracy point
+is the median terminal surface error over the same 32 cases per family;
+the horizontal coordinate is measured warm single-rollout runtime.
+`Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
+epoch37 model. No longer-trained checkpoints enter this comparison.
+
+The original Figures12/12c used the particular timed case's error, a different
+statistic. For Tanaka, the one-epoch hero/M3 errors are 0.152511%/0.548683% on
+that case but 0.038876%/0.012373% as family medians. Do not infer a family-wide
+accuracy win from the original single-case plot.
+
+```sh
+UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --recent-one-epoch
+```
+
 ### 13-model-roofline
 
 [PNG](figures/13-model-roofline.png) / [PDF](figures/13-model-roofline.pdf).

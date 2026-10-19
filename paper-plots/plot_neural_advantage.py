@@ -385,11 +385,6 @@ if __name__ == "__main__":
             completed.append((json.loads((control / "all_summaries.json").read_text()),
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
-            hero_run = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014"
-            hero_timings = json.loads((control / "single_rollout_timings.json").read_text())
-            hero_timings["families"].update(json.loads((hero_run / "fig12_epoch7_timings.json").read_text())["families"])
-            completed.append((json.loads((hero_run / "eval_epoch37_weight_ema/all_summaries.json").read_text()),
-                              hero_timings, "Hero · epoch 37", "#202328", "D", phase_method))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))
@@ -493,7 +488,7 @@ if __name__ == "__main__":
         })
         fig, axes = plt.subplots(2, 2, figsize=(12, 9) if args.recent_one_epoch
                                  else (17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.70 if args.recent_one_epoch else 0.83,
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if args.recent_one_epoch else 0.83,
                             bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
@@ -581,11 +576,12 @@ if __name__ == "__main__":
             ax.grid(axis="y", lw=0.6)
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
-        fig.suptitle("Figure 12d · One-epoch candidates and trained hero" if args.recent_one_epoch
+        fig.suptitle("Figure 12d · One epoch, full data" if args.recent_one_epoch
                      else "Figure 12b · One epoch, full data",
                      x=0.10, y=0.965, ha="left", fontsize=19)
         fig.text(0.10, 0.91 if args.recent_one_epoch else 0.923,
-                 "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
+                 "RTX 6000 Ada · 32-case median error · Single-rollout timing · Weight EMA" if args.recent_one_epoch
+                 else "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
         if args.recent_one_epoch:
             fig.legend(handles=[
                 Line2D([], [], color="#899198", marker="o", mfc="white", lw=1, label="Classical"),
