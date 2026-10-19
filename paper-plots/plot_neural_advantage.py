@@ -47,10 +47,8 @@ def refresh_classical_timings(report: dict[str, Any]) -> None:
                     report["families"][family]["methods"].setdefault(name.split("_", 1)[0], record)["seconds"] = record["seconds"]
         return
     for filename, orders in (
-        ("classical_all_orders_20260928/ada/classical.json", (1, 6)),
-        ("c27_cs_terms_scratch1_20261019/single_rollout_timing.json", (4,)),
-        ("c27_cs_terms_m1_scratch1_20261019/single_rollout_timing.json", (5,)),
-        ("hero_speed_20261019/graphfft_state_rollouts.json", (2, 3)),
+        ("hero_speed_20261019/fused_final_rollouts.json", (1, 2, 3, 4, 5)),
+        ("hero_speed_20261019/fused_final_m6_rollouts.json", (6,)),
     ):
         measured = json.loads((ROOT / "outputs" / filename).read_text())
         for family, result in measured["families"].items():
@@ -457,10 +455,11 @@ if __name__ == "__main__":
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
             hero_speed = ROOT / "outputs/hero_speed_20261019"
-            hero_before = json.loads((hero_speed / "graphfft_state_rollouts.json").read_text())
-            completed.append((json.loads((hero_speed / "graphfft_unroll_eval/all_summaries.json").read_text()),
-                              json.loads((hero_speed / "graphfft_unroll_all_rollouts.json").read_text()),
-                              "Trained hero · epoch 37", "#222831", "*", phase_method))
+            hero_before = (json.loads((hero_speed / "graphfft_unroll_all_rollouts.json").read_text()), phase_method)
+            completed.append((json.loads((hero_speed / "fused_final_eval/all_summaries.json").read_text()),
+                              json.loads((hero_speed / "fused_final_rollouts.json").read_text()),
+                              "Trained hero · epoch 37", "#222831", "*",
+                              phase_method.replace("_spectral_all", "_projectiontranspose_fieldstride_spectral_all")))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))
@@ -589,7 +588,9 @@ if __name__ == "__main__":
                            color="#aab2b9", ls=":", lw=1.2, zorder=1)
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
-                ax.annotate(f"M{order}", (x, y), xytext=(6, -12 if args.recent_one_epoch and order == 3 else -2),
+                ax.annotate(f"M{order}", (x, y),
+                            xytext=((-24, 4) if args.recent_one_epoch and family == "stokes" and order == 2
+                                    else (6, -12 if args.recent_one_epoch and order == 3 else -2)),
                             textcoords="offset points", color="#667078", fontsize=10)
             points = []
             decoder_points = {}
@@ -610,7 +611,7 @@ if __name__ == "__main__":
                            facecolors="white" if native_decoder else color,
                            edgecolors=color if native_decoder else "white", linewidths=0.7, zorder=4)
                 if hero_before is not None and label.startswith("Trained hero"):
-                    previous = float(np.median(hero_before["families"][family]["methods"][timing_method]["seconds"]))
+                    previous = float(np.median(hero_before[0]["families"][family]["methods"][hero_before[1]]["seconds"]))
                     ax.text(0.03, 0.085, f"Hero: {previous:.2f} → {seconds:.2f} s ({100 * (seconds / previous - 1):+.1f}%)",
                             transform=ax.transAxes, color=color, fontsize=9)
                 print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "

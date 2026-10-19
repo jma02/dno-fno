@@ -70,6 +70,11 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features_product_overlap_nestedfused",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_headtranspose",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_contexttranspose",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
     "fourier_fused_features_product_overlap_exactg0",
     "fourier_fused_features_product_overlap_grid512",
@@ -121,6 +126,11 @@ if __name__ == "__main__":
     parser.add_argument("--graph-fft-alias", action="store_true", help="Let XLA reuse inverse-FFT inputs; requires --graph-fft.")
     parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation into an elementwise mask; requires --graph-fft.")
     parser.add_argument("--unroll-stages", action="store_true", help="Unroll the four fixed-point iterations without changing their count.")
+    parser.add_argument("--unroll-substeps", type=int, default=1, help="Unroll this many existing time steps together.")
+    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward"), default="cufft",
+                        help="Shared Bernoulli forward transform backend; neural and classical.")
+    parser.add_argument("--materialize-spectra", action="store_true", help="Avoid cloning rotated spectra into multiple consumers.")
+    parser.add_argument("--batch-saved-dno", action="store_true", help="Evaluate saved-frame DNO diagnostics together after single-trajectory integration.")
     parser.add_argument("--profile", action="store_true", help="Save compiled HLO and trace the measured execution; profiling timings are not clean latency measurements.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
@@ -140,6 +150,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1 or args.pad_factor < 1:
         parser.error("steps must be nonnegative; repeats and pad-factor must be positive")
+    if args.unroll_substeps < 1:
+        parser.error("unroll-substeps must be positive")
     if (args.graph_fft_alias or args.graph_fft_mask) and not args.graph_fft:
         parser.error("--graph-fft-alias and --graph-fft-mask require --graph-fft")
     if args.require_idle_gpu and (not os.environ.get("CUDA_VISIBLE_DEVICES", "").startswith("GPU-")
@@ -174,6 +186,10 @@ if __name__ == "__main__":
         "graph_fft_alias": args.graph_fft_alias,
         "graph_fft_mask": args.graph_fft_mask,
         "unroll_stages": args.unroll_stages,
+        "unroll_substeps": args.unroll_substeps,
+        "bernoulli_fft": args.bernoulli_fft,
+        "materialize_spectra": args.materialize_spectra,
+        "batch_saved_dno": args.batch_saved_dno,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
@@ -235,7 +251,9 @@ if __name__ == "__main__":
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
                                     half_spectrum="half" in options, project_momentum="momentum" in options,
-                                    unroll_stages=args.unroll_stages,
+                                    unroll_stages=args.unroll_stages, unroll_substeps=args.unroll_substeps,
+                                    bernoulli_fft=args.bernoulli_fft, materialize_spectra=args.materialize_spectra,
+                                    batch_saved_dno=args.batch_saved_dno,
                                     predict_hat=spectral_predict)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
@@ -263,7 +281,9 @@ if __name__ == "__main__":
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
                                     predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options,
-                                    project_momentum="momentum" in options, unroll_stages=args.unroll_stages)
+                                    project_momentum="momentum" in options, unroll_stages=args.unroll_stages,
+                                    unroll_substeps=args.unroll_substeps, bernoulli_fft=args.bernoulli_fft,
+                                    materialize_spectra=args.materialize_spectra, batch_saved_dno=args.batch_saved_dno)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)

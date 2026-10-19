@@ -14,15 +14,19 @@ template<int N, class T, int EPT>
 using FFTBase = decltype(Block() + Size<N>() + Precision<T>() + SM<DNO_SM>() +
                          ElementsPerThread<EPT>() + FFTsPerBlock<1>());
 
-template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false>
+template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false, bool strided_b = false>
 __global__ void transform(const void* a, const void* b, void* out,
-                          const void* symbols, int input_length, bool multiply) {
+                          const void* symbols, int input_length, bool multiply,
+                          int source_branches = 0, int output_branches = 0) {
     using C = typename FFT::value_type;
     using I = typename FFT::input_type;
     using O = typename FFT::output_type;
     constexpr bool inverse = type_of<FFT>::value == fft_type::c2r;
     C data[FFT::storage_size] = {};
     extern __shared__ __align__(16) unsigned char scratch[];
+    int weight_row = blockIdx.x;
+    if constexpr (strided_b)
+        weight_row = (blockIdx.x / output_branches) * source_branches + blockIdx.x % output_branches;
     for (int i = 0; i < FFT::input_ept; ++i) {
         int k = threadIdx.x + i * FFT::stride;
         if (k < FFT::input_length && k < input_length) {
@@ -34,7 +38,7 @@ __global__ void transform(const void* a, const void* b, void* out,
                 value = static_cast<const I*>(a)[blockIdx.x * input_length + k];
             }
             if (multiply) {
-                I weight = static_cast<const I*>(b)[blockIdx.x * input_length + k];
+                I weight = static_cast<const I*>(b)[weight_row * input_length + k];
                 value.x *= weight.x;
                 value.y *= weight.y;
             }
@@ -332,7 +336,14 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
-    if (operation == 11) {
+    if (operation == 12) {
+        // Read the retained prefix of each source-field batch without packing it first.
+        int source_branches = b.dimensions()[b.dimensions().size() - 2];
+        int output_branches = out->dimensions()[out->dimensions().size() - 2];
+        transform<F, false, false, false, true, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
+            a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, true,
+            source_branches, output_branches);
+    } else if (operation == 11) {
         // The logical [B,N,R] head is supplied column-major, already contiguous along N.
         transform<F, false, false, false, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
             a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, true);

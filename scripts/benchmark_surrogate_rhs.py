@@ -49,6 +49,8 @@ def rhs_nonlinear_if_spectral(
     rotation: tuple[jax.Array, jax.Array] | None = None,
     ramp_time: float | jax.Array | None = None,
     half_spectrum: bool = False,
+    bernoulli_fft: Literal["cufft", "cufftdx_forward"] = "cufft",
+    materialize_spectra: bool = False,
 ) -> ti.SpectralState:
     physical_hat = (ti.apply_linear_flow_hat(state_hat, time_value, params) if rotation is None
                     else rotate_spectrum(state_hat, *rotation, params))
@@ -56,6 +58,8 @@ def rhs_nonlinear_if_spectral(
     positive_modes = slice(0, nx // 2 + 1)
     eta_hat = physical_hat.eta_hat[..., positive_modes]
     xi_hat = physical_hat.xi_hat[..., positive_modes]
+    if materialize_spectra:
+        eta_hat, xi_hat = jax.lax.optimization_barrier((eta_hat, xi_hat))
     k = params.k[positive_modes]
     if predict_hat is not None:
         gxi_hat = predict_hat(eta_hat, xi_hat).at[..., nx // 2].set(0)
@@ -88,7 +92,12 @@ def rhs_nonlinear_if_spectral(
         gxi = 2.0 * jnp.fft.irfft(gxi_hat, n=2 * nx, axis=-1)
     numerator = gxi + eta_x * xi_x
     xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
-    xi_t_hat = 0.5 * jnp.fft.rfft(xi_t, axis=-1)[..., positive_modes]
+    if bernoulli_fft == "cufftdx_forward":
+        from scripts.benchmark_cufftdx import fft
+        xi_t_spectrum = fft(xi_t, 2 * nx)
+    else:
+        xi_t_spectrum = jnp.fft.rfft(xi_t, axis=-1)
+    xi_t_hat = 0.5 * xi_t_spectrum[..., positive_modes]
     xi_t_hat = xi_t_hat.at[..., nx // 2].set(0)
     eta_t_hat = gxi_hat - params.g0[..., positive_modes] * xi_hat
     nonlinear_hat = ti.SpectralState(eta_t_hat, xi_t_hat) if half_spectrum else ti.SpectralState(
@@ -108,7 +117,10 @@ def rollout_if_trial(
     initial: ti.State, times: jax.Array, *, params: ti.SolverParams, substeps: int,
     carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
     predict_hat: Predictor | None = None, half_spectrum: bool = False,
-    project_momentum: bool = False, unroll_stages: bool = False,
+    project_momentum: bool = False, unroll_stages: bool = False, unroll_substeps: int = 1,
+    bernoulli_fft: Literal["cufft", "cufftdx_forward"] = "cufft",
+    materialize_spectra: bool = False,
+    batch_saved_dno: bool = False,
 ) -> dict[str, jax.Array]:
     """Paired GL2 with optional spectral carry and interval-cached local rotations.
 
@@ -147,11 +159,13 @@ def rollout_if_trial(
                     fields = jax.vmap(lambda s, t, co, si: rhs_nonlinear_if_spectral(
                         s, t, flow_params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
                         rotation=(co, si), ramp_time=time_value + t, half_spectrum=half_spectrum,
+                        bernoulli_fft=bernoulli_fft, materialize_spectra=materialize_spectra,
                     ))(packed, c * dt, cosine[:2], sine[:2])
                 else:
                     fields = jax.vmap(lambda s, t: rhs_nonlinear_if_spectral(
                         s, t, flow_params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
-                        half_spectrum=half_spectrum,
+                        half_spectrum=half_spectrum, bernoulli_fft=bernoulli_fft,
+                        materialize_spectra=materialize_spectra,
                     ))(packed, time_value + c * dt)
                 f1 = ti.SpectralState(*(field[0] for field in fields))
                 f2 = ti.SpectralState(*(field[1] for field in fields))
@@ -197,12 +211,12 @@ def rollout_if_trial(
                 return ti.SpectralState(*fields)
             return ti.project_zero_mean_xi(ti._hat_to_state(next_hat))
 
-        next_state = jax.lax.fori_loop(0, substeps, step, carry)
+        next_state = jax.lax.fori_loop(0, substeps, step, carry, unroll=unroll_substeps)
         physical = (ti.project_zero_mean_xi(
             ti.State(*jnp.fft.irfft(jnp.stack(next_state), n=params.nx)) if half_spectrum
             else ti._hat_to_state(next_state)) if carry_spectral
                     else cast(ti.State, next_state))
-        gxi = predict_gxi(*physical) if predict_gxi is not None else None
+        gxi = predict_gxi(*physical) if predict_gxi is not None and not batch_saved_dno else None
         return next_state, (physical.eta, physical.xi, gxi)
 
     carry = ti._state_to_hat(initial, params.nx) if carry_spectral else initial
@@ -231,6 +245,8 @@ def rollout_if_trial(
             gxi = jnp.fft.irfft(predict_hat(spectra[..., 0, :], spectra[..., 1, :]), n=params.nx)
         if params.filter_fraction < 1.0:
             gxi = ti.apply_lowpass(gxi, params.k, params.filter_fraction)
+    elif batch_saved_dno:
+        gxi = jax.lax.map(lambda fields: predict_gxi(*fields), (eta, xi), batch_size=8)
     else:
         gxi = jnp.concatenate((predict_gxi(*initial)[None], cast(jax.Array, saved_gxi)))
     return {"times": times, "eta": eta, "xi": xi, "gxi": gxi}

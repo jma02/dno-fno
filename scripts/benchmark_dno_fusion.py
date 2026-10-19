@@ -57,6 +57,12 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused_contextbatch",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextinverse",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_headtranspose",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_contexttranspose",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_fieldstride",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
@@ -76,6 +82,11 @@ def resample_rfft(spectrum: jax.Array, n: int) -> jax.Array:
         return result.at[..., -1].set(2 * result[..., -1].real)
     result = jnp.pad(scaled, ((0, 0),) * (scaled.ndim - 1) + ((0, (n - source_n) // 2),))
     return result.at[..., source_n // 2].set(0.5 * result[..., source_n // 2].real)
+
+
+def transposed_matmul(a: jax.Array, b: jax.Array) -> jax.Array:
+    """Expose the transposed projection to GPU layout selection."""
+    return jnp.swapaxes(jnp.swapaxes(b, -1, -2) @ jnp.swapaxes(a, -1, -2), -1, -2)
 
 
 def build_variant(
@@ -171,6 +182,13 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    split_g1 = variant.endswith("_splitg1")
+    variant = variant.removesuffix("_splitg1")
+    field_stride = variant.endswith("_fieldstride")
+    variant = variant.removesuffix("_fieldstride")
+    transpose_head = variant.endswith(("_headtranspose", "_projectiontranspose"))
+    transpose_context = variant.endswith(("_contexttranspose", "_projectiontranspose"))
+    variant = variant.removesuffix("_headtranspose").removesuffix("_contexttranspose").removesuffix("_projectiontranspose")
     serial_g1 = variant.endswith("_serial")
     variant = variant.removesuffix("_serial")
     context_inverse = variant.endswith("_contextinverse")
@@ -411,6 +429,12 @@ def build_variant(
                     with (nullcontext() if serial_g1 else compute_on("gpu_stream:1")):
                         if model.baseline_order == 2:
                             analytic_hat = m2_hat(normalized_inputs)
+                        elif split_g1:
+                            analytic_hat = jax.jit(lambda eta, xi: -sandwich(
+                                (eta * model.eta_scale).astype(g1_dtype),
+                                fft(xi.astype(g1_dtype), nx, ept=g1_input_ept), operators,
+                                spectral=True, ept=sandwich_ept,
+                            ).sum(axis=1))(eta_norm, xi_phys)
                         else:
                             analytic_hat = jax.jit(lambda values: -sandwich(
                                 values[0][:, 0] if fused_g1 else (values[0][:, 0] * model.eta_scale).astype(g1_dtype),
@@ -498,7 +522,8 @@ def build_variant(
                         joint = features @ cast(jax.Array, context_joint_kernel)
                         features, context = joint[..., :-model.surface_context_width], joint[..., -model.surface_context_width:]
                     else:
-                        context = features @ loaded.params["eta_context_in"]["kernel"]
+                        context = (transposed_matmul(features, loaded.params["eta_context_in"]["kernel"])
+                                   if transpose_context else features @ loaded.params["eta_context_in"]["kernel"])
                     if context_batch:
                         # Independent fields share one FFT batch, not Fourier modes.
                         combined_hat = jnp.fft.rfft(jnp.concatenate((
@@ -530,12 +555,13 @@ def build_variant(
                 features = features * amplitude[..., None] ** 2
             correction_hat = jnp.zeros_like(xi_phys_hat)
             if ordinary_blocks:
-                weights = features @ cast(jax.Array, head_kernel)
-                ordinary_fields = branch_fields[:, :ordinary_branches]
+                weights = (transposed_matmul(features, cast(jax.Array, head_kernel))
+                           if transpose_head else features @ cast(jax.Array, head_kernel))
+                ordinary_fields = branch_fields if field_stride else branch_fields[:, :ordinary_branches]
                 ordinary_filters = filters[:, :ordinary_branches]
                 if fused_product:
                     weighted_hat = fft(weights, correction_nx, b=ordinary_fields, outer=ordinary_filters,
-                                       ept=fft_ept, channels_last=True)
+                                       ept=fft_ept, channels_last=True, field_stride=field_stride)
                 elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
                     weights = jnp.moveaxis(weights, -1, 1)
                     weighted_hat = correction_nx * fft(weights, correction_nx, b=ordinary_fields,
@@ -723,8 +749,10 @@ if __name__ == "__main__":
     parser.add_argument("--variants", nargs="+", choices=(*VARIANTS, *TRIALS), default=VARIANTS)
     parser.add_argument("--reference", choices=(*VARIANTS, *TRIALS), default="original")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
+    parser.add_argument("--reference-ept", type=int, choices=(4, 8, 16), help="Hold the reference FFT execution layout fixed while tuning candidates.")
     parser.add_argument("--capture", choices=(*VARIANTS, *TRIALS), help="Capture 100 warmed calls of one variant instead of timing/testing.")
     args = parser.parse_args()
+    reference_ept = args.reference_ept or args.ept
     variants = args.variants
     if not args.capture and args.reference not in variants:
         parser.error("include the numerical reference in variants")
@@ -742,7 +770,8 @@ if __name__ == "__main__":
     functions, records = {}, {}
     for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
-        forward = build_variant(loaded, depth, eta.shape[-1], variant, fft_ept=args.ept)
+        forward = build_variant(loaded, depth, eta.shape[-1], variant,
+                                fft_ept=reference_ept if variant == args.reference else args.ept)
         if variant.startswith("fourier") or variant == "terms_interleaved_features_cufftdx_spectral":
             forward = jax.jit(lambda e, x, fn=forward: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         executable = forward.lower(eta, xi).compile()
@@ -790,7 +819,7 @@ if __name__ == "__main__":
             families.extend([family] * 12)
     check_eta, check_xi = map(jnp.asarray, (np.concatenate(validation_eta), np.concatenate(validation_xi)))
     check_depth = jnp.log(jnp.asarray(np.concatenate(validation_depth)))
-    reference_predict = build_variant(loaded, check_depth, eta.shape[-1], args.reference, fft_ept=args.ept)
+    reference_predict = build_variant(loaded, check_depth, eta.shape[-1], args.reference, fft_ept=reference_ept)
     if args.reference.startswith("fourier") or args.reference == "terms_interleaved_features_cufftdx_spectral":
         reference_predict = jax.jit(lambda e, x, fn=reference_predict: jnp.fft.irfft(
             fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
@@ -808,12 +837,14 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
-        if variant.endswith(("_contextfold", "_contextinverse")):
+        if variant.endswith(("_contextfold", "_contextinverse", "_headtranspose",
+                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1")):
             correction_outputs = []
             instrumented_exact = True
             for name, original in ((args.reference, expected), (variant, actual)):
                 components = build_variant(loaded, check_depth, eta.shape[-1], name,
-                                           fft_ept=args.ept, return_components=True)
+                                           fft_ept=reference_ept if name == args.reference else args.ept,
+                                           return_components=True)
                 full_hat, correction_hat = components(jnp.fft.rfft(check_eta), jnp.fft.rfft(check_xi))
                 instrumented_full = np.asarray(jnp.fft.irfft(full_hat, n=eta.shape[-1]))
                 instrumented_exact &= bool(np.array_equal(instrumented_full, original))
@@ -854,6 +885,7 @@ if __name__ == "__main__":
               "batch_size_timing": 1, "nx": eta.shape[-1],
               "parameters": sum(leaf.size for leaf in jax.tree.leaves(loaded.params)),
               "device": jax.devices()[0].device_kind, "reference": args.reference, "variants": records,
+              "fft_ept": args.ept, "reference_fft_ept": reference_ept,
               "scope": "Model-only inference prototypes; production model and checkpoints unchanged."}
     (args.output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -883,6 +915,12 @@ if __name__ == "__main__":
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_serial="Serial G₁",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold="Fold context projections",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_contextinverse="cuFFTDx context inverse FFT",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_headtranspose="Transposed head GEMM",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_contexttranspose="Transposed context GEMM",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose="Transposed head + context GEMMs",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_fieldstride="Direct strided branch fields",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride="Transposed projections + strided fields",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1="Separate G₁ input arguments",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",

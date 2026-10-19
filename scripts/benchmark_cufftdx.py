@@ -31,20 +31,25 @@ OUTPUT = ROOT / "outputs/cufftdx_20260925"
 
 
 @cache
-def register() -> ctypes.CDLL:
-    library = ctypes.CDLL(str(OUTPUT / "cufftdx.so"))
-    for name in ("dno_cufftdx", "dno_cufftdx_features"):
-        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, name)), platform="CUDA")
+def register(field_stride: bool = False) -> ctypes.CDLL:
+    library = ctypes.CDLL(str(OUTPUT / ("cufftdx_fieldstride.so" if field_stride else "cufftdx.so")))
+    targets = (("dno_cufftdx_fieldstride", "dno_cufftdx"),) if field_stride else tuple(
+        (name, name) for name in ("dno_cufftdx", "dno_cufftdx_features"))
+    for name, symbol in targets:
+        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, symbol)), platform="CUDA")
     return library
 
 
 def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
     outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
-    promote: bool = False, channels_last: bool = False,
+    promote: bool = False, channels_last: bool = False, field_stride: bool = False,
 ) -> jax.Array:
     """Fuse FFT loads/stores; channels_last consumes a column-major [B,N,R] head with real outer filters."""
-    register()
+    if field_stride:
+        register(True)
+    else:
+        register()
     fp64 = promote or a.dtype in (jnp.float64, jnp.complex128)
     dtype = (jnp.float64 if fp64 else jnp.float32) if inverse else (jnp.complex128 if fp64 else jnp.complex64)
     if normalization is not None:
@@ -52,9 +57,10 @@ def fft(
     shape = (*a.shape[:-2], a.shape[-1], n // 2 + 1) if channels_last else (*a.shape[:-1], n if inverse else n // 2 + 1)
     result = jax.ShapeDtypeStruct(shape, dtype)
     layouts = (tuple(range(a.ndim - 2)) + (a.ndim - 1, a.ndim - 2), None, None) if channels_last else None
-    return jax.ffi.ffi_call("dno_cufftdx", result, vmap_method="broadcast_all", input_layouts=layouts)(
+    return jax.ffi.ffi_call("dno_cufftdx_fieldstride" if field_stride else "dno_cufftdx", result,
+                          vmap_method="broadcast_all", input_layouts=layouts)(
         a, normalization if normalization is not None else a if b is None else b, a if outer is None else outer,
-        size=np.int64(n), operation=np.int64(11 if channels_last else 9 if promote else 8 if normalization is not None else 4 if outer is not None else inverse),
+        size=np.int64(n), operation=np.int64(12 if field_stride else 11 if channels_last else 9 if promote else 8 if normalization is not None else 4 if outer is not None else inverse),
         multiply=b is not None, ept=np.int64(ept),
     )
 
@@ -194,6 +200,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--build-only", action="store_true")
+    parser.add_argument("--field-stride", action="store_true", help="Build/check the isolated strided-field product FFT.")
     parser.add_argument("--sm", type=int, default=89)
     parser.add_argument("--ept", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--output", type=Path, default=OUTPUT)
@@ -211,13 +218,38 @@ if __name__ == "__main__":
             f"-arch=sm_{args.sm}", f"-DDNO_SM={args.sm * 10}", "--shared",
             "-Xcompiler", "-fPIC", "-DCUFFTDX_DISABLE_CUTLASS_DEPENDENCY",
             f"-I{mathdx}", f"-I{jax.ffi.include_dir()}",
-            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / "cufftdx.so"),
+            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
         ], check=True)
     if args.build_only:
         raise SystemExit(0)
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(42)
     records = {}
+    if args.field_stride:
+        for batch in (1, 2, 32):
+            filters = jnp.asarray(rng.normal(size=(batch, 28, 513)), dtype=jnp.float32)
+            for stage_pair in (False, True):
+                weights = jnp.asarray(rng.normal(size=(batch, 1024, 28)), dtype=jnp.float32)
+                fields = jnp.asarray(rng.normal(size=(batch, 32, 1024)), dtype=jnp.float32)
+                if stage_pair:
+                    weights, fields = jnp.stack((weights, -weights)), jnp.stack((fields, -fields))
+                for ept in args.ept:
+                    functions = []
+                    for strided in (False, True):
+                        candidate = lambda x, y, strided=strided: fft(  # noqa: E731
+                            x, 1024, b=y if strided else y[..., :28, :], outer=filters,
+                            ept=ept, channels_last=True, field_stride=strided,
+                        )
+                        if stage_pair:
+                            candidate = jax.vmap(candidate)
+                        functions.append(jax.jit(candidate).lower(weights, fields).compile())
+                    np.testing.assert_array_equal(np.asarray(functions[0](weights, fields)),
+                                                  np.asarray(functions[1](weights, fields)))
+                    name = f"fieldstride_batch{batch}_{'paired' if stage_pair else 'direct'}_e{ept}"
+                    records[name] = measure(functions, weights, fields, args.repeats)
+                    print(name, json.dumps(records[name]), flush=True)
+        (args.output / "fieldstride_native.json").write_text(json.dumps(records, indent=2) + "\n")
+        raise SystemExit(0)
     for n, batch, dtype in (() if args.classical or args.classical_fused else (
         (1024, 1, jnp.float64), (1024, 2, jnp.float64), (8192, 3, jnp.float64), (1024, 32, jnp.float32),
     )):
