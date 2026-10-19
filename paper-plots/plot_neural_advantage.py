@@ -384,7 +384,12 @@ if __name__ == "__main__":
             control = ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch"
             completed.append((json.loads((control / "all_summaries.json").read_text()),
                               json.loads((phase_run / "control_timing.json").read_text()),
-                              "One-epoch control", "#007da6", "s", phase_method))
+                              "Hero control · epoch 1", "#007da6", "s", phase_method))
+            hero_run = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014"
+            hero_timings = json.loads((control / "single_rollout_timings.json").read_text())
+            hero_timings["families"].update(json.loads((hero_run / "fig12_epoch7_timings.json").read_text())["families"])
+            completed.append((json.loads((hero_run / "eval_epoch37_weight_ema/all_summaries.json").read_text()),
+                              hero_timings, "Hero · epoch 37", "#202328", "D", phase_method))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))
@@ -392,6 +397,10 @@ if __name__ == "__main__":
             completed.append((json.loads((amplitude_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((amplitude_run / "single_rollout_timing.json").read_text()),
                               "Surface-amplitude conditioning", "#7560a8", "P", phase_method))
+            wavenumber_run = ROOT / "outputs/c27_phase_wavenumber_scratch1_20261019"
+            completed.append((json.loads((wavenumber_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
+                              json.loads((wavenumber_run / "single_rollout_timing.json").read_text()),
+                              "Wavelength-aware phase head", "#b58a20", "v", phase_method))
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
             if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
@@ -484,7 +493,7 @@ if __name__ == "__main__":
         })
         fig, axes = plt.subplots(2, 2, figsize=(12, 9) if args.recent_one_epoch
                                  else (17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if args.recent_one_epoch else 0.83,
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.70 if args.recent_one_epoch else 0.83,
                             bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
@@ -572,7 +581,8 @@ if __name__ == "__main__":
             ax.grid(axis="y", lw=0.6)
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
-        fig.suptitle(f"Figure {'12d' if args.recent_one_epoch else '12b'} · One epoch, full data",
+        fig.suptitle("Figure 12d · One-epoch candidates and trained hero" if args.recent_one_epoch
+                     else "Figure 12b · One epoch, full data",
                      x=0.10, y=0.965, ha="left", fontsize=19)
         fig.text(0.10, 0.91 if args.recent_one_epoch else 0.923,
                  "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
