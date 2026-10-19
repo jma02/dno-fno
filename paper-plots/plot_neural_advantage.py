@@ -447,6 +447,24 @@ if __name__ == "__main__":
                 if all(family in results and timing_method in timings.get("families", {}).get(family, {}).get("methods", {})
                        for family, _ in FAMILIES):
                     completed.append((results, timings, label, "#d25232", "o", timing_method))
+        m1_run = ROOT / "outputs/c27_cs_terms_m1_scratch1_20261019"
+        m1_timings = json.loads((m1_run / "single_rollout_timing.json").read_text()) if args.recent_one_epoch else {}
+        if args.recent_one_epoch:
+            for evaluation, timing_file, timing_method, label, marker in (
+                ("eval_weight_ema_standard", "single_rollout_timing.json",
+                 "terms_interleaved_features_cufftdx_boundaries_stages_carry_local", "optimized", "^"),
+                ("eval_weight_ema_spectral", "spectral_rollout_timing.json",
+                 "terms_interleaved_features_cufftdx_spectral_boundaries_stages_carry_local", "spectral I/O", "D"),
+            ):
+                result_path = m1_run / evaluation / "all_summaries.json"
+                timing_path = m1_run / timing_file
+                if result_path.exists() and timing_path.exists():
+                    results = json.loads(result_path.read_text())
+                    timings = json.loads(timing_path.read_text())
+                    if all(family in results and timings.get("families", {}).get(family, {}).get("methods", {})
+                           .get(timing_method, {}).get("seconds") for family, _ in FAMILIES):
+                        completed.append((results, timings, f"Encoder–decoder (M1) · {label}",
+                                          "#168678", marker, timing_method))
         if not completed:
             parser.error("No completed four-family one-epoch weight-EMA rollout evaluation with an available runtime yet.")
         plt.rcParams.update({
@@ -457,7 +475,7 @@ if __name__ == "__main__":
         })
         fig, axes = plt.subplots(2, 2, figsize=(12, 9) if args.recent_one_epoch
                                  else (17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.77 if args.recent_one_epoch else 0.83,
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if args.recent_one_epoch else 0.83,
                             bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
@@ -488,7 +506,8 @@ if __name__ == "__main__":
                 orders = (1, *orders, 5)
                 classical_errors = [extra_errors[1], *classical_errors, extra_errors[5]]
                 classical_seconds = [float(np.median(recorded_methods["M1"]["seconds"])),
-                                     *classical_seconds, float(np.median(recorded_methods["M5"]["seconds"]))]
+                                     *classical_seconds, float(np.median(m1_timings["families"][family]["methods"]
+                                         ["M5_boundaries_stages_carry_local"]["seconds"]))]
                 ax.axvline(float(np.median(recorded_methods["M6"]["seconds"])),
                            color="#aab2b9", ls=":", lw=1.2, zorder=1)
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
@@ -519,7 +538,7 @@ if __name__ == "__main__":
                 optimized = decoder_points["CS-field decoder · optimized"]
                 ax.annotate("", xy=optimized, xytext=native,
                             arrowprops={"arrowstyle": "->", "color": "#d25232", "lw": 1}, zorder=3)
-                ax.text(0.03, 0.025, f"Decoder: {native[0]:.2f} → {optimized[0]:.2f} s ({100 * (optimized[0] / native[0] - 1):+.1f}%)",
+                ax.text(0.03, 0.025, f"M3 decoder: {native[0]:.2f} → {optimized[0]:.2f} s ({100 * (optimized[0] / native[0] - 1):+.1f}%)",
                         transform=ax.transAxes, color="#d25232", fontsize=9)
             label_positions = np.linspace(0.90, max(0.08, 0.90 - 0.0975 * (len(points) - 1)), len(points))
             for (error, seconds, label, color), label_y in zip(
