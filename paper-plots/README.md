@@ -618,10 +618,11 @@ is the median terminal surface error over the same 32 cases per family;
 the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
 epoch37 model. Black stars separately show `Trained hero · epoch 37`, using
-`outputs/hero_speed_20261019/graphfft_state_eval` for its own 128-case evaluation
-and `graphfft_state_rollouts.json` for fresh full-horizon, batch-one timings.
+`outputs/hero_speed_20261019/graphfft_unroll_eval` for its own 128-case evaluation
+and `graphfft_unroll_all_rollouts.json` for fresh full-horizon, batch-one timings.
 The weights are unchanged; the remaining native real FFTs execute through a
-graph-compatible cuFFT wrapper, alongside the existing cuFFTDx kernels.
+graph-compatible cuFFT wrapper, alongside the existing cuFFTDx kernels, and
+the four fixed GL2 iterations are unrolled without changing their count.
 Compilation, graph capture, warm-up and transfers are excluded. Each timing is
 one synchronized measurement after a full warm-up, not a batch time divided by 32.
 The original one-epoch hero retains its existing accuracy and
@@ -629,28 +630,34 @@ The original one-epoch hero retains its existing accuracy and
 Other neural points remain one-epoch experiments.
 
 The hero's before/after annotation uses fresh epoch-37 measurements from
-`hero37_native_rollouts.json` and `graphfft_state_rollouts.json` in that same
+`graphfft_state_rollouts.json` and `graphfft_unroll_all_rollouts.json` in that same
 directory, not timings borrowed from the one-epoch control:
 
-| Family | Previous (s) | Graph-compatible FFTs (s) | Time saved |
+| Family | Previous (s) | Unrolled GL2 iterations (s) | Time saved |
 | --- | ---: | ---: | ---: |
-| Stokes | 1.570502 | 1.427920 | 9.08% |
-| Tanaka | 15.415726 | 14.035769 | 8.95% |
-| Benjamin–Feir | 15.420391 | 14.066648 | 8.78% |
-| JONSWAP/TMA | 1.571655 | 1.433282 | 8.80% |
+| Stokes | 1.427920 | 1.301794 | 8.83% |
+| Tanaka | 14.035769 | 12.267328 | 12.60% |
+| Benjamin–Feir | 14.066648 | 12.272578 | 12.75% |
+| JONSWAP/TMA | 1.433282 | 1.251901 | 12.65% |
 
-The same wrapper is applied to the newly timed M2/M3 comparisons. Cloud results,
-batch-32 timings and the original one-epoch neural points are unchanged.
-The 128-case graph evaluation reproduces every saved hero37 surface and
-potential value exactly across all 251 frames; all trajectories remain finite
-with positive fluid depth.
+M2/M3 retain their faster measured graph-FFT timings in
+`graphfft_state_rollouts.json`; unrolling did not improve the tested M3 runtime.
+Cloud results, batch-32 timings and the original one-epoch neural points are
+unchanged. The hero's accuracy is taken from this unrolled execution's own
+128-case evaluation, not copied from the previous implementation.
+In that evaluation, every surface, potential and DNO value is bit-identical to
+the previous graph-FFT evaluation across all 128 trajectories and all 251 saved
+frames. All errors are unchanged, and every trajectory remains finite with
+positive fluid depth. This equality check concerns the 128-case evaluation,
+not the separate batch-one timing traces.
 
-To reproduce this inference trial, add `--graph-fft` to the timing/evaluation
+To reproduce this inference trial, add `--graph-fft --unroll-stages` to the timing/evaluation
 commands and set
 `XLA_FLAGS='--xla_gpu_experimental_stream_annotation=true --xla_gpu_enable_command_buffer=+WHILE --xla_gpu_command_buffer_unroll_loops=false'`.
 Build the native library if needed with `scripts/benchmark_cufft_library.py --build-ffi NEW_SO`.
 The timer expects `outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_state.so`.
-Training and default inference settings are unchanged.
+Input aliasing and endpoint-mask trials are disabled. Training and default
+inference settings are unchanged.
 
 The original Figure12 used the particular timed case's error, a different
 statistic. For Tanaka, the one-epoch hero/M3 errors are 0.152511%/0.548683% on

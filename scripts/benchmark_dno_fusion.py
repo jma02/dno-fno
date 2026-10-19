@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from collections.abc import Callable
 import ctypes
 from itertools import product
@@ -55,6 +56,8 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextinverse",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
           "cufftdx", "cufftdx_joint", "cufftdx_product", "cufftdx_both", "cufftdx_dense", "cufftdx_head",
@@ -168,6 +171,10 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    serial_g1 = variant.endswith("_serial")
+    variant = variant.removesuffix("_serial")
+    context_inverse = variant.endswith("_contextinverse")
+    variant = variant.removesuffix("_contextinverse")
     context_fold = variant.endswith("_contextfold")
     variant = variant.removesuffix("_contextfold")
     context_batch = variant.endswith("_contextbatch")
@@ -401,7 +408,7 @@ def build_variant(
                     g1_xi_hat = fft(xi_phys if fused_g1 else xi_phys.astype(jnp.float64), nx,
                                     ept=g1_input_ept, promote=fused_g1)
                 if overlap_g1:
-                    with compute_on("gpu_stream:1"):
+                    with (nullcontext() if serial_g1 else compute_on("gpu_stream:1")):
                         if model.baseline_order == 2:
                             analytic_hat = m2_hat(normalized_inputs)
                         else:
@@ -502,9 +509,15 @@ def build_variant(
                         nested_inner_hat = combined_hat[:, model.surface_context_width:]
                     else:
                         context_hat = jnp.fft.rfft(context, axis=1)
-                    context = jnp.fft.irfft(
-                        context_multiplier * context_hat, n=correction_nx, axis=1,
-                    )
+                    if context_inverse:
+                        context = jnp.moveaxis(fft(
+                            jnp.moveaxis(context_multiplier * context_hat, 1, -1),
+                            correction_nx, inverse=True, ept=fft_ept,
+                        ), -1, 1)
+                    else:
+                        context = jnp.fft.irfft(
+                            context_multiplier * context_hat, n=correction_nx, axis=1,
+                        )
                     context = context @ (cast(jax.Array, context_folded_kernel) if context_fold
                                          else loaded.params["eta_context_expand"]["kernel"])
                     features = features + context
@@ -795,7 +808,7 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
-        if variant.endswith("_contextfold"):
+        if variant.endswith(("_contextfold", "_contextinverse")):
             correction_outputs = []
             instrumented_exact = True
             for name, original in ((args.reference, expected), (variant, actual)):
@@ -867,7 +880,9 @@ if __name__ == "__main__":
                   fourier_balanced_features_overlap="Balance surface-feature stores + G₁ overlap",
                   fourier_fused_features_product_overlap="Fused head product FFT + G₁ overlap",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch="Batch context + nested first FFT",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_serial="Serial G₁",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold="Fold context projections",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_contextinverse="cuFFTDx context inverse FFT",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",

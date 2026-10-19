@@ -70,6 +70,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features_product_overlap_nestedfused",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
     "fourier_fused_features_product_overlap_exactg0",
     "fourier_fused_features_product_overlap_grid512",
     "fourier_balanced_features_product_overlap",
@@ -117,6 +118,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, choices=range(1, 33), default=1)
     parser.add_argument("--require-idle-gpu", action="store_true", help="Exit 75 if another process uses the selected GPU before or during timings.")
     parser.add_argument("--graph-fft", action="store_true", help="Trial graph-compatible cuFFT calls in both neural and classical rollout paths.")
+    parser.add_argument("--graph-fft-alias", action="store_true", help="Let XLA reuse inverse-FFT inputs; requires --graph-fft.")
+    parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation into an elementwise mask; requires --graph-fft.")
+    parser.add_argument("--unroll-stages", action="store_true", help="Unroll the four fixed-point iterations without changing their count.")
+    parser.add_argument("--profile", action="store_true", help="Save compiled HLO and trace the measured execution; profiling timings are not clean latency measurements.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
     parser.add_argument("--classical-backend", choices=("cufft", "interleaved_cufftdx"), default="cufft")
@@ -135,6 +140,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.steps < 0 or args.repeats < 1 or args.pad_factor < 1:
         parser.error("steps must be nonnegative; repeats and pad-factor must be positive")
+    if (args.graph_fft_alias or args.graph_fft_mask) and not args.graph_fft:
+        parser.error("--graph-fft-alias and --graph-fft-mask require --graph-fft")
     if args.require_idle_gpu and (not os.environ.get("CUDA_VISIBLE_DEVICES", "").startswith("GPU-")
                                  or "," in os.environ["CUDA_VISIBLE_DEVICES"]):
         parser.error("--require-idle-gpu requires one GPU UUID in CUDA_VISIBLE_DEVICES")
@@ -164,10 +171,14 @@ if __name__ == "__main__":
         "fft_ept": args.ept, "classical_pad_factor": args.pad_factor,
         "classical_backend": args.classical_backend,
         "graph_fft": args.graph_fft,
+        "graph_fft_alias": args.graph_fft_alias,
+        "graph_fft_mask": args.graph_fft_mask,
+        "unroll_stages": args.unroll_stages,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
-        "timing": "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded",
+        "timing": ("instrumented GPU trace; not a clean latency measurement" if args.profile else
+                   "synchronized GPU execution after same-executable warm-up; compilation and host transfers excluded"),
         "neural_runs": {name: str(RUNS["compact" if base in FUSION_VARIANTS else base])
                         for name in methods if not name.startswith("M")
                         for base in (method_base(name),)},
@@ -224,6 +235,7 @@ if __name__ == "__main__":
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
                                     half_spectrum="half" in options, project_momentum="momentum" in options,
+                                    unroll_stages=args.unroll_stages,
                                     predict_hat=spectral_predict)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
@@ -251,7 +263,7 @@ if __name__ == "__main__":
                 function = (partial(rollout_if_trial, params=params, substeps=cfg.substeps,
                                     carry_spectral="carry" in options, local_if="local" in options,
                                     predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options,
-                                    project_momentum="momentum" in options)
+                                    project_momentum="momentum" in options, unroll_stages=args.unroll_stages)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)
@@ -270,8 +282,12 @@ if __name__ == "__main__":
                     predict_correction=correction if shared_baseline else None, predict_hat=spectral_predict))
             with ExitStack() as patches:
                 if args.graph_fft:
-                    patches.enter_context(patch.object(jnp.fft, "rfft", graph_fft))
-                    patches.enter_context(patch.object(jnp.fft, "irfft", partial(graph_fft, inverse=True)))
+                    transform = (partial(graph_fft, input_alias=True,
+                                         library=ROOT / "outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_alias.so")
+                                 if args.graph_fft_alias else graph_fft)
+                    transform = partial(transform, endpoint_mask=args.graph_fft_mask)
+                    patches.enter_context(patch.object(jnp.fft, "rfft", transform))
+                    patches.enter_context(patch.object(jnp.fft, "irfft", partial(transform, inverse=True)))
                 patches.enter_context(rhs_patch)
                 if "boundaries" in options:
                     patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
@@ -299,6 +315,9 @@ if __name__ == "__main__":
 
                     patches.enter_context(patch.object(ti, "_gauss_legendre_2_stage_map", paired_stage_map))
                 compiled[label] = runner.lower(initial, times).compile()
+                if args.profile:
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.with_name(f"{args.output.stem}_{family}_{label}.hlo").write_text(compiled[label].as_text())
                 compile_seconds = time.perf_counter() - started
             started = time.perf_counter()
             jax.block_until_ready(compiled[label](initial, times))
@@ -313,10 +332,14 @@ if __name__ == "__main__":
                     continue
                 check_exclusive_gpu(args.require_idle_gpu)
                 started = time.perf_counter()
-                outputs[method] = jax.block_until_ready(compiled[method](initial, times))
+                with (jax.profiler.trace(str(args.output.with_suffix("") / f"{family}_{method}"))
+                      if args.profile else nullcontext()):
+                    outputs[method] = jax.block_until_ready(compiled[method](initial, times))
                 duration = time.perf_counter() - started
                 check_exclusive_gpu(args.require_idle_gpu)
                 records[method]["seconds"].append(duration)
+                if args.profile:
+                    records[method]["profiled"] = True
                 print(f"{family} {method}: repeat {repeat + 1}: {duration:.4f}s", flush=True)
         for method, result in outputs.items():
             eta = np.asarray(result["eta"])

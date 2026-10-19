@@ -457,9 +457,9 @@ if __name__ == "__main__":
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
             hero_speed = ROOT / "outputs/hero_speed_20261019"
-            hero_before = json.loads((hero_speed / "hero37_native_rollouts.json").read_text())
-            completed.append((json.loads((hero_speed / "graphfft_state_eval/all_summaries.json").read_text()),
-                              json.loads((hero_speed / "graphfft_state_rollouts.json").read_text()),
+            hero_before = json.loads((hero_speed / "graphfft_state_rollouts.json").read_text())
+            completed.append((json.loads((hero_speed / "graphfft_unroll_eval/all_summaries.json").read_text()),
+                              json.loads((hero_speed / "graphfft_unroll_all_rollouts.json").read_text()),
                               "Trained hero · epoch 37", "#222831", "*", phase_method))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),

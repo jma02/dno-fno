@@ -108,7 +108,7 @@ def rollout_if_trial(
     initial: ti.State, times: jax.Array, *, params: ti.SolverParams, substeps: int,
     carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
     predict_hat: Predictor | None = None, half_spectrum: bool = False,
-    project_momentum: bool = False,
+    project_momentum: bool = False, unroll_stages: bool = False,
 ) -> dict[str, jax.Array]:
     """Paired GL2 with optional spectral carry and interval-cached local rotations.
 
@@ -159,7 +159,9 @@ def rollout_if_trial(
                     ti._tree_scale(f1, row[0]), ti._tree_scale(f2, row[1])), dt)) for row in weights)
                 return (candidates[0], candidates[1]), f1, f2
 
-            stages = jax.lax.fori_loop(0, 4, lambda _, pair: stage_map(pair)[0], (v0, v0))
+            stages = jax.lax.fori_loop(
+                0, 4, lambda _, pair: stage_map(pair)[0], (v0, v0), unroll=unroll_stages,
+            )
             _, f1, f2 = stage_map(stages)
             v1 = ti._tree_add(v0, ti._tree_scale(ti._tree_add(f1, f2), 0.5 * dt))
             next_hat = (rotate_spectrum(v1, cosine[2], sine[2], flow_params) if local_if

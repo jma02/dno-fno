@@ -50,9 +50,9 @@ ffi::ErrorOr<std::unique_ptr<PlanCache>> instantiate(int64_t /*n*/, bool /*inver
     return std::make_unique<PlanCache>();
 }
 
-ffi::Error initialize(
-    PlanCache* cache, int32_t device, ffi::AnyBuffer input, ffi::Result<ffi::AnyBuffer> output,
-    ffi::Result<ffi::Buffer<ffi::U8>> scratch, int64_t n, bool inverse) {
+ffi::Error initialize_plan(
+    PlanCache* cache, int32_t device, ffi::AnyBuffer input,
+    ffi::Result<ffi::Buffer<ffi::U8>> scratch, int64_t n, bool inverse, bool input_alias) {
     std::lock_guard<std::mutex> lock(cache->mutex);
     if (cache->devices.count(device)) return ffi::Error::Success();
     auto plan = std::make_unique<Plan>();
@@ -62,7 +62,7 @@ ffi::Error initialize(
     long long length = n, input_length = inverse ? n / 2 + 1 : n;
     long long output_length = inverse ? n : n / 2 + 1;
     long long batch = input.element_count() / input_length;
-    plan->copy_bytes = inverse ? input.size_bytes() : 0;
+    plan->copy_bytes = inverse && !input_alias ? input.size_bytes() : 0;
     plan->workspace_offset = (plan->copy_bytes + 255) / 256 * 256;
     auto status = cufftCreate(&plan->handle);
     if (status != CUFFT_SUCCESS) return cufft_error("cufftCreate", status);
@@ -76,6 +76,19 @@ ffi::Error initialize(
         return ffi::Error::Internal("cuFFT workspace exceeds the supplied scratch buffer");
     cache->devices.emplace(device, std::move(plan));
     return ffi::Error::Success();
+}
+
+ffi::Error initialize(
+    PlanCache* cache, int32_t device, ffi::AnyBuffer input, ffi::Result<ffi::AnyBuffer> output,
+    ffi::Result<ffi::Buffer<ffi::U8>> scratch, int64_t n, bool inverse) {
+    return initialize_plan(cache, device, input, scratch, n, inverse, false);
+}
+
+ffi::Error initialize_alias(
+    PlanCache* cache, int32_t device, ffi::AnyBuffer input, ffi::Result<ffi::AnyBuffer> output,
+    ffi::Result<ffi::Buffer<ffi::U8>> scratch, ffi::Result<ffi::AnyBuffer> overwritten_input,
+    int64_t n, bool inverse) {
+    return initialize_plan(cache, device, input, scratch, n, inverse, true);
 }
 
 ffi::Error execute(cudaStream_t stream, PlanCache* cache, int32_t device, ffi::AnyBuffer input,
@@ -126,6 +139,15 @@ ffi::Error execute(cudaStream_t stream, PlanCache* cache, int32_t device, ffi::A
     return status == CUFFT_SUCCESS ? ffi::Error::Success() : cufft_error("cufftExec", status);
 }
 
+ffi::Error execute_alias(
+    cudaStream_t stream, PlanCache* cache, int32_t device, ffi::AnyBuffer input,
+    ffi::Result<ffi::AnyBuffer> output, ffi::Result<ffi::Buffer<ffi::U8>> scratch,
+    ffi::Result<ffi::AnyBuffer> overwritten_input, int64_t n, bool inverse) {
+    // XLA aliases the auxiliary output to input and inserts a copy if the
+    // original operand is live elsewhere. Only this declared alias may change.
+    return execute(stream, cache, device, input, output, scratch, n, inverse);
+}
+
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufft_instantiate, instantiate,
     ffi::Ffi::Bind<ffi::ExecutionStage::kInstantiate>()
         .Attr<int64_t>("n").Attr<bool>("inverse"));
@@ -141,4 +163,17 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufft_execute, execute,
         .Ctx<ffi::State<PlanCache>>().Ctx<ffi::DeviceOrdinal>()
         .Arg<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::Buffer<ffi::U8>>()
         .Attr<int64_t>("n").Attr<bool>("inverse"),
+    {ffi::Traits::kCmdBufferCompatible});
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufft_alias_initialize, initialize_alias,
+    ffi::Ffi::Bind<ffi::ExecutionStage::kInitialize>()
+        .Ctx<ffi::State<PlanCache>>().Ctx<ffi::DeviceOrdinal>()
+        .Arg<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::Buffer<ffi::U8>>()
+        .Ret<ffi::AnyBuffer>().Attr<int64_t>("n").Attr<bool>("inverse"));
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufft_alias_execute, execute_alias,
+    ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::State<PlanCache>>().Ctx<ffi::DeviceOrdinal>()
+        .Arg<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::Buffer<ffi::U8>>()
+        .Ret<ffi::AnyBuffer>().Attr<int64_t>("n").Attr<bool>("inverse"),
     {ffi::Traits::kCmdBufferCompatible});

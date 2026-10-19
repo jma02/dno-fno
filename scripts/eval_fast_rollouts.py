@@ -54,6 +54,8 @@ def main() -> None:
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
     parser.add_argument("--fold-context", action="store_true", help="Reassociate and batch the fixed context projections.")
     parser.add_argument("--graph-fft", action="store_true", help="Trial graph-compatible cuFFT calls throughout the rollout.")
+    parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation; requires --graph-fft.")
+    parser.add_argument("--unroll-stages", action="store_true", help="Unroll the same four fixed-point iterations.")
     parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features",
                                                     "terms_interleaved_features_cufftdx",
                                                     "terms_interleaved_features_cufftdx_spectral"),
@@ -63,6 +65,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.batch_context_fft and not args.fuse_nested_fft:
         parser.error("--batch-context-fft requires --fuse-nested-fft")
+    if args.graph_fft_mask and not args.graph_fft:
+        parser.error("--graph-fft-mask requires --graph-fft")
     if not 0.0 < args.ic_quantile_offset < 1.0:
         parser.error("ic-quantile-offset must be between 0 and 1")
     run_dir = args.run_dir.resolve()
@@ -77,6 +81,8 @@ def main() -> None:
         + ("_contextbatch" if args.batch_context_fft else "")
         + ("_contextfold" if args.fold_context else "")
         + ("_graphfft" if args.graph_fft else "")
+        + ("_fftmask" if args.graph_fft_mask else "")
+        + ("_unrolled" if args.unroll_stages else "")
         + (f"_{args.cs_terms_variant}" if args.cs_terms_variant else ""))
     checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
     loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
@@ -105,6 +111,8 @@ def main() -> None:
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
         "graph_fft": args.graph_fft,
+        "graph_fft_mask": args.graph_fft_mask,
+        "unroll_stages": args.unroll_stages,
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
@@ -141,12 +149,13 @@ def main() -> None:
         function = partial(
             rollout_if_trial, params=params, substeps=cfg.substeps,
             carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,
-            project_momentum=args.project_momentum,
+            project_momentum=args.project_momentum, unroll_stages=args.unroll_stages,
         )
         with ExitStack() as patches:
             if args.graph_fft:
-                patches.enter_context(patch.object(jnp.fft, "rfft", graph_fft))
-                patches.enter_context(patch.object(jnp.fft, "irfft", partial(graph_fft, inverse=True)))
+                transform = partial(graph_fft, endpoint_mask=args.graph_fft_mask)
+                patches.enter_context(patch.object(jnp.fft, "rfft", transform))
+                patches.enter_context(patch.object(jnp.fft, "irfft", partial(transform, inverse=True)))
             patches.enter_context(patch.object(ti, "_state_to_hat", packed_boundary))
             patches.enter_context(patch.object(ti, "_hat_to_state", partial(packed_boundary, inverse=True)))
             executable = jax.jit(function).lower(initial, times).compile()

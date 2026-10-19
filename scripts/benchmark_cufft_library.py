@@ -24,7 +24,7 @@ FFI_LIBRARY = ROOT / "outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_state.so"
 
 
 @cache
-def register_graph_ffi(library: Path) -> ct.CDLL:
+def register_graph_ffi(library: Path, input_alias: bool = False) -> ct.CDLL:
     import jax
 
     module = ct.CDLL(str(library.resolve()))
@@ -33,28 +33,34 @@ def register_graph_ffi(library: Path) -> ct.CDLL:
         getter = getattr(module, f"dno_cufft_{name}")
         getter.restype = ct.c_void_p
         registration[name] = jax.ffi.pycapsule(ct.c_void_p(getter()))
-    jax.ffi.register_ffi_type("dno_cufft_plan", {
+    suffix = "_alias" if input_alias else ""
+    jax.ffi.register_ffi_type(f"dno_cufft_plan{suffix}", {
         "type_id": registration["type_id"], "type_info": registration["type_info"],
     }, platform="CUDA")
-    jax.ffi.register_ffi_target("dno_cufft_graph", {
+    jax.ffi.register_ffi_target(f"dno_cufft_graph{suffix}", {
         "instantiate": jax.ffi.pycapsule(module.dno_cufft_instantiate),
-        "initialize": jax.ffi.pycapsule(module.dno_cufft_initialize),
-        "execute": jax.ffi.pycapsule(module.dno_cufft_execute),
+        "initialize": jax.ffi.pycapsule(getattr(module, f"dno_cufft{suffix}_initialize")),
+        "execute": jax.ffi.pycapsule(getattr(module, f"dno_cufft{suffix}_execute")),
     }, platform="CUDA")
     return module
 
 
 def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | None = None,
               *, inverse: bool = False,
-              library: Path = FFI_LIBRARY) -> jax.Array:
+              library: Path = FFI_LIBRARY, input_alias: bool = False,
+              endpoint_mask: bool = False) -> jax.Array:
     """Real FFT with JAX axis/normalization semantics and capture-compatible cuFFT.
 
     Executable-owned plans are initialized per device before capture. Scratch is
-    an extra XLA result; C2R always copies the input before execution.
+    an extra XLA result. The optional alias trial lets XLA reuse dead inputs or
+    copy live inputs before C2R, instead of always copying inside the handler;
+    forward transforms keep the accepted non-destructive implementation.
     """
     import jax
     import jax.numpy as jnp
 
+    if input_alias and not inverse:
+        return graph_fft(a, n=n, axis=axis, norm=norm, library=FFI_LIBRARY)
     expected = (np.dtype("complex64"), np.dtype("complex128")) if inverse else (
         np.dtype("float32"), np.dtype("float64"))
     if a.ndim < 1 or not -a.ndim <= axis < a.ndim or norm not in (None, "backward", "forward", "ortho"):
@@ -64,15 +70,19 @@ def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | No
         n = 2 * (a.shape[-1] - 1) if inverse else a.shape[-1]
     if a.dtype not in expected or a.ndim < 1 or n < 1:
         raise ValueError("graph_fft requires positive n and real/complex FP32 or FP64 axis-last inputs")
-    register_graph_ffi(library)
+    register_graph_ffi(library, input_alias)
     input_n = n // 2 + 1 if inverse else n
     a = a[..., :input_n]
     if a.shape[-1] < input_n:
         a = jnp.pad(a, [(0, 0)] * (a.ndim - 1) + [(0, input_n - a.shape[-1])])
     if inverse:
-        a = a.at[..., 0].set(a[..., 0].real)
-        if n % 2 == 0:
-            a = a.at[..., -1].set(a[..., -1].real)
+        if endpoint_mask:
+            mode = jnp.arange(input_n)
+            a = jnp.where((mode == 0) | ((mode == input_n - 1) & (n % 2 == 0)), a.real, a)
+        else:
+            a = a.at[..., 0].set(a[..., 0].real)
+            if n % 2 == 0:
+                a = a.at[..., -1].set(a[..., -1].real)
     fp64 = a.dtype in (np.dtype("float64"), np.dtype("complex128"))
     real_dtype = np.dtype("float64" if fp64 else "float32")
     complex_dtype = np.dtype("complex128" if fp64 else "complex64")
@@ -80,11 +90,14 @@ def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | No
                                 real_dtype if inverse else complex_dtype)
     # cuFFT documents an 8*batch*n complex-element worst-case workspace bound.
     # Initialization verifies the actual requirement before execution/capture.
-    copy_bytes = a.size * a.dtype.itemsize if inverse else 0
+    copy_bytes = a.size * a.dtype.itemsize if inverse and not input_alias else 0
     scratch_bytes = (copy_bytes + 255) // 256 * 256 + 8 * math.prod(a.shape[:-1]) * n * complex_dtype.itemsize
-    result, _ = jax.ffi.ffi_call("dno_cufft_graph", (
-        output, jax.ShapeDtypeStruct((scratch_bytes,), jnp.uint8)), vmap_method="broadcast_all",
-    )(a, n=np.int64(n), inverse=inverse)
+    results = [output, jax.ShapeDtypeStruct((scratch_bytes,), jnp.uint8)]
+    if input_alias:
+        results.append(jax.ShapeDtypeStruct(a.shape, a.dtype))
+    result = jax.ffi.ffi_call(f"dno_cufft_graph{'_alias' if input_alias else ''}",
+        results, vmap_method="broadcast_all", input_output_aliases={0: 2} if input_alias else {},
+    )(a, n=np.int64(n), inverse=inverse)[0]
     result = cast(jax.Array, result)
     scale = (1 / math.sqrt(n) if norm == "ortho" else
              1 / n if (inverse and norm in (None, "backward")) or (not inverse and norm == "forward") else 1)
@@ -105,6 +118,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--build-ffi", type=Path, metavar="NEW_SO", help="Build the opt-in JAX wrapper without GPU calls; refuse an existing output.")
     parser.add_argument("--check-ffi", type=Path, metavar="SO", help="Run native-GPU correctness checks only; print results, without timing or files.")
+    parser.add_argument("--alias-ffi-input", action="store_true", help="Check the explicit input/output-alias trial in --check-ffi.")
+    parser.add_argument("--mask-ffi-endpoints", action="store_true", help="Check elementwise endpoint masking instead of scatters in --check-ffi.")
     parser.add_argument("--repeats", type=int, default=7)
     args = parser.parse_args()
     if args.build_ffi:
@@ -132,7 +147,9 @@ def main() -> None:
         jax.config.update("jax_enable_x64", True)
         if jax.default_backend() != "gpu":
             parser.error("--check-ffi requires a GPU backend")
-        ffi_module = register_graph_ffi(args.check_ffi)
+        ffi_module = register_graph_ffi(args.check_ffi, args.alias_ffi_input)
+        transform_ffi = partial(graph_fft, library=args.check_ffi, input_alias=args.alias_ffi_input,
+                                endpoint_mask=args.mask_ffi_endpoints)
         version = ct.c_int()
         checked(ffi_module, "cufftGetVersion", ct.byref(version))
         libraries = sorted({line.rsplit(None, 1)[-1] for line in Path("/proc/self/maps").read_text().splitlines()
@@ -157,8 +174,8 @@ def main() -> None:
                 values = jnp.asarray(host)
                 reference = jnp.fft.irfft if inverse else jnp.fft.rfft
                 expected = np.asarray(jax.jit(lambda x: reference(x, n=n, axis=axis))(values))
-                transform = partial(graph_fft, n=n, axis=axis, inverse=inverse, library=args.check_ffi)
-                candidate = jax.jit(jax.vmap(transform) if vmapped else transform)
+                ffi_transform = partial(transform_ffi, n=n, axis=axis, inverse=inverse)
+                candidate = jax.jit(jax.vmap(ffi_transform) if vmapped else ffi_transform)
                 for _ in range(2):
                     actual = np.asarray(candidate(values))
                     relative = float(np.linalg.norm(actual - expected) / np.linalg.norm(expected))
@@ -166,18 +183,21 @@ def main() -> None:
                         raise AssertionError(f"cuFFT FFI {dtype}/{inverse}/{shape}/vmap={vmapped}: {relative}")
                     maximum[np.dtype(dtype).name] = max(maximum[np.dtype(dtype).name], relative)
                     np.testing.assert_array_equal(np.asarray(values), host)
+                # Keep the caller's operand live across the FFI invocation.
+                live = jax.jit(lambda x: (ffi_transform(x), 2 * x))(values)
+                np.testing.assert_array_equal(np.asarray(live[1]), 2 * host)
+                np.testing.assert_allclose(np.asarray(live[0]), expected,
+                                           rtol=tolerance, atol=tolerance * np.max(np.abs(expected)))
                 count += 1
             values = jnp.asarray(rng.normal(size=(2, 1024)).astype(dtype))
-            roundtrip = jax.jit(lambda x: graph_fft(graph_fft(x, library=args.check_ffi),
-                                                  inverse=True, library=args.check_ffi))
+            roundtrip = jax.jit(lambda x: transform_ffi(transform_ffi(x), inverse=True))
             np.testing.assert_allclose(np.asarray(roundtrip(values)), np.asarray(values),
                                        rtol=tolerance, atol=tolerance)
 
             def scan(values: jax.Array, use_ffi: bool) -> jax.Array:
                 def step(state: jax.Array, unused: None) -> tuple[jax.Array, None]:
                     if use_ffi:
-                        restored = graph_fft(graph_fft(state, library=args.check_ffi),
-                                             inverse=True, library=args.check_ffi)
+                        restored = transform_ffi(transform_ffi(state), inverse=True)
                     else:
                         restored = jnp.fft.irfft(jnp.fft.rfft(state), n=state.shape[-1])
                     return 0.999 * restored + 0.001 * jnp.roll(state, 1, axis=-1), None
