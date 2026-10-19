@@ -379,10 +379,15 @@ if __name__ == "__main__":
         completed = []
         if args.recent_one_epoch:
             screens = ()
-            control = ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema"
+            phase_run = ROOT / "outputs/c27_phase_rank_one_scratch1_20261019"
+            phase_method = method.replace("_spectral_all", "_nestedfused_contextbatch_spectral_all")
+            control = ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema_nestedfused_contextbatch"
             completed.append((json.loads((control / "all_summaries.json").read_text()),
-                              json.loads((control / "single_rollout_timings.json").read_text()),
-                              "One-epoch control", "#007da6", "s", method))
+                              json.loads((phase_run / "control_timing.json").read_text()),
+                              "One-epoch control", "#007da6", "s", phase_method))
+            completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
+                              json.loads((phase_run / "single_rollout_timing.json").read_text()),
+                              "Rank-one phase head", "#ad527a", "X", phase_method))
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
             if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
