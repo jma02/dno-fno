@@ -388,6 +388,10 @@ if __name__ == "__main__":
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))
+            amplitude_run = ROOT / "outputs/c27_surface_amplitude_fp32_scratch1_20261019"
+            completed.append((json.loads((amplitude_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
+                              json.loads((amplitude_run / "single_rollout_timing.json").read_text()),
+                              "Surface-amplitude conditioning", "#7560a8", "P", phase_method))
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
             if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
