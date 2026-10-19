@@ -126,11 +126,12 @@ Short-horizon CPU benchmark on one held-out Stokes initial condition, Fourier-re
 
 The CPU and single-rollout comparisons were refreshed on October 19. Ada batch-one plots share
 `refresh_classical_timings` in `plot_neural_advantage.py`: M1/M6 come from
-`outputs/classical_all_orders_20260928/ada/classical.json`, M2 from
-`outputs/momentum_classical_M2_timing_20261010/*_timing.json`, M3/M4 from
+`outputs/classical_all_orders_20260928/ada/classical.json`, M2/M3 from
+`outputs/hero_speed_20261019/graphfft_state_rollouts.json`, M4 from
 `outputs/c27_cs_terms_scratch1_20261019/single_rollout_timing.json`, and M5 from
 `outputs/c27_cs_terms_m1_scratch1_20261019/single_rollout_timing.json`.
-M3/M4 now use FP64 interleaved cuFFTDx with padding 1; the M6 reference-runtime
+M2–M5 use FP64 interleaved cuFFTDx with padding 1; M2/M3 additionally use the
+graph-compatible cuFFT wrapper for the remaining rollout FFTs. The M6 reference-runtime
 line retains the validated padding-2 measurement. The padding-1 M6 trial is
 excluded because its BF trajectory differs from the reference.
 
@@ -184,7 +185,7 @@ Neither figure changes the manuscript or its ZIP. No data are uploaded.
 Completed single-rollout figure: [PNG](figures/11-single-rollout-warm.png) /
 [PDF](figures/11-single-rollout-warm.pdf). On the RTX 6000 Ada, the full neural
 model retains its approximately 15.2 seconds for T=20 and 150.3 seconds for
-T=200. Updated M3 takes about 1.17/11.60 seconds and M6 about 2.57/25.59 seconds
+T=200. Updated M3 takes about 1.14/11.40 seconds and M6 about 2.57/25.59 seconds
 on the Stokes/Tanaka cases. The former speed comparisons against the archived
 CS implementation no longer apply; neural accuracy values are unchanged.
 
@@ -617,10 +618,39 @@ is the median terminal surface error over the same 32 cases per family;
 the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
 epoch37 model. Black stars separately show `Trained hero · epoch 37`, using
-`eval_epoch37_weight_ema` from the extended run. Both hero checkpoints use the
-same measured latency from `c27_phase_rank_one_scratch1_20261019/control_timing.json`:
-their architecture and optimized inference path are unchanged. Other neural
-points remain one-epoch experiments.
+`outputs/hero_speed_20261019/graphfft_state_eval` for its own 128-case evaluation
+and `graphfft_state_rollouts.json` for fresh full-horizon, batch-one timings.
+The weights are unchanged; the remaining native real FFTs execute through a
+graph-compatible cuFFT wrapper, alongside the existing cuFFTDx kernels.
+Compilation, graph capture, warm-up and transfers are excluded. Each timing is
+one synchronized measurement after a full warm-up, not a batch time divided by 32.
+The original one-epoch hero retains its existing accuracy and
+`c27_phase_rank_one_scratch1_20261019/control_timing.json` measurements.
+Other neural points remain one-epoch experiments.
+
+The hero's before/after annotation uses fresh epoch-37 measurements from
+`hero37_native_rollouts.json` and `graphfft_state_rollouts.json` in that same
+directory, not timings borrowed from the one-epoch control:
+
+| Family | Previous (s) | Graph-compatible FFTs (s) | Time saved |
+| --- | ---: | ---: | ---: |
+| Stokes | 1.570502 | 1.427920 | 9.08% |
+| Tanaka | 15.415726 | 14.035769 | 8.95% |
+| Benjamin–Feir | 15.420391 | 14.066648 | 8.78% |
+| JONSWAP/TMA | 1.571655 | 1.433282 | 8.80% |
+
+The same wrapper is applied to the newly timed M2/M3 comparisons. Cloud results,
+batch-32 timings and the original one-epoch neural points are unchanged.
+The 128-case graph evaluation reproduces every saved hero37 surface and
+potential value exactly across all 251 frames; all trajectories remain finite
+with positive fluid depth.
+
+To reproduce this inference trial, add `--graph-fft` to the timing/evaluation
+commands and set
+`XLA_FLAGS='--xla_gpu_experimental_stream_annotation=true --xla_gpu_enable_command_buffer=+WHILE --xla_gpu_command_buffer_unroll_loops=false'`.
+Build the native library if needed with `scripts/benchmark_cufft_library.py --build-ffi NEW_SO`.
+The timer expects `outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_state.so`.
+Training and default inference settings are unchanged.
 
 The original Figure12 used the particular timed case's error, a different
 statistic. For Tanaka, the one-epoch hero/M3 errors are 0.152511%/0.548683% on

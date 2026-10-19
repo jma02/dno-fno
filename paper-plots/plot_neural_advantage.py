@@ -48,17 +48,15 @@ def refresh_classical_timings(report: dict[str, Any]) -> None:
         return
     for filename, orders in (
         ("classical_all_orders_20260928/ada/classical.json", (1, 6)),
-        ("c27_cs_terms_scratch1_20261019/single_rollout_timing.json", (3, 4)),
+        ("c27_cs_terms_scratch1_20261019/single_rollout_timing.json", (4,)),
         ("c27_cs_terms_m1_scratch1_20261019/single_rollout_timing.json", (5,)),
+        ("hero_speed_20261019/graphfft_state_rollouts.json", (2, 3)),
     ):
         measured = json.loads((ROOT / "outputs" / filename).read_text())
         for family, result in measured["families"].items():
             for name, record in result["methods"].items():
                 if name.split("_", 1)[0] in {f"M{order}" for order in orders}:
                     report["families"][family]["methods"][name.split("_", 1)[0]]["seconds"] = record["seconds"]
-    for family, _ in FAMILIES:
-        measured = json.loads((ROOT / f"outputs/momentum_classical_M2_timing_20261010/{family}_timing.json").read_text())
-        report["families"][family]["methods"]["M2"]["seconds"] = measured["methods"]["none"]["seconds"]
 
 
 def draw_comparison(args: argparse.Namespace, fig: Figure | SubFigure, heading: str = "") -> None:
@@ -436,6 +434,7 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )
         completed = []
+        hero_before = None
         if args.subset40:
             screens = ()
             for suffix, label, color, marker in (
@@ -457,9 +456,10 @@ if __name__ == "__main__":
             completed.append((json.loads((control / "all_summaries.json").read_text()),
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
-            hero = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch37_weight_ema"
-            completed.append((json.loads((hero / "all_summaries.json").read_text()),
-                              json.loads((phase_run / "control_timing.json").read_text()),
+            hero_speed = ROOT / "outputs/hero_speed_20261019"
+            hero_before = json.loads((hero_speed / "hero37_native_rollouts.json").read_text())
+            completed.append((json.loads((hero_speed / "graphfft_state_eval/all_summaries.json").read_text()),
+                              json.loads((hero_speed / "graphfft_state_rollouts.json").read_text()),
                               "Trained hero · epoch 37", "#222831", "*", phase_method))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
@@ -589,7 +589,8 @@ if __name__ == "__main__":
                            color="#aab2b9", ls=":", lw=1.2, zorder=1)
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
-                ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
+                ax.annotate(f"M{order}", (x, y), xytext=(6, -12 if args.recent_one_epoch and order == 3 else -2),
+                            textcoords="offset points", color="#667078", fontsize=10)
             points = []
             decoder_points = {}
             for results, timings, label, color, marker, timing_method in completed:
@@ -608,6 +609,10 @@ if __name__ == "__main__":
                 ax.scatter(seconds, error, s=100 if label.startswith("Trained hero") else 45, marker=marker,
                            facecolors="white" if native_decoder else color,
                            edgecolors=color if native_decoder else "white", linewidths=0.7, zorder=4)
+                if hero_before is not None and label.startswith("Trained hero"):
+                    previous = float(np.median(hero_before["families"][family]["methods"][timing_method]["seconds"]))
+                    ax.text(0.03, 0.085, f"Hero: {previous:.2f} → {seconds:.2f} s ({100 * (seconds / previous - 1):+.1f}%)",
+                            transform=ax.transAxes, color=color, fontsize=9)
                 print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "
                       f"finite {result['n_model_finite_truth_valid']}/{result['n_truth_valid']}")
             if len(decoder_points) == 2:
@@ -630,7 +635,7 @@ if __name__ == "__main__":
             span = max(log_high - log_low, 0.5)
             ax.set(yscale="log", xlim=(0, (1.12 if compact_screens else 2.0)
                                       * max(*classical_seconds, *(point[1] for point in points))),
-                   ylim=(10**(log_low - 0.13 * span), 10**(log_high + 0.20 * span)))
+                   ylim=(10**(log_low - (0.25 if args.recent_one_epoch else 0.13) * span), 10**(log_high + 0.20 * span)))
             ax.xaxis.set_major_locator(MaxNLocator(4))
             ax.yaxis.set_major_locator(LogLocator(numticks=5))
             if span < 1.0:
