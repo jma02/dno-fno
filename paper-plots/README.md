@@ -611,11 +611,15 @@ UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantag
 ### 12d-one-epoch-full-data
 
 [PNG](figures/12d-one-epoch-full-data.png) / [PDF](figures/12d-one-epoch-full-data.pdf).
-Recent full-data, one-epoch weight-EMA candidates on Ada. Every accuracy point
+Recent full-data, one-epoch weight-EMA candidates and the trained hero on Ada. Every accuracy point
 is the median terminal surface error over the same 32 cases per family;
 the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
-epoch37 model. No longer-trained checkpoints enter this comparison.
+epoch37 model. Black stars separately show `Trained hero · epoch 37`, using
+`eval_epoch37_weight_ema` from the extended run. Both hero checkpoints use the
+same measured latency from `c27_phase_rank_one_scratch1_20261019/control_timing.json`:
+their architecture and optimized inference path are unchanged. Other neural
+points remain one-epoch experiments.
 
 The original Figure12 used the particular timed case's error, a different
 statistic. For Tanaka, the one-epoch hero/M3 errors are 0.152511%/0.548683% on

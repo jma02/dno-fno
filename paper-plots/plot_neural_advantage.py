@@ -284,7 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
     parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
     parser.add_argument("--subset40", action="store_true", help="Figure 12b: saved 40-epoch subset screens.")
-    parser.add_argument("--recent-one-epoch", action="store_true", help="Figure 12d: recent full-data, one-epoch models with measured runtimes.")
+    parser.add_argument("--recent-one-epoch", action="store_true", help="Figure 12d: recent one-epoch models and the trained hero on full data.")
     parser.add_argument("--momentum-comparison", action="store_true", help="Figure 12c: measured original and momentum-corrected rollouts.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     parser.add_argument("--hide-timing-changes", action="store_true", help="Omit before/after runtime annotations.")
@@ -457,6 +457,10 @@ if __name__ == "__main__":
             completed.append((json.loads((control / "all_summaries.json").read_text()),
                               json.loads((phase_run / "control_timing.json").read_text()),
                               "Hero control · epoch 1", "#007da6", "s", phase_method))
+            hero = ROOT / "outputs/c27_nested_b16_ema_low_lr_ep60_20261014/eval_epoch37_weight_ema"
+            completed.append((json.loads((hero / "all_summaries.json").read_text()),
+                              json.loads((phase_run / "control_timing.json").read_text()),
+                              "Trained hero · epoch 37", "#222831", "*", phase_method))
             completed.append((json.loads((phase_run / "eval_weight_ema_standard/all_summaries.json").read_text()),
                               json.loads((phase_run / "single_rollout_timing.json").read_text()),
                               "Rank-one phase head", "#ad527a", "X", phase_method))
@@ -560,7 +564,7 @@ if __name__ == "__main__":
         compact_screens = args.recent_one_epoch or args.subset40
         fig, axes = plt.subplots(2, 2, figsize=(12, 9) if compact_screens
                                  else (17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.73 if compact_screens else 0.83,
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.70 if args.recent_one_epoch else 0.73 if compact_screens else 0.83,
                             bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
@@ -601,7 +605,7 @@ if __name__ == "__main__":
                 if failures:
                     label += f" · {failures}/{result['n_truth_valid']} failed"
                 points.append((error, seconds, label, color))
-                ax.scatter(seconds, error, s=45, marker=marker,
+                ax.scatter(seconds, error, s=100 if label.startswith("Trained hero") else 45, marker=marker,
                            facecolors="white" if native_decoder else color,
                            edgecolors=color if native_decoder else "white", linewidths=0.7, zorder=4)
                 print(f"{family}, {label}: median error {error:.8g}%; architecture runtime {seconds:.6f}s; "
@@ -636,7 +640,7 @@ if __name__ == "__main__":
             ax.grid(axis="y", lw=0.6)
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
-        fig.suptitle("Figure 12d · One epoch, full data" if args.recent_one_epoch
+        fig.suptitle("Figure 12d · Runtime versus error" if args.recent_one_epoch
                      else "Figure 12b · 40-epoch training screens" if args.subset40
                      else "Figure 12b · One epoch, full data",
                      x=0.10, y=0.965, ha="left", fontsize=19)
@@ -648,7 +652,7 @@ if __name__ == "__main__":
             fig.legend(handles=[
                 Line2D([], [], color="#899198", marker="o", mfc="white", lw=1, label="Classical"),
                 *([Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time")] if args.recent_one_epoch else []),
-                *[Line2D([], [], color=color, marker=marker, ls="none", ms=7,
+                *[Line2D([], [], color=color, marker=marker, ls="none", ms=9 if label.startswith("Trained hero") else 7,
                          mfc="white" if label.endswith("· native") else color,
                          label=label.replace("CS-field decoder", "Encoder–decoder (M3)"))
                   for _, _, label, color, marker, _ in completed],
