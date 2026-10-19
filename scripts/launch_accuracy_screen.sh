@@ -12,7 +12,7 @@ reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s phase_direction|phase_rank_one|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
+    printf 'Usage: %s phase_direction|phase_rank_one|surface_amplitude|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
@@ -21,6 +21,7 @@ for arm in "$@"; do
     case "$arm" in
         phase_direction) arm_args=(--data_phase_projection_weight 1) ;;
         phase_rank_one) arm_args=(--cs_phase_rank_one) ;;
+        surface_amplitude) arm_args=(--cs_surface_amplitude_normalization) ;;
         nested_features) arm_args=(--cs_nested_surface_features) ;;
         cs_terms|cs_terms_m1|cs_terms_w160)
             arm_args=(--cs_terms_residual --cs_terms_cpu_prefetch --cs_nested_blocks 0 --cs_baseline_order 3)
