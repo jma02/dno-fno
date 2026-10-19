@@ -227,6 +227,7 @@ if __name__ == "__main__":
     parser.add_argument("--stack-hardware", action="store_true", help="Stack the four-family Blackwell, Ada, and A100 comparisons.")
     parser.add_argument("--single-case", action="store_true", help="Plot single-case runtime/error measurements.")
     parser.add_argument("--one-epoch", action="store_true", help="Figure 12b: completed full-data, one-epoch screens.")
+    parser.add_argument("--recent-one-epoch", action="store_true", help="Figure 12d: recent full-data, one-epoch models with measured runtimes.")
     parser.add_argument("--momentum-comparison", action="store_true", help="Figure 12c: measured original and momentum-corrected rollouts.")
     parser.add_argument("--output-name", type=Path, help="Output stem, relative to paper-plots/figures or absolute.")
     parser.add_argument("--hide-timing-changes", action="store_true", help="Omit before/after runtime annotations.")
@@ -297,7 +298,7 @@ if __name__ == "__main__":
             fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
         plt.close(fig)
         raise SystemExit(0)
-    if args.one_epoch:
+    if args.one_epoch or args.recent_one_epoch:
         neural = json.loads((ROOT / "outputs/rms_context_timing_20261007/ada/timings.json").read_text())
         method = "fourier_fused_features_product_overlap_spectral_all_boundaries_stages_carry_local"
         screens = (
@@ -376,6 +377,12 @@ if __name__ == "__main__":
             ("lr6_momentum_half_ema995_grad05_adam05_mbfloor1e5", "Mode-balance floor × 10", "#52794b", "v"),
         )
         completed = []
+        if args.recent_one_epoch:
+            screens = ()
+            control = ROOT / "outputs/c27_phase1_lr8_momentum_half_ema995_grad05_adam05_b2099_batch16_hd04_band128_nested1_gamma32_full_20261012/eval_fast_weight_ema"
+            completed.append((json.loads((control / "all_summaries.json").read_text()),
+                              json.loads((control / "single_rollout_timings.json").read_text()),
+                              "One-epoch control", "#007da6", "s", method))
         for suffix, label, color, marker in screens:
             run_date = "20261010" if suffix.startswith(("lr6_momentum_half_ema995", "lr8_momentum_half_ema995", "lr8_momentum_full_ema995", "lr10_momentum_half_ema995")) else "20261009"
             if suffix.startswith(("lr8_momentum_half_ema995_grad05_adam05_b2099_batch128",
@@ -448,8 +455,10 @@ if __name__ == "__main__":
             "axes.edgecolor": "#c6cbd0", "grid.color": "#edf0f2",
             "xtick.color": "#59616a", "ytick.color": "#59616a",
         })
-        fig, axes = plt.subplots(2, 2, figsize=(17, max(9.5, 2.5 + 1.2 * len(completed))))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9) if args.recent_one_epoch
+                                 else (17, max(9.5, 2.5 + 1.2 * len(completed))))
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.77 if args.recent_one_epoch else 0.83,
+                            bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
             orders = (2, 3, 4)
@@ -500,7 +509,9 @@ if __name__ == "__main__":
                 ax.text(0.03, 0.025, f"Decoder: {native[0]:.2f} → {optimized[0]:.2f} s ({100 * (optimized[0] / native[0] - 1):+.1f}%)",
                         transform=ax.transAxes, color="#d25232", fontsize=9)
             label_positions = np.linspace(0.90, max(0.08, 0.90 - 0.0975 * (len(points) - 1)), len(points))
-            for (error, seconds, label, color), label_y in zip(sorted(points, reverse=True), label_positions, strict=True):
+            for (error, seconds, label, color), label_y in zip(
+                [] if args.recent_one_epoch else sorted(points, reverse=True), label_positions, strict=False,
+            ):
                 ax.annotate(f"{label}\n{error:.4g}%", (seconds, error), xytext=(0.65, label_y), textcoords="axes fraction",
                             ha="left", va="center", color=color, fontsize=9,
                             arrowprops={"arrowstyle": "-", "color": color, "lw": 0.7, "alpha": 0.6, "relpos": (0, 0.5)},
@@ -508,7 +519,8 @@ if __name__ == "__main__":
             values = classical_errors + [point[0] for point in points]
             log_low, log_high = np.log10([min(values), max(values)])
             span = max(log_high - log_low, 0.5)
-            ax.set(yscale="log", xlim=(0, 2.0 * max(*classical_seconds, *(point[1] for point in points))),
+            ax.set(yscale="log", xlim=(0, (1.12 if args.recent_one_epoch else 2.0)
+                                      * max(*classical_seconds, *(point[1] for point in points))),
                    ylim=(10**(log_low - 0.13 * span), 10**(log_high + 0.20 * span)))
             ax.xaxis.set_major_locator(MaxNLocator(4))
             ax.yaxis.set_major_locator(LogLocator(numticks=5))
@@ -519,13 +531,24 @@ if __name__ == "__main__":
             ax.grid(axis="y", lw=0.6)
             ax.set_title(title, loc="left", fontsize=13, pad=12)
             ax.set_title(f"T = {timing['horizon']:g}", loc="right", fontsize=10, color="#777f86", pad=12)
-        fig.suptitle("Figure 12b · One epoch, full data", x=0.10, y=0.965, ha="left", fontsize=19)
-        fig.text(0.10, 0.923, "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
-        fig.text(0.10, 0.891, "Fast paths and both decoder paths: measured timings. Other native screens: shared timing proxy.",
-                 color="#59616a", fontsize=10)
+        fig.suptitle(f"Figure {'12d' if args.recent_one_epoch else '12b'} · One epoch, full data",
+                     x=0.10, y=0.965, ha="left", fontsize=19)
+        fig.text(0.10, 0.91 if args.recent_one_epoch else 0.923,
+                 "RTX 6000 Ada · 32 test cases per family · Weight EMA", color="#59616a", fontsize=11)
+        if args.recent_one_epoch:
+            fig.legend(handles=[
+                Line2D([], [], color="#899198", marker="o", mfc="white", lw=1, label="Classical"),
+                *[Line2D([], [], color=color, marker=marker, ls="none", ms=7,
+                         mfc="white" if label.endswith("· native") else color,
+                         label=label.replace("CS-field decoder", "Encoder–decoder (M3)"))
+                  for _, _, label, color, marker, _ in completed],
+            ], loc="upper left", bbox_to_anchor=(0.09, 0.895), ncols=2, frameon=False, fontsize=10)
+        else:
+            fig.text(0.10, 0.891, "Fast paths and both decoder paths: measured timings. Other native screens: shared timing proxy.",
+                     color="#59616a", fontsize=10)
         fig.supxlabel("Single-rollout runtime (seconds)", y=0.045, fontsize=12)
         fig.supylabel("Median final surface error (%)", x=0.02, fontsize=12)
-        stem = OUT / (args.output_name or "12b-one-epoch-full-data")
+        stem = OUT / (args.output_name or ("12d-one-epoch-full-data" if args.recent_one_epoch else "12b-one-epoch-full-data"))
         stem.parent.mkdir(parents=True, exist_ok=True)
         for extension in ("png", "pdf"):
             fig.savefig(f"{stem}.{extension}", dpi=180, facecolor="white")
