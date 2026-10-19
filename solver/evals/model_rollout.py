@@ -101,6 +101,7 @@ def load_run(
             nested_surface_modulation=bool(config.get("cs_nested_surface_modulation", False)),
             nested_surface_features=bool(config.get("cs_nested_surface_features", False)),
             phase_rank_one=bool(config.get("cs_phase_rank_one", False)),
+            phase_wavenumber_hidden=int(config.get("cs_phase_wavenumber_hidden", 0)),
             latent=int(config["latent"]),
             n_polys=int(config["cs_n_polys"]),
             use_first_deriv=bool(config["cs_use_first_deriv"]),

@@ -32,7 +32,7 @@ from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
-    phase_rank_one_hat, surface_amplitude,
+    PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
 )
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
@@ -215,8 +215,10 @@ def build_variant(
         variant = "front"
     predict = build_predict_gxi_batched(loaded)
     model = loaded.model
-    if model.phase_rank_one and (trial == "fourier" or (not spectral_io and variant != "original")):
-        raise ValueError("Phase rank-one inference requires original or physically rounded Fourier I/O.")
+    if (model.phase_rank_one or model.phase_wavenumber_hidden) and (
+        trial == "fourier" or (not spectral_io and variant != "original")
+    ):
+        raise ValueError("Phase correction inference requires original or physically rounded Fourier I/O.")
     if model.surface_amplitude_reference > 0 and not spectral_io and variant != "original":
         raise ValueError("Amplitude-conditioned inference requires original or Fourier I/O.")
     if nested_fused and (nx != 1024 or coarse_correction or not model.nested_blocks or not spectral_io):
@@ -304,6 +306,12 @@ def build_variant(
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
         log_depth = depth.astype(jnp.float32).reshape(-1, 1)
+        phase_multiplier = None
+        if model.phase_wavenumber_hidden:
+            phase_multiplier = cast(jax.Array, PhaseWavenumberMultiplier(
+                model.phase_wavenumber_hidden, model.domain_length,
+            ).apply({"params": loaded.params["phase_wavenumber"]}, log_depth, nx // 2 + 1))
+            jax.block_until_ready(phase_multiplier)
         nested_modulation = ((jnp.tanh(loaded.params["nested_surface_gain"]), jnp.exp(log_depth))
                              if model.nested_surface_modulation else None)
         h = jnp.exp(log_depth if model.baseline_true_depth else jnp.minimum(log_depth, jnp.log(model.h_clip_max)))
@@ -396,6 +404,10 @@ def build_variant(
                 eta_norm_hat * model.eta_scale, xi_phys_hat, log_depth,
                 loaded.params["phase_rank_one_coefficients"], model.domain_length,
             ) if model.phase_rank_one else None)
+            if phase_multiplier is not None:
+                phase_hat = phase_wavenumber_hat(
+                    eta_norm_hat * model.eta_scale, xi_phys_hat, phase_multiplier, model.domain_length,
+                )
             if coarse_correction:
                 normalized_hat = resample_rfft(cast(jax.Array, normalized_hat), correction_nx)
                 normalized_inputs = fft(normalized_hat, correction_nx, inverse=True, ept=input_ept)

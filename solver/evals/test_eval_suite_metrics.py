@@ -36,7 +36,7 @@ from solver.evals.eval_suite import (  # noqa: E402
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from solver.solvers.dno_series_jax import _dno_series_hat, dno_series_eval  # noqa: E402
-from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual  # noqa: E402
+from dno_net_v2 import CraigSulemDNO, CraigSulemTermsResidual, PhaseWavenumberMultiplier  # noqa: E402
 from fno1d import SpectralConv1d  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -221,6 +221,7 @@ class ComputeMetricsTest(unittest.TestCase):
             {"cs_nested_blocks": 1, "cs_nested_surface_features": True,
              "cs_surface_feature_scales": [0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1]},
             {"cs_phase_rank_one": True},
+            {"cs_phase_wavenumber_hidden": 8},
             {"cs_surface_amplitude_reference": .07, "cs_nested_blocks": 1,
              "cs_surface_feature_scales": [.1, .02, .003, 1., 10., .3, .1]},
             {"cs_baseline_true_depth": True},
@@ -262,6 +263,7 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.model.nested_surface_features,
                                  options.get("cs_nested_surface_features", False))
                 self.assertEqual(loaded.model.phase_rank_one, options.get("cs_phase_rank_one", False))
+                self.assertEqual(loaded.model.phase_wavenumber_hidden, options.get("cs_phase_wavenumber_hidden", 0))
                 self.assertEqual(loaded.model.surface_amplitude_reference,
                                  options.get("cs_surface_amplitude_reference", 0.0))
                 self.assertEqual(loaded.model.baseline_true_depth, options.get("cs_baseline_true_depth", False))
@@ -309,14 +311,26 @@ class ComputeMetricsTest(unittest.TestCase):
                 self.assertEqual(loaded.epoch, 37)
 
     def test_nested_checkpoint_restores_nonzero_correction_and_m1_baseline(self) -> None:
+        self._check_nested_checkpoint(phase_wavenumber_hidden=0)
+
+    def test_wavenumber_phase_checkpoint_restores_nonzero_correction(self) -> None:
+        self._check_nested_checkpoint(phase_wavenumber_hidden=8)
+
+    def _check_nested_checkpoint(self, phase_wavenumber_hidden: int) -> None:
         model = CraigSulemDNO(width=8, n_blocks=1, nested_blocks=1, latent=2, mult_hidden=4,
-                             baseline_order=1, nested_surface_modulation=True, phase_rank_one=True)
+                             baseline_order=1, nested_surface_modulation=True,
+                             phase_rank_one=not phase_wavenumber_hidden,
+                             phase_wavenumber_hidden=phase_wavenumber_hidden)
         inputs = 0.1 * jax.random.normal(jax.random.PRNGKey(4), (2, 32, 2), dtype=jnp.float32)
         depth = jnp.log(jnp.asarray([[0.2], [8.0]], dtype=jnp.float32))
         params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
         params["cs_block_0"]["gamma"] = jnp.full((2,), 0.1, dtype=jnp.float32)
         params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
-        params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], dtype=jnp.float32)
+        if phase_wavenumber_hidden:
+            params["phase_wavenumber"]["out"]["kernel"] = jnp.linspace(-0.15, 0.2, 8, dtype=jnp.float32)[:, None]
+            params["phase_wavenumber"]["out"]["bias"] = jnp.asarray([0.03], dtype=jnp.float32)
+        else:
+            params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], dtype=jnp.float32)
         prediction, baseline, m1, correction = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                                        model.apply({"params": params}, inputs, depth, return_baseline=True))
         np.testing.assert_array_equal(baseline, m1)
@@ -325,7 +339,8 @@ class ComputeMetricsTest(unittest.TestCase):
         config = {
             "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1,
             "cs_nested_blocks": 1, "latent": 2, "cs_n_polys": 3, "cs_mult_hidden": 4,
-            "cs_nested_surface_modulation": True, "cs_phase_rank_one": True,
+            "cs_nested_surface_modulation": True, "cs_phase_rank_one": not phase_wavenumber_hidden,
+            "cs_phase_wavenumber_hidden": phase_wavenumber_hidden,
             "cs_use_first_deriv": True, "cs_use_second_deriv": True,
             "cs_use_half_deriv": True, "cs_use_hilbert": True,
             "cs_baseline_order": 1, "cs_baseline_true_depth": False,
@@ -345,8 +360,11 @@ class ComputeMetricsTest(unittest.TestCase):
         self.assertEqual(restored.model.nested_blocks, 1)
         self.assertTrue(restored.model.nested_surface_modulation)
         np.testing.assert_array_equal(restored.params["nested_surface_gain"], params["nested_surface_gain"])
-        self.assertTrue(restored.model.phase_rank_one)
-        np.testing.assert_array_equal(restored.params["phase_rank_one_coefficients"], params["phase_rank_one_coefficients"])
+        self.assertEqual(restored.model.phase_rank_one, not phase_wavenumber_hidden)
+        self.assertEqual(restored.model.phase_wavenumber_hidden, phase_wavenumber_hidden)
+        key = "phase_wavenumber" if phase_wavenumber_hidden else "phase_rank_one_coefficients"
+        for actual_leaf, expected_leaf in zip(jax.tree.leaves(restored.params[key]), jax.tree.leaves(params[key]), strict=True):
+            np.testing.assert_array_equal(actual_leaf, expected_leaf)
         self.assertEqual(restored.model.baseline_order, 1)
         self.assertEqual(restored.epoch, 40)
 
@@ -603,6 +621,12 @@ class ComputeMetricsTest(unittest.TestCase):
                             self.assertLess(float(jnp.max(jnp.abs(error)) / jnp.sqrt(jnp.mean(expected**2))), 1e-6)
 
     def test_nested_fused_fourier_path_preserves_signed_nested_contribution(self) -> None:
+        self._check_nested_fused_fourier_path(phase_wavenumber_hidden=0)
+
+    def test_wavenumber_phase_fused_fourier_path_preserves_signed_correction(self) -> None:
+        self._check_nested_fused_fourier_path(phase_wavenumber_hidden=8)
+
+    def _check_nested_fused_fourier_path(self, phase_wavenumber_hidden: int) -> None:
         from contextlib import nullcontext
         from scripts import benchmark_dno_fusion as fusion
 
@@ -630,14 +654,19 @@ class ComputeMetricsTest(unittest.TestCase):
 
         model = CraigSulemDNO(width=8, n_blocks=2, nested_blocks=1, latent=2, mult_hidden=4,
                              eta_scale=0.3, xi_scale=0.7, target_scale=0.8,
-                             nested_surface_modulation=True, phase_rank_one=True, domain_length=3 * np.pi,
+                             nested_surface_modulation=True, phase_rank_one=not phase_wavenumber_hidden,
+                             phase_wavenumber_hidden=phase_wavenumber_hidden, domain_length=3 * np.pi,
                              surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
                              surface_context_width=4)
         params = cast(dict[str, Any], model.init(
             jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
             jnp.zeros((1, 1), jnp.float32))["params"])
         params["nested_surface_gain"] = jnp.asarray(0.6, jnp.float32)
-        params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], jnp.float32)
+        if phase_wavenumber_hidden:
+            params["phase_wavenumber"]["out"]["kernel"] = jnp.linspace(-0.15, 0.2, 8, dtype=jnp.float32)[:, None]
+            params["phase_wavenumber"]["out"]["bias"] = jnp.asarray([0.03], dtype=jnp.float32)
+        else:
+            params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], jnp.float32)
         params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
             params["cs_block_0"]["phi_proj"]["kernel"], 0.1)
         block = params["cs_block_1"]
@@ -655,11 +684,14 @@ class ComputeMetricsTest(unittest.TestCase):
         ):
             cases = [(features, batch, 0.0) for features, batch in product((False, True), (1, 32))]
             cases += [(False, batch, .07) for batch in (1, 32)]
+            if phase_wavenumber_hidden:
+                cases = [(False, batch, 0.0) for batch in (1, 32)]
             for surface_features, batch, amplitude_reference in cases:
                 with self.subTest(surface_features=surface_features, batch=batch,
                                   amplitude_reference=amplitude_reference):
                     case_model = model.clone(nested_surface_features=surface_features,
-                                             nested_surface_modulation=not surface_features and not amplitude_reference,
+                                             nested_surface_modulation=not surface_features and not amplitude_reference
+                                             and not phase_wavenumber_hidden,
                                              surface_amplitude_reference=amplitude_reference)
                     case_block = {**block, "surface_mix": jnp.asarray([[0.17, -0.11], [-0.09, 0.23]], jnp.float32)} if surface_features else block
                     case_params = {**params, "cs_block_1": case_block}
@@ -710,6 +742,14 @@ class ComputeMetricsTest(unittest.TestCase):
                     u = jnp.fft.irfft(u_hat, n=nx)
                     beta = 0.3 - 0.4 * (depth + jnp.log(2 * jnp.pi / model.domain_length))
                     rank_one = beta * u * jnp.mean(u * potential, axis=-1, keepdims=True)
+                    phase_multiplier = beta
+                    if phase_wavenumber_hidden:
+                        phase_multiplier = cast(jax.Array, PhaseWavenumberMultiplier(8, model.domain_length).apply(
+                            {"params": params["phase_wavenumber"]}, depth, nx // 2 + 1,
+                        ))
+                        v = jnp.fft.irfft(phase_multiplier * u_hat, n=nx)
+                        rank_one = 0.5 * (u * jnp.mean(v * potential, axis=-1, keepdims=True)
+                                          + v * jnp.mean(u * potential, axis=-1, keepdims=True))
                     rank_one *= 1.1 / model.target_scale
                     # Isolate the head: subtracting full FP32 corrections loses its small signal.
                     isolated_params = {
@@ -720,9 +760,10 @@ class ComputeMetricsTest(unittest.TestCase):
                         "cs_block_1": {**case_block, "gamma": jnp.zeros_like(block["gamma"])},
                     }
                     phase_only = loaded._replace(params=isolated_params)
-                    no_phase = loaded._replace(params={
-                        **isolated_params, "phase_rank_one_coefficients": jnp.zeros((2,), jnp.float32),
-                    })
+                    zero_phase = ({"phase_wavenumber": params["phase_wavenumber"] | {
+                        "out": jax.tree.map(jnp.zeros_like, params["phase_wavenumber"]["out"]),
+                    }} if phase_wavenumber_hidden else {"phase_rank_one_coefficients": jnp.zeros((2,), jnp.float32)})
+                    no_phase = loaded._replace(params=isolated_params | zero_phase)
                     phase_forward = fusion.build_variant(phase_only, depth, nx, name + "_nestedfused_contextbatch")
                     phase_free = fusion.build_variant(no_phase, depth, nx, name + "_nestedfused_contextbatch")
                     phase_increment = jnp.fft.irfft(phase_forward(eta_hat, xi_hat) - phase_free(eta_hat, xi_hat), n=nx)
@@ -738,6 +779,13 @@ class ComputeMetricsTest(unittest.TestCase):
                     native_rank_one = beta * native_u * jnp.mean(
                         native_u * normalized[..., 1] * model.xi_scale, axis=-1, keepdims=True,
                     ) * (1.1 / model.target_scale)
+                    if phase_wavenumber_hidden:
+                        native_v = jnp.fft.irfft(phase_multiplier * native_u_hat, n=nx)
+                        native_potential = normalized[..., 1] * model.xi_scale
+                        native_rank_one = 0.5 * (
+                            native_u * jnp.mean(native_v * native_potential, axis=-1, keepdims=True)
+                            + native_v * jnp.mean(native_u * native_potential, axis=-1, keepdims=True)
+                        ) * (1.1 / model.target_scale)
                     self.assertGreater(float(jnp.linalg.norm(rank_one)), 1e-5)
                     for increment, reference_phase in ((phase_increment, rank_one), (native_increment, native_rank_one)):
                         self.assertLess(float(jnp.linalg.norm(increment - reference_phase)

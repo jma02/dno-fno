@@ -23,7 +23,10 @@ sys.path.insert(0, str(REPO_ROOT / "models" / "dno-net"))
 sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier  # noqa: E402
+from dno_net_v2 import (  # noqa: E402
+    CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
+    PhaseWavenumberMultiplier,
+)
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
@@ -1513,8 +1516,44 @@ def test_phase_rank_one_option_requires_m1_cs_network() -> None:
 
 
 def test_packed_nested_branches_match_native_values_and_gradients() -> None:
+    check_packed_nested_branches(phase_wavenumber_hidden=0)
+
+
+def test_phase_wavenumber_option_requires_m1_and_excludes_rank_one() -> None:
+    main = trainer_function("main")
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_phase_wavenumber_hidden")
+    validation: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.If)
+                                 and ast.unparse(node.test).startswith("args.cs_phase_wavenumber_hidden")]
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "phase_wavenumber_option", "exec"), namespace)
+    assert parser.parse_args([]).cs_phase_wavenumber_hidden == 0
+    assert parser.parse_args(["--cs_phase_wavenumber_hidden", "8"]).cs_phase_wavenumber_hidden == 8
+    valid = dict(cs_phase_wavenumber_hidden=8, cs_phase_rank_one=False, model="cs_dno",
+                 cs_terms_residual=False, cs_baseline_order=1)
+    code = compile(ast.Module(body=validation, type_ignores=[]), "phase_wavenumber_validation", "exec")
+    namespace["args"] = SimpleNamespace(**valid)
+    exec(code, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for name, value in (("cs_phase_wavenumber_hidden", -1), ("model", "fno"),
+                            ("cs_terms_residual", True), ("cs_baseline_order", 2), ("cs_phase_rank_one", True)):
+            namespace["args"] = SimpleNamespace(**(valid | {name: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+            namespace["args"].cs_phase_wavenumber_hidden = 0
+            exec(code, namespace)
+
+
+def test_packed_wavenumber_phase_matches_native_values_and_gradients() -> None:
+    check_packed_nested_branches(phase_wavenumber_hidden=8)
+
+
+def check_packed_nested_branches(phase_wavenumber_hidden: int) -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
-                      and "args.cs_nested_surface_features" in ast.unparse(node.test))
+                      and ast.unparse(node.test).startswith("args.cs_nested_surface_features"))
     valid_config = dict(cs_nested_surface_features=True, cs_nested_blocks=1, cs_normalize_surface_features=True,
                         cs_use_half_deriv=True, cs_use_second_deriv=True, cs_use_learned_eta_filters=False,
                         cs_nested_surface_modulation=False)
@@ -1553,6 +1592,9 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
                        for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
+    if phase_wavenumber_hidden:
+        precision_cases = [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, False)
+                           for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
          whiten, depth_gate, context, cutoff, dtype, nested_modulation, nested_features, phase_rank_one) in precision_cases:
         case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
@@ -1568,12 +1610,18 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             surface_depth_gate=depth_gate, baseline_order=1, baseline_true_depth=True,
             surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
             log_multiplier_inputs=log_multiplier_inputs, phase_rank_one=phase_rank_one,
-            domain_length=5 * np.pi if phase_rank_one else 2 * np.pi,
+            phase_wavenumber_hidden=phase_wavenumber_hidden,
+            domain_length=5 * np.pi if phase_rank_one or phase_wavenumber_hidden else 2 * np.pi,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
-        params = dict(model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        params = cast(dict[str, Any], model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
         if phase_rank_one:
             params["phase_rank_one_coefficients"] = jnp.array([0.25, -0.07], dtype=jnp.float32)
+        if phase_wavenumber_hidden:
+            params["phase_wavenumber"]["out"]["kernel"] = jnp.linspace(
+                -0.15, 0.2, phase_wavenumber_hidden, dtype=jnp.float32,
+            )[:, None]
+            params["phase_wavenumber"]["out"]["bias"] = jnp.asarray([0.03], dtype=jnp.float32)
         if nested_modulation:
             params["nested_surface_gain"] = jnp.asarray(0.6, dtype=jnp.float32)
         if depth_gate:
@@ -1614,19 +1662,29 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             assert actual.dtype == expected.dtype == case_inputs.dtype
             np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
         np.testing.assert_array_equal(packed[1], packed[2])
-        if phase_rank_one:
+        if phase_rank_one or phase_wavenumber_hidden:
+            zero_phase = ({"phase_wavenumber": params["phase_wavenumber"] | {
+                "out": jax.tree.map(jnp.zeros_like, params["phase_wavenumber"]["out"]),
+            }} if phase_wavenumber_hidden else {"phase_rank_one_coefficients": jnp.zeros(2, dtype=jnp.float32)})
             disabled = evaluate_packed(
-                {"params": params | {"phase_rank_one_coefficients": jnp.zeros(2, dtype=jnp.float32)}},
+                {"params": params | zero_phase},
                 case_inputs, case_depth, return_baseline=True,
             )
             k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=dtype)
-            u = jnp.fft.irfft(
-                (1j * k * jnp.sqrt(k) * jnp.fft.rfft(case_inputs[..., 0] * model.eta_scale)).at[:, -1].set(0),
-                n=nx,
-            )
-            coefficients = cast(jax.Array, params["phase_rank_one_coefficients"])
-            beta = coefficients[0] + coefficients[1] * (case_depth + jnp.log(2 * jnp.pi / model.domain_length))
-            expected_phase = beta * u * jnp.mean(u * case_inputs[..., 1] * model.xi_scale, axis=1, keepdims=True)
+            u_hat = (1j * k * jnp.sqrt(k) * jnp.fft.rfft(case_inputs[..., 0] * model.eta_scale)).at[:, -1].set(0)
+            u = jnp.fft.irfft(u_hat, n=nx)
+            potential = case_inputs[..., 1] * model.xi_scale
+            if phase_wavenumber_hidden:
+                multiplier = cast(jax.Array, PhaseWavenumberMultiplier(phase_wavenumber_hidden, model.domain_length).apply(
+                    {"params": params["phase_wavenumber"]}, case_depth, nx // 2 + 1,
+                ))
+                v = jnp.fft.irfft(multiplier * u_hat, n=nx)
+                expected_phase = 0.5 * (u * jnp.mean(v * potential, axis=1, keepdims=True)
+                                        + v * jnp.mean(u * potential, axis=1, keepdims=True))
+            else:
+                coefficients = cast(jax.Array, params["phase_rank_one_coefficients"])
+                beta = coefficients[0] + coefficients[1] * (case_depth + jnp.log(2 * jnp.pi / model.domain_length))
+                expected_phase = beta * u * jnp.mean(u * potential, axis=1, keepdims=True)
             expected_phase = expected_phase[..., None] / model.target_scale
             np.testing.assert_allclose(packed[3] - disabled[3], expected_phase, rtol=3e-5, atol=2e-7)
             np.testing.assert_allclose(packed[0] - disabled[0], expected_phase, rtol=3e-5, atol=2e-7)
@@ -1658,6 +1716,9 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
             assert float(jnp.abs(actual_grad[0]["nested_surface_gain"])) > 0
         if phase_rank_one:
             assert bool(jnp.all(jnp.abs(actual_grad[0]["phase_rank_one_coefficients"]) > 0))
+        if phase_wavenumber_hidden:
+            for leaf in jax.tree.leaves(actual_grad[0]["phase_wavenumber"]):
+                assert float(jnp.linalg.norm(leaf)) > 0
         if multiplier_skip:
             for index in range(2):
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
@@ -2809,7 +2870,9 @@ if __name__ == "__main__":
     test_milestone_rollouts_use_only_started_weight_ema()
     test_nested_zero_inner_initialization_and_gradient_activation()
     test_phase_rank_one_option_requires_m1_cs_network()
+    test_phase_wavenumber_option_requires_m1_and_excludes_rank_one()
     test_packed_nested_branches_match_native_values_and_gradients()
+    test_packed_wavenumber_phase_matches_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()

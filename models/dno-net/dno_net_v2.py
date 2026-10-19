@@ -42,6 +42,41 @@ def phase_rank_one_hat(
     return beta * moment * u_hat
 
 
+def phase_wavenumber_hat(
+    eta_hat: jnp.ndarray, xi_hat: jnp.ndarray, multiplier: jnp.ndarray,
+    domain_length: float,
+) -> jnp.ndarray:
+    """Unnormalized rFFT of .5[u mean(v xi) + v mean(u xi)], v = m(kh)u."""
+    grid_size = 2 * (eta_hat.shape[-1] - 1)
+    k = (2.0 * jnp.pi / domain_length) * jnp.arange(
+        eta_hat.shape[-1], dtype=eta_hat.real.dtype,
+    )
+    u_hat = (1j * k * jnp.sqrt(k) * eta_hat).at[..., -1].set(0)
+    v_hat = multiplier * u_hat
+    weights = jnp.full(k.shape, 2, dtype=k.dtype).at[0].set(1).at[-1].set(1)
+    moments = jnp.sum(
+        weights * jnp.real(jnp.conj(jnp.stack((u_hat, v_hat), axis=-2))
+                           * xi_hat[..., None, :]), axis=-1, keepdims=True,
+    ) / grid_size**2
+    return 0.5 * (u_hat * moments[..., 1, :] + v_hat * moments[..., 0, :])
+
+
+class PhaseWavenumberMultiplier(nn.Module):
+    """Signed scalar multiplier conditioned on physical kh at the actual depth."""
+    hidden: int
+    domain_length: float
+
+    @nn.compact
+    def __call__(self, log_depth: jnp.ndarray, n_freq: int) -> jnp.ndarray:
+        k = (2.0 * jnp.pi / self.domain_length) * jnp.arange(n_freq, dtype=log_depth.dtype)
+        kh = jnp.exp(log_depth) * k[None, :]
+        features = jnp.stack((jnp.log1p(kh), jnp.tanh(kh)), axis=-1)
+        hidden = nn.tanh(nn.Dense(self.hidden, name="hidden")(features))
+        return nn.Dense(
+            1, name="out", kernel_init=nn.initializers.zeros, bias_init=nn.initializers.zeros,
+        )(hidden)[..., 0]
+
+
 class DepthAwareMultiplier(nn.Module):
     """Learn a real Fourier multiplier for each wavenumber and branch.
 
@@ -161,6 +196,7 @@ class CraigSulemDNO(nn.Module):
     nested_surface_modulation: bool = False  # Bounded eta/h modulation of both nested factors.
     nested_surface_features: bool = False  # Mix even linear surface features per nested branch.
     phase_rank_one: bool = False      # Signed quadratic correction along |D|^.5 eta_x.
+    phase_wavenumber_hidden: int = 0  # Positive width enables a symmetric kh-aware phase head.
 
     # Polynomial and derivative features of normalized eta.
     n_polys: int = 3                  # eta, eta^2, eta^3
@@ -412,6 +448,15 @@ class CraigSulemDNO(nn.Module):
                 jnp.fft.rfft(eta_norm, axis=-1) * self.eta_scale,
                 jnp.fft.rfft(xi_phys, axis=-1), depth, coefficients, self.domain_length,
             )
+        elif self.phase_wavenumber_hidden:
+            multiplier = PhaseWavenumberMultiplier(
+                self.phase_wavenumber_hidden, self.domain_length, name="phase_wavenumber",
+            )(depth, grid_size // 2 + 1)
+            phase_hat = phase_wavenumber_hat(
+                jnp.fft.rfft(eta_norm, axis=-1) * self.eta_scale,
+                jnp.fft.rfft(xi_phys, axis=-1), multiplier, self.domain_length,
+            )
+        if phase_hat is not None:
             # Inject before the existing inverse FFT, compensating its forward norm
             # and the outer branch normalization; this head is not another tied branch.
             phase_hat = phase_hat * (float(self.n_blocks * self.latent) ** 0.5 / grid_size)

@@ -139,6 +139,8 @@ def main() -> None:
                         help="Learn per-branch mixtures of eta and its even linear features for nested factors.")
     parser.add_argument("--cs_phase_rank_one", action="store_true",
                         help="Add a learned signed rank-one correction along the half derivative of eta_x.")
+    parser.add_argument("--cs_phase_wavenumber_hidden", type=int, default=0,
+                        help="Hidden width of a kh-conditioned symmetric phase correction; 0 disables it.")
     parser.add_argument(
         "--cs_baseline_order", type=int, choices=(1, 2, 3), default=1,
         help="Highest analytic CS term; order 3 is available only for the CS-field decoder.",
@@ -435,6 +437,12 @@ def main() -> None:
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
     args = parser.parse_args()
+    if args.cs_phase_wavenumber_hidden < 0:
+        parser.error("--cs_phase_wavenumber_hidden must be nonnegative")
+    if args.cs_phase_wavenumber_hidden and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.cs_baseline_order != 1 or args.cs_phase_rank_one
+    ):
+        parser.error("--cs_phase_wavenumber_hidden requires tied-filter cs_dno with G0+G1 and no rank-one head")
     if args.cs_phase_rank_one and (
         args.model != "cs_dno" or args.cs_terms_residual or args.cs_baseline_order != 1
     ):
@@ -750,6 +758,7 @@ def main() -> None:
             nested_surface_modulation=args.cs_nested_surface_modulation,
             nested_surface_features=args.cs_nested_surface_features,
             phase_rank_one=args.cs_phase_rank_one,
+            phase_wavenumber_hidden=args.cs_phase_wavenumber_hidden,
             mult_hidden=args.cs_mult_hidden,
             baseline_order=args.cs_baseline_order,
             baseline_true_depth=args.cs_baseline_true_depth,

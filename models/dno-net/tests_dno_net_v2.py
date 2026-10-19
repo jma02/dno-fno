@@ -25,7 +25,7 @@ from flax.typing import FrozenVariableDict
 
 from dno_net_v2 import (
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
-    phase_rank_one_hat, surface_amplitude,
+    PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
 )
 from solver.solvers.dno_series_jax import dno_series_eval
 
@@ -1516,6 +1516,130 @@ def test_phase_rank_one_zero_head_parity_normalization_and_trainability() -> Non
                                     jnp.fft.irfft(clipped, n=eta.shape[-1])[-1], rtol=1e-3, atol=1e-8)
 
 
+def test_phase_wavenumber_matches_physical_formula_and_constant_head() -> None:
+    length = 3 * pi
+    module = PhaseWavenumberMultiplier(8, length)
+    for nx in (64, 96):
+        eta, xi, depth = _phase_rank_one_state(nx)
+        variables = unfreeze(module.init(jax.random.PRNGKey(67), depth, nx // 2 + 1))
+        assert jnp.all(module.apply(variables, depth, nx // 2 + 1) == 0)
+        variables["params"]["out"]["kernel"] = jnp.linspace(-.15, .2, 8)[:, None]
+        variables["params"]["out"]["bias"] = jnp.asarray([.03])
+        multiplier = cast(jax.Array, module.apply(variables, depth, nx // 2 + 1))
+        kh = jnp.exp(depth) * (2 * pi / length) * jnp.arange(nx // 2 + 1)
+        hidden, out = variables["params"]["hidden"], variables["params"]["out"]
+        expected_multiplier = (jnp.tanh(jnp.stack((jnp.log1p(kh), jnp.tanh(kh)), axis=-1)
+                                         @ hidden["kernel"] + hidden["bias"])
+                               @ out["kernel"] + out["bias"])[..., 0]
+        assert jnp.allclose(multiplier, expected_multiplier, rtol=1e-13, atol=1e-15)
+        assert not jnp.allclose(multiplier[-1], cast(jax.Array, module.apply(
+            variables, jnp.minimum(depth, jnp.log(5.0)), nx // 2 + 1,
+        ))[-1], rtol=1e-3, atol=1e-6)
+        phase = 2 * pi * jnp.arange(nx) / nx
+        components = jnp.asarray([[1.0], [.7]])[..., None] * jnp.stack((
+            -.04 * (3 * 2 * pi / length)**1.5 * jnp.sin(3 * phase),
+            .015 * (5 * 2 * pi / length)**1.5 * jnp.cos(5 * phase),
+        ))
+        u = jnp.sum(components, axis=1)
+        v = jnp.sum(components * multiplier[:, jnp.asarray([3, 5]), None], axis=1)
+        expected = .5 * (u * jnp.mean(v * xi, axis=-1, keepdims=True)
+                         + v * jnp.mean(u * xi, axis=-1, keepdims=True))
+        eta_hat, xi_hat = jnp.fft.rfft(eta), jnp.fft.rfft(xi)
+        actual = phase_wavenumber_hat(eta_hat, xi_hat, multiplier, length)
+        assert jnp.all(actual[..., 0] == 0) and jnp.all(actual[..., -1] == 0)
+        assert jnp.allclose(actual, jnp.fft.rfft(expected), rtol=1e-11, atol=1e-13)
+        constant = phase_wavenumber_hat(eta_hat, xi_hat, jnp.full_like(multiplier, .23), length)
+        assert jnp.allclose(constant, phase_rank_one_hat(
+            eta_hat, xi_hat, depth, jnp.asarray([.23, 0.0]), length,
+        ), rtol=1e-12, atol=1e-14)
+
+
+def test_phase_wavenumber_structure_order_and_active_gradients() -> None:
+    eta, xi, depth = _phase_rank_one_state()
+    module = PhaseWavenumberMultiplier(8, 3 * pi)
+    variables = unfreeze(module.init(jax.random.PRNGKey(67), depth, eta.shape[-1] // 2 + 1))
+    variables["params"]["out"]["kernel"] = jnp.linspace(-.15, .2, 8)[:, None]
+    variables["params"]["out"]["bias"] = jnp.asarray([.03])
+
+    def response(surface: jax.Array, potential: jax.Array, log_h: jax.Array = depth,
+                 params: Any = variables["params"]) -> jax.Array:
+        multiplier = cast(jax.Array, module.apply({"params": params}, log_h, surface.shape[-1] // 2 + 1))
+        return jnp.fft.irfft(phase_wavenumber_hat(
+            jnp.fft.rfft(surface), jnp.fft.rfft(potential), multiplier, 3 * pi,
+        ), n=surface.shape[-1])
+
+    actual = response(eta, xi)
+    psi = jnp.roll(xi, 3, axis=-1)
+    other = response(eta, psi)
+    assert jnp.all(jnp.linalg.norm(actual, axis=-1) > 1e-6)
+    assert jnp.allclose(response(eta, .3*xi-.7*psi), .3*actual-.7*other, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(jnp.mean(psi*actual, axis=-1), jnp.mean(xi*other, axis=-1), rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(response(eta, xi+2.3), actual, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(response(eta+.4, xi), actual, rtol=1e-11, atol=1e-13)
+    assert jnp.max(jnp.abs(jnp.mean(actual, axis=-1))) < 1e-14
+    reflected = (-jnp.arange(eta.shape[-1])) % eta.shape[-1]
+    assert jnp.allclose(response(eta[:, reflected], xi[:, reflected]), actual[:, reflected], rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(response(jnp.roll(eta, 7, axis=-1), jnp.roll(xi, 7, axis=-1)),
+                        jnp.roll(actual, 7, axis=-1), rtol=1e-11, atol=1e-13)
+    for scale in (-.5, .3):
+        assert jnp.allclose(response(scale*eta, xi), scale**2*actual, rtol=1e-11, atol=1e-13)
+    _, eta_tangent = jax.jvp(lambda field: response(field, xi), (eta,), (eta,))
+    _, xi_tangent = jax.jvp(lambda field: response(eta, field), (xi,), (xi,))
+    _, depth_tangent = jax.jvp(lambda log_h: response(eta, xi, log_h), (depth,), (jnp.ones_like(depth),))
+    assert jnp.allclose(eta_tangent, 2*actual, rtol=1e-11, atol=1e-13)
+    assert jnp.allclose(xi_tangent, actual, rtol=1e-11, atol=1e-13)
+    assert jnp.all(jnp.isfinite(depth_tangent)) and jnp.linalg.norm(depth_tangent) > 1e-8
+    gradients = jax.grad(lambda params: jnp.mean(response(eta, xi, params=params)*xi))(variables["params"])
+    assert all(jnp.all(jnp.isfinite(leaf)) and jnp.linalg.norm(leaf) > 1e-9
+               for leaf in jax.tree.leaves(gradients))
+    zero, first = jax.jvp(lambda field: response(field, xi), (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(zero == 0) and jnp.all(first == 0)
+    assert jnp.all(response(jnp.full_like(eta, .2), xi) == 0)
+
+
+def test_phase_wavenumber_zero_init_native_scaling_and_trainability() -> None:
+    eta, xi, depth = _phase_rank_one_state()
+    for dtype in (jnp.float32, jnp.float64):
+        for nested_blocks in (0, 1):
+            plain = _model(nested_blocks=nested_blocks, surface_context_width=8).clone(
+                domain_length=3*pi, eta_scale=.3, xi_scale=1.7, target_scale=.4,
+            )
+            model = plain.clone(phase_wavenumber_hidden=8)
+            inputs = jnp.stack((eta/plain.eta_scale, xi/plain.xi_scale), axis=-1).astype(dtype)
+            log_h = depth.astype(dtype)
+            original = plain.init(jax.random.PRNGKey(41), inputs, log_h)
+            variables = unfreeze(model.init(jax.random.PRNGKey(41), inputs, log_h))
+            head = variables["params"].pop("phase_wavenumber")
+            assert all(jnp.all(leaf == 0) for leaf in jax.tree.leaves(head["out"]))
+            assert jax.tree.structure(original) == jax.tree.structure(variables)
+            assert all(jnp.array_equal(a,b) for a,b in zip(jax.tree.leaves(original), jax.tree.leaves(variables), strict=True))
+            shared = _activate_residual(original)
+            variables = unfreeze(shared)
+            variables["params"]["phase_wavenumber"] = head
+            expected = cast(tuple[jax.Array, ...], plain.apply(shared, inputs, log_h, return_baseline=True))
+            actual_zero = cast(tuple[jax.Array, ...], model.apply(variables, inputs, log_h, return_baseline=True))
+            assert all(jnp.array_equal(a,b) for a,b in zip(expected, actual_zero, strict=True))
+            gradients = jax.grad(lambda params: jnp.mean(cast(tuple[jax.Array, ...], model.apply(
+                {"params": params}, inputs, log_h, return_baseline=True,
+            ))[3][..., 0]*xi))(variables["params"])
+            assert all(jnp.linalg.norm(leaf) > 1e-8 for leaf in jax.tree.leaves(gradients["phase_wavenumber"]["out"]))
+            assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+            head["out"]["kernel"] = jnp.linspace(-.15, .2, 8, dtype=jnp.float32)[:, None]
+            head["out"]["bias"] = jnp.asarray([.03], dtype=jnp.float32)
+            multiplier = cast(jax.Array, PhaseWavenumberMultiplier(8, model.domain_length).apply(
+                {"params": head}, log_h, eta.shape[-1]//2+1,
+            ))
+            increment = jnp.fft.irfft(phase_wavenumber_hat(
+                jnp.fft.rfft(inputs[..., 0])*model.eta_scale,
+                jnp.fft.rfft(inputs[..., 1]*model.xi_scale), multiplier, model.domain_length,
+            ), n=eta.shape[-1])[..., None]/model.target_scale
+            actual = cast(tuple[jax.Array, ...], model.apply(variables, inputs, log_h, return_baseline=True))
+            tolerance = 2e-7 if dtype == jnp.float32 else 2e-13
+            assert jnp.allclose(actual[3]-actual_zero[3], increment, rtol=2e-5, atol=tolerance)
+            assert jnp.allclose(actual[0]-actual_zero[0], increment, rtol=2e-5, atol=tolerance)
+            assert jnp.array_equal(actual[1], actual_zero[1]) and jnp.array_equal(actual[2], actual_zero[2])
+
+
 def test_surface_amplitude_formula_and_original_nested_scale() -> None:
     eta, xi, depth = _state()
     plain = _model(nested_blocks=1, surface_feature_scales=(.2, .1, .06, .4, .8, .3, .2)).clone(
@@ -1657,6 +1781,9 @@ def main() -> int:
         test_phase_rank_one_spectrum_matches_physical_definition,
         test_phase_rank_one_preserves_operator_structure_and_quadratic_order,
         test_phase_rank_one_zero_head_parity_normalization_and_trainability,
+        test_phase_wavenumber_matches_physical_formula_and_constant_head,
+        test_phase_wavenumber_structure_order_and_active_gradients,
+        test_phase_wavenumber_zero_init_native_scaling_and_trainability,
         test_surface_amplitude_formula_and_original_nested_scale,
         test_surface_amplitude_structure_and_derivatives,
     )
