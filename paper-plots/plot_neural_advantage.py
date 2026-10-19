@@ -429,8 +429,8 @@ if __name__ == "__main__":
         for evaluation, timing_file, timing_method, label in (
             ("eval_weight_ema_standard", "single_rollout_timing.json",
              "compact_boundaries_stages_carry_local", "CS-field decoder · native"),
-            ("eval_fast_weight_ema_terms_interleaved_features", "interleaved_features_rollout_timing.json",
-             "terms_interleaved_features_boundaries_stages_carry_local", "CS-field decoder · optimized"),
+            ("eval_fast_weight_ema_terms_interleaved_features_cufftdx", "cufftdx_boundaries_rollout_timing.json",
+             "terms_interleaved_features_cufftdx_boundaries_stages_carry_local", "CS-field decoder · optimized"),
         ):
             result_path = decoder_run / evaluation / "all_summaries.json"
             timing_path = decoder_run / timing_file
@@ -452,13 +452,16 @@ if __name__ == "__main__":
         fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.12, hspace=0.38, wspace=0.27)
         for ax, (family, title) in zip(axes.flat, FAMILIES, strict=True):
             timing = neural["families"][family]
-            orders = (2, 3)
+            orders = (2, 3, 4)
             classical_errors = [100 * json.loads(
-                (ROOT / f"outputs/momentum_classical_M{order}_none_20261010/{family}_summary.json").read_text(),
+                (ROOT / f"outputs/momentum_classical_M{order}_none_{'20261019' if order == 4 else '20261010'}/{family}_summary.json").read_text(),
             )["rel_l2_eta_median_conditional_finite_tfinal"] for order in orders]
             classical_seconds = [float(np.median(json.loads(
                 (ROOT / f"outputs/momentum_classical_M{order}_timing_20261010/{family}_timing.json").read_text(),
-            )["methods"]["none"]["seconds"])) for order in orders]
+            )["methods"]["none"]["seconds"])) for order in (2, 3)]
+            classical_seconds.append(float(np.median(json.loads(
+                (decoder_run / "single_rollout_timing.json").read_text(),
+            )["families"][family]["methods"]["M4_boundaries_stages_carry_local"]["seconds"])))
             for _, measured, *_ in completed:
                 if measured.get("classical_backend") != "interleaved_cufftdx":
                     continue
