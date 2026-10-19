@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from functools import partial
 from math import pi
 from typing import Any, cast
 
@@ -456,6 +457,28 @@ def test_true_depth_analytic_baselines_and_returned_components() -> None:
                 clipped_residual = _learned_residual(clipped, active, inputs[..., 0], inputs[..., 1], depth)
                 assert float(jnp.linalg.norm(true_residual)) > 0
                 assert jnp.allclose(true_residual, clipped_residual, rtol=1e-9, atol=1e-14)
+
+
+def test_cs_term_fields_reconstruct_and_differentiate() -> None:
+    eta, xi, _ = _state()
+    eta, xi = (jnp.broadcast_to(value, (4, value.shape[-1])) for value in (eta, xi))
+    depth = jnp.asarray([[0.02], [0.2], [2.0], [12.0]])
+    k = jnp.arange(eta.shape[-1] // 2 + 1, dtype=jnp.float64)
+    term_fn = partial(dno_series_eval, k=k, depth=depth, order=3, pad_factor=2, return_terms=True)
+    terms = term_fn(eta, xi)
+    assert terms.shape == (4, 4, eta.shape[-1])
+    assert jnp.all(jnp.isfinite(terms))
+    for order in range(4):
+        expected = dno_series_eval(eta, xi, k, depth, order=order, pad_factor=2)
+        assert jnp.allclose(terms[:, :order + 1].sum(axis=-2), expected, rtol=1e-10, atol=1e-12)
+    scaled = term_fn(0.37 * eta, xi)
+    assert jnp.allclose(scaled, terms * 0.37 ** jnp.arange(4)[None, :, None], rtol=1e-8, atol=1e-12)
+    direction = jnp.roll(xi, 3, axis=-1)
+    expected_direction = term_fn(eta, direction)
+    _, tangent = jax.jvp(term_fn, (eta, xi), (jnp.zeros_like(eta), direction))
+    assert jnp.allclose(tangent, expected_direction, rtol=1e-8, atol=1e-12)
+    assert jnp.allclose(term_fn(eta, 0.3 * xi - 0.7 * direction),
+                        0.3 * terms - 0.7 * expected_direction, rtol=1e-8, atol=1e-12)
 
 
 def test_experimental_residual_orders() -> None:
@@ -1180,6 +1203,7 @@ def main() -> int:
         test_learned_eta_filters_preserve_initial_features_and_shared_parameters,
         test_learned_eta_filters_change_spectral_shape_and_condition_on_depth,
         test_true_depth_analytic_baselines_and_returned_components,
+        test_cs_term_fields_reconstruct_and_differentiate,
         test_experimental_residual_orders,
         test_surface_feature_scaling_folds_into_first_projection,
         test_softened_curvature_uses_physical_wavenumbers,

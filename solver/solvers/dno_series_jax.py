@@ -79,8 +79,9 @@ def _dno_series_hat(
     nx: int,
     order: int,
     pad_factor: int = DEFAULT_PAD_FACTOR,
+    return_terms: bool = False,
 ) -> jnp.ndarray:
-    """Evaluate the DNO series while keeping every recurrence term spectral."""
+    """Evaluate the series; optionally retain its individual terms on axis -2."""
     padded_nx = pad_factor * nx
 
     def pad(coefficients: jnp.ndarray) -> jnp.ndarray:
@@ -135,6 +136,8 @@ def _dno_series_hat(
         gm_hats.append(gm_hat)
         if m < order:
             gm_padded.append(pad(gm_hat))
+    if return_terms:
+        return jnp.stack(gm_hats, axis=-2)
     return sum(gm_hats, start=jnp.zeros_like(gm_hats[0]))
 
 
@@ -145,8 +148,10 @@ def dno_series_eval(
     depth: float | jax.Array,
     order: int,
     pad_factor: int = DEFAULT_PAD_FACTOR,
+    *,
+    return_terms: bool = False,
 ) -> jnp.ndarray:
-    """Evaluate the Craig-Sulem DNO series up to the requested order on arrays of shape (..., nx)."""
+    """Evaluate CS on (..., nx), or return (..., order+1, nx) individual terms."""
     eta = jnp.asarray(eta)
     xi = jnp.asarray(xi)
     k = jnp.asarray(k)
@@ -163,5 +168,6 @@ def dno_series_eval(
         nx=nx,
         order=order,
         pad_factor=pad_factor,
+        return_terms=return_terms,
     )
     return jnp.fft.irfft(gxi_hat, n=nx, axis=-1)
