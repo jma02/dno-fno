@@ -478,6 +478,19 @@ if __name__ == "__main__":
                     direct = measured["families"].get(family, {}).get("methods", {}).get(f"M{order}_boundaries_stages_carry_local")
                     if direct is not None:
                         classical_seconds[index] = float(np.median(direct["seconds"]))
+            if args.recent_one_epoch:
+                with np.load(ROOT / f"outputs/cs_order_sweep_20260923/{family}.npz") as sweep:
+                    extra_errors = {order: 100 * float(np.median(sweep["eta_rel_l2"][
+                        np.flatnonzero(sweep["orders"] == order).item(), -1,
+                    ])) for order in (1, 5)}
+                recorded = json.loads((ROOT / "outputs/classical_all_orders_20260928/ada/classical.json").read_text())
+                recorded_methods = recorded["families"][family]["methods"]
+                orders = (1, *orders, 5)
+                classical_errors = [extra_errors[1], *classical_errors, extra_errors[5]]
+                classical_seconds = [float(np.median(recorded_methods["M1"]["seconds"])),
+                                     *classical_seconds, float(np.median(recorded_methods["M5"]["seconds"]))]
+                ax.axvline(float(np.median(recorded_methods["M6"]["seconds"])),
+                           color="#aab2b9", ls=":", lw=1.2, zorder=1)
             ax.plot(classical_seconds, classical_errors, "o-", color="#899198", markerfacecolor="white", ms=5, lw=1)
             for order, x, y in zip(orders, classical_seconds, classical_errors, strict=True):
                 ax.annotate(f"M{order}", (x, y), xytext=(6, -2), textcoords="offset points", color="#667078", fontsize=10)
@@ -538,6 +551,7 @@ if __name__ == "__main__":
         if args.recent_one_epoch:
             fig.legend(handles=[
                 Line2D([], [], color="#899198", marker="o", mfc="white", lw=1, label="Classical"),
+                Line2D([], [], color="#aab2b9", ls=":", lw=1.2, label="M6 time"),
                 *[Line2D([], [], color=color, marker=marker, ls="none", ms=7,
                          mfc="white" if label.endswith("· native") else color,
                          label=label.replace("CS-field decoder", "Encoder–decoder (M3)"))
