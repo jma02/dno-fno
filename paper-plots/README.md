@@ -767,3 +767,34 @@ change the checkpoint-selection or early-stopping rules.
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 UV_CACHE_DIR=/tmp/dno-uv-cache \
   uv run --no-sync paper-plots/plot_phase_diagnostics.py --phase-training
 ```
+
+### GPU-only versus CPU-offloaded baseline profile
+
+[PNG](figures/gpu-vs-cpu-offload-profile.png) / [PDF](figures/gpu-vs-cpu-offload-profile.pdf)
+
+One trained hero epoch-37 DNO evaluation on local RTX 6000 Ada, with one
+1024-point Tanaka state and GPU-resident Fourier inputs. Both paths use the
+current context-real/layout optimizations. The alternative sends the same
+normalized inputs to a CPU worker for G0+G1 while the GPU computes the learned
+correction, then transfers the baseline back and joins the outputs.
+
+After five warmups, one synchronized unprofiled call took 142.384 microseconds
+on GPU only and 549.989 microseconds with CPU offloading (3.86 times longer).
+The relative output difference was 1.407e-13. Transfers, thread dispatch,
+preparation, joining and the final wait are included; compilation is excluded.
+These are forward-call measurements, not full-rollout times.
+
+The lower panels are a separate instrumented trace: host calls/waits, worker
+calls/waits, GPU kernels and actual device transfers share the captured clock.
+Profiling increases their total durations to 199.872 and 1112.165 microseconds;
+the trace is not rescaled into an unprofiled timing breakdown. CPU-worker
+intervals include dispatch and dependency waits, not only CPU arithmetic.
+Raw timing and trace files are in
+`outputs/hero_speed_20261019/cpu_offload_profile/`.
+
+Regenerate the plot without GPU work:
+
+```sh
+JAX_PLATFORMS=cpu UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync scripts/profile_cpu_offload.py --plot-only
+```
