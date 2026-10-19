@@ -696,6 +696,10 @@ class ComputeMetricsTest(unittest.TestCase):
                     case_block = {**block, "surface_mix": jnp.asarray([[0.17, -0.11], [-0.09, 0.23]], jnp.float32)} if surface_features else block
                     case_params = {**params, "cs_block_1": case_block}
                     if amplitude_reference:
+                        fresh_params = cast(dict[str, Any], case_model.init(
+                            jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
+                            jnp.zeros((1, 1), jnp.float32))["params"])
+                        self.assertEqual(fresh_params["eta_amplitude_gain"].dtype, jnp.float32)
                         case_params["eta_amplitude_gain"] = jnp.asarray([.2, -.3, .1, .4], jnp.float32)
                     zero_params = {**case_params, "cs_block_1": {**case_block, "gamma": jnp.zeros_like(block["gamma"])}}
                     loaded = LoadedRun(case_model, case_params, {"model": "cs_dno"}, stats, "scale", 1)
@@ -773,6 +777,7 @@ class ComputeMetricsTest(unittest.TestCase):
                     native_increment = jax.jit(lambda values: cast(tuple[jax.Array, ...], case_model.apply(
                         {"params": isolated_params}, values, depth, return_baseline=True,
                     ))[3][..., 0] * 1.1)(normalized)
+                    self.assertEqual(native_increment.dtype, jnp.float32)
                     native_u_hat = (1j * k * jnp.sqrt(k) * jnp.fft.rfft(normalized[..., 0])
                                     * model.eta_scale).at[:, -1].set(0)
                     native_u = jnp.fft.irfft(native_u_hat, n=nx)

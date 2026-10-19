@@ -342,7 +342,7 @@ class CraigSulemDNO(nn.Module):
         context = None
         for name in ("eta_feat_proj", "eta_feat_mix"):
             if name == "eta_feat_mix" and amplitude is not None:
-                gain = self.param("eta_amplitude_gain", nn.initializers.zeros, (self.width // 2,))
+                gain = self.param("eta_amplitude_gain", nn.initializers.zeros, (self.width // 2,), jnp.float32)
                 eta_features = eta_features * (1.0 + gain * jnp.log(amplitude[..., None]))
             eta_features = nn.gelu(
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)

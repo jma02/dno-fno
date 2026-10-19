@@ -1640,6 +1640,20 @@ def test_phase_wavenumber_zero_init_native_scaling_and_trainability() -> None:
             assert jnp.array_equal(actual[1], actual_zero[1]) and jnp.array_equal(actual[2], actual_zero[2])
 
 
+def test_surface_amplitude_preserves_training_dtype_under_x64() -> None:
+    eta, xi, depth = _state()
+    model = _model(nested_blocks=1, surface_context_width=8).clone(surface_amplitude_reference=.04)
+    for dtype in (jnp.float32, jnp.float64):
+        inputs = jnp.stack((eta, xi), axis=-1).astype(dtype)
+        log_h = depth.astype(dtype)
+        variables = model.init(jax.random.PRNGKey(79), inputs, log_h)
+        assert variables["params"]["eta_amplitude_gain"].dtype == jnp.float32
+        assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(variables))
+        for state in (variables, _activate_residual(variables)):
+            outputs = cast(tuple[jax.Array, ...], model.apply(state, inputs, log_h, return_baseline=True))
+            assert all(value.dtype == dtype and jnp.all(jnp.isfinite(value)) for value in outputs)
+
+
 def test_surface_amplitude_formula_and_original_nested_scale() -> None:
     eta, xi, depth = _state()
     plain = _model(nested_blocks=1, surface_feature_scales=(.2, .1, .06, .4, .8, .3, .2)).clone(
@@ -1784,6 +1798,7 @@ def main() -> int:
         test_phase_wavenumber_matches_physical_formula_and_constant_head,
         test_phase_wavenumber_structure_order_and_active_gradients,
         test_phase_wavenumber_zero_init_native_scaling_and_trainability,
+        test_surface_amplitude_preserves_training_dtype_under_x64,
         test_surface_amplitude_formula_and_original_nested_scale,
         test_surface_amplitude_structure_and_derivatives,
     )

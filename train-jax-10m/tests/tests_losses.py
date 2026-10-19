@@ -1551,7 +1551,11 @@ def test_packed_wavenumber_phase_matches_native_values_and_gradients() -> None:
     check_packed_nested_branches(phase_wavenumber_hidden=8)
 
 
-def check_packed_nested_branches(phase_wavenumber_hidden: int) -> None:
+def test_packed_surface_amplitude_matches_native_values_and_gradients() -> None:
+    check_packed_nested_branches(phase_wavenumber_hidden=0, surface_amplitude_reference=0.07)
+
+
+def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude_reference: float = 0.0) -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
                       and ast.unparse(node.test).startswith("args.cs_nested_surface_features"))
     valid_config = dict(cs_nested_surface_features=True, cs_nested_blocks=1, cs_normalize_surface_features=True,
@@ -1592,7 +1596,7 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int) -> None:
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
                        for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
-    if phase_wavenumber_hidden:
+    if phase_wavenumber_hidden or surface_amplitude_reference:
         precision_cases = [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, False)
                            for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
@@ -1611,10 +1615,14 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int) -> None:
             surface_polynomial_skip=polynomial_skip, multiplier_skip=multiplier_skip,
             log_multiplier_inputs=log_multiplier_inputs, phase_rank_one=phase_rank_one,
             phase_wavenumber_hidden=phase_wavenumber_hidden,
+            surface_amplitude_reference=surface_amplitude_reference,
             domain_length=5 * np.pi if phase_rank_one or phase_wavenumber_hidden else 2 * np.pi,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
         params = cast(dict[str, Any], model.init(jax.random.PRNGKey(3), inputs, depth)["params"])
+        if surface_amplitude_reference:
+            assert params["eta_amplitude_gain"].dtype == jnp.float32
+            params["eta_amplitude_gain"] = jnp.asarray([0.2, -0.3, 0.1, 0.4], dtype=jnp.float32)
         if phase_rank_one:
             params["phase_rank_one_coefficients"] = jnp.array([0.25, -0.07], dtype=jnp.float32)
         if phase_wavenumber_hidden:
@@ -1700,8 +1708,13 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int) -> None:
         actual_value, actual_grad = differentiate(params, case_inputs, case_depth, packed=True)
         np.testing.assert_allclose(actual_value, expected_value, rtol=3e-6, atol=2e-7)
         for actual, expected in zip(jax.tree.leaves(actual_grad), jax.tree.leaves(expected_grad)):
+            assert actual.dtype == expected.dtype
             np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-7)
             assert bool(jnp.all(jnp.isfinite(actual)))
+        if surface_amplitude_reference:
+            assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(actual_grad[0]))
+            assert actual_grad[1].dtype == actual_grad[2].dtype == dtype
+            assert float(jnp.linalg.norm(actual_grad[0]["eta_amplitude_gain"])) > 0
         for index in range(2 - nested_blocks, 2):
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
@@ -2873,6 +2886,7 @@ if __name__ == "__main__":
     test_phase_wavenumber_option_requires_m1_and_excludes_rank_one()
     test_packed_nested_branches_match_native_values_and_gradients()
     test_packed_wavenumber_phase_matches_native_values_and_gradients()
+    test_packed_surface_amplitude_matches_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()
