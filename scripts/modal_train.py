@@ -7,11 +7,8 @@ Workflow:
     # 1. Upload a training dataset directory:
     modal run scripts/modal_train.py::upload_dataset --dataset outputs/paper_dataset/arrays
 
-    # 2. Train with the C27 recipe (two A100-80GB GPUs by default):
-    bash scripts/launch_c27_paper_dataset_modal.sh
-
-    # Optional GPU shape override for that same recipe:
-    GPU_SPEC=H100:4 bash scripts/launch_c27_paper_dataset_modal.sh
+    # 2. Configure the approved recipe with explicit training arguments:
+    modal run scripts/modal_train.py::train --help
 
     # 3. Download a finished run dir to local outputs/:
     modal run scripts/modal_train.py::download_run --run-name YOUR_RUN_NAME
@@ -20,7 +17,7 @@ Workflow:
     modal run scripts/modal_train.py::status
 
 The volume keeps both input files and run outputs, so later runs reuse the upload.
-Use the lower-level ``train`` entrypoint directly only when configuring a custom run.
+Training uses one A100-80GB by default, with a four-hour dispatch deadline.
 """
 
 from __future__ import annotations
@@ -35,8 +32,8 @@ APP_NAME = "dno-fno-train"
 VOLUME_NAME = "dno-fno-train-data"
 # GPU shape is fixed at decorator time in modal>=1.x (no with_options on Function);
 # expose an env var so the caller can pick a shape without editing the file.
-DEFAULT_GPU = os.environ.get("MODAL_GPU", "H100:1")
-TIMEOUT_SECONDS = 24 * 3600
+DEFAULT_GPU = os.environ.get("MODAL_GPU", "A100-80GB:1")
+TIMEOUT_SECONDS = 4 * 3600
 VOLUME_MOUNT = "/data"
 
 
@@ -95,11 +92,12 @@ def status() -> dict[str, list[str]]:
 
 @app.local_entrypoint()
 def upload_dataset(dataset: str) -> None:
-    """Upload the dataset's NPY arrays while preserving repo-relative paths."""
+    """Upload the dataset's NPY arrays and normalization stats at repo-relative paths."""
     dataset_path = Path(dataset).resolve()
     targets = sorted(dataset_path.glob("*.npy"))
     if not targets:
         raise ValueError(f"dataset directory contains no NPY arrays: {dataset_path}")
+    targets.append(dataset_path / "stats.json")
     repo_root = REPO_ROOT.resolve()
     relative_targets = [
         (path, f"/{path.relative_to(repo_root).as_posix()}") for path in targets
@@ -120,9 +118,12 @@ def upload_dataset(dataset: str) -> None:
     gpu=DEFAULT_GPU,
     volumes={VOLUME_MOUNT: volume},
     timeout=TIMEOUT_SECONDS,
-    cpu=8,
-    memory=256 * 1024,
-    retries=modal.Retries(max_retries=10, backoff_coefficient=1.0, initial_delay=0.0),
+    startup_timeout=300,
+    cpu=(8, 8),
+    memory=(256 * 1024, 256 * 1024),
+    retries=0,
+    max_containers=1,
+    scaledown_window=1,
 )
 def run_training(
     *,
@@ -141,12 +142,14 @@ def run_training(
     latent: int,
     cs_mult_hidden: int,
     trainer_args: str,
+    deadline_unix: float,
 ) -> dict[str, object]:
     import json
     import os
     import shlex
     import subprocess
     import sys
+    import threading
     import time
     from time import perf_counter
 
@@ -190,7 +193,7 @@ def run_training(
     }
     cmd = [
         sys.executable,
-        "/repo/train-jax-10m/1d_dno_fno_jax.py",
+        "/repo/train-jax-10m/1d_dno_fno_jax_ema_grad.py",
         *(part for key, value in options.items() for part in (f"--{key}", str(value))),
     ]
     if model_kind == "fno":
@@ -198,15 +201,18 @@ def run_training(
     cmd.extend(shlex.split(trainer_args))
 
     print("$", " ".join(cmd))
+    if time.time() >= deadline_unix:
+        raise TimeoutError("Training dispatch deadline has already elapsed")
     started = perf_counter()
-    # Run the trainer as a child so we can periodically commit the volume — without
-    # this, preemption can lose all writes since the last function exit (the trainer
-    # writes per-epoch ckpts to /data/outputs/<run>/latest_ckpt; we need those flushed
-    # to the volume so the next retry actually sees them and resumes).
+    # Commit completed artifacts periodically; the independent deadline also holds
+    # while a volume commit is blocked.
     proc = subprocess.Popen(cmd, cwd="/repo", env=os.environ.copy())
+    deadline_timer = threading.Timer(max(0.0, deadline_unix - time.time()), proc.kill)
+    deadline_timer.daemon = True
     commit_interval_s = 300.0
     next_commit = time.monotonic() + commit_interval_s
     try:
+        deadline_timer.start()
         while True:
             try:
                 proc.wait(timeout=30.0)
@@ -225,6 +231,8 @@ def run_training(
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
+        deadline_timer.cancel()
         try:
             volume.commit()
         except Exception as e:
@@ -239,8 +247,6 @@ def run_training(
 
     print(f"training finished in {elapsed:.0f}s, returncode={completed_returncode}")
     if completed_returncode != 0:
-        # Raise so Modal's Retries policy resurrects the function with the same args;
-        # the trainer's auto-resume from latest_ckpt picks up where the crash left off.
         raise RuntimeError(
             f"trainer exited with returncode={completed_returncode} "
             f"(run_name={run_name}, elapsed={elapsed:.0f}s)"
@@ -258,9 +264,9 @@ def run_training(
 def train(
     dataset: str,
     run_name: str = "",
-    epochs: int = 30,
+    epochs: int = 1,
     batch_size: int = 1024,
-    lr: float = 5e-4,
+    lr: float = 2e-5,
     weight_decay: float = 1e-4,
     modes: int = 64,
     width: int = 64,
@@ -276,10 +282,10 @@ def train(
     """Local entrypoint: dispatch a training run on a Modal GPU worker.
 
     GPU shape is taken from the ``MODAL_GPU`` env var at module import time
-    (defaults to ``H100:1``). Set it before invoking modal CLI, e.g.
-    ``MODAL_GPU=H100:2 modal run scripts/modal_train.py::train ...``.
+    (defaults to ``A100-80GB:1``). Set it before invoking modal CLI to override it.
     """
     from datetime import datetime
+    from time import time
 
     if not run_name:
         run_name = datetime.now().strftime("fno_jax_10m_%Y%m%d_%H%M%S")
@@ -302,6 +308,7 @@ def train(
         latent=latent,
         cs_mult_hidden=cs_mult_hidden,
         trainer_args=trainer_args,
+        deadline_unix=time() + TIMEOUT_SECONDS,
     )
     remote_training = cast(_ModalTrainingFunction, run_training)
     if spawn:
