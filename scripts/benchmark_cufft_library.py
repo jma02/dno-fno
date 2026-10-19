@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import jax
 
 ROOT = Path(__file__).resolve().parents[1]
-FFI_LIBRARY = ROOT / "outputs/cufft_graph_ffi_20261019/cufft_graph_ffi.so"
+FFI_LIBRARY = ROOT / "outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_state.so"
 
 
 @cache
@@ -37,6 +37,7 @@ def register_graph_ffi(library: Path) -> ct.CDLL:
         "type_id": registration["type_id"], "type_info": registration["type_info"],
     }, platform="CUDA")
     jax.ffi.register_ffi_target("dno_cufft_graph", {
+        "instantiate": jax.ffi.pycapsule(module.dno_cufft_instantiate),
         "initialize": jax.ffi.pycapsule(module.dno_cufft_initialize),
         "execute": jax.ffi.pycapsule(module.dno_cufft_execute),
     }, platform="CUDA")
@@ -48,8 +49,8 @@ def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | No
               library: Path = FFI_LIBRARY) -> jax.Array:
     """Real FFT with JAX axis/normalization semantics and capture-compatible cuFFT.
 
-    Plans are initialized before capture. Scratch is an extra XLA result, not
-    shared plan-owned device memory; C2R always copies the input before execution.
+    Executable-owned plans are initialized per device before capture. Scratch is
+    an extra XLA result; C2R always copies the input before execution.
     """
     import jax
     import jax.numpy as jnp
@@ -185,12 +186,17 @@ def main() -> None:
 
             expected = np.asarray(jax.jit(lambda x: scan(x, False))(values))
             scanned = jax.jit(lambda x: scan(x, True)).lower(values).compile()
-            actual = np.asarray(scanned(values))
-            relative = float(np.linalg.norm(actual - expected) / np.linalg.norm(expected))
-            if not np.isfinite(relative) or relative > tolerance:
-                raise AssertionError(f"cuFFT FFI dependent scan {dtype}: {relative}")
+            scan_errors = []
+            # Reuse this executable without intervening compilations: cached
+            # graphs must retain live cuFFT plans after the first execution.
+            for repeat in range(4):
+                actual = np.asarray(scanned(values))
+                relative = float(np.linalg.norm(actual - expected) / np.linalg.norm(expected))
+                if not np.isfinite(relative) or relative > tolerance:
+                    raise AssertionError(f"cuFFT FFI dependent scan {dtype}/repeat={repeat}: {relative}")
+                scan_errors.append(relative)
             hlo = cast(str, scanned.as_text())
-            print(json.dumps({"dtype": np.dtype(dtype).name, "scan_relative_error": relative,
+            print(json.dumps({"dtype": np.dtype(dtype).name, "scan_relative_errors": scan_errors,
                               "scan_native_fft_ops": hlo.count("fft_type="),
                               "scan_command_buffer_mentions": hlo.count("command_buffer") + hlo.count("command-buffer")}))
         print(json.dumps({"checks": count, "max_relative_error": maximum,
