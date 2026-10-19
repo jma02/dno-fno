@@ -40,6 +40,7 @@ G1_FP32_TRIALS = tuple(G1_FP32_BASE + suffix + tuning
     for suffix in ("", "_reuse", "_inputfp32", "_reuse_inputfp32")
     for tuning in ("", *(f"_g1e{a}x{b}" for a, b in product((4, 8, 16), repeat=2))))
 TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_features_cufftdx",
+          "terms_interleaved_features_cufftdx_spectral",
           "fourier", "fourier_round", "fourier_reuse", "fourier_input",
           "fourier_g1fft", "fourier_features", "fourier_product", "fourier_allfft",
           "fourier_fields", "fourier_kernels", "fourier_kernels_e4", "fourier_kernels_e16",
@@ -82,10 +83,12 @@ def build_variant(
         if variant == "original":
             predict = build_predict_gxi_batched(loaded)
             return jax.jit(lambda eta, xi: predict(eta, xi, depth))
-        if variant not in ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_features_cufftdx"):
+        if variant not in ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_features_cufftdx",
+                           "terms_interleaved_features_cufftdx_spectral"):
             raise ValueError("CS-field inference requires an original or terms_interleaved variant.")
         batch_features = "_features" in variant
-        boundary_cufftdx = variant.endswith("_cufftdx")
+        boundary_cufftdx = "_cufftdx" in variant
+        spectral_io = variant.endswith("_spectral")
         if batch_features and (model.use_learned_eta_filters or model.surface_feature_transform is not None):
             raise ValueError("Batched decoder features require fixed, unwhitened surface filters.")
         log_depth = depth.astype(jnp.float64).reshape(-1, 1)
@@ -103,7 +106,11 @@ def build_variant(
 
         @jax.jit
         def forward_terms(eta: jax.Array, xi: jax.Array) -> jax.Array:
-            inputs = jnp.stack((eta.astype(jnp.float64), xi.astype(jnp.float64)), axis=-1) / scales
+            if spectral_io:
+                eta_physical = jnp.fft.irfft(eta.astype(jnp.complex128), n=nx)
+                inputs = jnp.stack((eta_physical / scales[0], jnp.zeros_like(eta_physical)), axis=-1)
+            else:
+                inputs = jnp.stack((eta.astype(jnp.float64), xi.astype(jnp.float64)), axis=-1) / scales
             if batch_features:
                 eta_norm = inputs[..., 0].astype(jnp.float32)
                 derived = jnp.moveaxis(jnp.fft.irfft(
@@ -130,9 +137,12 @@ def build_variant(
             else:
                 coefficients = model.apply({"params": loaded.params}, inputs, log_depth,
                                            method=model.encode_geometry)
-            # Preserve the native decoder's FP64 normalization round trip and pad2 projections.
-            physical = jnp.moveaxis(inputs * scales, -1, -2)
-            physical_hat = fft(physical, nx, ept=fft_ept) if boundary_cufftdx else jnp.fft.rfft(physical)
+            if spectral_io:
+                # Keep original FP64 spectra, skipping the analytic input normalization/FFT round trip.
+                physical_hat = jnp.stack((eta, xi), axis=-2).astype(jnp.complex128)
+            else:
+                physical = jnp.moveaxis(inputs * scales, -1, -2)
+                physical_hat = fft(physical, nx, ept=fft_ept) if boundary_cufftdx else jnp.fft.rfft(physical)
             eta_hat, xi_hat = jnp.moveaxis(physical_hat.at[..., -1].set(0), -2, 0)
             terms_hat = classical_hat(
                 eta_hat, xi_hat, k, g0, nx=nx, order=model.baseline_order, pad_factor=2,
@@ -140,6 +150,12 @@ def build_variant(
             )
             terms = (fft(terms_hat, nx, inverse=True, ept=fft_ept) if boundary_cufftdx
                      else jnp.fft.irfft(terms_hat, n=nx))
+            if spectral_io:
+                correction = cast(tuple[jax.Array, ...], model.apply(
+                    {}, coefficients, terms, method=model.decode_terms, return_baseline=True,
+                ))[3][..., 0] * model.target_scale
+                output_hat = jnp.sum(terms_hat, axis=-2) + fft(correction, nx, ept=fft_ept)
+                return output_hat.at[..., 0].set(0).at[..., -1].set(output_hat[..., -1].real)
             prediction = cast(jax.Array, model.apply({}, coefficients, terms, method=model.decode_terms))
             output = (prediction[..., 0] * model.target_scale).astype(eta.dtype)
             return output - output.mean(axis=-1, keepdims=True)
@@ -652,7 +668,7 @@ if __name__ == "__main__":
     for variant in (args.capture,) if args.capture else variants:
         started = time.perf_counter()
         forward = build_variant(loaded, depth, eta.shape[-1], variant, fft_ept=args.ept)
-        if variant.startswith("fourier"):
+        if variant.startswith("fourier") or variant == "terms_interleaved_features_cufftdx_spectral":
             forward = jax.jit(lambda e, x, fn=forward: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         executable = forward.lower(eta, xi).compile()
         records[variant] = {"setup_compile_s": time.perf_counter() - started, "seconds": [],
@@ -700,13 +716,13 @@ if __name__ == "__main__":
     check_eta, check_xi = map(jnp.asarray, (np.concatenate(validation_eta), np.concatenate(validation_xi)))
     check_depth = jnp.log(jnp.asarray(np.concatenate(validation_depth)))
     reference_predict = build_variant(loaded, check_depth, eta.shape[-1], args.reference, fft_ept=args.ept)
-    if args.reference.startswith("fourier"):
+    if args.reference.startswith("fourier") or args.reference == "terms_interleaved_features_cufftdx_spectral":
         reference_predict = jax.jit(lambda e, x, fn=reference_predict: jnp.fft.irfft(
             fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
     expected = np.asarray(reference_predict(check_eta, check_xi))
     for variant in (name for name in variants if name != args.reference):
         candidate = build_variant(loaded, check_depth, eta.shape[-1], variant, fft_ept=args.ept)
-        if variant.startswith("fourier"):
+        if variant.startswith("fourier") or variant == "terms_interleaved_features_cufftdx_spectral":
             candidate = jax.jit(lambda e, x, fn=candidate: jnp.fft.irfft(fn(jnp.fft.rfft(e), jnp.fft.rfft(x)), n=e.shape[-1]))
         actual = np.asarray(candidate(check_eta, check_xi))
         relative = np.linalg.norm(actual - expected, axis=-1) / np.linalg.norm(expected, axis=-1)
@@ -717,7 +733,7 @@ if __name__ == "__main__":
             "passed": (bool(np.isfinite(actual).all() and relative.max() <= 1e-5)
                        if "lowrank" not in variant else None),
         }
-        if variant.startswith("fourier"):
+        if variant.startswith("fourier") or variant == "terms_interleaved_features_cufftdx_spectral":
             other_xi = jnp.roll(check_xi, 1, axis=0)
             other = np.asarray(candidate(check_eta, other_xi))
             mixed = np.asarray(candidate(check_eta, 0.3 * check_xi - 0.7 * other_xi))
@@ -756,6 +772,7 @@ if __name__ == "__main__":
     labels.update(terms_interleaved="CS-field decoder · batched recurrence",
                   terms_interleaved_features="CS-field decoder · batched recurrence + features",
                   terms_interleaved_features_cufftdx="CS-field decoder · cuFFTDx boundaries",
+                  terms_interleaved_features_cufftdx_spectral="CS-field decoder · Fourier input/output",
                   fourier="Fourier input/output", fourier_round="Fourier I/O · physical input rounding",
                   fourier_reuse="Reuse FP32 input spectrum for G₁",
                   fourier_input="cuFFTDx FP64 input inverse FFT",

@@ -76,6 +76,7 @@ FUSION_VARIANTS["shared_m1_spectral_all"] = "front"
 FUSION_VARIANTS["terms_interleaved"] = "terms_interleaved"
 FUSION_VARIANTS["terms_interleaved_features"] = "terms_interleaved_features"
 FUSION_VARIANTS["terms_interleaved_features_cufftdx"] = "terms_interleaved_features_cufftdx"
+FUSION_VARIANTS["terms_interleaved_features_cufftdx_spectral"] = "terms_interleaved_features_cufftdx_spectral"
 METHODS = ("M1", "M2", "M3", "M4", "M5", "M6", "small", "full", "compact", *FUSION_VARIANTS)
 
 
@@ -210,7 +211,7 @@ if __name__ == "__main__":
                             jnp.fft.rfft(xi).at[..., p.nx // 2].set(0), p, r,
                         ), n=p.nx), p=params, r=correction,
                     )
-                if method.startswith("fourier_"):
+                if method.startswith("fourier_") or method == "terms_interleaved_features_cufftdx_spectral":
                     spectral_predict = predict
                     predict = partial(lambda eta, xi, fn: jnp.fft.irfft(
                         fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=eta.shape[-1]), fn=spectral_predict)

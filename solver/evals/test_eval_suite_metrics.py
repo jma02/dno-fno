@@ -354,6 +354,8 @@ class ComputeMetricsTest(unittest.TestCase):
 
     def _check_terms_checkpoint(self, order: int) -> None:
         from scripts.benchmark_dno_fusion import build_variant
+        from scripts.benchmark_surrogate_rhs import rollout_if_trial
+        from solver.solvers import time_integrator as ti
 
         surface_scales = (0.1, 0.02, 0.003, 1.0, 10.0, 0.3, 0.1)
         model = CraigSulemTermsResidual(
@@ -477,6 +479,61 @@ class ComputeMetricsTest(unittest.TestCase):
                     actual = build_variant(loaded, depth, 32, variant)(physical[..., 0], physical[..., 1])
                     np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=3e-13)
                     self.assertLess(float(jnp.linalg.norm(actual - expected)) / correction_norm, 2e-6)
+
+            nyquist = (-1.0) ** jnp.arange(32)
+            eta = physical[..., 0] + 0.0011 + 0.0014 * jnp.cos(11 * x) + 0.0005 * nyquist
+            xi = physical[..., 1] + 0.017 * jnp.sin(13 * x) + 0.02 * nyquist
+            eta_hat, xi_hat = map(jnp.fft.rfft, (eta, xi))
+            self.assertGreater(float(jnp.min(jnp.abs(eta_hat[:, -1]))), 1e-3)
+            self.assertGreater(float(jnp.min(jnp.abs(xi_hat[:, -1]))), 1e-2)
+            native_hat = jnp.fft.rfft(reference(eta, xi, depth))
+            optimized = build_variant(
+                loaded, depth, 32, "terms_interleaved_features_cufftdx",
+            )
+            optimized_hat = jnp.fft.rfft(optimized(eta, xi))
+            spectral = build_variant(
+                loaded, depth, 32, "terms_interleaved_features_cufftdx_spectral",
+            )
+            actual_hat = spectral(eta_hat, xi_hat)
+            self.assertEqual(actual_hat.shape, (2, 17))
+            self.assertEqual(actual_hat.dtype, jnp.complex128)
+            np.testing.assert_array_equal(actual_hat[:, 0], 0)
+            np.testing.assert_array_equal(actual_hat[:, -1].imag, 0)
+            retained = slice(1, 9)
+            baseline_hat = jnp.fft.rfft(build_predict_gxi_batched(loaded._replace(params=raw_params))(
+                eta, xi, depth,
+            ))
+            retained_correction_norm = float(jnp.linalg.norm((native_hat - baseline_hat)[:, retained]))
+            self.assertGreater(retained_correction_norm, 1e-7)
+            for reference_hat in (native_hat, optimized_hat):
+                np.testing.assert_allclose(actual_hat[:, retained], reference_hat[:, retained],
+                                           rtol=2e-6, atol=3e-12)
+                self.assertLess(float(jnp.linalg.norm(
+                    (actual_hat - reference_hat)[:, retained],
+                )) / retained_correction_norm, 2e-6)
+
+            solver_params = ti.make_solver_params(
+                32, model.domain_length, jnp.exp(depth), filter_fraction=0.5,
+                nonlinear_ramp_time=jnp.asarray([0.0015, 0.002]),
+            )
+            initial = ti.State(eta, xi)
+            times = jnp.asarray([0.0, 0.001, 0.002], dtype=jnp.float64)
+            physical_rollout = jax.jit(partial(
+                rollout_if_trial, params=solver_params, substeps=1,
+                carry_spectral=True, local_if=True, predict_gxi=optimized,
+            ))(initial, times)
+            spectral_physical = jax.jit(lambda e, q: jnp.fft.irfft(
+                spectral(jnp.fft.rfft(e), jnp.fft.rfft(q)), n=32,
+            ))
+            spectral_rollout = jax.jit(partial(
+                rollout_if_trial, params=solver_params, substeps=1,
+                carry_spectral=True, local_if=True,
+                predict_gxi=spectral_physical, predict_hat=spectral,
+            ))(initial, times)
+            for field in ("eta", "xi", "gxi"):
+                self.assertTrue(bool(jnp.all(jnp.isfinite(spectral_rollout[field]))))
+                np.testing.assert_allclose(spectral_rollout[field], physical_rollout[field],
+                                           rtol=2e-6, atol=3e-12)
 
     def test_cached_fourier_multiplier_skip_matches_nonzero_native_branches(self) -> None:
         from scripts.benchmark_dno_fusion import build_variant
@@ -843,8 +900,10 @@ class ComputeMetricsTest(unittest.TestCase):
         ), patch.object(fast, "_write_json"), patch.object(Path, "mkdir") as mkdir, patch("builtins.print"):
             for decoder, variant in ((True, None), (True, "terms_interleaved"),
                                      (True, "terms_interleaved_features"), (True, "terms_interleaved_features_cufftdx"),
+                                     (True, "terms_interleaved_features_cufftdx_spectral"),
                                      (False, "terms_interleaved"), (False, "terms_interleaved_features"),
-                                     (False, "terms_interleaved_features_cufftdx")):
+                                     (False, "terms_interleaved_features_cufftdx"),
+                                     (False, "terms_interleaved_features_cufftdx_spectral")):
                 with self.subTest(decoder=decoder, variant=variant), patch("sys.argv", [
                     "eval_fast_rollouts", "--run-dir", str(directory), "--reference-dir", str(reference),
                     *(["--cs-terms-variant", variant] if variant else []),
@@ -863,15 +922,19 @@ class ComputeMetricsTest(unittest.TestCase):
                     self.assertEqual(load_ics.call_count, 4)
                     self.assertEqual(build.call_count, 4 if variant else 0)
                     self.assertEqual(native.call_count, 0 if variant else 4)
+                    spectral = bool(variant and variant.endswith("_spectral"))
                     for call in build.call_args_list:
                         self.assertEqual(call.args[2:], (8, variant))
-                        self.assertEqual(call.kwargs, {"fft_ept": 8})
-                    for call in jit.call_args_list:
-                        self.assertIs(call.args[0].keywords["predict_hat"], None)
-                        self.assertTrue(call.args[0].keywords["carry_spectral"])
-                        self.assertTrue(call.args[0].keywords["local_if"])
+                        self.assertEqual(call.kwargs, {"fft_ept": 8, **({"solver_g0": None} if spectral else {})})
+                    rollouts = [call.args[0] for call in jit.call_args_list
+                                if getattr(call.args[0], "func", None) is fast.rollout_if_trial]
+                    self.assertEqual(len(rollouts), 4)
+                    for function in rollouts:
+                        self.assertIs(function.keywords["predict_hat"], build.return_value if spectral else None)
+                        self.assertTrue(function.keywords["carry_spectral"])
+                        self.assertTrue(function.keywords["local_if"])
                         if variant:
-                            self.assertIs(call.args[0].keywords["predict_gxi"], build.return_value)
+                            self.assertIs(function.keywords["predict_gxi"], compiled if spectral else build.return_value)
                     for call in evaluate.call_args_list:
                         self.assertEqual(call.args[4], directory / (
                             "eval_fast_weight_ema" + (f"_{variant}" if variant else "")))
