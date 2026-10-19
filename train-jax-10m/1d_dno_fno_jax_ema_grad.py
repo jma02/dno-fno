@@ -111,6 +111,8 @@ def main() -> None:
     )
     parser.add_argument("--cs_normalize_surface_features", action="store_true",
                         help="Fit fixed per-feature RMS scales on up to 65536 training rows.")
+    parser.add_argument("--cs_surface_amplitude_normalization", action="store_true",
+                        help="Normalize ordinary surface features per sample, condition on amplitude, and restore amplitude squared.")
     parser.add_argument("--cs_curvature_cutoff", type=float, default=0.0,
                         help="Physical-wavenumber cutoff for softened curvature; 0 keeps the second derivative.")
     parser.add_argument("--cs_whiten_surface_features", action="store_true",
@@ -553,6 +555,12 @@ def main() -> None:
         parser.error("--cs_curvature_cutoff requires --cs_use_second_deriv")
     if args.cs_surface_context_gate and args.cs_surface_context_width == 0:
         parser.error("--cs_surface_context_gate requires --cs_surface_context_width > 0")
+    if args.cs_surface_amplitude_normalization and (
+        args.model != "cs_dno" or not args.cs_normalize_surface_features or args.cs_baseline_order != 1
+        or args.cs_terms_residual or args.cs_nested_surface_features or args.cs_nested_surface_modulation
+    ):
+        parser.error("--cs_surface_amplitude_normalization requires RMS-scaled tied-filter M1 features "
+                     "without nested surface features/modulation")
     if args.cs_surface_polynomial_skip and (args.model != "cs_dno" or args.cs_n_polys < 3 or args.cs_baseline_order != 1):
         parser.error("Polynomial skip requires cs_dno, at least three surface powers, and the G0+G1 baseline")
     if not 0 <= args.cs_nested_blocks <= args.n_blocks:
@@ -646,11 +654,21 @@ def main() -> None:
     target_scale = target_absmax if target_absmax > 0 else 1.0
     args.cs_surface_feature_scales = None
     args.cs_surface_feature_transform = None
+    args.cs_surface_amplitude_reference = 0.0
     if args.cs_normalize_surface_features:
         # Independent RNG: fitting training-only scales must not advance the batch shuffle.
         feature_rows = np.random.default_rng(0).choice(
             train_indices, size=min(65536, train_indices.size), replace=False,
         )
+        if args.cs_surface_amplitude_normalization:
+            surface_energy = 0.0
+            for start in range(0, feature_rows.size, 256):
+                eta = np.asarray(dataset["eta"][feature_rows[start:start + 256]], dtype=np.float32) / np.float32(eta_scale)
+                surface_energy += float(np.sum(np.square(eta, dtype=np.float64)))
+            args.cs_surface_amplitude_reference = float(np.sqrt(surface_energy / (feature_rows.size * nx)))
+            if not np.isfinite(args.cs_surface_amplitude_reference) or args.cs_surface_amplitude_reference <= 0:
+                raise FloatingPointError("Non-positive or non-finite training surface RMS")
+            print(f"Surface-amplitude reference RMS: {args.cs_surface_amplitude_reference}")
         feature_k = (2.0 * np.pi / domain_length) * np.arange(nx // 2 + 1)
         feature_second_symbol = -feature_k**2
         if args.cs_curvature_cutoff > 0:
@@ -674,6 +692,13 @@ def main() -> None:
             fields.extend(np.fft.irfft(eta_hat * symbol, n=nx, axis=-1) for symbol in feature_symbols)
             if args.cs_use_relative_elevation:
                 fields.append(eta_features * eta_scale / dataset["depth"][rows, None])
+            if args.cs_surface_amplitude_normalization:
+                amplitude = np.sqrt(np.mean(
+                    (eta_features / np.float32(args.cs_surface_amplitude_reference)) ** 2,
+                    axis=-1, keepdims=True,
+                ) + np.float32(1e-6))
+                fields = [field / amplitude ** (index + 1 if index < args.cs_n_polys else 1)
+                          for index, field in enumerate(fields)]
             feature_energy += np.array([
                 np.sum(np.square(field, dtype=np.float64)) for field in fields
             ])
@@ -712,6 +737,7 @@ def main() -> None:
             use_learned_eta_filters=args.cs_use_learned_eta_filters,
             surface_feature_scales=(tuple(args.cs_surface_feature_scales)
                                     if args.cs_surface_feature_scales is not None else None),
+            surface_amplitude_reference=args.cs_surface_amplitude_reference,
             surface_feature_transform=(tuple(map(tuple, args.cs_surface_feature_transform))
                                        if args.cs_surface_feature_transform is not None else None),
             surface_context_width=args.cs_surface_context_width,

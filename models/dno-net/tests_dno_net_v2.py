@@ -25,7 +25,7 @@ from flax.typing import FrozenVariableDict
 
 from dno_net_v2 import (
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
-    phase_rank_one_hat,
+    phase_rank_one_hat, surface_amplitude,
 )
 from solver.solvers.dno_series_jax import dno_series_eval
 
@@ -1516,6 +1516,101 @@ def test_phase_rank_one_zero_head_parity_normalization_and_trainability() -> Non
                                     jnp.fft.irfft(clipped, n=eta.shape[-1])[-1], rtol=1e-3, atol=1e-8)
 
 
+def test_surface_amplitude_formula_and_original_nested_scale() -> None:
+    eta, xi, depth = _state()
+    plain = _model(nested_blocks=1, surface_feature_scales=(.2, .1, .06, .4, .8, .3, .2)).clone(
+        domain_length=3*pi, eta_scale=.3, xi_scale=.7, target_scale=.8,
+    )
+    model = plain.clone(surface_amplitude_reference=.03)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    initialized = unfreeze(model.init(jax.random.PRNGKey(52), inputs, depth))
+    plain_initialized = plain.init(jax.random.PRNGKey(52), inputs, depth)
+    gain = initialized["params"].pop("eta_amplitude_gain")
+    assert jnp.all(gain == 0)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(initialized), jax.tree.leaves(plain_initialized), strict=True,
+    ))
+    initialized["params"]["eta_amplitude_gain"] = gain
+    zero_head = cast(tuple[jax.Array, ...], model.apply(initialized, inputs, depth, return_baseline=True))
+    assert jnp.array_equal(zero_head[0], zero_head[1])
+    variables = unfreeze(_activate_residual(initialized))
+    variables["params"]["eta_amplitude_gain"] = jnp.linspace(-.2, .3, model.width//2)
+    a = jnp.sqrt(jnp.mean((eta/.03)**2, axis=-1, keepdims=True)+1e-6)
+    assert jnp.array_equal(a, surface_amplitude(eta, .03))
+    k = 2*pi/model.domain_length*jnp.arange(eta.shape[-1]//2+1)
+    eta_hat = jnp.fft.rfft(eta)
+    features = jnp.stack([
+        eta, eta**2, eta**3,
+        *(jnp.fft.irfft(symbol*eta_hat, n=eta.shape[-1]) for symbol in
+          (1j*k, -k**2, jnp.sqrt(k), -1j*jnp.sign(k))),
+    ], axis=-1)
+    features = features / a[..., None]**jnp.asarray([1, 2, 3, 1, 1, 1, 1])
+    features = features / jnp.asarray(model.surface_feature_scales)
+    features = nn.gelu(features @ variables["params"]["eta_feat_proj"]["kernel"])
+    features *= 1+jnp.log(a)[..., None]*variables["params"]["eta_amplitude_gain"]
+    features = nn.gelu(features @ variables["params"]["eta_feat_mix"]["kernel"])
+    features = a[..., None]**2*features*jnp.tanh(features)
+    expected = jnp.zeros_like(xi)
+    for index in range(model.n_blocks):
+        block = CraigSulemBlock(model.latent, model.domain_length, model.h_clip_max,
+                               model.mult_hidden, nested=index == 1)
+        expected += cast(jax.Array, block.apply(
+            {"params": variables["params"][f"cs_block_{index}"]},
+            features, xi*model.xi_scale, depth, eta_norm=eta/.03,
+        ))
+    expected /= (model.n_blocks*model.latent)**.5*model.target_scale
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    assert jnp.allclose(actual, expected, rtol=2e-12, atol=1e-14)
+    variables["params"]["cs_block_0"]["phi_proj"]["kernel"] *= 0
+    raw_nested = plain.clone(surface_feature_scales=(.03, .1, .06, .4, .8, .3, .2))
+    assert jnp.array_equal(_learned_residual(model, variables, eta, xi, depth),
+                           _learned_residual(raw_nested, variables, eta, xi, depth))
+
+
+def test_surface_amplitude_structure_and_derivatives() -> None:
+    eta, xi, depth = _state()
+    eta = jnp.concatenate((eta, .04*eta))
+    xi = jnp.concatenate((xi, jnp.roll(xi, 7, axis=-1)))
+    depth = jnp.concatenate((depth, jnp.log(jnp.array([[.04]]))))
+    model = _model(nested_blocks=1, surface_context_width=8,
+                   surface_feature_scales=(.03, .002, .0002, .1, .4, .05, .03)).clone(
+        surface_amplitude_reference=.04,
+    )
+    variables = unfreeze(_activate_residual(model.init(
+        jax.random.PRNGKey(53), jnp.stack((eta, xi), axis=-1), depth,
+    )))
+    variables["params"]["eta_amplitude_gain"] = jnp.linspace(-.2, .3, model.width//2)
+
+    @jax.jit
+    def residual(surface: jax.Array, potential: jax.Array) -> jax.Array:
+        return _learned_residual(model, variables, surface, potential, depth)
+
+    other = jnp.roll(xi, 5, axis=-1)
+    first, second = residual(eta, xi), residual(eta, other)
+    assert jnp.allclose(residual(eta, 1.7*xi-.4*other), 1.7*first-.4*second, rtol=2e-11, atol=1e-13)
+    assert jnp.allclose(jnp.sum(xi*second), jnp.sum(other*first), rtol=2e-11, atol=1e-13)
+    assert jnp.allclose(residual(jnp.roll(eta, 9, axis=-1), jnp.roll(xi, 9, axis=-1)),
+                        jnp.roll(first, 9, axis=-1), rtol=2e-11, atol=1e-13)
+    zeros = jnp.zeros_like(eta)
+    flat, first_variation = jax.jvp(lambda e: residual(e, xi), (zeros,), (eta,))
+    assert jnp.max(jnp.abs(flat)) == 0 and jnp.max(jnp.abs(first_variation)) == 0
+    second_variation = jax.jvp(
+        lambda e: jax.jvp(lambda v: residual(v, xi), (e,), (eta,))[1], (zeros,), (eta,),
+    )[1]
+    errors = [jnp.linalg.norm(residual(scale*eta, xi)/scale**2-.5*second_variation)
+              / jnp.linalg.norm(.5*second_variation) for scale in (1e-5, 1e-6, 1e-7)]
+    assert errors[2] < .15*errors[1] < .15**2*errors[0]
+    direction = jnp.roll(eta, 3, axis=-1)
+    derivative = jax.jvp(lambda e: residual(e, xi), (eta,), (direction,))[1]
+    fd = (residual(eta+1e-5*direction, xi)-residual(eta-1e-5*direction, xi))/2e-5
+    assert jnp.linalg.norm(derivative-fd)/jnp.linalg.norm(derivative) < 2e-7
+    gradients = jax.grad(lambda p: jnp.sum(_learned_residual(
+        model, {"params": p}, eta, xi, depth,
+    )*xi))(variables["params"])
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+    assert jnp.linalg.norm(gradients["eta_amplitude_gain"]) > 1e-8
+
+
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
@@ -1562,6 +1657,8 @@ def main() -> int:
         test_phase_rank_one_spectrum_matches_physical_definition,
         test_phase_rank_one_preserves_operator_structure_and_quadratic_order,
         test_phase_rank_one_zero_head_parity_normalization_and_trainability,
+        test_surface_amplitude_formula_and_original_nested_scale,
+        test_surface_amplitude_structure_and_derivatives,
     )
     for test in tests:
         test()

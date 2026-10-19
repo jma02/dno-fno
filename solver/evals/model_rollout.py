@@ -111,6 +111,7 @@ def load_run(
             use_relative_elevation=bool(config.get("cs_use_relative_elevation", False)),
             use_learned_eta_filters=bool(config.get("cs_use_learned_eta_filters", False)),
             surface_feature_scales=None if surface_scales is None else tuple(map(float, surface_scales)),
+            surface_amplitude_reference=float(config.get("cs_surface_amplitude_reference", 0.0)),
             surface_feature_transform=(None if surface_transform is None else
                                        tuple(tuple(map(float, row)) for row in surface_transform)),
             surface_context_width=int(config.get("cs_surface_context_width", 0)),

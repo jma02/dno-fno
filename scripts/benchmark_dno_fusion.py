@@ -30,7 +30,10 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
-from dno_net_v2 import CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier, phase_rank_one_hat  # noqa: E402
+from dno_net_v2 import (  # noqa: E402
+    CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
+    phase_rank_one_hat, surface_amplitude,
+)
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
 TUNED_TRIALS = tuple("fourier_tuned_" + "_".join(map(str, epts)) + suffix
@@ -214,6 +217,8 @@ def build_variant(
     model = loaded.model
     if model.phase_rank_one and (trial == "fourier" or (not spectral_io and variant != "original")):
         raise ValueError("Phase rank-one inference requires original or physically rounded Fourier I/O.")
+    if model.surface_amplitude_reference > 0 and not spectral_io and variant != "original":
+        raise ValueError("Amplitude-conditioned inference requires original or Fourier I/O.")
     if nested_fused and (nx != 1024 or coarse_correction or not model.nested_blocks or not spectral_io):
         raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
     if context_batch and not model.surface_context_width:
@@ -420,11 +425,20 @@ def build_variant(
             nested_eta = eta_norm
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
+                if model.surface_amplitude_reference > 0:
+                    nested_eta = eta_norm / model.surface_amplitude_reference
                 if nested_modulation is not None:
                     gain, actual_depth = nested_modulation
                     nested_eta = nested_eta * (
                         1.0 + gain * jnp.tanh(eta_norm * model.eta_scale / actual_depth)
                     )
+            amplitude = None
+            if model.surface_amplitude_reference > 0:
+                amplitude = surface_amplitude(eta_norm, model.surface_amplitude_reference)
+                degrees = jnp.asarray(
+                    [*range(1, model.n_polys + 1), *([1] * surface_ops.shape[0])], dtype=features.dtype,
+                )
+                features = features / amplitude[..., None] ** degrees
             if model.surface_feature_scales is not None:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
             nested_eta = nested_eta[:, None, :]
@@ -439,6 +453,9 @@ def build_variant(
             nested_inner_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
+                if name == "eta_feat_mix" and amplitude is not None:
+                    features = features * (1.0 + jnp.log(amplitude)[..., None]
+                                           * loaded.params["eta_amplitude_gain"])
                 features = nn.gelu(features @ kernel)
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     context = features @ loaded.params["eta_context_in"]["kernel"]
@@ -462,6 +479,8 @@ def build_variant(
                 features = features * (1.0 + jnp.tanh(context))
             if polynomial_features is not None:
                 features = jnp.concatenate((features, polynomial_features), axis=-1)
+            if amplitude is not None:
+                features = features * amplitude[..., None] ** 2
             correction_hat = jnp.zeros_like(xi_phys_hat)
             if ordinary_blocks:
                 weights = features @ cast(jax.Array, head_kernel)

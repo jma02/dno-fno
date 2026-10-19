@@ -17,6 +17,11 @@ from flax import linen as nn
 from solver.solvers.dno_series_jax import dno_series_eval
 
 
+def surface_amplitude(eta_norm: jnp.ndarray, reference_rms: float) -> jnp.ndarray:
+    """Smooth per-surface RMS amplitude relative to the fixed training RMS."""
+    return jnp.sqrt(jnp.mean((eta_norm / reference_rms) ** 2, axis=-1, keepdims=True) + 1e-6)
+
+
 def phase_rank_one_hat(
     eta_hat: jnp.ndarray, xi_hat: jnp.ndarray, log_depth: jnp.ndarray,
     coefficients: jnp.ndarray, domain_length: float,
@@ -167,6 +172,7 @@ class CraigSulemDNO(nn.Module):
     use_relative_elevation: bool = False  # Append physical eta / actual depth.
     use_learned_eta_filters: bool = False  # Modulate the two even surface filters.
     surface_feature_scales: tuple[float, ...] | None = None  # Fixed training-feature RMS.
+    surface_amplitude_reference: float = 0.0  # Positive raw-eta TRAIN RMS enables per-surface conditioning.
     surface_feature_transform: tuple[tuple[float, ...], ...] | None = None  # Fixed, zero-preserving whitening.
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
@@ -231,7 +237,7 @@ class CraigSulemDNO(nn.Module):
         return ((g0_term + dx_term) / self.target_scale).astype(xi_norm.dtype)
 
     def _encode_surface(
-        self, eta_norm: jnp.ndarray, depth: jnp.ndarray,
+        self, eta_norm: jnp.ndarray, depth: jnp.ndarray, *, amplitude: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None, jnp.ndarray | None]:
         """Shared geometry trunk before the baseline-dependent Taylor gate."""
         grid_size = eta_norm.shape[1]
@@ -276,6 +282,12 @@ class CraigSulemDNO(nn.Module):
         if self.use_relative_elevation:
             features.append(eta_norm * self.eta_scale / jnp.exp(depth))
         eta_features = jnp.stack(features, axis=-1)
+        if amplitude is not None:
+            powers = jnp.asarray(
+                list(range(1, self.n_polys + 1)) + [1] * (len(features) - self.n_polys),
+                dtype=eta_features.dtype,
+            )
+            eta_features = eta_features / amplitude[..., None] ** powers
         if self.surface_feature_scales is not None:
             eta_features = eta_features / jnp.asarray(
                 self.surface_feature_scales, dtype=eta_features.dtype,
@@ -293,6 +305,9 @@ class CraigSulemDNO(nn.Module):
         # With no constant input, zero eta gives zero features.
         context = None
         for name in ("eta_feat_proj", "eta_feat_mix"):
+            if name == "eta_feat_mix" and amplitude is not None:
+                gain = self.param("eta_amplitude_gain", nn.initializers.zeros, (self.width // 2,))
+                eta_features = eta_features * (1.0 + gain * jnp.log(amplitude[..., None]))
             eta_features = nn.gelu(
                 nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
             )
@@ -350,7 +365,11 @@ class CraigSulemDNO(nn.Module):
                 jnp.exp(depth if self.baseline_true_depth else clipped_log_depth).astype(jnp.float64), order=2,
             ) / self.target_scale
 
-        eta_features, nested_features, polynomial_features, context = self._encode_surface(eta_norm, depth)
+        amplitude = (surface_amplitude(eta_norm, self.surface_amplitude_reference)
+                     if self.surface_amplitude_reference > 0 else None)
+        eta_features, nested_features, polynomial_features, context = self._encode_surface(
+            eta_norm, depth, amplitude=amplitude,
+        )
         # G0-only must allow O(eta) corrections; its bias-free GELU trunk already does.
         # Preserve the analytic Taylor terms; a constant input removes this constraint.
         if self.baseline_order == 2:
@@ -368,12 +387,17 @@ class CraigSulemDNO(nn.Module):
                 kernel_init=nn.initializers.zeros, name="eta_depth_gate",
             )(jnp.concatenate((t, t**2), axis=-1)))
             eta_features = eta_features * gains[:, None, :]
+        if amplitude is not None:
+            eta_features = eta_features * amplitude[..., None] ** 2
 
         # Sum parallel correction groups, starting from zero in xi's dtype.
         correction = jnp.zeros((batch_size, grid_size), dtype=xi_phys.dtype)
-        # The nested eta factors use the same fixed training-RMS scaling as the trunk.
-        nested_surface = (eta_norm / self.surface_feature_scales[0]
-                          if self.surface_feature_scales is not None else eta_norm)
+        # Nested eta factors retain raw training-RMS scaling when the trunk is normalized.
+        nested_surface = eta_norm
+        if self.surface_amplitude_reference > 0:
+            nested_surface = nested_surface / self.surface_amplitude_reference
+        elif self.surface_feature_scales is not None:
+            nested_surface = nested_surface / self.surface_feature_scales[0]
         if self.nested_surface_modulation:
             gain = self.param("nested_surface_gain", nn.initializers.zeros, ())
             nested_surface = nested_surface * (
