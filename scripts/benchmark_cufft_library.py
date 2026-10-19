@@ -48,13 +48,15 @@ def register_graph_ffi(library: Path, input_alias: bool = False) -> ct.CDLL:
 def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | None = None,
               *, inverse: bool = False,
               library: Path = FFI_LIBRARY, input_alias: bool = False,
-              endpoint_mask: bool = False) -> jax.Array:
+              endpoint_mask: bool = False, hermitian_input: bool = False) -> jax.Array:
     """Real FFT with JAX axis/normalization semantics and capture-compatible cuFFT.
 
     Executable-owned plans are initialized per device before capture. Scratch is
     an extra XLA result. The optional alias trial lets XLA reuse dead inputs or
     copy live inputs before C2R, instead of always copying inside the handler;
     forward transforms keep the accepted non-destructive implementation.
+    ``hermitian_input`` skips endpoint clearing when the caller guarantees real
+    DC and, for even lengths, Nyquist coefficients.
     """
     import jax
     import jax.numpy as jnp
@@ -75,7 +77,7 @@ def graph_fft(a: jax.Array, n: int | None = None, axis: int = -1, norm: str | No
     a = a[..., :input_n]
     if a.shape[-1] < input_n:
         a = jnp.pad(a, [(0, 0)] * (a.ndim - 1) + [(0, input_n - a.shape[-1])])
-    if inverse:
+    if inverse and not hermitian_input:
         if endpoint_mask:
             mode = jnp.arange(input_n)
             a = jnp.where((mode == 0) | ((mode == input_n - 1) & (n % 2 == 0)), a.real, a)

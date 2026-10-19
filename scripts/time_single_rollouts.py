@@ -78,6 +78,9 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_nestedoverlap",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
     "fourier_fused_features_product_overlap_exactg0",
@@ -136,6 +139,7 @@ if __name__ == "__main__":
     parser.add_argument("--materialize-spectra", action="store_true", help="Avoid cloning rotated spectra into multiple consumers.")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Evaluate saved-frame DNO diagnostics together after single-trajectory integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
+    parser.add_argument("--spectral-saved-dno", action="store_true", help="Evaluate saved DNO diagnostics directly from the spectral carry.")
     parser.add_argument("--profile", action="store_true", help="Save compiled HLO and trace the measured execution; profiling timings are not clean latency measurements.")
     parser.add_argument("--ept", type=int, choices=(4, 8, 16), default=8)
     parser.add_argument("--pad-factor", type=int, default=8, help="Padding for classical DNO and shared-M1 baseline; model-local baselines are unchanged.")
@@ -171,6 +175,11 @@ if __name__ == "__main__":
     ):
         parser.error("optimized classical timing requires a carry or local method")
     base_methods = set(map(method_base, methods))
+    if args.spectral_saved_dno and (args.batch_saved_dno or any(
+        (not method.startswith(("fourier_", "M"))) or "carry" not in method
+        or (method.startswith("M") and args.classical_backend != "interleaved_cufftdx") for method in methods
+    )):
+        parser.error("--spectral-saved-dno requires spectral predictors with carry and no saved-DNO batching")
     if (args.reference != "cached_M6" and args.reference not in methods) or (base_methods & {"compact", *FUSION_VARIANTS} and not args.candidate_run):
         parser.error("methods must include the reference unless cached_M6; candidate methods require --candidate-run")
     if args.without_baselines and any(method.startswith("M") for method in methods):
@@ -196,6 +205,7 @@ if __name__ == "__main__":
         "materialize_spectra": args.materialize_spectra,
         "batch_saved_dno": args.batch_saved_dno,
         "pack_saved_inputs": args.pack_saved_inputs,
+        "spectral_saved_dno": args.spectral_saved_dno,
         "precision": "FP64 classical/integration; FP32 learned inference",
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
@@ -260,6 +270,7 @@ if __name__ == "__main__":
                                     unroll_stages=args.unroll_stages, unroll_substeps=args.unroll_substeps,
                                     bernoulli_fft=args.bernoulli_fft, materialize_spectra=args.materialize_spectra,
                                     batch_saved_dno=args.batch_saved_dno,
+                                    spectral_saved_dno=args.spectral_saved_dno,
                                     predict_hat=spectral_predict)
                             if "carry" in options or "local" in options else partial(ti.rollout, params=params, save_gxi=True,
                                    substeps_per_interval=cfg.substeps, method="gl2_if",
@@ -291,7 +302,8 @@ if __name__ == "__main__":
                                     predict_gxi=predict, predict_hat=spectral_predict, half_spectrum="half" in options,
                                     project_momentum="momentum" in options, unroll_stages=args.unroll_stages,
                                     unroll_substeps=args.unroll_substeps, bernoulli_fft=args.bernoulli_fft,
-                                    materialize_spectra=args.materialize_spectra, batch_saved_dno=args.batch_saved_dno)
+                                    materialize_spectra=args.materialize_spectra, batch_saved_dno=args.batch_saved_dno,
+                                    spectral_saved_dno=args.spectral_saved_dno)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
             runner = jax.jit(function)

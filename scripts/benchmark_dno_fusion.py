@@ -28,6 +28,7 @@ from jax.experimental.compute_on import compute_on  # noqa: E402
 from jax.stages import Wrapped  # noqa: E402
 
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
+from scripts.benchmark_cufft_library import graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import dense  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
@@ -66,7 +67,10 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_nestedoverlap",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
           "fourier_fused_features_product_overlap_grid512",
           "fourier_balanced_features_product_overlap",
@@ -186,6 +190,10 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    context_real = variant.endswith("_contextreal")
+    variant = variant.removesuffix("_contextreal")
+    nested_overlap = variant.endswith("_nestedoverlap")
+    variant = variant.removesuffix("_nestedoverlap")
     transpose_mix = variant.endswith("_mixtranspose")
     variant = variant.removesuffix("_mixtranspose")
     branch_major = variant.endswith("_branchmajor")
@@ -264,6 +272,8 @@ def build_variant(
         raise ValueError("Nested fusion requires a 1024-point nested model with Fourier I/O.")
     if context_batch and not model.surface_context_width:
         raise ValueError("Context/nested FFT batching requires surface context channels.")
+    if nested_overlap and not (nested_fused and context_batch):
+        raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
                          or model.surface_context_gate or model.surface_amplitude_reference > 0):
         raise ValueError("Context folding requires ungated Fourier-I/O surface context.")
@@ -518,6 +528,7 @@ def build_variant(
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
             context = None
             nested_inner_hat = None
+            nested_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
                 if context_fold and name == "eta_feat_mix":
                     features = nn.gelu(features)
@@ -545,9 +556,23 @@ def build_variant(
                         ), axis=1))
                         context_hat = jnp.moveaxis(combined_hat[:, :model.surface_context_width], 1, -1)
                         nested_inner_hat = combined_hat[:, model.surface_context_width:]
+                        if nested_overlap:
+                            with compute_on("gpu_stream:2"):
+                                nested_hat = jax.jit(lambda values: filters[:, ordinary_branches:] * sandwich(
+                                    (cast(jax.Array, gamma)[None, :, None] * values[1]).reshape(-1, correction_nx),
+                                    (cast(jax.Array, inner_filters) * values[0][:, model.surface_context_width:]).reshape(
+                                        -1, values[0].shape[-1]),
+                                    cast(jax.Array, nested_symbols), spectral=True, ept=fft_ept,
+                                ).reshape(cast(jax.Array, inner_filters).shape))((combined_hat, nested_eta))
                     else:
                         context_hat = jnp.fft.rfft(context, axis=1)
-                    if context_inverse:
+                    if context_real:
+                        # A real multiplier preserves the RFFT's real DC/Nyquist coefficients.
+                        context = graph_fft(
+                            context_multiplier * context_hat, n=correction_nx, axis=1,
+                            inverse=True, hermitian_input=True,
+                        )
+                    elif context_inverse:
                         context = jnp.moveaxis(fft(
                             jnp.moveaxis(context_multiplier * context_hat, 1, -1),
                             correction_nx, inverse=True, ept=fft_ept,
@@ -586,7 +611,7 @@ def build_variant(
             if model.nested_blocks:
                 inner_hat = (cast(jax.Array, nested_inner_hat) if context_batch else
                              jnp.fft.rfft(nested_eta * branch_fields[:, ordinary_branches:]))
-                if nested_fused:
+                if nested_fused and not nested_overlap:
                     inner_hat = cast(jax.Array, inner_filters) * inner_hat
                     # Preserve the first FFT; unit symbols fuse IFFT/product/FFT with unnormalized output.
                     surface = cast(jax.Array, gamma)[None, :, None] * nested_eta
@@ -594,11 +619,11 @@ def build_variant(
                         surface.reshape(-1, correction_nx), inner_hat.reshape(-1, inner_hat.shape[-1]),
                         cast(jax.Array, nested_symbols), spectral=True, ept=fft_ept,
                     ).reshape(inner_hat.shape)
-                else:
+                elif not nested_overlap:
                     middle = jnp.fft.irfft(cast(jax.Array, inner_filters) * inner_hat, n=correction_nx)
                     nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
                         cast(jax.Array, gamma)[None, :, None] * nested_eta * middle)
-                correction_hat = correction_hat + jnp.sum(nested_hat, axis=1)
+                correction_hat = correction_hat + jnp.sum(cast(jax.Array, nested_hat), axis=1)
             correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if coarse_correction:
                 correction_hat = resample_rfft(correction_hat, nx)
@@ -852,7 +877,7 @@ if __name__ == "__main__":
                        if "lowrank" not in variant else None),
         }
         if variant.endswith(("_contextfold", "_contextinverse", "_headtranspose",
-                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1", "_gelureuse", "_branchmajor", "_mixtranspose")):
+                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1", "_gelureuse", "_branchmajor", "_mixtranspose", "_nestedoverlap", "_contextreal")):
             correction_outputs = []
             instrumented_exact = True
             for name, original in ((args.reference, expected), (variant, actual)):
@@ -938,7 +963,10 @@ if __name__ == "__main__":
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_branchmajor="Branch-major product FFT",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor="Branch-major FFT and reused GELU",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose="Transposed second surface projection",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_nestedoverlap="Overlap nested branch with surface MLP",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal="Skip real-context endpoint clears",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1="Separate G₁ input arguments",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor="Separate G₁ inputs with branch-major FFT",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
                   fourier_fused_features_product_overlap_g1fp32="Current network with FP32 G₁",
                   fourier_balanced_features_product_overlap="Balanced features + product FFT + G₁ overlap",

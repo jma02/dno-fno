@@ -61,9 +61,11 @@ def main() -> None:
     parser.add_argument("--field-stride", action="store_true", help="Read ordinary branch fields without an intermediate copy.")
     parser.add_argument("--reuse-first-gelu", action="store_true", help="Reuse the first surface activation across its two consumers.")
     parser.add_argument("--branch-major", action="store_true", help="Consume the head projection without a paired-stage layout copy.")
+    parser.add_argument("--real-context-endpoints", action="store_true", help="Skip clearing the already-real context FFT endpoints.")
     parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
+    parser.add_argument("--spectral-saved-dno", action="store_true", help="Evaluate saved DNO diagnostics directly from the spectral carry.")
     parser.add_argument("--cs-terms-variant", choices=("terms_interleaved", "terms_interleaved_features",
                                                     "terms_interleaved_features_cufftdx",
                                                     "terms_interleaved_features_cufftdx_spectral"),
@@ -75,6 +77,8 @@ def main() -> None:
         parser.error("--batch-context-fft requires --fuse-nested-fft")
     if args.graph_fft_mask and not args.graph_fft:
         parser.error("--graph-fft-mask requires --graph-fft")
+    if args.spectral_saved_dno and args.batch_saved_dno:
+        parser.error("--spectral-saved-dno cannot be combined with saved-DNO batching")
     if not 0.0 < args.ic_quantile_offset < 1.0:
         parser.error("ic-quantile-offset must be between 0 and 1")
     run_dir = args.run_dir.resolve()
@@ -96,9 +100,11 @@ def main() -> None:
         + ("_fieldstride" if args.field_stride else "")
         + ("_gelureuse" if args.reuse_first_gelu else "")
         + ("_branchmajor" if args.branch_major else "")
+        + ("_contextreal" if args.real_context_endpoints else "")
         + ("_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
         + ("_savedpacked" if args.pack_saved_inputs else "")
+        + ("_savedspectral" if args.spectral_saved_dno else "")
         + (f"_{args.cs_terms_variant}" if args.cs_terms_variant else ""))
     checkpoint_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir is not None else None
     loaded = load_run(run_dir, checkpoint=args.checkpoint, checkpoint_dir=checkpoint_dir)
@@ -113,14 +119,15 @@ def main() -> None:
                + ("_projectiontranspose" if args.transpose_projections else "")
                + ("_fieldstride" if args.field_stride else "")
                + ("_gelureuse" if args.reuse_first_gelu else "")
-               + ("_branchmajor" if args.branch_major else ""))
+               + ("_branchmajor" if args.branch_major else "")
+               + ("_contextreal" if args.real_context_endpoints else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
         if (args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0
                 or args.correction_grid != 1024 or args.transpose_projections or args.field_stride
-                or args.reuse_first_gelu or args.branch_major):
+                or args.reuse_first_gelu or args.branch_major or args.real_context_endpoints):
             parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
         variant = args.cs_terms_variant or f"terms_m{loaded.config['cs_baseline_order']}_jax"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +146,7 @@ def main() -> None:
         "bernoulli_fft": args.bernoulli_fft,
         "batch_saved_dno": args.batch_saved_dno,
         "pack_saved_inputs": args.pack_saved_inputs,
+        "spectral_saved_dno": args.spectral_saved_dno,
     }
     summaries = {}
     for family, cfg in FAMILY_CONFIGS.items():
@@ -160,6 +168,8 @@ def main() -> None:
         jax.block_until_ready((initial, times, params))
         started = perf_counter()
         if terms_decoder and not variant.endswith("_spectral"):
+            if args.spectral_saved_dno:
+                parser.error("--spectral-saved-dno requires a spectral predictor")
             spectral = None
             if args.cs_terms_variant:
                 physical = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8)
@@ -179,6 +189,7 @@ def main() -> None:
             project_momentum=args.project_momentum, unroll_stages=args.unroll_stages,
             materialize_spectra=args.materialize_spectra,
             bernoulli_fft=args.bernoulli_fft, batch_saved_dno=args.batch_saved_dno,
+            spectral_saved_dno=args.spectral_saved_dno,
         )
         with ExitStack() as patches:
             if args.graph_fft:

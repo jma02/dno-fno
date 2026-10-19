@@ -132,7 +132,7 @@ def rollout_if_trial(
     project_momentum: bool = False, unroll_stages: bool = False, unroll_substeps: int = 1,
     bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both"] = "cufft",
     materialize_spectra: bool = False,
-    batch_saved_dno: bool = False,
+    batch_saved_dno: bool = False, spectral_saved_dno: bool = False,
 ) -> dict[str, jax.Array]:
     """Paired GL2 with optional spectral carry and interval-cached local rotations.
 
@@ -228,7 +228,14 @@ def rollout_if_trial(
             ti.State(*jnp.fft.irfft(jnp.stack(next_state), n=params.nx)) if half_spectrum
             else ti._hat_to_state(next_state)) if carry_spectral
                     else cast(ti.State, next_state))
-        gxi = predict_gxi(*physical) if predict_gxi is not None and not batch_saved_dno else None
+        if spectral_saved_dno:
+            saved_hat = cast(ti.SpectralState, next_state)
+            gxi = jnp.fft.irfft(cast(Predictor, predict_hat)(
+                saved_hat.eta_hat[..., :params.nx // 2 + 1],
+                saved_hat.xi_hat[..., :params.nx // 2 + 1],
+            ), n=params.nx)
+        else:
+            gxi = predict_gxi(*physical) if predict_gxi is not None and not batch_saved_dno else None
         return next_state, (physical.eta, physical.xi, gxi)
 
     carry = ti._state_to_hat(initial, params.nx) if carry_spectral else initial
@@ -253,8 +260,12 @@ def rollout_if_trial(
                 e, x, params.k, params.depth, params.dno_order, pad_factor=params.pad_factor,
             ))(eta, xi)
         else:
-            spectra = jnp.fft.rfft(jnp.stack((eta, xi), axis=-2), axis=-1).at[..., params.nx // 2].set(0)
+            spectra = jnp.fft.rfft(jnp.stack(
+                (eta[:1], xi[:1]) if spectral_saved_dno else (eta, xi), axis=-2,
+            ), axis=-1).at[..., params.nx // 2].set(0)
             gxi = jnp.fft.irfft(predict_hat(spectra[..., 0, :], spectra[..., 1, :]), n=params.nx)
+            if spectral_saved_dno:
+                gxi = jnp.concatenate((gxi, cast(jax.Array, saved_gxi)))
         if params.filter_fraction < 1.0:
             gxi = ti.apply_lowpass(gxi, params.k, params.filter_fraction)
     elif batch_saved_dno:

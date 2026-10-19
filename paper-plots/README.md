@@ -617,13 +617,15 @@ is the median terminal surface error over the same 32 cases per family;
 the horizontal coordinate is measured warm single-rollout runtime.
 `Hero control · epoch 1` is the original Oct12 B16 checkpoint, not the extended
 epoch37 model. Black stars separately show `Trained hero · epoch 37`, using
-`outputs/hero_speed_20261019/layout_final_eval` for its own 128-case evaluation
-and `layout_final_rollouts.json` for fresh full-horizon, batch-one timings.
+`outputs/hero_speed_20261019/contextreal_eval` for its own 128-case evaluation
+and `contextreal_final_rollouts.json` for fresh full-horizon, batch-one timings.
 The weights are unchanged. The optimized execution retains graph-compatible
 cuFFT and four unrolled GL2 iterations, materializes reused stage-input spectra,
 changes the learned projection/field layouts, reuses the first surface activation,
 packs saved-state input transforms, and uses cuFFTDx inverse and forward FFTs for
-the FP64 Bernoulli term. Equations, precision, timestep and iteration count are
+the FP64 Bernoulli term. The latest change removes redundant DC/Nyquist clearing
+only from the context inverse FFT: its real Fourier multiplier preserves the
+real endpoints produced by the preceding real-input FFT. Equations, precision, timestep and iteration count are
 unchanged; the shared RHS optimizations also apply to the classical measurements.
 Compilation, graph capture, warm-up and transfers are excluded. Each timing is
 one synchronized measurement after a full warm-up, not a batch time divided by 32.
@@ -632,43 +634,40 @@ The original one-epoch hero retains its existing accuracy and
 Other neural points remain one-epoch experiments.
 
 The hero's before/after annotation uses fresh epoch-37 measurements from
-`fused_final_rollouts.json` and `layout_final_rollouts.json` in that same
+`layout_final_rollouts.json` and `contextreal_final_rollouts.json` in that same
 directory, not timings borrowed from the one-epoch control:
 
 | Family | Previous (s) | Optimized execution (s) | Time saved |
 | --- | ---: | ---: | ---: |
-| Stokes | 1.053539 | 0.975186 | 7.44% |
-| Tanaka | 10.254260 | 9.620791 | 6.18% |
-| Benjamin–Feir | 10.260169 | 9.637787 | 6.07% |
-| JONSWAP/TMA | 1.053588 | 0.989491 | 6.08% |
+| Stokes | 0.975186 | 0.942440 | 3.36% |
+| Tanaka | 9.620791 | 9.403381 | 2.26% |
+| Benjamin–Feir | 9.637787 | 9.427579 | 2.18% |
+| JONSWAP/TMA | 0.989491 | 0.943172 | 4.68% |
 
-M1–M6 use the freshly measured shared-RHS paths listed above; each order's
+M1–M6 retain the measured shared-RHS paths listed above; each order's
 selected path is used for all four families, rather than selecting individual
 family minima. M3 now takes 0.981624/9.759309/9.752981/0.983787 seconds on
-Stokes/Tanaka/Benjamin–Feir/JONSWAP-TMA.
+Stokes/Tanaka/Benjamin–Feir/JONSWAP-TMA. The context-only optimization has no
+classical counterpart: the classical recurrence already uses cuFFTDx.
 Cloud results, batch-32 timings and the original one-epoch neural points are
 unchanged. The hero's accuracy is taken from this optimized execution's own
 128-case evaluation, not copied from the previous implementation.
-All 128 evaluated trajectories remain finite with positive fluid depth. The new
+All 128 evaluated trajectories remain finite with positive fluid depth. The
 median surface errors are 0.000410541%, 0.010115862%, 0.021913915% and 0.006764379%
-for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively: changes of
-−0.009%, −0.020%, −0.149% and −0.004% relative to the preceding execution.
-Individual trajectories are not bit-identical. The pooled geometric mean of
-paired terminal surface-error ratios is 1.00008584, with 64 cases improving and
-64 worsening. The largest increase is a Stokes case from 0.000031529% to
-0.000034842% (1.105×). DNO-output errors change more: Tanaka's median terminal
-Gxi error rises from 0.02848249% to 0.03068513%, and the worst paired Gxi error
-ratio is 1.358. These results support retained surface accuracy at the measured
-speed, not invariance of every predicted quantity. The detailed comparison is
-`outputs/hero_speed_20261019/layout_final_eval_audit.json`.
+for Stokes, Tanaka, Benjamin–Feir and JONSWAP/TMA, respectively. Against
+`layout_final_eval`, all 98,697,216 saved eta, xi and Gxi values are bit-identical
+across 128 cases and 251 frames per case; the saved energy diagnostics are also
+unchanged. This equality applies to the evaluated cohort, not an assertion about
+arbitrary inputs. The detailed comparison is
+`outputs/hero_speed_20261019/contextreal_eval_audit.json`.
 
 To reproduce this inference trial, use the
-`fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_spectral_all_boundaries_stages_carry_local`
+`fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_spectral_all_boundaries_stages_carry_local`
 method, add `--graph-fft --unroll-stages --materialize-spectra --pack-saved-inputs --bernoulli-fft cufftdx_both`
 to the timing/evaluation commands and set
 `XLA_FLAGS='--xla_gpu_experimental_stream_annotation=true --xla_gpu_enable_command_buffer=+WHILE --xla_gpu_command_buffer_unroll_loops=false'`.
 For the evaluator, select the same predictor with `--fuse-nested-fft --batch-context-fft
---transpose-projections --field-stride --reuse-first-gelu --branch-major` instead of the timer's method name.
+--transpose-projections --field-stride --reuse-first-gelu --branch-major --real-context-endpoints` instead of the timer's method name.
 Build the isolated strided-field and branch-major libraries with
 `uv run --no-sync scripts/benchmark_cufftdx.py --build-only --field-stride` and
 `uv run --no-sync scripts/benchmark_cufftdx.py --build-only --branch-major`.
