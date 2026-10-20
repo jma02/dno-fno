@@ -20,10 +20,13 @@ def physical_from_spectral(
 
 def rotate_spectrum(
     state: ti.SpectralState, cosine: jax.Array, sine_over_omega: jax.Array, params: ti.SolverParams,
+    rotation_products: tuple[jax.Array, jax.Array] | None = None,
 ) -> ti.SpectralState:
+    if rotation_products is None:
+        rotation_products = (sine_over_omega * params.g0, sine_over_omega * params.gravity)
     return ti.SpectralState(
-        cosine * state.eta_hat + sine_over_omega * params.g0 * state.xi_hat,
-        cosine * state.xi_hat - sine_over_omega * params.gravity * state.eta_hat,
+        cosine * state.eta_hat + rotation_products[0] * state.xi_hat,
+        cosine * state.xi_hat - rotation_products[1] * state.eta_hat,
     )
 
 
@@ -55,13 +58,14 @@ def rhs_nonlinear_if_spectral(
     predict_correction: Predictor | None = None,
     predict_hat: Predictor | None = None,
     rotation: tuple[jax.Array, jax.Array] | None = None,
+    rotation_products: tuple[jax.Array, jax.Array] | None = None,
     ramp_time: float | jax.Array | None = None,
     half_spectrum: bool = False,
-    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both"] = "cufft",
+    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"] = "cufft",
     materialize_spectra: bool = False,
 ) -> ti.SpectralState:
     physical_hat = (ti.apply_linear_flow_hat(state_hat, time_value, params) if rotation is None
-                    else rotate_spectrum(state_hat, *rotation, params))
+                    else rotate_spectrum(state_hat, *rotation, params, rotation_products))
     nx = params.nx
     positive_modes = slice(0, nx // 2 + 1)
     eta_hat = physical_hat.eta_hat[..., positive_modes]
@@ -90,25 +94,30 @@ def rhs_nonlinear_if_spectral(
         gxi_hat = gxi_hat.at[..., nx // 2].set(0)
 
     inverse_fft = jnp.fft.irfft
-    if bernoulli_fft == "cufftdx_both":
+    if bernoulli_fft in ("cufftdx_both", "cufftdx_fused"):
         from scripts.benchmark_cufftdx import fft
         inverse_fft = partial(fft, inverse=True, ept=8)
     if pack_ffts == "all":
-        eta_x, xi_x, gxi = jnp.moveaxis(2.0 * inverse_fft(
+        fields = inverse_fft(
             jnp.stack((1j * k * eta_hat, 1j * k * xi_hat, gxi_hat), axis=-2),
             n=2 * nx,
-        ), -2, 0)
+        )
     else:
-        eta_x = 2.0 * inverse_fft(1j * k * eta_hat, n=2 * nx)
-        xi_x = 2.0 * inverse_fft(1j * k * xi_hat, n=2 * nx)
-        gxi = 2.0 * inverse_fft(gxi_hat, n=2 * nx)
-    numerator = gxi + eta_x * xi_x
-    xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
-    if bernoulli_fft != "cufft":
-        from scripts.benchmark_cufftdx import fft
-        xi_t_spectrum = fft(xi_t, 2 * nx)
+        fields = jnp.stack((inverse_fft(1j * k * eta_hat, n=2 * nx),
+                            inverse_fft(1j * k * xi_hat, n=2 * nx),
+                            inverse_fft(gxi_hat, n=2 * nx)), axis=-2)
+    if bernoulli_fft == "cufftdx_fused":
+        from scripts.benchmark_cufftdx import bernoulli_rfft
+        xi_t_spectrum = bernoulli_rfft(fields)
     else:
-        xi_t_spectrum = jnp.fft.rfft(xi_t, axis=-1)
+        eta_x, xi_x, gxi = jnp.moveaxis(2.0 * fields, -2, 0)
+        numerator = gxi + eta_x * xi_x
+        xi_t = -0.5 * xi_x**2 + 0.5 * numerator**2 / (1.0 + eta_x**2)
+        if bernoulli_fft != "cufft":
+            from scripts.benchmark_cufftdx import fft
+            xi_t_spectrum = fft(xi_t, 2 * nx)
+        else:
+            xi_t_spectrum = jnp.fft.rfft(xi_t, axis=-1)
     xi_t_hat = 0.5 * xi_t_spectrum[..., positive_modes]
     xi_t_hat = xi_t_hat.at[..., nx // 2].set(0)
     eta_t_hat = gxi_hat - params.g0[..., positive_modes] * xi_hat
@@ -122,7 +131,9 @@ def rhs_nonlinear_if_spectral(
         nonlinear_hat = ti._tree_scale(nonlinear_hat, ti.nonlinear_ramp_factor(
             time_value if ramp_time is None else ramp_time, params))
     return (ti.apply_linear_flow_hat(nonlinear_hat, -time_value, params) if rotation is None
-            else rotate_spectrum(nonlinear_hat, rotation[0], -rotation[1], params))
+            else rotate_spectrum(nonlinear_hat, rotation[0], -rotation[1], params,
+                                 None if rotation_products is None
+                                 else (-rotation_products[0], -rotation_products[1])))
 
 
 def rollout_if_trial(
@@ -130,8 +141,10 @@ def rollout_if_trial(
     carry_spectral: bool, local_if: bool, predict_gxi: Predictor | None = None,
     predict_hat: Predictor | None = None, half_spectrum: bool = False,
     project_momentum: bool = False, unroll_stages: bool = False, unroll_substeps: int = 1,
-    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both"] = "cufft",
+    bernoulli_fft: Literal["cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"] = "cufft",
     materialize_spectra: bool = False,
+    materialize_updated_state: bool = False,
+    cache_rotation_products: bool = False,
     batch_saved_dno: bool = False, spectral_saved_dno: bool = False,
 ) -> dict[str, jax.Array]:
     """Paired GL2 with optional spectral carry and interval-cached local rotations.
@@ -156,6 +169,9 @@ def rollout_if_trial(
         omega = jnp.sqrt(flow_params.gravity * flow_params.g0)
         cosine = jnp.cos(omega * tau)
         sine = jnp.where(omega > 0, jnp.sin(omega * tau) / omega, 0.0)
+        products = (jax.lax.optimization_barrier((sine * flow_params.g0, sine * flow_params.gravity))
+                    if cache_rotation_products and local_if else None)
+        stage_products = None if products is None else (products[0][:2], products[1][:2])
 
         def step(index: int, state: ti.State | ti.SpectralState) -> ti.State | ti.SpectralState:
             time_value = start + dt * index
@@ -168,11 +184,12 @@ def rollout_if_trial(
             ) -> tuple[tuple[ti.SpectralState, ti.SpectralState], ti.SpectralState, ti.SpectralState]:
                 packed = jax.tree.map(lambda first, second: jnp.stack((first, second)), *stages)
                 if local_if:
-                    fields = jax.vmap(lambda s, t, co, si: rhs_nonlinear_if_spectral(
+                    fields = jax.vmap(lambda s, t, co, si, prod: rhs_nonlinear_if_spectral(
                         s, t, flow_params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
-                        rotation=(co, si), ramp_time=time_value + t, half_spectrum=half_spectrum,
+                        rotation=(co, si), rotation_products=prod, ramp_time=time_value + t,
+                        half_spectrum=half_spectrum,
                         bernoulli_fft=bernoulli_fft, materialize_spectra=materialize_spectra,
-                    ))(packed, c * dt, cosine[:2], sine[:2])
+                    ))(packed, c * dt, cosine[:2], sine[:2], stage_products)
                 else:
                     fields = jax.vmap(lambda s, t: rhs_nonlinear_if_spectral(
                         s, t, flow_params, predict_gxi, pack_ffts="all", predict_hat=predict_hat,
@@ -190,12 +207,15 @@ def rollout_if_trial(
             )
             _, f1, f2 = stage_map(stages)
             v1 = ti._tree_add(v0, ti._tree_scale(ti._tree_add(f1, f2), 0.5 * dt))
-            next_hat = (rotate_spectrum(v1, cosine[2], sine[2], flow_params) if local_if
+            next_hat = (rotate_spectrum(v1, cosine[2], sine[2], flow_params,
+                                       None if products is None else (products[0][2], products[1][2])) if local_if
                         else ti.apply_linear_flow_hat(v1, time_value + dt, flow_params))
             if params.filter_fraction < 1.0:
                 next_hat = ti._lowpass_hat(next_hat, flow_params)
             if carry_spectral:
                 fields = jnp.stack(next_hat)
+                if materialize_updated_state:
+                    fields = jax.lax.optimization_barrier(fields)
                 if half_spectrum:
                     fields = fields.at[..., 0].set(fields[..., 0].real)
                 else:

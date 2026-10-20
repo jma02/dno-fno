@@ -57,12 +57,14 @@ def main() -> None:
     parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation; requires --graph-fft.")
     parser.add_argument("--unroll-stages", action="store_true", help="Unroll the same four fixed-point iterations.")
     parser.add_argument("--materialize-spectra", action="store_true", help="Compute shared rotated spectra once.")
+    parser.add_argument("--materialize-updated-state", action="store_true", help="Materialize the completed step before Hermitian projection.")
+    parser.add_argument("--cache-rotation-products", action="store_true", help="Cache shared linear-flow coefficients once per saved interval.")
     parser.add_argument("--transpose-projections", action="store_true", help="Use context/head operand layouts from the timing trial.")
     parser.add_argument("--field-stride", action="store_true", help="Read ordinary branch fields without an intermediate copy.")
     parser.add_argument("--reuse-first-gelu", action="store_true", help="Reuse the first surface activation across its two consumers.")
     parser.add_argument("--branch-major", action="store_true", help="Consume the head projection without a paired-stage layout copy.")
     parser.add_argument("--real-context-endpoints", action="store_true", help="Skip clearing the already-real context FFT endpoints.")
-    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both"), default="cufft")
+    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
     parser.add_argument("--spectral-saved-dno", action="store_true", help="Evaluate saved DNO diagnostics directly from the spectral carry.")
@@ -96,12 +98,14 @@ def main() -> None:
         + ("_fftmask" if args.graph_fft_mask else "")
         + ("_unrolled" if args.unroll_stages else "")
         + ("_spectra" if args.materialize_spectra else "")
+        + ("_statebarrier" if args.materialize_updated_state else "")
+        + ("_rotationproducts" if args.cache_rotation_products else "")
         + ("_projections" if args.transpose_projections else "")
         + ("_fieldstride" if args.field_stride else "")
         + ("_gelureuse" if args.reuse_first_gelu else "")
         + ("_branchmajor" if args.branch_major else "")
         + ("_contextreal" if args.real_context_endpoints else "")
-        + ("_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
+        + ("_bernoullifused" if args.bernoulli_fft == "cufftdx_fused" else "_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
         + ("_savedpacked" if args.pack_saved_inputs else "")
         + ("_savedspectral" if args.spectral_saved_dno else "")
@@ -143,6 +147,8 @@ def main() -> None:
         "graph_fft_mask": args.graph_fft_mask,
         "unroll_stages": args.unroll_stages,
         "materialize_spectra": args.materialize_spectra,
+        "materialize_updated_state": args.materialize_updated_state,
+        "cache_rotation_products": args.cache_rotation_products,
         "bernoulli_fft": args.bernoulli_fft,
         "batch_saved_dno": args.batch_saved_dno,
         "pack_saved_inputs": args.pack_saved_inputs,
@@ -188,6 +194,8 @@ def main() -> None:
             carry_spectral=True, local_if=True, predict_gxi=physical, predict_hat=spectral,
             project_momentum=args.project_momentum, unroll_stages=args.unroll_stages,
             materialize_spectra=args.materialize_spectra,
+            materialize_updated_state=args.materialize_updated_state,
+            cache_rotation_products=args.cache_rotation_products,
             bernoulli_fft=args.bernoulli_fft, batch_saved_dno=args.batch_saved_dno,
             spectral_saved_dno=args.spectral_saved_dno,
         )

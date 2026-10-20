@@ -32,10 +32,10 @@ OUTPUT = ROOT / "outputs/cufftdx_20260925"
 
 
 @cache
-def register(field_stride: bool = False, branch_major: bool = False) -> ctypes.CDLL:
-    stem = "cufftdx_branchmajor" if branch_major else "cufftdx_fieldstride" if field_stride else "cufftdx"
+def register(field_stride: bool = False, branch_major: bool = False, bernoulli: bool = False) -> ctypes.CDLL:
+    stem = "cufftdx_bernoulli" if bernoulli else "cufftdx_branchmajor" if branch_major else "cufftdx_fieldstride" if field_stride else "cufftdx"
     library = ctypes.CDLL(str(OUTPUT / f"{stem}.so"))
-    targets = ((f"dno_{stem}", "dno_cufftdx"),) if field_stride or branch_major else tuple(
+    targets = ((f"dno_{stem}", "dno_cufftdx"),) if field_stride or branch_major or bernoulli else tuple(
         (name, name) for name in ("dno_cufftdx", "dno_cufftdx_features"))
     for name, symbol in targets:
         jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, symbol)), platform="CUDA")
@@ -54,6 +54,17 @@ def _branch_major_fft(a: jax.Array, b: jax.Array, outer: jax.Array, n: int, ept:
         size=np.int64(n), operation=np.int64(13), multiply=True, ept=np.int64(ept),
     )
     return spectrum.reshape((*a.shape[:-2], a.shape[-1], n // 2 + 1))
+
+
+def bernoulli_rfft(fields: jax.Array) -> jax.Array:
+    """Double unscaled [...,3,2048] FP64 inverse fields and transform the Bernoulli term."""
+    if fields.dtype != jnp.float64 or fields.shape[-2:] != (3, 2048):
+        raise ValueError("Bernoulli FFT requires unscaled FP64 [...,3,2048] fields.")
+    register(bernoulli=True)
+    return jax.ffi.ffi_call(
+        "dno_cufftdx_bernoulli", jax.ShapeDtypeStruct((*fields.shape[:-2], 1025), jnp.complex128),
+        vmap_method="broadcast_all",
+    )(fields, fields, fields, size=np.int64(2048), operation=np.int64(14), multiply=False, ept=np.int64(8))
 
 
 def fft(
@@ -236,6 +247,7 @@ if __name__ == "__main__":
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--field-stride", action="store_true", help="Build/check the isolated strided-field product FFT.")
     parser.add_argument("--branch-major", action="store_true", help="Build/check the isolated branch-major product FFT against strided fields.")
+    parser.add_argument("--bernoulli", action="store_true", help="Build the isolated FP64 Bernoulli-to-forward-FFT trial.")
     parser.add_argument("--sm", type=int, default=89)
     parser.add_argument("--ept", nargs="+", type=int, choices=(4, 8, 16), default=[8])
     parser.add_argument("--output", type=Path, default=OUTPUT)
@@ -253,7 +265,7 @@ if __name__ == "__main__":
             f"-arch=sm_{args.sm}", f"-DDNO_SM={args.sm * 10}", "--shared",
             "-Xcompiler", "-fPIC", "-DCUFFTDX_DISABLE_CUTLASS_DEPENDENCY",
             f"-I{mathdx}", f"-I{jax.ffi.include_dir()}",
-            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_branchmajor.so" if args.branch_major else "cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
+            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_bernoulli.so" if args.bernoulli else "cufftdx_branchmajor.so" if args.branch_major else "cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
         ], check=True)
     if args.build_only:
         raise SystemExit(0)

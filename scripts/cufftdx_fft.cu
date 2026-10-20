@@ -1,6 +1,7 @@
 // Inference-only cuFFTDx experiment; no changes to the production FFT backend.
 #include <cuda_runtime.h>
 #include <cufftdx.hpp>
+#include <type_traits>
 #include "xla/ffi/api/ffi.h"
 
 namespace ffi = xla::ffi;
@@ -14,7 +15,17 @@ template<int N, class T, int EPT>
 using FFTBase = decltype(Block() + Size<N>() + Precision<T>() + SM<DNO_SM>() +
                          ElementsPerThread<EPT>() + FFTsPerBlock<1>());
 
-template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false, bool strided_b = false, bool branch_major = false>
+__device__ __forceinline__ double bernoulli_value(double eta, double xi, double q) {
+    // Match the accepted XLA pointwise kernel: separate FP64 RN operations, no FMA.
+    double eta_x = __dmul_rn(2.0, eta), xi_x = __dmul_rn(2.0, xi), gxi = __dmul_rn(2.0, q);
+    double numerator = __dadd_rn(gxi, __dmul_rn(eta_x, xi_x));
+    double kinetic = __dmul_rn(0.5, __dmul_rn(xi_x, xi_x));
+    double quotient = __ddiv_rn(__dmul_rn(0.5, __dmul_rn(numerator, numerator)),
+                               __dadd_rn(1.0, __dmul_rn(eta_x, eta_x)));
+    return __dsub_rn(quotient, kinetic);
+}
+
+template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false, bool strided_b = false, bool branch_major = false, bool bernoulli = false>
 __global__ void transform(const void* a, const void* b, void* out,
                           const void* symbols, int input_length, bool multiply,
                           int source_branches = 0, int output_branches = 0) {
@@ -34,7 +45,11 @@ __global__ void transform(const void* a, const void* b, void* out,
         int k = threadIdx.x + i * FFT::stride;
         if (k < FFT::input_length && k < input_length) {
             I value;
-            if constexpr (promote) {
+            if constexpr (bernoulli) {
+                const I* fields = static_cast<const I*>(a) + blockIdx.x * 3 * input_length + k;
+                I eta = fields[0], xi = fields[input_length], q = fields[2 * input_length];
+                value = I(bernoulli_value(eta.x, xi.x, q.x), bernoulli_value(eta.y, xi.y, q.y));
+            } else if constexpr (promote) {
                 float2 input = static_cast<const float2*>(a)[blockIdx.x * input_length + k];
                 value = I(input.x, input.y);
             } else {
@@ -339,7 +354,14 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
-    if (operation == 13) {
+    if (operation == 14) {
+        if constexpr (N == 2048 && std::is_same_v<T, double> && EPT == 8) {
+            transform<F, false, false, false, false, false, false, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
+                a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, false);
+        } else {
+            return ffi::Error::InvalidArgument("Bernoulli FFT requires FP64, length 2048 and EPT8.");
+        }
+    } else if (operation == 13) {
         // Keep the GEMM head in [branch,batch,N] storage; fields/output remain batch-major.
         if constexpr (N == 1024) {
             int source_branches = b.dimensions()[b.dimensions().size() - 2];

@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Literal
+from typing import Literal, cast
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -24,23 +24,30 @@ Activation = Literal["none", "gelu", "gelu_lift"]
 def dense(
     x: jax.Array, weight: jax.Array, activation: Activation = "none", *,
     tile: tuple[int, int, int] = (32, 32, 32), num_warps: int = 4,
-    interpret: bool = False,
+    interpret: bool = False, residual: jax.Array | None = None, input_scale: float = 1.0,
+    input_transposed: bool = False,
 ) -> jax.Array:
     """One non-split-K GEMM and optional epilogue, preserving leading dimensions."""
     rows, inner, columns = x.size // x.shape[-1], x.shape[-1], weight.shape[-1]
     bm, bn, bk = tile
 
-    def kernel(x_ref: Ref, w_ref: Ref, out_ref: Ref) -> None:
+    def kernel(x_ref: Ref, w_ref: Ref, residual_ref: Ref | None, out_ref: Ref) -> None:
         m = pl.program_id(0) * bm + jnp.arange(bm)
         n = pl.program_id(1) * bn + jnp.arange(bn)
         accumulator = jnp.zeros((bm, bn), dtype=jnp.float32)
         for offset in range(0, inner, bk):
             k = offset + jnp.arange(bk)
-            a = plt.load(x_ref.at[m[:, None], k[None, :]],
+            a = plt.load(x_ref.at[k[None, :], m[:, None]] if input_transposed
+                         else x_ref.at[m[:, None], k[None, :]],
                          mask=(m[:, None] < rows) & (k[None, :] < inner), other=0)
+            if input_scale != 1.0:
+                a *= jnp.float32(input_scale)
             b = plt.load(w_ref.at[k[:, None], n[None, :]],
                          mask=(k[:, None] < inner) & (n[None, :] < columns), other=0)
             accumulator += pl.dot(a, b, precision=jax.lax.Precision.HIGHEST)
+        if residual is not None:
+            accumulator += plt.load(cast(Ref, residual_ref).at[m[:, None], n[None, :]],
+                                    mask=(m[:, None] < rows) & (n[None, :] < columns), other=0)
         if activation != "none":
             accumulator = jax.nn.gelu(accumulator)
         if activation == "gelu_lift":
@@ -53,7 +60,8 @@ def dense(
         grid=(pl.cdiv(rows, bm), pl.cdiv(columns, bn)), interpret=interpret,
         compiler_params=plt.CompilerParams(num_warps=num_warps, num_stages=1),
         name=f"dno_dense_{inner}_{columns}_{activation}",
-    )(x.reshape(rows, inner), weight)
+    )(x.reshape(rows, inner).T if input_transposed else x.reshape(rows, inner),
+      weight, None if residual is None else residual.reshape(rows, columns))
     return output.reshape(*x.shape[:-1], columns)
 
 

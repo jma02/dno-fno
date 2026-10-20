@@ -80,6 +80,9 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_mixtranspose",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_nestedoverlap",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_headpad",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextalias",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
@@ -134,9 +137,11 @@ if __name__ == "__main__":
     parser.add_argument("--graph-fft-mask", action="store_true", help="Fuse inverse endpoint preparation into an elementwise mask; requires --graph-fft.")
     parser.add_argument("--unroll-stages", action="store_true", help="Unroll the four fixed-point iterations without changing their count.")
     parser.add_argument("--unroll-substeps", type=int, default=1, help="Unroll this many existing time steps together.")
-    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both"), default="cufft",
+    parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"), default="cufft",
                         help="Shared Bernoulli transform backend; neural and classical.")
     parser.add_argument("--materialize-spectra", action="store_true", help="Avoid cloning rotated spectra into multiple consumers.")
+    parser.add_argument("--materialize-updated-state", action="store_true", help="Materialize the completed step before Hermitian projection.")
+    parser.add_argument("--cache-rotation-products", action="store_true", help="Cache shared linear-flow coefficients once per saved interval.")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Evaluate saved-frame DNO diagnostics together after single-trajectory integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
     parser.add_argument("--spectral-saved-dno", action="store_true", help="Evaluate saved DNO diagnostics directly from the spectral carry.")
@@ -203,6 +208,8 @@ if __name__ == "__main__":
         "unroll_substeps": args.unroll_substeps,
         "bernoulli_fft": args.bernoulli_fft,
         "materialize_spectra": args.materialize_spectra,
+        "materialize_updated_state": args.materialize_updated_state,
+        "cache_rotation_products": args.cache_rotation_products,
         "batch_saved_dno": args.batch_saved_dno,
         "pack_saved_inputs": args.pack_saved_inputs,
         "spectral_saved_dno": args.spectral_saved_dno,
@@ -269,6 +276,8 @@ if __name__ == "__main__":
                                     half_spectrum="half" in options, project_momentum="momentum" in options,
                                     unroll_stages=args.unroll_stages, unroll_substeps=args.unroll_substeps,
                                     bernoulli_fft=args.bernoulli_fft, materialize_spectra=args.materialize_spectra,
+                                    materialize_updated_state=args.materialize_updated_state,
+                                    cache_rotation_products=args.cache_rotation_products,
                                     batch_saved_dno=args.batch_saved_dno,
                                     spectral_saved_dno=args.spectral_saved_dno,
                                     predict_hat=spectral_predict)
@@ -303,6 +312,8 @@ if __name__ == "__main__":
                                     project_momentum="momentum" in options, unroll_stages=args.unroll_stages,
                                     unroll_substeps=args.unroll_substeps, bernoulli_fft=args.bernoulli_fft,
                                     materialize_spectra=args.materialize_spectra, batch_saved_dno=args.batch_saved_dno,
+                                    materialize_updated_state=args.materialize_updated_state,
+                                    cache_rotation_products=args.cache_rotation_products,
                                     spectral_saved_dno=args.spectral_saved_dno)
                             if "carry" in options or "local" in options else partial(
                                 rollout_surrogate, params=params, substeps=cfg.substeps, predict_gxi=predict))
