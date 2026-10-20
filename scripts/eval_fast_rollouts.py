@@ -49,6 +49,8 @@ def main() -> None:
     parser.add_argument("--ic-quantile-offset", type=float, default=0.5, help="Within-group stratified case quantile offset")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
+    parser.add_argument("--reflection-average", action="store_true",
+                        help="Diagnostic: average spectral predictions with reflected inputs/outputs; doubles model calls.")
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
@@ -90,6 +92,7 @@ def main() -> None:
         f"eval_fast_{args.checkpoint}"
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
+        + ("_reflection" if args.reflection_average else "")
         + ("_grid512" if args.correction_grid == 512 else "")
         + ("_exactg0" if args.exact_solver_g0 else "")
         + ("_nestedfused" if args.fuse_nested_fft else "")
@@ -132,6 +135,8 @@ def main() -> None:
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
+        if args.reflection_average and not (args.cs_terms_variant or "").endswith("_spectral"):
+            parser.error("--reflection-average requires a spectral predictor")
         if (args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0
                 or args.correction_grid != 1024 or args.transpose_projections or args.field_stride
                 or args.reuse_first_gelu or args.branch_major or args.real_context_endpoints or args.fuse_context_add):
@@ -146,6 +151,7 @@ def main() -> None:
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
+        "reflection_average": args.reflection_average,
         "graph_fft": args.graph_fft,
         "graph_fft_mask": args.graph_fft_mask,
         "unroll_stages": args.unroll_stages,
@@ -189,6 +195,13 @@ def main() -> None:
         else:
             spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
                                      solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)
+            if args.reflection_average:
+                spectral = partial(
+                    lambda eta_hat, xi_hat, fn: 0.5 * (
+                        fn(eta_hat, xi_hat)
+                        + jnp.conj(fn(jnp.conj(eta_hat), jnp.conj(xi_hat)))
+                    ), fn=spectral,
+                )
             physical = jax.jit(partial(physical_from_spectral, predict_hat=spectral)
                                if args.pack_saved_inputs else partial(lambda eta, xi, fn, n: jnp.fft.irfft(
                                    fn(jnp.fft.rfft(eta), jnp.fft.rfft(xi)), n=n,
