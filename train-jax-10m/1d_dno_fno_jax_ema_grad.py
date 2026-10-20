@@ -205,6 +205,8 @@ def main() -> None:
                         help="Weight on the selected loss at detached M6-labelled rollout states; applied only on scheduled updates.")
     parser.add_argument("--rollout_training_loss", choices=("data", "full"), default="full",
                         help="Generated targets use data loss alone or data plus mode-balancing and tangent losses; original-data losses are unchanged.")
+    parser.add_argument("--rollout_training_full_spectrum", action="store_true",
+                        help="Use full M6 targets for valid generated rows, including their auxiliary losses; stored and fallback rows remain projected.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
     parser.add_argument("--rollout_training_ramp_epochs", type=float, default=5.0,
                         help="Linear weight ramp duration in epochs; fractional values are allowed. 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
@@ -515,6 +517,8 @@ def main() -> None:
         parser.error("--input_noise_rms must be finite and nonnegative")
     if not np.isfinite(args.rollout_training_weight) or args.rollout_training_weight < 0:
         parser.error("--rollout_training_weight must be finite and nonnegative")
+    if args.rollout_training_full_spectrum and args.rollout_training_weight == 0:
+        parser.error("--rollout_training_full_spectrum requires --rollout_training_weight > 0")
     if not np.isfinite(args.rollout_training_ramp_epochs) or args.rollout_training_ramp_epochs < 0:
         parser.error("rollout-training ramp must be finite and nonnegative")
     if min(args.rollout_training_start_epoch, args.rollout_training_interval,
@@ -961,6 +965,7 @@ def main() -> None:
         collect_family_metrics: bool = False,
         n_data_only_rows: int = 0,
         terms_phys: jax.Array | None = None,
+        full_spectrum_rows: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
         carrier_modes = sideband_offsets = None
         if args.phase_mechanism == "bf_sideband":
@@ -1009,6 +1014,9 @@ def main() -> None:
         data_mask: jax.Array | bool = True
         if args.data_k_max is not None:
             data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
+        if full_spectrum_rows is not None:
+            data_mask = data_mask | full_spectrum_rows[:, None, None]
+        if args.data_k_max is not None or full_spectrum_rows is not None:
             data_squared_error = jnp.sum(jnp.abs(jnp.where(
                 data_mask, error_hat.astype(jnp.complex128), 0.0,
             )) ** 2, axis=(1, 2))
@@ -1350,7 +1358,10 @@ def main() -> None:
                     jnp.where(valid[:, None], xi_new, source_fields[1]), depth,
                     nx=nx, length=domain_length, dno_order=6, pad_factor=8,
                     maximum_wavenumber=128.0,
+                    project_output=not args.rollout_training_full_spectrum,
                 )
+                if args.rollout_training_full_spectrum:
+                    target_new -= jnp.mean(target_new, axis=-1, keepdims=True)
                 generated_fields = tuple(
                     generated.astype(original.dtype)
                     for generated, original in zip((eta_new, xi_new, target_new), source_fields)
@@ -1361,15 +1372,20 @@ def main() -> None:
                     jax.lax.stop_gradient(cast(jax.Array, jnp.where(valid[:, None], generated, original)))
                     for generated, original in zip(generated_fields, source_fields)
                 )
-                return *fields, jnp.mean(valid.astype(jnp.float32))
+                return (
+                    *fields, jnp.mean(valid.astype(jnp.float32)),
+                    *((jax.lax.stop_gradient(valid),) if args.rollout_training_full_spectrum else ()),
+                )
 
-            rollout_eta, rollout_xi, rollout_target, rollout_valid = jax.lax.cond(
+            rollout_fields = jax.lax.cond(
                 rollout_scheduled, generate_rollout_batch,
-                lambda _: (*map(jax.lax.stop_gradient, source_fields), jnp.float32(0.0)), None,
+                lambda _: (
+                    *map(jax.lax.stop_gradient, source_fields), jnp.float32(0.0),
+                    *((jnp.zeros(n_rollout, dtype=bool),) if args.rollout_training_full_spectrum else ()),
+                ), None,
             )
             rollout_batch = (
-                rollout_scheduled, rollout_depth, family[:n_rollout],
-                rollout_eta, rollout_xi, rollout_target, rollout_valid,
+                rollout_scheduled, rollout_depth, family[:n_rollout], *rollout_fields,
             )
             if args.amplitude_probe_scale > 0:
                 def generate_amplitude_batch(_: None) -> tuple[jax.Array, ...]:
@@ -1418,12 +1434,14 @@ def main() -> None:
                 "train_l2_loss": full_l2_loss, "train_data_loss": data_loss,
             }
             if rollout_batch is not None:
-                scheduled, depth_sub, family_sub, eta_sub, xi_sub, target_sub, valid_fraction = rollout_batch
+                scheduled, depth_sub, family_sub, eta_sub, xi_sub, target_sub, valid_fraction = rollout_batch[:7]
+                full_spectrum_rows = rollout_batch[7] if args.rollout_training_full_spectrum else None
                 rollout_loss, rollout_mode_loss, rollout_tangent_loss, rollout_mechanism_loss = jax.lax.cond(
                     scheduled,
                     lambda p: tuple(map(jnp.float64, compute_loss_components(
                         p, eta_sub, xi_sub, target_sub, depth_sub, family_sub,
                         n_data_only_rows=eta_sub.shape[0] if args.rollout_training_loss == "data" else 0,
+                        full_spectrum_rows=full_spectrum_rows,
                     )[:4])),
                     lambda _: (jnp.float64(0.0),) * 4, current_params,
                 )

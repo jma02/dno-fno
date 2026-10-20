@@ -26,7 +26,7 @@ def project_fixed_band(
 
 @partial(
     jax.jit,
-    static_argnames=("nx", "length", "dno_order", "pad_factor", "maximum_wavenumber"),
+    static_argnames=("nx", "length", "dno_order", "pad_factor", "maximum_wavenumber", "project_output"),
 )
 def compute_dno_target(
     eta: jax.Array,
@@ -38,8 +38,13 @@ def compute_dno_target(
     dno_order: int,
     pad_factor: int,
     maximum_wavenumber: float,
+    project_output: bool = True,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Return projected inputs and their discrete DNO target."""
+    """Return projected inputs and their DNO target.
+
+    With ``project_output=False``, return raw full-band q before output
+    projection and mean removal so both labels can share the same M6 evaluation.
+    """
 
     eta_array = jnp.asarray(eta, dtype=jnp.float64)
     xi_array = jnp.asarray(xi, dtype=jnp.float64)
@@ -65,10 +70,11 @@ def compute_dno_target(
         dno_order,
         pad_factor=pad_factor,
     )
-    target = project_fixed_band(
-        target,
-        wavenumbers,
-        maximum_wavenumber=maximum_wavenumber,
-    )
-    target = target - target.mean(axis=-1, keepdims=True)
+    if project_output:
+        target = project_fixed_band(
+            target,
+            wavenumbers,
+            maximum_wavenumber=maximum_wavenumber,
+        )
+        target = target - target.mean(axis=-1, keepdims=True)
     return eta_input, xi_input, target

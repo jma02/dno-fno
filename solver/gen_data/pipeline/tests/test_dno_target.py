@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import unittest
+from functools import partial
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -14,12 +15,31 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
+from solver.gen_data.pipeline.dno_target import compute_dno_target, project_fixed_band  # noqa: E402
+from solver.solvers.dno_series_jax import build_grid  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
 
 class DnoTargetTest(unittest.TestCase):
+    def test_full_target_retains_high_modes_and_reproduces_projected_target(self) -> None:
+        x, k = build_grid(64, 2.0 * math.pi)
+        evaluate = partial(
+            compute_dno_target,
+            0.02 * jnp.cos(3.0 * x) + 0.01 * jnp.sin(5.0 * x),
+            0.03 * jnp.sin(4.0 * x), 0.8,
+            nx=64, length=2.0 * math.pi, dno_order=6, pad_factor=8,
+            maximum_wavenumber=8.0,
+        )
+        projected = evaluate()
+        full = evaluate(project_output=False)
+        for projected_input, full_input in zip(projected[:2], full[:2]):
+            np.testing.assert_array_equal(projected_input, full_input)
+        reconstructed = project_fixed_band(full[2], k, maximum_wavenumber=8.0)
+        reconstructed -= jnp.mean(reconstructed, axis=-1, keepdims=True)
+        np.testing.assert_array_equal(projected[2], reconstructed)
+        self.assertGreater(float(jnp.max(jnp.abs(jnp.fft.fft(full[2])[jnp.abs(k) > 8]))), 1e-6)
+
     def test_evaluator_promotes_stored_float32_fields_to_float64(self) -> None:
         x = 2.0 * np.pi * jnp.arange(64, dtype=jnp.float32) / 64.0
         eta_input, xi_input, target = compute_dno_target(
