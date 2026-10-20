@@ -44,7 +44,10 @@ TrainerLoss = Callable[
 ]
 
 
-def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> TrainerLoss:
+def trainer_loss(
+    config: SimpleNamespace, domain_length: float = 2 * np.pi,
+    *, full_spectrum_rows: jax.Array | None = None,
+) -> TrainerLoss:
     # Exercise the trainer's inline arithmetic, not a second implementation.
     config.data_xi_projection_weight = 0.0
     config.data_phase_projection_weight = 0.0
@@ -68,6 +71,7 @@ def trainer_loss(config: SimpleNamespace, domain_length: float = 2 * np.pi) -> T
     function.body += ast.parse("return data_loss, (full_l2_loss, family_metrics)").body
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "args": config, "target_residual64": None,
+        "full_spectrum_rows": full_spectrum_rows,
         "PhysicalFamilyId": PhysicalFamilyId, "collect_family_metrics": True, "domain_length": domain_length,
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
@@ -218,6 +222,59 @@ def test_subtract_before_fft_changes_only_residual_arithmetic() -> None:
             assert float(jnp.linalg.norm(before - reference)) < 0.01 * float(jnp.linalg.norm(after - reference))
 
 
+def test_generated_full_spectrum_rows_preserve_fallback_losses_and_gradients() -> None:
+    nx, size = 512, 4
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    family = jnp.arange(1, size + 1)
+    valid = jnp.array([True, False, True, False])
+    for dtype, normalization in product((jnp.float32, jnp.float64), ("target", "residual")):
+        config = SimpleNamespace(model="cs_dno", data_normalization=normalization,
+                                 data_k_max=128.0, residual_floor=1e-6)
+        target = jnp.asarray((jnp.arange(size) + 1)[:, None, None]
+                             * (jnp.sin(3 * x) + 0.7 * jnp.cos(160 * x))[None, :, None], dtype=dtype)
+        prediction = target + jnp.asarray(
+            0.03 * jnp.cos(7 * x) + 0.09 * jnp.sin(170 * x), dtype=dtype,
+        )[None, :, None]
+        baseline = 0.8 * target
+        ordinary = trainer_loss(config)
+        mixed = trainer_loss(config, full_spectrum_rows=valid)
+        full = trainer_loss(SimpleNamespace(**{**vars(config), "data_k_max": None}))
+        evaluate = jax.jit(jax.value_and_grad(mixed, argnums=(0, 2, 3), has_aux=True))
+        (value, (full_metric, family_metrics)), gradients = evaluate(
+            prediction, target, baseline, baseline, family,
+        )
+        row_results = [
+            jax.value_and_grad(full if valid[i] else ordinary, has_aux=True)(
+                prediction[i:i + 1], target[i:i + 1], baseline[i:i + 1],
+                baseline[i:i + 1], family[i:i + 1],
+            ) for i in range(size)
+        ]
+        np.testing.assert_allclose(value, jnp.mean(jnp.asarray([row[0][0] for row in row_results])), rtol=2e-6)
+        np.testing.assert_allclose(gradients[0], jnp.concatenate([row[1] for row in row_results]) / size,
+                                   rtol=2e-6, atol=2e-9)
+        for gradient in gradients[1:]:
+            np.testing.assert_array_equal(gradient, 0)
+        ordinary_metrics = ordinary(prediction, target, baseline, baseline, family)[1]
+        np.testing.assert_array_equal(full_metric, ordinary_metrics[0])
+        # Only the final data-objective entry in each family's five metrics changes.
+        np.testing.assert_allclose(jnp.asarray(family_metrics).reshape(4, 5)[:, :4],
+                                   jnp.asarray(ordinary_metrics[1]).reshape(4, 5)[:, :4], rtol=1e-12)
+        gradient_hat = np.asarray(jnp.fft.rfft(gradients[0], axis=1))
+        assert np.linalg.norm(gradient_hat[np.asarray(valid), 170]) > 1e-3
+        np.testing.assert_allclose(gradient_hat[~np.asarray(valid), 129:], 0,
+                                   atol=8 * np.finfo(np.dtype(dtype)).eps * np.max(np.abs(gradient_hat)))
+        for mask, reference in ((jnp.zeros(size, bool), ordinary), (jnp.ones(size, bool), full)):
+            masked = trainer_loss(config, full_spectrum_rows=mask)
+            actual = jax.value_and_grad(masked, has_aux=True)(prediction, target, baseline, baseline, family)
+            expected = jax.value_and_grad(reference, has_aux=True)(prediction, target, baseline, baseline, family)
+            for a, b in zip(jax.tree.leaves(actual), jax.tree.leaves(expected)):
+                np.testing.assert_array_equal(a, b)
+        (zero, _), zero_gradients = evaluate(target, target, baseline, baseline, family)
+        assert zero == 0
+        for gradient in zero_gradients:
+            np.testing.assert_array_equal(gradient, 0)
+
+
 def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> None:
     from util import make_normalizers
 
@@ -306,7 +363,8 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
     np.testing.assert_array_equal(generated[1:5], jnp.zeros(4))
     config.__dict__.update(mode_balanced_warmup_steps=1, phase_mechanism_weight=0.0,
                            phase_mechanism_ramp_epochs=0.0, rollout_training_weight=0.7,
-                           rollout_training_ramp_epochs=0.0, rollout_training_loss="full", hadamard_weight=0.0)
+                           rollout_training_ramp_epochs=0.0, rollout_training_loss="full",
+                           rollout_training_full_spectrum=False, hadamard_weight=0.0)
     namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family,
                      current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None, terms_phys=None,
                      rollout_batch=(True, depth, family, eta, xi, target, jnp.float32(1.0)))
@@ -1753,7 +1811,8 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
-        rollout_training_loss="full", amplitude_probe_scale=0.0, subtract_before_fft=False,
+        rollout_training_loss="full", rollout_training_full_spectrum=False,
+        amplitude_probe_scale=0.0, subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
     )
 
@@ -1833,6 +1892,27 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         np.testing.assert_allclose(metrics["phase_mechanism_loss"], base[3], rtol=1e-12)
         np.testing.assert_allclose(metrics["rollout_phase_mechanism_loss"],
                                    teacher[3] if loss_mode == "full" else 0.0, rtol=1e-12)
+    config.rollout_training_full_spectrum = True
+    config.rollout_training_loss = "full"
+    config.data_xi_projection_weight = config.data_phase_projection_weight = 0.0
+    valid = jnp.arange(size) % 2 == 0
+    generated = (*generated[:2], generated[2] + valid[:, None] * 0.02 * jnp.sin(3 * x), *generated[3:])
+    namespace["rollout_batch"] = (True, depth, family, *generated[:3], jnp.mean(valid), valid)
+    (actual, metrics), actual_gradient = jax.value_and_grad(
+        namespace["compute_training_loss"], has_aux=True,
+    )(params)
+    expected_value, expected_gradient = jax.value_and_grad(lambda p: sum(
+        weight * (values[0] + config.phase_mechanism_weight * values[3])
+        for weight, values in (
+            (1.0, components(p, *fields)),
+            (config.rollout_training_weight, components(p, *generated, full_spectrum_rows=valid)),
+        )
+    ))(params)
+    np.testing.assert_allclose(actual, expected_value, rtol=1e-12)
+    np.testing.assert_allclose(actual_gradient, expected_gradient, rtol=1e-12, atol=1e-12)
+    expected_generated = components(params, *generated, full_spectrum_rows=valid)
+    np.testing.assert_allclose(metrics["rollout_phase_mechanism_loss"], expected_generated[3], rtol=1e-12)
+    assert not np.isclose(expected_generated[3], teacher[3])
 
 
 def test_datum_shift_geometry_clean_rows_rng_and_validation() -> None:
@@ -2349,6 +2429,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
     config.hadamard_weight = 0.0
     config.rollout_training_weight, config.rollout_training_ramp_epochs = 0.7, 0.0
     config.rollout_training_loss, config.amplitude_probe_scale = "full", 0.0
+    config.rollout_training_full_spectrum = False
     namespace["args"] = config
     exec(validate, namespace)
 
@@ -2394,14 +2475,15 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     function.body += [scheduled]
     function.body += ast.parse(
         "rollout_batch = (rollout_scheduled, batch_depth, family, 3 * eta, 2 * xi, 1.5 * gxi, "
-        "jnp.float32(rollout_scheduled)) if enabled else None"
+        "jnp.float32(rollout_scheduled), "
+        "*((family == 2,) if args.rollout_training_full_spectrum else ())) if enabled else None"
     ).body
     function.body += [trainer_function("compute_training_loss")]
     function.body += ast.parse("return compute_training_loss(current_params)").body
     config = SimpleNamespace(
         rollout_training_weight=0.75, rollout_training_start_epoch=60,
         rollout_training_ramp_epochs=5, rollout_training_interval=16,
-        rollout_training_loss="full", amplitude_probe_scale=0.0,
+        rollout_training_loss="full", rollout_training_full_spectrum=False, amplitude_probe_scale=0.0,
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=6.0,
         mode_balanced_warmup_steps=4000, mode_balanced_k_max=128.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
@@ -2537,6 +2619,24 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
                 "rollout_mode_balanced_loss", "rollout_translation_tangent_loss"):
         np.testing.assert_array_equal(new_metrics[key], old_metrics[key])
         np.testing.assert_array_equal(new_derivatives[key], old_derivatives[key])
+    config.rollout_training_full_spectrum = True
+    config.data_k_max, config.data_xi_projection_weight = 1.5, 0.0
+    components = jax.vmap(
+        namespace["compute_loss_components"], in_axes=(None, 0, 0, 0, 0, 0), axis_name="batch",
+    )
+    generated = tuple(value[None] for value in (3 * eta, 2 * xi, 1.5 * target, jnp.log(depth)[:, None], family))
+    weights = jnp.array([1.0, 6.0, 10.0])
+    expected, expected_gradient = jax.value_and_grad(lambda p: weights @ (
+        jnp.asarray(components(p, *fields)[:3])[:, 0]
+        + 0.75 * jnp.asarray(components(p, *generated, full_spectrum_rows=family[None] == 2)[:3])[:, 0]
+    ))(params)
+    (actual, metrics), gradient = jax.value_and_grad(lambda p: jax.tree.map(
+        jnp.mean, mapped(p, 4000, True, *fields),
+    ), has_aux=True)(params)
+    np.testing.assert_allclose((actual, gradient), (expected, expected_gradient), rtol=1e-10)
+    generated_losses = components(params, *generated, full_spectrum_rows=family[None] == 2)
+    for index, key in enumerate(("rollout_data_loss", "rollout_mode_balanced_loss", "rollout_translation_tangent_loss")):
+        np.testing.assert_allclose(metrics[key], generated_losses[index][0], rtol=1e-12)
 
 
 def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
@@ -2551,7 +2651,8 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     assert isinstance(function, ast.FunctionDef)
     function.body += component.body[:prelude_end]
     function.body += ast.parse(
-        "return rollout_eta, rollout_xi, rollout_target, rollout_valid, rollout_scheduled"
+        "return (*rollout_batch[3:7], rollout_scheduled, "
+        "*((rollout_batch[7],) if args.rollout_training_full_spectrum else ()))"
     ).body
     nx, size = 512, 4
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -2567,7 +2668,8 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
-        rollout_training_steps=4, amplitude_probe_scale=0.0, poison=False, poison_target=np.nan,
+        rollout_training_steps=4, rollout_training_full_spectrum=False,
+        amplitude_probe_scale=0.0, poison=False, poison_target=np.nan,
     )
 
     def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
@@ -2587,11 +2689,15 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         return {"eta": jnp.stack((initial.eta, eta_new)), "xi": jnp.stack((initial.xi, xi_new))}
 
     def teacher(eta: jax.Array, xi: jax.Array, depth: jax.Array, **options: Any) -> tuple[jax.Array, ...]:
-        assert options == dict(nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0)
+        assert options.get("project_output", True) == (not config.rollout_training_full_spectrum)
+        assert {key: value for key, value in options.items() if key != "project_output"} == dict(
+            nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+        )
         projected_eta, projected_xi, labels = compute_dno_target(eta, xi, depth, **options)
         if config.poison:
             safe_inputs = jnp.all(jnp.isfinite(eta) & jnp.isfinite(xi) & (eta + depth > 0))
-            labels = cast(jax.Array, jnp.where(safe_inputs, labels, jnp.nan)).at[3].set(config.poison_target)
+            poison = config.poison_target * (jnp.cos(x) if config.rollout_training_full_spectrum else 1.0)
+            labels = cast(jax.Array, jnp.where(safe_inputs, labels, jnp.nan)).at[3].set(poison)
         return projected_eta, projected_xi, labels
 
     namespace: dict[str, Any] = {
@@ -2619,7 +2725,8 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         substeps=4,
     )
     expected = teacher(raw["eta"][-1], raw["xi"][-1], jnp.exp(depth.astype(jnp.float64)),
-                       nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0)
+                       nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+                       project_output=True)
     for actual, projected in zip(result[:3], expected):
         assert actual.dtype == jnp.float32 and actual.shape == (size, nx)
         np.testing.assert_allclose(actual, projected, rtol=2e-5, atol=2e-8)
@@ -2652,6 +2759,46 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
             np.testing.assert_array_equal(actual[:1], clean[:1])
     assert "rollout" not in ast.unparse(trainer_function("eval_step"))
     assert "compute_dno_target" not in ast.unparse(trainer_function("eval_step"))
+
+    # Full-band labels retain nonlinear harmonics; rejected rows retain their
+    # original P128 target and must not inherit the valid rows' wider loss mask.
+    config.rollout_training_full_spectrum, config.poison = True, False
+    high_eta = eta + (0.0002 * jnp.cos(128 * x))[None].astype(jnp.float32)
+    high_xi = xi + (0.003 * jnp.sin(70 * x))[None].astype(jnp.float32)
+    high_fields = (high_eta, high_xi, target, depth, family)
+    full_result = prepare(params, active_step, *high_fields)
+    np.testing.assert_array_equal(full_result[5], jnp.ones(size, bool))
+    raw_full = rollout(
+        ti.State(high_eta.astype(jnp.float64), high_xi.astype(jnp.float64)), jnp.array([0.0, 0.04]),
+        ti.make_solver_params(nx, 2 * np.pi, jnp.exp(depth.astype(jnp.float64))),
+        lambda e, z: 4 * params * (e / 2 + z / 3 - jnp.mean(e / 2 + z / 3, axis=-1, keepdims=True)),
+        substeps=4,
+    )
+    expected_full = compute_dno_target(
+        raw_full["eta"][-1], raw_full["xi"][-1], jnp.exp(depth.astype(jnp.float64)),
+        nx=nx, length=2 * np.pi, dno_order=6, pad_factor=8, maximum_wavenumber=128.0,
+        project_output=False,
+    )[2]
+    expected_full -= expected_full.mean(axis=-1, keepdims=True)
+    np.testing.assert_allclose(full_result[2], expected_full.astype(jnp.float32), rtol=2e-6, atol=2e-8)
+    assert np.linalg.norm(np.fft.rfft(full_result[2])[:, 129:]) > 1e-4
+    for derivative in jax.jvp(
+        lambda p: prepare(p, active_step, *high_fields)[:3], (params,), (jnp.ones_like(params),),
+    )[1]:
+        np.testing.assert_array_equal(derivative, 0)
+    unscheduled = prepare(params, active_step + 1, *high_fields)
+    np.testing.assert_array_equal(unscheduled[5], jnp.zeros(size, bool))
+    for actual, original in zip(unscheduled[:3], high_fields[:3]):
+        np.testing.assert_array_equal(actual, original)
+    config.poison = True
+    for config.poison_target in (np.nan, 1e40):
+        rejected = prepare(params, active_step, *high_fields)
+        np.testing.assert_array_equal(rejected[5], [True, False, False, False])
+        assert rejected[3] == 0.25
+        for actual, original, clean in zip(rejected[:3], high_fields[:3], full_result[:3]):
+            np.testing.assert_array_equal(actual[1:], original[1:])
+            np.testing.assert_array_equal(actual[:1], clean[:1])
+    config.rollout_training_full_spectrum = False
 
     # The extra operator probes use original rows, not detached trajectory endpoints.
     function.name = "prepare_amplitude"
@@ -2732,6 +2879,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
                 exec(validate, namespace)
     config = SimpleNamespace(
         amplitude_probe_scale=0.0, rollout_training_weight=0.75, rollout_training_loss="full",
+        rollout_training_full_spectrum=False,
         rollout_training_start_epoch=1, rollout_training_ramp_epochs=1,
         mode_balanced_weight=6.0, mode_balanced_warmup_steps=1, translation_tangent_weight=10.0,
         phase_mechanism_weight=0.1, phase_mechanism_ramp_epochs=0.0, hadamard_weight=0.0,
@@ -2863,6 +3011,7 @@ if __name__ == "__main__":
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_target_normalization_matches_unweighted_relative_l2()
     test_subtract_before_fft_changes_only_residual_arithmetic()
+    test_generated_full_spectrum_rows_preserve_fallback_losses_and_gradients()
     test_fp64_residual_uses_direct_correction_and_preserves_loss_scales()
     test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
     test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmetries()
