@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from solver.solvers.time_integrator import (
     _spectral_truncate_real,
     _spectral_upsample_real,
+    dealiased_zakharov_xi_rhs,
 )
 
 
@@ -38,6 +39,57 @@ def _bernoulli_rhs_defect(
         error_padded * (target_padded + eta_x_padded * xi_x_padded + 0.5 * error_padded)
         / (1.0 + eta_x_padded**2), nx,
     )
+
+
+def compute_rhs_relative_error(
+    eta: jax.Array,
+    xi: jax.Array,
+    gxi_prediction: jax.Array,
+    gxi_target: jax.Array,
+    depth: jax.Array,
+    k: jax.Array,
+    *,
+    gravity: float = 1.0,
+    k_max: float = 128.0,
+) -> jax.Array:
+    """Per-row retained Zakharov RHS error in the quadratic wave-energy norm.
+
+    Full mean-free q enters the doubled-grid Bernoulli term before projection.
+    The cancellation-free xi defect includes both occurrences of predicted q.
+    The reference xi equation includes gravity; the denominator is detached.
+    The shared factor two for positive Fourier modes cancels in the ratio.
+    """
+    eta, xi, gxi_prediction, gxi_target, depth = map(
+        jnp.float64, (eta, xi, gxi_prediction, gxi_target, depth),
+    )
+    nx = eta.shape[-1]
+    error, target = _centered_error(gxi_prediction, gxi_target, True)
+    k_abs = jnp.abs(k[:nx // 2 + 1]).astype(eta.dtype)
+    eta_x, xi_x = (
+        jnp.fft.irfft(
+            1j * k_abs * jnp.fft.rfft(field, axis=-1, norm="forward").at[..., -1].set(0),
+            n=nx, norm="forward",
+        )
+        for field in (eta, xi)
+    )
+    xi_error = _bernoulli_rhs_defect(eta_x, xi_x, target, error)
+    xi_target = -gravity * eta + dealiased_zakharov_xi_rhs(eta_x, xi_x, target)
+    error_hat, xi_error_hat, target_hat, xi_target_hat = (
+        jnp.fft.rfft(field, axis=-1, norm="forward").astype(jnp.complex128)
+        for field in (error, xi_error, target, xi_target)
+    )
+    g0 = (k_abs[None, :] * jnp.tanh(depth[:, None] * k_abs[None, :])).astype(jnp.float64)
+    band = ((k_abs > 0.0) & (k_abs <= k_max)).at[-1].set(False)
+    squared_error = jnp.sum(jnp.where(
+        band, gravity * jnp.abs(error_hat)**2 + g0 * jnp.abs(xi_error_hat)**2, 0.0,
+    ), axis=-1)
+    squared_target = jnp.sum(jnp.where(
+        band, gravity * jnp.abs(target_hat)**2 + g0 * jnp.abs(xi_target_hat)**2, 0.0,
+    ), axis=-1)
+    zero_error = squared_error == 0.0
+    error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
+    denominator = jax.lax.stop_gradient(jnp.sqrt(jnp.maximum(squared_target, 1e-30)))
+    return error_norm / denominator
 
 
 def compute_phase_mechanism_loss(

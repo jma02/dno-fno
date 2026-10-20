@@ -55,6 +55,7 @@ from hadamard_shape_regularizer import compute_hadamard_loss, compute_local_resp
 from translation_tangent_regularizer import (  # noqa: E402
     compute_modal_phase_loss,
     compute_phase_mechanism_loss,
+    compute_rhs_relative_error,
     compute_translation_tangent_loss,
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
@@ -207,6 +208,8 @@ def main() -> None:
                         help="Generated targets use data loss alone or data plus mode-balancing and tangent losses; original-data losses are unchanged.")
     parser.add_argument("--rollout_training_full_spectrum", action="store_true",
                         help="Use full M6 targets for valid generated rows, including their auxiliary losses; stored and fallback rows remain projected.")
+    parser.add_argument("--rollout_training_rhs", action="store_true",
+                        help="Replace generated-row DNO data fit by relative retained two-equation RHS error.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
     parser.add_argument("--rollout_training_ramp_epochs", type=float, default=5.0,
                         help="Linear weight ramp duration in epochs; fractional values are allowed. 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
@@ -519,6 +522,8 @@ def main() -> None:
         parser.error("--rollout_training_weight must be finite and nonnegative")
     if args.rollout_training_full_spectrum and args.rollout_training_weight == 0:
         parser.error("--rollout_training_full_spectrum requires --rollout_training_weight > 0")
+    if args.rollout_training_rhs and not args.rollout_training_full_spectrum:
+        parser.error("--rollout_training_rhs requires --rollout_training_full_spectrum")
     if not np.isfinite(args.rollout_training_ramp_epochs) or args.rollout_training_ramp_epochs < 0:
         parser.error("rollout-training ramp must be finite and nonnegative")
     if min(args.rollout_training_start_epoch, args.rollout_training_interval,
@@ -1088,14 +1093,21 @@ def main() -> None:
                 nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
                 denominator = data_target_norm * args.nonlinear_weight_mean / nonlinear_weight
         denominator = jax.lax.stop_gradient(denominator)
-        data_loss = jnp.mean(data_error_norm / denominator)
+        per_row_data_loss = data_error_norm / denominator
+        if full_spectrum_rows is not None and args.rollout_training_rhs:
+            rhs_error = compute_rhs_relative_error(
+                eta, xi, denorm_targets_jax(predictions)[..., 0], gxi,
+                jnp.exp(batch_depth[:, 0].astype(jnp.float64)), k_grid_jax,
+            )
+            per_row_data_loss = jnp.where(full_spectrum_rows, rhs_error, per_row_data_loss)
+        data_loss = jnp.mean(per_row_data_loss)
         full_l2_loss = jnp.mean(error_norm / target_norm)
         family_metrics: tuple[jax.Array, ...] = ()
         if collect_family_metrics:
             row_metrics = jnp.stack((
                 jnp.ones_like(error_norm), error_norm / target_norm,
                 error_norm / residual_denominator, squared_error < residual_squared,
-                data_error_norm / denominator,
+                per_row_data_loss,
             ))
             # Masked means, not means of each shard's family means: pmean remains exact.
             family_metrics = tuple(
