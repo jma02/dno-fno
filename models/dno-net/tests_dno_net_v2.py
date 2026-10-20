@@ -13,6 +13,7 @@ from collections.abc import Callable
 from functools import partial
 from math import pi
 from typing import Any, cast
+from unittest.mock import patch
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -157,6 +158,73 @@ def test_default_matches_original_forward() -> None:
     expected += residual / (model.n_blocks * model.latent) ** 0.5
     actual = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
     assert jnp.array_equal(actual, expected)
+
+
+def test_reflection_encoder_matches_full_prediction_average() -> None:
+    """Average nonzero geometry heads, not two complete DNO evaluations."""
+    from scripts import benchmark_dno_fusion as fusion
+    from solver.evals.model_rollout import LoadedRun
+
+    nx = 64
+    eta, xi, _ = _state(nx)
+    eta = jnp.concatenate((eta, jnp.roll(eta, 7, axis=-1)), axis=0)
+    xi = jnp.concatenate((xi, 0.6 * jnp.roll(xi, 3, axis=-1)), axis=0)
+    reflection = (-jnp.arange(nx)) % nx
+    for batch in (1, 2):
+        model = _model(
+            nested_blocks=1, surface_context_width=8,
+            surface_context_gate=batch == 2, surface_polynomial_skip=batch == 2,
+            surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
+            surface_feature_transform=(tuple(tuple(float(i == j) + 0.03 for j in range(7))
+                                             for i in range(7)) if batch == 2 else None),
+        )
+        depth = jnp.log(jnp.asarray([[0.8], [0.04]], dtype=jnp.float32)[:batch])
+        variables = _activate_residual(model.init(
+            jax.random.PRNGKey(701), jnp.stack((eta[:batch], xi[:batch]), axis=-1).astype(jnp.float32), depth,
+        ))
+        loaded = LoadedRun(
+            model, unfreeze(variables)["params"], {},
+            {"feature_absmax": [1.0, 1.0], "target_absmax": 1.0}, "scale", 0,
+        )
+        # Only the G1 CUDA sandwich is substituted; all geometry, nested branches,
+        # cached filters, reflection averaging, and output assembly are production.
+        with patch.object(fusion, "sandwich", lambda surface, potential, symbols, **_: (
+            symbols * jnp.fft.rfft(
+                surface[:, None, :] * jnp.fft.irfft(symbols * potential[:, None, :], n=nx),
+            )
+        )):
+            ordinary = fusion.build_variant(loaded, depth, nx, "fourier_round", return_components=True)
+            disabled = fusion.build_variant(
+                loaded, depth, nx, "fourier_round", return_components=True, reflection_encoder=False,
+            )
+            averaged = fusion.build_variant(
+                loaded, depth, nx, "fourier_round", return_components=True, reflection_encoder=True,
+            )
+            eta_hat, xi_hat = jnp.fft.rfft(eta[:batch]), jnp.fft.rfft(xi[:batch])
+            raw = ordinary(eta_hat, xi_hat)
+            for actual, expected in zip(disabled(eta_hat, xi_hat), raw):
+                assert jnp.array_equal(actual, expected)
+            reflected = ordinary(jnp.conj(eta_hat), jnp.conj(xi_hat))
+            predicted = averaged(eta_hat, xi_hat)
+            assert float(jnp.linalg.norm(raw[1])) > 1e-6
+            for actual, first, second in zip(predicted, raw, reflected):
+                expected = 0.5 * (first + jnp.conj(second))
+                assert float(jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected)) < 3e-6
+            for index, (actual, expected) in enumerate(zip(
+                averaged(jnp.conj(eta_hat), jnp.conj(xi_hat)), predicted,
+            )):
+                relative = float(jnp.linalg.norm(actual - jnp.conj(expected)) / jnp.linalg.norm(expected))
+                # Two independently rounded FP32 encoder evaluations contribute
+                # to covariance; the direct-average check above keeps its 3e-6 budget.
+                assert relative < 6e-6, (batch, index, relative)
+            other_hat = jnp.fft.rfft(jnp.roll(xi[:batch], 11, axis=-1))
+            other = averaged(eta_hat, other_hat)
+            mixed = averaged(eta_hat, 0.3 * xi_hat - 0.7 * other_hat)
+            for actual, first, second in zip(mixed, predicted, other):
+                expected = 0.3 * first - 0.7 * second
+                assert float(jnp.linalg.norm(actual - expected) / jnp.linalg.norm(expected)) < 3e-6
+            # Confirm that the Fourier conjugation above is x_j -> x_{-j}, not reversal.
+            assert jnp.allclose(jnp.fft.irfft(jnp.conj(eta_hat), n=nx), eta[:batch, reflection], atol=1e-14)
 
 
 def test_order_two_has_zero_value_and_first_variation() -> None:
@@ -1752,6 +1820,7 @@ def test_surface_amplitude_structure_and_derivatives() -> None:
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
+        test_reflection_encoder_matches_full_prediction_average,
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,
         test_learned_operator_is_self_adjoint_and_linear,

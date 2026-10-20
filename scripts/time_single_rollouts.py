@@ -69,6 +69,7 @@ FUSION_VARIANTS.update({f"{variant}_spectral_all": variant for variant in (
     "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
     "fourier_fused_features_product_overlap_nestedfused",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch",
+    "fourier_fused_features_product_overlap_nestedfused_contextbatch_reflectionencoder",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_headtranspose",
     "fourier_fused_features_product_overlap_nestedfused_contextbatch_contexttranspose",

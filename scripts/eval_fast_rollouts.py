@@ -51,6 +51,8 @@ def main() -> None:
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
     parser.add_argument("--reflection-average", action="store_true",
                         help="Diagnostic: average spectral predictions with reflected inputs/outputs; doubles model calls.")
+    parser.add_argument("--reflection-encoder", action="store_true",
+                        help="Average reflected geometry encodings; share the baseline and branch FFTs.")
     parser.add_argument("--exact-solver-g0", action="store_true", help="Use the solver's FP64 linear symbol and original potential spectrum.")
     parser.add_argument("--fuse-nested-fft", action="store_true", help="Fuse the final nested correction FFT pair.")
     parser.add_argument("--batch-context-fft", action="store_true", help="Batch context and nested first FFTs; requires --fuse-nested-fft.")
@@ -78,6 +80,8 @@ def main() -> None:
     parser.add_argument("--correction-grid", type=int, choices=(512, 1024), default=1024,
                         help="Learned correction grid; the analytic baseline and solver stay at 1024.")
     args = parser.parse_args()
+    if args.reflection_average and args.reflection_encoder:
+        parser.error("Choose either full-predictor or encoder reflection averaging")
     if args.batch_context_fft and not args.fuse_nested_fft:
         parser.error("--batch-context-fft requires --fuse-nested-fft")
     if args.graph_fft_mask and not args.graph_fft:
@@ -93,6 +97,7 @@ def main() -> None:
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
         + ("_reflection" if args.reflection_average else "")
+        + ("_reflectionencoder" if args.reflection_encoder else "")
         + ("_grid512" if args.correction_grid == 512 else "")
         + ("_exactg0" if args.exact_solver_g0 else "")
         + ("_nestedfused" if args.fuse_nested_fft else "")
@@ -135,6 +140,8 @@ def main() -> None:
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
+        if args.reflection_encoder:
+            parser.error("--reflection-encoder requires a branch model, not a CS-field decoder")
         if args.reflection_average and not (args.cs_terms_variant or "").endswith("_spectral"):
             parser.error("--reflection-average requires a spectral predictor")
         if (args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0
@@ -152,6 +159,7 @@ def main() -> None:
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
         "reflection_average": args.reflection_average,
+        "reflection_encoder": args.reflection_encoder,
         "graph_fft": args.graph_fft,
         "graph_fft_mask": args.graph_fft_mask,
         "unroll_stages": args.unroll_stages,
@@ -194,7 +202,8 @@ def main() -> None:
                                    fn=build_predict_gxi_batched(loaded), depth=jnp.log(depths))
         else:
             spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
-                                     solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None)
+                                     solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None,
+                                     reflection_encoder=args.reflection_encoder)
             if args.reflection_average:
                 spectral = partial(
                     lambda eta_hat, xi_hat, fn: 0.5 * (

@@ -56,6 +56,7 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_balanced_features_overlap", "fourier_fused_features_product_overlap",
           "fourier_fused_features_product_overlap_nestedfused",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_reflectionencoder",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextfold",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_contextinverse",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_headtranspose",
@@ -104,10 +105,16 @@ def transposed_matmul(a: jax.Array, b: jax.Array) -> jax.Array:
 def build_variant(
     loaded: LoadedRun, depth: jax.Array, nx: int, variant: str, *, include_baselines: bool = True,
     include_correction: bool = True, fft_ept: int = 8, solver_g0: jax.Array | None = None,
-    return_components: bool = False,
+    return_components: bool = False, reflection_encoder: bool = False,
 ) -> Wrapped:
     """Intercept inference arithmetic; optionally return full and learned Fourier outputs."""
+    reflection_encoder = reflection_encoder or variant.endswith("_reflectionencoder")
+    variant = variant.removesuffix("_reflectionencoder")
     model = loaded.model
+    if reflection_encoder and (isinstance(model, CraigSulemTermsResidual) or not variant.startswith("fourier")):
+        raise ValueError("Encoder reflection averaging requires Fourier branch inference.")
+    if reflection_encoder and (model.use_learned_eta_filters or model.use_relative_elevation):
+        raise ValueError("Encoder reflection averaging requires the fixed surface-feature path.")
     if isinstance(model, CraigSulemTermsResidual):
         if not include_baselines or not include_correction or loaded.norm_mode != "scale":
             raise ValueError("CS-field inference requires the complete scale-normalized decoder.")
@@ -286,6 +293,8 @@ def build_variant(
         raise ValueError("Context/nested FFT batching requires surface context channels.")
     if context_add and (not context_real or model.surface_context_gate or context_fold):
         raise ValueError("The fused context residual requires an ungated real-context inverse.")
+    if reflection_encoder and context_add:
+        raise ValueError("Encoder reflection averaging does not support the fused context-add kernel.")
     if fuse_second_gelu and (not context_add or model.baseline_order != 1):
         raise ValueError("The fused second projection requires contextadd and the quadratic lift.")
     if nested_overlap and not (nested_fused and context_batch):
@@ -546,6 +555,18 @@ def build_variant(
                     features[..., jnp.asarray([half_index, second_index])] @ cast(jax.Array, surface_mix), -1, 1,
                 )
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
+            if reflection_encoder:
+                parity = jnp.asarray(
+                    [1] * model.n_polys + [
+                        sign for enabled, sign in (
+                            (model.use_first_deriv, -1), (model.use_second_deriv, 1),
+                            (model.use_half_deriv, 1), (model.use_hilbert, -1),
+                        ) if enabled
+                    ], dtype=features.dtype,
+                )
+                # Two geometry views; the xi fields, nested branches and baseline stay single-pass.
+                features = jnp.stack((features, features * parity), axis=-2)
+            context_channels = model.surface_context_width * (2 if reflection_encoder else 1)
             context = None
             nested_inner_hat = None
             nested_hat = None
@@ -555,7 +576,10 @@ def build_variant(
                     continue
                 kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
                 if name == "eta_feat_mix" and amplitude is not None:
-                    features = features * (1.0 + jnp.log(amplitude)[..., None]
+                    log_amplitude = jnp.log(amplitude)[..., None]
+                    if reflection_encoder:
+                        log_amplitude = log_amplitude[..., None]
+                    features = features * (1.0 + log_amplitude
                                            * loaded.params["eta_amplitude_gain"])
                 if fuse_second_gelu and name == "eta_feat_mix":
                     features = dense(features, kernel, "gelu_lift",
@@ -572,28 +596,32 @@ def build_variant(
                     else:
                         context = (transposed_matmul(features, loaded.params["eta_context_in"]["kernel"])
                                    if transpose_context else features @ loaded.params["eta_context_in"]["kernel"])
+                    if reflection_encoder:
+                        context = context.reshape(context.shape[0], correction_nx, context_channels)
                     if context_batch:
                         # Independent fields share one FFT batch, not Fourier modes.
                         combined_hat = jnp.fft.rfft(jnp.concatenate((
                             jnp.moveaxis(context, -1, 1),
                             nested_eta * branch_fields[:, ordinary_branches:],
                         ), axis=1))
-                        context_hat = jnp.moveaxis(combined_hat[:, :model.surface_context_width], 1, -1)
-                        nested_inner_hat = combined_hat[:, model.surface_context_width:]
+                        context_hat = jnp.moveaxis(combined_hat[:, :context_channels], 1, -1)
+                        nested_inner_hat = combined_hat[:, context_channels:]
                         if nested_overlap:
                             with compute_on("gpu_stream:2"):
                                 nested_hat = jax.jit(lambda values: filters[:, ordinary_branches:] * sandwich(
                                     (cast(jax.Array, gamma)[None, :, None] * values[1]).reshape(-1, correction_nx),
-                                    (cast(jax.Array, inner_filters) * values[0][:, model.surface_context_width:]).reshape(
+                                    (cast(jax.Array, inner_filters) * values[0][:, context_channels:]).reshape(
                                         -1, values[0].shape[-1]),
                                     cast(jax.Array, nested_symbols), spectral=True, ept=fft_ept,
                                 ).reshape(cast(jax.Array, inner_filters).shape))((combined_hat, nested_eta))
                     else:
                         context_hat = jnp.fft.rfft(context, axis=1)
+                    context_symbol = (jnp.tile(context_multiplier, (1, 1, 2))
+                                      if reflection_encoder else context_multiplier)
                     if context_real:
                         # A real multiplier preserves the RFFT's real DC/Nyquist coefficients.
                         context = graph_fft(
-                            context_multiplier * context_hat, n=correction_nx, axis=1,
+                            context_symbol * context_hat, n=correction_nx, axis=1,
                             inverse=True, hermitian_input=True,
                             input_alias=context_alias,
                             norm="forward" if context_add else None,
@@ -602,13 +630,15 @@ def build_variant(
                         )
                     elif context_inverse:
                         context = jnp.moveaxis(fft(
-                            jnp.moveaxis(context_multiplier * context_hat, 1, -1),
+                            jnp.moveaxis(context_symbol * context_hat, 1, -1),
                             correction_nx, inverse=True, ept=fft_ept,
                         ), -1, 1)
                     else:
                         context = jnp.fft.irfft(
-                            context_multiplier * context_hat, n=correction_nx, axis=1,
+                            context_symbol * context_hat, n=correction_nx, axis=1,
                         )
+                    if reflection_encoder:
+                        context = context.reshape(context.shape[0], correction_nx, 2, model.surface_context_width)
                     if context_add:
                         features = dense(context, loaded.params["eta_context_expand"]["kernel"],
                                          residual=features, input_scale=1 / correction_nx,
@@ -622,6 +652,9 @@ def build_variant(
                 features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             if model.surface_context_gate and context is not None:
                 features = features * (1.0 + jnp.tanh(context))
+            if reflection_encoder:
+                # The head is linear; average after every nonlinear geometry operation.
+                features = jnp.mean(features, axis=-2)
             if polynomial_features is not None:
                 features = jnp.concatenate((features, polynomial_features), axis=-1)
             if amplitude is not None:
