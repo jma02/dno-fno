@@ -1862,6 +1862,40 @@ def test_packed_parity_streams_match_native_values_and_gradients() -> None:
     check_packed_nested_branches(phase_wavenumber_hidden=0, surface_parity_streams=True)
 
 
+def test_pair_coupling_options_values_and_gradients() -> None:
+    main = trainer_function("main")
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_pair_coupling")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test).startswith("args.cs_pair_coupling"))
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "pair_coupling_option", "exec"), namespace)
+    assert parser.parse_args([]).cs_pair_coupling is False
+    assert parser.parse_args(["--cs_pair_coupling"]).cs_pair_coupling is True
+    code = compile(ast.Module(body=[validation], type_ignores=[]), "pair_coupling_validation", "exec")
+    valid = dict(cs_pair_coupling=True, model="cs_dno", cs_terms_residual=False,
+                 latent=4, n_blocks=8, cs_nested_blocks=1)
+    for nested in (0, 1, 7):
+        namespace["args"] = SimpleNamespace(**(valid | {"cs_nested_blocks": nested}))
+        exec(code, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for field, value in (("model", "fno"), ("cs_terms_residual", True), ("latent", 0),
+                             ("latent", 1), ("latent", 3), ("cs_nested_blocks", 8)):
+            namespace["args"] = SimpleNamespace(**(valid | {field: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+            namespace["args"].cs_pair_coupling = False
+            exec(code, namespace)
+    constructor = next(node for node in ast.walk(main) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "model_class")
+    assert any(keyword.arg == "pair_coupling" and ast.unparse(keyword.value) == "args.cs_pair_coupling"
+               for keyword in constructor.keywords)
+    check_packed_nested_branches(phase_wavenumber_hidden=0, pair_coupling=True)
+
+
 def test_mixed_surface_lift_options_values_and_gradients() -> None:
     main = trainer_function("main")
     option = next(node for node in main.body if isinstance(node, ast.Expr)
@@ -1894,6 +1928,7 @@ def test_mixed_surface_lift_options_values_and_gradients() -> None:
 def check_packed_nested_branches(
     phase_wavenumber_hidden: int, surface_amplitude_reference: float = 0.0,
     surface_parity_streams: bool = False, surface_cubic_channels: int = 0,
+    pair_coupling: bool = False,
 ) -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
                       and ast.unparse(node.test).startswith("args.cs_nested_surface_features"))
@@ -1935,14 +1970,16 @@ def check_packed_nested_branches(
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
                        for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
-    if phase_wavenumber_hidden or surface_amplitude_reference or surface_parity_streams or surface_cubic_channels:
+    if phase_wavenumber_hidden or surface_amplitude_reference or surface_parity_streams or surface_cubic_channels or pair_coupling:
         precision_cases = [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, False)
                            for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
+    branches = 4 if pair_coupling else 2
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
          whiten, depth_gate, context, cutoff, dtype, nested_modulation, nested_features, phase_rank_one) in precision_cases:
         case_inputs, case_depth = inputs.astype(dtype), depth.astype(dtype)
         model = CraigSulemDNO(
-            width=8, n_blocks=2, nested_blocks=nested_blocks, latent=2, mult_hidden=4,
+            width=8, n_blocks=2, nested_blocks=nested_blocks, latent=branches, mult_hidden=4,
+            pair_coupling=pair_coupling,
             nested_surface_modulation=nested_modulation,
             nested_surface_features=nested_features,
             curvature_cutoff=cutoff,
@@ -1983,8 +2020,13 @@ def check_packed_nested_branches(
             if index < 2 - nested_blocks:
                 shape = cast(jax.Array, group["phi_proj"]["kernel"]).shape
                 group["phi_proj"]["kernel"] = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape) * 0.02 - 0.07
+                if pair_coupling:
+                    shape = cast(jax.Array, group["phi_cross"]["kernel"]).shape
+                    group["phi_cross"]["kernel"] = jnp.linspace(
+                        -0.13 + index * 0.03, 0.19 + index * 0.05, int(np.prod(shape)), dtype=jnp.float32,
+                    ).reshape(shape)
             else:
-                group["gamma"] = jnp.array([0.2, -0.3], dtype=jnp.float32)
+                group["gamma"] = jnp.linspace(0.2, -0.3, branches, dtype=jnp.float32)
                 if nested_features:
                     group["surface_mix"] = jnp.array([[0.1, -0.1], [0.05, 0.1]], dtype=jnp.float32)
             if multiplier_skip:
@@ -1996,7 +2038,7 @@ def check_packed_nested_branches(
             "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
             "nx": nx, "domain_length": float(model.domain_length),
             "args": SimpleNamespace(model="cs_dno", cs_terms_residual=False, n_blocks=2, cs_nested_blocks=nested_blocks,
-                                    latent=2, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
+                                    latent=branches, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
                                     cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs,
                                     cs_nested_surface_features=nested_features),
         }
@@ -2066,6 +2108,9 @@ def check_packed_nested_branches(
             for columns in (slice(None, -surface_cubic_channels), slice(-surface_cubic_channels, None)):
                 assert float(jnp.linalg.norm(actual_grad[0]["eta_feat_mix"]["kernel"][:, columns])) > 0
                 assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][columns])) > 0
+        if pair_coupling:
+            for index in range(2 - nested_blocks):
+                assert float(jnp.linalg.norm(actual_grad[0][f"cs_block_{index}"]["phi_cross"]["kernel"])) > 0
         for index in range(2 - nested_blocks, 2):
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
@@ -3579,6 +3624,7 @@ if __name__ == "__main__":
     test_packed_wavenumber_phase_matches_native_values_and_gradients()
     test_packed_surface_amplitude_matches_native_values_and_gradients()
     test_packed_parity_streams_match_native_values_and_gradients()
+    test_pair_coupling_options_values_and_gradients()
     test_mixed_surface_lift_options_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()

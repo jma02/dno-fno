@@ -32,28 +32,32 @@ OUTPUT = ROOT / "outputs/cufftdx_20260925"
 
 
 @cache
-def register(field_stride: bool = False, branch_major: bool = False, bernoulli: bool = False) -> ctypes.CDLL:
-    stem = "cufftdx_bernoulli" if bernoulli else "cufftdx_branchmajor" if branch_major else "cufftdx_fieldstride" if field_stride else "cufftdx"
+def register(field_stride: bool = False, branch_major: bool = False, bernoulli: bool = False,
+             pair_coupling: bool = False) -> ctypes.CDLL:
+    stem = "cufftdx_paircoupling" if pair_coupling else "cufftdx_bernoulli" if bernoulli else "cufftdx_branchmajor" if branch_major else "cufftdx_fieldstride" if field_stride else "cufftdx"
     library = ctypes.CDLL(str(OUTPUT / f"{stem}.so"))
-    targets = ((f"dno_{stem}", "dno_cufftdx"),) if field_stride or branch_major or bernoulli else tuple(
+    targets = ((f"dno_{stem}", "dno_cufftdx"),) if field_stride or branch_major or bernoulli or pair_coupling else tuple(
         (name, name) for name in ("dno_cufftdx", "dno_cufftdx_features"))
     for name, symbol in targets:
         jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(getattr(library, symbol)), platform="CUDA")
     return library
 
 
-def _branch_major_fft(a: jax.Array, b: jax.Array, outer: jax.Array, n: int, ept: int) -> jax.Array:
+def _branch_major_fft(a: jax.Array, b: jax.Array, outer: jax.Array, n: int, ept: int,
+                      pair_coupling: bool = False) -> jax.Array:
     """Flatten stage/batch axes before imposing the GEMM's branch-major storage."""
     a_flat = a.reshape((-1, *a.shape[-2:]))
-    result = jax.ShapeDtypeStruct((a_flat.shape[0], a.shape[-1], n // 2 + 1), jnp.complex64)
+    branches = outer.shape[-2]
+    result = jax.ShapeDtypeStruct((a_flat.shape[0], branches, n // 2 + 1), jnp.complex64)
     spectrum = jax.ffi.ffi_call(
-        "dno_cufftdx_branchmajor", result, vmap_method="broadcast_all",
+        "dno_cufftdx_paircoupling" if pair_coupling else "dno_cufftdx_branchmajor",
+        result, vmap_method="broadcast_all",
         input_layouts=((2, 0, 1), None, None),
     )(
         a_flat, b.reshape((-1, *b.shape[-2:])), outer.reshape((-1, *outer.shape[-2:])),
-        size=np.int64(n), operation=np.int64(13), multiply=True, ept=np.int64(ept),
+        size=np.int64(n), operation=np.int64(15 if pair_coupling else 13), multiply=True, ept=np.int64(ept),
     )
-    return spectrum.reshape((*a.shape[:-2], a.shape[-1], n // 2 + 1))
+    return spectrum.reshape((*a.shape[:-2], branches, n // 2 + 1))
 
 
 def bernoulli_rfft(fields: jax.Array) -> jax.Array:
@@ -71,24 +75,27 @@ def fft(
     a: jax.Array, n: int, *, inverse: bool = False, b: jax.Array | None = None,
     outer: jax.Array | None = None, ept: int = 8, normalization: jax.Array | None = None,
     promote: bool = False, channels_last: bool = False, field_stride: bool = False,
-    branch_major: bool = False,
+    branch_major: bool = False, pair_coupling: bool = False,
 ) -> jax.Array:
     """Fuse FFT loads/stores; channels_last consumes a column-major [B,N,R] head with real outer filters."""
-    if branch_major:
+    if branch_major or pair_coupling:
         if not channels_last or not field_stride or b is None or outer is None or a.dtype != jnp.float32:
             raise ValueError("Branch-major FFT requires an FP32 column-major head, strided fields, and real filters.")
-        register(branch_major=True)
+        if pair_coupling and (n != 1024 or ept != 8 or outer.shape[-2] % 2
+                              or a.shape[-1] != 3 * outer.shape[-2] // 2):
+            raise ValueError("Pair coupling requires a 1024-point EPT8 head with R diagonal and R/2 cross columns.")
+        register(branch_major=not pair_coupling, pair_coupling=pair_coupling)
 
         @custom_vmap
         def product(x: jax.Array, y: jax.Array, filters: jax.Array) -> jax.Array:
-            return _branch_major_fft(x, y, filters, n, ept)
+            return _branch_major_fft(x, y, filters, n, ept, pair_coupling)
 
         @product.def_vmap
         def product_vmap(axis_size: int, batched: list[bool], x: jax.Array,
                          y: jax.Array, filters: jax.Array) -> tuple[jax.Array, bool]:
             x, y, filters = tuple(value if mapped else jnp.broadcast_to(value, (axis_size, *value.shape))
                                   for value, mapped in zip((x, y, filters), batched))
-            return _branch_major_fft(x, y, filters, n, ept), True
+            return _branch_major_fft(x, y, filters, n, ept, pair_coupling), True
 
         return product(a, b, outer)
     if field_stride:
@@ -247,6 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--field-stride", action="store_true", help="Build/check the isolated strided-field product FFT.")
     parser.add_argument("--branch-major", action="store_true", help="Build/check the isolated branch-major product FFT against strided fields.")
+    parser.add_argument("--pair-coupling", action="store_true", help="Build/check the isolated FP32 EPT8 symmetric-pair product FFT.")
     parser.add_argument("--bernoulli", action="store_true", help="Build the isolated FP64 Bernoulli-to-forward-FFT trial.")
     parser.add_argument("--sm", type=int, default=89)
     parser.add_argument("--ept", nargs="+", type=int, choices=(4, 8, 16), default=[8])
@@ -256,6 +264,8 @@ if __name__ == "__main__":
     classical.add_argument("--classical", action="store_true", help="Screen the same FFT backend in the complete padded M1–M6 recurrence.")
     classical.add_argument("--classical-fused", action="store_true", help="Fuse padded classical products with forward FFTs, retaining JAX inverse FFTs.")
     args = parser.parse_args()
+    if args.pair_coupling and args.ept != [8]:
+        parser.error("The pair-coupling trial uses EPT8.")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
     if args.build or args.build_only:
@@ -264,14 +274,56 @@ if __name__ == "__main__":
             shutil.which("nvcc") or "/usr/local/cuda-12.9/bin/nvcc", "-std=c++17", "-O3",
             f"-arch=sm_{args.sm}", f"-DDNO_SM={args.sm * 10}", "--shared",
             "-Xcompiler", "-fPIC", "-DCUFFTDX_DISABLE_CUTLASS_DEPENDENCY",
+            *(["-DDNO_PAIR_COUPLING_ONLY"] if args.pair_coupling else []),
             f"-I{mathdx}", f"-I{jax.ffi.include_dir()}",
-            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_bernoulli.so" if args.bernoulli else "cufftdx_branchmajor.so" if args.branch_major else "cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
+            str(ROOT / "scripts/cufftdx_fft.cu"), "-o", str(OUTPUT / ("cufftdx_paircoupling.so" if args.pair_coupling else "cufftdx_bernoulli.so" if args.bernoulli else "cufftdx_branchmajor.so" if args.branch_major else "cufftdx_fieldstride.so" if args.field_stride else "cufftdx.so")),
         ], check=True)
     if args.build_only:
         raise SystemExit(0)
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(42)
     records = {}
+    if args.pair_coupling:
+        for batch, paired, active, source_branches in (
+            (batch, paired, active, source_branches)
+            for batch in (1, 2, 32) for paired in (False, True)
+            for active in (False, True) for source_branches in (28, 32)
+        ):
+            prefix = (2, batch) if paired else (batch,)
+            weights = jnp.asarray(rng.normal(size=(*prefix, 1024, 42)), dtype=jnp.float32)
+            if not active:
+                weights = weights.at[..., 28:].set(0)
+            fields = jnp.asarray(rng.normal(size=(*prefix, source_branches, 1024)), dtype=jnp.float32)
+            filters = jnp.asarray(rng.normal(size=(batch, 28, 513)), dtype=jnp.float32)
+
+            def pair_reference(x: jax.Array, y: jax.Array) -> jax.Array:
+                coefficients = jnp.moveaxis(x, -1, -2)
+                weighted = (coefficients[..., :28, :] * y[..., :28, :]
+                            + jnp.repeat(coefficients[..., 28:, :], 2, axis=-2)
+                            * y[..., jnp.arange(28) ^ 1, :])
+                return filters * jnp.fft.rfft(weighted)
+
+            def pair_candidate(x: jax.Array, y: jax.Array) -> jax.Array:
+                return fft(x, 1024, b=y, outer=filters, channels_last=True,
+                           field_stride=True, pair_coupling=True)
+
+            candidate = jax.vmap(pair_candidate) if paired else pair_candidate
+            reference = jax.jit(pair_reference)(weights, fields)
+            actual = jax.jit(candidate)(weights, fields)
+            relative = float(jnp.linalg.norm(actual - reference) / jnp.linalg.norm(reference))
+            np.testing.assert_allclose(actual, reference, rtol=2e-6,
+                                       atol=2e-6 * float(jnp.max(jnp.abs(reference))))
+            if not active:
+                diagonal = lambda x, y: fft(  # noqa: E731
+                    x[..., :28], 1024, b=y, outer=filters, channels_last=True,
+                    field_stride=True, branch_major=True)
+                expected = jax.jit(jax.vmap(diagonal) if paired else diagonal)(weights, fields)
+                np.testing.assert_array_equal(actual, expected)
+            key = f"batch{batch}_{'paired' if paired else 'direct'}_{'active' if active else 'zero'}_fields{source_branches}"
+            records[key] = {"relative_l2": relative}
+            print(key, json.dumps(records[key]), flush=True)
+        (args.output / "paircoupling_native.json").write_text(json.dumps(records, indent=2) + "\n")
+        raise SystemExit(0)
     if args.field_stride or args.branch_major:
         for batch in (1, 2, 32):
             filters = jnp.asarray(rng.normal(size=(batch, 28, 513)), dtype=jnp.float32)

@@ -178,6 +178,7 @@ class CraigSulemBlock(nn.Module):
     nested: bool = False
     multiplier_skip: bool = False
     log_multiplier_inputs: bool = False
+    pair_coupling: bool = False
 
     @nn.compact
     def __call__(
@@ -235,6 +236,14 @@ class CraigSulemBlock(nn.Module):
             weighted_xi = gamma * surface * inner_field
         else:
             weighted_xi = cast(jnp.ndarray, spatial_weights) * filtered_xi
+            if self.pair_coupling:
+                cross_weights = nn.Dense(
+                    self.n_branches // 2, name="phi_cross",
+                    kernel_init=nn.initializers.zeros, use_bias=False,
+                )(eta_features)
+                weighted_xi = weighted_xi + jnp.repeat(cross_weights, 2, axis=-1) * filtered_xi[
+                    ..., jnp.arange(self.n_branches) ^ 1
+                ]
         weighted_xi_hat = jnp.fft.rfft(weighted_xi, axis=1, norm="forward")
         correction_hat = jnp.sum(multiplier * weighted_xi_hat, axis=-1)
         if correction_hat_addition is not None:
@@ -250,6 +259,7 @@ class CraigSulemDNO(nn.Module):
     nested_blocks: int = 0            # Replace this many final groups with M eta N eta M.
     nested_surface_modulation: bool = False  # Bounded eta/h modulation of both nested factors.
     nested_surface_features: bool = False  # Mix even linear surface features per nested branch.
+    pair_coupling: bool = False       # Symmetric cross terms between adjacent ordinary branches.
     phase_rank_one: bool = False      # Signed quadratic correction along |D|^.5 eta_x.
     phase_wavenumber_hidden: int = 0  # Positive width enables a symmetric kh-aware phase head.
 
@@ -552,6 +562,7 @@ class CraigSulemDNO(nn.Module):
                 nested=block_idx >= self.n_blocks - self.nested_blocks,
                 multiplier_skip=self.multiplier_skip,
                 log_multiplier_inputs=self.log_multiplier_inputs,
+                pair_coupling=self.pair_coupling,
                 name=f"cs_block_{block_idx}",
             )(eta_features, xi_phys, clipped_log_depth,
               eta_norm=nested_surface, nested_features=nested_features,

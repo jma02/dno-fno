@@ -113,7 +113,7 @@ def build_variant(
     reflection_encoder = reflection_encoder or variant.endswith("_reflectionencoder")
     variant = variant.removesuffix("_reflectionencoder")
     model = loaded.model
-    if (model.surface_parity_products or model.surface_cubic_channels) and not (
+    if (model.surface_parity_products or model.surface_cubic_channels or model.pair_coupling) and not (
         variant == "original" or variant.startswith("fourier")
     ):
         raise ValueError("Experimental surface lifts require original or Fourier branch inference.")
@@ -276,6 +276,8 @@ def build_variant(
     fused_features = balanced_features or variant in ("fourier_fused_features", "fourier_fused_features_product")
     if coarse_correction and not (overlap_g1 and fused_features and fused_product):
         raise ValueError("The 512-point correction requires fused features/product with G1 overlap.")
+    if model.pair_coupling and (pad_head or (fused_product and (correction_nx != 1024 or fft_ept != 8))):
+        raise ValueError("Fused pair coupling requires the unpadded 1024-point EPT8 head.")
     fused_fields = fused_features or variant in ("fourier_fused_fields", "fourier_fused_both", "fourier_fused_g1")
     fused_inputs = variant in ("fourier_fused_inputs", "fourier_fused_both")
     if fused_fields or fused_inputs:
@@ -329,6 +331,10 @@ def build_variant(
     head_kernel = (jnp.concatenate(tuple(loaded.params[f"cs_block_{i}"]["phi_proj"]["kernel"]
                                         for i in range(ordinary_blocks)), axis=-1)
                    if ordinary_blocks else None)
+    if model.pair_coupling and head_kernel is not None:
+        head_kernel = jnp.concatenate((head_kernel, jnp.concatenate(tuple(
+            loaded.params[f"cs_block_{i}"]["phi_cross"]["kernel"]
+            for i in range(ordinary_blocks)), axis=-1)), axis=-1)
     cached = None
     k = (2 * jnp.pi / model.domain_length) * jnp.arange(nx // 2 + 1, dtype=jnp.float32)
     second_symbol = -(k ** 2)
@@ -699,8 +705,16 @@ def build_variant(
                                               ((0, 0), (0, model.nested_blocks * model.latent), (0, 0)))
                 if fused_product:
                     weighted_hat = fft(weights, correction_nx, b=ordinary_fields, outer=ordinary_filters,
-                                       ept=fft_ept, channels_last=True, field_stride=field_stride,
-                                       branch_major=branch_major)
+                                       ept=fft_ept, channels_last=True,
+                                       field_stride=field_stride or model.pair_coupling,
+                                       branch_major=branch_major, pair_coupling=model.pair_coupling)
+                elif model.pair_coupling:
+                    weights = jnp.moveaxis(weights, -1, 1)
+                    fields = ordinary_fields[:, :ordinary_branches]
+                    weighted = (weights[:, :ordinary_branches] * fields
+                                + jnp.repeat(weights[:, ordinary_branches:], 2, axis=1)
+                                * fields[:, jnp.arange(ordinary_branches) ^ 1])
+                    weighted_hat = ordinary_filters * jnp.fft.rfft(weighted)
                 elif trial in ("fourier_product", "fourier_allfft", "fourier_kernels"):
                     weights = jnp.moveaxis(weights, -1, 1)
                     weighted_hat = correction_nx * fft(weights, correction_nx, b=ordinary_fields,

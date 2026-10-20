@@ -25,7 +25,7 @@ __device__ __forceinline__ double bernoulli_value(double eta, double xi, double 
     return __dsub_rn(quotient, kinetic);
 }
 
-template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false, bool strided_b = false, bool branch_major = false, bool bernoulli = false>
+template<class FFT, bool outer = false, bool normalize = false, bool promote = false, bool real_outer = false, bool strided_b = false, bool branch_major = false, bool bernoulli = false, bool pair_coupling = false>
 __global__ void transform(const void* a, const void* b, void* out,
                           const void* symbols, int input_length, bool multiply,
                           int source_branches = 0, int output_branches = 0) {
@@ -59,6 +59,15 @@ __global__ void transform(const void* a, const void* b, void* out,
                 I weight = static_cast<const I*>(b)[weight_row * input_length + k];
                 value.x *= weight.x;
                 value.y *= weight.y;
+            }
+            if constexpr (pair_coupling) {
+                int batches = gridDim.x / output_branches;
+                int cross_row = (output_branches + (blockIdx.x % output_branches) / 2) * batches
+                                + blockIdx.x / output_branches;
+                I cross = static_cast<const I*>(a)[cross_row * input_length + k];
+                I partner = static_cast<const I*>(b)[(weight_row ^ 1) * input_length + k];
+                value.x = __fadd_rn(value.x, __fmul_rn(cross.x, partner.x));
+                value.y = __fadd_rn(value.y, __fmul_rn(cross.y, partner.y));
             }
             if constexpr (inverse) {
                 if (k == 0 || k == size_of<FFT>::value / 2) value.y = 0;
@@ -354,7 +363,17 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
         if (first != cudaSuccess || second != cudaSuccess)
             return ffi::Error::Internal("Cannot reserve cuFFTDx shared memory.");
     }
-    if (operation == 14) {
+    if (operation == 15) {
+        if constexpr (N == 1024 && std::is_same_v<T, float>) {
+            int source_branches = b.dimensions()[b.dimensions().size() - 2];
+            int output_branches = out->dimensions()[out->dimensions().size() - 2];
+            transform<F, false, false, false, true, true, true, false, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
+                a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, true,
+                source_branches, output_branches);
+        } else {
+            return ffi::Error::InvalidArgument("Pair coupling requires an FP32 1024-point branch head.");
+        }
+    } else if (operation == 14) {
         if constexpr (N == 2048 && std::is_same_v<T, double> && EPT == 8) {
             transform<F, false, false, false, false, false, false, true><<<out->element_count() / F::output_length, F::block_dim, F::shared_memory_size, stream>>>(
                 a.untyped_data(), b.untyped_data(), out->untyped_data(), symbols.untyped_data(), N / 2, false);
@@ -460,6 +479,11 @@ ffi::Error launch(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
 ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
                     ffi::AnyBuffer symbols, ffi::Result<ffi::AnyBuffer> out,
                     int64_t size, int64_t operation, bool multiply, int64_t ept) {
+#ifdef DNO_PAIR_COUPLING_ONLY
+    if (size != 1024 || operation != 15 || ept != 8 || a.element_type() != ffi::F32)
+        return ffi::Error::InvalidArgument("Pair-coupling library requires FP32, length 1024, operation 15 and EPT8.");
+    return launch<1024, float, 8>(stream, a, b, symbols, out, operation, multiply);
+#else
     bool fp64 = a.element_type() == ffi::F64 || a.element_type() == ffi::C128 || operation == 9 || operation == 10;
     if (size == 512) {
         if (ept == 4)
@@ -496,6 +520,7 @@ ffi::Error execute(cudaStream_t stream, ffi::AnyBuffer a, ffi::AnyBuffer b,
                     : launch<8192, float, 8>(stream, a, b, symbols, out, operation, multiply);
     }
     return ffi::Error::InvalidArgument("Benchmark supports FFT lengths 512, 1024, 2048 and 8192.");
+#endif
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
@@ -504,6 +529,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx, execute,
         .Ret<ffi::AnyBuffer>().Attr<int64_t>("size").Attr<int64_t>("operation").Attr<bool>("multiply").Attr<int64_t>("ept"),
     {ffi::Traits::kCmdBufferCompatible});
 
+#ifndef DNO_PAIR_COUPLING_ONLY
 template<int N, int EPT, bool balanced = false>
 ffi::Error launch_features(cudaStream_t stream, ffi::AnyBuffer inputs, ffi::AnyBuffer surface_ops,
                            ffi::AnyBuffer filters, ffi::AnyBuffer normalized, ffi::Result<ffi::AnyBuffer> features,
@@ -550,3 +576,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_cufftdx_features, execute_features,
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
         .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Attr<int64_t>("ept").Attr<bool>("balanced"),
     {ffi::Traits::kCmdBufferCompatible});
+#endif

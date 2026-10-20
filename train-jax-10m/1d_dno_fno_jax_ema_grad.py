@@ -139,6 +139,8 @@ def main() -> None:
                         help="Use log1p(k), log(h), tanh(kh), and log1p(k*tanh(kh)) as multiplier inputs.")
     parser.add_argument("--cs_nested_blocks", type=int, default=0,
                         help="Replace the final N branch groups with learned nested surface/filter compositions.")
+    parser.add_argument("--cs_pair_coupling", action="store_true",
+                        help="Add symmetric learned coupling within adjacent ordinary branch pairs.")
     parser.add_argument("--cs_nested_zero_inner", action="store_true",
                         help="Initialize nested gates at one and inner output weights at zero.")
     parser.add_argument("--cs_nested_surface_modulation", action="store_true",
@@ -627,6 +629,11 @@ def main() -> None:
                      "width, and no context/depth gates, polynomial skip, nested surface changes or phase heads")
     if not 0 <= args.cs_nested_blocks <= args.n_blocks:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
+    if args.cs_pair_coupling and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.latent < 2 or args.latent % 2
+        or args.cs_nested_blocks >= args.n_blocks
+    ):
+        parser.error("--cs_pair_coupling requires tied-filter cs_dno, positive even latent, and an ordinary block")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
         parser.error("Nested branches require --model cs_dno with the G0+G1 baseline")
     if args.fp64_residual and (
@@ -820,6 +827,7 @@ def main() -> None:
             multiplier_skip=args.cs_multiplier_skip,
             log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,
+            pair_coupling=args.cs_pair_coupling,
             nested_surface_modulation=args.cs_nested_surface_modulation,
             nested_surface_features=args.cs_nested_surface_features,
             phase_rank_one=args.cs_phase_rank_one,
@@ -884,7 +892,10 @@ def main() -> None:
                 groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
                 ordinary_groups = args.n_blocks - args.cs_nested_blocks
                 ordinary_branches = ordinary_groups * args.latent
-                weights = (eta_features @ jnp.concatenate([group["phi_proj"]["kernel"] for group in groups[:ordinary_groups]], axis=-1)
+                head_kernels = [group["phi_proj"]["kernel"] for group in groups[:ordinary_groups]]
+                if model.pair_coupling:
+                    head_kernels += [group["phi_cross"]["kernel"] for group in groups[:ordinary_groups]]
+                weights = (eta_features @ jnp.concatenate(head_kernels, axis=-1)
                            if ordinary_groups else jnp.zeros((*eta_features.shape[:2], 0), dtype=eta_features.dtype))
                 filters = jnp.concatenate([
                     cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
@@ -892,7 +903,11 @@ def main() -> None:
                 ], axis=-1)
                 xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
                 filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
-                weighted = weights * filtered[..., :ordinary_branches]
+                weighted = weights[..., :ordinary_branches] * filtered[..., :ordinary_branches]
+                if model.pair_coupling:
+                    weighted += jnp.repeat(weights[..., ordinary_branches:], 2, axis=-1) * filtered[
+                        ..., jnp.arange(ordinary_branches) ^ 1
+                    ]
                 if args.cs_nested_blocks:
                     nested_eta = call_kwargs["eta_norm"][..., None]
                     if args.cs_nested_surface_features:

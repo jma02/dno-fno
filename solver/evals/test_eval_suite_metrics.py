@@ -626,7 +626,59 @@ class ComputeMetricsTest(unittest.TestCase):
     def test_wavenumber_phase_fused_fourier_path_preserves_signed_correction(self) -> None:
         self._check_nested_fused_fourier_path(phase_wavenumber_hidden=8)
 
-    def _check_nested_fused_fourier_path(self, phase_wavenumber_hidden: int) -> None:
+    def test_pair_coupling_fused_fourier_path_preserves_native_and_nested_outputs(self) -> None:
+        self._check_nested_fused_fourier_path(phase_wavenumber_hidden=0, pair_coupling=True)
+
+    def test_pair_coupling_branchmajor_layout_and_stage_batching(self) -> None:
+        from scripts import benchmark_cufftdx as native
+
+        def fake_ffi(target: str, result: Any, **options: Any) -> Any:
+            self.assertEqual(target, "dno_cufftdx_paircoupling")
+            self.assertEqual(options["input_layouts"], ((2, 0, 1), None, None))
+
+            def apply(a: jax.Array, b: jax.Array, outer: jax.Array, **attributes: Any) -> jax.Array:
+                self.assertEqual(attributes["operation"], 15)
+                batch, n, _ = a.shape
+                branches, sources = outer.shape[-2], b.shape[-2]
+                self.assertEqual(result.shape, (batch, branches, n // 2 + 1))
+                # Emulate the native pointer arithmetic, not the logical tensor formula.
+                coefficients = jnp.moveaxis(a, -1, 0).reshape(-1)
+                sample = jnp.arange(n)[None, None, :]
+                row = jnp.arange(branches)[None, :, None]
+                batch_index = jnp.arange(batch)[:, None, None]
+                diagonal = coefficients[((row * batch + batch_index) * n + sample)]
+                cross = coefficients[(((branches + row // 2) * batch + batch_index) * n + sample)]
+                field_row = batch_index * sources + row
+                fields = b.reshape(-1)
+                weighted = (diagonal * fields[field_row * n + sample]
+                            + cross * fields[(field_row ^ 1) * n + sample])
+                return outer * jnp.fft.rfft(weighted)
+
+            return apply
+
+        rng = np.random.default_rng(72)
+        with patch.object(native, "register"), patch.object(jax.ffi, "ffi_call", side_effect=fake_ffi):
+            for batch, sources, active in product((1, 2), (28, 32), (False, True)):
+                head = jnp.asarray(rng.normal(size=(2, batch, 1024, 42)), jnp.float32)
+                if not active:
+                    head = head.at[..., 28:].set(0)
+                fields = jnp.asarray(rng.normal(size=(2, batch, sources, 1024)), jnp.float32)
+                filters = jnp.asarray(rng.normal(size=(2, batch, 28, 513)), jnp.float32)
+                coefficients = jnp.moveaxis(head, -1, -2)
+                weighted = (coefficients[..., :28, :] * fields[..., :28, :]
+                            + jnp.repeat(coefficients[..., 28:, :], 2, axis=-2)
+                            * fields[..., jnp.arange(28) ^ 1, :])
+                forward = partial(native.fft, n=1024, channels_last=True,
+                                  field_stride=True, pair_coupling=True)
+                direct = forward(head[0], b=fields[0], outer=filters[0])
+                np.testing.assert_array_equal(direct, filters[0] * jnp.fft.rfft(weighted[0]))
+                for axes, symbols in (((0, 0, None), filters[0]), ((0, 0, 0), filters)):
+                    paired = jax.vmap(lambda a, b, f: forward(a, b=b, outer=f), in_axes=axes)(
+                        head, fields, symbols)
+                    np.testing.assert_array_equal(paired, symbols * jnp.fft.rfft(weighted))
+
+    def _check_nested_fused_fourier_path(self, phase_wavenumber_hidden: int,
+                                       pair_coupling: bool = False) -> None:
         from contextlib import nullcontext
         from scripts import benchmark_dno_fusion as fusion
 
@@ -634,9 +686,16 @@ class ComputeMetricsTest(unittest.TestCase):
 
         def fft_cpu(a: jax.Array, n: int, *, inverse: bool = False,
                     b: jax.Array | None = None, outer: jax.Array | None = None,
-                    channels_last: bool = False, **_: Any) -> jax.Array:
+                    channels_last: bool = False, pair_coupling: bool = False, **_: Any) -> jax.Array:
             if b is not None:
-                a = (jnp.moveaxis(a, -1, -2) if channels_last else a) * b
+                a = jnp.moveaxis(a, -1, -2) if channels_last else a
+                if pair_coupling:
+                    branches = cast(jax.Array, outer).shape[-2]
+                    a = (a[..., :branches, :] * b[..., :branches, :]
+                         + jnp.repeat(a[..., branches:, :], 2, axis=-2)
+                         * b[..., jnp.arange(branches) ^ 1, :])
+                else:
+                    a = a * b
             result = jnp.fft.irfft(a, n=n) if inverse else jnp.fft.rfft(a, n=n)
             return result if outer is None else result * outer
 
@@ -657,7 +716,7 @@ class ComputeMetricsTest(unittest.TestCase):
                              nested_surface_modulation=True, phase_rank_one=not phase_wavenumber_hidden,
                              phase_wavenumber_hidden=phase_wavenumber_hidden, domain_length=3 * np.pi,
                              surface_feature_scales=(0.2, 0.04, 0.008, 2., 8., 0.7, 0.3),
-                             surface_context_width=4)
+                             surface_context_width=4, pair_coupling=pair_coupling)
         params = cast(dict[str, Any], model.init(
             jax.random.PRNGKey(83), jnp.zeros((1, nx, 2), jnp.float32),
             jnp.zeros((1, 1), jnp.float32))["params"])
@@ -669,6 +728,10 @@ class ComputeMetricsTest(unittest.TestCase):
             params["phase_rank_one_coefficients"] = jnp.asarray([0.3, -0.4], jnp.float32)
         params["cs_block_0"]["phi_proj"]["kernel"] = jnp.full_like(
             params["cs_block_0"]["phi_proj"]["kernel"], 0.1)
+        if pair_coupling:
+            params["cs_block_0"]["phi_cross"]["kernel"] = jnp.linspace(
+                -0.3, 0.2, params["cs_block_0"]["phi_cross"]["kernel"].size,
+                dtype=jnp.float32).reshape(params["cs_block_0"]["phi_cross"]["kernel"].shape)
         block = params["cs_block_1"]
         block["gamma"] = jnp.asarray([0.13, -0.19], jnp.float32)
         for name, bias in (("m_shared", [0.6, -0.45]), ("m_inner", [-0.4, 0.7])):
@@ -686,6 +749,8 @@ class ComputeMetricsTest(unittest.TestCase):
             cases += [(False, batch, .07) for batch in (1, 32)]
             if phase_wavenumber_hidden:
                 cases = [(False, batch, 0.0) for batch in (1, 32)]
+            if pair_coupling:
+                cases = [(False, batch, 0.0) for batch in (1, 2)]
             for surface_features, batch, amplitude_reference in cases:
                 with self.subTest(surface_features=surface_features, batch=batch,
                                   amplitude_reference=amplitude_reference):
@@ -720,6 +785,12 @@ class ComputeMetricsTest(unittest.TestCase):
                     expected, actual = forward(eta_hat, xi_hat), fused(eta_hat, xi_hat)
                     np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=2e-7)
                     np.testing.assert_allclose(context_fused(eta_hat, xi_hat), expected, rtol=3e-6, atol=2e-7)
+                    if pair_coupling:
+                        advanced = fusion.build_variant(loaded, depth, nx, name
+                            + "_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor")
+                        np.testing.assert_allclose(advanced(eta_hat, xi_hat), expected, rtol=3e-6, atol=2e-7)
+                        plain = fusion.build_variant(loaded, depth, nx, "fourier_round")
+                        np.testing.assert_allclose(plain(eta_hat, xi_hat), expected, rtol=3e-6, atol=2e-7)
                     native = build_predict_gxi_batched(loaded)(eta, xi, depth)
                     self.assertLess(float(jnp.linalg.norm(jnp.fft.irfft(expected, n=nx) - native)
                                           / jnp.linalg.norm(native)), 3e-6)
@@ -763,6 +834,9 @@ class ComputeMetricsTest(unittest.TestCase):
                         }},
                         "cs_block_1": {**case_block, "gamma": jnp.zeros_like(block["gamma"])},
                     }
+                    if pair_coupling:
+                        isolated_params["cs_block_0"]["phi_cross"] = jax.tree.map(
+                            jnp.zeros_like, case_params["cs_block_0"]["phi_cross"])
                     phase_only = loaded._replace(params=isolated_params)
                     zero_phase = ({"phase_wavenumber": params["phase_wavenumber"] | {
                         "out": jax.tree.map(jnp.zeros_like, params["phase_wavenumber"]["out"]),
@@ -795,7 +869,7 @@ class ComputeMetricsTest(unittest.TestCase):
                     for increment, reference_phase in ((phase_increment, rank_one), (native_increment, native_rank_one)):
                         self.assertLess(float(jnp.linalg.norm(increment - reference_phase)
                                               / jnp.linalg.norm(reference_phase)), 1e-6)
-                    if batch == 1 and not surface_features:
+                    if batch == 1 and not surface_features and not pair_coupling:
                         for unsupported in ("fourier", "packed", "front"):
                             with self.assertRaisesRegex(ValueError, "physically rounded Fourier"):
                                 fusion.build_variant(loaded, depth, nx, unsupported)

@@ -61,6 +61,7 @@ def _model(
     nested_blocks: int = 0,
     nested_surface_modulation: bool = False,
     nested_surface_features: bool = False,
+    pair_coupling: bool = False,
     multiplier_skip: bool = False,
 ) -> CraigSulemDNO:
     return CraigSulemDNO(
@@ -87,6 +88,7 @@ def _model(
         nested_blocks=nested_blocks,
         nested_surface_modulation=nested_surface_modulation,
         nested_surface_features=nested_surface_features,
+        pair_coupling=pair_coupling,
         multiplier_skip=multiplier_skip,
         mult_hidden=16,
         baseline_order=baseline_order,
@@ -1250,6 +1252,99 @@ def test_parity_streams_restore_filtered_odd_quadratic() -> None:
     assert abs(float(jnp.fft.irfft(-1j * jnp.sign(jnp.arange(33)) * jnp.fft.rfft(eta))[0, 0])) < 1e-14
 
 
+def test_pair_coupling_initialization_and_default_identity() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    original = _model(nested_blocks=1, surface_context_width=8,
+                      surface_feature_scales=(.2, .04, .008, 2., 8., .7, .3)).clone(
+        width=320, n_blocks=8, latent=4, mult_hidden=80,
+    )
+    model = original.clone(pair_coupling=True)
+    control = original.init(jax.random.PRNGKey(89), inputs, depth)
+    variables = unfreeze(model.init(jax.random.PRNGKey(89), inputs, depth))
+    assert sum(leaf.size for leaf in jax.tree.leaves(control)) == 40384
+    assert sum(leaf.size for leaf in jax.tree.leaves(variables)) == 42624
+    for index in range(7):
+        cross = variables["params"][f"cs_block_{index}"]["phi_cross"]["kernel"]
+        assert cross.shape == (160, 2) and cross.dtype == jnp.float32 and jnp.all(cross == 0)
+    assert "phi_cross" not in variables["params"]["cs_block_7"]
+    for dtype in (jnp.float32, jnp.float64):
+        assert jnp.array_equal(cast(jax.Array, model.apply(variables, inputs.astype(dtype), depth.astype(dtype))),
+                               cast(jax.Array, original.apply(control, inputs.astype(dtype), depth.astype(dtype))))
+    for index in range(7):
+        del variables["params"][f"cs_block_{index}"]["phi_cross"]
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(control), jax.tree.leaves(variables), strict=True,
+    ))
+    assert jnp.array_equal(cast(jax.Array, original.clone(pair_coupling=False).apply(control, inputs, depth)),
+                           cast(jax.Array, original.apply(control, inputs, depth)))
+
+
+def test_pair_coupling_explicit_symmetric_formula_and_gradients() -> None:
+    eta, xi, depth = _state()
+    features = jnp.stack((eta**2, eta * jnp.roll(eta, 3, axis=-1)), axis=-1)
+    block = CraigSulemBlock(4, 2 * pi, 5.0, 16, pair_coupling=True)
+    variables = unfreeze(block.init(jax.random.PRNGKey(90), features, xi, depth))
+    variables["params"]["phi_cross"]["kernel"] = jnp.asarray([[.3, -.2], [.1, .4]], jnp.float32)
+    multiplier = DepthAwareMultiplier(4, 2 * pi, 5.0, 16)
+    filters = cast(jax.Array, multiplier.apply(
+        {"params": variables["params"]["m_shared"]}, depth, eta.shape[-1] // 2 + 1,
+    ))
+    fields = jnp.fft.irfft(filters * jnp.fft.rfft(xi)[..., None], n=eta.shape[-1], axis=1)
+    cross = features @ variables["params"]["phi_cross"]["kernel"]
+    expected_hat = jnp.zeros_like(jnp.fft.rfft(xi))
+    for left, right in ((0, 1), (2, 3)):
+        expected_hat = expected_hat + filters[..., left] * jnp.fft.rfft(cross[..., left // 2] * fields[..., right])
+        expected_hat = expected_hat + filters[..., right] * jnp.fft.rfft(cross[..., left // 2] * fields[..., left])
+    actual = cast(jax.Array, block.apply(variables, features, xi, depth))
+    assert jnp.linalg.norm(actual) > 1e-8
+    assert jnp.allclose(actual, jnp.fft.irfft(expected_hat, n=eta.shape[-1]), rtol=1e-12, atol=1e-15)
+    for active in (True, False):
+        if not active:
+            variables["params"]["phi_cross"]["kernel"] = jnp.zeros((2, 2), jnp.float32)
+        gradients = jax.grad(lambda params: jnp.sum(cast(jax.Array, block.apply(
+            {"params": params}, features, xi, depth,
+        )) * xi))(variables["params"])
+        assert jnp.all(jnp.linalg.norm(gradients["phi_cross"]["kernel"], axis=0) > 0)
+        assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+
+
+def test_pair_coupling_preserves_operator_structure() -> None:
+    eta, xi, depth = _state()
+    model = _model(pair_coupling=True, nested_blocks=1, surface_context_width=8,
+                   surface_feature_scales=(.2, .04, .008, 2., 8., .7, .3)).clone(latent=4)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    variables = unfreeze(_activate_residual(model.init(jax.random.PRNGKey(91), inputs, depth)))
+    kernel = variables["params"]["cs_block_0"]["phi_cross"]["kernel"]
+    control = _learned_residual(model, variables, eta, xi, depth)
+    variables["params"]["cs_block_0"]["phi_cross"]["kernel"] = .2 * jax.random.normal(
+        jax.random.PRNGKey(92), kernel.shape, dtype=kernel.dtype,
+    )
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    assert jnp.linalg.norm(actual - control) > 1e-8
+    psi = jnp.roll(xi, 9, axis=-1)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, .3 * xi - .7 * psi, depth)
+    assert jnp.allclose(mixed, .3 * actual - .7 * other, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-11, atol=1e-14)
+    shifted = _learned_residual(model, variables, jnp.roll(eta, 7, axis=-1), jnp.roll(xi, 7, axis=-1), depth)
+    assert jnp.allclose(shifted, jnp.roll(actual, 7, axis=-1), rtol=1e-10, atol=1e-14)
+    zero, first = jax.jvp(lambda surface: _learned_residual(model, variables, surface, xi, depth),
+                          (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(zero == 0) and jnp.all(first == 0)
+    norms = jnp.asarray([jnp.linalg.norm(_learned_residual(model, variables, scale * eta, xi, depth))
+                         for scale in (1e-3, 5e-4, 2.5e-4)])
+    assert jnp.allclose(norms[:-1] / norms[1:], 4., rtol=.01)
+    gradients = jax.grad(lambda params: jnp.sum(_learned_residual(
+        model, {"params": params}, eta, xi, depth,
+    ) * xi))(variables["params"])
+    assert all(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(gradients))
+    for name in ("phi_proj", "phi_cross"):
+        assert jnp.all(jnp.linalg.norm(gradients["cs_block_0"][name]["kernel"], axis=0) > 0)
+    assert jnp.linalg.norm(gradients["eta_feat_mix"]["kernel"]) > 0
+    assert jnp.linalg.norm(gradients["cs_block_0"]["m_shared"]["out"]["kernel"]) > 0
+
+
 def test_nested_branch_formula_and_gradients() -> None:
     eta, xi, depth = _state()
     features = jnp.stack((eta, eta**2), axis=-1)
@@ -2173,6 +2268,9 @@ def main() -> int:
         test_parity_streams_features_dense_and_activation,
         test_parity_streams_structure_and_live_gradients,
         test_parity_streams_restore_filtered_odd_quadratic,
+        test_pair_coupling_initialization_and_default_identity,
+        test_pair_coupling_explicit_symmetric_formula_and_gradients,
+        test_pair_coupling_preserves_operator_structure,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
         test_nested_surface_modulation_identity_depth_and_gradient,
