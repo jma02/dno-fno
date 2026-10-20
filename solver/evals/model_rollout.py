@@ -119,6 +119,7 @@ def load_run(
             surface_context_gate=bool(config.get("cs_surface_context_gate", False)),
             surface_depth_gate=bool(config.get("cs_surface_depth_gate", False)),
             surface_polynomial_skip=bool(config.get("cs_surface_polynomial_skip", False)),
+            surface_parity_products=bool(config.get("cs_surface_parity_products", False)),
             mult_hidden=int(config["cs_mult_hidden"]),
             multiplier_skip=bool(config.get("cs_multiplier_skip", False)),
             log_multiplier_inputs=bool(config.get("cs_log_multiplier_inputs", False)),

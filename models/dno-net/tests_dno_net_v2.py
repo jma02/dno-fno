@@ -27,6 +27,7 @@ from flax.typing import FrozenVariableDict
 from dno_net_v2 import (
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
     PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
+    surface_parity_products,
 )
 from solver.solvers.dno_series_jax import dno_series_eval
 
@@ -52,6 +53,7 @@ def _model(
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
+    surface_parity_products: bool = False,
     surface_depth_gate: bool = False,
     nested_blocks: int = 0,
     nested_surface_modulation: bool = False,
@@ -75,6 +77,7 @@ def _model(
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
+        surface_parity_products=surface_parity_products,
         surface_depth_gate=surface_depth_gate,
         nested_blocks=nested_blocks,
         nested_surface_modulation=nested_surface_modulation,
@@ -928,6 +931,114 @@ def test_even_surface_features_enforce_reflection_covariance() -> None:
         reflected = cast(jax.Array, model.apply(variables, inputs[:, reflection], depth))
         assert jnp.allclose(reflected, output[:, reflection], rtol=1e-10, atol=1e-13)
         assert jnp.linalg.norm(_learned_residual(model, variables, eta, xi, depth)) > 0
+
+
+def test_parity_products_formula_normalization_and_head() -> None:
+    eta, xi, depth = _state()
+    inputs = jnp.stack((eta, xi), axis=-1)
+    k = jnp.arange(eta.shape[-1] // 2 + 1)
+    eta_hat = jnp.fft.rfft(eta)
+    dx, dxx, half, hilbert = (
+        jnp.fft.irfft(symbol * eta_hat, n=eta.shape[-1])
+        for symbol in (1j * k, -k**2, jnp.sqrt(k), -1j * jnp.sign(k))
+    )
+    raw = jnp.stack((eta, eta**2, eta**3, dx, dxx, half, hilbert), axis=-1)
+    products = jnp.stack((eta, eta**2, eta**3, dx**2, dxx, half, hilbert**2, dx * hilbert), axis=-1)
+    assert jnp.array_equal(surface_parity_products(raw), products)
+    scales = (0.2, 0.04, 0.008, 4., 8., 0.7, 0.09, 0.6)
+    normalized = products / jnp.asarray(scales)
+    for polynomial_skip in (False, True):
+        model = _model(
+            surface_parity_products=True, surface_feature_scales=scales,
+            surface_context_width=8, surface_context_gate=True,
+            surface_polynomial_skip=polynomial_skip, nested_blocks=1,
+        )
+        initialized = model.init(jax.random.PRNGKey(71), inputs, depth)
+        prediction, baseline, _, correction = cast(tuple[jax.Array, ...], model.apply(
+            initialized, inputs, depth, return_baseline=True,
+        ))
+        assert jnp.array_equal(prediction, baseline)
+        assert jnp.all(correction == 0)
+        variables = _activate_residual(initialized)
+        _, captured = model.apply(
+            variables, inputs, depth,
+            capture_intermediates=lambda module, _: module.name in (
+                "eta_feat_proj", "eta_feat_mix", "eta_context_expand", "phi_proj",
+            ),
+        )
+        intermediates = captured["intermediates"]
+        assert jnp.allclose(
+            cast(jax.Array, intermediates["eta_feat_proj"]["__call__"][0]),
+            normalized @ cast(jax.Array, variables["params"]["eta_feat_proj"]["kernel"]), rtol=1e-12, atol=1e-14,
+        )
+        z = nn.gelu(cast(jax.Array, intermediates["eta_feat_mix"]["__call__"][0]))
+        context = cast(jax.Array, intermediates["eta_context_expand"]["__call__"][0])
+        skip = ((normalized[..., 1:3],) if polynomial_skip else ()) + (normalized[..., jnp.asarray((3, 6, 7))],)
+        features = jnp.concatenate((z * jnp.tanh(z) * (1 + jnp.tanh(context)), *skip), axis=-1)
+        assert jnp.array_equal(
+            cast(jax.Array, intermediates["cs_block_0"]["phi_proj"]["__call__"][0]),
+            features @ cast(jax.Array, variables["params"]["cs_block_0"]["phi_proj"]["kernel"]),
+        )
+
+
+def test_parity_products_structure_and_direct_quadratic_skip() -> None:
+    eta, xi, depth = _state()
+    eta, xi = (jnp.concatenate((value, jnp.roll(value, 7, axis=-1)), axis=0) for value in (eta, xi))
+    depth = jnp.concatenate((depth, jnp.log(jnp.asarray([[0.3]]))), axis=0)
+    model = _model(
+        surface_parity_products=True, surface_feature_scales=(0.2, 0.04, 0.008, 4., 8., 0.7, 0.09, 0.6),
+        surface_context_width=8, surface_context_gate=True, nested_blocks=1,
+    )
+    inputs = jnp.stack((eta, xi), axis=-1)
+    initialized = model.init(jax.random.PRNGKey(72), inputs, depth)
+    variables = _activate_residual(initialized)
+    reflection = (-jnp.arange(eta.shape[-1])) % eta.shape[-1]
+    output = cast(jax.Array, model.apply(variables, inputs, depth))
+    reflected = cast(jax.Array, model.apply(variables, inputs[:, reflection], depth))
+    assert jnp.allclose(reflected, output[:, reflection], rtol=1e-10, atol=1e-13)
+    psi = jnp.roll(xi, 9, axis=-1)
+    actual = _learned_residual(model, variables, eta, xi, depth)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+    assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-10, atol=1e-14)
+    residual = partial(_learned_residual, model, variables, xi=xi, depth=depth)
+    value, variation = jax.jvp(residual, (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(value == 0) and jnp.all(variation == 0)
+    norms = [jnp.linalg.norm(residual(scale * eta)) for scale in (1 / 32, 1 / 64, 1 / 128)]
+    assert all(abs(float(a / b) / 4 - 1) < 0.01 for a, b in zip(norms[:-1], norms[1:], strict=True))
+    for channel in range(3):
+        direct = unfreeze(initialized)
+        kernel = direct["params"]["cs_block_0"]["phi_proj"]["kernel"]
+        direct["params"]["cs_block_0"]["phi_proj"]["kernel"] = kernel.at[-3 + channel, 0].set(1)
+        at_one = _learned_residual(model, direct, eta, xi, depth)
+        at_half = _learned_residual(model, direct, eta / 2, xi, depth)
+        assert jnp.linalg.norm(at_one) > 1e-8
+        assert jnp.allclose(at_one, 4 * at_half, rtol=1e-12, atol=1e-14)
+
+
+def test_parity_products_hero_parameter_count_and_default_identity() -> None:
+    eta, xi, depth = _state(32)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    original = CraigSulemDNO(
+        width=320, n_blocks=8, latent=4, nested_blocks=1, mult_hidden=80,
+        surface_context_width=8, surface_feature_scales=(1.,) * 7,
+    )
+    key = jax.random.PRNGKey(73)
+    initialized = original.init(key, inputs, depth)
+    explicit_default = original.clone(surface_parity_products=False).init(key, inputs, depth)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(initialized), jax.tree.leaves(explicit_default), strict=True,
+    ))
+    model = original.clone(surface_parity_products=True, surface_feature_scales=(1.,) * 8)
+    enabled = model.init(key, inputs, depth)
+    assert sum(value.size for value in jax.tree.leaves(enabled)) - sum(
+        value.size for value in jax.tree.leaves(initialized)
+    ) == 244
+    assert cast(jax.Array, enabled["params"]["eta_feat_proj"]["kernel"]).shape == (8, 160)
+    assert cast(jax.Array, enabled["params"]["cs_block_0"]["phi_proj"]["kernel"]).shape == (163, 4)
+    assert jnp.array_equal(cast(jax.Array, original.apply(initialized, inputs, depth)),
+                           cast(jax.Array, model.apply(enabled, inputs, depth)))
 
 
 def test_nested_branch_formula_and_gradients() -> None:
@@ -1845,6 +1956,9 @@ def main() -> int:
         test_depth_gate_changes_leading_quadratic_without_losing_structure,
         test_polynomial_skip_formula_initialization_and_gradients,
         test_even_surface_features_enforce_reflection_covariance,
+        test_parity_products_formula_normalization_and_head,
+        test_parity_products_structure_and_direct_quadratic_skip,
+        test_parity_products_hero_parameter_count_and_default_identity,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
         test_nested_surface_modulation_identity_depth_and_gradient,

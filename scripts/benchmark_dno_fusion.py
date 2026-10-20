@@ -35,6 +35,7 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
     PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
+    surface_parity_products,
 )
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
@@ -112,6 +113,8 @@ def build_variant(
     reflection_encoder = reflection_encoder or variant.endswith("_reflectionencoder")
     variant = variant.removesuffix("_reflectionencoder")
     model = loaded.model
+    if model.surface_parity_products and not (variant == "original" or variant.startswith("fourier")):
+        raise ValueError("Parity-product inference requires original or Fourier branch inference.")
     if reflection_encoder and (isinstance(model, CraigSulemTermsResidual) or not variant.startswith("fourier")):
         raise ValueError("Encoder reflection averaging requires Fourier branch inference.")
     if reflection_encoder and (model.use_learned_eta_filters or model.use_relative_elevation):
@@ -529,6 +532,8 @@ def build_variant(
                     jnp.moveaxis(fields[:, :surface_ops.shape[0], :], 1, -1),
                 ), axis=-1)
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
+            if model.surface_parity_products:
+                features = surface_parity_products(features)
             nested_eta = eta_norm
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
@@ -556,9 +561,10 @@ def build_variant(
                     features[..., jnp.asarray([half_index, second_index])] @ cast(jax.Array, surface_mix), -1, 1,
                 )
             polynomial_features = features[..., 1:3] if model.surface_polynomial_skip else None
+            parity_features = features[..., jnp.asarray([3, 6, 7])] if model.surface_parity_products else None
             if reflection_encoder:
                 parity = jnp.asarray(
-                    [1] * model.n_polys + [
+                    [1] * features.shape[-1] if model.surface_parity_products else [1] * model.n_polys + [
                         sign for enabled, sign in (
                             (model.use_first_deriv, -1), (model.use_second_deriv, 1),
                             (model.use_half_deriv, 1), (model.use_hilbert, -1),
@@ -658,6 +664,8 @@ def build_variant(
                 features = jnp.mean(features, axis=-2)
             if polynomial_features is not None:
                 features = jnp.concatenate((features, polynomial_features), axis=-1)
+            if parity_features is not None:
+                features = jnp.concatenate((features, parity_features), axis=-1)
             if amplitude is not None:
                 features = features * amplitude[..., None] ** 2
             correction_hat = jnp.zeros_like(xi_phys_hat)

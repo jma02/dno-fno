@@ -126,6 +126,8 @@ def main() -> None:
                         help="Modulate lifted surface features by a bounded, depth-only learned gain.")
     parser.add_argument("--cs_surface_polynomial_skip", action="store_true",
                         help="Append normalized eta squared/cubed directly to the final surface features.")
+    parser.add_argument("--cs_surface_parity_products", action="store_true",
+                        help="Use reflection-even derivative products and append them after the quadratic lift.")
     parser.add_argument("--cs_multiplier_skip", action="store_true",
                         help="Add a learned linear skip from normalized 1, k*tanh(kh), k squared to each multiplier.")
     parser.add_argument("--cs_log_multiplier_inputs", action="store_true",
@@ -580,6 +582,15 @@ def main() -> None:
                      "without nested surface features/modulation")
     if args.cs_surface_polynomial_skip and (args.model != "cs_dno" or args.cs_n_polys < 3 or args.cs_baseline_order != 1):
         parser.error("Polynomial skip requires cs_dno, at least three surface powers, and the G0+G1 baseline")
+    if args.cs_surface_parity_products and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.cs_baseline_order != 1
+        or args.cs_n_polys != 3 or not args.cs_normalize_surface_features
+        or not all((args.cs_use_first_deriv, args.cs_use_second_deriv, args.cs_use_half_deriv, args.cs_use_hilbert))
+        or args.cs_use_relative_elevation or args.cs_use_learned_eta_filters
+        or args.cs_surface_amplitude_normalization or args.cs_whiten_surface_features
+    ):
+        parser.error("Parity products require RMS-scaled tied-filter M1, three surface powers and all four "
+                     "derivative features, without extra eta channels, amplitude normalization or whitening")
     if not 0 <= args.cs_nested_blocks <= args.n_blocks:
         parser.error("--cs_nested_blocks must be between zero and --n_blocks")
     if args.cs_nested_blocks and (args.model != "cs_dno" or args.cs_baseline_order != 1):
@@ -698,7 +709,8 @@ def main() -> None:
             (args.cs_use_half_deriv, np.sqrt(feature_k)),
             (args.cs_use_hilbert, -1j * np.sign(feature_k)),
         ) if enabled]
-        feature_energy = np.zeros(args.cs_n_polys + len(feature_symbols) + args.cs_use_relative_elevation)
+        feature_energy = np.zeros(args.cs_n_polys + len(feature_symbols)
+                                  + args.cs_use_relative_elevation + args.cs_surface_parity_products)
         feature_cross = (np.zeros((feature_energy.size, feature_energy.size))
                          if args.cs_whiten_surface_features else None)
         for start in range(0, feature_rows.size, 256):
@@ -707,6 +719,10 @@ def main() -> None:
             fields = [eta_features**p for p in range(1, args.cs_n_polys + 1)]
             eta_hat = np.fft.rfft(eta_features, axis=-1)
             fields.extend(np.fft.irfft(eta_hat * symbol, n=nx, axis=-1) for symbol in feature_symbols)
+            if args.cs_surface_parity_products:
+                dx, hilbert = fields[3], fields[6]
+                fields[3], fields[6] = dx**2, hilbert**2
+                fields.append(dx * hilbert)
             if args.cs_use_relative_elevation:
                 fields.append(eta_features * eta_scale / dataset["depth"][rows, None])
             if args.cs_surface_amplitude_normalization:
@@ -761,6 +777,7 @@ def main() -> None:
             surface_context_gate=args.cs_surface_context_gate,
             surface_depth_gate=args.cs_surface_depth_gate,
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
+            surface_parity_products=args.cs_surface_parity_products,
             multiplier_skip=args.cs_multiplier_skip,
             log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,

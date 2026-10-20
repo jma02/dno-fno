@@ -12,7 +12,7 @@ reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s full_q_teacher|rhs_teacher|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
+    printf 'Usage: %s full_q_teacher|rhs_teacher|parity_products|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
@@ -21,6 +21,7 @@ for arm in "$@"; do
     case "$arm" in
         full_q_teacher) arm_args=(--rollout_training_full_spectrum) ;;
         rhs_teacher) arm_args=(--rollout_training_full_spectrum --rollout_training_rhs) ;;
+        parity_products) arm_args=(--cs_surface_parity_products) ;;
         phase_direction) arm_args=(--data_phase_projection_weight 1) ;;
         phase_rank_one) arm_args=(--cs_phase_rank_one) ;;
         phase_wavenumber) arm_args=(--cs_phase_wavenumber_hidden 8) ;;

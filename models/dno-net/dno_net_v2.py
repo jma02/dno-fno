@@ -17,6 +17,12 @@ from flax import linen as nn
 from solver.solvers.dno_series_jax import dno_series_eval
 
 
+def surface_parity_products(features: jnp.ndarray) -> jnp.ndarray:
+    """Replace the two odd surface channels by their three even quadratic products."""
+    eta, eta2, eta3, dx, dxx, half, hilbert = jnp.moveaxis(features, -1, 0)
+    return jnp.stack((eta, eta2, eta3, dx**2, dxx, half, hilbert**2, dx * hilbert), axis=-1)
+
+
 def surface_amplitude(eta_norm: jnp.ndarray, reference_rms: float) -> jnp.ndarray:
     """Smooth per-surface RMS amplitude relative to the fixed training RMS."""
     return jnp.sqrt(jnp.mean((eta_norm / reference_rms) ** 2, axis=-1, keepdims=True) + 1e-6)
@@ -213,6 +219,7 @@ class CraigSulemDNO(nn.Module):
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
+    surface_parity_products: bool = False  # Even dx/Hilbert products in the trunk and head.
     surface_depth_gate: bool = False  # Condition lifted features on depth alone.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     multiplier_skip: bool = False    # Learn constant, G0, and k^2 symbol coefficients.
@@ -318,6 +325,8 @@ class CraigSulemDNO(nn.Module):
         if self.use_relative_elevation:
             features.append(eta_norm * self.eta_scale / jnp.exp(depth))
         eta_features = jnp.stack(features, axis=-1)
+        if self.surface_parity_products:
+            eta_features = surface_parity_products(eta_features)
         if amplitude is not None:
             powers = jnp.asarray(
                 list(range(1, self.n_polys + 1)) + [1] * (len(features) - self.n_polys),
@@ -334,7 +343,10 @@ class CraigSulemDNO(nn.Module):
             nested_features = jnp.stack((
                 eta_features[..., curvature_index + 1], eta_features[..., curvature_index],
             ), axis=-1)
-        polynomial_features = eta_features[..., 1:3] if self.surface_polynomial_skip else None
+        skips = ((eta_features[..., 1:3],) if self.surface_polynomial_skip else ())
+        if self.surface_parity_products:
+            skips += (eta_features[..., jnp.asarray((3, 6, 7))],)
+        polynomial_features = jnp.concatenate(skips, axis=-1) if skips else None
         if self.surface_feature_transform is not None:
             eta_features = eta_features @ jnp.asarray(self.surface_feature_transform, dtype=eta_features.dtype)
 
