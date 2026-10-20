@@ -48,6 +48,8 @@ def main() -> None:
     reference.add_argument("--reference-dir", type=Path, help="Directory containing cached M6 references for each family")
     parser.add_argument("--ic-quantile-offset", type=float, default=0.5, help="Within-group stratified case quantile offset")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--center-xi", action="store_true",
+                        help="Remove the potential's mean at every DNO call, including internal stages.")
     parser.add_argument("--project-momentum", action="store_true", help="Experimental post-step momentum correction.")
     parser.add_argument("--reflection-average", action="store_true",
                         help="Diagnostic: average spectral predictions with reflected inputs/outputs; doubles model calls.")
@@ -94,6 +96,7 @@ def main() -> None:
     reference_dir = (args.reference_dir or args.reference_run or run_dir).resolve()
     output_dir = args.output_dir or run_dir / (
         f"eval_fast_{args.checkpoint}"
+        + ("_centerxi" if args.center_xi else "")
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
         + ("_reflection" if args.reflection_average else "")
@@ -158,6 +161,7 @@ def main() -> None:
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
         "project_momentum": args.project_momentum,
+        "center_xi": args.center_xi,
         "reflection_average": args.reflection_average,
         "reflection_encoder": args.reflection_encoder,
         "graph_fft": args.graph_fft,
@@ -197,13 +201,22 @@ def main() -> None:
             spectral = None
             if args.cs_terms_variant:
                 physical = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8)
+                if args.center_xi:
+                    physical = partial(lambda eta, xi, fn: fn(
+                        eta, xi - jnp.mean(xi, axis=-1, keepdims=True),
+                    ), fn=physical)
             else:
                 physical = partial(lambda eta, xi, fn, depth: fn(eta, xi, depth),
-                                   fn=build_predict_gxi_batched(loaded), depth=jnp.log(depths))
+                                   fn=build_predict_gxi_batched(loaded, center_xi=args.center_xi),
+                                   depth=jnp.log(depths))
         else:
             spectral = build_variant(loaded, jnp.log(depths), nx, variant, fft_ept=8,
                                      solver_g0=params.g0[..., :nx // 2 + 1] if args.exact_solver_g0 else None,
                                      reflection_encoder=args.reflection_encoder)
+            if args.center_xi:
+                spectral = partial(lambda eta_hat, xi_hat, fn: fn(
+                    eta_hat, xi_hat.at[..., 0].set(0),
+                ), fn=spectral)
             if args.reflection_average:
                 spectral = partial(
                     lambda eta_hat, xi_hat, fn: 0.5 * (
@@ -244,6 +257,7 @@ def main() -> None:
             family, cfg, loaded, partial(lambda eta, xi, _depth, fn: fn(eta, xi), fn=physical),
             output_dir, dataset, 32, source, checkpoint_source, 32,
             truth_batch_size=8, ic_selection="stratified", ic_quantile_offset=args.ic_quantile_offset, pred=pred,
+            center_xi=args.center_xi,
         )
         del pred, result, executable, function, physical, spectral
         jax.clear_caches()
