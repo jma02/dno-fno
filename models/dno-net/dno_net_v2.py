@@ -17,10 +17,52 @@ from flax import linen as nn
 from solver.solvers.dno_series_jax import dno_series_eval
 
 
-def surface_parity_products(features: jnp.ndarray) -> jnp.ndarray:
+def surface_parity_products(
+    features: jnp.ndarray, *, include_odd: bool = False,
+) -> jnp.ndarray:
     """Replace the two odd surface channels by their three even quadratic products."""
     eta, eta2, eta3, dx, dxx, half, hilbert = jnp.moveaxis(features, -1, 0)
-    return jnp.stack((eta, eta2, eta3, dx**2, dxx, half, hilbert**2, dx * hilbert), axis=-1)
+    channels = (eta, eta2, eta3, dx**2, dxx, half, hilbert**2, dx * hilbert)
+    return jnp.stack(channels + ((dx, hilbert) if include_odd else ()), axis=-1)
+
+
+def parity_gelu(features: jnp.ndarray) -> jnp.ndarray:
+    """Apply GELU while retaining reflection-even and reflection-odd streams."""
+    even, odd = jnp.split(features, 2, axis=-1)
+    plus, minus = nn.gelu(even + odd), nn.gelu(even - odd)
+    return jnp.concatenate((0.5 * (plus + minus), 0.5 * (plus - minus)), axis=-1)
+
+
+def parity_dense(
+    features: jnp.ndarray, even_kernel: jnp.ndarray, odd_kernel: jnp.ndarray,
+) -> jnp.ndarray:
+    """Apply independent bias-free projections without mixing reflection parity."""
+    even, odd = features[..., :even_kernel.shape[0]], features[..., even_kernel.shape[0]:]
+    if even_kernel.shape[0] == odd_kernel.shape[0]:
+        projected = jnp.einsum(
+            "...pi,pio->...po", jnp.stack((even, odd), axis=-2),
+            jnp.stack((even_kernel, odd_kernel)),
+        )
+        return projected.reshape((*features.shape[:-1], 2 * even_kernel.shape[1]))
+    return jnp.concatenate((even @ even_kernel, odd @ odd_kernel), axis=-1)
+
+
+class ParityDense(nn.Module):
+    """Bias-free dense layer with an equal-width output for each parity stream."""
+    features: int
+    even_inputs: int
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        even_kernel = self.param(
+            "even_kernel", nn.initializers.lecun_normal(),
+            (self.even_inputs, self.features // 2), jnp.float32,
+        )
+        odd_kernel = self.param(
+            "odd_kernel", nn.initializers.lecun_normal(),
+            (inputs.shape[-1] - self.even_inputs, self.features // 2), jnp.float32,
+        )
+        return parity_dense(inputs, even_kernel, odd_kernel)
 
 
 def surface_amplitude(eta_norm: jnp.ndarray, reference_rms: float) -> jnp.ndarray:
@@ -220,6 +262,7 @@ class CraigSulemDNO(nn.Module):
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
     surface_parity_products: bool = False  # Even dx/Hilbert products in the trunk and head.
+    surface_parity_streams: bool = False  # Retain raw odd channels in a parity-separated trunk.
     surface_depth_gate: bool = False  # Condition lifted features on depth alone.
     mult_hidden: int = 32             # Hidden channels in each multiplier network.
     multiplier_skip: bool = False    # Learn constant, G0, and k^2 symbol coefficients.
@@ -326,7 +369,9 @@ class CraigSulemDNO(nn.Module):
             features.append(eta_norm * self.eta_scale / jnp.exp(depth))
         eta_features = jnp.stack(features, axis=-1)
         if self.surface_parity_products:
-            eta_features = surface_parity_products(eta_features)
+            eta_features = surface_parity_products(
+                eta_features, include_odd=self.surface_parity_streams,
+            )
         if amplitude is not None:
             powers = jnp.asarray(
                 list(range(1, self.n_polys + 1)) + [1] * (len(features) - self.n_polys),
@@ -356,13 +401,24 @@ class CraigSulemDNO(nn.Module):
             if name == "eta_feat_mix" and amplitude is not None:
                 gain = self.param("eta_amplitude_gain", nn.initializers.zeros, (self.width // 2,), jnp.float32)
                 eta_features = eta_features * (1.0 + gain * jnp.log(amplitude[..., None]))
-            eta_features = nn.gelu(
-                nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
-            )
+            if self.surface_parity_streams:
+                eta_features = parity_gelu(ParityDense(
+                    self.width // 2,
+                    8 if name == "eta_feat_proj" else self.width // 4, name=name,
+                )(eta_features))
+            else:
+                eta_features = nn.gelu(
+                    nn.Dense(self.width // 2, name=name, use_bias=False)(eta_features)
+                )
             if name == "eta_feat_proj" and self.surface_context_width:
-                context = nn.Dense(
-                    self.surface_context_width, name="eta_context_in", use_bias=False,
-                )(eta_features)
+                if self.surface_parity_streams:
+                    context = ParityDense(
+                        self.surface_context_width, self.width // 4, name="eta_context_in",
+                    )(eta_features)
+                else:
+                    context = nn.Dense(
+                        self.surface_context_width, name="eta_context_in", use_bias=False,
+                    )(eta_features)
                 context_k, context_log_h = jnp.broadcast_arrays(k_op, clipped_log_depth)
                 conditioning = jnp.stack((
                     jnp.log1p(context_k), context_log_h,
@@ -378,9 +434,15 @@ class CraigSulemDNO(nn.Module):
                     context_multiplier * jnp.fft.rfft(context, axis=1),
                     n=grid_size, axis=1,
                 )
-                context = nn.Dense(
-                    self.width // 2, name="eta_context_expand", use_bias=False,
-                )(context)
+                if self.surface_parity_streams:
+                    context = ParityDense(
+                        self.width // 2, self.surface_context_width // 2,
+                        name="eta_context_expand",
+                    )(context)
+                else:
+                    context = nn.Dense(
+                        self.width // 2, name="eta_context_expand", use_bias=False,
+                    )(context)
                 eta_features = eta_features + context
         return eta_features, nested_features, polynomial_features, context
 

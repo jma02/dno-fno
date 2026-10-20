@@ -1726,7 +1726,14 @@ def test_packed_surface_amplitude_matches_native_values_and_gradients() -> None:
     check_packed_nested_branches(phase_wavenumber_hidden=0, surface_amplitude_reference=0.07)
 
 
-def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude_reference: float = 0.0) -> None:
+def test_packed_parity_streams_match_native_values_and_gradients() -> None:
+    check_packed_nested_branches(phase_wavenumber_hidden=0, surface_parity_streams=True)
+
+
+def check_packed_nested_branches(
+    phase_wavenumber_hidden: int, surface_amplitude_reference: float = 0.0,
+    surface_parity_streams: bool = False,
+) -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
                       and ast.unparse(node.test).startswith("args.cs_nested_surface_features"))
     valid_config = dict(cs_nested_surface_features=True, cs_nested_blocks=1, cs_normalize_surface_features=True,
@@ -1767,7 +1774,7 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
                        for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
-    if phase_wavenumber_hidden or surface_amplitude_reference:
+    if phase_wavenumber_hidden or surface_amplitude_reference or surface_parity_streams:
         precision_cases = [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, False)
                            for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
@@ -1778,7 +1785,8 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude
             nested_surface_modulation=nested_modulation,
             nested_surface_features=nested_features,
             curvature_cutoff=cutoff,
-            surface_feature_scales=(0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3),
+            surface_feature_scales=((0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3, 0.2, 0.4, 0.6)
+                                    if surface_parity_streams else (0.3, 0.1, 0.04, 0.7, 2.0, 0.5, 0.3)),
             surface_feature_transform=(tuple(map(tuple, np.eye(7) + 0.05 * np.ones((7, 7))))
                                        if whiten else None),
             surface_context_width=context, surface_context_gate=depth_gate and bool(context),
@@ -1787,6 +1795,8 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude
             log_multiplier_inputs=log_multiplier_inputs, phase_rank_one=phase_rank_one,
             phase_wavenumber_hidden=phase_wavenumber_hidden,
             surface_amplitude_reference=surface_amplitude_reference,
+            surface_parity_products=surface_parity_streams,
+            surface_parity_streams=surface_parity_streams,
             domain_length=5 * np.pi if phase_rank_one or phase_wavenumber_hidden else 2 * np.pi,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
@@ -1886,6 +1896,10 @@ def check_packed_nested_branches(phase_wavenumber_hidden: int, surface_amplitude
             assert all(leaf.dtype == jnp.float32 for leaf in jax.tree.leaves(actual_grad[0]))
             assert actual_grad[1].dtype == actual_grad[2].dtype == dtype
             assert float(jnp.linalg.norm(actual_grad[0]["eta_amplitude_gain"])) > 0
+        if surface_parity_streams:
+            for name in ("eta_feat_proj", "eta_feat_mix", "eta_context_in", "eta_context_expand"):
+                for parity in ("even_kernel", "odd_kernel"):
+                    assert float(jnp.linalg.norm(actual_grad[0][name][parity])) > 0
         for index in range(2 - nested_blocks, 2):
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
@@ -3212,6 +3226,7 @@ if __name__ == "__main__":
     test_packed_nested_branches_match_native_values_and_gradients()
     test_packed_wavenumber_phase_matches_native_values_and_gradients()
     test_packed_surface_amplitude_matches_native_values_and_gradients()
+    test_packed_parity_streams_match_native_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()

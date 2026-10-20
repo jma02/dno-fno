@@ -26,7 +26,8 @@ from flax.typing import FrozenVariableDict
 
 from dno_net_v2 import (
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
-    PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
+    ParityDense, PhaseWavenumberMultiplier, parity_dense, parity_gelu,
+    phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
     surface_parity_products,
 )
 from solver.solvers.dno_series_jax import dno_series_eval
@@ -54,6 +55,7 @@ def _model(
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
     surface_parity_products: bool = False,
+    surface_parity_streams: bool = False,
     surface_depth_gate: bool = False,
     nested_blocks: int = 0,
     nested_surface_modulation: bool = False,
@@ -78,6 +80,7 @@ def _model(
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
         surface_parity_products=surface_parity_products,
+        surface_parity_streams=surface_parity_streams,
         surface_depth_gate=surface_depth_gate,
         nested_blocks=nested_blocks,
         nested_surface_modulation=nested_surface_modulation,
@@ -1039,6 +1042,138 @@ def test_parity_products_hero_parameter_count_and_default_identity() -> None:
     assert cast(jax.Array, enabled["params"]["cs_block_0"]["phi_proj"]["kernel"]).shape == (163, 4)
     assert jnp.array_equal(cast(jax.Array, original.apply(initialized, inputs, depth)),
                            cast(jax.Array, model.apply(enabled, inputs, depth)))
+    streams = model.clone(surface_parity_streams=True, surface_feature_scales=(1.,) * 10)
+    stream_state = streams.init(key, inputs, depth)
+    assert sum(value.size for value in jax.tree.leaves(stream_state)) == 26068
+    for name, shapes in (
+        ("eta_feat_proj", ((8, 80), (2, 80))),
+        ("eta_feat_mix", ((80, 80), (80, 80))),
+        ("eta_context_in", ((80, 4), (80, 4))),
+        ("eta_context_expand", ((4, 80), (4, 80))),
+    ):
+        for stream, shape in zip(("even_kernel", "odd_kernel"), shapes, strict=True):
+            value = cast(jax.Array, stream_state["params"][name][stream])
+            assert value.shape == shape and value.dtype == jnp.float32
+    assert cast(jax.Array, stream_state["params"]["cs_block_0"]["phi_proj"]["kernel"]).shape == (163, 4)
+    assert jnp.array_equal(cast(jax.Array, streams.apply(stream_state, inputs, depth)),
+                           cast(jax.Array, original.apply(initialized, inputs, depth)))
+    stream_default = model.clone(surface_parity_streams=False).init(key, inputs, depth)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(enabled), jax.tree.leaves(stream_default), strict=True,
+    ))
+
+
+def test_parity_streams_features_dense_and_activation() -> None:
+    raw = jax.random.normal(jax.random.PRNGKey(74), (2, 16, 7), dtype=jnp.float64)
+    features = surface_parity_products(raw, include_odd=True)
+    assert jnp.array_equal(features[..., :8], surface_parity_products(raw))
+    assert jnp.array_equal(features[..., 8:], raw[..., jnp.asarray((3, 6))])
+    reflection = (-jnp.arange(raw.shape[1])) % raw.shape[1]
+    for even_inputs, input_width in ((8, 10), (8, 16), (4, 8)):
+        layer = ParityDense(features=16, even_inputs=even_inputs)
+        x = jax.random.normal(jax.random.PRNGKey(input_width), (2, 16, input_width), dtype=jnp.float64)
+        variables = layer.init(jax.random.PRNGKey(75), x)
+        even_kernel, odd_kernel = (
+            cast(jax.Array, variables["params"][name]) for name in ("even_kernel", "odd_kernel")
+        )
+        expected = jnp.concatenate((
+            x[..., :even_inputs] @ even_kernel, x[..., even_inputs:] @ odd_kernel,
+        ), axis=-1)
+        actual = cast(jax.Array, layer.apply(variables, x))
+        assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-14)
+        assert jnp.array_equal(actual, parity_dense(x, even_kernel, odd_kernel))
+        signs = jnp.concatenate((jnp.ones(even_inputs), -jnp.ones(input_width - even_inputs)))
+        reflected = parity_gelu(cast(jax.Array, layer.apply(variables, x[:, reflection] * signs)))
+        activated = parity_gelu(actual)
+        assert jnp.allclose(
+            reflected, activated[:, reflection] * jnp.repeat(jnp.asarray((1, -1)), 8),
+            rtol=1e-12, atol=1e-14,
+        )
+        assert jnp.allclose(
+            activated[..., :8] + activated[..., 8:],
+            nn.gelu(actual[..., :8] + actual[..., 8:]), rtol=1e-12, atol=1e-14,
+        )
+
+
+def test_parity_streams_structure_and_live_gradients() -> None:
+    eta, xi, depth = _state()
+    eta, xi = (jnp.concatenate((v, jnp.roll(v, 7, axis=-1))) for v in (eta, xi))
+    depth = jnp.concatenate((depth, jnp.log(jnp.asarray([[0.3]]))))
+    model = _model(
+        surface_parity_products=True, surface_parity_streams=True,
+        surface_feature_scales=(0.2, 0.04, 0.008, 4., 8., 0.7, 0.09, 0.6, 2., 0.3),
+        surface_context_width=8, nested_blocks=1,
+    )
+    inputs = jnp.stack((eta, xi), axis=-1)
+    initialized = model.init(jax.random.PRNGKey(76), inputs, depth)
+    variables = _activate_residual(initialized)
+    reflection = (-jnp.arange(eta.shape[-1])) % eta.shape[-1]
+    for batch_size in (1, 2):
+        output = cast(jax.Array, model.apply(variables, inputs[:batch_size], depth[:batch_size]))
+        reflected = cast(jax.Array, model.apply(
+            variables, inputs[:batch_size, reflection], depth[:batch_size],
+        ))
+        assert jnp.allclose(reflected, output[:, reflection], rtol=1e-10, atol=1e-13)
+    residual = partial(_learned_residual, model, variables, xi=xi, depth=depth)
+    actual = residual(eta)
+    assert jnp.linalg.norm(actual) > 1e-8
+    psi = jnp.roll(xi, 9, axis=-1)
+    other = _learned_residual(model, variables, eta, psi, depth)
+    mixed = _learned_residual(model, variables, eta, 0.3 * xi - 0.7 * psi, depth)
+    assert jnp.allclose(mixed, 0.3 * actual - 0.7 * other, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(psi, actual), jnp.vdot(other, xi), rtol=1e-10, atol=1e-14)
+    value, variation = jax.jvp(residual, (jnp.zeros_like(eta),), (eta,))
+    assert jnp.all(value == 0) and jnp.all(variation == 0)
+    norms = [jnp.linalg.norm(residual(scale * eta)) for scale in (1 / 32, 1 / 64, 1 / 128)]
+    assert all(abs(float(a / b) / 4 - 1) < 0.01 for a, b in zip(norms[:-1], norms[1:], strict=True))
+    gradients = jax.grad(lambda params: jnp.mean(_learned_residual(
+        model, {"params": params}, eta, xi, depth,
+    ) ** 2))(variables["params"])
+    assert all(jnp.all(jnp.isfinite(v)) and jnp.linalg.norm(v) > 0 for v in jax.tree.leaves(gradients))
+    initial_gradients = jax.grad(lambda params: jnp.mean(_learned_residual(
+        model, {"params": params}, eta, xi, depth,
+    ) * xi))(initialized["params"])
+    assert jnp.linalg.norm(initial_gradients["cs_block_0"]["phi_proj"]["kernel"][8:16]) > 0
+    assert jnp.all(initial_gradients["eta_feat_proj"]["odd_kernel"] == 0)
+
+
+def test_parity_streams_restore_filtered_odd_quadratic() -> None:
+    """A filtered Hilbert channel survives where every local product vanishes."""
+    _, xi, depth = _state()
+    x = 2 * jnp.pi * jnp.arange(xi.shape[-1]) / xi.shape[-1]
+    eta = (jnp.sin(x) - 2 * jnp.sin(2 * x) + jnp.sin(3 * x))[None]
+    model = _model(
+        surface_parity_products=True, surface_parity_streams=True,
+        surface_feature_scales=(1.,) * 10, surface_context_width=8,
+    )
+    variables = unfreeze(model.init(jax.random.PRNGKey(77), jnp.stack((eta, xi), axis=-1), depth))
+    params = variables["params"]
+    for name in ("eta_feat_proj", "eta_feat_mix", "eta_context_in", "eta_context_expand"):
+        params[name] = jax.tree.map(jnp.zeros_like, params[name])
+    params["eta_feat_proj"]["odd_kernel"] = params["eta_feat_proj"]["odd_kernel"].at[1, 0].set(1)
+    for name in ("eta_feat_mix", "eta_context_in", "eta_context_expand"):
+        params[name]["odd_kernel"] = params[name]["odd_kernel"].at[0, 0].set(1)
+    for name in ("eta_context_hidden", "eta_context_out"):
+        params[name] = jax.tree.map(jnp.zeros_like, params[name])
+    params["eta_context_hidden"]["kernel"] = params["eta_context_hidden"]["kernel"].at[0, 0].set(1)
+    params["eta_context_out"]["kernel"] = params["eta_context_out"]["kernel"].at[0, 4].set(1)
+    params["cs_block_0"]["phi_proj"]["kernel"] = params["cs_block_0"]["phi_proj"]["kernel"].at[8, 0].set(1)
+    modes = jnp.arange(1, 4, dtype=eta.dtype)
+    symbol = 0.1 * jnp.tanh(jnp.tanh(jnp.log1p(modes)))
+    filtered_at_zero = jnp.dot(jnp.asarray((-1., 2., -1.)), symbol)
+    leading = filtered_at_zero**2 / 16
+    assert leading > 1e-9
+    for scale in (1e-2, 5e-3, 2.5e-3):
+        _, captured = model.apply(
+            variables, jnp.stack((scale * eta, xi), axis=-1), depth,
+            capture_intermediates=lambda module, _: module.name == "phi_proj",
+        )
+        coefficient = cast(
+            jax.Array, captured["intermediates"]["cs_block_0"]["phi_proj"]["__call__"][0],
+        )[0, 0, 0]
+        assert jnp.allclose(coefficient / scale**2, leading, rtol=1e-7, atol=1e-16)
+    # At x=0, eta=eta_x=Heta=0, so the three local quadratic skips cannot supply this.
+    assert abs(float(jnp.fft.irfft(-1j * jnp.sign(jnp.arange(33)) * jnp.fft.rfft(eta))[0, 0])) < 1e-14
 
 
 def test_nested_branch_formula_and_gradients() -> None:
@@ -1959,6 +2094,9 @@ def main() -> int:
         test_parity_products_formula_normalization_and_head,
         test_parity_products_structure_and_direct_quadratic_skip,
         test_parity_products_hero_parameter_count_and_default_identity,
+        test_parity_streams_features_dense_and_activation,
+        test_parity_streams_structure_and_live_gradients,
+        test_parity_streams_restore_filtered_odd_quadratic,
         test_nested_branch_formula_and_gradients,
         test_nested_model_replacement_preserves_structure,
         test_nested_surface_modulation_identity_depth_and_gradient,

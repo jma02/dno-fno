@@ -35,7 +35,7 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
     PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
-    surface_parity_products,
+    parity_dense, parity_gelu, surface_parity_products,
 )
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
@@ -299,6 +299,8 @@ def build_variant(
         raise ValueError("The fused context residual requires an ungated real-context inverse.")
     if reflection_encoder and context_add:
         raise ValueError("Encoder reflection averaging does not support the fused context-add kernel.")
+    if model.surface_parity_streams and (reflection_encoder or context_fold or context_add):
+        raise ValueError("Parity streams require single-pass, unfused block-diagonal context projections.")
     if fuse_second_gelu and (not context_add or model.baseline_order != 1):
         raise ValueError("The fused second projection requires contextadd and the quadratic lift.")
     if nested_overlap and not (nested_fused and context_batch):
@@ -362,11 +364,13 @@ def build_variant(
             head_kernel = jnp.pad(cast(jax.Array, head_kernel),
                                  ((0, 0),) * (cast(jax.Array, head_kernel).ndim - 1)
                                  + ((0, model.nested_blocks * model.latent),))
-        first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]
-        if model.surface_feature_transform is not None:
-            first_projection_kernel = jnp.asarray(
-                model.surface_feature_transform, dtype=first_projection_kernel.dtype,
-            ) @ first_projection_kernel
+        first_projection_kernel = None
+        if not model.surface_parity_streams:
+            first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]
+            if model.surface_feature_transform is not None:
+                first_projection_kernel = jnp.asarray(
+                    model.surface_feature_transform, dtype=first_projection_kernel.dtype,
+                ) @ first_projection_kernel
         filters = jnp.moveaxis(jnp.concatenate(cast(tuple[jax.Array, ...], cached), axis=-1), -1, 1)
         inner_filters = gamma = nested_symbols = surface_mix = None
         if model.nested_blocks:
@@ -533,7 +537,7 @@ def build_variant(
                 ), axis=-1)
                 branch_fields = fields[:, surface_ops.shape[0]:, :]
             if model.surface_parity_products:
-                features = surface_parity_products(features)
+                features = surface_parity_products(features, include_odd=model.surface_parity_streams)
             nested_eta = eta_norm
             if model.nested_blocks:
                 nested_eta = eta_norm if model.surface_feature_scales is None else eta_norm / model.surface_feature_scales[0]
@@ -581,25 +585,33 @@ def build_variant(
                 if context_fold and name == "eta_feat_mix":
                     features = nn.gelu(features)
                     continue
-                kernel = first_projection_kernel if name == "eta_feat_proj" else loaded.params[name]["kernel"]
                 if name == "eta_feat_mix" and amplitude is not None:
                     log_amplitude = jnp.log(amplitude)[..., None]
                     if reflection_encoder:
                         log_amplitude = log_amplitude[..., None]
                     features = features * (1.0 + log_amplitude
                                            * loaded.params["eta_amplitude_gain"])
-                if fuse_second_gelu and name == "eta_feat_mix":
-                    features = dense(features, kernel, "gelu_lift",
-                                     precision=jax.lax.Precision.DEFAULT)
+                if model.surface_parity_streams:
+                    layer = loaded.params[name]
+                    features = parity_gelu(parity_dense(features, layer["even_kernel"], layer["odd_kernel"]))
                 else:
-                    features = nn.gelu(transposed_matmul(features, kernel)
-                                       if transpose_mix and name == "eta_feat_mix" else features @ kernel)
+                    kernel = (cast(jax.Array, first_projection_kernel) if name == "eta_feat_proj"
+                              else loaded.params[name]["kernel"])
+                    if fuse_second_gelu and name == "eta_feat_mix":
+                        features = dense(features, kernel, "gelu_lift",
+                                         precision=jax.lax.Precision.DEFAULT)
+                    else:
+                        features = nn.gelu(transposed_matmul(features, kernel)
+                                           if transpose_mix and name == "eta_feat_mix" else features @ kernel)
                 if reuse_first_gelu and name == "eta_feat_proj":
                     features = jax.lax.optimization_barrier(features)
                 if name == "eta_feat_proj" and context_multiplier is not None:
                     if context_fold:
                         joint = features @ cast(jax.Array, context_joint_kernel)
                         features, context = joint[..., :-model.surface_context_width], joint[..., -model.surface_context_width:]
+                    elif model.surface_parity_streams:
+                        layer = loaded.params["eta_context_in"]
+                        context = parity_dense(features, layer["even_kernel"], layer["odd_kernel"])
                     else:
                         context = (transposed_matmul(features, loaded.params["eta_context_in"]["kernel"])
                                    if transpose_context else features @ loaded.params["eta_context_in"]["kernel"])
@@ -651,6 +663,10 @@ def build_variant(
                                          residual=features, input_scale=1 / correction_nx,
                                          tile=(32, 32, 16), num_warps=2, input_transposed=True,
                                          precision=jax.lax.Precision.DEFAULT)
+                    elif model.surface_parity_streams:
+                        layer = loaded.params["eta_context_expand"]
+                        context = parity_dense(context, layer["even_kernel"], layer["odd_kernel"])
+                        features = features + context
                     else:
                         context = context @ (cast(jax.Array, context_folded_kernel) if context_fold
                                              else loaded.params["eta_context_expand"]["kernel"])
