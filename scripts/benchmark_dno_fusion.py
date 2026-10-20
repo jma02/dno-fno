@@ -35,7 +35,7 @@ from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, loa
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
     PhaseWavenumberMultiplier, phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
-    parity_dense, parity_gelu, surface_parity_products,
+    mixed_surface_lift, parity_dense, parity_gelu, surface_parity_products,
 )
 
 VARIANTS = ("original", "g1", "packed", "cached", "all", "batched", "surface", "front")
@@ -113,8 +113,10 @@ def build_variant(
     reflection_encoder = reflection_encoder or variant.endswith("_reflectionencoder")
     variant = variant.removesuffix("_reflectionencoder")
     model = loaded.model
-    if model.surface_parity_products and not (variant == "original" or variant.startswith("fourier")):
-        raise ValueError("Parity-product inference requires original or Fourier branch inference.")
+    if (model.surface_parity_products or model.surface_cubic_channels) and not (
+        variant == "original" or variant.startswith("fourier")
+    ):
+        raise ValueError("Experimental surface lifts require original or Fourier branch inference.")
     if reflection_encoder and (isinstance(model, CraigSulemTermsResidual) or not variant.startswith("fourier")):
         raise ValueError("Encoder reflection averaging requires Fourier branch inference.")
     if reflection_encoder and (model.use_learned_eta_filters or model.use_relative_elevation):
@@ -301,7 +303,7 @@ def build_variant(
         raise ValueError("Encoder reflection averaging does not support the fused context-add kernel.")
     if model.surface_parity_streams and (reflection_encoder or context_fold or context_add):
         raise ValueError("Parity streams require single-pass, unfused block-diagonal context projections.")
-    if fuse_second_gelu and (not context_add or model.baseline_order != 1):
+    if fuse_second_gelu and (not context_add or model.baseline_order != 1 or model.surface_cubic_channels):
         raise ValueError("The fused second projection requires contextadd and the quadratic lift.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
@@ -672,7 +674,9 @@ def build_variant(
                                              else loaded.params["eta_context_expand"]["kernel"])
                         features = features + context
             if not fuse_second_gelu:
-                features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
+                features = (mixed_surface_lift(features, model.surface_cubic_channels)
+                            if model.surface_cubic_channels else
+                            features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1))
             if model.surface_context_gate and context is not None:
                 features = features * (1.0 + jnp.tanh(context))
             if reflection_encoder:

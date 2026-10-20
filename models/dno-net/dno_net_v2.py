@@ -17,6 +17,13 @@ from flax import linen as nn
 from solver.solvers.dno_series_jax import dno_series_eval
 
 
+def mixed_surface_lift(features: jnp.ndarray, cubic_channels: int) -> jnp.ndarray:
+    """Give the final channels cubic onset while retaining quadratic onset elsewhere."""
+    tangent = jnp.tanh(features)
+    cubic = jnp.arange(features.shape[-1]) >= features.shape[-1] - cubic_channels
+    return features * tangent * jnp.where(cubic, tangent, 1.0)
+
+
 def surface_parity_products(
     features: jnp.ndarray, *, include_odd: bool = False,
 ) -> jnp.ndarray:
@@ -261,6 +268,7 @@ class CraigSulemDNO(nn.Module):
     surface_context_width: int = 0    # Optional narrow nonlocal surface encoder.
     surface_context_gate: bool = False  # Reuse context as a bounded multiplicative gate.
     surface_polynomial_skip: bool = False  # Direct quadratic/cubic features at the head.
+    surface_cubic_channels: int = 0  # Final hidden channels have independent cubic onset.
     surface_parity_products: bool = False  # Even dx/Hilbert products in the trunk and head.
     surface_parity_streams: bool = False  # Retain raw odd channels in a parity-separated trunk.
     surface_depth_gate: bool = False  # Condition lifted features on depth alone.
@@ -485,7 +493,8 @@ class CraigSulemDNO(nn.Module):
         if self.baseline_order == 2:
             eta_features = eta_features * jnp.tanh(eta_features) ** 2
         elif self.baseline_order != 0:
-            eta_features = eta_features * jnp.tanh(eta_features)
+            eta_features = (mixed_surface_lift(eta_features, self.surface_cubic_channels)
+                            if self.surface_cubic_channels else eta_features * jnp.tanh(eta_features))
         if self.surface_context_gate and context is not None:
             eta_features = eta_features * (1.0 + jnp.tanh(context))
         if polynomial_features is not None:

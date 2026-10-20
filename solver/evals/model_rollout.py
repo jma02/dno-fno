@@ -119,6 +119,7 @@ def load_run(
             surface_context_gate=bool(config.get("cs_surface_context_gate", False)),
             surface_depth_gate=bool(config.get("cs_surface_depth_gate", False)),
             surface_polynomial_skip=bool(config.get("cs_surface_polynomial_skip", False)),
+            surface_cubic_channels=int(config.get("cs_surface_cubic_channels", 0)),
             surface_parity_products=bool(config.get("cs_surface_parity_products", False)),
             surface_parity_streams=bool(config.get("cs_surface_parity_streams", False)),
             mult_hidden=int(config["cs_mult_hidden"]),

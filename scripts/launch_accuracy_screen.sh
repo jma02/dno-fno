@@ -2,7 +2,7 @@
 set -euo pipefail
 cd /home/johnma/dno-fno
 
-export CUDA_VISIBLE_DEVICES=GPU-c44b86bf-148d-aa7e-32ec-77d4f2f7ce71
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-GPU-c44b86bf-148d-aa7e-32ec-77d4f2f7ce71}
 export JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 export UV_CACHE_DIR=/tmp/dno-uv-cache MPLCONFIGDIR=/tmp/dno-matplotlib
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
@@ -12,13 +12,15 @@ reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s full_q_teacher|rhs_teacher|parity_products|parity_streams|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
+    printf 'Usage: %s modal_residual05|cubic32|full_q_teacher|rhs_teacher|parity_products|parity_streams|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
     export JAX_PLATFORMS=cuda
     eval_args=(--fuse-nested-fft --batch-context-fft)
     case "$arm" in
+        modal_residual05) arm_args=(--data_modal_residual_floor 0.05) ;;
+        cubic32) arm_args=(--cs_surface_cubic_channels 32) ;;
         full_q_teacher) arm_args=(--rollout_training_full_spectrum) ;;
         rhs_teacher) arm_args=(--rollout_training_full_spectrum --rollout_training_rhs) ;;
         parity_products) arm_args=(--cs_surface_parity_products) ;;

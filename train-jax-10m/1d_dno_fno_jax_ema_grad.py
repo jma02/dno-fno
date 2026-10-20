@@ -130,6 +130,8 @@ def main() -> None:
                         help="Use reflection-even derivative products and append them after the quadratic lift.")
     parser.add_argument("--cs_surface_parity_streams", action="store_true",
                         help="Retain odd derivative channels in a separate reflection-equivariant surface stream.")
+    parser.add_argument("--cs_surface_cubic_channels", type=int, default=0,
+                        help="Give this many final surface channels cubic rather than quadratic onset.")
     parser.add_argument("--cs_multiplier_skip", action="store_true",
                         help="Add a learned linear skip from normalized 1, k*tanh(kh), k squared to each multiplier.")
     parser.add_argument("--cs_log_multiplier_inputs", action="store_true",
@@ -279,6 +281,9 @@ def main() -> None:
                         help="Extra weight inside the data-error norm perpendicular to each active eta Fourier mode.")
     parser.add_argument("--residual_floor", type=float, default=1e-6,
                         help="Residual denominator floor as a fraction of the target norm.")
+    parser.add_argument("--data_modal_residual_floor", type=float, default=0.0,
+                        help="Positive fractional peak-residual floor enables within-mode data weighting, "
+                        "preserving the analytic-baseline loss scale; zero disables it.")
     parser.add_argument("--metric_interval", type=int, default=16,
                         help="Copy metrics to the host every N training or validation batches.")
     # Additional losses; a zero weight disables each one.
@@ -556,6 +561,10 @@ def main() -> None:
         parser.error("--nonlinear_weight_mean must be in [1, 2]")
     if not np.isfinite(args.residual_floor) or args.residual_floor <= 0.0:
         parser.error("--residual_floor must be finite and positive")
+    if not np.isfinite(args.data_modal_residual_floor) or args.data_modal_residual_floor < 0.0:
+        parser.error("--data_modal_residual_floor must be finite and nonnegative")
+    if args.data_modal_residual_floor and args.model != "cs_dno":
+        parser.error("--data_modal_residual_floor requires --model cs_dno")
     if args.data_k_max is not None and (not np.isfinite(args.data_k_max) or args.data_k_max <= 0.0):
         parser.error("--data_k_max must be finite and positive")
     if not np.isfinite(args.data_xi_projection_weight) or args.data_xi_projection_weight < 0.0:
@@ -584,6 +593,13 @@ def main() -> None:
                      "without nested surface features/modulation")
     if args.cs_surface_polynomial_skip and (args.model != "cs_dno" or args.cs_n_polys < 3 or args.cs_baseline_order != 1):
         parser.error("Polynomial skip requires cs_dno, at least three surface powers, and the G0+G1 baseline")
+    if not 0 <= args.cs_surface_cubic_channels <= args.width // 2:
+        parser.error("--cs_surface_cubic_channels must lie between zero and half the width")
+    if args.cs_surface_cubic_channels and (
+        args.model != "cs_dno" or args.cs_baseline_order != 1 or args.cs_terms_residual
+        or args.cs_surface_parity_streams or args.cs_surface_amplitude_normalization
+    ):
+        parser.error("Cubic surface channels require tied-filter M1 without parity streams or amplitude normalization")
     if args.cs_surface_parity_products and (
         args.model != "cs_dno" or args.cs_terms_residual or args.cs_baseline_order != 1
         or args.cs_n_polys != 3 or not args.cs_normalize_surface_features
@@ -793,6 +809,7 @@ def main() -> None:
             surface_polynomial_skip=args.cs_surface_polynomial_skip,
             surface_parity_products=args.cs_surface_parity_products,
             surface_parity_streams=args.cs_surface_parity_streams,
+            surface_cubic_channels=args.cs_surface_cubic_channels,
             multiplier_skip=args.cs_multiplier_skip,
             log_multiplier_inputs=args.cs_log_multiplier_inputs,
             nested_blocks=args.cs_nested_blocks,
@@ -1065,6 +1082,34 @@ def main() -> None:
             data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
                 data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
             )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
+        if args.data_modal_residual_floor > 0.0:
+            modal_mask = data_mask & (k_rfft_jax > 0.0)[None, :, None]
+            modal_residual = (target_hat.astype(jnp.complex128)
+                              - baseline_hat.astype(jnp.complex128))
+            modal_power = jnp.where(modal_mask, jnp.abs(modal_residual) ** 2, 0.0)
+            modal_floor = (args.data_modal_residual_floor**2 * jnp.max(modal_power, axis=(1, 2))
+                           + (args.residual_floor * data_target_norm) ** 2)
+            inverse_scale = jax.lax.rsqrt(modal_power + modal_floor[:, None, None])
+            residual_power = jnp.sum(modal_power, axis=(1, 2))
+            scaled_power = jnp.sum(inverse_scale * modal_power, axis=(1, 2))
+            modal_weight = jnp.where(
+                modal_mask & (residual_power > 0.0)[:, None, None],
+                inverse_scale * (
+                    residual_power / jnp.where(residual_power > 0.0, scaled_power, 1.0)
+                )[:, None, None],
+                1.0,
+            )
+            # Keep DC and the target denominator unchanged; weights are label-only.
+            data_squared_error = jnp.sum(jnp.where(
+                data_mask,
+                jax.lax.stop_gradient(modal_weight) * jnp.abs(error_hat.astype(jnp.complex128)) ** 2,
+                0.0,
+            ), axis=(1, 2))
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(
+                data_zero_error, 0.0,
+                jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)),
+            )
         if args.data_phase_projection_weight > 0.0:
             eta_hat = jnp.fft.rfft(eta, axis=1).astype(jnp.complex128)
             phase_band = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask

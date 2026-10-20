@@ -26,7 +26,7 @@ from flax.typing import FrozenVariableDict
 
 from dno_net_v2 import (
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
-    ParityDense, PhaseWavenumberMultiplier, parity_dense, parity_gelu,
+    ParityDense, PhaseWavenumberMultiplier, mixed_surface_lift, parity_dense, parity_gelu,
     phase_rank_one_hat, phase_wavenumber_hat, surface_amplitude,
     surface_parity_products,
 )
@@ -54,6 +54,7 @@ def _model(
     surface_context_width: int = 0,
     surface_context_gate: bool = False,
     surface_polynomial_skip: bool = False,
+    surface_cubic_channels: int = 0,
     surface_parity_products: bool = False,
     surface_parity_streams: bool = False,
     surface_depth_gate: bool = False,
@@ -79,6 +80,7 @@ def _model(
         surface_context_width=surface_context_width,
         surface_context_gate=surface_context_gate,
         surface_polynomial_skip=surface_polynomial_skip,
+        surface_cubic_channels=surface_cubic_channels,
         surface_parity_products=surface_parity_products,
         surface_parity_streams=surface_parity_streams,
         surface_depth_gate=surface_depth_gate,
@@ -164,6 +166,78 @@ def test_default_matches_original_forward() -> None:
     expected += residual / (model.n_blocks * model.latent) ** 0.5
     actual = cast(jax.Array, model.apply(variables, inputs, depth))[..., 0]
     assert jnp.array_equal(actual, expected)
+
+
+def test_mixed_surface_lift_structure_and_orders() -> None:
+    eta, xi, depth = _state()
+    model = _model(surface_cubic_channels=4, surface_context_width=8, nested_blocks=1)
+    inputs = jnp.stack((eta, xi), axis=-1)
+    initial = model.init(jax.random.PRNGKey(83), inputs, depth)
+    control = model.clone(surface_cubic_channels=0)
+    original = control.init(jax.random.PRNGKey(83), inputs, depth)
+    assert jax.tree.structure(initial) == jax.tree.structure(original)
+    assert all(jnp.array_equal(a, b) for a, b in zip(
+        jax.tree.leaves(initial), jax.tree.leaves(original), strict=True,
+    ))
+    assert jnp.array_equal(cast(jax.Array, model.apply(initial, inputs, depth)),
+                           cast(jax.Array, control.apply(original, inputs, depth)))
+    features = jnp.linspace(-1.0, 1.0, 48).reshape(1, 3, 16)
+    lifted = mixed_surface_lift(features, 4)
+    assert jnp.array_equal(lifted[..., :12], features[..., :12] * jnp.tanh(features[..., :12]))
+    assert jnp.allclose(lifted[..., 12:], features[..., 12:] * jnp.tanh(features[..., 12:])**2,
+                        rtol=2e-16, atol=1e-17)
+    variables = jax.tree.map(lambda a: a.astype(jnp.float64), _activate_residual(initial))
+    q = _learned_residual(model, variables, eta, xi, depth)
+    other_xi = jnp.roll(xi, 7, axis=-1)
+    other_q = _learned_residual(model, variables, eta, other_xi, depth)
+    assert jnp.allclose(_learned_residual(model, variables, eta, .3*xi-.7*other_xi, depth),
+                        .3*q-.7*other_q, rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(jnp.vdot(other_xi, q), jnp.vdot(xi, other_q), rtol=1e-10, atol=1e-14)
+    assert jnp.allclose(_learned_residual(
+        model, variables, jnp.roll(eta, 9, axis=-1), jnp.roll(xi, 9, axis=-1), depth,
+    ), jnp.roll(q, 9, axis=-1), rtol=1e-10, atol=1e-14)
+    zero, derivative = jax.jvp(
+        lambda e: _learned_residual(model, variables, e, xi, depth), (jnp.zeros_like(eta),), (eta,),
+    )
+    assert jnp.all(zero == 0) and jnp.all(derivative == 0)
+    for cubic, expected in ((False, 4), (True, 8)):
+        isolated = unfreeze(variables)
+        isolated["params"]["cs_block_1"]["gamma"] = jnp.zeros_like(
+            isolated["params"]["cs_block_1"]["gamma"],
+        )
+        kernel = isolated["params"]["cs_block_0"]["phi_proj"]["kernel"]
+        mask = jnp.arange(16) >= 12
+        isolated["params"]["cs_block_0"]["phi_proj"]["kernel"] = kernel * (
+            mask if cubic else ~mask
+        )[:, None]
+        norms = [jnp.linalg.norm(_learned_residual(model, isolated, scale*eta, xi, depth))
+                 for scale in (1/256, 1/512, 1/1024)]
+        assert all(abs(float(a/b)/expected-1) < .01
+                   for a, b in zip(norms[:-1], norms[1:], strict=True))
+
+
+def test_mixed_surface_lift_fourier_inference() -> None:
+    from scripts import benchmark_dno_fusion as fusion
+    from solver.evals.model_rollout import LoadedRun
+
+    eta, xi, _ = _state()
+    eta = jnp.concatenate((eta, jnp.roll(eta, 7, axis=-1))).astype(jnp.float32)
+    xi = jnp.concatenate((xi, .7*jnp.roll(xi, 3, axis=-1))).astype(jnp.float32)
+    depth = jnp.log(jnp.asarray([[.8], [.04]], dtype=jnp.float32))
+    model = _model(surface_cubic_channels=4, surface_context_width=8, nested_blocks=1,
+                   surface_feature_scales=(.3, .1, .04, .7, 2., .5, .3))
+    variables = _activate_residual(model.init(jax.random.PRNGKey(84), jnp.stack((eta, xi), axis=-1), depth))
+    loaded = LoadedRun(model, unfreeze(variables)["params"], {},
+                       {"feature_absmax": [1., 1.], "target_absmax": 1.}, "scale", 0)
+    with patch.object(fusion, "sandwich", lambda surface, potential, symbols, **_: (
+        symbols * jnp.fft.rfft(surface[:, None, :] * jnp.fft.irfft(symbols * potential[:, None, :], n=64))
+    )):
+        for batch in (1, 2):
+            predict = fusion.build_variant(loaded, depth[:batch], 64, "fourier_round", return_components=True)
+            correction_hat = predict(jnp.fft.rfft(eta[:batch]), jnp.fft.rfft(xi[:batch]))[1]
+            native_hat = jnp.fft.rfft(_learned_residual(model, variables, eta[:batch], xi[:batch], depth[:batch]))
+            native_hat = native_hat.at[..., 0].set(0)
+            assert float(jnp.linalg.norm(correction_hat-native_hat)/jnp.linalg.norm(native_hat)) < 3e-6
 
 
 def test_reflection_encoder_matches_full_prediction_average() -> None:
@@ -2066,6 +2140,8 @@ def test_surface_amplitude_structure_and_derivatives() -> None:
 def main() -> int:
     tests: tuple[Callable[[], None], ...] = (
         test_default_matches_original_forward,
+        test_mixed_surface_lift_structure_and_orders,
+        test_mixed_surface_lift_fourier_inference,
         test_reflection_encoder_matches_full_prediction_average,
         test_order_two_has_zero_value_and_first_variation,
         test_order_two_is_quadratic_near_zero,

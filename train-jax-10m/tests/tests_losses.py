@@ -48,11 +48,12 @@ TrainerLoss = Callable[
 
 def trainer_loss(
     config: SimpleNamespace, domain_length: float = 2 * np.pi,
-    *, full_spectrum_rows: jax.Array | None = None,
+    *, full_spectrum_rows: jax.Array | None = None, capture_modal_weights: bool = False,
 ) -> TrainerLoss:
     # Exercise the trainer's inline arithmetic, not a second implementation.
     config.data_xi_projection_weight = 0.0
     config.data_phase_projection_weight = 0.0
+    config.data_modal_residual_floor = getattr(config, "data_modal_residual_floor", 0.0)
     config.subtract_before_fft = getattr(config, "subtract_before_fft", False)
     config.fp64_residual = False
     config.rollout_training_rhs = getattr(config, "rollout_training_rhs", False)
@@ -71,7 +72,10 @@ def trainer_loss(
     function.body = ast.parse(
         "k_rfft_jax = (2 * jnp.pi / domain_length) * jnp.arange(predictions.shape[1] // 2 + 1)"
     ).body + component.body[assignments["pred_hat"]:assignments["h_phys"]]
-    function.body += ast.parse("return data_loss, (full_l2_loss, family_metrics)").body
+    function.body += ast.parse(
+        "return data_loss, (full_l2_loss, (modal_weight,))" if capture_modal_weights
+        else "return data_loss, (full_l2_loss, family_metrics)"
+    ).body
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "args": config, "target_residual64": None,
         "full_spectrum_rows": full_spectrum_rows,
@@ -335,6 +339,130 @@ def test_subtract_before_fft_changes_only_residual_arithmetic() -> None:
             assert float(jnp.linalg.norm(before - reference)) < 0.01 * float(jnp.linalg.norm(after - reference))
 
 
+def test_modal_residual_preserves_baseline_start_dc_masks_and_ordinary_metrics() -> None:
+    nx = 64
+    x = np.arange(nx) * (2 * np.pi / nx)
+    family = jnp.arange(1, 5)
+    for dtype, cutoff, full_rows in product(
+        (jnp.float32, jnp.float64), (None, 8.0), (None, jnp.array([True, False, True, False])),
+    ):
+        config = SimpleNamespace(model="cs_dno", data_normalization="target",
+                                 data_k_max=cutoff, residual_floor=1e-6, data_modal_residual_floor=0.0)
+        ordinary = trainer_loss(config, full_spectrum_rows=full_rows)
+        weighted = trainer_loss(SimpleNamespace(**{**vars(config), "data_modal_residual_floor": 0.05}),
+                                full_spectrum_rows=full_rows)
+        target = jnp.asarray(np.arange(1, 5)[:, None, None]
+                             * (1.0 + np.sin(x) + 0.4 * np.cos(20 * x))[None, :, None], dtype)
+        baseline = target - jnp.asarray(0.2 + 0.07 * np.cos(3 * x) + 0.3 * np.sin(18 * x), dtype)[None, :, None]
+        original = ordinary(baseline, target, baseline, baseline, family)
+        actual = weighted(baseline, target, baseline, baseline, family)
+        # Normalizing modal weights preserves the initial scalar objective, including DC.
+        np.testing.assert_allclose(actual[0], original[0], rtol=3e-7, atol=1e-15)
+        np.testing.assert_array_equal(actual[1][0], original[1][0])
+        np.testing.assert_array_equal(np.asarray(actual[1][1]).reshape(4, 5)[:, :4],
+                                      np.asarray(original[1][1]).reshape(4, 5)[:, :4])
+        pred_hat, target_hat = (jnp.fft.rfft(v, axis=1) for v in (baseline, target))
+        mask = jnp.ones((4, nx // 2 + 1, 1), bool)
+        if cutoff is not None:
+            mask = mask & (jnp.arange(nx // 2 + 1) <= cutoff)[None, :, None]
+        if full_rows is not None:
+            mask = mask | full_rows[:, None, None]
+        expected = jnp.mean(jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
+            mask, (pred_hat - target_hat).astype(jnp.complex128), 0.0,
+        )) ** 2, axis=(1, 2))) / jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
+            mask, target_hat.astype(jnp.complex128), 0.0,
+        )) ** 2, axis=(1, 2))))
+        np.testing.assert_array_equal(original[0], expected)
+        # A DC-only discrepancy is not reweighted even when the label residual is nonzero.
+        dc_prediction = target + jnp.asarray(0.125, dtype)
+        np.testing.assert_allclose(weighted(dc_prediction, target, baseline, baseline, family)[0],
+                                   ordinary(dc_prediction, target, baseline, baseline, family)[0], rtol=3e-7)
+
+
+def test_modal_residual_weights_gradients_and_symmetries() -> None:
+    nx, size, alpha = 64, 3, 0.05
+    x = np.arange(nx) * (2 * np.pi / nx)
+    config = SimpleNamespace(model="cs_dno", data_normalization="target", data_k_max=12.0,
+                             residual_floor=1e-6, data_modal_residual_floor=alpha)
+    losses = trainer_loss(config, capture_modal_weights=True)
+    target = jnp.asarray(np.arange(1, size + 1)[:, None, None]
+                         * (0.3 + np.sin(x) + 0.2 * np.cos(19 * x))[None, :, None])
+    baseline = target - (0.2 + 0.08 * jnp.cos(2 * x) + 0.001 * jnp.sin(7 * x))[None, :, None]
+    prediction = target + (0.03 + 0.02 * jnp.sin(3 * x) + 0.01 * jnp.cos(20 * x))[None, :, None]
+    family = jnp.arange(1, size + 1)
+    (value, (_, (weight,))), gradients = jax.jit(jax.value_and_grad(
+        losses, argnums=(0, 1, 2, 3), has_aux=True,
+    ))(prediction, target, baseline, baseline, family)
+    q_hat, b_hat, error = (
+        np.fft.rfft(np.asarray(v), axis=1) for v in (target, baseline, prediction - target)
+    )
+    mask = (np.arange(nx // 2 + 1) <= config.data_k_max)[None, :, None]
+    modal_mask = mask & (np.arange(nx // 2 + 1) > 0)[None, :, None]
+    q_norm = np.sqrt(np.sum(np.where(mask, np.abs(q_hat)**2, 0), axis=(1, 2)))
+    power = np.where(modal_mask, np.abs(q_hat - b_hat)**2, 0)
+    inverse = 1 / np.sqrt(power + (
+        alpha**2 * np.max(power, axis=(1, 2)) + (config.residual_floor * q_norm)**2
+    )[:, None, None])
+    expected_weights = np.where(modal_mask, inverse * (
+        np.sum(power, axis=(1, 2)) / np.sum(inverse * power, axis=(1, 2))
+    )[:, None, None], 1.0)
+    np.testing.assert_allclose(weight, expected_weights, rtol=1e-13, atol=1e-13)
+    active = np.asarray(weight)[:, 1:13]
+    assert np.all(np.max(active, axis=1) / np.min(active, axis=1) <= np.sqrt(1 + alpha**2) / alpha)
+    np.testing.assert_array_equal(np.asarray(weight)[:, [0, *range(13, nx // 2 + 1)]], 1)
+    weighted_norm = np.sqrt(np.sum(np.where(mask, expected_weights * np.abs(error)**2, 0), axis=(1, 2)))
+    np.testing.assert_allclose(value, np.mean(weighted_norm / q_norm), rtol=1e-13)
+    # Analytic real-input gradient of the one-sided Fourier norm (no autodiff reference).
+    half_weights = np.full(nx // 2 + 1, 0.5)
+    half_weights[[0, -1]] = 1.0
+    expected_gradient = nx * np.fft.irfft(np.where(
+        mask, expected_weights * error * half_weights[None, :, None], 0,
+    ), n=nx, axis=1) / (size * q_norm * weighted_norm)[:, None, None]
+    np.testing.assert_allclose(gradients[0], expected_gradient, rtol=2e-12, atol=1e-14)
+    np.testing.assert_array_equal(gradients[1], -gradients[0])
+    for gradient in gradients[2:]:
+        np.testing.assert_array_equal(gradient, 0)
+    for scale, shift in ((0.1, 0), (-3.0, 0), (1.0, 7)):
+        transformed = [scale * jnp.roll(v, shift, axis=1) for v in (prediction, target, baseline, baseline)]
+        (changed, (_, (changed_weights,))), changed_gradient = jax.value_and_grad(
+            losses, has_aux=True,
+        )(*transformed, family)
+        np.testing.assert_allclose(changed, value, rtol=2e-13)
+        np.testing.assert_allclose(changed_weights, weight, rtol=2e-13, atol=1e-13)
+        np.testing.assert_allclose(changed_gradient, jnp.roll(gradients[0], shift, axis=1) / scale,
+                                   rtol=3e-12, atol=1e-13)
+
+
+def test_modal_residual_exact_fit_zero_residual_and_nonfinite_inputs() -> None:
+    config = SimpleNamespace(model="cs_dno", data_normalization="target", data_k_max=12.0,
+                             residual_floor=1e-6, data_modal_residual_floor=0.05)
+    losses = trainer_loss(config, capture_modal_weights=True)
+    ordinary = trainer_loss(SimpleNamespace(**{**vars(config), "data_modal_residual_floor": 0.0}))
+    family = jnp.array([1, 2, 3])
+    evaluate = jax.jit(jax.value_and_grad(losses, argnums=(0, 1, 2, 3), has_aux=True))
+    for dtype in (jnp.float32, jnp.float64):
+        x = jnp.arange(64, dtype=dtype) * (2 * jnp.pi / 64)
+        target = jnp.stack((jnp.sin(x), jnp.cos(3 * x), jnp.zeros_like(x)))[..., None]
+        baseline = target.at[0].multiply(0.8)
+        (zero, _), gradients = evaluate(target, target, baseline, baseline, family)
+        np.testing.assert_array_equal(zero, 0)
+        for gradient in gradients:
+            np.testing.assert_array_equal(gradient, 0)
+        prediction = target.at[1, :, 0].add(0.03 * jnp.cos(5 * x))
+        (actual, (_, (weights,))), gradients = evaluate(prediction, target, target, target, family)
+        expected = jax.value_and_grad(ordinary, has_aux=True)(prediction, target, target, target, family)
+        np.testing.assert_array_equal(actual, expected[0][0])
+        np.testing.assert_array_equal(weights, 1)
+        np.testing.assert_allclose(gradients[0], expected[1], rtol=2e-6, atol=1e-10)
+        for gradient in gradients:
+            assert np.all(np.isfinite(gradient))
+        np.testing.assert_array_equal(gradients[0][jnp.array([0, 2])], 0)
+        for invalid in (jnp.nan, jnp.inf):
+            bad = target.at[0, 3, 0].set(invalid)
+            assert not np.isfinite(losses(bad, target, baseline, baseline, family)[0])
+            assert not np.isfinite(losses(prediction, bad, baseline, baseline, family)[0])
+
+
 def test_generated_full_spectrum_rows_preserve_fallback_losses_and_gradients() -> None:
     nx, size = 512, 4
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -402,7 +530,7 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
                          baseline_true_depth=True)
     config = SimpleNamespace(
         model="cs_dno", data_normalization="target", data_k_max=16.0, residual_floor=1e-6,
-        data_xi_projection_weight=0.0, data_phase_projection_weight=0.0,
+        data_xi_projection_weight=0.0, data_phase_projection_weight=0.0, data_modal_residual_floor=0.0,
         mode_balanced_weight=6.0, mode_balanced_k_max=16.0,
         mode_balanced_activity_threshold=1e-4, mode_balanced_denominator_eps=1e-6,
         translation_tangent_weight=0.0, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
@@ -505,6 +633,7 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
         mode_balanced_weight=0.0, translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
+        data_modal_residual_floor=0.0,
     )
     nx = 1024
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -617,7 +746,7 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
 def test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmetries() -> None:
     config = SimpleNamespace(
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0,
-        data_phase_projection_weight=0.0, mode_balanced_weight=0.0,
+        data_phase_projection_weight=0.0, data_modal_residual_floor=0.0, mode_balanced_weight=0.0,
         translation_tangent_weight=0.0, phase_mechanism="none", subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False,
     )
@@ -1001,6 +1130,7 @@ def test_tangent_geometry_wiring_and_uneven_shard_reduction() -> None:
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
+        data_modal_residual_floor=0.0,
     )
 
     def apply_model(
@@ -1244,6 +1374,7 @@ def test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(basel
         model="cs_dno", cs_terms_residual=True, fp64_residual=False,
         data_k_max=128, data_normalization="target", residual_floor=1e-6,
         data_xi_projection_weight=0.0, data_phase_projection_weight=0.0, subtract_before_fft=False,
+        data_modal_residual_floor=0.0,
         mode_balanced_weight=6.0, mode_balanced_k_max=128,
         mode_balanced_activity_threshold=1e-6, mode_balanced_denominator_eps=1e-12,
         jonswap_mode_balanced_scale=1.0, translation_tangent_weight=10.0,
@@ -1730,9 +1861,38 @@ def test_packed_parity_streams_match_native_values_and_gradients() -> None:
     check_packed_nested_branches(phase_wavenumber_hidden=0, surface_parity_streams=True)
 
 
+def test_mixed_surface_lift_options_values_and_gradients() -> None:
+    main = trainer_function("main")
+    option = next(node for node in main.body if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--cs_surface_cubic_channels")
+    validations: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.If)
+                                  and "args.cs_surface_cubic_channels" in ast.unparse(node.test)]
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "mixed_lift_option", "exec"), namespace)
+    assert parser.parse_args([]).cs_surface_cubic_channels == 0
+    assert parser.parse_args(["--cs_surface_cubic_channels", "32"]).cs_surface_cubic_channels == 32
+    code = compile(ast.Module(body=validations, type_ignores=[]), "mixed_lift_validation", "exec")
+    valid = dict(cs_surface_cubic_channels=2, width=8, model="cs_dno", cs_baseline_order=1,
+                 cs_terms_residual=False, cs_surface_parity_streams=False, cs_surface_amplitude_normalization=False)
+    for channels in (0, 2, 4):
+        namespace["args"] = SimpleNamespace(**(valid | {"cs_surface_cubic_channels": channels}))
+        exec(code, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for field, value in (("cs_surface_cubic_channels", -1), ("cs_surface_cubic_channels", 5),
+                             ("model", "fno"), ("cs_baseline_order", 2), ("cs_terms_residual", True),
+                             ("cs_surface_parity_streams", True), ("cs_surface_amplitude_normalization", True)):
+            namespace["args"] = SimpleNamespace(**(valid | {field: value}))
+            with np.testing.assert_raises(ValueError):
+                exec(code, namespace)
+    check_packed_nested_branches(phase_wavenumber_hidden=0, surface_cubic_channels=2)
+
+
 def check_packed_nested_branches(
     phase_wavenumber_hidden: int, surface_amplitude_reference: float = 0.0,
-    surface_parity_streams: bool = False,
+    surface_parity_streams: bool = False, surface_cubic_channels: int = 0,
 ) -> None:
     validation = next(node for node in trainer_function("main").body if isinstance(node, ast.If)
                       and ast.unparse(node.test).startswith("args.cs_nested_surface_features"))
@@ -1774,7 +1934,7 @@ def check_packed_nested_branches(
     precision_cases = [(*case, False) for case in precision_cases]
     precision_cases += [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, True)
                        for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
-    if phase_wavenumber_hidden or surface_amplitude_reference or surface_parity_streams:
+    if phase_wavenumber_hidden or surface_amplitude_reference or surface_parity_streams or surface_cubic_channels:
         precision_cases = [(nested, False, False, False, False, False, 2, 0.0, dtype, False, False, False)
                            for dtype, nested in product((jnp.float32, jnp.float64), (0, 1))]
     for (nested_blocks, polynomial_skip, multiplier_skip, log_multiplier_inputs,
@@ -1797,6 +1957,7 @@ def check_packed_nested_branches(
             surface_amplitude_reference=surface_amplitude_reference,
             surface_parity_products=surface_parity_streams,
             surface_parity_streams=surface_parity_streams,
+            surface_cubic_channels=surface_cubic_channels,
             domain_length=5 * np.pi if phase_rank_one or phase_wavenumber_hidden else 2 * np.pi,
             eta_scale=0.13, xi_scale=0.08, target_scale=0.12,
         )
@@ -1900,6 +2061,10 @@ def check_packed_nested_branches(
             for name in ("eta_feat_proj", "eta_feat_mix", "eta_context_in", "eta_context_expand"):
                 for parity in ("even_kernel", "odd_kernel"):
                     assert float(jnp.linalg.norm(actual_grad[0][name][parity])) > 0
+        if surface_cubic_channels:
+            for columns in (slice(None, -surface_cubic_channels), slice(-surface_cubic_channels, None)):
+                assert float(jnp.linalg.norm(actual_grad[0]["eta_feat_mix"]["kernel"][:, columns])) > 0
+                assert float(jnp.linalg.norm(actual_grad[0]["cs_block_0"]["phi_proj"]["kernel"][columns])) > 0
         for index in range(2 - nested_blocks, 2):
             group_grad = actual_grad[0][f"cs_block_{index}"]
             for part in ("gamma", "m_inner", "m_shared"):
@@ -1941,6 +2106,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         rollout_training_loss="full", rollout_training_full_spectrum=False, rollout_training_rhs=False,
         amplitude_probe_scale=0.0, subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
+        data_modal_residual_floor=0.0,
     )
 
     def apply_model(
@@ -2470,7 +2636,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, phase_mechanism="none", jonswap_mode_balanced_scale=1.0,
         subtract_before_fft=False, fp64_residual=False, subtract_before_centering=False,
-        data_phase_projection_weight=0.0,
+        data_phase_projection_weight=0.0, data_modal_residual_floor=0.0,
     )
     nx = 64
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -2667,6 +2833,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
         phase_mechanism_ramp_epochs=0.0,
         jonswap_mode_balanced_scale=1.0, subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
+        data_modal_residual_floor=0.0,
     )
     nx = 32
     x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
@@ -3201,6 +3368,9 @@ if __name__ == "__main__":
     test_nonlinear_denominator_prioritizes_larger_corrections()
     test_target_normalization_matches_unweighted_relative_l2()
     test_subtract_before_fft_changes_only_residual_arithmetic()
+    test_modal_residual_preserves_baseline_start_dc_masks_and_ordinary_metrics()
+    test_modal_residual_weights_gradients_and_symmetries()
+    test_modal_residual_exact_fit_zero_residual_and_nonfinite_inputs()
     test_generated_full_spectrum_rows_preserve_fallback_losses_and_gradients()
     test_fp64_residual_uses_direct_correction_and_preserves_loss_scales()
     test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics()
@@ -3227,6 +3397,7 @@ if __name__ == "__main__":
     test_packed_wavenumber_phase_matches_native_values_and_gradients()
     test_packed_surface_amplitude_matches_native_values_and_gradients()
     test_packed_parity_streams_match_native_values_and_gradients()
+    test_mixed_surface_lift_options_values_and_gradients()
     test_all_momentum_ignores_family_labels_and_supervises_generated_rows()
     test_datum_shift_geometry_clean_rows_rng_and_validation()
     test_reflection_pairs_labels_preserves_rng_and_commutes_with_m6()
