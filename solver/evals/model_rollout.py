@@ -32,6 +32,7 @@ from solver.solvers.dno_series_jax import myfft, myifft  # noqa: E402
 
 Predictor = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 BatchedPredictor = Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]
+StageRecords = tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
 GL2_ITERATIONS = 4
 
 
@@ -251,8 +252,9 @@ def rollout_surrogate(
     predict_gxi: Predictor,
     *,
     substeps: int = 8,
+    return_stages: bool = False,
 ) -> dict[str, jnp.ndarray]:
-    """Integrate a surrogate DNO action with float64 state and hard-filtered GL2."""
+    """Integrate FP64 GL2; optional stage records retain unprojected physical states."""
     state = ti.State(
         eta=jnp.asarray(initial.eta, dtype=jnp.float64),
         xi=jnp.asarray(initial.xi, dtype=jnp.float64),
@@ -261,46 +263,72 @@ def rollout_surrogate(
     state = ti.project_zero_mean_xi(state)
     initial_gxi = predict_gxi(state.eta, state.xi)
     if times.shape[0] == 1:
-        return {
+        result = {
             "times": times,
             "eta": state.eta[None, :],
             "xi": state.xi[None, :],
             "gxi": initial_gxi[None, :],
         }
+        if return_stages:
+            result.update(
+                stage_eta=jnp.empty((0, 2) + state.eta.shape, dtype=state.eta.dtype),
+                stage_xi=jnp.empty((0, 2) + state.xi.shape, dtype=state.xi.dtype),
+                stage_times=jnp.empty((0, 2), dtype=times.dtype),
+                stage_weights=jnp.empty((0, 2), dtype=times.dtype),
+            )
+        return result
 
     rhs = partial(_rhs_nonlinear_if_surrogate, predict_gxi=predict_gxi)
 
     def step_fn(
         carry: ti.State,
         data: tuple[jnp.ndarray, jnp.ndarray],
-    ) -> tuple[ti.State, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+    ) -> tuple[ti.State, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, StageRecords | None]]:
         current_time, interval = data
         substep_dt = interval / substeps
 
-        def body_fn(substep: int, substate: ti.State) -> ti.State:
-            next_state = ti.gauss_legendre_2_if_step(
+        def body_fn(substep: int | jax.Array, substate: ti.State) -> tuple[ti.State, StageRecords | None]:
+            stepped = ti.gauss_legendre_2_if_step(
                 substate,
                 current_time + substep_dt * substep,
                 substep_dt,
                 params,
                 iterations=GL2_ITERATIONS,
                 rhs=rhs,
+                return_stages=return_stages,
             )
-            return ti.project_zero_mean_xi(next_state)
+            if isinstance(stepped, ti.GL2StageResult):
+                return ti.project_zero_mean_xi(stepped.state), (
+                    stepped.stages.eta, stepped.stages.xi, stepped.times, stepped.weights,
+                )
+            return ti.project_zero_mean_xi(stepped), None
 
-        next_state = jax.lax.fori_loop(0, substeps, body_fn, carry)
+        stage_records = None
+        if return_stages:
+            next_state, stage_records = jax.lax.scan(
+                lambda substate, substep: body_fn(substep, substate), carry, jnp.arange(substeps),
+            )
+        else:
+            next_state = jax.lax.fori_loop(0, substeps, lambda index, value: body_fn(index, value)[0], carry)
         saved_gxi = predict_gxi(next_state.eta, next_state.xi)
-        return next_state, (next_state.eta, next_state.xi, saved_gxi)
+        return next_state, (next_state.eta, next_state.xi, saved_gxi, stage_records)
 
     intervals = times[1:] - times[:-1]
-    _, (saved_eta, saved_xi, saved_gxi) = jax.lax.scan(
+    _, (saved_eta, saved_xi, saved_gxi, stage_records) = jax.lax.scan(
         step_fn,
         state,
         (times[:-1], intervals),
     )
-    return {
+    result = {
         "times": times,
         "eta": jnp.concatenate((state.eta[None, :], saved_eta), axis=0),
         "xi": jnp.concatenate((state.xi[None, :], saved_xi), axis=0),
         "gxi": jnp.concatenate((initial_gxi[None, :], saved_gxi), axis=0),
     }
+    if stage_records is not None:
+        n_steps = (times.shape[0] - 1) * substeps
+        result.update({
+            key: values.reshape((n_steps,) + values.shape[2:])
+            for key, values in zip(("stage_eta", "stage_xi", "stage_times", "stage_weights"), stage_records)
+        })
+    return result

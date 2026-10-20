@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
-from solver.evals.model_rollout import rollout_surrogate
+from solver.evals.model_rollout import _rhs_nonlinear_if_surrogate, rollout_surrogate
+from solver.solvers import time_integrator as ti
 from solver.solvers.dno_series_jax import dno_series_eval
 from solver.solvers.time_integrator import (
     SpectralState,
@@ -135,6 +137,92 @@ class GaussLegendreTelemetryTest(unittest.TestCase):
             eta=0.03 * jnp.cos(self.x),
             xi=0.02 * jnp.sin(self.x),
         )
+
+    def test_final_stage_capture_preserves_step_and_unfiltered_physical_inputs(self) -> None:
+        nx = 32
+        x = jnp.arange(nx) * (2 * jnp.pi / nx)
+        state = State(
+            jnp.stack((0.12 * jnp.cos(2*x) + 0.02 * jnp.sin(7*x), 0.09 * jnp.sin(3*x))),
+            jnp.stack((0.15 * jnp.sin(2*x), 0.13 * jnp.cos(3*x) + 0.01 * jnp.cos(9*x))),
+        )
+        params = make_solver_params(nx, 2 * math.pi, jnp.array([[0.6], [1.7]]), filter_fraction=0.25)
+        t, dt = 0.37, 0.2
+
+        def predict(eta: jax.Array, xi: jax.Array) -> jax.Array:
+            return ti.linear_dno_action(xi, params.g0) + 4 * eta * xi
+
+        def rhs(stage: SpectralState, time: float | jax.Array, settings: ti.SolverParams) -> SpectralState:
+            return _rhs_nonlinear_if_surrogate(stage, time, settings, predict)
+
+        ordinary = jax.jit(lambda value: gauss_legendre_2_if_step(value, t, dt, params, rhs=rhs))(state)
+        captured = jax.jit(lambda value: gauss_legendre_2_if_step(
+            value, t, dt, params, rhs=rhs, return_stages=True,
+        ))(state)
+        for actual, expected in zip(captured.state, ordinary):
+            np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_allclose(captured.times, t + dt * (0.5 + np.array([-1, 1])*np.sqrt(3)/6), atol=0, rtol=1e-15)
+        np.testing.assert_array_equal(captured.weights, [dt/2, dt/2])
+        final_rhs = tuple(
+            rhs(ti.apply_linear_flow_hat(ti._state_to_hat(State(eta, xi), nx), -time, params), time, params)
+            for eta, xi, time in zip(captured.stages.eta, captured.stages.xi, captured.times)
+        )
+        reconstructed = ti._finish_gauss_legendre_2_step(
+            ti.apply_linear_flow_hat(ti._state_to_hat(state, nx), -t, params), *final_rhs,
+            t=t, dt=dt, params=params,
+        )
+        for actual, expected in zip(reconstructed, ordinary):
+            np.testing.assert_allclose(actual, expected, atol=3e-15, rtol=3e-14)
+        # The true stages still contain the initial high modes; only the endpoint is filtered.
+        self.assertGreater(float(jnp.linalg.norm(jnp.fft.rfft(captured.stages.eta)[..., 5:])), 0.1)
+        self.assertLess(float(jnp.linalg.norm(jnp.fft.rfft(captured.state.eta)[..., 5:])), 1e-13)
+
+    def test_surrogate_stage_records_cover_each_actual_substep(self) -> None:
+        initial = State(jnp.stack((self.mild.eta, 0.8*self.mild.eta)),
+                        jnp.stack((self.mild.xi + 0.07, 1.1*self.mild.xi - 0.04)))
+        times = jnp.array([0.11, 0.18, 0.30])
+        params = self.params._replace(filter_fraction=0.5)
+
+        def predict(eta: jax.Array, xi: jax.Array) -> jax.Array:
+            return ti.linear_dno_action(xi, params.g0) + 4 * eta * xi
+
+        for substeps in (1, 3):
+            ordinary = jax.jit(lambda state: rollout_surrogate(
+                state, times, params, predict, substeps=substeps,
+            ))(initial)
+            captured = jax.jit(lambda state: rollout_surrogate(
+                state, times, params, predict, substeps=substeps, return_stages=True,
+            ))(initial)
+            for key in ordinary:
+                np.testing.assert_array_equal(captured[key], ordinary[key])
+            self.assertEqual(captured['stage_eta'].shape, (2*substeps, 2, 2, self.nx))
+            self.assertEqual(captured['stage_xi'].shape, captured['stage_eta'].shape)
+            step_dts = np.repeat(np.diff(times)/substeps, substeps)
+            starts = np.concatenate([float(start) + np.arange(substeps)*float(interval)/substeps
+                                     for start, interval in zip(times[:-1], np.diff(times))])
+            expected_times = starts[:, None] + step_dts[:, None]*(0.5 + np.array([-1, 1])*np.sqrt(3)/6)
+            np.testing.assert_allclose(captured['stage_times'], expected_times, atol=0, rtol=2e-16)
+            # XLA may implement division by substeps as reciprocal multiplication.
+            np.testing.assert_allclose(captured['stage_weights'], np.repeat(step_dts[:, None]/2, 2, axis=1),
+                                       atol=0, rtol=2e-16)
+            np.testing.assert_array_equal(captured['stage_weights'][:, 0], captured['stage_weights'][:, 1])
+            state = ti.project_zero_mean_xi(initial)
+            for step, (start, dt) in enumerate(zip(starts, step_dts)):
+                final_rhs = tuple(_rhs_nonlinear_if_surrogate(
+                    ti.apply_linear_flow_hat(ti._state_to_hat(State(eta, xi), self.nx), -time, params),
+                    time, params, predict,
+                ) for eta, xi, time in zip(captured['stage_eta'][step], captured['stage_xi'][step],
+                                          captured['stage_times'][step]))
+                state = ti.project_zero_mean_xi(ti._finish_gauss_legendre_2_step(
+                    ti.apply_linear_flow_hat(ti._state_to_hat(state, self.nx), -start, params),
+                    *final_rhs, t=start, dt=dt, params=params,
+                ))
+                if (step+1) % substeps == 0:
+                    frame = (step+1)//substeps
+                    for field, expected in zip(state, (captured['eta'][frame], captured['xi'][frame])):
+                        np.testing.assert_allclose(field, expected, atol=3e-15, rtol=3e-14)
+        empty = rollout_surrogate(initial, times[:1], params, predict, return_stages=True)
+        self.assertEqual(empty['stage_eta'].shape, (0, 2, 2, self.nx))
+        self.assertEqual(empty['stage_times'].shape, (0, 2))
 
     def test_surrogate_true_dno_matches_fixed_truth_without_truth_ramping(self) -> None:
         initial = State(

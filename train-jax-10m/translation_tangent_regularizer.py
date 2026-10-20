@@ -92,6 +92,79 @@ def compute_rhs_relative_error(
     return error_norm / denominator
 
 
+def compute_coherent_rollout_loss(
+    stage_eta: jax.Array,
+    stage_xi: jax.Array,
+    gxi_prediction: jax.Array,
+    gxi_target: jax.Array,
+    depth: jax.Array,
+    k: jax.Array,
+    stage_times: jax.Array,
+    stage_weights: jax.Array,
+    initial_eta: jax.Array,
+    initial_xi: jax.Array,
+    valid_mask: jax.Array,
+    *,
+    gravity: float = 1.0,
+    k_max: float = 128.0,
+) -> jax.Array:
+    """Relative norm of a detached path's signed, GL2-weighted RHS defect.
+
+    Fields have shape (steps, 2, batch, nx); times and weights are (steps, 2).
+    Times are relative to the initial state, and weights include dt/2. Only
+    predictions receive gradients. Invalid rows must be sanitized upstream.
+    Full mean-free q enters Bernoulli before retaining modes and transporting
+    both equations backwards by the flat-water linear flow. The denominator
+    is the initial quadratic energy norm, not a per-stage RHS norm.
+    """
+    stage_eta, stage_xi, gxi_target, depth, k, stage_times, stage_weights, initial_eta, initial_xi = map(
+        lambda value: jax.lax.stop_gradient(jnp.asarray(value, dtype=jnp.float64)),
+        (stage_eta, stage_xi, gxi_target, depth, k, stage_times, stage_weights, initial_eta, initial_xi),
+    )
+    valid_mask = jax.lax.stop_gradient(valid_mask)
+    g = jax.lax.stop_gradient(jnp.asarray(gravity, dtype=jnp.float64))
+    nx = stage_eta.shape[-1]
+    k_abs = jnp.abs(k[:nx // 2 + 1])
+    error, target = _centered_error(
+        jnp.asarray(gxi_prediction, dtype=jnp.float64).reshape(-1, nx),
+        gxi_target.reshape(-1, nx), True,
+    )
+    eta_x, xi_x = (
+        jnp.fft.irfft(
+            1j * k_abs * jnp.fft.rfft(field.reshape(-1, nx), norm="forward").at[..., -1].set(0),
+            n=nx, norm="forward",
+        )
+        for field in (stage_eta, stage_xi)
+    )
+    eta_error_hat, xi_error_hat = (
+        jnp.fft.rfft(field, norm="forward").reshape(*stage_eta.shape[:-1], nx // 2 + 1)
+        for field in (error, _bernoulli_rhs_defect(eta_x, xi_x, target, error))
+    )
+    g0 = k_abs * jnp.tanh(depth[:, None] * k_abs)
+    eta_error_hat, xi_error_hat = jnp.sqrt(g) * eta_error_hat, jnp.sqrt(g0) * xi_error_hat
+    angle = stage_times[..., None, None] * jnp.sqrt(g * g0)
+    cosine, sine = jnp.cos(angle), jnp.sin(angle)
+    accumulated_eta, accumulated_xi = (
+        jnp.sum(stage_weights[..., None, None] * field, axis=(0, 1))
+        for field in (cosine * eta_error_hat - sine * xi_error_hat,
+                      sine * eta_error_hat + cosine * xi_error_hat)
+    )
+    band = ((k_abs > 0.0) & (k_abs <= k_max)).at[-1].set(False)
+    squared_error = jnp.sum(jnp.where(
+        band, jnp.abs(accumulated_eta)**2 + jnp.abs(accumulated_xi)**2, 0.0,
+    ), axis=-1)
+    initial_eta_hat, initial_xi_hat = (
+        jnp.fft.rfft(field, norm="forward") for field in (initial_eta, initial_xi)
+    )
+    squared_reference = jnp.sum(jnp.where(
+        band, g * jnp.abs(initial_eta_hat)**2 + g0 * jnp.abs(initial_xi_hat)**2, 0.0,
+    ), axis=-1)
+    zero_error = squared_error == 0.0
+    error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
+    relative = error_norm / jnp.sqrt(jnp.maximum(squared_reference, 1e-30))
+    return jnp.sum(jnp.where(valid_mask, relative, 0.0)) / jnp.maximum(jnp.sum(valid_mask), 1)
+
+
 def compute_phase_mechanism_loss(
     eta: jax.Array,
     xi: jax.Array,

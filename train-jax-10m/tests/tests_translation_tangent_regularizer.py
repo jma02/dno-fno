@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from translation_tangent_regularizer import (  # noqa: E402
     _centered_error,
+    compute_coherent_rollout_loss,
     compute_modal_phase_loss,
     compute_phase_mechanism_loss,
     compute_translation_tangent_loss,
@@ -952,8 +953,157 @@ def test_mechanism_batched_selection_equals_individual_rows() -> None:
         np.testing.assert_array_equal(gradient[1], 0.)
 
 
+def _coherent_inputs() -> tuple[jax.Array, ...]:
+    n = 64
+    x = jnp.arange(n, dtype=jnp.float64) * (2 * jnp.pi / n)
+    phase = jnp.arange(12, dtype=jnp.float64).reshape(2, 2, 3, 1) / 17
+    eta = .03 * jnp.cos(3 * x + phase)
+    xi = .04 * jnp.sin(2 * x - phase)
+    target = .1 * jnp.sin(4 * x + phase) + .05 * jnp.cos(19 * x)
+    prediction = target + .02 * jnp.cos(23 * x + phase) + .005 * jnp.sin(6 * x)
+    return (
+        eta, xi, prediction, target, jnp.array([.1, .3, 1.2]),
+        2 * jnp.fft.fftfreq(n, d=1 / n),
+        jnp.array([[.02, .07], [.14, .23]]), jnp.array([[.03, .07], [.04, .11]]),
+        eta[0, 0], xi[0, 0], jnp.array([True, False, True]),
+    )
+
+
+def _coherent_equation_reference(inputs: tuple[jax.Array, ...], gravity: float, k_max: float) -> float:
+    eta, xi, pred, target, depth, k, times, weights, eta0, xi0, valid = map(np.asarray, inputs)
+    n = eta.shape[-1]
+    ka = abs(k[:n // 2 + 1])
+    pred = pred - pred.mean(axis=-1, keepdims=True)
+    target = target - target.mean(axis=-1, keepdims=True)
+    spectra = np.fft.rfft(np.stack((eta, xi, pred, target), axis=-2), norm="forward")
+    spectra[..., -1] = 0
+    eta_pad = np.fft.irfft(spectra[..., 0, :], n=2 * n, norm="forward")
+    eta_x, xi_x = (
+        np.fft.irfft(1j * ka * spectra[..., index, :], n=2 * n, norm="forward")
+        for index in (0, 1)
+    )
+    xi_rhs = [
+        -gravity * eta_pad - .5 * xi_x**2
+        + .5 * (np.fft.irfft(spectra[..., index, :], n=2 * n, norm="forward") + eta_x * xi_x)**2
+        / (1 + eta_x**2)
+        for index in (2, 3)
+    ]
+    dq = np.sqrt(gravity) * np.fft.rfft(pred - target, norm="forward")
+    lam = ka * np.tanh(depth[:, None] * ka)
+    dxi = np.sqrt(lam) * np.fft.rfft(xi_rhs[0] - xi_rhs[1], norm="forward")[..., :n // 2 + 1]
+    angle = times[..., None, None] * np.sqrt(gravity * lam)
+    c, s = np.cos(angle), np.sin(angle)
+    accumulated = np.sum(weights[..., None, None, None] * np.stack((c * dq - s * dxi, s * dq + c * dxi), axis=-2), axis=(0, 1))
+    band = (ka > 0) & (ka <= k_max)
+    band[-1] = False
+    norm = np.linalg.norm(accumulated[..., band], axis=(-2, -1))
+    initial_energy = gravity * abs(np.fft.rfft(eta0, norm="forward"))**2 + lam * abs(np.fft.rfft(xi0, norm="forward"))**2
+    denominator = np.sqrt(np.maximum(np.sum(initial_energy[..., band], axis=-1), 1e-30))
+    return float(np.mean((norm / denominator)[valid])) if np.any(valid) else 0.0
+
+
+def test_coherent_loss_matches_padded_equations_and_translation() -> None:
+    inputs = _coherent_inputs()
+    evaluate = jax.jit(jax.value_and_grad(compute_coherent_rollout_loss, argnums=2),
+                       static_argnames=("gravity", "k_max"))
+    loss, gradient = evaluate(*inputs, gravity=2.3, k_max=16.)
+    np.testing.assert_allclose(loss, _coherent_equation_reference(inputs, 2.3, 16.), rtol=2e-12)
+    shifted = tuple(jnp.roll(value, 7, axis=-1) if index in (0, 1, 2, 3, 8, 9) else value
+                    for index, value in enumerate(inputs))
+    shifted_loss, shifted_gradient = evaluate(*shifted, gravity=2.3, k_max=16.)
+    np.testing.assert_allclose(shifted_loss, loss, rtol=2e-12)
+    np.testing.assert_allclose(shifted_gradient, jnp.roll(gradient, 7, axis=-1), rtol=2e-11, atol=1e-14)
+    # Separate constants and Nyquist components cannot enter the retained equations.
+    nyquist = (-1.)**jnp.arange(inputs[0].shape[-1])
+    offsets = tuple(value + (2. + .3 * nyquist if index == 2 else -.7 + .1 * nyquist)
+                    if index in (2, 3) else value for index, value in enumerate(inputs))
+    np.testing.assert_allclose(evaluate(*offsets, gravity=2.3, k_max=16.)[0], loss, rtol=2e-12)
+
+
+def test_coherent_loss_stops_path_gradients_and_matches_finite_difference() -> None:
+    inputs = _coherent_inputs()
+    evaluate = jax.jit(jax.value_and_grad(compute_coherent_rollout_loss, argnums=tuple(range(10))),
+                       static_argnames=("gravity", "k_max"))
+    loss, gradients = evaluate(*inputs, gravity=2.3, k_max=16.)
+    assert loss > 0
+    for index, gradient in enumerate(gradients):
+        assert np.isfinite(np.asarray(gradient)).all()
+        if index != 2:
+            np.testing.assert_array_equal(gradient, 0.)
+    np.testing.assert_array_equal(gradients[2][:, :, 1], 0.)
+    assert np.linalg.norm(gradients[2]) > 0
+    direction = inputs[2] - inputs[3]
+    epsilon = 1e-5
+    numerical = []
+    for sign in (-1, 1):
+        changed = (*inputs[:2], inputs[2] + sign * epsilon * direction, *inputs[3:])
+        numerical.append(_coherent_equation_reference(changed, 2.3, 16.))
+    np.testing.assert_allclose(jnp.sum(gradients[2] * direction),
+                               (numerical[1] - numerical[0]) / (2 * epsilon), rtol=2e-7)
+    # The selected-row mean and gradient are independent of sanitized invalid rows.
+    singles = []
+    for row in (0, 2):
+        single = tuple(value[:, :, row:row + 1] if index < 4 else
+                       value[row:row + 1] if index in (4, 8, 9, 10) else value
+                       for index, value in enumerate(inputs))
+        value, grads = evaluate(*single, gravity=2.3, k_max=16.)
+        singles.append(value)
+        np.testing.assert_allclose(gradients[2][:, :, row], grads[2][:, :, 0] / 2, rtol=2e-12, atol=1e-15)
+    np.testing.assert_allclose(loss, np.mean(singles), rtol=2e-12)
+
+
+def test_coherent_loss_zero_mask_and_nonfinite_contracts() -> None:
+    inputs = _coherent_inputs()
+    evaluate = jax.jit(jax.value_and_grad(compute_coherent_rollout_loss, argnums=2))
+    for dtype in (jnp.float32, jnp.float64):
+        cast_inputs = tuple(value.astype(dtype) if value.dtype != jnp.bool_ else value for value in inputs)
+        exact = (*cast_inputs[:2], cast_inputs[3], *cast_inputs[3:])
+        zero = tuple(jnp.zeros_like(value) if index in (0, 1, 2, 3, 8, 9) else value
+                     for index, value in enumerate(cast_inputs))
+        masked = (*cast_inputs[:-1], jnp.zeros_like(cast_inputs[-1]))
+        for case in (exact, zero, masked):
+            loss, gradient = evaluate(*case)
+            assert loss.dtype == jnp.float64 and gradient.dtype == dtype
+            np.testing.assert_array_equal(loss, 0.)
+            np.testing.assert_array_equal(gradient, 0.)
+        for nonfinite in (jnp.nan, jnp.inf):
+            bad = (*cast_inputs[:2], cast_inputs[2].at[0, 0, 0, 0].set(nonfinite), *cast_inputs[3:])
+            loss, gradient = evaluate(*bad)
+            assert not np.isfinite(float(loss))
+            assert not np.isfinite(np.asarray(gradient)).all()
+
+
+def test_coherent_loss_transport_cancellation_and_high_mode_coupling() -> None:
+    n = 64
+    x = jnp.arange(n, dtype=jnp.float64) * (2 * jnp.pi / n)
+    k = jnp.fft.fftfreq(n, d=1 / n)
+    zero = jnp.zeros((1, 2, 1, n))
+    depth, mask = jnp.array([.4]), jnp.array([True])
+    prediction = jnp.broadcast_to(.02 * jnp.cos(2 * x), zero.shape)
+    initial = (.02 * jnp.cos(2 * x))[None]
+    omega = jnp.sqrt(2 * jnp.tanh(2 * depth[0]))
+    inputs = (zero, zero, prediction, -prediction, depth, k, jnp.array([[0., jnp.pi / omega]]),
+              jnp.array([[.1, .1]]), initial, jnp.zeros_like(initial), mask)
+    np.testing.assert_allclose(compute_coherent_rollout_loss(*inputs, k_max=8.), 0., atol=1e-15)
+    coherent = (*inputs[:6], jnp.zeros_like(inputs[6]), *inputs[7:])
+    np.testing.assert_allclose(compute_coherent_rollout_loss(*coherent, k_max=8.), .4, rtol=1e-12)
+    # Both q fields have no retained modes, but their product has difference mode4.
+    target = jnp.broadcast_to(.1 * jnp.cos(19 * x), zero.shape)
+    prediction = target + .02 * jnp.cos(23 * x)
+    coupled = (*coherent[:2], prediction, target, *coherent[4:])
+    loss = compute_coherent_rollout_loss(*coupled, k_max=8.)
+    assert loss > 1e-4
+    np.testing.assert_allclose(loss, _coherent_equation_reference(coupled, 1., 8.), rtol=2e-12)
+    projected = (*coupled[:2], zero, zero, *coupled[4:])
+    np.testing.assert_array_equal(compute_coherent_rollout_loss(*projected, k_max=8.), 0.)
+
+
 if __name__ == "__main__":
     tests = (
+        test_coherent_loss_matches_padded_equations_and_translation,
+        test_coherent_loss_stops_path_gradients_and_matches_finite_difference,
+        test_coherent_loss_zero_mask_and_nonfinite_contracts,
+        test_coherent_loss_transport_cancellation_and_high_mode_coupling,
         test_exact_prediction_has_zero_loss,
         test_local_objective_detects_globally_cancelling_error,
         test_rigid_speed_error_matches_analytic_loss,

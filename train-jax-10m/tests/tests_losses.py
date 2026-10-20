@@ -32,6 +32,7 @@ from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.gen_data.pipeline.types import PhysicalFamilyId  # noqa: E402
 from solver.solvers.time_integrator import dealiased_zakharov_xi_rhs  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
+    compute_coherent_rollout_loss,
     compute_modal_phase_loss,
     compute_phase_mechanism_loss,
     compute_rhs_relative_error,
@@ -605,9 +606,9 @@ def test_fp64_residual_uses_direct_correction_and_preserves_loss_scales() -> Non
     config.__dict__.update(mode_balanced_warmup_steps=1, phase_mechanism_weight=0.0,
                            phase_mechanism_ramp_epochs=0.0, rollout_training_weight=0.7,
                            rollout_training_ramp_epochs=0.0, rollout_training_loss="full",
-                           rollout_training_full_spectrum=False, hadamard_weight=0.0)
+                           rollout_training_full_spectrum=False, rollout_coherent_weight=0.0, hadamard_weight=0.0)
     namespace.update(eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family,
-                     current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None, terms_phys=None,
+                     current_state=SimpleNamespace(step=100), n_data_only_rows=0, amplitude_batch=None, coherent_batch=None, terms_phys=None,
                      rollout_batch=(True, depth, family, eta, xi, target, jnp.float32(1.0)))
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
                  "fp64_residual_teacher_loss", "exec"), namespace)
@@ -2103,7 +2104,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         phase_mechanism_weight=0.03, phase_mechanism_ramp_epochs=0.0,
         hadamard_weight=0.0, mode_balanced_warmup_steps=1,
         rollout_training_weight=0.7, rollout_training_ramp_epochs=0,
-        rollout_training_loss="full", rollout_training_full_spectrum=False, rollout_training_rhs=False,
+        rollout_training_loss="full", rollout_training_full_spectrum=False, rollout_training_rhs=False, rollout_coherent_weight=0.0,
         amplitude_probe_scale=0.0, subtract_before_fft=False,
         fp64_residual=False, subtract_before_centering=False, data_phase_projection_weight=0.0,
         data_modal_residual_floor=0.0,
@@ -2124,7 +2125,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
         "k_rfft_jax": jnp.arange(nx // 2 + 1),
         "compute_phase_mechanism_loss": compute_phase_mechanism_loss, "apply_model": apply_model,
         "compute_rhs_relative_error": compute_rhs_relative_error,
-        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0, "amplitude_batch": None, "terms_phys": None,
+        "current_state": SimpleNamespace(step=100), "n_data_only_rows": 0, "amplitude_batch": None, "coherent_batch": None, "terms_phys": None,
     }
     exec(compile(ast.Module(body=[trainer_function("compute_loss_components"),
                                  trainer_function("compute_training_loss")], type_ignores=[]),
@@ -2767,6 +2768,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
     config.rollout_training_weight, config.rollout_training_ramp_epochs = 0.7, 0.0
     config.rollout_training_loss, config.amplitude_probe_scale = "full", 0.0
     config.rollout_training_full_spectrum = False
+    config.rollout_coherent_weight = 0.0
     namespace["args"] = config
     exec(validate, namespace)
 
@@ -2780,7 +2782,7 @@ def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> 
         jax=jax, jnp=jnp, FlatParams=Any, compute_loss_components=components,
         current_state=SimpleNamespace(step=0), train_steps_per_epoch=100,
         training_dtype=jnp.float64, physical_dtype=jnp.float64, eta=eta, xi=eta, gxi=eta,
-        batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None, terms_phys=None,
+        batch_depth=eta[:, :1], family=family, n_data_only_rows=0, amplitude_batch=None, coherent_batch=None, terms_phys=None,
     )
     exec(compile(ast.Module(body=[trainer_function("compute_training_loss")], type_ignores=[]),
                  "momentum_ramp_loss", "exec"), namespace)
@@ -2820,7 +2822,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     config = SimpleNamespace(
         rollout_training_weight=0.75, rollout_training_start_epoch=60,
         rollout_training_ramp_epochs=5, rollout_training_interval=16,
-        rollout_training_loss="full", rollout_training_full_spectrum=False, rollout_training_rhs=False,
+        rollout_training_loss="full", rollout_training_full_spectrum=False, rollout_training_rhs=False, rollout_coherent_weight=0.0,
         amplitude_probe_scale=0.0,
         model="fno", data_k_max=None, residual_floor=1e-6, data_xi_projection_weight=0.0, mode_balanced_weight=6.0,
         mode_balanced_warmup_steps=4000, mode_balanced_k_max=128.0,
@@ -2864,7 +2866,7 @@ def test_rollout_weight_ramp_scales_only_scheduled_student_loss() -> None:
     namespace: dict[str, Any] = {
         "jax": jax, "jnp": jnp, "FlatParams": Any, "SimpleNamespace": SimpleNamespace, "cast": cast,
         "args": config, "train_steps_per_epoch": 32, "training_dtype": jnp.float64, "physical_dtype": jnp.float64,
-        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None, "terms_phys": None,
+        "n_data_only_rows": 0, "PhysicalFamilyId": PhysicalFamilyId, "amplitude_batch": None, "coherent_batch": None, "terms_phys": None,
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "norm_targets_jax": lambda target: target[..., None] / 4,
         "denorm_targets_jax": lambda target: target * 4,
@@ -3023,8 +3025,8 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         dirichlet_probe_mode="off", dirichlet_probe_fraction=0.25,
         rollout_training_weight=1.0, rollout_training_start_epoch=60,
         rollout_training_interval=16, rollout_training_microbatch=size,
-        rollout_training_steps=4, rollout_training_full_spectrum=False,
-        amplitude_probe_scale=0.0, poison=False, poison_target=np.nan,
+        rollout_training_steps=4, rollout_training_full_spectrum=False, rollout_coherent_weight=0.0,
+        amplitude_probe_scale=0.0, poison=False, poison_target=np.nan, stage_poison=None,
     )
 
     def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
@@ -3033,6 +3035,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     def rollout(
         initial: ti.State, times: jax.Array, params: ti.SolverParams,
         predict: Callable[[jax.Array, jax.Array], jax.Array], *, substeps: int,
+        return_stages: bool = False,
     ) -> dict[str, jax.Array]:
         assert substeps == 4
         velocity = predict(initial.eta, initial.xi)
@@ -3041,7 +3044,29 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         xi_new += 0.0001 * jnp.sin(140 * x)
         if config.poison:
             eta_new = eta_new.at[1].set(jnp.nan).at[2].set(-2 * jnp.asarray(params.depth)[2])
-        return {"eta": jnp.stack((initial.eta, eta_new)), "xi": jnp.stack((initial.xi, xi_new))}
+        result = {"eta": jnp.stack((initial.eta, eta_new)), "xi": jnp.stack((initial.xi, xi_new))}
+        if return_stages:
+            stage_times = (jnp.arange(substeps)[:, None] + jnp.array([0.5 - np.sqrt(3) / 6, 0.5 + np.sqrt(3) / 6])) * 0.01
+            stage_eta = initial.eta + stage_times[..., None, None] * velocity + 0.0001 * jnp.cos(140 * x)
+            stage_xi = initial.xi + stage_times[..., None, None] * velocity + 0.0001 * jnp.sin(140 * x)
+            if config.stage_poison is not None:
+                stage_eta = stage_eta.at[1, 0, 1, 5].set(config.stage_poison)
+                stage_eta = stage_eta.at[2, 1, 2, 8].set(-2 * jnp.asarray(params.depth)[2, 0])
+            result.update(stage_eta=stage_eta, stage_xi=stage_xi, stage_times=stage_times,
+                          stage_weights=jnp.full_like(stage_times, 0.005))
+        return result
+
+    def stage_teacher(
+        eta: jax.Array, xi: jax.Array, k: jax.Array, depth: jax.Array,
+        order: int, *, pad_factor: int,
+    ) -> jax.Array:
+        assert order == 6 and pad_factor == 8 and k.dtype == eta.dtype == xi.dtype == depth.dtype == jnp.float64
+        labels = 2 * xi + eta**2 + 0.1 * depth * xi
+        safe_inputs = jnp.all(jnp.isfinite(eta) & jnp.isfinite(xi) & (eta + depth > 0))
+        labels = jnp.where(safe_inputs, labels, jnp.nan)
+        if config.stage_poison is not None:
+            labels = labels.at[-1, 7].set(jnp.nan)
+        return labels
 
     def teacher(eta: jax.Array, xi: jax.Array, depth: jax.Array, **options: Any) -> tuple[jax.Array, ...]:
         assert options.get("project_output", True) == (not config.rollout_training_full_spectrum)
@@ -3062,6 +3087,7 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
         "norm_inputs_jax": lambda eta, xi: jnp.stack((eta / 2, xi / 3), axis=-1),
         "denorm_targets_jax": lambda prediction: prediction * 4,
         "rollout_surrogate": rollout, "compute_dno_target": teacher,
+        "dno_series_eval": stage_teacher, "k_grid_jax": jnp.fft.fftfreq(nx) * nx,
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "trainer_rollout", "exec"), namespace)
     prepare = namespace["prepare"]
@@ -3155,6 +3181,75 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
             np.testing.assert_array_equal(actual[:1], clean[:1])
     config.rollout_training_full_spectrum = False
 
+    # Actual GL2 stages (including their high modes) have separate full-M6
+    # labels; turning them on must not change the existing endpoint teacher.
+    function.name = "prepare_coherent"
+    function.body[-1] = ast.parse("return rollout_batch, coherent_batch").body[0]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                 "trainer_coherent_batch", "exec"), namespace)
+    prepare_coherent = namespace["prepare_coherent"]
+    config.poison = False
+    ordinary, absent = prepare_coherent(params, active_step, *fields)
+    assert absent is None
+    config.rollout_coherent_weight = 0.3
+    endpoint, coherent = prepare_coherent(params, active_step, *fields)
+    assert coherent[0]
+    np.testing.assert_array_equal(coherent[1], depth)
+    stages = coherent[2:]
+    for actual, old in zip(endpoint, ordinary):
+        np.testing.assert_array_equal(actual, old)
+    physical_prediction = namespace["denorm_targets_jax"](apply_model(
+        {"params": params}, namespace["norm_inputs_jax"](eta, xi), depth,
+    ))[..., 0].astype(jnp.float64)
+    frozen_velocity = physical_prediction - physical_prediction.mean(axis=-1, keepdims=True)
+    raw = rollout(
+        ti.State(eta.astype(jnp.float64), xi.astype(jnp.float64)), jnp.array([0.0, 0.04]),
+        ti.make_solver_params(nx, 2 * np.pi, jnp.exp(depth.astype(jnp.float64))),
+        lambda e, z: frozen_velocity,
+        substeps=4, return_stages=True,
+    )
+    for actual, key in zip((*stages[:2], *stages[4:]), ("stage_eta", "stage_xi", "stage_times", "stage_weights")):
+        # The independent eager FP32 predictor is not contracted like lax.cond.
+        np.testing.assert_allclose(actual, raw[key], rtol=2e-7, atol=3e-10)
+    physical_depth = jnp.broadcast_to(jnp.exp(depth.astype(jnp.float64)), stages[0].shape[:-1] + (1,))
+    np.testing.assert_allclose(stages[2], stage_teacher(
+        stages[0].reshape(-1, nx), stages[1].reshape(-1, nx), namespace["k_grid_jax"],
+        physical_depth.reshape(-1, 1), 6, pad_factor=8,
+    ).reshape(stages[0].shape), rtol=2e-15, atol=2e-17)
+    assert np.all(stages[3]) and stages[0].shape == (4, 2, size, nx)
+    for value in stages[:3]:
+        assert np.linalg.norm(np.fft.rfft(value)[..., 129:]) > 0.01
+    config.rollout_training_full_spectrum = True
+    full_endpoint, full_stages = prepare_coherent(params, active_step, *high_fields)
+    for actual, old in zip(full_endpoint[3:6], full_result[:3]):
+        np.testing.assert_array_equal(actual, old)
+    np.testing.assert_array_equal(full_endpoint[7], full_result[5])
+    assert full_stages[2].shape == stages[0].shape
+    config.rollout_training_full_spectrum = False
+    for step in (active_step - 16, active_step + 1):
+        inactive_endpoint, inactive_stages = prepare_coherent(params, step, *fields)
+        assert not inactive_endpoint[0] and not inactive_stages[0]
+        np.testing.assert_array_equal(inactive_stages[1], depth)
+        for value in inactive_stages[2:]:
+            np.testing.assert_array_equal(value, jnp.zeros_like(value))
+    detached = jax.jvp(
+        lambda p, e, z, q: prepare_coherent(p, active_step, e, z, q, depth, family)[1][2:5],
+        (params, *fields[:3]), tuple(jnp.ones_like(value) for value in (params, *fields[:3])),
+    )[1]
+    for derivative in detached:
+        np.testing.assert_array_equal(derivative, 0)
+    for config.stage_poison in (np.nan, 1e40):
+        unchanged_endpoint, rejected_stages = prepare_coherent(params, active_step, *fields)
+        rejected_stages = rejected_stages[2:]
+        for actual, old in zip(unchanged_endpoint, endpoint):
+            np.testing.assert_array_equal(actual, old)
+        np.testing.assert_array_equal(rejected_stages[3], [True, False, False, False])
+        for rejected, clean in zip(rejected_stages[:3], stages[:3]):
+            assert np.isfinite(rejected).all()
+            np.testing.assert_allclose(rejected[:, :, 0], clean[:, :, 0], rtol=2e-15, atol=2e-17)
+            np.testing.assert_array_equal(rejected[:, :, 1:], 0)
+    config.stage_poison, config.rollout_coherent_weight = None, 0.0
+
     # The extra operator probes use original rows, not detached trajectory endpoints.
     function.name = "prepare_amplitude"
     function.body[-1] = ast.parse("return amplitude_batch, source_fields, rollout_depth").body[0]
@@ -3214,6 +3309,93 @@ def test_rollout_teacher_schedule_detachment_projection_and_rejection() -> None:
     assert prepare_amplitude(params, active_step, *fields)[0] is None
 
 
+def test_coherent_rollout_reprediction_schedule_ramp_and_endpoint_parity() -> None:
+    nx, size = 32, 2
+    x = jnp.arange(nx, dtype=jnp.float64) * (2 * jnp.pi / nx)
+    eta = jnp.array([0.02, 0.04])[:, None] * jnp.cos(2 * x)
+    xi = jnp.array([0.03, 0.05])[:, None] * jnp.sin(x)
+    depth, family = jnp.log(jnp.array([[0.5], [8.0]])), jnp.array([1, 2])
+    times = jnp.array([[0.002, 0.008], [0.012, 0.018]])
+    stage_eta = eta + times[..., None, None] * xi
+    stage_xi = xi - times[..., None, None] * eta
+    stage_target = 0.4 * stage_xi + stage_eta**2
+    weights, k = jnp.full_like(times, 0.005), jnp.fft.fftfreq(nx) * nx
+    config = SimpleNamespace(
+        rollout_coherent_weight=0.3, rollout_training_weight=0.75,
+        rollout_training_start_epoch=2, rollout_training_ramp_epochs=1,
+        rollout_training_loss="full", rollout_training_full_spectrum=False,
+        mode_balanced_weight=6.0, mode_balanced_warmup_steps=1,
+        translation_tangent_weight=10.0, phase_mechanism_weight=0.2,
+        phase_mechanism_ramp_epochs=0.0, hadamard_weight=0.0,
+    )
+
+    def apply_model(variables: dict[str, jax.Array], inputs: jax.Array, depth: jax.Array) -> jax.Array:
+        return variables["params"] * (inputs[..., :1] + inputs[..., 1:]) + 0.01 * depth[:, None, :]
+
+    def components(p: jax.Array, e: jax.Array, *unused: Any, **options: Any) -> tuple[Any, ...]:
+        losses = jnp.mean(e**2) * jnp.arange(1, 5) * p ** jnp.arange(1, 5)
+        return *losses, jnp.float64(1.0), losses[0], ()
+
+    namespace: dict[str, Any] = dict(
+        jax=jax, jnp=jnp, cast=cast, FlatParams=Any, args=config, nx=nx,
+        training_dtype=jnp.float64, physical_dtype=jnp.float64,
+        current_state=SimpleNamespace(step=32), train_steps_per_epoch=32,
+        compute_loss_components=components, compute_coherent_rollout_loss=compute_coherent_rollout_loss,
+        apply_model=apply_model, norm_inputs_jax=lambda e, z: jnp.stack((e / 2, z / 3), axis=-1),
+        denorm_targets_jax=lambda q: 4 * q, k_grid_jax=k,
+        eta=eta, xi=xi, gxi=0.4 * xi, batch_depth=depth, family=family,
+        n_data_only_rows=0, terms_phys=None, amplitude_batch=None, coherent_batch=None,
+        rollout_batch=(True, depth, family, 2 * eta, xi, 0.4 * xi, jnp.float32(1)),
+    )
+    component = trainer_function("train_step")
+    coherent_index = next(i for i, node in enumerate(component.body) if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == "coherent_batch is not None")
+    function = ast.parse("def coherent_update(current_params):\n    current_state.params = current_params").body[0]
+    assert isinstance(function, ast.FunctionDef)
+    function.body += component.body[coherent_index - 1:coherent_index + 1]
+    function.body += ast.parse("return (loss_value, metrics), grads").body
+    exec(compile(ast.fix_missing_locations(ast.Module(
+        body=[trainer_function("compute_training_loss"), function], type_ignores=[],
+    )), "coherent_training_loss", "exec"), namespace)
+    p = jnp.float64(0.6)
+    ordinary = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(p)
+    disabled = namespace["coherent_update"](p)
+    for actual, old in zip(jax.tree.leaves(disabled), jax.tree.leaves(ordinary)):
+        np.testing.assert_array_equal(actual, old)
+    stage_depth = jnp.broadcast_to(depth, stage_eta.shape[:-1] + (1,)).reshape(-1, 1)
+    for valid in (jnp.ones(size, bool), jnp.array([True, False]), jnp.zeros(size, bool)):
+        expected = jax.value_and_grad(lambda parameter: compute_coherent_rollout_loss(
+            stage_eta, stage_xi,
+            (4 * apply_model({"params": parameter}, jnp.stack((stage_eta.reshape(-1, nx) / 2,
+             stage_xi.reshape(-1, nx) / 3), axis=-1), stage_depth))[..., 0].reshape(stage_eta.shape),
+            stage_target, jnp.exp(depth).reshape(-1), k, times, weights, eta, xi, valid,
+        ))(p)
+        assert np.isfinite(expected).all()
+        if not np.any(valid):
+            np.testing.assert_array_equal(expected, (0.0, 0.0))
+        else:
+            assert expected[0] > 0 and expected[1] != 0
+        for step in (16, 32, 48, 49, 64, 80):
+            namespace["current_state"].step = step
+            active = step >= 32 and step % 16 == 0
+            weight = 0.75 * np.clip((step - 32) / 32, 0, 1)
+            namespace["coherent_batch"] = (active, depth, stage_eta, stage_xi, stage_target, valid, times, weights)
+            namespace["rollout_batch"] = (active, depth, family, 2 * eta, xi, 0.4 * xi, jnp.float32(active))
+            (value, metrics), gradient = namespace["coherent_update"](p)
+            (old, old_metrics), old_gradient = jax.value_and_grad(namespace["compute_training_loss"], has_aux=True)(p)
+            np.testing.assert_allclose((value, gradient),
+                np.asarray((old, old_gradient)) + active * weight * config.rollout_coherent_weight * np.asarray(expected),
+                rtol=1e-12, atol=1e-15)
+            for key in old_metrics:
+                np.testing.assert_array_equal(metrics[key], old_metrics[key])
+            np.testing.assert_allclose(metrics["rollout_coherent_loss"], active * expected[0], rtol=1e-12)
+            np.testing.assert_array_equal(metrics["rollout_coherent_valid_fraction"], jnp.mean(valid.astype(jnp.float32)))
+        if np.all(valid):
+            compiled = jax.jit(namespace["coherent_update"])(p)
+            for actual, eager in zip(jax.tree.leaves(compiled), jax.tree.leaves(((value, metrics), gradient))):
+                np.testing.assert_allclose(actual, eager, rtol=1e-12, atol=1e-15)
+
+
 def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
     main = trainer_function("main")
     option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
@@ -3234,7 +3416,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
                 exec(validate, namespace)
     config = SimpleNamespace(
         amplitude_probe_scale=0.0, rollout_training_weight=0.75, rollout_training_loss="full",
-        rollout_training_full_spectrum=False,
+        rollout_training_full_spectrum=False, rollout_coherent_weight=0.0,
         rollout_training_start_epoch=1, rollout_training_ramp_epochs=1,
         mode_balanced_weight=6.0, mode_balanced_warmup_steps=1, translation_tangent_weight=10.0,
         phase_mechanism_weight=0.1, phase_mechanism_ramp_epochs=0.0, hadamard_weight=0.0,
@@ -3262,7 +3444,7 @@ def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
         norm_targets_jax=lambda q: q[..., None], depth_sub=depth,
         k_rfft_jax=jnp.arange(eta.shape[1] // 2 + 1),
         eta=eta, xi=xi, gxi=target, batch_depth=depth, family=family, n_data_only_rows=0, terms_phys=None,
-        amplitude_batch=None,
+        amplitude_batch=None, coherent_batch=None,
         rollout_batch=(True, depth, family, 2 * eta, xi, target, jnp.float32(1)),
     )
     prior = trainer_function("compute_training_loss")
@@ -3409,6 +3591,7 @@ if __name__ == "__main__":
     test_momentum_ramp_weights_original_and_generated_losses_and_gradients()
     test_rollout_weight_ramp_scales_only_scheduled_student_loss()
     test_rollout_teacher_schedule_detachment_projection_and_rejection()
+    test_coherent_rollout_reprediction_schedule_ramp_and_endpoint_parity()
     test_amplitude_probe_compensation_schedule_and_off_parity()
     test_amplitude_probe_retained_band_values_and_gradients()
     print("[PASS] data normalization, finite gradients, and family metric reductions")

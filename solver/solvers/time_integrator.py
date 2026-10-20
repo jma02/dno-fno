@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from typing import Callable, Literal, NamedTuple, overload
 
 import jax
 import jax.numpy as jnp
@@ -38,6 +38,13 @@ class ImplicitStepTelemetry(NamedTuple):
 class ImplicitStepResult(NamedTuple):
     state: State
     telemetry: ImplicitStepTelemetry
+
+
+class GL2StageResult(NamedTuple):
+    state: State
+    stages: State
+    times: jax.Array
+    weights: jax.Array
 
 
 class _GL2IterationCarry(NamedTuple):
@@ -703,6 +710,33 @@ def _gauss_legendre_2_if_step_result(
     )
 
 
+@overload
+def gauss_legendre_2_if_step(
+    state: State, t: float | jax.Array, dt: float | jax.Array, params: SolverParams,
+    iterations: int = 4, relaxation: float = 1.0, *,
+    rhs: Callable[[SpectralState, float | jax.Array, SolverParams], SpectralState] = rhs_nonlinear_if,
+    return_stages: Literal[False] = False,
+) -> State: ...
+
+
+@overload
+def gauss_legendre_2_if_step(
+    state: State, t: float | jax.Array, dt: float | jax.Array, params: SolverParams,
+    iterations: int = 4, relaxation: float = 1.0, *,
+    rhs: Callable[[SpectralState, float | jax.Array, SolverParams], SpectralState] = rhs_nonlinear_if,
+    return_stages: Literal[True],
+) -> GL2StageResult: ...
+
+
+@overload
+def gauss_legendre_2_if_step(
+    state: State, t: float | jax.Array, dt: float | jax.Array, params: SolverParams,
+    iterations: int = 4, relaxation: float = 1.0, *,
+    rhs: Callable[[SpectralState, float | jax.Array, SolverParams], SpectralState] = rhs_nonlinear_if,
+    return_stages: bool,
+) -> State | GL2StageResult: ...
+
+
 def gauss_legendre_2_if_step(
     state: State,
     t: float | jax.Array,
@@ -714,8 +748,9 @@ def gauss_legendre_2_if_step(
     rhs: Callable[
         [SpectralState, float | jnp.ndarray, SolverParams], SpectralState
     ] = rhs_nonlinear_if,
-) -> State:
-    """Take a fixed-iteration GL2 step; ``rhs`` uses integrating-factor coordinates."""
+    return_stages: bool = False,
+) -> State | GL2StageResult:
+    """Take fixed-iteration GL2, optionally retaining its final physical stage pair."""
 
     sqrt3 = jnp.sqrt(jnp.asarray(3.0, dtype=state.eta.dtype))
     c1 = 0.5 - sqrt3 / 6.0
@@ -782,13 +817,26 @@ def gauss_legendre_2_if_step(
         a22=a22,
         rhs=rhs,
     )
-    return _finish_gauss_legendre_2_step(
+    next_state = _finish_gauss_legendre_2_step(
         v0,
         f1,
         f2,
         t=t,
         dt=dt,
         params=params,
+    )
+    if not return_stages:
+        return next_state
+    stage_times = jnp.stack((t + c1 * dt, t + c2 * dt))
+    physical_stages = tuple(
+        _hat_to_state(apply_linear_flow_hat(stage, time, params))
+        for stage, time in zip((stage1, stage2), stage_times)
+    )
+    return GL2StageResult(
+        next_state,
+        State(*(jnp.stack(fields) for fields in zip(*physical_stages))),
+        stage_times,
+        jnp.full((2,), 0.5 * dt, dtype=state.eta.dtype),
     )
 
 

@@ -53,6 +53,7 @@ from solver.evals.eval_suite import FAMILY_CONFIGS, _write_json, compute_macro_s
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, rollout_surrogate  # noqa: E402
 from hadamard_shape_regularizer import compute_hadamard_loss, compute_local_response_loss  # noqa: E402
 from translation_tangent_regularizer import (  # noqa: E402
+    compute_coherent_rollout_loss,
     compute_modal_phase_loss,
     compute_phase_mechanism_loss,
     compute_rhs_relative_error,
@@ -216,6 +217,8 @@ def main() -> None:
                         help="Use full M6 targets for valid generated rows, including their auxiliary losses; stored and fallback rows remain projected.")
     parser.add_argument("--rollout_training_rhs", action="store_true",
                         help="Replace generated-row DNO data fit by relative retained two-equation RHS error.")
+    parser.add_argument("--rollout_coherent_weight", type=float, default=0.0,
+                        help="Additional accumulated full-RHS error at detached GL2 stages, normalized by initial wave energy; uses the rollout schedule and ramp.")
     parser.add_argument("--rollout_training_start_epoch", type=int, default=60)
     parser.add_argument("--rollout_training_ramp_epochs", type=float, default=5.0,
                         help="Linear weight ramp duration in epochs; fractional values are allowed. 0 enables full weight immediately. Start 60 and ramp 5 reach full weight at the start of epoch 65.")
@@ -533,6 +536,10 @@ def main() -> None:
         parser.error("--rollout_training_full_spectrum requires --rollout_training_weight > 0")
     if args.rollout_training_rhs and not args.rollout_training_full_spectrum:
         parser.error("--rollout_training_rhs requires --rollout_training_full_spectrum")
+    if not np.isfinite(args.rollout_coherent_weight) or args.rollout_coherent_weight < 0:
+        parser.error("--rollout_coherent_weight must be finite and nonnegative")
+    if args.rollout_coherent_weight > 0 and args.rollout_training_weight == 0:
+        parser.error("--rollout_coherent_weight requires --rollout_training_weight > 0")
     if not np.isfinite(args.rollout_training_ramp_epochs) or args.rollout_training_ramp_epochs < 0:
         parser.error("rollout-training ramp must be finite and nonnegative")
     if min(args.rollout_training_start_epoch, args.rollout_training_interval,
@@ -1407,6 +1414,7 @@ def main() -> None:
             )
 
         rollout_batch = None
+        coherent_batch = None
         amplitude_batch = None
         if args.rollout_training_weight > 0:
             rollout_scheduled = (
@@ -1438,7 +1446,35 @@ def main() -> None:
                         filter_fraction=min(1.0, 128.0 * domain_length / (jnp.pi * nx)),
                     ),
                     predict_frozen, substeps=args.rollout_training_steps,
+                    **({"return_stages": True} if args.rollout_coherent_weight > 0 else {}),
                 )
+                stage_data = ()
+                if args.rollout_coherent_weight > 0:
+                    stage_eta, stage_xi = map(jax.lax.stop_gradient, (
+                        trajectory["stage_eta"], trajectory["stage_xi"],
+                    ))
+                    stage_valid = jnp.all(
+                        jnp.isfinite(stage_eta) & jnp.isfinite(stage_xi)
+                        & jnp.isfinite(physical_dtype(stage_eta)) & jnp.isfinite(physical_dtype(stage_xi))
+                        & (stage_eta + depth > 0), axis=(0, 1, 3),
+                    )
+                    stage_eta, stage_xi = (
+                        jnp.where(stage_valid[None, None, :, None], value, 0.0)
+                        for value in (stage_eta, stage_xi)
+                    )
+                    # Label the actual stage, without projecting its input spectrum.
+                    stage_target = dno_series_eval(
+                        stage_eta.reshape(-1, nx), stage_xi.reshape(-1, nx),
+                        k_grid_jax.astype(jnp.float64),
+                        jnp.broadcast_to(depth, stage_eta.shape[:-1] + (1,)).reshape(-1, 1),
+                        6, pad_factor=8,
+                    ).reshape(stage_eta.shape)
+                    stage_valid &= jnp.all(jnp.isfinite(stage_target), axis=(0, 1, 3))
+                    stage_data = (jax.tree.map(jax.lax.stop_gradient, (
+                        *(jnp.where(stage_valid[None, None, :, None], value, 0.0)
+                          for value in (stage_eta, stage_xi, stage_target)),
+                        stage_valid, trajectory["stage_times"], trajectory["stage_weights"],
+                    )),)
                 eta_new, xi_new = map(jax.lax.stop_gradient, (trajectory["eta"][-1], trajectory["xi"][-1]))
                 valid = jnp.all(jnp.isfinite(eta_new) & jnp.isfinite(xi_new) & (eta_new + depth > 0), axis=-1)
                 # Invalid endpoints are sanitized before M6 and fall back to original supervised rows.
@@ -1464,6 +1500,7 @@ def main() -> None:
                 return (
                     *fields, jnp.mean(valid.astype(jnp.float32)),
                     *((jax.lax.stop_gradient(valid),) if args.rollout_training_full_spectrum else ()),
+                    *stage_data,
                 )
 
             rollout_fields = jax.lax.cond(
@@ -1471,8 +1508,17 @@ def main() -> None:
                 lambda _: (
                     *map(jax.lax.stop_gradient, source_fields), jnp.float32(0.0),
                     *((jnp.zeros(n_rollout, dtype=bool),) if args.rollout_training_full_spectrum else ()),
+                    *(((*(
+                        jnp.zeros((args.rollout_training_steps, 2, n_rollout, nx), dtype=jnp.float64)
+                        for _ in range(3)), jnp.zeros(n_rollout, dtype=bool),
+                        jnp.zeros((args.rollout_training_steps, 2), dtype=jnp.float64),
+                        jnp.zeros((args.rollout_training_steps, 2), dtype=jnp.float64)),)
+                      if args.rollout_coherent_weight > 0 else ()),
                 ), None,
             )
+            if args.rollout_coherent_weight > 0:
+                coherent_batch = (rollout_scheduled, rollout_depth, *rollout_fields[-1])
+                rollout_fields = rollout_fields[:-1]
             rollout_batch = (
                 rollout_scheduled, rollout_depth, family[:n_rollout], *rollout_fields,
             )
@@ -1626,6 +1672,33 @@ def main() -> None:
         (loss_value, metrics), grads = jax.value_and_grad(
             compute_training_loss, has_aux=True
         )(current_state.params)
+        if coherent_batch is not None:
+            scheduled, depth_sub, stage_eta, stage_xi, stage_target, stage_valid, stage_times, stage_weights = coherent_batch
+            stage_depth = jnp.broadcast_to(depth_sub, stage_eta.shape[:-1] + (1,))
+            # Differentiate inside the branch: skipped updates must not allocate
+            # the large stage-prediction backward tape.
+            accumulated_loss, accumulated_grads = jax.lax.cond(
+                scheduled,
+                lambda p: jax.value_and_grad(lambda student: compute_coherent_rollout_loss(
+                    stage_eta, stage_xi,
+                    denorm_targets_jax(apply_model(
+                        {"params": student},
+                        norm_inputs_jax(physical_dtype(stage_eta.reshape(-1, nx)),
+                                        physical_dtype(stage_xi.reshape(-1, nx))),
+                        physical_dtype(stage_depth.reshape(-1, 1)),
+                    ))[..., 0].reshape(stage_eta.shape),
+                    stage_target, jnp.exp(depth_sub.astype(jnp.float64)).reshape(-1),
+                    k_grid_jax, stage_times, stage_weights,
+                    eta[:stage_eta.shape[2]], xi[:stage_eta.shape[2]], stage_valid,
+                ))(p),
+                lambda p: (jnp.float64(0.0), jax.tree.map(jnp.zeros_like, p)), current_state.params,
+            )
+            coherent_weight = args.rollout_coherent_weight * metrics["rollout_weight"]
+            loss_value += coherent_weight * accumulated_loss
+            grads = jax.tree.map(lambda g, extra: g + (coherent_weight * extra).astype(g.dtype),
+                                 grads, accumulated_grads)
+            metrics.update(rollout_coherent_loss=accumulated_loss,
+                           rollout_coherent_valid_fraction=jnp.mean(stage_valid.astype(jnp.float32)))
         grads = jax.lax.pmean(grads, axis_name="batch")
         loss_value = jax.lax.pmean(loss_value, axis_name="batch")
         metrics = jax.lax.pmean(metrics, axis_name="batch")
