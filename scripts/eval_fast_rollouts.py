@@ -64,6 +64,7 @@ def main() -> None:
     parser.add_argument("--reuse-first-gelu", action="store_true", help="Reuse the first surface activation across its two consumers.")
     parser.add_argument("--branch-major", action="store_true", help="Consume the head projection without a paired-stage layout copy.")
     parser.add_argument("--real-context-endpoints", action="store_true", help="Skip clearing the already-real context FFT endpoints.")
+    parser.add_argument("--fuse-context-add", action="store_true", help="Fuse the context projection and residual addition; requires --real-context-endpoints.")
     parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
@@ -105,6 +106,7 @@ def main() -> None:
         + ("_gelureuse" if args.reuse_first_gelu else "")
         + ("_branchmajor" if args.branch_major else "")
         + ("_contextreal" if args.real_context_endpoints else "")
+        + ("_contextadd" if args.fuse_context_add else "")
         + ("_bernoullifused" if args.bernoulli_fft == "cufftdx_fused" else "_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
         + ("_savedpacked" if args.pack_saved_inputs else "")
@@ -124,14 +126,15 @@ def main() -> None:
                + ("_fieldstride" if args.field_stride else "")
                + ("_gelureuse" if args.reuse_first_gelu else "")
                + ("_branchmajor" if args.branch_major else "")
-               + ("_contextreal" if args.real_context_endpoints else ""))
+               + ("_contextreal" if args.real_context_endpoints else "")
+               + ("_contextadd" if args.fuse_context_add else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")
     if terms_decoder:
         if (args.fold_context or args.fuse_nested_fft or args.batch_context_fft or args.exact_solver_g0
                 or args.correction_grid != 1024 or args.transpose_projections or args.field_stride
-                or args.reuse_first_gelu or args.branch_major or args.real_context_endpoints):
+                or args.reuse_first_gelu or args.branch_major or args.real_context_endpoints or args.fuse_context_add):
             parser.error("CS-field decoder evaluation does not support branch-specific FFT variants")
         variant = args.cs_terms_variant or f"terms_m{loaded.config['cs_baseline_order']}_jax"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +152,7 @@ def main() -> None:
         "materialize_spectra": args.materialize_spectra,
         "materialize_updated_state": args.materialize_updated_state,
         "cache_rotation_products": args.cache_rotation_products,
+        "fuse_context_add": args.fuse_context_add,
         "bernoulli_fft": args.bernoulli_fft,
         "batch_saved_dno": args.batch_saved_dno,
         "pack_saved_inputs": args.pack_saved_inputs,

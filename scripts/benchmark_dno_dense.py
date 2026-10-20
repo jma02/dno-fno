@@ -1,4 +1,4 @@
-"""Benchmark-only IEEE FP32 surface-network GEMMs with fused activation epilogues."""
+"""Benchmark-only surface-network GEMMs with explicit precision and fused epilogues."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,7 @@ def dense(
     x: jax.Array, weight: jax.Array, activation: Activation = "none", *,
     tile: tuple[int, int, int] = (32, 32, 32), num_warps: int = 4,
     interpret: bool = False, residual: jax.Array | None = None, input_scale: float = 1.0,
-    input_transposed: bool = False,
+    input_transposed: bool = False, precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
     """One non-split-K GEMM and optional epilogue, preserving leading dimensions."""
     rows, inner, columns = x.size // x.shape[-1], x.shape[-1], weight.shape[-1]
@@ -44,10 +44,19 @@ def dense(
                 a *= jnp.float32(input_scale)
             b = plt.load(w_ref.at[k[:, None], n[None, :]],
                          mask=(k[:, None] < inner) & (n[None, :] < columns), other=0)
-            accumulator += pl.dot(a, b, precision=jax.lax.Precision.HIGHEST)
+            accumulator += pl.dot(a, b, precision=precision)
         if residual is not None:
-            accumulator += plt.load(cast(Ref, residual_ref).at[m[:, None], n[None, :]],
-                                    mask=(m[:, None] < rows) & (n[None, :] < columns), other=0)
+            skip = plt.load(cast(Ref, residual_ref).at[m[:, None], n[None, :]],
+                            mask=(m[:, None] < rows) & (n[None, :] < columns), other=0)
+            if interpret:
+                accumulator += skip
+            else:
+                # Keep the rounded dot result: Triton otherwise folds the skip into its accumulator.
+                accumulator, = plt.elementwise_inline_asm(
+                    "add.rn.f32 $0, $1, $2;", args=(accumulator, skip),
+                    constraints="=f,f,f", pack=1,
+                    result_shape_dtypes=(jax.ShapeDtypeStruct(accumulator.shape, jnp.float32),),
+                )
         if activation != "none":
             accumulator = jax.nn.gelu(accumulator)
         if activation == "gelu_lift":

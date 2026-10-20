@@ -72,6 +72,7 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_headpad",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextalias",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd",
+          "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd_mixgelu",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial",
@@ -193,6 +194,8 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    fuse_second_gelu = variant.endswith("_mixgelu")
+    variant = variant.removesuffix("_mixgelu")
     context_add = variant.endswith("_contextadd")
     variant = variant.removesuffix("_contextadd")
     context_alias = variant.endswith("_contextalias")
@@ -283,6 +286,8 @@ def build_variant(
         raise ValueError("Context/nested FFT batching requires surface context channels.")
     if context_add and (not context_real or model.surface_context_gate or context_fold):
         raise ValueError("The fused context residual requires an ungated real-context inverse.")
+    if fuse_second_gelu and (not context_add or model.baseline_order != 1):
+        raise ValueError("The fused second projection requires contextadd and the quadratic lift.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
@@ -552,8 +557,12 @@ def build_variant(
                 if name == "eta_feat_mix" and amplitude is not None:
                     features = features * (1.0 + jnp.log(amplitude)[..., None]
                                            * loaded.params["eta_amplitude_gain"])
-                features = nn.gelu(transposed_matmul(features, kernel)
-                                   if transpose_mix and name == "eta_feat_mix" else features @ kernel)
+                if fuse_second_gelu and name == "eta_feat_mix":
+                    features = dense(features, kernel, "gelu_lift",
+                                     precision=jax.lax.Precision.DEFAULT)
+                else:
+                    features = nn.gelu(transposed_matmul(features, kernel)
+                                       if transpose_mix and name == "eta_feat_mix" else features @ kernel)
                 if reuse_first_gelu and name == "eta_feat_proj":
                     features = jax.lax.optimization_barrier(features)
                 if name == "eta_feat_proj" and context_multiplier is not None:
@@ -603,12 +612,14 @@ def build_variant(
                     if context_add:
                         features = dense(context, loaded.params["eta_context_expand"]["kernel"],
                                          residual=features, input_scale=1 / correction_nx,
-                                         tile=(32, 32, 16), num_warps=2, input_transposed=True)
+                                         tile=(32, 32, 16), num_warps=2, input_transposed=True,
+                                         precision=jax.lax.Precision.DEFAULT)
                     else:
                         context = context @ (cast(jax.Array, context_folded_kernel) if context_fold
                                              else loaded.params["eta_context_expand"]["kernel"])
                         features = features + context
-            features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
+            if not fuse_second_gelu:
+                features = features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1)
             if model.surface_context_gate and context is not None:
                 features = features * (1.0 + jnp.tanh(context))
             if polynomial_features is not None:
@@ -904,7 +915,7 @@ if __name__ == "__main__":
                        if "lowrank" not in variant else None),
         }
         if variant.endswith(("_contextfold", "_contextinverse", "_headtranspose",
-                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1", "_gelureuse", "_branchmajor", "_mixtranspose", "_nestedoverlap", "_contextreal", "_headpad", "_contextalias", "_contextadd")):
+                             "_contexttranspose", "_projectiontranspose", "_fieldstride", "_splitg1", "_gelureuse", "_branchmajor", "_mixtranspose", "_nestedoverlap", "_contextreal", "_headpad", "_contextalias", "_contextadd", "_mixgelu")):
             correction_outputs = []
             instrumented_exact = True
             for name, original in ((args.reference, expected), (variant, actual)):
@@ -995,6 +1006,7 @@ if __name__ == "__main__":
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_headpad="Zero-pad head to complete branch width",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextalias="Reuse dead context inverse input",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd="Fuse context projection and residual addition",
+                  fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd_mixgelu="Fuse second projection, GELU and lift",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1="Separate G₁ input arguments",
                   fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor="Separate G₁ inputs with branch-major FFT",
                   fourier_fused_features_product_overlap_nestedfused="Fused nested FFT",
