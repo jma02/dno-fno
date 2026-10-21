@@ -1223,6 +1223,14 @@ def trainer_function(name: str) -> ast.FunctionDef:
                 if isinstance(node, ast.FunctionDef) and node.name == name)
 
 
+def trainer_optimizer(main: ast.FunctionDef) -> list[ast.stmt]:
+    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign)
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "inner_optimizer")
+    end = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign)
+               and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "optimizer")
+    return main.body[start:end + 1]
+
+
 def test_terms_selector_preserves_order_and_rejects_unused_blocks() -> None:
     main = trainer_function("main")
     options: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.Expr)
@@ -1521,8 +1529,6 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
                   and node.value.args[0].value == "--surface_head_lr_multiplier")
     validation = next(node for node in main.body if isinstance(node, ast.If)
                       and "np.isfinite(args.surface_head_lr_multiplier)" in ast.unparse(node.test))
-    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.AnnAssign)
-                 and isinstance(node.target, ast.Name) and node.target.id == "optimizer_transforms")
     params = {
         "cs_block_0": {"phi_proj": {"kernel": jnp.array([0.0, 0.1]), "bias": jnp.array([0.2])},
                        "m_shared": {"kernel": jnp.array([0.3, -0.4])}},
@@ -1532,10 +1538,11 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     schedule = optax.constant_schedule(6e-5)
     namespace: dict[str, Any] = {"parser": parser, "np": np, "jax": jax, "cast": cast,
-                                 "optax": optax, "params": params, "lr_schedule": schedule}
+                                 "optax": optax, "params": params, "lr_schedule": schedule,
+                                 "head_transform": None}
     exec(compile(ast.Module(body=[option], type_ignores=[]), "head_lr_option", "exec"), namespace)
     validate = compile(ast.Module(body=[validation], type_ignores=[]), "head_lr_validation", "exec")
-    configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "head_optimizer", "exec")
+    configure = compile(ast.Module(body=trainer_optimizer(main), type_ignores=[]), "head_optimizer", "exec")
     for multiplier in (1.0, 2.0):
         config = parser.parse_args([] if multiplier == 1 else ["--surface_head_lr_multiplier", str(multiplier)])
         config.gradient_ema_decay, config.adam_b1, config.adam_b2, config.weight_decay = 0.9, 0.9, 0.999, 1e-4
@@ -1591,16 +1598,14 @@ def test_adam_moment_options_preserve_both_emas() -> None:
     validations = {name: next(node for node in main.body if isinstance(node, ast.If)
                              and f"args.{name}" in ast.unparse(node.test))
                    for name in ("adam_b1", "adam_b2")}
-    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.AnnAssign)
-                 and isinstance(node.target, ast.Name) and node.target.id == "optimizer_transforms")
     parser = argparse.ArgumentParser(add_help=False)
     params = {"kernel": jnp.array([0.0, 0.1], dtype=jnp.float32)}
     schedule = optax.constant_schedule(6e-5)
     namespace: dict[str, Any] = {"parser": parser, "optax": optax, "jax": jax,
-                                 "params": params, "lr_schedule": schedule}
+                                 "params": params, "lr_schedule": schedule, "head_transform": None}
     exec(compile(ast.Module(body=options, type_ignores=[]), "adam_options", "exec"), namespace)
     validate = compile(ast.Module(body=list(validations.values()), type_ignores=[]), "adam_validation", "exec")
-    configure = compile(ast.Module(body=main.body[start:start + 3], type_ignores=[]), "adam_optimizer", "exec")
+    configure = compile(ast.Module(body=trainer_optimizer(main), type_ignores=[]), "adam_optimizer", "exec")
     states = []
     for arguments, b1, b2 in (([], 0.9, 0.999), (["--adam_b1", "0.5"], 0.5, 0.999),
                               (["--adam_b2", "0.99"], 0.9, 0.99)):
@@ -1657,6 +1662,138 @@ def test_adam_moment_options_preserve_both_emas() -> None:
                 assert f"--{name} must be in [0, 1)" in error.call_args.args[0]
             namespace["args"] = parser.parse_args([f"--{name}=0"])
             exec(validate, namespace)
+
+
+def test_head_whitening_calibration_and_physical_optimizer_coordinates() -> None:
+    import optax
+    from checkpoint_util import WeightEMATrainState, training_counter_values
+
+    main = trainer_function("main")
+    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call) and node.value.args
+                  and isinstance(node.value.args[0], ast.Constant)
+                  and node.value.args[0].value == "--surface_head_whitening")
+    validation = next(node for node in main.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test).startswith("args.surface_head_whitening and"))
+    parser = argparse.ArgumentParser(add_help=False)
+    option_namespace: dict[str, Any] = {"parser": parser}
+    exec(compile(ast.Module(body=[option], type_ignores=[]), "head_whitening_option", "exec"), option_namespace)
+    assert not parser.parse_args([]).surface_head_whitening
+    valid = dict(surface_head_whitening=True, model="cs_dno", cs_terms_residual=False,
+                 cs_nested_blocks=1, n_blocks=8, init_checkpoint=None)
+    validate = compile(ast.Module(body=[validation], type_ignores=[]), "head_whitening_validation", "exec")
+    option_namespace["args"] = SimpleNamespace(**valid)
+    exec(validate, option_namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for invalid in ({"model": "fno"}, {"cs_terms_residual": True},
+                        {"cs_nested_blocks": 8}, {"init_checkpoint": "saved"}):
+            option_namespace["args"] = SimpleNamespace(**(valid | invalid))
+            with np.testing.assert_raises(ValueError):
+                exec(validate, option_namespace)
+    calibration = next(node for node in main.body if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == "args.surface_head_whitening")
+    math_block = next(node for node in calibration.body if isinstance(node, ast.With))
+    eigen_start = next(i for i, node in enumerate(math_block.body) if isinstance(node, ast.Assign)
+                       and isinstance(node.targets[0], ast.Tuple))
+    calibrate = compile(ast.Module(body=math_block.body[eigen_start:], type_ignores=[]),
+                        "head_whitening_calibration", "exec")
+    configure = compile(ast.Module(body=[trainer_function("transform_surface_heads"),
+                                        *trainer_optimizer(main)], type_ignores=[]),
+                        "head_whitening_optimizer", "exec")
+    vectors, _ = np.linalg.qr(np.random.default_rng(41).normal(size=(4, 4)))
+    covariance = (vectors * np.array([9.0, 1.0, 0.02, 0.0])) @ vectors.T
+    for dtype, tolerance in ((jnp.float32, 3e-6), (jnp.float64, 2e-12)):
+        namespace: dict[str, Any] = {
+            "np": np, "jnp": jnp, "jax": jax, "Any": Any, "optax": optax,
+            "covariance": covariance, "head_width": 4, "training_dtype": dtype,
+        }
+        exec(calibrate, namespace)
+        transform = namespace["head_transform"]
+        assert transform.dtype == dtype
+        np.testing.assert_allclose(transform, transform.T, rtol=0, atol=tolerance)
+        np.testing.assert_allclose(np.sum(np.asarray(transform)**2) / 4, 1.0, atol=tolerance)
+        assert np.linalg.eigvalsh(transform).min() > 0
+        np.testing.assert_allclose(np.linalg.cond(transform), np.sqrt(1000), rtol=tolerance)
+        np.testing.assert_array_equal(transform @ jnp.zeros((4, 2), dtype), 0)
+        namespace["covariance"] = 7.0 * covariance
+        exec(calibrate, namespace)
+        np.testing.assert_allclose(namespace["head_transform"], transform, rtol=tolerance)
+        namespace["covariance"] = np.zeros((4, 4))
+        with np.testing.assert_raises(FloatingPointError):
+            exec(calibrate, namespace)
+
+        params = {
+            "cs_block_0": {"phi_proj": {"kernel": jnp.zeros((4, 2), dtype)},
+                           "m_shared": {"kernel": jnp.ones((4, 2), dtype)}},
+            "cs_block_1": {"phi_proj": {"kernel": jnp.arange(8, dtype=dtype).reshape(4, 2) / 10}},
+            "cs_block_2": {"gamma": jnp.array([0.3, -0.2], dtype)},
+            "eta_feat_proj": {"kernel": jnp.array([0.1, -0.4], dtype)},
+            "other_block": {"phi_proj": {"kernel": jnp.array([0.2, -0.1], dtype)}},
+        }
+
+        def change_heads(tree: Any, matrix: jax.Array) -> Any:
+            changed = jax.tree.map(lambda value: value, tree)
+            for name in ("cs_block_0", "cs_block_1"):
+                changed[name]["phi_proj"]["kernel"] = matrix @ tree[name]["phi_proj"]["kernel"]
+            return changed
+
+        schedule = optax.exponential_decay(1e-3, transition_steps=1, decay_rate=0.9)
+        config = SimpleNamespace(gradient_ema_decay=0.5, adam_b1=0.5, adam_b2=0.99,
+                                 weight_decay=0.07, surface_head_lr_multiplier=1.0)
+        namespace.update(args=config, params=params, lr_schedule=schedule)
+        for selected_transform in (None, transform):
+            namespace["head_transform"] = selected_transform
+            physical_initial = params if selected_transform is None else change_heads(params, transform)
+            namespace["params"] = physical_initial
+            exec(configure, namespace)
+            actual = WeightEMATrainState.create(
+                apply_fn=Mock(), params=physical_initial, tx=namespace["optimizer"],
+                weight_ema_params=physical_initial, weight_ema_decay=0.995, weight_ema_start_step=1,
+            )
+            coordinates = params
+            reference = WeightEMATrainState.create(
+                apply_fn=Mock(), params=coordinates,
+                tx=optax.chain(optax.ema(0.5, debias=True),
+                               optax.adamw(schedule, b1=0.5, b2=0.99, weight_decay=0.07)),
+                weight_ema_params=coordinates, weight_ema_decay=0.995, weight_ema_start_step=1,
+            )
+            update = jax.jit(lambda state, grads: state.apply_gradients(grads=grads))
+            for step in range(1, 7):
+                grads = jax.tree.map(
+                    lambda value: (0.2 * jnp.sin(jnp.arange(value.size, dtype=dtype).reshape(value.shape)
+                                                 + step) + 0.1 * value).astype(dtype), actual.params,
+                )
+                coordinate_grads = (grads if selected_transform is None
+                                    else change_heads(grads, transform.T))
+                actual = update(actual, grads)
+                reference = update(reference, coordinate_grads)
+                expected_params, expected_shadow = reference.params, reference.weight_ema_params
+                if selected_transform is not None:
+                    expected_params = change_heads(expected_params, transform)
+                    expected_shadow = change_heads(expected_shadow, transform)
+                for observed, expected in zip(jax.tree.leaves((actual.params, actual.weight_ema_params)),
+                                               jax.tree.leaves((expected_params, expected_shadow)), strict=True):
+                    assert observed.dtype == expected.dtype == dtype
+                    if selected_transform is None:
+                        np.testing.assert_array_equal(observed, expected)
+                    else:
+                        np.testing.assert_allclose(observed, expected, rtol=tolerance, atol=tolerance * 0.01)
+                for observed, expected in zip(jax.tree.leaves(actual.opt_state[1]),
+                                               jax.tree.leaves(reference.opt_state[1]), strict=True):
+                    assert observed.dtype == expected.dtype
+                    np.testing.assert_allclose(observed, expected, rtol=tolerance, atol=tolerance * 0.01)
+                expected_gradient_ema = (actual.opt_state[0].ema if selected_transform is None
+                                         else change_heads(actual.opt_state[0].ema, transform.T))
+                for observed, expected in zip(jax.tree.leaves(expected_gradient_ema),
+                                               jax.tree.leaves(reference.opt_state[0].ema), strict=True):
+                    np.testing.assert_allclose(observed, expected, rtol=tolerance, atol=tolerance * 0.01)
+                for name in ("cs_block_2", "eta_feat_proj", "other_block"):
+                    jax.tree.map(np.testing.assert_array_equal, actual.params[name], reference.params[name])
+                np.testing.assert_array_equal(actual.params["cs_block_0"]["m_shared"]["kernel"],
+                                              reference.params["cs_block_0"]["m_shared"]["kernel"])
+                assert training_counter_values(actual.replace(opt_state=actual.opt_state[1]),
+                                               context="head whitening") == (step, step)
+                assert int(actual.opt_state[0].count) == int(reference.opt_state[0].count) == step
 
 
 def test_milestone_rollouts_use_only_started_weight_ema() -> None:
@@ -3616,6 +3753,7 @@ if __name__ == "__main__":
     test_learning_rate_hold_schedule_and_validation()
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()
+    test_head_whitening_calibration_and_physical_optimizer_coordinates()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_nested_zero_inner_initialization_and_gradient_activation()
     test_phase_rank_one_option_requires_m1_cs_network()

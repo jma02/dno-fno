@@ -37,6 +37,7 @@ from util import (  # noqa: E402
     FlatParams,
     assert_pytree_replicated,
     build_dataset_split_indices,
+    compute_log_depth,
     device_prefetch,
     get_batches,
     load_dataset_arrays,
@@ -82,6 +83,20 @@ def subsample_family_indices(
     return np.sort(np.concatenate([
         rng.choice(group, size=int(fraction * group.size), replace=False) for group in groups
     ]))
+
+
+def transform_surface_heads(updates: Any, transform: jax.Array) -> Any:
+    path_leaves, tree = jax.tree_util.tree_flatten_with_path(updates)
+    indices = [index for index, (path, _) in enumerate(path_leaves)
+               if (len(path) == 3 and getattr(path[0], "key").startswith("cs_block_")
+                   and path[1:] == (jax.tree_util.DictKey("phi_proj"), jax.tree_util.DictKey("kernel")))]
+    values = [value for _, value in path_leaves]
+    heads = [values[index] for index in indices]
+    packed = jnp.concatenate(heads, axis=-1)
+    transformed = transform.astype(packed.dtype) @ packed
+    for index, head in zip(indices, jnp.split(transformed, np.cumsum([head.shape[-1] for head in heads[:-1]]), axis=-1)):
+        values[index] = head
+    return jax.tree_util.tree_unflatten(tree, values)
 
 
 def main() -> None:
@@ -245,6 +260,8 @@ def main() -> None:
                         help="Fraction of planned updates before cosine decay starts; hold peak LR after warmup until this point. 0 starts decay immediately after warmup.")
     parser.add_argument("--surface_head_lr_multiplier", type=float, default=1.0,
                         help="Scale post-AdamW updates only for the spatial branch projection kernels.")
+    parser.add_argument("--surface_head_whitening", action="store_true",
+                        help="Precondition ordinary spatial heads with a fixed fresh-encoder TRAIN covariance; inference is unchanged.")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument(
         "--gradient_ema_decay", type=float, default=0.9,
@@ -514,6 +531,11 @@ def main() -> None:
         parser.error("--lr_hold_fraction must be finite and in [0, 1)")
     if not np.isfinite(args.surface_head_lr_multiplier) or args.surface_head_lr_multiplier <= 0:
         parser.error("--surface_head_lr_multiplier must be finite and positive")
+    if args.surface_head_whitening and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.cs_nested_blocks >= args.n_blocks
+        or args.init_checkpoint
+    ):
+        parser.error("--surface_head_whitening requires fresh tied-filter cs_dno with an ordinary block")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
     if not 0.0 <= args.weight_ema_secondary_decay < 1.0:
@@ -870,6 +892,62 @@ def main() -> None:
             )
             print(f"Initialized weights from {args.init_checkpoint}; optimizer starts fresh")
 
+    head_transform = None
+    if args.surface_head_whitening:
+        # Fixed independent TRAIN sampling; no validation rows or batch-shuffle RNG.
+        candidates = np.random.default_rng(2026102024).choice(
+            train_indices, size=min(32768, train_indices.size), replace=False,
+        )
+        simulation_ids = np.load(dataset_path / "simulation_id.npy", mmap_mode="r")
+        head_rows = []
+        for family in PhysicalFamilyId:
+            rows = candidates[family_ids[candidates] == family]
+            _, first = np.unique(simulation_ids[rows], return_index=True)
+            selected = rows[np.sort(first)[:256]]
+            if selected.size != 256:
+                raise ValueError("Head whitening needs 256 distinct TRAIN simulations per family")
+            head_rows.append(selected)
+        calibration_rows = np.stack(head_rows, axis=1).reshape(-1)
+        if np.unique(simulation_ids[calibration_rows]).size != calibration_rows.size:
+            raise ValueError("Head-whitening TRAIN families share simulation IDs")
+        calibration_normalize, _, _ = make_normalizers(stats, args.norm, dtype=np.dtype(training_dtype))
+
+        @jax.jit
+        def capture_head_covariance(eta: jax.Array, log_depth: jax.Array) -> jax.Array:
+            captured: list[jax.Array] = []
+
+            def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
+                          context: nn.module.InterceptorContext) -> Any:
+                if context.module.name == "cs_block_0" and context.method_name == "__call__":
+                    captured.append(call_args[0])
+                return next_fun(*call_args, **call_kwargs)
+
+            with nn.intercept_methods(intercept):
+                model.apply({"params": params}, calibration_normalize(eta, jnp.zeros_like(eta)), log_depth)
+            features = captured[0].reshape(-1, head_width).astype(jnp.float64)
+            return features.T @ features
+
+        head_width = cast(jax.Array, params["cs_block_0"]["phi_proj"]["kernel"]).shape[0]
+        covariance = np.zeros((head_width, head_width), dtype=np.float64)
+        with jax.default_device(devices[0]):
+            for start in range(0, calibration_rows.size, 16):
+                rows = calibration_rows[start:start + 16]
+                covariance += np.asarray(capture_head_covariance(
+                    jnp.asarray(dataset["eta"][rows], dtype=training_dtype),
+                    jnp.asarray(compute_log_depth(dataset["depth"][rows]), dtype=training_dtype),
+                )) / (calibration_rows.size * nx)
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            if not np.all(np.isfinite(eigenvalues)) or eigenvalues[-1] <= 0:
+                raise FloatingPointError("Non-positive or non-finite post-lift TRAIN covariance")
+            eigen_floor = 1e-3 * eigenvalues[-1]
+            transform = (eigenvectors / np.sqrt(np.maximum(eigenvalues, eigen_floor))) @ eigenvectors.T
+            transform *= np.sqrt(head_width / np.sum(transform**2))
+            head_transform = jnp.asarray(transform, dtype=training_dtype)
+        args.surface_head_whitening_transform = np.asarray(head_transform).tolist()
+        print(f"Head whitening: {calibration_rows.size} balanced distinct-simulation TRAIN rows; "
+              f"eigenvalues {eigenvalues[0]:.6g}..{eigenvalues[-1]:.6g}, floor {eigen_floor:.6g}, "
+              "unit RMS singular value; fixed physical-weight optimizer coordinates")
+
     def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array,
                     *, return_baseline: bool = False, terms_phys: jax.Array | None = None) -> Any:
         if args.model != "cs_dno":
@@ -969,10 +1047,24 @@ def main() -> None:
         )
         print(f"LR continuation after update {schedule_steps}: "
               f"{args.lr_warmup_steps}-update ramp to {args.lr_continuation}, then constant")
+    inner_optimizer = optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, b2=args.adam_b2,
+                                 weight_decay=args.weight_decay)
+    if head_transform is not None:
+        adam = optax.scale_by_adam(b1=args.adam_b1, b2=args.adam_b2)
+        transform_array = head_transform
+
+        def update_head_adam(updates: Any, state: Any, params: Any = None) -> tuple[Any, Any]:
+            updates = transform_surface_heads(updates, transform_array.T)
+            updates, state = adam.update(updates, state, params)
+            return transform_surface_heads(updates, transform_array), state
+
+        inner_optimizer = optax.chain(
+            optax.GradientTransformation(adam.init, update_head_adam),
+            optax.add_decayed_weights(args.weight_decay),
+            optax.scale_by_learning_rate(lr_schedule),
+        )
     optimizer_transforms: list[optax.GradientTransformation] = [
-        optax.ema(args.gradient_ema_decay, debias=True),
-        optax.adamw(learning_rate=lr_schedule, b1=args.adam_b1, b2=args.adam_b2,
-                    weight_decay=args.weight_decay),
+        optax.ema(args.gradient_ema_decay, debias=True), inner_optimizer,
     ]
     if args.surface_head_lr_multiplier != 1.0:
         head_mask = jax.tree_util.tree_map_with_path(
