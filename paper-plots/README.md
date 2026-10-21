@@ -798,3 +798,19 @@ Regenerate the plot without GPU work:
 JAX_PLATFORMS=cpu UV_CACHE_DIR=/tmp/dno-uv-cache \
   uv run --no-sync scripts/profile_cpu_offload.py --plot-only
 ```
+
+### M3 encoder–decoder kernel profile
+
+[PNG](figures/m3-encoder-decoder-profile.png) / [PDF](figures/m3-encoder-decoder-profile.pdf)
+
+Trained epoch-1 weight EMA, one 1024-point Stokes state on RTX 6000 Ada.
+Bars show average GPU kernel time over 20 traced calls: CS fields and input/output
+transforms 123.4 µs, geometry encoder/head 38.0 µs, decoder/join 8.0 µs.
+The CS bar separates six padded FP64 FFTs (90.6 µs) from its remaining work.
+Percentages use total GPU kernel time, not end-to-end latency.
+
+```sh
+JAX_PLATFORMS=cpu UV_CACHE_DIR=/tmp/dno-uv-cache \
+  uv run --no-sync scripts/profile_dno.py --analyze-decoder \
+  --output outputs/c27_cs_terms_scratch1_20261019/profile_20261020
+```

@@ -103,6 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=200)
     parser.add_argument("--analyze", action="store_true", help="Plot measured rooflines and forward traces from the hardware/model result tree (no GPU work).")
     parser.add_argument("--analyze-current", action="store_true", help="Plot current Ada network/M2/M6 kernel timings (no GPU work).")
+    parser.add_argument("--analyze-decoder", action="store_true", help="Plot saved M3 encoder-decoder kernel breakdown (no GPU work).")
     parser.add_argument("--hardware-diagnosis", action="store_true", help="Compare dispatch, dependent execution, and 16 real GL2 steps with an annotated GPU trace.")
     args = parser.parse_args()
     if args.capture < 0 or args.trace < 0 or args.repeats < 1:
@@ -111,6 +112,51 @@ if __name__ == "__main__":
         parser.error("capture and trace must run separately")
     if args.variant != "original" and args.depth_mode != "fixed":
         parser.error("optimized variants require fixed depth")
+    if args.analyze_decoder:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        profile = json.loads((args.output / "kernel_profile.json").read_text())
+        components = profile["component_breakdown"]["decoder_1_stage"]
+        durations = components["gpu_us_per_call"]
+        total = components["gpu_busy_us_per_call"]
+        padded_fft = sum(duration for kernel, (_, duration) in
+                         profile["scopes"]["decoder_1_stage"]["kernels_count_us"].items()
+                         if "Size<2048u>" in kernel and "Precision<double>" in kernel)
+        padded_fft /= profile["traced_calls_per_scope"]
+        fig, ax = plt.subplots(figsize=(10, 4.8))
+        fig.subplots_adjust(left=0.22, right=0.98, top=0.73, bottom=0.18)
+        ax.barh(0, padded_fft, height=0.58, color="#cb5924")
+        ax.barh(0, durations["cs_terms"] - padded_fft, left=padded_fft,
+                height=0.58, color="#efc3ac")
+        ax.text(padded_fft / 2, 0, f"Padded FP64 FFTs\n{padded_fft:.1f} µs",
+                ha="center", va="center", color="white", fontsize=11)
+        ax.text((padded_fft + durations["cs_terms"]) / 2, 0,
+                f"Other CS\n{durations['cs_terms'] - padded_fft:.1f} µs",
+                ha="center", va="center", fontsize=10, color="#573c30")
+        ax.barh(1, durations["encoder"], height=0.58, color="#087fa4")
+        ax.barh(2, durations["decoder_join"], height=0.58, color="#279180")
+        for position, key in enumerate(("cs_terms", "encoder", "decoder_join")):
+            value = durations[key]
+            ax.text(value + 2.3, position, f"{value:.1f} µs · {100 * value / total:.1f}%",
+                    va="center", fontsize=11, color="#30383d")
+        ax.set(yticks=(0, 1, 2), yticklabels=("CS fields G₀–G₃", "Geometry encoder", "Decoder + sum"),
+               ylim=(2.65, -0.65), xlim=(0, 175), xticks=(0, 25, 50, 75, 100, 125, 150),
+               xlabel="GPU kernel time per forward (µs)")
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.spines["bottom"].set_color("#c7cdd2")
+        ax.tick_params(axis="y", length=0, pad=12, labelsize=12)
+        ax.tick_params(axis="x", colors="#65717a", labelsize=10)
+        ax.grid(axis="x", color="#e9edf0", linewidth=0.8)
+        ax.set_axisbelow(True)
+        fig.text(0.05, 0.92, "M3 encoder–decoder: where the time goes", fontsize=20)
+        fig.text(0.05, 0.83, "RTX 6000 Ada · N = 1024 · one state", fontsize=11, color="#65717a")
+        fig.text(0.98, 0.83, f"Total GPU kernel time: {total:.1f} µs", ha="right", fontsize=11, color="#65717a")
+        for suffix in ("png", "pdf"):
+            fig.savefig(ROOT / "paper-plots/figures" / f"m3-encoder-decoder-profile.{suffix}", dpi=180)
+        plt.close(fig)
+        raise SystemExit(0)
     if args.analyze_current:
         import matplotlib
         matplotlib.use("Agg")
