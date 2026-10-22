@@ -67,6 +67,7 @@ from fno1d import FNO1d  # noqa: E402
 from checkpoint_util import (  # noqa: E402
     CheckpointMetadata,
     WeightEMATrainState,
+    read_parameter_update_count,
     save_checkpoint,
     training_counter_values,
 )
@@ -262,6 +263,10 @@ def main() -> None:
                         help="Scale post-AdamW updates only for the spatial branch projection kernels.")
     parser.add_argument("--surface_head_whitening", action="store_true",
                         help="Precondition ordinary spatial heads with a fixed fresh-encoder TRAIN covariance; inference is unchanged.")
+    parser.add_argument("--surface_head_muon", action="store_true",
+                        help="Apply Muon to the concatenated ordinary spatial heads; retain AdamW elsewhere.")
+    parser.add_argument("--surface_head_muon_scale", type=float, default=20.0,
+                        help="Scale the packed Muon direction before shared weight decay and learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument(
         "--gradient_ema_decay", type=float, default=0.9,
@@ -536,6 +541,13 @@ def main() -> None:
         or args.init_checkpoint
     ):
         parser.error("--surface_head_whitening requires fresh tied-filter cs_dno with an ordinary block")
+    if not np.isfinite(args.surface_head_muon_scale) or args.surface_head_muon_scale <= 0:
+        parser.error("--surface_head_muon_scale must be finite and positive")
+    if args.surface_head_muon and (
+        args.model != "cs_dno" or args.cs_terms_residual or args.cs_nested_blocks >= args.n_blocks
+        or args.init_checkpoint or args.surface_head_whitening or args.surface_head_lr_multiplier != 1.0
+    ):
+        parser.error("--surface_head_muon requires fresh tied-filter ordinary heads without whitening or a head LR multiplier")
     if not 0.0 <= args.weight_ema_decay < 1.0:
         parser.error("--weight_ema_decay must be in [0, 1)")
     if not 0.0 <= args.weight_ema_secondary_decay < 1.0:
@@ -1063,6 +1075,36 @@ def main() -> None:
             optax.add_decayed_weights(args.weight_decay),
             optax.scale_by_learning_rate(lr_schedule),
         )
+    if args.surface_head_muon:
+        head_names = tuple(f"cs_block_{i}" for i in range(args.n_blocks - args.cs_nested_blocks))
+        adam_mask = jax.tree_util.tree_map_with_path(
+            lambda path, _: not (len(path) == 3 and getattr(path[0], "key") in head_names
+                                and path[1:] == (jax.tree_util.DictKey("phi_proj"), jax.tree_util.DictKey("kernel"))),
+            params,
+        )
+        adam = optax.masked(optax.scale_by_adam(b1=args.adam_b1, b2=args.adam_b2), adam_mask)
+        muon = optax.contrib.scale_by_muon(beta=args.adam_b1, ns_steps=5, nesterov=True)
+
+        def init_head_muon(params: Any) -> Any:
+            packed = jnp.concatenate([params[name]["phi_proj"]["kernel"] for name in head_names], axis=-1)
+            return adam.init(params), muon.init(packed)
+
+        def update_head_muon(updates: Any, state: Any, params: Any = None) -> tuple[Any, Any]:
+            packed = jnp.concatenate([updates[name]["phi_proj"]["kernel"] for name in head_names], axis=-1)
+            head_updates, muon_state = muon.update(packed, state[1])
+            updates, adam_state = adam.update(updates, state[0], params)
+            updates = dict(updates)
+            for name, head in zip(head_names, jnp.split(cast(jax.Array, head_updates), len(head_names), axis=-1)):
+                updates[name] = dict(updates[name]) | {
+                    "phi_proj": dict(updates[name]["phi_proj"]) | {"kernel": args.surface_head_muon_scale * head},
+                }
+            return updates, (adam_state, muon_state)
+
+        inner_optimizer = optax.chain(
+            optax.GradientTransformation(init_head_muon, update_head_muon),
+            optax.add_decayed_weights(args.weight_decay),
+            optax.scale_by_learning_rate(lr_schedule),
+        )
     optimizer_transforms: list[optax.GradientTransformation] = [
         optax.ema(args.gradient_ema_decay, debias=True), inner_optimizer,
     ]
@@ -1076,6 +1118,25 @@ def main() -> None:
     optimizer = optax.chain(*optimizer_transforms)
     print(f"gradient EMA before AdamW: decay={args.gradient_ema_decay}, debias=True; "
           f"AdamW b1={args.adam_b1}, b2={args.adam_b2}")
+    if args.surface_head_muon:
+        print(f"ordinary heads: packed Muon, beta={args.adam_b1}, NS=5, Nesterov=True, "
+              f"direction scale={args.surface_head_muon_scale}, peak coefficient={args.lr * args.surface_head_muon_scale}")
+
+    def check_training_counters(
+        state: WeightEMATrainState, *, context: str, announce: bool = False,
+    ) -> tuple[int, int]:
+        inner_state: Any = cast(tuple[Any, ...], state.opt_state)[1]
+        if args.surface_head_muon:
+            adam_state = inner_state[0][0]
+            inner_state = (adam_state.inner_state, *inner_state[1:])
+        counts = training_counter_values(state.replace(opt_state=inner_state), context=context, announce=announce)
+        if args.surface_head_muon:
+            muon_count = read_parameter_update_count(cast(tuple[Any, ...], state.opt_state)[1][0][1].count,
+                                                     counter_name=f"{context} Muon count")
+            if muon_count != counts[0] or muon_count != counts[1]:
+                raise RuntimeError(f"{context} Muon/TrainState/Adam counters disagree: {muon_count}, {counts}")
+        return counts
+
     training_state = WeightEMATrainState.create(
         apply_fn=apply_model, params=params, tx=optimizer,
         weight_ema_params=params if args.weight_ema_decay > 0.0 else None,
@@ -1914,9 +1975,9 @@ def main() -> None:
         )
 
     # Verify all GPU copies agree before training, including after checkpoint restore.
-    # The counter helper reads AdamW; checkpoints retain the full EMA + AdamW state.
-    training_counter_values(
-        training_state.replace(opt_state=training_state.opt_state[1]),
+    # Checkpoints retain the full gradient-EMA and optimizer state.
+    check_training_counters(
+        training_state,
         context="training startup",
         announce=True,
     )
@@ -2053,8 +2114,8 @@ def main() -> None:
                   f"{args.early_stopping_patience} epochs; best epoch {best_epoch}, "
                   f"validation loss {best_val_loss:.8g}", flush=True)
             break
-        epoch_start_step, epoch_start_optimizer_count = training_counter_values(
-            training_state.replace(opt_state=training_state.opt_state[1]),
+        epoch_start_step, epoch_start_optimizer_count = check_training_counters(
+            training_state,
             context=f"epoch {epoch} start",
         )
         epoch_rng = np.random.default_rng(epoch_seeds[epoch - 1])
@@ -2101,8 +2162,8 @@ def main() -> None:
             train_bar.set_postfix(loss=batch_losses[-1], refresh=False)
 
         # Require one optimizer update per batch and matching counters across GPUs.
-        epoch_end_step, epoch_end_optimizer_count = training_counter_values(
-            training_state.replace(opt_state=training_state.opt_state[1]),
+        epoch_end_step, epoch_end_optimizer_count = check_training_counters(
+            training_state,
             context=f"epoch {epoch} end",
         )
         state_updates = epoch_end_step - epoch_start_step

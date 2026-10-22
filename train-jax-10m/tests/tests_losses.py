@@ -1546,6 +1546,7 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
     for multiplier in (1.0, 2.0):
         config = parser.parse_args([] if multiplier == 1 else ["--surface_head_lr_multiplier", str(multiplier)])
         config.gradient_ema_decay, config.adam_b1, config.adam_b2, config.weight_decay = 0.9, 0.9, 0.999, 1e-4
+        config.surface_head_muon = False
         namespace["args"] = config
         exec(validate, namespace)
         exec(configure, namespace)
@@ -1612,6 +1613,7 @@ def test_adam_moment_options_preserve_both_emas() -> None:
         config = parser.parse_args(arguments)
         assert (config.adam_b1, config.adam_b2) == (b1, b2)
         config.gradient_ema_decay, config.weight_decay, config.surface_head_lr_multiplier = 0.5, 1e-4, 1.0
+        config.surface_head_muon = False
         namespace["args"] = config
         exec(validate, namespace)
         exec(configure, namespace)
@@ -1739,7 +1741,7 @@ def test_head_whitening_calibration_and_physical_optimizer_coordinates() -> None
 
         schedule = optax.exponential_decay(1e-3, transition_steps=1, decay_rate=0.9)
         config = SimpleNamespace(gradient_ema_decay=0.5, adam_b1=0.5, adam_b2=0.99,
-                                 weight_decay=0.07, surface_head_lr_multiplier=1.0)
+                                 weight_decay=0.07, surface_head_lr_multiplier=1.0, surface_head_muon=False)
         namespace.update(args=config, params=params, lr_schedule=schedule)
         for selected_transform in (None, transform):
             namespace["head_transform"] = selected_transform
@@ -1794,6 +1796,115 @@ def test_head_whitening_calibration_and_physical_optimizer_coordinates() -> None
                 assert training_counter_values(actual.replace(opt_state=actual.opt_state[1]),
                                                context="head whitening") == (step, step)
                 assert int(actual.opt_state[0].count) == int(reference.opt_state[0].count) == step
+
+
+def test_packed_surface_head_muon_and_unchanged_adam_emas_counters() -> None:
+    import optax
+    from checkpoint_util import WeightEMATrainState, read_parameter_update_count, training_counter_values
+
+    main = trainer_function("main")
+    options: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.Expr)
+               and isinstance(node.value, ast.Call) and node.value.args
+               and isinstance(node.value.args[0], ast.Constant)
+               and node.value.args[0].value in ("--surface_head_muon", "--surface_head_muon_scale")]
+    checks: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.If)
+              and (ast.unparse(node.test).startswith("args.surface_head_muon and")
+                   or ast.unparse(node.test).startswith("not np.isfinite(args.surface_head_muon_scale)"))]
+    parser = argparse.ArgumentParser(add_help=False)
+    namespace: dict[str, Any] = {"parser": parser, "np": np}
+    exec(compile(ast.Module(body=options, type_ignores=[]), "muon_options", "exec"), namespace)
+    assert not parser.parse_args([]).surface_head_muon
+    assert parser.parse_args([]).surface_head_muon_scale == 20.0
+    config = SimpleNamespace(
+        surface_head_muon=True, surface_head_muon_scale=20.0, surface_head_whitening=False,
+        model="cs_dno", cs_terms_residual=False, n_blocks=8, cs_nested_blocks=1,
+        init_checkpoint=None, gradient_ema_decay=0.5, adam_b1=0.5, adam_b2=0.99,
+        weight_decay=0.07, surface_head_lr_multiplier=1.0,
+    )
+    namespace["args"] = config
+    validate = compile(ast.Module(body=checks, type_ignores=[]), "muon_validation", "exec")
+    exec(validate, namespace)
+    with patch.object(parser, "error", side_effect=ValueError):
+        for change in ({"model": "fno"}, {"cs_terms_residual": True}, {"cs_nested_blocks": 8},
+                       {"init_checkpoint": "saved"}, {"surface_head_whitening": True},
+                       {"surface_head_lr_multiplier": 2.0},
+                       *({"surface_head_muon_scale": value} for value in (0, -1, np.nan, np.inf))):
+            namespace["args"] = SimpleNamespace(**(vars(config) | change))
+            with np.testing.assert_raises(ValueError):
+                exec(validate, namespace)
+
+    names = tuple(f"cs_block_{i}" for i in range(7))
+    params: dict[str, Any] = {name: {"phi_proj": {"kernel": jnp.zeros((160, 4), jnp.float32),
+                                 "bias": jnp.array([0.2], jnp.float32)},
+                     "m_shared": {"kernel": jnp.ones((4, 2), jnp.float32)}} for name in reversed(names)}
+    params["cs_block_7"] = {"gamma": jnp.array([0.2, -0.1, 0.3, 0.4], jnp.float32)}
+    params["eta_feat_proj"] = {"kernel": jnp.array([0.1, -0.3], jnp.float32)}
+    params["other_block"] = {"phi_proj": {"kernel": jnp.ones((2, 2), jnp.float32)}}
+    schedule = optax.exponential_decay(8e-5, transition_steps=1, decay_rate=0.9)
+    namespace.update(args=config, params=params, lr_schedule=schedule, head_transform=None,
+                     jax=jax, jnp=jnp, optax=optax, Any=Any, cast=cast, WeightEMATrainState=WeightEMATrainState,
+                     training_counter_values=training_counter_values,
+                     read_parameter_update_count=read_parameter_update_count)
+    exec(compile(ast.Module(body=[*trainer_optimizer(main), trainer_function("check_training_counters")],
+                            type_ignores=[]), "muon_optimizer", "exec"), namespace)
+    common = dict(apply_fn=Mock(), weight_ema_decay=0.995, weight_ema_secondary_decay=0.9,
+                  weight_ema_start_step=1)
+    actual: Any = WeightEMATrainState.create(params=params, tx=namespace["optimizer"],
+                                       weight_ema_params=params, weight_ema_secondary_params=params, **common)
+    adam: Any = WeightEMATrainState.create(
+        params=params, weight_ema_params=params, weight_ema_secondary_params=params,
+        tx=optax.chain(optax.ema(0.5, debias=True),
+                       optax.adamw(schedule, b1=0.5, b2=0.99, weight_decay=0.07)), **common,
+    )
+    packed = jnp.concatenate([params[name]["phi_proj"]["kernel"] for name in names], axis=-1)
+    muon: Any = WeightEMATrainState.create(
+        params=packed, weight_ema_params=packed, weight_ema_secondary_params=packed,
+        tx=optax.chain(optax.ema(0.5, debias=True),
+                       optax.contrib.scale_by_muon(beta=0.5, ns_steps=5, nesterov=True),
+                       optax.scale(20), optax.add_decayed_weights(0.07),
+                       optax.scale_by_learning_rate(schedule)), **common,
+    )
+    update = jax.jit(lambda state, grads: state.apply_gradients(grads=grads))
+    check_counters = namespace["check_training_counters"]
+    for step in range(1, 7):
+        grads = jax.tree.map(lambda value: jnp.zeros_like(value) if step == 1 else
+                             0.1 * jnp.sin(jnp.arange(value.size, dtype=jnp.float32).reshape(value.shape)
+                                           + step), params)
+        for index, name in enumerate(names):
+            if step > 1:
+                grads[name]["phi_proj"]["kernel"] = (index + 1) * jax.random.normal(
+                    jax.random.fold_in(jax.random.PRNGKey(step), index), (160, 4), dtype=jnp.float32,
+                )
+        packed_grads = jnp.concatenate([grads[name]["phi_proj"]["kernel"] for name in names], axis=-1)
+        actual, adam, muon = update(actual, grads), update(adam, grads), update(muon, packed_grads)
+        assert check_counters(actual, context="Muon test") == (step, step)
+        assert actual.opt_state[1][0][1].mu.shape == (160, 28)
+        jax.tree.map(np.testing.assert_array_equal, actual.opt_state[0], adam.opt_state[0])
+        np.testing.assert_array_equal(actual.opt_state[1][0][1].mu, muon.opt_state[1].mu)
+        for attribute in ("params", "weight_ema_params", "weight_ema_secondary_params"):
+            observed_leaves = jax.tree_util.tree_flatten_with_path(getattr(actual, attribute))[0]
+            for (path, observed), expected in zip(observed_leaves, jax.tree.leaves(getattr(adam, attribute)), strict=True):
+                assert np.isfinite(observed).all() and observed.dtype == jnp.float32
+                if (len(path) == 3 and path[0].key in names
+                        and path[1:] == (jax.tree_util.DictKey("phi_proj"), jax.tree_util.DictKey("kernel"))):
+                    index = names.index(path[0].key)
+                    expected = getattr(muon, attribute)[:, 4*index:4*index+4]
+                    np.testing.assert_allclose(observed, expected, rtol=2e-6, atol=1e-9)
+                else:
+                    np.testing.assert_array_equal(observed, expected)
+        if step == 1:
+            for name in names:
+                np.testing.assert_array_equal(actual.params[name]["phi_proj"]["kernel"], 0)
+    inner = actual.opt_state[1]
+    bad_muon = (inner[0][0], inner[0][1]._replace(count=jnp.asarray(5, jnp.int32)))
+    bad_adam = (inner[0][0]._replace(inner_state=inner[0][0].inner_state._replace(count=jnp.asarray(5, jnp.int32))),
+                inner[0][1])
+    for modified in ((bad_muon, *inner[1:]), (bad_adam, *inner[1:]),
+                     (*inner[:-1], inner[-1]._replace(count=jnp.asarray(5, jnp.int32)))):
+        with np.testing.assert_raises(RuntimeError):
+            check_counters(actual.replace(opt_state=(actual.opt_state[0], modified)), context="bad count")
+    with np.testing.assert_raises(RuntimeError):
+        check_counters(actual.replace(step=actual.step + 1), context="bad TrainState")
 
 
 def test_milestone_rollouts_use_only_started_weight_ema() -> None:
@@ -3754,6 +3865,7 @@ if __name__ == "__main__":
     test_surface_head_lr_multiplier_updates_and_weight_ema()
     test_adam_moment_options_preserve_both_emas()
     test_head_whitening_calibration_and_physical_optimizer_coordinates()
+    test_packed_surface_head_muon_and_unchanged_adam_emas_counters()
     test_milestone_rollouts_use_only_started_weight_ema()
     test_nested_zero_inner_initialization_and_gradient_activation()
     test_phase_rank_one_option_requires_m1_cs_network()

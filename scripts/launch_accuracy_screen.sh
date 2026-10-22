@@ -12,13 +12,14 @@ reference_dir=$control_dir/eval_fast_weight_ema_nestedfused_contextbatch
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s head_whitening|pair_coupling|coherent_stage|modal_residual05|cubic32|full_q_teacher|rhs_teacher|parity_products|parity_streams|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
+    printf 'Usage: %s head_muon|head_whitening|pair_coupling|coherent_stage|modal_residual05|cubic32|full_q_teacher|rhs_teacher|parity_products|parity_streams|phase_direction|phase_rank_one|phase_wavenumber|surface_amplitude_fp32|nested_features|cs_terms|cs_terms_m1|cs_terms_w160 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
     export JAX_PLATFORMS=cuda
     eval_args=(--fuse-nested-fft --batch-context-fft)
     case "$arm" in
+        head_muon) arm_args=(--surface_head_muon --surface_head_muon_scale 20) ;;
         head_whitening) arm_args=(--surface_head_whitening) ;;
         pair_coupling) arm_args=(--cs_pair_coupling) ;;
         coherent_stage) arm_args=(--rollout_coherent_weight 1) ;;
