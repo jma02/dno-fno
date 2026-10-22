@@ -9,10 +9,11 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import signal
 import sys
 from pathlib import Path
 from time import perf_counter
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +27,7 @@ from scipy.optimize import minimize
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from solver.evals.model_rollout import load_run, rollout_surrogate  # noqa: E402
+from solver.evals.model_rollout import LoadedRun, load_run, rollout_surrogate  # noqa: E402
 from solver.gen_data.pipeline.dno_target import compute_dno_target  # noqa: E402
 from solver.solvers import time_integrator as ti  # noqa: E402
 from util import build_dataset_split_indices, get_batches, load_dataset_arrays, make_normalizers  # noqa: E402
@@ -34,6 +35,23 @@ from util import build_dataset_split_indices, get_batches, load_dataset_arrays, 
 trainer = importlib.import_module("1d_dno_fno_jax_ema_grad")
 jax.config.update("jax_enable_x64", True)
 Batch = tuple[jax.Array, ...]
+
+
+def save_iterate(
+    run_dir: Path, params: Any, iteration: int, source: LoadedRun,
+    kind: Literal["raw", "weight_ema"],
+) -> None:
+    destination = run_dir / ("weight_ema_ckpt" if kind == "weight_ema" else "latest_ckpt")
+    destination.mkdir()
+    checkpoints.save_checkpoint(
+        destination.resolve(), jax.device_get({"params": params, "step": iteration}),
+        step=source.epoch, prefix="ckpt_", orbax_checkpointer=ocp.PyTreeCheckpointer(),
+    )
+    # Fine-tuning iterations are not additional full-data training epochs.
+    (destination / "metadata.json").write_text(json.dumps(
+        {"epoch": source.epoch, "fine_tune_iteration": iteration,
+         "stats": source.stats, "params_kind": kind}, indent=2,
+    ))
 
 
 def main() -> None:
@@ -235,6 +253,8 @@ def main() -> None:
         print(json.dumps(record), flush=True)
 
     termination = ""
+    interrupted = False
+    previous_term_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         result = minimize(scaled_objective, x_initial, method="L-BFGS-B", jac=True, callback=accept,
                           options={"maxiter": args.maxiter, "maxls": args.max_line_search,
@@ -242,6 +262,11 @@ def main() -> None:
         termination = str(result.message)
     except (TimeoutError, FloatingPointError) as error:
         termination = str(error)
+    except KeyboardInterrupt:
+        termination = "Interrupted; retained the last accepted iterate"
+        interrupted = True
+    finally:
+        signal.signal(signal.SIGTERM, previous_term_handler)
     applied = np.asarray(jnp.asarray(accepted, dtype=flat_initial.dtype), dtype=np.float64)
     summary.update(accepted_steps=accepted_steps, evaluations=evaluations, termination=termination,
                    accepted_objective=accepted_value, optimization_seconds=perf_counter() - optimization_start,
@@ -249,19 +274,16 @@ def main() -> None:
                    weight_ema_initial_coefficient=config.weight_ema_decay**accepted_steps)
     config_payload = vars(config) | {"run_name": args.output_dir.name, "gradient_ema_decay": 0.0,
                                      "fine_tune_optimizer": summary["optimizer"], "weight_decay": 0.0,
-                                     "fine_tune_iterations": accepted_steps}
+                                     "fine_tune_iterations": accepted_steps, "epochs": loaded.epoch,
+                                     "fine_tune_train_rows": args.train_rows}
     (args.output_dir / "config.json").write_text(json.dumps(config_payload, indent=2))
-    for name, params in (("latest_ckpt", unravel(jnp.asarray(accepted, dtype=flat_initial.dtype))),
-                         ("weight_ema_ckpt", shadow)):
-        destination = args.output_dir / name
-        destination.mkdir()
-        checkpoints.save_checkpoint(destination.resolve(), jax.device_get({"params": params, "step": accepted_steps}),
-                                    step=accepted_steps, prefix="ckpt_", orbax_checkpointer=ocp.PyTreeCheckpointer())
-        (destination / "metadata.json").write_text(json.dumps(
-            {"epoch": accepted_steps, "fine_tune_iteration": accepted_steps, "initial_epoch": loaded.epoch,
-             "stats": loaded.stats, "params_kind": "weight_ema" if name.startswith("weight") else "raw"},
-            indent=2,
-        ))
+    save_iterate(args.output_dir, unravel(jnp.asarray(accepted, dtype=flat_initial.dtype)), accepted_steps, loaded, "raw")
+    save_iterate(args.output_dir, shadow, accepted_steps, loaded, "weight_ema")
+    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    if interrupted:
+        print(json.dumps(summary), flush=True)
+        return
+
     @jax.jit(static_argnames=("hd_active",))
     def validation_metrics(params: Any, batch: Batch, key: jax.Array, *, hd_active: bool) -> jax.Array:
         values = jax.vmap(lambda _: components(params, *batch, collect_family_metrics=True),
@@ -286,6 +308,8 @@ def main() -> None:
                     jax.random.fold_in(jax.random.PRNGKey(config.seed + 2), index), 0,
                 ), hd_active=hd_active,
             ))
+            if not np.isfinite(values).all():
+                raise FloatingPointError(f"Non-finite {name} validation metrics in batch {index}")
             totals += values * len(ids)
             tangent_sum += values[2] * values[4] * len(ids)
             tangent_count += values[4] * len(ids)
@@ -302,8 +326,8 @@ def main() -> None:
                 for family, row in zip(("stokes", "tanaka", "benjamin_feir", "jonswap_tma"), totals[7:].reshape(4, 5))
             },
         }
+        (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
         print(json.dumps({name: summary[f"validation_{name}"]}), flush=True)
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

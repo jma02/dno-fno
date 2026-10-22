@@ -2,12 +2,14 @@
 
 import argparse
 import ast
+import json
 from collections.abc import Callable
 from functools import partial
 from importlib import import_module
 from itertools import product
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -3830,7 +3832,46 @@ def test_amplitude_probe_retained_band_values_and_gradients() -> None:
             np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-13)
 
 
+def test_lbfgs_exports_keep_training_epoch_and_distinct_weight_kinds() -> None:
+    from finetune_lbfgs import save_iterate
+    from solver.evals.model_rollout import LoadedRun, load_run
+
+    options = import_module("1d_dno_fno_jax_ema_grad").build_parser().parse_args(["--dataset", "unused"])
+    config = vars(options) | {
+        "model": "cs_dno", "norm": "scale", "width": 8, "n_blocks": 1, "latent": 1,
+        "cs_n_polys": 1, "cs_mult_hidden": 4, "domain_length": float(2 * np.pi),
+        "eta_scale": 0.1, "xi_scale": 0.2, "target_scale": 0.3,
+    }
+    model = CraigSulemDNO(width=8, n_blocks=1, latent=1, n_polys=1, mult_hidden=4,
+                          eta_scale=0.1, xi_scale=0.2, target_scale=0.3)
+    x = jnp.arange(32, dtype=jnp.float32) * jnp.float32(2 * np.pi / 32)
+    inputs = jnp.stack((0.1 * jnp.cos(x), 0.2 * jnp.sin(2 * x)), axis=-1)[None]
+    depth = jnp.zeros((1, 1), dtype=jnp.float32)
+    params = dict(model.init(jax.random.PRNGKey(0), inputs, depth)["params"])
+    stats = {"feature_absmax": [0.1, 0.2], "target_absmax": 0.3}
+    source = LoadedRun(model, params, config, stats, "scale", 37)
+    with TemporaryDirectory(prefix="dno-lbfgs-checkpoint-") as directory:
+        run_dir = Path(directory)
+        (run_dir / "config.json").write_text(json.dumps(config))
+        for kind, selection, increment in (("raw", "latest", 0.01), ("weight_ema", "weight_ema", 0.02)):
+            candidate = jax.tree.map(lambda value: value + jnp.float32(increment), params)
+            save_iterate(run_dir, candidate, 3, source, cast(Any, kind))
+            restored = load_run(run_dir, checkpoint=cast(Any, selection))
+            assert restored.epoch == 37
+            assert restored.stats == stats
+            metadata = json.loads((run_dir / f"{selection}_ckpt" / "metadata.json").read_text())
+            assert metadata["fine_tune_iteration"] == 3
+            assert metadata["params_kind"] == kind
+            for actual, expected in zip(jax.tree.leaves(restored.params), jax.tree.leaves(candidate)):
+                np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(
+                restored.model.apply({"params": restored.params}, inputs, depth),
+                model.apply({"params": candidate}, inputs, depth),
+            )
+
+
 if __name__ == "__main__":
+    test_lbfgs_exports_keep_training_epoch_and_distinct_weight_kinds()
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_rhs_energy_error_matches_padded_equations_and_stopped_denominator()
     test_rhs_teacher_flag_requires_full_spectrum_and_active_teacher()
