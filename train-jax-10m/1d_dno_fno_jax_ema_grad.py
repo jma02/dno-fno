@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -35,6 +35,7 @@ for _d in (REPO_ROOT, FNO_DIR, DNO_DIR):
 
 from util import (  # noqa: E402
     FlatParams,
+    StatsDict,
     assert_pytree_replicated,
     build_dataset_split_indices,
     compute_log_depth,
@@ -100,7 +101,7 @@ def transform_surface_heads(updates: Any, transform: jax.Array) -> Any:
     return jax.tree_util.tree_unflatten(tree, values)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     # Model, dataset, and optimizer options.
     parser = argparse.ArgumentParser(description="Train a 1D JAX neural DNO surrogate with gradient EMA.")
     parser.add_argument("--model", choices=("fno", "cs_dno"), default="fno")
@@ -477,6 +478,410 @@ def main() -> None:
         default=1e-12,
         help="Epsilon added to the squared norm in the Hadamard loss denominator.",
     )
+    return parser
+
+
+def build_apply_model(
+    args: argparse.Namespace, model: Any, nx: int, domain_length: float,
+) -> Callable[..., Any]:
+    def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array,
+                    *, return_baseline: bool = False, terms_phys: jax.Array | None = None) -> Any:
+        if args.model != "cs_dno":
+            prediction = cast(jax.Array, model.apply(variables, inputs, depth))
+            return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction) if return_baseline else prediction
+        if args.cs_terms_residual:
+            return model.apply(variables, inputs, depth, return_baseline=return_baseline, terms_phys=terms_phys)
+        multiplier_model = DepthAwareMultiplier(
+            args.latent, domain_length, 5.0, args.cs_mult_hidden,
+            multiplier_skip=args.cs_multiplier_skip,
+            log_multiplier_inputs=args.cs_log_multiplier_inputs,
+        )
+
+        def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
+                      context: nn.module.InterceptorContext) -> Any:
+            if isinstance(context.module, CraigSulemBlock) and context.method_name == "__call__":
+                eta_features, xi_phys, log_depth = call_args
+                if context.module.name != f"cs_block_{args.n_blocks - 1}":
+                    return jnp.zeros_like(xi_phys)
+                groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
+                ordinary_groups = args.n_blocks - args.cs_nested_blocks
+                ordinary_branches = ordinary_groups * args.latent
+                head_kernels = [group["phi_proj"]["kernel"] for group in groups[:ordinary_groups]]
+                if model.pair_coupling:
+                    head_kernels += [group["phi_cross"]["kernel"] for group in groups[:ordinary_groups]]
+                weights = (eta_features @ jnp.concatenate(head_kernels, axis=-1)
+                           if ordinary_groups else jnp.zeros((*eta_features.shape[:2], 0), dtype=eta_features.dtype))
+                filters = jnp.concatenate([
+                    cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
+                    for group in groups
+                ], axis=-1)
+                xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
+                filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
+                weighted = weights[..., :ordinary_branches] * filtered[..., :ordinary_branches]
+                if model.pair_coupling:
+                    weighted += jnp.repeat(weights[..., ordinary_branches:], 2, axis=-1) * filtered[
+                        ..., jnp.arange(ordinary_branches) ^ 1
+                    ]
+                if args.cs_nested_blocks:
+                    nested_eta = call_kwargs["eta_norm"][..., None]
+                    if args.cs_nested_surface_features:
+                        surface_mix = jnp.concatenate([
+                            group["surface_mix"] for group in groups[ordinary_groups:]
+                        ], axis=-1)
+                        nested_eta = nested_eta + call_kwargs["nested_features"] @ surface_mix
+                    inner_filters = jnp.concatenate([
+                        cast(jax.Array, multiplier_model.apply({"params": group["m_inner"]}, log_depth, nx // 2 + 1))
+                        for group in groups[ordinary_groups:]
+                    ], axis=-1)
+                    inner = jnp.fft.irfft(
+                        inner_filters * jnp.fft.rfft(nested_eta * filtered[..., ordinary_branches:], axis=1, norm="forward"),
+                        n=nx, axis=1, norm="forward",
+                    )
+                    gains = jnp.concatenate([group["gamma"] for group in groups[ordinary_groups:]])
+                    weighted = jnp.concatenate((weighted, nested_eta * inner * gains), axis=-1)
+                weighted_hat = jnp.fft.rfft(weighted, axis=1, norm="forward")
+                correction_hat = jnp.sum(filters * weighted_hat, axis=-1)
+                if call_kwargs["correction_hat_addition"] is not None:
+                    correction_hat = correction_hat + call_kwargs["correction_hat_addition"]
+                return jnp.fft.irfft(correction_hat, n=nx, axis=-1, norm="forward")
+            return next_fun(*call_args, **call_kwargs)
+
+        with nn.intercept_methods(intercept):
+            return model.apply(variables, inputs, depth, return_baseline=return_baseline)
+
+    return apply_model
+
+
+def build_loss_functions(
+    args: argparse.Namespace, model: Any, apply_model: Callable[..., Any],
+    nx: int, domain_length: float, stats: StatsDict,
+    physical_dtype: Any, training_dtype: Any, n_devices: int,
+) -> tuple[Callable[..., Any], Callable[..., jax.Array]]:
+    norm_inputs_jax, norm_targets_jax, denorm_targets_jax = make_normalizers(
+        stats, args.norm, dtype=np.dtype(physical_dtype),
+    )
+
+    log_h_max = float(np.log(5.0))
+    hadamard_microbatch_local = args.hadamard_microbatch // n_devices
+    _, _k_grid = build_grid(nx, domain_length)
+    k_grid_jax = jnp.asarray(_k_grid, dtype=physical_dtype)
+    k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
+
+    # Full-batch losses shared by training and validation.
+    def compute_loss_components(
+        current_params: FlatParams,
+        eta: jax.Array,
+        xi: jax.Array,
+        gxi: jax.Array,
+        batch_depth: jax.Array,
+        family: jax.Array,
+        *,
+        collect_family_metrics: bool = False,
+        n_data_only_rows: int = 0,
+        terms_phys: jax.Array | None = None,
+        full_spectrum_rows: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
+        carrier_modes = sideband_offsets = None
+        if args.phase_mechanism == "bf_sideband":
+            carrier_modes, sideband_offsets = family[:, 1], family[:, 2]
+            family = family[:, 0]
+        target_residual64 = None
+        if args.fp64_residual:
+            physical_inputs64 = norm_inputs_jax(eta.astype(jnp.float64), xi.astype(jnp.float64))
+            physical_depth64 = batch_depth.astype(jnp.float64)
+            baseline64 = (
+                cast(jax.Array, model.apply({}, physical_inputs64[..., 1], physical_depth64,
+                                           method=model._linear_baseline))
+                + cast(jax.Array, model.apply({}, physical_inputs64[..., 0], physical_inputs64[..., 1],
+                                             physical_depth64, method=model._g1_baseline))
+            )[..., None]
+            target_residual64 = norm_targets_jax(gxi.astype(jnp.float64)) - baseline64
+        eta, xi, gxi, batch_depth = map(physical_dtype, (eta, xi, gxi, batch_depth))
+        batch_targets = norm_targets_jax(gxi)
+        predictions, baseline, m1_baseline, correction = apply_model(
+            {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
+            return_baseline=True,
+            **({"terms_phys": terms_phys} if terms_phys is not None else {}),
+        )
+        pred_hat = jnp.fft.rfft(predictions, axis=1)
+        target_hat = jnp.fft.rfft(batch_targets, axis=1)
+        baseline_hat = jnp.fft.rfft(baseline, axis=1)
+        error_hat = (jnp.fft.rfft(predictions - batch_targets, axis=1)
+                     if args.subtract_before_fft else pred_hat - target_hat)
+        physical_error64 = None
+        if target_residual64 is not None:
+            residual64 = correction.astype(jnp.float64) - target_residual64
+            error_hat = jnp.fft.rfft(residual64, axis=1)
+            physical_error64 = denorm_targets_jax(residual64)[..., 0]
+        squared_error = jnp.sum(jnp.abs(error_hat.astype(jnp.complex128)) ** 2, axis=(1, 2))
+        zero_error = squared_error == 0.0
+        error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
+        target_norm = jnp.sqrt(jnp.maximum(
+            jnp.sum(jnp.abs(target_hat.astype(jnp.complex128)) ** 2, axis=(1, 2)), 1e-12,
+        ))
+        residual_squared = jnp.sum(
+            jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
+        )
+        residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
+        data_error_norm, data_target_norm, data_residual_denominator = error_norm, target_norm, residual_denominator
+        data_squared_error: jax.Array = squared_error
+        data_mask: jax.Array | bool = True
+        if args.data_k_max is not None:
+            data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
+        if full_spectrum_rows is not None:
+            data_mask = data_mask | full_spectrum_rows[:, None, None]
+        if args.data_k_max is not None or full_spectrum_rows is not None:
+            data_squared_error = jnp.sum(jnp.abs(jnp.where(
+                data_mask, error_hat.astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2))
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
+            data_target_norm = jnp.sqrt(jnp.maximum(jnp.sum(jnp.abs(jnp.where(
+                data_mask, target_hat.astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2)), 1e-12))
+            data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
+                data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
+            )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
+        if args.data_modal_residual_floor > 0.0:
+            modal_mask = data_mask & (k_rfft_jax > 0.0)[None, :, None]
+            modal_residual = (target_hat.astype(jnp.complex128)
+                              - baseline_hat.astype(jnp.complex128))
+            modal_power = jnp.where(modal_mask, jnp.abs(modal_residual) ** 2, 0.0)
+            modal_floor = (args.data_modal_residual_floor**2 * jnp.max(modal_power, axis=(1, 2))
+                           + (args.residual_floor * data_target_norm) ** 2)
+            inverse_scale = jax.lax.rsqrt(modal_power + modal_floor[:, None, None])
+            residual_power = jnp.sum(modal_power, axis=(1, 2))
+            scaled_power = jnp.sum(inverse_scale * modal_power, axis=(1, 2))
+            modal_weight = jnp.where(
+                modal_mask & (residual_power > 0.0)[:, None, None],
+                inverse_scale * (
+                    residual_power / jnp.where(residual_power > 0.0, scaled_power, 1.0)
+                )[:, None, None],
+                1.0,
+            )
+            # Keep DC and the target denominator unchanged; weights are label-only.
+            data_squared_error = jnp.sum(jnp.where(
+                data_mask,
+                jax.lax.stop_gradient(modal_weight) * jnp.abs(error_hat.astype(jnp.complex128)) ** 2,
+                0.0,
+            ), axis=(1, 2))
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(
+                data_zero_error, 0.0,
+                jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)),
+            )
+        if args.data_phase_projection_weight > 0.0:
+            eta_hat = jnp.fft.rfft(eta, axis=1).astype(jnp.complex128)
+            phase_band = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
+            eta_power = jnp.abs(eta_hat) ** 2
+            phase_active = phase_band[..., 0] & (
+                eta_power > 1e-12 * jnp.max(eta_power[:, 1:], axis=1, keepdims=True)
+            )
+            phase_error = jnp.where(
+                phase_active,
+                jnp.imag(error_hat[..., 0].astype(jnp.complex128) * jnp.conj(eta_hat))
+                / jnp.sqrt(jnp.where(phase_active, eta_power, 1.0)),
+                0.0,
+            )
+            data_squared_error = data_squared_error + args.data_phase_projection_weight * jnp.sum(
+                phase_error**2, axis=1,
+            )
+            data_zero_error = data_squared_error == 0.0
+            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
+        if args.data_xi_projection_weight > 0.0:
+            xi_hat = jnp.fft.rfft(xi, axis=1).astype(jnp.complex128)
+            projection_mask = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
+            xi_direction = jnp.where(projection_mask[..., 0], xi_hat, 0.0)
+            projection_error = jnp.where(
+                projection_mask, error_hat.astype(jnp.complex128), 0.0,
+            )[..., 0]
+            direction_squared = jnp.sum(jnp.abs(xi_direction) ** 2, axis=1)
+            projection_dot = jnp.real(jnp.sum(jnp.conj(xi_direction) * projection_error, axis=1))
+            direction_active = direction_squared > jnp.finfo(xi.dtype).eps * jnp.sum(
+                jnp.abs(xi_hat[:, 1:]) ** 2, axis=1,
+            )
+            projection_squared = jnp.where(
+                direction_active,
+                projection_dot**2 / jnp.where(direction_active, direction_squared, 1.0),
+                0.0,
+            )
+            emphasized_squared_error: jax.Array = data_squared_error + args.data_xi_projection_weight * projection_squared
+            emphasized_zero_error = emphasized_squared_error == 0.0
+            data_error_norm = jnp.where(
+                emphasized_zero_error, 0.0,
+                jnp.sqrt(jnp.where(emphasized_zero_error, 1.0, emphasized_squared_error)),
+            )
+        denominator = data_target_norm
+        if args.model == "cs_dno":
+            if args.data_normalization == "residual":
+                denominator = data_residual_denominator
+            elif args.data_normalization == "bounded":
+                residual_ratio = data_residual_denominator / data_target_norm
+                row_weight = 1.0 + args.nonlinear_reference / (residual_ratio + args.nonlinear_reference)
+                denominator = data_target_norm * args.nonlinear_weight_mean / row_weight
+            elif args.data_normalization == "nonlinear":
+                # Nonlinear weighting uses the M1 correction even with a G2 baseline.
+                m1_error_hat = (target_hat - jnp.fft.rfft(m1_baseline, axis=1)).astype(jnp.complex128)
+                if args.data_k_max is not None:
+                    m1_error_hat = jnp.where(data_mask, m1_error_hat, 0.0)
+                residual_ratio = jnp.sqrt(jnp.sum(
+                    jnp.abs(m1_error_hat) ** 2, axis=(1, 2),
+                )) / data_target_norm
+                nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
+                denominator = data_target_norm * args.nonlinear_weight_mean / nonlinear_weight
+        denominator = jax.lax.stop_gradient(denominator)
+        per_row_data_loss = data_error_norm / denominator
+        if full_spectrum_rows is not None and args.rollout_training_rhs:
+            rhs_error = compute_rhs_relative_error(
+                eta, xi, denorm_targets_jax(predictions)[..., 0], gxi,
+                jnp.exp(batch_depth[:, 0].astype(jnp.float64)), k_grid_jax,
+            )
+            per_row_data_loss = jnp.where(full_spectrum_rows, rhs_error, per_row_data_loss)
+        data_loss = jnp.mean(per_row_data_loss)
+        full_l2_loss = jnp.mean(error_norm / target_norm)
+        family_metrics: tuple[jax.Array, ...] = ()
+        if collect_family_metrics:
+            row_metrics = jnp.stack((
+                jnp.ones_like(error_norm), error_norm / target_norm,
+                error_norm / residual_denominator, squared_error < residual_squared,
+                per_row_data_loss,
+            ))
+            # Masked means, not means of each shard's family means: pmean remains exact.
+            family_metrics = tuple(
+                value for family_id in PhysicalFamilyId
+                for value in jnp.mean(jnp.where(family == family_id, row_metrics, 0.0), axis=1)
+            )
+        # Data fit uses normalized Gxi; the physics losses below use physical fields.
+        h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
+        gxi_prediction = denorm_targets_jax(predictions)[..., 0]
+        # Paired probe rows contribute only to data fit; auxiliary means use originals.
+        full_batch_size = eta.shape[0]
+        n_auxiliary_rows = full_batch_size - n_data_only_rows
+        if n_auxiliary_rows == 0:
+            zero = jnp.float32(0.0)
+            return data_loss, zero, zero, zero, zero, full_l2_loss, family_metrics
+        eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets = (
+            value[:n_auxiliary_rows]
+            for value in (eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets)
+        )
+        mode_loss = jnp.float32(0.0)
+        if args.mode_balanced_weight > 0.0:
+            mode_loss = compute_mode_balanced_loss(
+                eta=eta,
+                gxi_prediction=gxi_prediction,
+                gxi_target=denorm_targets_jax(batch_targets)[..., 0],
+                depth=h_phys,
+                k_rfft=k_rfft_jax,
+                k_max=args.mode_balanced_k_max,
+                activity_threshold=args.mode_balanced_activity_threshold,
+                denominator_eps=args.mode_balanced_denominator_eps,
+                subtract_before_fft=args.subtract_before_fft,
+                gxi_error=None if physical_error64 is None else physical_error64[:n_auxiliary_rows],
+                sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
+                                                       training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
+            )
+        tangent_loss = jnp.float32(0.0)
+        local_selected = jnp.float32(0.0)
+        if args.translation_tangent_weight > 0.0:
+            tangent_options: dict[str, Any] = dict(
+                sample_mask=(family == PhysicalFamilyId.TANAKA) if args.translation_tangent_scope == "tanaka" else None,
+                denominator_eps=args.translation_tangent_denominator_eps,
+                loss_norm=args.translation_tangent_loss_norm,
+                charbonnier_eps=args.translation_tangent_charbonnier_eps,
+                subtract_before_centering=args.subtract_before_centering,
+            )
+            if args.translation_tangent_geometry == "coupled_modal":
+                tangent_loss, local_selected = compute_modal_phase_loss(
+                    eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                    k_max=args.translation_tangent_k_max, **tangent_options,
+                )
+            else:
+                tangent_loss, local_selected = compute_translation_tangent_loss(
+                    eta, gxi_prediction, gxi, h_phys, k_grid_jax,
+                    global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
+                    smoothing_scale=args.translation_tangent_smoothing_scale, **tangent_options,
+                )
+            # Weight each GPU's contribution by its number of selected nonflat samples.
+            global_selected = jax.lax.psum(local_selected, axis_name="batch")
+            device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
+            shard_weight = (
+                device_count
+                * local_selected
+                / jnp.maximum(global_selected, jnp.float32(1.0))
+            )
+            tangent_loss = tangent_loss * shard_weight
+        mechanism_loss = jnp.float32(0.0)
+        if args.phase_mechanism == "stokes_carrier":
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
+                subtract_before_centering=args.subtract_before_centering,
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        elif args.phase_mechanism in ("tanaka_momentum", "all_momentum"):
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="momentum", horizon=200.0,
+                subtract_before_centering=args.subtract_before_centering,
+                sample_mask=family == PhysicalFamilyId.TANAKA if args.phase_mechanism == "tanaka_momentum" else None,
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        elif args.phase_mechanism == "bf_sideband":
+            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
+                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
+                mechanism="sideband", sample_mask=family == PhysicalFamilyId.BENJAMIN_FEIR, horizon=200.0,
+                subtract_before_centering=args.subtract_before_centering,
+                carrier_mode=cast(jax.Array, carrier_modes)[:n_auxiliary_rows],
+                sideband_offset=cast(jax.Array, sideband_offsets)[:n_auxiliary_rows],
+            )
+            mechanism_loss *= mechanism_count / full_batch_size
+        return data_loss, mode_loss, tangent_loss, mechanism_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
+
+    def hadamard_loss_on_subset(
+        rng: jax.Array,
+        current_params: FlatParams,
+        eta: jax.Array,
+        xi: jax.Array,
+        batch_depth: jax.Array,
+        flow_target: jax.Array | None = None,
+    ) -> jax.Array:
+        rng_perm, rng_probe = jax.random.split(rng)
+        sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
+            :hadamard_microbatch_local
+        ]
+        eta_sub = eta.astype(physical_dtype)[sample_indices]
+        xi_sub = xi.astype(physical_dtype)[sample_indices]
+        batch_depth_sub = batch_depth.astype(physical_dtype)[sample_indices].astype(jnp.float64)
+        response_loss = partial(
+            compute_hadamard_loss,
+            flow_target=flow_target[sample_indices] if flow_target is not None else None,
+        ) if args.hadamard_mode == "self" else partial(
+            compute_local_response_loss, mode=args.hadamard_mode, length=domain_length,
+        )
+        return response_loss(
+            rng=rng_probe,
+            apply_fn=apply_model,
+            model_params=current_params,
+            eta_phys=eta_sub,
+            xi_phys=xi_sub,
+            batch_depth_local=batch_depth_sub,
+            norm_inputs_fn=norm_inputs_jax,
+            denorm_targets_fn=denorm_targets_jax,
+            k=k_grid_jax,
+            dtype=jnp.float64,
+            k_max=args.hadamard_k_max,
+            sobolev_order=args.hadamard_sobolev_order,
+            fd_step_min=args.hadamard_fd_step_min,
+            fd_step_max=args.hadamard_fd_step_max,
+            min_surface_rms=args.hadamard_min_surface_rms,
+            denominator_eps=args.hadamard_denominator_eps,
+        )
+
+    return compute_loss_components, hadamard_loss_on_subset
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     if args.cs_phase_wavenumber_hidden < 0:
         parser.error("--cs_phase_wavenumber_hidden must be nonnegative")
@@ -960,70 +1365,7 @@ def main() -> None:
               f"eigenvalues {eigenvalues[0]:.6g}..{eigenvalues[-1]:.6g}, floor {eigen_floor:.6g}, "
               "unit RMS singular value; fixed physical-weight optimizer coordinates")
 
-    def apply_model(variables: dict[str, Any], inputs: jax.Array, depth: jax.Array,
-                    *, return_baseline: bool = False, terms_phys: jax.Array | None = None) -> Any:
-        if args.model != "cs_dno":
-            prediction = cast(jax.Array, model.apply(variables, inputs, depth))
-            return (prediction, jnp.zeros_like(prediction), jnp.zeros_like(prediction), prediction) if return_baseline else prediction
-        if args.cs_terms_residual:
-            return model.apply(variables, inputs, depth, return_baseline=return_baseline, terms_phys=terms_phys)
-        multiplier_model = DepthAwareMultiplier(
-            args.latent, domain_length, 5.0, args.cs_mult_hidden,
-            multiplier_skip=args.cs_multiplier_skip,
-            log_multiplier_inputs=args.cs_log_multiplier_inputs,
-        )
-
-        def intercept(next_fun: Any, call_args: tuple[Any, ...], call_kwargs: dict[str, Any],
-                      context: nn.module.InterceptorContext) -> Any:
-            if isinstance(context.module, CraigSulemBlock) and context.method_name == "__call__":
-                eta_features, xi_phys, log_depth = call_args
-                if context.module.name != f"cs_block_{args.n_blocks - 1}":
-                    return jnp.zeros_like(xi_phys)
-                groups = [variables["params"][f"cs_block_{i}"] for i in range(args.n_blocks)]
-                ordinary_groups = args.n_blocks - args.cs_nested_blocks
-                ordinary_branches = ordinary_groups * args.latent
-                head_kernels = [group["phi_proj"]["kernel"] for group in groups[:ordinary_groups]]
-                if model.pair_coupling:
-                    head_kernels += [group["phi_cross"]["kernel"] for group in groups[:ordinary_groups]]
-                weights = (eta_features @ jnp.concatenate(head_kernels, axis=-1)
-                           if ordinary_groups else jnp.zeros((*eta_features.shape[:2], 0), dtype=eta_features.dtype))
-                filters = jnp.concatenate([
-                    cast(jax.Array, multiplier_model.apply({"params": group["m_shared"]}, log_depth, nx // 2 + 1))
-                    for group in groups
-                ], axis=-1)
-                xi_hat = jnp.fft.rfft(xi_phys, axis=-1, norm="forward")
-                filtered = jnp.fft.irfft(filters * xi_hat[..., None], n=nx, axis=1, norm="forward")
-                weighted = weights[..., :ordinary_branches] * filtered[..., :ordinary_branches]
-                if model.pair_coupling:
-                    weighted += jnp.repeat(weights[..., ordinary_branches:], 2, axis=-1) * filtered[
-                        ..., jnp.arange(ordinary_branches) ^ 1
-                    ]
-                if args.cs_nested_blocks:
-                    nested_eta = call_kwargs["eta_norm"][..., None]
-                    if args.cs_nested_surface_features:
-                        surface_mix = jnp.concatenate([
-                            group["surface_mix"] for group in groups[ordinary_groups:]
-                        ], axis=-1)
-                        nested_eta = nested_eta + call_kwargs["nested_features"] @ surface_mix
-                    inner_filters = jnp.concatenate([
-                        cast(jax.Array, multiplier_model.apply({"params": group["m_inner"]}, log_depth, nx // 2 + 1))
-                        for group in groups[ordinary_groups:]
-                    ], axis=-1)
-                    inner = jnp.fft.irfft(
-                        inner_filters * jnp.fft.rfft(nested_eta * filtered[..., ordinary_branches:], axis=1, norm="forward"),
-                        n=nx, axis=1, norm="forward",
-                    )
-                    gains = jnp.concatenate([group["gamma"] for group in groups[ordinary_groups:]])
-                    weighted = jnp.concatenate((weighted, nested_eta * inner * gains), axis=-1)
-                weighted_hat = jnp.fft.rfft(weighted, axis=1, norm="forward")
-                correction_hat = jnp.sum(filters * weighted_hat, axis=-1)
-                if call_kwargs["correction_hat_addition"] is not None:
-                    correction_hat = correction_hat + call_kwargs["correction_hat_addition"]
-                return jnp.fft.irfft(correction_hat, n=nx, axis=-1, norm="forward")
-            return next_fun(*call_args, **call_kwargs)
-
-        with nn.intercept_methods(intercept):
-            return model.apply(variables, inputs, depth, return_baseline=return_baseline)
+    apply_model = build_apply_model(args, model, nx, domain_length)
 
     # Set the learning-rate schedule and initialize AdamW's update state.
     schedule_steps = schedule_epochs * train_steps_per_epoch
@@ -1175,322 +1517,12 @@ def main() -> None:
     norm_inputs_jax, norm_targets_jax, denorm_targets_jax = make_normalizers(
         stats, args.norm, dtype=np.dtype(physical_dtype),
     )
-
-    log_h_max = float(np.log(5.0))
-    hadamard_microbatch_local = args.hadamard_microbatch // n_devices
     _, _k_grid = build_grid(nx, domain_length)
     k_grid_jax = jnp.asarray(_k_grid, dtype=physical_dtype)
     k_rfft_jax = jnp.abs(k_grid_jax[: nx // 2 + 1])
-
-    # Full-batch losses shared by training and validation.
-    def compute_loss_components(
-        current_params: FlatParams,
-        eta: jax.Array,
-        xi: jax.Array,
-        gxi: jax.Array,
-        batch_depth: jax.Array,
-        family: jax.Array,
-        *,
-        collect_family_metrics: bool = False,
-        n_data_only_rows: int = 0,
-        terms_phys: jax.Array | None = None,
-        full_spectrum_rows: jax.Array | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
-        carrier_modes = sideband_offsets = None
-        if args.phase_mechanism == "bf_sideband":
-            carrier_modes, sideband_offsets = family[:, 1], family[:, 2]
-            family = family[:, 0]
-        target_residual64 = None
-        if args.fp64_residual:
-            physical_inputs64 = norm_inputs_jax(eta.astype(jnp.float64), xi.astype(jnp.float64))
-            physical_depth64 = batch_depth.astype(jnp.float64)
-            baseline64 = (
-                cast(jax.Array, model.apply({}, physical_inputs64[..., 1], physical_depth64,
-                                           method=model._linear_baseline))
-                + cast(jax.Array, model.apply({}, physical_inputs64[..., 0], physical_inputs64[..., 1],
-                                             physical_depth64, method=model._g1_baseline))
-            )[..., None]
-            target_residual64 = norm_targets_jax(gxi.astype(jnp.float64)) - baseline64
-        eta, xi, gxi, batch_depth = map(physical_dtype, (eta, xi, gxi, batch_depth))
-        batch_targets = norm_targets_jax(gxi)
-        predictions, baseline, m1_baseline, correction = apply_model(
-            {"params": current_params}, norm_inputs_jax(eta, xi), batch_depth,
-            return_baseline=True,
-            **({"terms_phys": terms_phys} if terms_phys is not None else {}),
-        )
-        pred_hat = jnp.fft.rfft(predictions, axis=1)
-        target_hat = jnp.fft.rfft(batch_targets, axis=1)
-        baseline_hat = jnp.fft.rfft(baseline, axis=1)
-        error_hat = (jnp.fft.rfft(predictions - batch_targets, axis=1)
-                     if args.subtract_before_fft else pred_hat - target_hat)
-        physical_error64 = None
-        if target_residual64 is not None:
-            residual64 = correction.astype(jnp.float64) - target_residual64
-            error_hat = jnp.fft.rfft(residual64, axis=1)
-            physical_error64 = denorm_targets_jax(residual64)[..., 0]
-        squared_error = jnp.sum(jnp.abs(error_hat.astype(jnp.complex128)) ** 2, axis=(1, 2))
-        zero_error = squared_error == 0.0
-        error_norm = jnp.where(zero_error, 0.0, jnp.sqrt(jnp.where(zero_error, 1.0, squared_error)))
-        target_norm = jnp.sqrt(jnp.maximum(
-            jnp.sum(jnp.abs(target_hat.astype(jnp.complex128)) ** 2, axis=(1, 2)), 1e-12,
-        ))
-        residual_squared = jnp.sum(
-            jnp.abs((target_hat - baseline_hat).astype(jnp.complex128)) ** 2, axis=(1, 2),
-        )
-        residual_denominator = jnp.sqrt(residual_squared + (args.residual_floor * target_norm) ** 2)
-        data_error_norm, data_target_norm, data_residual_denominator = error_norm, target_norm, residual_denominator
-        data_squared_error: jax.Array = squared_error
-        data_mask: jax.Array | bool = True
-        if args.data_k_max is not None:
-            data_mask = (k_rfft_jax <= args.data_k_max)[None, :, None]
-        if full_spectrum_rows is not None:
-            data_mask = data_mask | full_spectrum_rows[:, None, None]
-        if args.data_k_max is not None or full_spectrum_rows is not None:
-            data_squared_error = jnp.sum(jnp.abs(jnp.where(
-                data_mask, error_hat.astype(jnp.complex128), 0.0,
-            )) ** 2, axis=(1, 2))
-            data_zero_error = data_squared_error == 0.0
-            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
-            data_target_norm = jnp.sqrt(jnp.maximum(jnp.sum(jnp.abs(jnp.where(
-                data_mask, target_hat.astype(jnp.complex128), 0.0,
-            )) ** 2, axis=(1, 2)), 1e-12))
-            data_residual_denominator = jnp.sqrt(jnp.sum(jnp.abs(jnp.where(
-                data_mask, (target_hat - baseline_hat).astype(jnp.complex128), 0.0,
-            )) ** 2, axis=(1, 2)) + (args.residual_floor * data_target_norm) ** 2)
-        if args.data_modal_residual_floor > 0.0:
-            modal_mask = data_mask & (k_rfft_jax > 0.0)[None, :, None]
-            modal_residual = (target_hat.astype(jnp.complex128)
-                              - baseline_hat.astype(jnp.complex128))
-            modal_power = jnp.where(modal_mask, jnp.abs(modal_residual) ** 2, 0.0)
-            modal_floor = (args.data_modal_residual_floor**2 * jnp.max(modal_power, axis=(1, 2))
-                           + (args.residual_floor * data_target_norm) ** 2)
-            inverse_scale = jax.lax.rsqrt(modal_power + modal_floor[:, None, None])
-            residual_power = jnp.sum(modal_power, axis=(1, 2))
-            scaled_power = jnp.sum(inverse_scale * modal_power, axis=(1, 2))
-            modal_weight = jnp.where(
-                modal_mask & (residual_power > 0.0)[:, None, None],
-                inverse_scale * (
-                    residual_power / jnp.where(residual_power > 0.0, scaled_power, 1.0)
-                )[:, None, None],
-                1.0,
-            )
-            # Keep DC and the target denominator unchanged; weights are label-only.
-            data_squared_error = jnp.sum(jnp.where(
-                data_mask,
-                jax.lax.stop_gradient(modal_weight) * jnp.abs(error_hat.astype(jnp.complex128)) ** 2,
-                0.0,
-            ), axis=(1, 2))
-            data_zero_error = data_squared_error == 0.0
-            data_error_norm = jnp.where(
-                data_zero_error, 0.0,
-                jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)),
-            )
-        if args.data_phase_projection_weight > 0.0:
-            eta_hat = jnp.fft.rfft(eta, axis=1).astype(jnp.complex128)
-            phase_band = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
-            eta_power = jnp.abs(eta_hat) ** 2
-            phase_active = phase_band[..., 0] & (
-                eta_power > 1e-12 * jnp.max(eta_power[:, 1:], axis=1, keepdims=True)
-            )
-            phase_error = jnp.where(
-                phase_active,
-                jnp.imag(error_hat[..., 0].astype(jnp.complex128) * jnp.conj(eta_hat))
-                / jnp.sqrt(jnp.where(phase_active, eta_power, 1.0)),
-                0.0,
-            )
-            data_squared_error = data_squared_error + args.data_phase_projection_weight * jnp.sum(
-                phase_error**2, axis=1,
-            )
-            data_zero_error = data_squared_error == 0.0
-            data_error_norm = jnp.where(data_zero_error, 0.0, jnp.sqrt(jnp.where(data_zero_error, 1.0, data_squared_error)))
-        if args.data_xi_projection_weight > 0.0:
-            xi_hat = jnp.fft.rfft(xi, axis=1).astype(jnp.complex128)
-            projection_mask = ((k_rfft_jax > 0.0) & (k_rfft_jax <= 128.0))[None, :, None] & data_mask
-            xi_direction = jnp.where(projection_mask[..., 0], xi_hat, 0.0)
-            projection_error = jnp.where(
-                projection_mask, error_hat.astype(jnp.complex128), 0.0,
-            )[..., 0]
-            direction_squared = jnp.sum(jnp.abs(xi_direction) ** 2, axis=1)
-            projection_dot = jnp.real(jnp.sum(jnp.conj(xi_direction) * projection_error, axis=1))
-            direction_active = direction_squared > jnp.finfo(xi.dtype).eps * jnp.sum(
-                jnp.abs(xi_hat[:, 1:]) ** 2, axis=1,
-            )
-            projection_squared = jnp.where(
-                direction_active,
-                projection_dot**2 / jnp.where(direction_active, direction_squared, 1.0),
-                0.0,
-            )
-            emphasized_squared_error: jax.Array = data_squared_error + args.data_xi_projection_weight * projection_squared
-            emphasized_zero_error = emphasized_squared_error == 0.0
-            data_error_norm = jnp.where(
-                emphasized_zero_error, 0.0,
-                jnp.sqrt(jnp.where(emphasized_zero_error, 1.0, emphasized_squared_error)),
-            )
-        denominator = data_target_norm
-        if args.model == "cs_dno":
-            if args.data_normalization == "residual":
-                denominator = data_residual_denominator
-            elif args.data_normalization == "bounded":
-                residual_ratio = data_residual_denominator / data_target_norm
-                row_weight = 1.0 + args.nonlinear_reference / (residual_ratio + args.nonlinear_reference)
-                denominator = data_target_norm * args.nonlinear_weight_mean / row_weight
-            elif args.data_normalization == "nonlinear":
-                # Nonlinear weighting uses the M1 correction even with a G2 baseline.
-                m1_error_hat = (target_hat - jnp.fft.rfft(m1_baseline, axis=1)).astype(jnp.complex128)
-                if args.data_k_max is not None:
-                    m1_error_hat = jnp.where(data_mask, m1_error_hat, 0.0)
-                residual_ratio = jnp.sqrt(jnp.sum(
-                    jnp.abs(m1_error_hat) ** 2, axis=(1, 2),
-                )) / data_target_norm
-                nonlinear_weight = 1.0 + residual_ratio / (residual_ratio + args.nonlinear_reference)
-                denominator = data_target_norm * args.nonlinear_weight_mean / nonlinear_weight
-        denominator = jax.lax.stop_gradient(denominator)
-        per_row_data_loss = data_error_norm / denominator
-        if full_spectrum_rows is not None and args.rollout_training_rhs:
-            rhs_error = compute_rhs_relative_error(
-                eta, xi, denorm_targets_jax(predictions)[..., 0], gxi,
-                jnp.exp(batch_depth[:, 0].astype(jnp.float64)), k_grid_jax,
-            )
-            per_row_data_loss = jnp.where(full_spectrum_rows, rhs_error, per_row_data_loss)
-        data_loss = jnp.mean(per_row_data_loss)
-        full_l2_loss = jnp.mean(error_norm / target_norm)
-        family_metrics: tuple[jax.Array, ...] = ()
-        if collect_family_metrics:
-            row_metrics = jnp.stack((
-                jnp.ones_like(error_norm), error_norm / target_norm,
-                error_norm / residual_denominator, squared_error < residual_squared,
-                per_row_data_loss,
-            ))
-            # Masked means, not means of each shard's family means: pmean remains exact.
-            family_metrics = tuple(
-                value for family_id in PhysicalFamilyId
-                for value in jnp.mean(jnp.where(family == family_id, row_metrics, 0.0), axis=1)
-            )
-        # Data fit uses normalized Gxi; the physics losses below use physical fields.
-        h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
-        gxi_prediction = denorm_targets_jax(predictions)[..., 0]
-        # Paired probe rows contribute only to data fit; auxiliary means use originals.
-        full_batch_size = eta.shape[0]
-        n_auxiliary_rows = full_batch_size - n_data_only_rows
-        if n_auxiliary_rows == 0:
-            zero = jnp.float32(0.0)
-            return data_loss, zero, zero, zero, zero, full_l2_loss, family_metrics
-        eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets = (
-            value[:n_auxiliary_rows]
-            for value in (eta, xi, gxi, batch_depth, family, h_phys, gxi_prediction, batch_targets)
-        )
-        mode_loss = jnp.float32(0.0)
-        if args.mode_balanced_weight > 0.0:
-            mode_loss = compute_mode_balanced_loss(
-                eta=eta,
-                gxi_prediction=gxi_prediction,
-                gxi_target=denorm_targets_jax(batch_targets)[..., 0],
-                depth=h_phys,
-                k_rfft=k_rfft_jax,
-                k_max=args.mode_balanced_k_max,
-                activity_threshold=args.mode_balanced_activity_threshold,
-                denominator_eps=args.mode_balanced_denominator_eps,
-                subtract_before_fft=args.subtract_before_fft,
-                gxi_error=None if physical_error64 is None else physical_error64[:n_auxiliary_rows],
-                sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
-                                                       training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
-            )
-        tangent_loss = jnp.float32(0.0)
-        local_selected = jnp.float32(0.0)
-        if args.translation_tangent_weight > 0.0:
-            tangent_options: dict[str, Any] = dict(
-                sample_mask=(family == PhysicalFamilyId.TANAKA) if args.translation_tangent_scope == "tanaka" else None,
-                denominator_eps=args.translation_tangent_denominator_eps,
-                loss_norm=args.translation_tangent_loss_norm,
-                charbonnier_eps=args.translation_tangent_charbonnier_eps,
-                subtract_before_centering=args.subtract_before_centering,
-            )
-            if args.translation_tangent_geometry == "coupled_modal":
-                tangent_loss, local_selected = compute_modal_phase_loss(
-                    eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
-                    k_max=args.translation_tangent_k_max, **tangent_options,
-                )
-            else:
-                tangent_loss, local_selected = compute_translation_tangent_loss(
-                    eta, gxi_prediction, gxi, h_phys, k_grid_jax,
-                    global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
-                    smoothing_scale=args.translation_tangent_smoothing_scale, **tangent_options,
-                )
-            # Weight each GPU's contribution by its number of selected nonflat samples.
-            global_selected = jax.lax.psum(local_selected, axis_name="batch")
-            device_count = jax.lax.psum(jnp.float32(1.0), axis_name="batch")
-            shard_weight = (
-                device_count
-                * local_selected
-                / jnp.maximum(global_selected, jnp.float32(1.0))
-            )
-            tangent_loss = tangent_loss * shard_weight
-        mechanism_loss = jnp.float32(0.0)
-        if args.phase_mechanism == "stokes_carrier":
-            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
-                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
-                mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
-                subtract_before_centering=args.subtract_before_centering,
-            )
-            mechanism_loss *= mechanism_count / full_batch_size
-        elif args.phase_mechanism in ("tanaka_momentum", "all_momentum"):
-            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
-                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
-                mechanism="momentum", horizon=200.0,
-                subtract_before_centering=args.subtract_before_centering,
-                sample_mask=family == PhysicalFamilyId.TANAKA if args.phase_mechanism == "tanaka_momentum" else None,
-            )
-            mechanism_loss *= mechanism_count / full_batch_size
-        elif args.phase_mechanism == "bf_sideband":
-            mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
-                eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
-                mechanism="sideband", sample_mask=family == PhysicalFamilyId.BENJAMIN_FEIR, horizon=200.0,
-                subtract_before_centering=args.subtract_before_centering,
-                carrier_mode=cast(jax.Array, carrier_modes)[:n_auxiliary_rows],
-                sideband_offset=cast(jax.Array, sideband_offsets)[:n_auxiliary_rows],
-            )
-            mechanism_loss *= mechanism_count / full_batch_size
-        return data_loss, mode_loss, tangent_loss, mechanism_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
-
-    def hadamard_loss_on_subset(
-        rng: jax.Array,
-        current_params: FlatParams,
-        eta: jax.Array,
-        xi: jax.Array,
-        batch_depth: jax.Array,
-        flow_target: jax.Array | None = None,
-    ) -> jax.Array:
-        rng_perm, rng_probe = jax.random.split(rng)
-        sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
-            :hadamard_microbatch_local
-        ]
-        eta_sub = eta.astype(physical_dtype)[sample_indices]
-        xi_sub = xi.astype(physical_dtype)[sample_indices]
-        batch_depth_sub = batch_depth.astype(physical_dtype)[sample_indices].astype(jnp.float64)
-        response_loss = partial(
-            compute_hadamard_loss,
-            flow_target=flow_target[sample_indices] if flow_target is not None else None,
-        ) if args.hadamard_mode == "self" else partial(
-            compute_local_response_loss, mode=args.hadamard_mode, length=domain_length,
-        )
-        return response_loss(
-            rng=rng_probe,
-            apply_fn=apply_model,
-            model_params=current_params,
-            eta_phys=eta_sub,
-            xi_phys=xi_sub,
-            batch_depth_local=batch_depth_sub,
-            norm_inputs_fn=norm_inputs_jax,
-            denorm_targets_fn=denorm_targets_jax,
-            k=k_grid_jax,
-            dtype=jnp.float64,
-            k_max=args.hadamard_k_max,
-            sobolev_order=args.hadamard_sobolev_order,
-            fd_step_min=args.hadamard_fd_step_min,
-            fd_step_max=args.hadamard_fd_step_max,
-            min_surface_rms=args.hadamard_min_surface_rms,
-            denominator_eps=args.hadamard_denominator_eps,
-        )
+    compute_loss_components, hadamard_loss_on_subset = build_loss_functions(
+        args, model, apply_model, nx, domain_length, stats, physical_dtype, training_dtype, n_devices,
+    )
 
     def train_step(
         current_state: WeightEMATrainState,

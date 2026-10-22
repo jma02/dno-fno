@@ -4,6 +4,7 @@ import argparse
 import ast
 from collections.abc import Callable
 from functools import partial
+from importlib import import_module
 from itertools import product
 from pathlib import Path
 import sys
@@ -14,7 +15,6 @@ from unittest.mock import Mock, patch
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import linen as nn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO_ROOT / "train-jax-10m"))
 
 from losses import relative_l2_loss  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
-    CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
+    CraigSulemDNO, CraigSulemTermsResidual,
     PhaseWavenumberMultiplier,
 )
 from mode_balanced_regularizer import compute_mode_balanced_loss  # noqa: E402
@@ -40,6 +40,7 @@ from translation_tangent_regularizer import (  # noqa: E402
 )
 
 jax.config.update("jax_enable_x64", True)
+trainer = import_module("1d_dno_fno_jax_ema_grad")
 
 TrainerLoss = Callable[
     [jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
@@ -194,7 +195,7 @@ def test_rhs_teacher_flag_requires_full_spectrum_and_active_teacher() -> None:
     main = trainer_function("main")
     names = {"--rollout_training_rhs", "--rollout_training_full_spectrum", "--rollout_training_weight"}
     options: list[ast.stmt] = [
-        node for node in ast.walk(main) if isinstance(node, ast.Expr)
+        node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
         and isinstance(node.value, ast.Call) and node.value.args
         and isinstance(node.value.args[0], ast.Constant) and node.value.args[0].value in names
     ]
@@ -726,7 +727,7 @@ def test_xi_projection_uses_production_loss_and_preserves_ordinary_metrics() -> 
     np.testing.assert_array_equal(gradient, 0)
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--data_xi_projection_weight")
@@ -845,7 +846,7 @@ def test_phase_projection_weights_angular_not_radial_errors_and_preserves_symmet
         np.testing.assert_array_equal(original[:6], relabeled[:6])
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--data_phase_projection_weight")
@@ -913,7 +914,7 @@ def test_retained_band_zero_error_and_cutoff_validation() -> None:
             np.testing.assert_array_equal(gradient, 0.0)
             assert full_l2 > 0 if bool(jnp.any(prediction != truth)) else full_l2 == 0
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant) and node.value.args[0].value == "--data_k_max")
     validation = next(node for node in ast.walk(main) if isinstance(node, ast.If)
@@ -1233,7 +1234,7 @@ def trainer_optimizer(main: ast.FunctionDef) -> list[ast.stmt]:
 
 def test_terms_selector_preserves_order_and_rejects_unused_blocks() -> None:
     main = trainer_function("main")
-    options: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.Expr)
+    options: list[ast.stmt] = [node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                              and isinstance(node.value, ast.Call) and node.value.args
                              and isinstance(node.value.args[0], ast.Constant)
                              and node.value.args[0].value in ("--cs_terms_residual", "--cs_baseline_order")]
@@ -1284,7 +1285,7 @@ def test_terms_selector_preserves_order_and_rejects_unused_blocks() -> None:
             with np.testing.assert_raises(ValueError):
                 exec(code, namespace)
 
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
+    option = next(node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--cs_terms_cpu_prefetch")
@@ -1322,13 +1323,9 @@ def test_terms_trainer_apply_preserves_native_and_hadamard_gradients(baseline_or
     params["terms_head"]["kernel"] = 0.1 * jax.random.normal(
         jax.random.PRNGKey(8), kernel.shape, dtype=kernel.dtype,
     )
-    namespace: dict[str, Any] = dict(
-        jax=jax, jnp=jnp, Any=Any, cast=cast, model=model,
-        args=SimpleNamespace(model="cs_dno", cs_terms_residual=True),
+    apply_model = trainer.build_apply_model(
+        argparse.Namespace(model="cs_dno", cs_terms_residual=True), model, nx, float(model.domain_length),
     )
-    exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
-                 "terms_trainer_apply", "exec"), namespace)
-    apply_model = namespace["apply_model"]
     actual = apply_model({"params": params}, inputs, depth, return_baseline=True)
     expected = model.apply({"params": params}, inputs, depth, return_baseline=True)
     for value, reference in zip(actual, expected, strict=True):
@@ -1374,13 +1371,14 @@ def test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(basel
         width=8, baseline_order=baseline_order, surface_context_width=2, surface_feature_scales=(1.0,) * 7,
         eta_scale=0.134123456789, xi_scale=0.317123456789, target_scale=0.797123456789,
     )
-    norm_inputs, norm_targets, denorm_targets = make_normalizers(
+    norm_inputs, _, denorm_targets = make_normalizers(
         {"feature_absmax": [model.eta_scale, model.xi_scale], "target_absmax": model.target_scale},
         "scale", dtype=np.dtype(np.float64),
     )
     params = model.init(jax.random.PRNGKey(7), norm_inputs(eta, xi), depth)["params"]
     config = SimpleNamespace(
-        model="cs_dno", cs_terms_residual=True, fp64_residual=False,
+        model="cs_dno", cs_terms_residual=True, fp64_residual=False, norm="scale",
+        hadamard_microbatch=1, hadamard_k_max=12,
         data_k_max=128, data_normalization="target", residual_floor=1e-6,
         data_xi_projection_weight=0.0, data_phase_projection_weight=0.0, subtract_before_fft=False,
         data_modal_residual_floor=0.0,
@@ -1392,18 +1390,16 @@ def test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(basel
         translation_tangent_charbonnier_eps=1e-7, translation_tangent_smoothing_scale=1.0,
         stokes_relative_tangent=False, subtract_before_centering=False, phase_mechanism="all_momentum",
     )
-    namespace: dict[str, Any] = dict(
-        jax=jax, jnp=jnp, cast=cast, Any=Any, FlatParams=Any, args=config, model=model,
-        training_dtype=jnp.float32, physical_dtype=jnp.float64, PhysicalFamilyId=PhysicalFamilyId,
-        norm_inputs_jax=norm_inputs, norm_targets_jax=norm_targets, denorm_targets_jax=denorm_targets,
-        k_grid_jax=jnp.fft.fftfreq(nx) * nx, k_rfft_jax=jnp.arange(nx // 2 + 1), log_h_max=np.log(5),
-        compute_mode_balanced_loss=compute_mode_balanced_loss,
-        compute_translation_tangent_loss=compute_translation_tangent_loss,
-        compute_phase_mechanism_loss=compute_phase_mechanism_loss,
+    config = argparse.Namespace(**(
+        vars(trainer.build_parser().parse_args(["--dataset", "unused"])) | vars(config)
+    ))
+    apply_model = trainer.build_apply_model(config, model, nx, float(model.domain_length))
+    loss_components, hadamard_subset = trainer.build_loss_functions(
+        config, model, apply_model, nx, float(model.domain_length),
+        {"feature_absmax": [model.eta_scale, model.xi_scale], "target_absmax": model.target_scale},
+        jnp.float64, jnp.float32, 1,
     )
-    exec(compile(ast.Module(body=[trainer_function("apply_model"), trainer_function("compute_loss_components")],
-                            type_ignores=[]), "terms_physical_loss", "exec"), namespace)
-    components = jax.vmap(namespace["compute_loss_components"], in_axes=(None, 0, 0, 0, 0, 0), axis_name="batch")
+    components = jax.vmap(loss_components, in_axes=(None, 0, 0, 0, 0, 0), axis_name="batch")
     target = dno_series_eval(eta, xi, jnp.arange(nx // 2 + 1), jnp.exp(depth), order=baseline_order, pad_factor=2)
     family = jnp.asarray([PhysicalFamilyId.TANAKA])
     exact = components(params, *(value[None] for value in (eta, xi, target, depth, family)))
@@ -1436,17 +1432,20 @@ def test_terms_full_loss_preserves_physical_baseline_and_teacher_precision(basel
             parameters, *(value[None] for value in (eta, xi, target, depth, family)),
             **({"terms_phys": supplied_terms[None]} if supplied_terms is not None else {}),
         )
-        hadamard = compute_hadamard_loss(
-            rng=jax.random.PRNGKey(11), apply_fn=namespace["apply_model"], model_params=parameters,
-            eta_phys=generated[0], xi_phys=generated[1], batch_depth_local=depth,
-            norm_inputs_fn=norm_inputs, denorm_targets_fn=denorm_targets,
-            k=namespace["k_grid_jax"], dtype=jnp.float64, k_max=12,
-        )
+        hadamard = hadamard_subset(jax.random.PRNGKey(11), parameters, *generated[:2], depth)
         return jnp.sum(data + ordinary[0] + 6 * (mode + ordinary[1]) + 10 * (tangent + ordinary[2])
                        + 0.002574349830754761 * (momentum + ordinary[3])) + 0.04 * hadamard
 
     evaluate = jax.jit(jax.value_and_grad(loss))
     value, gradients = evaluate(params)
+    direct_hadamard = compute_hadamard_loss(
+        rng=jax.random.split(jax.random.PRNGKey(11))[1], apply_fn=apply_model, model_params=params,
+        eta_phys=generated[0], xi_phys=generated[1], batch_depth_local=depth,
+        norm_inputs_fn=norm_inputs, denorm_targets_fn=denorm_targets,
+        k=jnp.fft.fftfreq(nx) * nx, dtype=jnp.float64, k_max=12,
+    )
+    np.testing.assert_array_equal(hadamard_subset(jax.random.PRNGKey(11), params, *generated[:2], depth),
+                                  direct_hadamard)
     prefetched = evaluate(params, cached_terms)
     for actual, expected in zip(jax.tree.leaves(prefetched), jax.tree.leaves((value, gradients)), strict=True):
         np.testing.assert_allclose(actual, expected, rtol=3e-6, atol=1e-10)
@@ -1471,7 +1470,7 @@ def test_learning_rate_hold_schedule_and_validation() -> None:
     import optax
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--lr_hold_fraction")
@@ -1523,7 +1522,7 @@ def test_surface_head_lr_multiplier_updates_and_weight_ema() -> None:
     from checkpoint_util import WeightEMATrainState, training_counter_values
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--surface_head_lr_multiplier")
@@ -1592,7 +1591,7 @@ def test_adam_moment_options_preserve_both_emas() -> None:
     from checkpoint_util import WeightEMATrainState
 
     main = trainer_function("main")
-    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    options: list[ast.stmt] = [node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                               and isinstance(node.value, ast.Call) and node.value.args
                               and isinstance(node.value.args[0], ast.Constant)
                               and node.value.args[0].value in ("--adam_b1", "--adam_b2")]
@@ -1671,7 +1670,7 @@ def test_head_whitening_calibration_and_physical_optimizer_coordinates() -> None
     from checkpoint_util import WeightEMATrainState, training_counter_values
 
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--surface_head_whitening")
@@ -1803,7 +1802,7 @@ def test_packed_surface_head_muon_and_unchanged_adam_emas_counters() -> None:
     from checkpoint_util import WeightEMATrainState, read_parameter_update_count, training_counter_values
 
     main = trainer_function("main")
-    options: list[ast.stmt] = [node for node in main.body if isinstance(node, ast.Expr)
+    options: list[ast.stmt] = [node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                and isinstance(node.value, ast.Call) and node.value.args
                and isinstance(node.value.args[0], ast.Constant)
                and node.value.args[0].value in ("--surface_head_muon", "--surface_head_muon_scale")]
@@ -1969,7 +1968,7 @@ def test_milestone_rollouts_use_only_started_weight_ema() -> None:
 
 def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
     main = trainer_function("main")
-    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    options: list[ast.stmt] = [node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                               and isinstance(node.value, ast.Call) and node.value.args
                               and isinstance(node.value.args[0], ast.Constant)
                               and node.value.args[0].value in ("--cs_nested_blocks", "--cs_nested_zero_inner")]
@@ -2042,7 +2041,7 @@ def test_nested_zero_inner_initialization_and_gradient_activation() -> None:
 
 def test_phase_rank_one_option_requires_m1_cs_network() -> None:
     main = trainer_function("main")
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
+    option = next(node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--cs_phase_rank_one")
@@ -2072,7 +2071,7 @@ def test_packed_nested_branches_match_native_values_and_gradients() -> None:
 
 def test_phase_wavenumber_option_requires_m1_and_excludes_rank_one() -> None:
     main = trainer_function("main")
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
+    option = next(node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--cs_phase_wavenumber_hidden")
@@ -2112,7 +2111,7 @@ def test_packed_parity_streams_match_native_values_and_gradients() -> None:
 
 def test_pair_coupling_options_values_and_gradients() -> None:
     main = trainer_function("main")
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
+    option = next(node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--cs_pair_coupling")
@@ -2146,7 +2145,7 @@ def test_pair_coupling_options_values_and_gradients() -> None:
 
 def test_mixed_surface_lift_options_values_and_gradients() -> None:
     main = trainer_function("main")
-    option = next(node for node in main.body if isinstance(node, ast.Expr)
+    option = next(node for node in trainer_function("build_parser").body if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--cs_surface_cubic_channels")
@@ -2281,18 +2280,13 @@ def check_packed_nested_branches(
                 for part in ("m_shared", "m_inner") if index >= 2 - nested_blocks else ("m_shared",):
                     shape = cast(jax.Array, group[part]["symbol_skip"]["kernel"]).shape
                     group[part]["symbol_skip"]["kernel"] = jnp.linspace(-0.2, 0.3, int(np.prod(shape)), dtype=jnp.float32).reshape(shape)
-        namespace: dict[str, Any] = {
-            "jax": jax, "jnp": jnp, "nn": nn, "Any": Any, "cast": cast, "model": model,
-            "CraigSulemBlock": CraigSulemBlock, "DepthAwareMultiplier": DepthAwareMultiplier,
-            "nx": nx, "domain_length": float(model.domain_length),
-            "args": SimpleNamespace(model="cs_dno", cs_terms_residual=False, n_blocks=2, cs_nested_blocks=nested_blocks,
-                                    latent=branches, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
-                                    cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs,
-                                    cs_nested_surface_features=nested_features),
-        }
-        exec(compile(ast.Module(body=[trainer_function("apply_model")], type_ignores=[]),
-                     "trainer_packed_apply", "exec"), namespace)
-        packed_apply = namespace["apply_model"]
+        packed_apply = trainer.build_apply_model(
+            argparse.Namespace(model="cs_dno", cs_terms_residual=False, n_blocks=2, cs_nested_blocks=nested_blocks,
+                               latent=branches, cs_mult_hidden=4, cs_surface_polynomial_skip=polynomial_skip,
+                               cs_multiplier_skip=multiplier_skip, cs_log_multiplier_inputs=log_multiplier_inputs,
+                               cs_nested_surface_features=nested_features),
+            model, nx, float(model.domain_length),
+        )
         native = cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array],
                       model.apply({"params": params}, case_inputs, case_depth, return_baseline=True))
         evaluate_packed = jax.jit(packed_apply, static_argnames="return_baseline")
@@ -2548,7 +2542,7 @@ def test_all_momentum_ignores_family_labels_and_supervises_generated_rows() -> N
 
 def test_datum_shift_geometry_clean_rows_rng_and_validation() -> None:
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--datum_shift_rms")
@@ -2844,7 +2838,7 @@ def test_dirichlet_probe_batch_pairing_spectrum_and_true_depth_labels() -> None:
 
 def test_hadamard_flow_probes_route_only_training_physical_targets() -> None:
     main = trainer_function("main")
-    options: list[ast.stmt] = [node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    options: list[ast.stmt] = [node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                and isinstance(node.value, ast.Call) and node.value.args
                and isinstance(node.value.args[0], ast.Constant)
                and node.value.args[0].value in ("--hadamard_flow_probes", "--hadamard_mode")]
@@ -2998,7 +2992,7 @@ def test_dirichlet_data_uses_all_rows_but_auxiliary_gradients_use_only_prefix() 
 
 def test_fractional_rollout_ramp_parsing_validation_and_weights() -> None:
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--rollout_training_ramp_epochs")
@@ -3038,7 +3032,7 @@ def test_fractional_rollout_ramp_parsing_validation_and_weights() -> None:
 
 def test_momentum_ramp_weights_original_and_generated_losses_and_gradients() -> None:
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--phase_mechanism_ramp_epochs")
@@ -3691,7 +3685,7 @@ def test_coherent_rollout_reprediction_schedule_ramp_and_endpoint_parity() -> No
 
 def test_amplitude_probe_compensation_schedule_and_off_parity() -> None:
     main = trainer_function("main")
-    option = next(node for node in ast.walk(main) if isinstance(node, ast.Expr)
+    option = next(node for node in ast.walk(trainer_function("build_parser")) if isinstance(node, ast.Expr)
                   and isinstance(node.value, ast.Call) and node.value.args
                   and isinstance(node.value.args[0], ast.Constant)
                   and node.value.args[0].value == "--amplitude_probe_scale")
