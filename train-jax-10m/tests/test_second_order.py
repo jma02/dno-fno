@@ -143,6 +143,32 @@ def test_tangent_selected_signed_and_empty() -> None:
     np.testing.assert_array_equal(empty_residual(target + error), 0.)
 
 
+def test_tangent_flat_rows_have_finite_forward_curvature() -> None:
+    for dtype, tolerance in ((jnp.float32, 2e-5), (jnp.float64, 1e-10)):
+        x, k, eta, _, target, depth = map(lambda value: value.astype(dtype), _fields())
+        prediction = target + .02 * jnp.sin(2 * x)
+
+        def residual(value: jax.Array) -> jax.Array:
+            return compute_translation_tangent_loss(
+                eta, value, target, depth, k, return_irls_residuals=True,
+            )[0]
+
+        v = jnp.broadcast_to(jnp.cos(2 * x) + .3 * jnp.sin(3 * x), prediction.shape)
+        w = jnp.broadcast_to(jnp.sin(2 * x) - .2 * jnp.cos(4 * x), prediction.shape)
+        _, jv = jax.jvp(residual, (prediction,), (v,))
+        gv = driver.normal_product(residual, prediction, v)
+        gw = driver.normal_product(residual, prediction, w)
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in (jv, gv, gw))
+        for value in (jv, gv, gw):
+            np.testing.assert_array_equal(value[0], 0.)
+        energy = jnp.sum(jv**2)
+        assert energy > 0
+        np.testing.assert_allclose(jnp.sum(v * gv), energy, rtol=tolerance)
+        symmetry_scale = jnp.maximum(jnp.linalg.norm(v) * jnp.linalg.norm(gw),
+                                     jnp.linalg.norm(w) * jnp.linalg.norm(gv))
+        assert jnp.abs(jnp.sum(v * gw) - jnp.sum(w * gv)) <= tolerance * symmetry_scale
+
+
 def test_momentum_full_batch_denominator() -> None:
     x, k, eta, xi, target, depth = _fields()
     prediction = target + .03 * jnp.cos(3 * x) + .01 * jnp.sin(2 * x)

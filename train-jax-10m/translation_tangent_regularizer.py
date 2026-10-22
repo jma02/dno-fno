@@ -422,6 +422,9 @@ def compute_translation_tangent_loss(
     ).astype(fields.dtype)
     local_cross = smoothed[:, 0]
     local_energy = jnp.maximum(smoothed[:, 1], 0.0)
+    if return_irls_residuals:
+        # The shared FFT carries numerical zero tangents into this geometry-only channel.
+        local_energy = jax.lax.stop_gradient(local_energy)
     peak_energy = jnp.max(local_energy, axis=-1)
     energy_floor = jnp.asarray(denominator_eps, dtype=dtype) * peak_energy[:, None]
     local_speed_error = -local_cross / (
