@@ -580,6 +580,7 @@ def build_loss_functions(
         n_data_only_rows: int = 0,
         terms_phys: jax.Array | None = None,
         full_spectrum_rows: jax.Array | None = None,
+        return_irls_residuals: bool = False,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[jax.Array, ...]]:
         carrier_modes = sideband_offsets = None
         if args.phase_mechanism == "bf_sideband":
@@ -753,6 +754,16 @@ def build_loss_functions(
             )
         # Data fit uses normalized Gxi; the physics losses below use physical fields.
         h_phys = jnp.exp(jnp.minimum(batch_depth[:, 0], log_h_max))
+        if return_irls_residuals:
+            # The second-order entry point selects the plain relative data norm.
+            # Freeze the IRLS weight, not the error, at each linearization point.
+            nonzero = data_error_norm > 0.0
+            scale = jax.lax.stop_gradient(jnp.where(
+                nonzero,
+                jax.lax.rsqrt(eta.shape[0] * denominator * jnp.where(nonzero, data_error_norm, 1.0)),
+                0.0,
+            ))
+            data_loss = jnp.where(data_mask, error_hat.astype(jnp.complex128), 0.0) * scale[:, None, None]
         gxi_prediction = denorm_targets_jax(predictions)[..., 0]
         # Paired probe rows contribute only to data fit; auxiliary means use originals.
         full_batch_size = eta.shape[0]
@@ -779,6 +790,7 @@ def build_loss_functions(
                 gxi_error=None if physical_error64 is None else physical_error64[:n_auxiliary_rows],
                 sample_weight=cast(jax.Array, jnp.where(family == PhysicalFamilyId.JONSWAP_TMA,
                                                        training_dtype(args.jonswap_mode_balanced_scale), training_dtype(1.0))),
+                return_irls_residuals=return_irls_residuals,
             )
         tangent_loss = jnp.float32(0.0)
         local_selected = jnp.float32(0.0)
@@ -799,7 +811,8 @@ def build_loss_functions(
                 tangent_loss, local_selected = compute_translation_tangent_loss(
                     eta, gxi_prediction, gxi, h_phys, k_grid_jax,
                     global_relative_mask=(family == PhysicalFamilyId.STOKES) if args.stokes_relative_tangent else None,
-                    smoothing_scale=args.translation_tangent_smoothing_scale, **tangent_options,
+                    smoothing_scale=args.translation_tangent_smoothing_scale,
+                    return_irls_residuals=return_irls_residuals, **tangent_options,
                 )
             # Weight each GPU's contribution by its number of selected nonflat samples.
             global_selected = jax.lax.psum(local_selected, axis_name="batch")
@@ -809,23 +822,27 @@ def build_loss_functions(
                 * local_selected
                 / jnp.maximum(global_selected, jnp.float32(1.0))
             )
-            tangent_loss = tangent_loss * shard_weight
+            tangent_loss = tangent_loss * (jnp.sqrt(shard_weight) if return_irls_residuals else shard_weight)
         mechanism_loss = jnp.float32(0.0)
         if args.phase_mechanism == "stokes_carrier":
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
                 mechanism="carrier", sample_mask=family == PhysicalFamilyId.STOKES, horizon=20.0,
                 subtract_before_centering=args.subtract_before_centering,
+                return_irls_residuals=return_irls_residuals,
             )
-            mechanism_loss *= mechanism_count / full_batch_size
+            mechanism_loss *= (jnp.sqrt(mechanism_count / full_batch_size) if return_irls_residuals
+                               else mechanism_count / full_batch_size)
         elif args.phase_mechanism in ("tanaka_momentum", "all_momentum"):
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
                 mechanism="momentum", horizon=200.0,
                 subtract_before_centering=args.subtract_before_centering,
                 sample_mask=family == PhysicalFamilyId.TANAKA if args.phase_mechanism == "tanaka_momentum" else None,
+                return_irls_residuals=return_irls_residuals,
             )
-            mechanism_loss *= mechanism_count / full_batch_size
+            mechanism_loss *= (jnp.sqrt(mechanism_count / full_batch_size) if return_irls_residuals
+                               else mechanism_count / full_batch_size)
         elif args.phase_mechanism == "bf_sideband":
             mechanism_loss, mechanism_count = compute_phase_mechanism_loss(
                 eta, xi, gxi_prediction, gxi, jnp.exp(batch_depth[:, 0]), k_grid_jax,
@@ -833,8 +850,10 @@ def build_loss_functions(
                 subtract_before_centering=args.subtract_before_centering,
                 carrier_mode=cast(jax.Array, carrier_modes)[:n_auxiliary_rows],
                 sideband_offset=cast(jax.Array, sideband_offsets)[:n_auxiliary_rows],
+                return_irls_residuals=return_irls_residuals,
             )
-            mechanism_loss *= mechanism_count / full_batch_size
+            mechanism_loss *= (jnp.sqrt(mechanism_count / full_batch_size) if return_irls_residuals
+                               else mechanism_count / full_batch_size)
         return data_loss, mode_loss, tangent_loss, mechanism_loss, local_selected / full_batch_size, full_l2_loss, family_metrics
 
     def hadamard_loss_on_subset(
@@ -844,6 +863,8 @@ def build_loss_functions(
         xi: jax.Array,
         batch_depth: jax.Array,
         flow_target: jax.Array | None = None,
+        *,
+        return_irls_residuals: bool = False,
     ) -> jax.Array:
         rng_perm, rng_probe = jax.random.split(rng)
         sample_indices = jax.random.permutation(rng_perm, eta.shape[0])[
@@ -855,6 +876,7 @@ def build_loss_functions(
         response_loss = partial(
             compute_hadamard_loss,
             flow_target=flow_target[sample_indices] if flow_target is not None else None,
+            return_irls_residuals=return_irls_residuals,
         ) if args.hadamard_mode == "self" else partial(
             compute_local_response_loss, mode=args.hadamard_mode, length=domain_length,
         )

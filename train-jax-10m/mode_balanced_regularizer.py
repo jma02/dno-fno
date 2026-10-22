@@ -24,6 +24,7 @@ def compute_mode_balanced_loss(
     sample_weight: jax.Array | None = None,
     subtract_before_fft: bool = False,
     gxi_error: jax.Array | None = None,
+    return_irls_residuals: bool = False,
 ) -> jax.Array:
     """Compare complex DNO coefficients with soft balance over active modes.
 
@@ -57,6 +58,9 @@ def compute_mode_balanced_loss(
     Subtracting before the FFT changes only error arithmetic, not target scales
     or activity weights. ``gxi_error`` supplies a directly computed physical
     residual for the numerator; target scales and activity weights stay unchanged.
+    With ``return_irls_residuals``, return complex residuals whose locally frozen
+    weights make ``0.5 * sum(abs(residuals)**2)`` have the same parameter gradient.
+    This quadratic is for local linearization, not scalar loss evaluation.
     """
     real_dtype = eta.dtype
     eta_hat, prediction_hat, target_hat = (
@@ -100,6 +104,7 @@ def compute_mode_balanced_loss(
     per_sample_loss = jnp.sum(mode_weight * penalty, axis=-1) / jnp.maximum(
         active_weight, floor
     )
+    effective_frequency_squared = None
     if dispersion_weighting:
         parseval_weight = jnp.full_like(k_abs, 2.0)
         parseval_weight = parseval_weight.at[0].set(1.0)
@@ -114,4 +119,20 @@ def compute_mode_balanced_loss(
         per_sample_loss = effective_frequency_squared * per_sample_loss
     if sample_weight is not None:
         per_sample_loss *= jax.lax.stop_gradient(sample_weight)
+    if return_irls_residuals:
+        cap = jnp.asarray(ratio_cap, dtype=real_dtype)
+        cap_derivative = jnp.where(
+            squared_ratio < cap, 1.0, jnp.where(squared_ratio == cap, 0.5, 0.0)
+        )
+        penalty_derivative = cap_derivative / jnp.sqrt(1.0 + scaled_ratio)
+        weight = (
+            (2.0 / eta.shape[0])
+            * (mode_weight / jnp.maximum(active_weight[:, None], floor))
+            * penalty_derivative / (physical_scale + denominator_floor)
+        )
+        if effective_frequency_squared is not None:
+            weight *= effective_frequency_squared[:, None]
+        if sample_weight is not None:
+            weight *= sample_weight[:, None]
+        return error_hat * jnp.sqrt(jax.lax.stop_gradient(weight))
     return jnp.mean(per_sample_loss)

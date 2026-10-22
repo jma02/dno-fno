@@ -38,12 +38,16 @@ def projected_sobolev_energy(
     k: Array,
     k_max: float,
     sobolev_order: Literal[0, 1],
+    *,
+    return_weighted_spectrum: bool = False,
 ) -> Array:
     """Per-sample L2 or H1 energy after ``|k| <= k_max`` projection.
 
     ``field`` has shape ``(..., nx)`` and ``k`` has shape ``(nx,)``.  The
     unnormalised FFT is divided by ``nx**2``, so order zero agrees with the
     physical-space mean square by Parseval.
+    ``return_weighted_spectrum`` instead returns the normalized complex spectrum
+    whose squared norm is this energy.
     """
     nx = field.shape[-1]
     field_hat = jnp.fft.fft(field, axis=-1)
@@ -51,6 +55,8 @@ def projected_sobolev_energy(
         field_hat.real.dtype
     )
     weight_sq = jnp.ones_like(k) if sobolev_order == 0 else 1 + k**2
+    if return_weighted_spectrum:
+        return field_hat * jnp.sqrt(projector * weight_sq.astype(field_hat.real.dtype)) / nx
     weighted_energy = (
         projector * weight_sq.astype(field_hat.real.dtype) * jnp.abs(field_hat) ** 2
     )
@@ -84,6 +90,7 @@ def compute_hadamard_loss(
     min_surface_rms: float = 1e-3,
     denominator_eps: float = 1e-12,
     flow_target: Array | None = None,
+    return_irls_residuals: bool = False,
 ) -> Array:
     """Return the normalized finite-secant Hadamard loss.
 
@@ -102,6 +109,9 @@ def compute_hadamard_loss(
     With physical ``flow_target = G(eta)xi``, half the rows in expectation use
     its retained, mean-zero direction instead of a random probe. Zero-flow rows
     retain the random probe; validation can omit this target to stay unchanged.
+    ``return_irls_residuals`` returns the normalized complex spectrum for the
+    ``0.5 * ||r||^2`` convention. The model-dependent forcing denominator remains
+    differentiated, just as in the scalar loss.
     """
     eta = eta_phys.astype(dtype)
     xi = xi_phys.astype(dtype)
@@ -175,9 +185,16 @@ def compute_hadamard_loss(
     forcing = operator(eta, zeta * b_velocity) + spectral_dx(zeta * v_velocity, k_typed)
     residual = secant + forcing
 
-    residual_energy = projected_sobolev_energy(residual, k_typed, k_max, sobolev_order)
+    residual_energy = projected_sobolev_energy(
+        residual, k_typed, k_max, sobolev_order,
+        return_weighted_spectrum=return_irls_residuals,
+    )
     forcing_energy = projected_sobolev_energy(forcing, k_typed, k_max, sobolev_order)
     denominator = forcing_energy + jnp.asarray(denominator_eps, dtype=dtype)
+    if return_irls_residuals:
+        return jnp.sqrt(jnp.asarray(2.0 / batch_size, dtype=dtype)) * residual_energy / jnp.sqrt(
+            denominator[:, None]
+        )
     return jnp.mean(residual_energy / denominator)
 
 

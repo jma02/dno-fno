@@ -183,6 +183,7 @@ def compute_phase_mechanism_loss(
     gravity: float = 1.0,
     k_max: float = 128.0,
     subtract_before_centering: bool = False,
+    return_irls_residuals: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Match a signed RHS defect, with smooth absolute loss.
 
@@ -201,6 +202,8 @@ def compute_phase_mechanism_loss(
     All three residuals are dimensionless. T is a normalization horizon, not a
     trajectory prediction. Only predictions receive parameter gradients; no
     solver evaluation, trajectory differentiation, or new network call occurs.
+    ``return_irls_residuals`` returns the signed, locally reweighted residual and
+    selected count instead of the scalar mean, using the ``0.5 * ||r||^2`` convention.
     """
     nx, dtype = eta.shape[-1], eta.dtype
     error, target = _centered_error(gxi_prediction, gxi_target, subtract_before_centering)
@@ -258,6 +261,11 @@ def compute_phase_mechanism_loss(
     eps = jnp.asarray(charbonnier_eps, dtype=dtype)
     per_sample = squared / (jnp.sqrt(squared + eps**2) + eps)
     count = jnp.sum(selected.astype(dtype))
+    if return_irls_residuals:
+        weight = selected.astype(dtype) / (
+            jnp.maximum(count, 1.0) * jnp.sqrt(squared + eps**2)
+        )
+        return residual * jnp.sqrt(jax.lax.stop_gradient(weight)), count
     return jnp.sum(per_sample) / jnp.maximum(count, 1.0), count
 
 
@@ -374,6 +382,7 @@ def compute_translation_tangent_loss(
     loss_norm: Literal["squared", "charbonnier"] = "squared",
     charbonnier_eps: float = 1e-7,
     subtract_before_centering: bool = False,
+    return_irls_residuals: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Return the translation loss and count of selected nonflat samples.
 
@@ -393,6 +402,9 @@ def compute_translation_tangent_loss(
     ``charbonnier`` uses sqrt(row_loss + eps^2) - eps before averaging.
     This is a smooth absolute global or RMS local phase error, with finite
     zero-error gradients and nonvanishing slope outside the smoothing floor.
+    ``return_irls_residuals`` returns signed spatial residuals and the selected
+    count, with locally frozen Charbonnier weights if requested. Their
+    ``0.5 * ||r||^2`` gradient agrees with the scalar loss at the linearization point.
     """
     dtype = eta.dtype
     eta_hat = jnp.fft.fft(eta, axis=-1)
@@ -427,6 +439,9 @@ def compute_translation_tangent_loss(
         local_weight * local_relative_error**2,
         axis=-1,
     )
+    residuals = None
+    if return_irls_residuals:
+        residuals = jnp.sqrt(local_weight) * local_speed_error / physical_speed[:, None]
     if global_relative_mask is not None:
         error_projection = jnp.mean(error * eta_x, axis=-1)
         target_projection_squared = jnp.mean(centered_target * eta_x, axis=-1) ** 2
@@ -439,6 +454,13 @@ def compute_translation_tangent_loss(
         per_sample_loss = jnp.where(
             use_global, error_projection**2 / denominator, per_sample_loss
         )
+        if residuals is not None:
+            residuals = jnp.where(
+                use_global[:, None],
+                (error_projection / jnp.sqrt(denominator * eta.shape[-1]))[:, None],
+                residuals,
+            )
+    row_squared_loss = per_sample_loss
     if loss_norm == "charbonnier":
         eps = jnp.asarray(charbonnier_eps, dtype=dtype)
         # Rationalization avoids subtractive cancellation near zero.
@@ -450,5 +472,11 @@ def compute_translation_tangent_loss(
         selected = selected & sample_mask
     selected = selected.astype(dtype)
     selected_count = jnp.sum(selected)
+    if residuals is not None:
+        weight = 2.0 * selected / jnp.maximum(selected_count, 1.0)
+        if loss_norm == "charbonnier":
+            eps = jnp.asarray(charbonnier_eps, dtype=dtype)
+            weight /= 2.0 * jnp.sqrt(row_squared_loss + eps**2)
+        return residuals * jnp.sqrt(jax.lax.stop_gradient(weight[:, None])), selected_count
     loss = jnp.sum(selected * per_sample_loss) / jnp.maximum(selected_count, 1.0)
     return loss, selected_count
