@@ -3832,6 +3832,84 @@ def test_amplitude_probe_retained_band_values_and_gradients() -> None:
             np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-13)
 
 
+def test_lbfgs_rejected_trials_cannot_update_parameters_or_weight_ema() -> None:
+    refinement = import_module("finetune_lbfgs")
+    for mode, maxls in (("value", 8), ("gradient", 8), ("raise", 8), ("all", 8), ("value", 1)):
+        initial = np.array([0.0])
+        accepted, shadow = initial.copy(), initial.copy()
+        values: list[float] = []
+        counts: list[int] = []
+
+        def objective(vector: np.ndarray) -> tuple[float, np.ndarray]:
+            value, gradient = float((vector[0] - 0.1)**2), 2 * (vector - 0.1)
+            invalid = vector[0] != 0 if mode == "all" else abs(vector[0]) >= 0.25
+            if invalid:
+                if mode == "raise":
+                    raise FloatingPointError("Non-finite L-BFGS objective/gradient")
+                if mode == "gradient":
+                    gradient[:] = np.nan
+                else:
+                    value = np.nan
+            return value, gradient
+
+        def accept(vector: np.ndarray, value: float, evaluations: int) -> None:
+            nonlocal accepted, shadow
+            accepted = vector.copy()
+            shadow = 0.995 * shadow + 0.005 * vector
+            values.append(value)
+            counts.append(evaluations)
+
+        result = refinement.run_lbfgs(
+            objective, initial, 0.01, accept, maxiter=20, maxls=maxls, seconds=5,
+        )
+        assert result["invalid_trials"] > 0
+        assert result["evaluations"] <= 1 + 40 * maxls
+        np.testing.assert_array_equal(initial, [0.0])
+        assert np.all(np.diff([0.01, *values]) < 0)
+        assert np.all(np.diff([0, *counts]) > 0)
+        if mode == "all" or maxls == 1:
+            assert not values and result["termination"].startswith("ABNORMAL")
+            np.testing.assert_array_equal(accepted, initial)
+            np.testing.assert_array_equal(shadow, initial)
+        else:
+            assert values[-1] < 1e-12
+            np.testing.assert_allclose(accepted, [0.1], atol=1e-8)
+            assert shadow[0] > 0
+
+    # Native maxls exhaustion need not call NEW_X. Force that route explicitly,
+    # including a stale genuine evaluation and a mismatched callback value.
+    for failure in ("invalid", "mismatch", "nondecreasing", "wrong_value"):
+        accepted, shadow = np.zeros(1), np.zeros(1)
+        values, counts = [], []
+        mode = "raise"
+
+        def warn_minimize(
+            evaluate: Callable[[np.ndarray], tuple[float, np.ndarray]], initial: np.ndarray,
+            *, callback: Callable[[Any], None], **kwargs: Any,
+        ) -> Any:
+            vector = np.array([0.05])
+            value, _ = evaluate(vector)
+            callback(SimpleNamespace(x=vector, fun=value))
+            vector = np.array([1.0 if failure == "invalid" else 0.0 if failure == "nondecreasing" else 0.075])
+            value, _ = evaluate(vector)
+            if failure == "mismatch":
+                vector = np.array([0.1])
+            if failure == "wrong_value":
+                value *= 0.5
+            callback(SimpleNamespace(x=vector, fun=value))
+            raise AssertionError("The invalid NEW_X callback was accepted")
+
+        with patch.object(refinement, "minimize", warn_minimize):
+            result = refinement.run_lbfgs(
+                objective, np.zeros(1), 0.01, accept, maxiter=20, maxls=8, seconds=5,
+            )
+        assert "Rejected invalid or nondecreasing" in result["termination"]
+        assert len(values) == 1 and counts == [1]
+        assert result["evaluations"] == 2
+        np.testing.assert_array_equal(accepted, [0.05])
+        np.testing.assert_array_equal(shadow, [0.005 * 0.05])
+
+
 def test_lbfgs_exports_keep_training_epoch_and_distinct_weight_kinds() -> None:
     from finetune_lbfgs import save_iterate
     from solver.evals.model_rollout import LoadedRun, load_run
@@ -3871,6 +3949,7 @@ def test_lbfgs_exports_keep_training_epoch_and_distinct_weight_kinds() -> None:
 
 
 if __name__ == "__main__":
+    test_lbfgs_rejected_trials_cannot_update_parameters_or_weight_ema()
     test_lbfgs_exports_keep_training_epoch_and_distinct_weight_kinds()
     test_exact_fit_and_mixed_batches_have_finite_gradients()
     test_rhs_energy_error_matches_padded_equations_and_stopped_denominator()

@@ -7,6 +7,7 @@ states, HD probes, batch partition, and fully warmed loss coefficients fixed.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import importlib
 import json
 import signal
@@ -35,6 +36,58 @@ from util import build_dataset_split_indices, get_batches, load_dataset_arrays, 
 trainer = importlib.import_module("1d_dno_fno_jax_ema_grad")
 jax.config.update("jax_enable_x64", True)
 Batch = tuple[jax.Array, ...]
+
+
+def run_lbfgs(
+    objective: Callable[[np.ndarray], tuple[float, np.ndarray]], initial: np.ndarray, initial_value: float,
+    on_accept: Callable[[np.ndarray, float, int], None], *, maxiter: int, maxls: int, seconds: float,
+) -> dict[str, Any]:
+    """Reject invalid search trials without letting them update weights or EMA."""
+    statistics: dict[str, Any] = {"evaluations": 0, "invalid_trials": 0, "interrupted": False}
+    started = perf_counter()
+    last_vector = initial.copy()
+    last_value = accepted_value = initial_value
+
+    def evaluate(vector: np.ndarray) -> tuple[float, np.ndarray]:
+        nonlocal last_vector, last_value
+        if perf_counter() - started >= seconds:
+            raise TimeoutError("L-BFGS wall-time cap reached")
+        statistics["evaluations"] += 1
+        last_vector = vector.copy()
+        try:
+            value, gradient = objective(vector)
+        except FloatingPointError:
+            value, gradient = np.nan, np.zeros_like(vector)
+        if not np.isfinite(value) or not np.isfinite(gradient).all():
+            last_value = np.nan
+            statistics["invalid_trials"] += 1
+            # A finite rejection value avoids inf/inf in cubic interpolation.
+            # Accepted normalized losses never exceed 1. This placeholder is
+            # not a derivative and must never reach a secant or EMA update.
+            return 2.0, np.zeros_like(vector)
+        last_value = value
+        return value / initial_value, gradient / initial_value
+
+    def accept(intermediate_result: Any) -> None:
+        nonlocal accepted_value
+        if (not np.isfinite(last_value) or not np.array_equal(intermediate_result.x, last_vector)
+                or float(intermediate_result.fun) != last_value / initial_value
+                or last_value >= accepted_value):
+            raise FloatingPointError("Rejected invalid or nondecreasing L-BFGS accepted iterate")
+        accepted_value = last_value
+        on_accept(last_vector.copy(), last_value, statistics["evaluations"])
+
+    try:
+        result = minimize(evaluate, initial, method="L-BFGS-B", jac=True, callback=accept,
+                          options={"maxiter": maxiter, "maxls": maxls, "maxcor": 10,
+                                   "ftol": 1e-12, "gtol": 1e-12})
+        statistics["termination"] = str(result.message)
+    except (TimeoutError, FloatingPointError) as error:
+        statistics["termination"] = str(error)
+    except KeyboardInterrupt:
+        statistics.update(termination="Interrupted; retained the last accepted iterate", interrupted=True)
+    statistics["optimization_seconds"] = perf_counter() - started
+    return statistics
 
 
 def save_iterate(
@@ -227,22 +280,13 @@ def main() -> None:
     accepted = x_initial.copy()
     shadow = loaded.params
     accepted_steps = 0
-    evaluations = 0
     accepted_value = initial_value
     optimization_start = perf_counter()
 
-    def scaled_objective(vector: np.ndarray) -> tuple[float, np.ndarray]:
-        nonlocal evaluations
-        if perf_counter() - optimization_start >= args.seconds:
-            raise TimeoutError("L-BFGS wall-time cap reached")
-        value, gradient = objective(vector)
-        evaluations += 1
-        return value / initial_value, gradient / initial_value
-
-    def accept(intermediate_result: Any) -> None:
+    def accept(vector: np.ndarray, value: float, evaluations: int) -> None:
         nonlocal accepted, shadow, accepted_steps, accepted_value
-        accepted = intermediate_result.x.copy()
-        accepted_value = float(intermediate_result.fun) * initial_value
+        accepted = vector
+        accepted_value = value
         shadow = optax.incremental_update(unravel(jnp.asarray(accepted, dtype=flat_initial.dtype)),
                                           shadow, 1.0 - config.weight_ema_decay)
         accepted_steps += 1
@@ -252,24 +296,14 @@ def main() -> None:
             handle.write(json.dumps(record) + "\n")
         print(json.dumps(record), flush=True)
 
-    termination = ""
-    interrupted = False
     previous_term_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
-        result = minimize(scaled_objective, x_initial, method="L-BFGS-B", jac=True, callback=accept,
-                          options={"maxiter": args.maxiter, "maxls": args.max_line_search,
-                                   "maxcor": 10, "ftol": 1e-12, "gtol": 1e-12})
-        termination = str(result.message)
-    except (TimeoutError, FloatingPointError) as error:
-        termination = str(error)
-    except KeyboardInterrupt:
-        termination = "Interrupted; retained the last accepted iterate"
-        interrupted = True
+        optimization = run_lbfgs(objective, x_initial, initial_value, accept, maxiter=args.maxiter,
+                                 maxls=args.max_line_search, seconds=args.seconds)
     finally:
         signal.signal(signal.SIGTERM, previous_term_handler)
     applied = np.asarray(jnp.asarray(accepted, dtype=flat_initial.dtype), dtype=np.float64)
-    summary.update(accepted_steps=accepted_steps, evaluations=evaluations, termination=termination,
-                   accepted_objective=accepted_value, optimization_seconds=perf_counter() - optimization_start,
+    summary.update(**optimization, accepted_steps=accepted_steps, accepted_objective=accepted_value,
                    fp32_parameter_change_norm=float(np.linalg.norm(applied - x_initial)),
                    weight_ema_initial_coefficient=config.weight_ema_decay**accepted_steps)
     config_payload = vars(config) | {"run_name": args.output_dir.name, "gradient_ema_decay": 0.0,
@@ -280,7 +314,7 @@ def main() -> None:
     save_iterate(args.output_dir, unravel(jnp.asarray(accepted, dtype=flat_initial.dtype)), accepted_steps, loaded, "raw")
     save_iterate(args.output_dir, shadow, accepted_steps, loaded, "weight_ema")
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    if interrupted:
+    if optimization["interrupted"]:
         print(json.dumps(summary), flush=True)
         return
 
