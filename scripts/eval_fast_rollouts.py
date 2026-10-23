@@ -100,6 +100,7 @@ def main() -> None:
     reference_dir = (args.reference_dir or args.reference_run or run_dir).resolve()
     output_dir = args.output_dir or run_dir / (
         f"eval_fast_{args.checkpoint}"
+        + ("_matmulhighest" if args.matmul_precision == "highest" else "")
         + ("_centerxi" if args.center_xi else "")
         + (f"_q{args.ic_quantile_offset}" if args.ic_quantile_offset != 0.5 else "")
         + ("_momentum" if args.project_momentum else "")
