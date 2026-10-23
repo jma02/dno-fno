@@ -40,6 +40,9 @@ from scripts.time_single_rollouts import packed_boundary  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
+    parser.add_argument("--matmul-precision", choices=("default", "highest"), default="default",
+                        help="Precision for both cached multipliers and runtime matrix products.")
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", choices=("weight_ema", "weight_ema_secondary", "best_weight_ema", "latest"), default="weight_ema")
     parser.add_argument("--checkpoint-dir", type=Path, help="Directory containing metadata.json and ckpt_<epoch>; use --checkpoint best_weight_ema for EMA from a full state.")
@@ -82,6 +85,7 @@ def main() -> None:
     parser.add_argument("--correction-grid", type=int, choices=(512, 1024), default=1024,
                         help="Learned correction grid; the analytic baseline and solver stay at 1024.")
     args = parser.parse_args()
+    jax.config.update("jax_default_matmul_precision", args.matmul_precision)
     if args.reflection_average and args.reflection_encoder:
         parser.error("Choose either full-predictor or encoder reflection averaging")
     if args.batch_context_fft and not args.fuse_nested_fft:
@@ -160,6 +164,7 @@ def main() -> None:
         "path": str(checkpoint_dir or run_dir / ("best_val_ckpt" if args.checkpoint == "best_weight_ema"
                                else f"{args.checkpoint}_ckpt")), "epoch": loaded.epoch,
         "implementation": f"{variant}; {implementation}; spectral carry; local IF; packed boundaries",
+        "matmul_precision": args.matmul_precision,
         "project_momentum": args.project_momentum,
         "center_xi": args.center_xi,
         "reflection_average": args.reflection_average,
@@ -177,7 +182,8 @@ def main() -> None:
         "spectral_saved_dno": args.spectral_saved_dno,
     }
     summaries = {}
-    for family, cfg in FAMILY_CONFIGS.items():
+    for family in args.families:
+        cfg = FAMILY_CONFIGS[family]
         source = (reference_dir if args.reference_dir else next(reference_dir.glob(
             f"eval_epoch1_weight_ema_test_stratified_n32_gpu*/{family}_trajs.npz")).parent)
         ics, _, nx, length = _load_paper_dataset_ics(

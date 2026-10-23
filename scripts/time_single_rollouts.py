@@ -129,6 +129,8 @@ def check_exclusive_gpu(enabled: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--matmul-precision", choices=("default", "highest"), default="default",
+                        help="Precision for both cached multipliers and runtime matrix products.")
     parser.add_argument("--families", nargs="+", choices=FAMILY_CONFIGS, default=list(FAMILY_CONFIGS))
     parser.add_argument("--steps", type=int, default=0, help="0 uses each family's full saved trajectory.")
     parser.add_argument("--repeats", type=int, default=1)
@@ -164,6 +166,7 @@ if __name__ == "__main__":
     parser.add_argument("--without-baselines", action="store_true", help="Speed-only diagnostic: omit model G0+G1, leaving the integrator unchanged.")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/single_rollout_timing_20260923.json")
     args = parser.parse_args()
+    jax.config.update("jax_default_matmul_precision", args.matmul_precision)
     if args.steps < 0 or args.repeats < 1 or args.pad_factor < 1:
         parser.error("steps must be nonnegative; repeats and pad-factor must be positive")
     if args.unroll_substeps < 1:
@@ -216,6 +219,7 @@ if __name__ == "__main__":
         "pack_saved_inputs": args.pack_saved_inputs,
         "spectral_saved_dno": args.spectral_saved_dno,
         "precision": "FP64 classical/integration; FP32 learned inference",
+        "matmul_precision": args.matmul_precision,
         "checkpoint": args.checkpoint, "neural_epochs": {name: run.epoch for name, run in loaded.items()},
         "checkpoint_dir": str(args.checkpoint_dir) if args.checkpoint_dir else None,
         "timing": ("instrumented GPU trace; not a clean latency measurement" if args.profile else
