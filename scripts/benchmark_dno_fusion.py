@@ -75,9 +75,6 @@ TRIALS = ("terms_interleaved", "terms_interleaved_features", "terms_interleaved_
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_headpad",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextalias",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd",
-          "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal",
-          "fourier_fused_features_product_overlap_nestedfused_contextbatch_serial_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_exactg1",
-          "fourier_fused_features_product_overlap_exactg0_nestedfused_contextbatch_serial_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_exactg1",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_gelureuse_branchmajor_contextreal_contextadd_mixgelu",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1",
           "fourier_fused_features_product_overlap_nestedfused_contextbatch_projectiontranspose_fieldstride_splitg1_gelureuse_branchmajor",
@@ -210,8 +207,6 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
-    exact_g1 = variant.endswith("_exactg1")
-    variant = variant.removesuffix("_exactg1")
     fuse_second_gelu = variant.endswith("_mixgelu")
     variant = variant.removesuffix("_mixgelu")
     context_add = variant.endswith("_contextadd")
@@ -469,7 +464,7 @@ def build_variant(
             eta_norm_hat = jnp.fft.rfft(eta_norm)
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
-            normalized_hat = normalized_inputs = physical64 = None
+            normalized_hat = normalized_inputs = None
             if trial == "fourier" and model.baseline_order == 2:
                 xi_phys = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32) / scales[1]) * model.xi_scale
                 normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
@@ -482,9 +477,9 @@ def build_variant(
                                             normalization=jnp.array([1 / scales[0], 1 / scales[1], model.xi_scale], dtype=jnp.float32))
                     eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
                 else:
-                    physical64 = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
-                                  else jnp.fft.irfft(inputs, n=nx))
-                    normalized = physical64.astype(jnp.float32) / scales[None, :, None]
+                    physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
+                                else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
+                    normalized = physical / scales[None, :, None]
                     eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
                     normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
                 normalized_hat = (fft(normalized_inputs, nx, ept=fft_ept)
@@ -497,14 +492,7 @@ def build_variant(
                                     ept=g1_input_ept, promote=fused_g1)
                 if overlap_g1:
                     with (nullcontext() if serial_g1 else compute_on("gpu_stream:1")):
-                        if exact_g1:
-                            # Like classical M1: G1 of the FP64 state, not of its FP32-rounded physical copy.
-                            analytic_hat = -sandwich(
-                                cast(jax.Array, physical64)[:, 0] * (model.eta_scale / scales[0]).astype(jnp.float64),
-                                xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64),
-                                operators, spectral=True, ept=sandwich_ept,
-                            ).sum(axis=1)
-                        elif model.baseline_order == 2:
+                        if model.baseline_order == 2:
                             analytic_hat = m2_hat(normalized_inputs)
                         elif split_g1:
                             analytic_hat = jax.jit(lambda eta, xi: -sandwich(
