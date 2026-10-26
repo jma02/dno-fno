@@ -13,6 +13,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+from jax.custom_batching import custom_vmap  # noqa: E402
 from jax.experimental import pallas as pl  # noqa: E402
 from jax.experimental.pallas import triton as plt  # noqa: E402
 from jax.ref import Ref  # noqa: E402
@@ -72,6 +73,145 @@ def dense(
     )(x.reshape(rows, inner).T if input_transposed else x.reshape(rows, inner),
       weight, None if residual is None else residual.reshape(rows, columns))
     return output.reshape(*x.shape[:-1], columns)
+
+
+def _xla_tanh_ptx(x: str, out: str) -> str:
+    """XLA:GPU's F32 tanh as emitted for the hero: clamp, small-input passthrough, rational form, div.full."""
+    return f"""
+    setp.ge.f32 p0, {x}, 0f40FFF644;
+    selp.f32 c, 0f40FFF644, {x}, p0;
+    setp.le.f32 p0, c, 0fC0FFF644;
+    selp.f32 c, 0fC0FFF644, c, p0;
+    abs.f32 s, {x};
+    setp.lt.f32 p1, s, 0f39D1B717;
+    mul.rn.f32 s, c, c;
+    fma.rn.f32 n, s, 0fA59F25C0, 0f2A61337E;
+    fma.rn.f32 n, s, n, 0fAEBD37FF;
+    fma.rn.f32 n, s, n, 0f335C0041;
+    fma.rn.f32 n, s, n, 0f3779434A;
+    fma.rn.f32 n, s, n, 0f3A270DED;
+    fma.rn.f32 n, s, n, 0f3BA059DC;
+    mul.rn.f32 n, c, n;
+    fma.rn.f32 d, s, 0f35A0D3D8, 0f38F895D6;
+    fma.rn.f32 d, s, d, 0f3B14AA05;
+    fma.rn.f32 d, s, d, 0f3BA059DD;
+    div.full.f32 n, n, d;
+    selp.f32 {out}, c, n, p1;
+    """
+
+
+# jax.nn.gelu followed by g * tanh(g), instruction for instruction as XLA emits the accepted fusion.
+_GELU_LIFT_PTX = "{ .reg .f32 z, c, s, n, d, t, g; .reg .pred p0, p1;" + f"""
+    mul.rn.f32 z, $1, $1;
+    mul.rn.f32 z, $1, z;
+    mul.rn.f32 z, z, 0f3D372713;
+    add.rn.f32 z, $1, z;
+    mul.rn.f32 z, z, 0f3F4C422A;
+    {_xla_tanh_ptx("z", "t")}
+    add.rn.f32 t, t, 0f3F800000;
+    mul.rn.f32 t, t, 0f3F000000;
+    mul.rn.f32 g, $1, t;
+    {_xla_tanh_ptx("g", "t")}
+    mul.rn.f32 $0, g, t;
+""" + "}"
+
+
+def _ptx(asm: str, *args: jax.Array) -> jax.Array:
+    result, = plt.elementwise_inline_asm(
+        asm, args=args, constraints="=f" + ",f" * len(args), pack=1,
+        result_shape_dtypes=(jax.ShapeDtypeStruct(args[0].shape, jnp.float32),),
+    )
+    return result
+
+
+def fused_tail(
+    context: jax.Array, h1: jax.Array, w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array, *,
+    mix_rows: int = 128, mix_warps: int = 4, head_rows: int = 64, head_warps: int = 4, stages: int = 3,
+) -> jax.Array:
+    """Context expansion, residual, mix GEMM and GELU lift in one kernel; the split-K=2 head in another.
+
+    context [S*C, N] is the unnormalized inverse FFT, h1 [S*N, W]; returns head weights [B, S*N].
+    Dots are TF32 and accumulate in increasing k like the accepted XLA kernels.
+    """
+    channels = w_expand.shape[0]
+    points = context.shape[1]
+    rows, width = h1.shape
+    branches = w_head.shape[-1]
+    chunk, k_pad, b_pad = 32, 16, 32
+    split = width // 2
+    dot = partial(pl.dot, precision=jax.lax.Precision.DEFAULT)
+
+    def mix_kernel(ctx_ref: Ref, h1_ref: Ref, we_ref: Ref, wm_ref: Ref, g_ref: Ref) -> None:
+        m = pl.program_id(0) * mix_rows + jnp.arange(mix_rows)
+        n = pl.program_id(1) * chunk + jnp.arange(chunk)
+        c = jnp.arange(k_pad)
+        a = plt.load(ctx_ref.at[(m // points)[:, None] * channels + c[None, :], (m % points)[:, None]],
+                     mask=c[None, :] < channels, other=0) * jnp.float32(1 / points)
+
+        def step(i: jax.Array, mix: jax.Array) -> jax.Array:
+            k = i * chunk + jnp.arange(chunk)
+            we = plt.load(we_ref.at[c[:, None], k[None, :]], mask=c[:, None] < channels, other=0)
+            # A separate add keeps the rounded expansion, as in the accepted residual fusion.
+            h2 = _ptx("add.rn.f32 $0, $1, $2;", dot(a, we), plt.load(h1_ref.at[m[:, None], k[None, :]]))
+            return mix + dot(h2, plt.load(wm_ref.at[k[:, None], n[None, :]]))
+
+        mix = jax.lax.fori_loop(0, width // chunk, step, jnp.zeros((mix_rows, chunk), jnp.float32))
+        plt.store(g_ref.at[m[:, None], n[None, :]], _ptx(_GELU_LIFT_PTX, mix))
+
+    def head_kernel(g_ref: Ref, wh_ref: Ref, out_ref: Ref) -> None:
+        m = pl.program_id(0) * head_rows + jnp.arange(head_rows)
+        b = jnp.arange(b_pad)
+
+        def step(i: jax.Array, sums: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
+            k = i * chunk + jnp.arange(chunk)
+            g = plt.load(g_ref.at[m[:, None], k[None, :]])
+            wh = plt.load(wh_ref.at[k[:, None], b[None, :]], mask=b[None, :] < branches, other=0)
+            low = k[None, :] < split
+            return sums[0] + dot(jnp.where(low, g, 0), wh), sums[1] + dot(jnp.where(low, 0, g), wh)
+
+        zeros = jnp.zeros((head_rows, b_pad), jnp.float32)
+        first, second = jax.lax.fori_loop(0, width // chunk, step, (zeros, zeros))
+        plt.store(out_ref.at[b[None, :], m[:, None]], _ptx("add.rn.f32 $0, $1, $2;", first, second),
+                  mask=b[None, :] < branches)
+
+    g = pl.pallas_call(
+        mix_kernel, out_shape=jax.ShapeDtypeStruct((rows, width), jnp.float32),
+        grid=(pl.cdiv(rows, mix_rows), width // chunk),
+        compiler_params=plt.CompilerParams(num_warps=mix_warps, num_stages=stages),
+        name=f"dno_fused_mix_{width}",
+    )(context, h1, w_expand, w_mix)
+    return pl.pallas_call(
+        head_kernel, out_shape=jax.ShapeDtypeStruct((branches, rows), jnp.float32),
+        grid=(pl.cdiv(rows, head_rows),),
+        compiler_params=plt.CompilerParams(num_warps=head_warps, num_stages=stages),
+        name=f"dno_fused_head_{width}_{branches}",
+    )(g, w_head)
+
+
+def _stacked_tail(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
+                  w_head: jax.Array) -> jax.Array:
+    """Flatten all leading axes so paired stages share one launch and branch-major output."""
+    leading, points = context.shape[:-2], context.shape[-2]
+    weights = fused_tail(jnp.moveaxis(context, -1, -2).reshape(-1, points),
+                         features.reshape(-1, features.shape[-1]), w_expand, w_mix, w_head)
+    return jnp.moveaxis(weights.reshape(-1, *leading, points), 0, -1)
+
+
+@custom_vmap
+def tail_weights(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
+                 w_head: jax.Array) -> jax.Array:
+    """Head weights [..., N, B] from the inverse context FFT [..., N, C] and first activation [..., N, W]."""
+    return _stacked_tail(context, features, w_expand, w_mix, w_head)
+
+
+@tail_weights.def_vmap
+def _tail_weights_vmap(axis_size: int, batched: list[bool], context: jax.Array, features: jax.Array,
+                       w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array) -> tuple[jax.Array, bool]:
+    if any(batched[2:]):
+        raise ValueError("Fused tail weights must be shared across the mapped axis.")
+    context, features = (value if mapped else jnp.broadcast_to(value, (axis_size, *value.shape))
+                         for value, mapped in zip((context, features), batched))
+    return _stacked_tail(context, features, w_expand, w_mix, w_head), True
 
 
 if __name__ == "__main__":

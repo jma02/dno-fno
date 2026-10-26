@@ -30,7 +30,7 @@ from jax.stages import Wrapped  # noqa: E402
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
-from scripts.benchmark_dno_dense import dense  # noqa: E402
+from scripts.benchmark_dno_dense import dense, tail_weights  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
@@ -207,6 +207,8 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    fuse_tail = variant.endswith("_fusedtail")
+    variant = variant.removesuffix("_fusedtail")
     fuse_second_gelu = variant.endswith("_mixgelu")
     variant = variant.removesuffix("_mixgelu")
     context_add = variant.endswith("_contextadd")
@@ -307,6 +309,11 @@ def build_variant(
         raise ValueError("Parity streams require single-pass, unfused block-diagonal context projections.")
     if fuse_second_gelu and (not context_add or model.baseline_order != 1 or model.surface_cubic_channels):
         raise ValueError("The fused second projection requires contextadd and the quadratic lift.")
+    if fuse_tail and (not context_real or context_add or fuse_second_gelu or reflection_encoder or pad_head
+                      or model.baseline_order != 1 or model.surface_cubic_channels or model.surface_context_gate
+                      or model.surface_polynomial_skip or model.surface_parity_products or model.pair_coupling
+                      or model.surface_amplitude_reference > 0):
+        raise ValueError("The fused tail implements only the hero's real-context M1 trunk.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
@@ -587,9 +594,12 @@ def build_variant(
                 features = jnp.stack((features, features * parity), axis=-2)
             context_channels = model.surface_context_width * (2 if reflection_encoder else 1)
             context = None
+            tail = None
             nested_inner_hat = None
             nested_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
+                if fuse_tail and name == "eta_feat_mix":
+                    continue
                 if context_fold and name == "eta_feat_mix":
                     features = nn.gelu(features)
                     continue
@@ -651,7 +661,7 @@ def build_variant(
                             context_symbol * context_hat, n=correction_nx, axis=1,
                             inverse=True, hermitian_input=True,
                             input_alias=context_alias,
-                            norm="forward" if context_add else None,
+                            norm="forward" if context_add or fuse_tail else None,
                             library=(ROOT / "outputs/cufft_graph_ffi_20261019/cufft_graph_ffi_alias.so"
                                      if context_alias else FFI_LIBRARY),
                         )
@@ -666,7 +676,10 @@ def build_variant(
                         )
                     if reflection_encoder:
                         context = context.reshape(context.shape[0], correction_nx, 2, model.surface_context_width)
-                    if context_add:
+                    if fuse_tail:
+                        tail = tail_weights(context, features, loaded.params["eta_context_expand"]["kernel"],
+                                            loaded.params["eta_feat_mix"]["kernel"], cast(jax.Array, head_kernel))
+                    elif context_add:
                         features = dense(context, loaded.params["eta_context_expand"]["kernel"],
                                          residual=features, input_scale=1 / correction_nx,
                                          tile=(32, 32, 16), num_warps=2, input_transposed=True,
@@ -679,7 +692,7 @@ def build_variant(
                         context = context @ (cast(jax.Array, context_folded_kernel) if context_fold
                                              else loaded.params["eta_context_expand"]["kernel"])
                         features = features + context
-            if not fuse_second_gelu:
+            if not (fuse_second_gelu or fuse_tail):
                 features = (mixed_surface_lift(features, model.surface_cubic_channels)
                             if model.surface_cubic_channels else
                             features * jnp.tanh(features) ** (2 if model.baseline_order == 2 else 1))
@@ -696,7 +709,7 @@ def build_variant(
                 features = features * amplitude[..., None] ** 2
             correction_hat = jnp.zeros_like(xi_phys_hat)
             if ordinary_blocks:
-                weights = (transposed_matmul(features, cast(jax.Array, head_kernel))
+                weights = (cast(jax.Array, tail) if fuse_tail else transposed_matmul(features, cast(jax.Array, head_kernel))
                            if transpose_head else features @ cast(jax.Array, head_kernel))
                 ordinary_fields = branch_fields if field_stride else branch_fields[:, :ordinary_branches]
                 ordinary_filters = filters[:, :ordinary_branches]
