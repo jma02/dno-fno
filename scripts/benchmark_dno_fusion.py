@@ -30,7 +30,7 @@ from jax.stages import Wrapped  # noqa: E402
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
-from scripts.benchmark_dno_dense import context_filter, dense, tail_weights, trunk_head  # noqa: E402
+from scripts.benchmark_dno_dense import context_filter, cuda_tail_weights, dense, tail_weights, trunk_head  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
@@ -207,8 +207,9 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
-    fuse_tail = variant.endswith("_fusedtail")
-    variant = variant.removesuffix("_fusedtail")
+    cuda_tail = variant.endswith("_cudatail")
+    fuse_tail = cuda_tail or variant.endswith("_fusedtail")
+    variant = variant.removesuffix("_cudatail").removesuffix("_fusedtail")
     cuda_head = variant.endswith("_cudahead")
     variant = variant.removesuffix("_cudahead")
     cuda_context = variant.endswith("_cudacontext")
@@ -655,7 +656,7 @@ def build_variant(
                         context = context.reshape(context.shape[0], correction_nx, context_channels)
                     if cuda_context:
                         cuda_context_field, nested_pre = context_filter(
-                            cast(jax.Array, head_input), cast(jax.Array, context_multiplier)[0], cast(jax.Array, inner_filters)[0],
+                            cast(jax.Array, head_input), cast(jax.Array, context_multiplier), cast(jax.Array, inner_filters),
                             cast(jax.Array, gamma), cast(jax.Array, normalized_inputs),
                             cast(tuple, model.surface_feature_scales)[0], ept=fft_ept)
                         context_hat = cast(jax.Array, None)  # the filter consumes the spectra internally
@@ -703,7 +704,7 @@ def build_variant(
                     if reflection_encoder:
                         context = context.reshape(context.shape[0], correction_nx, 2, model.surface_context_width)
                     if fuse_tail:
-                        tail = tail_weights(context, features, loaded.params["eta_context_expand"]["kernel"],
+                        tail = (cuda_tail_weights if cuda_tail else tail_weights)(context, features, loaded.params["eta_context_expand"]["kernel"],
                                             loaded.params["eta_feat_mix"]["kernel"], cast(jax.Array, head_kernel))
                     elif context_add:
                         features = dense(context, loaded.params["eta_context_expand"]["kernel"],

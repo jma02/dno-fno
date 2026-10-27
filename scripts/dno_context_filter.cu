@@ -19,17 +19,19 @@ template <int N, int EPT>
 using Base = decltype(Block() + Size<N>() + Precision<float>() + SM<DNO_SM>() + ElementsPerThread<EPT>() + FFTsPerBlock<1>());
 using Folded = RealFFTOptions<complex_layout::natural, real_mode::folded>;
 
-// Rows are stage-major over (context channels, nested channels).
+// Rows are stage-major over (context channels, nested channels); leading index = stage * batch + trajectory,
+// and the depth-dependent context symbol / inner filters are indexed by trajectory = leading % n_depth.
 template <class Forward, class Inverse>
 __global__ void context_filter_kernel(const float* __restrict__ spectrum_input, const float* __restrict__ context_symbol,
                                       const float* __restrict__ inner_filters, const float* __restrict__ gamma,
                                       const float* __restrict__ normalized, float* __restrict__ context,
-                                      float2* __restrict__ nested, int channels, int n_nested, float nested_reciprocal) {
+                                      float2* __restrict__ nested, int channels, int n_nested, int n_depth,
+                                      float nested_reciprocal) {
     using C = typename Forward::value_type;
     constexpr int N = size_of<Forward>::value, F = N / 2 + 1;
     static_assert(Forward::output_ept == Inverse::input_ept && Forward::stride == Inverse::stride, "shared register layout");
     extern __shared__ __align__(16) unsigned char scratch[];
-    const int rows = channels + n_nested, stage = blockIdx.x / rows, c = blockIdx.x % rows;
+    const int rows = channels + n_nested, stage = blockIdx.x / rows, c = blockIdx.x % rows, depth = stage % n_depth;
     C data[Forward::storage_size] = {};
     for (int i = 0; i < Forward::input_ept; ++i) {
         int k = threadIdx.x + i * Forward::stride;
@@ -41,7 +43,8 @@ __global__ void context_filter_kernel(const float* __restrict__ spectrum_input, 
     for (int i = 0; i < Inverse::input_ept; ++i) {
         int k = threadIdx.x + i * Inverse::stride;
         if (k < F) {
-            float s = is_context ? context_symbol[k * channels + c] : inner_filters[(c - channels) * F + k];
+            float s = is_context ? context_symbol[(depth * F + k) * channels + c]
+                                 : inner_filters[(depth * n_nested + c - channels) * F + k];
             data[i] = C(__fmul_rn(data[i].x, s), __fmul_rn(data[i].y, s));
             if (k == 0 || k == N / 2) data[i].y = 0;
         }
@@ -83,14 +86,14 @@ __global__ void context_filter_kernel(const float* __restrict__ spectrum_input, 
 template <int EPT>
 ffi::Error launch(cudaStream_t stream, const float* spectrum_input, const float* context_symbol,
                   const float* inner_filters, const float* gamma, const float* normalized, float* context,
-                  float2* nested, int64_t stages, int channels, int n_nested, float nested_reciprocal) {
+                  float2* nested, int64_t stages, int channels, int n_nested, int n_depth, float nested_reciprocal) {
     using Forward = decltype(Base<1024, EPT>() + Type<fft_type::r2c>() + Folded());
     using Inverse = decltype(Base<1024, EPT>() + Type<fft_type::c2r>() + Folded());
     constexpr int shared = Forward::shared_memory_size > Inverse::shared_memory_size
                            ? Forward::shared_memory_size : Inverse::shared_memory_size;
     context_filter_kernel<Forward, Inverse><<<stages * (channels + n_nested), Forward::block_dim, shared, stream>>>(
         spectrum_input, context_symbol, inner_filters, gamma, normalized, context, nested, channels, n_nested,
-        nested_reciprocal);
+        n_depth, nested_reciprocal);
     auto error = cudaGetLastError();
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
@@ -104,14 +107,16 @@ ffi::Error context_filter(cudaStream_t stream, ffi::AnyBuffer spectrum_input, ff
     const int channels = static_cast<int>(context_symbol.dimensions().back());
     const int n_nested = static_cast<int>(gamma.element_count());
     const int64_t stages = spectrum_input.element_count() / (int64_t(rows) * points);
-    if (points != 1024 || rows != channels + n_nested)
+    const int n_depth = static_cast<int>(context_symbol.element_count() / (int64_t(points / 2 + 1) * channels));
+    if (points != 1024 || rows != channels + n_nested || n_depth < 1 || stages % n_depth != 0
+            || inner_filters.element_count() != int64_t(n_depth) * n_nested * (points / 2 + 1))
         return ffi::Error::InvalidArgument("Context filter supports 1024 points and context+nested rows.");
     auto run = ept == 4 ? launch<4> : ept == 16 ? launch<16> : launch<8>;
     return run(stream, static_cast<const float*>(spectrum_input.untyped_data()),
                static_cast<const float*>(context_symbol.untyped_data()),
                static_cast<const float*>(inner_filters.untyped_data()), static_cast<const float*>(gamma.untyped_data()),
                static_cast<const float*>(normalized.untyped_data()), static_cast<float*>(context->untyped_data()),
-               static_cast<float2*>(nested->untyped_data()), stages, channels, n_nested, nested_reciprocal);
+               static_cast<float2*>(nested->untyped_data()), stages, channels, n_nested, n_depth, nested_reciprocal);
 }
 
 }  // namespace

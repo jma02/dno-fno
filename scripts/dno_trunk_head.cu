@@ -1,7 +1,8 @@
-// Fused hero trunk head: scaled K=7 projection, GELU, 160-to-8 context projection and the
-// nested surface products, written as the batched context-FFT input. Reproduces the accepted
+// Fused hero trunk. Head: scaled K=7 projection, GELU, 160-to-8 context projection and the nested
+// surface products, written as the batched context-FFT input. Tail: context expansion and residual,
+// 160x160 mix, GELU lift and the split-K=2 head into branch-major weights. Both reproduce the accepted
 // XLA arithmetic: cvt.rna TF32 operands into mma.sync m16n8k8 in increasing k, XLA's GELU/tanh PTX and
-// separately rounded FP32 multiplies.
+// separately rounded FP32 operations.
 #include <cuda_runtime.h>
 #include <cstdint>
 #include "xla/ffi/api/ffi.h"
@@ -59,6 +60,132 @@ __device__ __forceinline__ float xla_gelu(float x) {
         "mul.rn.f32 %0, %1, t; }"
         : "=f"(y) : "f"(x));
     return y;
+}
+
+// XLA's fast F32 tanh, as emitted inside the GELU-lift fusion.
+__device__ __forceinline__ float xla_tanh(float x) {
+    float y;
+    asm("{ .reg .f32 c, s, n, d; .reg .pred p0, p1;\n\t"
+        "setp.ge.f32 p0, %1, 0f40FFF644;\n\t"
+        "selp.f32 c, 0f40FFF644, %1, p0;\n\t"
+        "setp.le.f32 p0, c, 0fC0FFF644;\n\t"
+        "selp.f32 c, 0fC0FFF644, c, p0;\n\t"
+        "abs.f32 s, %1;\n\t"
+        "setp.lt.f32 p1, s, 0f39D1B717;\n\t"
+        "mul.rn.f32 s, c, c;\n\t"
+        "fma.rn.f32 n, s, 0fA59F25C0, 0f2A61337E;\n\t"
+        "fma.rn.f32 n, s, n, 0fAEBD37FF;\n\t"
+        "fma.rn.f32 n, s, n, 0f335C0041;\n\t"
+        "fma.rn.f32 n, s, n, 0f3779434A;\n\t"
+        "fma.rn.f32 n, s, n, 0f3A270DED;\n\t"
+        "fma.rn.f32 n, s, n, 0f3BA059DC;\n\t"
+        "mul.rn.f32 n, c, n;\n\t"
+        "fma.rn.f32 d, s, 0f35A0D3D8, 0f38F895D6;\n\t"
+        "fma.rn.f32 d, s, d, 0f3B14AA05;\n\t"
+        "fma.rn.f32 d, s, d, 0f3BA059DD;\n\t"
+        "div.full.f32 n, n, d;\n\t"
+        "selp.f32 %0, c, n, p1; }"
+        : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float xla_gelu_lift(float x) {
+    float g = xla_gelu(x);
+    return __fmul_rn(g, xla_tanh(g));
+}
+
+// One block per 16 * MTiles rows (one stage), one warp per 8-column tile of every 16-row tile. Phase 1 forms
+// h2 = h1 + (context / N) We, phase 2 the mix GEMM and GELU lift, phase 3 (four warps) the two 80-long head
+// half-sums added in FP32. Each warp's mix and head weights sit in registers before their MMA chains; two row
+// tiles per block halve the SMs the tail occupies, leaving room for the concurrent G1 kernels.
+template <int Width, int Channels, int Branches, int MTiles>
+__global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
+        const float* __restrict__ context, const float* __restrict__ h1, const float* __restrict__ w_expand,
+        const float* __restrict__ w_mix, const float* __restrict__ w_head, float* __restrict__ weights,
+        int points, int64_t total_rows) {
+    static_assert(Channels == 8 && Width % 16 == 0 && Branches <= 32, "hero tail shapes");
+    constexpr int kSteps = Width / 8, kHalfSteps = kSteps / 2;
+    __shared__ float h2[MTiles][kRows][Width + 4];
+    __shared__ float g[MTiles][kRows][Width + 4];
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, gi = lane / 4, t = lane % 4;
+    const int row0 = blockIdx.x * kRows * MTiles, stage = row0 / points, x0 = row0 % points;
+    const int n = 8 * warp + gi, c0 = 8 * warp + 2 * t;
+
+    uint32_t mix_b[kSteps][2];
+    for (int s = 0; s < kSteps; ++s) {
+        mix_b[s][0] = tf32(w_mix[(8 * s + t) * Width + n]);
+        mix_b[s][1] = tf32(w_mix[(8 * s + t + 4) * Width + n]);
+    }
+    const uint32_t we0 = tf32(w_expand[t * Width + n]), we1 = tf32(w_expand[(t + 4) * Width + n]);
+    for (int m = 0; m < MTiles; ++m) {
+        const int r0 = kRows * m;
+        uint32_t a[4];
+        for (int i = 0; i < 4; ++i)
+            a[i] = tf32(__fmul_rn(context[(stage * Channels + t + 4 * (i / 2)) * points + x0 + r0 + gi + 8 * (i % 2)],
+                                  1.0f / points));
+        float skip[4];
+        for (int i = 0; i < 4; ++i) skip[i] = h1[(row0 + r0 + gi + 8 * (i / 2)) * Width + c0 + i % 2];
+        float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        mma_tf32(d, a, we0, we1);
+        for (int i = 0; i < 4; ++i) h2[m][gi + 8 * (i / 2)][c0 + i % 2] = __fadd_rn(skip[i], d[i]);
+    }
+    __syncthreads();
+
+    float mix[MTiles][4] = {};
+    for (int s = 0; s < kSteps; ++s) {
+        const int k = 8 * s;
+        for (int m = 0; m < MTiles; ++m) {
+            uint32_t ah[4] = {tf32(h2[m][gi][k + t]), tf32(h2[m][gi + 8][k + t]),
+                              tf32(h2[m][gi][k + t + 4]), tf32(h2[m][gi + 8][k + t + 4])};
+            mma_tf32(mix[m], ah, mix_b[s][0], mix_b[s][1]);
+        }
+    }
+    for (int m = 0; m < MTiles; ++m)
+        for (int i = 0; i < 4; ++i) g[m][gi + 8 * (i / 2)][c0 + i % 2] = xla_gelu_lift(mix[m][i]);
+    __syncthreads();
+
+    if (warp >= 4 * MTiles) return;
+    const int m = warp / 4, b = 8 * (warp % 4) + gi;
+    uint32_t head_b[kSteps][2];
+    for (int s = 0; s < kSteps; ++s)
+        for (int j = 0; j < 2; ++j)
+            head_b[s][j] = tf32(b < Branches ? w_head[(8 * s + t + 4 * j) * Branches + b] : 0.0f);
+    float first[4] = {0.0f, 0.0f, 0.0f, 0.0f}, second[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int s = 0; s < kHalfSteps; ++s) {
+        const int k0 = 8 * s, k1 = 8 * (s + kHalfSteps);
+        uint32_t a0[4] = {tf32(g[m][gi][k0 + t]), tf32(g[m][gi + 8][k0 + t]), tf32(g[m][gi][k0 + t + 4]), tf32(g[m][gi + 8][k0 + t + 4])};
+        uint32_t a1[4] = {tf32(g[m][gi][k1 + t]), tf32(g[m][gi + 8][k1 + t]), tf32(g[m][gi][k1 + t + 4]), tf32(g[m][gi + 8][k1 + t + 4])};
+        mma_tf32(first, a0, head_b[s][0], head_b[s][1]);
+        mma_tf32(second, a1, head_b[s + kHalfSteps][0], head_b[s + kHalfSteps][1]);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const int column = 8 * (warp % 4) + 2 * t + i % 2;
+        if (column < Branches)
+            weights[column * total_rows + row0 + kRows * m + gi + 8 * (i / 2)] = __fadd_rn(first[i], second[i]);
+    }
+}
+
+ffi::Error trunk_tail(cudaStream_t stream, ffi::AnyBuffer context, ffi::AnyBuffer h1, ffi::AnyBuffer w_expand,
+                      ffi::AnyBuffer w_mix, ffi::AnyBuffer w_head, ffi::Result<ffi::AnyBuffer> weights,
+                      int64_t m_tiles) {
+    const int points = static_cast<int>(context.dimensions().back());
+    const int64_t rows = h1.element_count() / 160;
+    if (w_mix.element_count() != 160 * 160 || w_expand.element_count() != 8 * 160 || w_head.element_count() != 160 * 28
+            || points % (kRows * m_tiles) != 0)
+        return ffi::Error::InvalidArgument("Trunk tail supports width 160, 8 context channels and 28 branches.");
+    const auto* args = static_cast<const float*>(context.untyped_data());
+    if (m_tiles == 2)
+        trunk_tail_kernel<160, 8, 28, 2><<<rows / (2 * kRows), 4 * 160, 0, stream>>>(
+            args, static_cast<const float*>(h1.untyped_data()), static_cast<const float*>(w_expand.untyped_data()),
+            static_cast<const float*>(w_mix.untyped_data()), static_cast<const float*>(w_head.untyped_data()),
+            static_cast<float*>(weights->untyped_data()), points, rows);
+    else
+        trunk_tail_kernel<160, 8, 28, 1><<<rows / kRows, 4 * 160, 0, stream>>>(
+            args, static_cast<const float*>(h1.untyped_data()), static_cast<const float*>(w_expand.untyped_data()),
+            static_cast<const float*>(w_mix.untyped_data()), static_cast<const float*>(w_head.untyped_data()),
+            static_cast<float*>(weights->untyped_data()), points, rows);
+    auto error = cudaGetLastError();
+    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
 // One block per 16 rows (points of one stage); its warps split the first projection's 8-column tiles,
@@ -163,4 +290,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_head, trunk_head,
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
         .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>()
         .Attr<float>("nested_reciprocal").Attr<int64_t>("nested_from").Attr<int64_t>("tiles_per_warp"),
+    {ffi::Traits::kCmdBufferCompatible});
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_tail, trunk_tail,
+    ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>().Attr<int64_t>("m_tiles"),
     {ffi::Traits::kCmdBufferCompatible});

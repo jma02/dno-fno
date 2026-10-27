@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Literal, cast
+from typing import Callable, Literal, cast
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -195,32 +195,6 @@ def fused_tail(
     )(g, w_head)
 
 
-def _stacked_tail(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
-                  w_head: jax.Array) -> jax.Array:
-    """Flatten all leading axes so paired stages share one launch and branch-major output."""
-    leading, points = context.shape[:-2], context.shape[-2]
-    weights = fused_tail(jnp.moveaxis(context, -1, -2).reshape(-1, points),
-                         features.reshape(-1, features.shape[-1]), w_expand, w_mix, w_head)
-    return jnp.moveaxis(weights.reshape(-1, *leading, points), 0, -1)
-
-
-@custom_vmap
-def tail_weights(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
-                 w_head: jax.Array) -> jax.Array:
-    """Head weights [..., N, B] from the inverse context FFT [..., N, C] and first activation [..., N, W]."""
-    return _stacked_tail(context, features, w_expand, w_mix, w_head)
-
-
-@tail_weights.def_vmap
-def _tail_weights_vmap(axis_size: int, batched: list[bool], context: jax.Array, features: jax.Array,
-                       w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array) -> tuple[jax.Array, bool]:
-    if any(batched[2:]):
-        raise ValueError("Fused tail weights must be shared across the mapped axis.")
-    context, features = (value if mapped else jnp.broadcast_to(value, (axis_size, *value.shape))
-                         for value, mapped in zip((context, features), batched))
-    return _stacked_tail(context, features, w_expand, w_mix, w_head), True
-
-
 def build_trunk(sm: int = 89) -> None:
     """Compile the CUDA trunk-head and context-filter FFI libraries; the latter needs MathDx cuFFTDx."""
     TRUNK_LIBRARY.parent.mkdir(parents=True, exist_ok=True)
@@ -233,11 +207,18 @@ def build_trunk(sm: int = 89) -> None:
 
 
 @cache
-def _register_trunk() -> tuple[ctypes.CDLL, ctypes.CDLL]:
-    head, context = ctypes.CDLL(str(TRUNK_LIBRARY)), ctypes.CDLL(str(CONTEXT_LIBRARY))
-    jax.ffi.register_ffi_target("dno_trunk_head", jax.ffi.pycapsule(head.dno_trunk_head), platform="CUDA")
-    jax.ffi.register_ffi_target("dno_context_filter", jax.ffi.pycapsule(context.dno_context_filter), platform="CUDA")
-    return head, context
+def _register_trunk() -> ctypes.CDLL:
+    library = ctypes.CDLL(str(TRUNK_LIBRARY))
+    jax.ffi.register_ffi_target("dno_trunk_head", jax.ffi.pycapsule(library.dno_trunk_head), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_trunk_tail", jax.ffi.pycapsule(library.dno_trunk_tail), platform="CUDA")
+    return library
+
+
+@cache
+def _register_context() -> ctypes.CDLL:
+    library = ctypes.CDLL(str(CONTEXT_LIBRARY))
+    jax.ffi.register_ffi_target("dno_context_filter", jax.ffi.pycapsule(library.dno_context_filter), platform="CUDA")
+    return library
 
 
 def trunk_head(
@@ -263,6 +244,47 @@ def trunk_head(
     return h1, spectrum_input
 
 
+def cuda_tail(context: jax.Array, h1: jax.Array, w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array, *,
+              m_tiles: int = 2) -> jax.Array:
+    """CUDA trunk tail on stacked stages: context [S*C, N], h1 [S*N, W]; returns weights [B, S*N]."""
+    _register_trunk()
+    return jax.ffi.ffi_call("dno_trunk_tail", jax.ShapeDtypeStruct((w_head.shape[-1], h1.shape[0]), jnp.float32))(
+        context, h1, w_expand, w_mix, w_head, m_tiles=np.int64(m_tiles))
+
+
+def _batched_tail(kernel: Callable[..., jax.Array]) -> Callable[..., jax.Array]:
+    """Head weights [..., N, B] from the inverse context FFT [..., N, C] and first activation [..., N, W].
+
+    Paired stages and other leading axes share one launch with branch-major output.
+    """
+    def stacked(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
+                w_head: jax.Array) -> jax.Array:
+        leading, points = context.shape[:-2], context.shape[-2]
+        weights = kernel(jnp.moveaxis(context, -1, -2).reshape(-1, points),
+                         features.reshape(-1, features.shape[-1]), w_expand, w_mix, w_head)
+        return jnp.moveaxis(weights.reshape(-1, *leading, points), 0, -1)
+
+    @custom_vmap
+    def batched(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
+                w_head: jax.Array) -> jax.Array:
+        return stacked(context, features, w_expand, w_mix, w_head)
+
+    @batched.def_vmap
+    def batched_vmap(axis_size: int, mapped: list[bool], context: jax.Array, features: jax.Array,
+                     w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array) -> tuple[jax.Array, bool]:
+        if any(mapped[2:]):
+            raise ValueError("Fused tail weights must be shared across the mapped axis.")
+        context, features = (value if axis else jnp.broadcast_to(value, (axis_size, *value.shape))
+                             for value, axis in zip((context, features), mapped))
+        return stacked(context, features, w_expand, w_mix, w_head), True
+
+    return batched
+
+
+tail_weights = _batched_tail(fused_tail)
+cuda_tail_weights = _batched_tail(cuda_tail)
+
+
 def context_filter(
     spectrum_input: jax.Array, context_symbol: jax.Array, inner_filters: jax.Array, gamma: jax.Array,
     normalized: jax.Array, nested_scale: float, ept: int = 8,
@@ -270,9 +292,10 @@ def context_filter(
     """cuFFTDx context filter on the trunk-head FFT input [..., C+R, N].
 
     Returns the unnormalized inverse-filtered context [..., C, N] and the nested sandwich spectra
-    [..., R, F] before the outer filters. context_symbol [F, C] and inner_filters [R, F] are real.
+    [..., R, F] before the outer filters. The real, depth-dependent context_symbol [D, F, C] and
+    inner_filters [D, R, F] are indexed by the trailing batch axis, so D is 1 or the trajectory count.
     """
-    _register_trunk()
+    _register_context()
     *leading, _, points = spectrum_input.shape
     channels, n_nested = context_symbol.shape[-1], gamma.shape[-1]
     return tuple(jax.ffi.ffi_call("dno_context_filter", (
