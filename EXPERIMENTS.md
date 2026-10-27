@@ -33,11 +33,12 @@ could not be recovered at all are in
 
 ## Dated logs
 
-106 files, 1957 rows.
+107 files, 1963 rows.
 
 | Date | Rows | File | Size |
 | --- | --- | --- | --- |
-| 2026-10-26 | 18 | [`experiments/experiments-2026-10-26.md`](experiments/experiments-2026-10-26.md) | 20 KB |
+| 2026-10-27 | 3 | [`experiments/experiments-2026-10-27.md`](experiments/experiments-2026-10-27.md) | 3 KB |
+| 2026-10-26 | 21 | [`experiments/experiments-2026-10-26.md`](experiments/experiments-2026-10-26.md) | 25 KB |
 | 2026-10-23 | 3 | [`experiments/experiments-2026-10-23.md`](experiments/experiments-2026-10-23.md) | 6 KB |
 | 2026-10-22 | 41 | [`experiments/experiments-2026-10-22.md`](experiments/experiments-2026-10-22.md) | 70 KB |
 | 2026-10-21 | 3 | [`experiments/experiments-2026-10-21.md`](experiments/experiments-2026-10-21.md) | 6 KB |
