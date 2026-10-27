@@ -30,7 +30,9 @@ from jax.stages import Wrapped  # noqa: E402
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
-from scripts.benchmark_dno_dense import context_filter, cuda_tail_weights, dense, tail_weights, trunk_head  # noqa: E402
+from scripts.benchmark_dno_dense import (  # noqa: E402
+    analytic_g1, context_filter, cuda_tail_weights, dense, tail_weights, trunk_head,
+)
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
@@ -207,6 +209,8 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
+    cuda_g1 = variant.endswith("_cudag1")
+    variant = variant.removesuffix("_cudag1")
     cuda_tail = variant.endswith("_cudatail")
     fuse_tail = cuda_tail or variant.endswith("_fusedtail")
     variant = variant.removesuffix("_cudatail").removesuffix("_fusedtail")
@@ -326,6 +330,9 @@ def build_variant(
         raise ValueError("The CUDA trunk head implements only the hero's fixed-feature, batched-context trunk.")
     if cuda_context and not (cuda_head and context_real and nested_fused) or cuda_context and context_add:
         raise ValueError("The CUDA context filter follows the CUDA head on the real-context fused nested path.")
+    if cuda_g1 and (not overlap_g1 or fused_g1 or split_g1 or g1_fp32 or model.baseline_order != 1
+                    or g1_input_ept != 8 or sandwich_ept != 8):
+        raise ValueError("The CUDA G1 kernel replaces the accepted EPT8 FP64 stream-1 M1 G1 region only.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
@@ -513,6 +520,9 @@ def build_variant(
                     with (nullcontext() if serial_g1 else compute_on("gpu_stream:1")):
                         if model.baseline_order == 2:
                             analytic_hat = m2_hat(normalized_inputs)
+                        elif cuda_g1:
+                            analytic_hat = jax.jit(lambda values: analytic_g1(values, operators, model.eta_scale))(
+                                normalized_inputs)
                         elif split_g1:
                             analytic_hat = jax.jit(lambda eta, xi: -sandwich(
                                 (eta * model.eta_scale).astype(g1_dtype),

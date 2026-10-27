@@ -218,6 +218,7 @@ def _register_trunk() -> ctypes.CDLL:
 def _register_context() -> ctypes.CDLL:
     library = ctypes.CDLL(str(CONTEXT_LIBRARY))
     jax.ffi.register_ffi_target("dno_context_filter", jax.ffi.pycapsule(library.dno_context_filter), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_g1", jax.ffi.pycapsule(library.dno_g1), platform="CUDA")
     return library
 
 
@@ -306,6 +307,21 @@ def context_filter(
         gamma.astype(jnp.float32), normalized,
         nested_reciprocal=np.float32(1) / np.float32(nested_scale), ept=np.int64(ept),
     ))  # pyright: ignore[reportReturnType]
+
+
+def analytic_g1(normalized: jax.Array, operators: jax.Array, eta_scale: float) -> jax.Array:
+    """FP64 cuFFTDx M1 analytic term -sum_j L_j[eta L_j xi] [..., F] from the FP32 trunk input [..., 2, N].
+
+    Channel 0 is eta_norm (scaled by eta_scale in FP32 before promotion) and channel 1 xi_phys; the complex128
+    operators [D, 2, F] are indexed by the trailing batch axis like context_filter.
+    """
+    _register_context()
+    *leading, _, points = normalized.shape
+    out, _ = jax.ffi.ffi_call("dno_g1", (
+        jax.ShapeDtypeStruct((*leading, points // 2 + 1), jnp.complex128),
+        jax.ShapeDtypeStruct((*leading, 2, points // 2 + 1), jnp.complex128),
+    ), vmap_method="expand_dims")(normalized, operators, eta_scale=np.float32(eta_scale))
+    return out
 
 
 if __name__ == "__main__":
