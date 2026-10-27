@@ -108,17 +108,17 @@ __device__ __forceinline__ uint32_t tf32_from_half(__half x, float inverse_scale
 }
 
 // One block per 16 * MTiles rows (one stage), one warp per 8-column tile of every 16-row tile. Phase 1 forms
-// h2 = h1 + (context / N) We, phase 2 the mix GEMM and GELU lift, phase 3 (four warps per row tile) the two
-// 80-long head half-sums added in FP32. h2 and g are kept as TF32 bits for ldmatrix; the mix and head weights
-// arrive as exact FP16 copies in fragment order (see pack_tail_weights), five 16-byte chunks per lane, since
+// h2 = h1 + (context / N) We, phase 2 the mix GEMM and GELU lift, phase 3 (one warp per 8-branch tile and row tile)
+// the two half-width head sums added in FP32. h2 and g are kept as TF32 bits for ldmatrix; the mix and head weights
+// arrive as exact FP16 copies in fragment order (see pack_tail_weights), Width / 32 16-byte chunks per lane, since
 // every block streams them from L2.
 template <int Width, int Channels, int Branches, int MTiles>
 __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
         const float* __restrict__ context, const float* __restrict__ h1, const float* __restrict__ w_expand,
         const uint4* __restrict__ mix16, const uint4* __restrict__ head16, float mix_scale, float head_scale,
         float* __restrict__ weights, int points, int64_t total_rows) {
-    static_assert(Channels == 8 && Width % 16 == 0 && Branches <= 32, "hero tail shapes");
-    constexpr int kSteps = Width / 8, kHalfSteps = kSteps / 2, kChunks = kSteps / 4;
+    constexpr int kSteps = Width / 8, kHalfSteps = kSteps / 2, kChunks = kSteps / 4, kHeadTiles = (Branches + 7) / 8;
+    static_assert(Channels == 8 && Width % 32 == 0 && kHeadTiles * MTiles <= Width / 8, "tail shapes");
     __shared__ __align__(16) uint32_t h2[MTiles][kRows][Width + 4];
     __shared__ __align__(16) uint32_t g[MTiles][kRows][Width + 4];
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, gi = lane / 4, t = lane % 4;
@@ -154,11 +154,11 @@ __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
         }
     }
     // Head warps fetch their weights before the GELU lift so the load latency overlaps it.
-    const bool head = warp < 4 * MTiles;
-    const int m = warp / 4;
+    const bool head = warp < kHeadTiles * MTiles;
+    const int m = warp / kHeadTiles;
     uint4 head_raw[kChunks];
     if (head)
-        for (int c = 0; c < kChunks; ++c) head_raw[c] = head16[(warp % 4 * kChunks + c) * 32 + lane];
+        for (int c = 0; c < kChunks; ++c) head_raw[c] = head16[(warp % kHeadTiles * kChunks + c) * 32 + lane];
     for (int m = 0; m < MTiles; ++m)
         for (int i = 0; i < 4; ++i) g[m][gi + 8 * (i / 2)][c0 + i % 2] = tf32(xla_gelu_lift(mix[m][i]));
     __syncthreads();
@@ -175,26 +175,41 @@ __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
         mma_tf32(second, a1, tf32_from_half(head_h[2 * s1], head_scale), tf32_from_half(head_h[2 * s1 + 1], head_scale));
     }
     for (int i = 0; i < 4; ++i) {
-        const int column = 8 * (warp % 4) + 2 * t + i % 2;
+        const int column = 8 * (warp % kHeadTiles) + 2 * t + i % 2;
         if (column < Branches)
             weights[column * total_rows + row0 + kRows * m + gi + 8 * (i / 2)] = __fadd_rn(first[i], second[i]);
     }
+}
+
+template <int Width, int Branches>
+void launch_trunk_tail(cudaStream_t stream, int64_t m_tiles, int64_t rows, const float* context, const float* h1,
+                       const float* w_expand, const uint4* mix16, const uint4* head16, float mix_scale,
+                       float head_scale, float* weights, int points) {
+    // Two row tiles per block only while their h2 and g tiles fit in 48 KB of static shared memory.
+    constexpr int kMaxTiles = 2 * 2 * kRows * (Width + 4) * 4 <= 48 * 1024 ? 2 : 1;
+    auto run = m_tiles == 2 ? trunk_tail_kernel<Width, 8, Branches, kMaxTiles> : trunk_tail_kernel<Width, 8, Branches, 1>;
+    run<<<rows / (m_tiles * kRows), 4 * Width, 0, stream>>>(context, h1, w_expand, mix16, head16, mix_scale, head_scale,
+                                                           weights, points, rows);
 }
 
 ffi::Error trunk_tail(cudaStream_t stream, ffi::AnyBuffer context, ffi::AnyBuffer h1, ffi::AnyBuffer w_expand,
                       ffi::AnyBuffer mix16, ffi::AnyBuffer head16, ffi::Result<ffi::AnyBuffer> weights,
                       float mix_scale, float head_scale, int64_t m_tiles) {
     const int points = static_cast<int>(context.dimensions().back());
-    const int64_t rows = h1.element_count() / 160;
-    if (mix16.element_count() != 160 * 160 || w_expand.element_count() != 8 * 160 || head16.element_count() != 160 * 32
-            || points % (kRows * m_tiles) != 0)
-        return ffi::Error::InvalidArgument("Trunk tail supports width 160, 8 context channels and 28 branches.");
-    auto run = m_tiles == 2 ? trunk_tail_kernel<160, 8, 28, 2> : trunk_tail_kernel<160, 8, 28, 1>;
-    run<<<rows / (m_tiles * kRows), 4 * 160, 0, stream>>>(
-        static_cast<const float*>(context.untyped_data()), static_cast<const float*>(h1.untyped_data()),
-        static_cast<const float*>(w_expand.untyped_data()), static_cast<const uint4*>(mix16.untyped_data()),
-        static_cast<const uint4*>(head16.untyped_data()), mix_scale, head_scale,
-        static_cast<float*>(weights->untyped_data()), points, rows);
+    const int width = static_cast<int>(w_expand.element_count() / 8);
+    const int branches = static_cast<int>(weights->dimensions()[0]);
+    const int64_t rows = h1.element_count() / width;
+    const bool supported = (width == 160 && (branches == 28 || branches == 60))
+                           || (width == 256 && branches == 28 && m_tiles == 1);
+    if (!supported || mix16.element_count() != int64_t(width) * width
+            || head16.element_count() != int64_t(width) * 8 * ((branches + 7) / 8) || points % (kRows * m_tiles) != 0)
+        return ffi::Error::InvalidArgument("Trunk tail supports width 160 with 28/60 branches and width 256 with 28.");
+    auto run = width == 256 ? launch_trunk_tail<256, 28> : branches == 60 ? launch_trunk_tail<160, 60>
+               : launch_trunk_tail<160, 28>;
+    run(stream, m_tiles, rows, static_cast<const float*>(context.untyped_data()),
+        static_cast<const float*>(h1.untyped_data()), static_cast<const float*>(w_expand.untyped_data()),
+        static_cast<const uint4*>(mix16.untyped_data()), static_cast<const uint4*>(head16.untyped_data()),
+        mix_scale, head_scale, static_cast<float*>(weights->untyped_data()), points);
     auto error = cudaGetLastError();
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
@@ -257,12 +272,12 @@ __global__ void __launch_bounds__(32 * Width / (8 * TilesPerWarp)) trunk_head_ke
     }
 }
 
-template <int TilesPerWarp>
+template <int Width, int TilesPerWarp>
 void launch_trunk_head(cudaStream_t stream, int64_t rows, const float* features, const float* reciprocal,
                        const float* w_first, const float* w_context, const float* normalized, const float* fields,
                        float* h1, float* spectrum_input, int n_features, int points, int n_fields, int nested_from,
                        float nested_reciprocal) {
-    trunk_head_kernel<160, 8, TilesPerWarp><<<rows / kRows, 32 * 160 / (8 * TilesPerWarp), 0, stream>>>(
+    trunk_head_kernel<Width, 8, TilesPerWarp><<<rows / kRows, 32 * Width / (8 * TilesPerWarp), 0, stream>>>(
         features, reciprocal, w_first, w_context, normalized, fields, h1, spectrum_input,
         n_features, points, n_fields, nested_from, nested_reciprocal);
 }
@@ -279,10 +294,11 @@ ffi::Error trunk_head(cudaStream_t stream, ffi::AnyBuffer features, ffi::AnyBuff
     const int width = static_cast<int>(w_first.dimensions().back());
     const int channels = static_cast<int>(w_context.dimensions().back());
     const int64_t rows = features.element_count() / n_features;
-    if (width != 160 || channels != 8 || n_features > 8 || points % kRows != 0)
-        return ffi::Error::InvalidArgument("Trunk head supports width 160, 8 context channels and <=8 features.");
-    auto launch = tiles_per_warp == 1 ? launch_trunk_head<1> : tiles_per_warp == 2 ? launch_trunk_head<2>
-                  : tiles_per_warp == 4 ? launch_trunk_head<4> : launch_trunk_head<5>;
+    if ((width != 160 && width != 256) || channels != 8 || n_features > 8 || points % kRows != 0)
+        return ffi::Error::InvalidArgument("Trunk head supports widths 160/256, 8 context channels and <=8 features.");
+    auto launch = width == 256 ? (tiles_per_warp == 2 ? launch_trunk_head<256, 2> : launch_trunk_head<256, 1>)
+                  : tiles_per_warp == 1 ? launch_trunk_head<160, 1> : tiles_per_warp == 2 ? launch_trunk_head<160, 2>
+                  : tiles_per_warp == 4 ? launch_trunk_head<160, 4> : launch_trunk_head<160, 5>;
     launch(stream, rows, static_cast<const float*>(features.untyped_data()),
            static_cast<const float*>(reciprocal.untyped_data()), static_cast<const float*>(w_first.untyped_data()),
            static_cast<const float*>(w_context.untyped_data()), static_cast<const float*>(normalized.untyped_data()),

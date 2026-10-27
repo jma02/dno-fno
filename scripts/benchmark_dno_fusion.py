@@ -411,7 +411,8 @@ def build_variant(
         if cuda_tail:
             *tail_packed, tail_scales = pack_tail_weights(loaded.params["eta_feat_mix"]["kernel"],
                                                           cast(jax.Array, head_kernel))
-            tail_packed, cuda_tail_kernel = tuple(map(jnp.asarray, tail_packed)), cuda_tail_weights(tail_scales)
+            tail_packed = tuple(map(jnp.asarray, tail_packed))
+            cuda_tail_kernel = cuda_tail_weights(tail_scales, cast(jax.Array, head_kernel).shape[-1])
         first_projection_kernel = None
         if not model.surface_parity_streams:
             first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]

@@ -249,7 +249,7 @@ def trunk_head(
 
 
 def pack_tail_weights(w_mix: jax.Array, w_head: jax.Array) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
-    """Exact FP16 copies of the TF32-rounded mix [W, W] and head [W, B<=32] weights for the CUDA tail.
+    """Exact FP16 copies of the TF32-rounded mix [W, W] and head [W, B] weights for the CUDA tail (W % 32 == 0).
 
     Each 8-column tile's B fragments (k = 8s + t and 8s + t + 4 for lane 4 gi + t) are stored lane-contiguous in
     16-byte chunks [tile, chunk, lane, 8]; a power-of-two scale per matrix keeps every value an FP16 number.
@@ -273,18 +273,18 @@ def pack_tail_weights(w_mix: jax.Array, w_head: jax.Array) -> tuple[np.ndarray, 
         return (packed * np.float32(2.0 ** shift)).astype(np.float16).view(np.uint16).ravel(), 2.0 ** -shift
 
     mix, mix_scale = pack(np.asarray(w_mix), w_mix.shape[1] // 8)
-    head, head_scale = pack(np.asarray(w_head), 4)
+    head, head_scale = pack(np.asarray(w_head), -(-w_head.shape[1] // 8))
     return mix, head, (mix_scale, head_scale)
 
 
 def cuda_tail(context: jax.Array, h1: jax.Array, w_expand: jax.Array, mix16: jax.Array, head16: jax.Array, *,
-              inverse_scales: tuple[float, float], m_tiles: int = 1) -> jax.Array:
+              inverse_scales: tuple[float, float], branches: int, m_tiles: int = 1) -> jax.Array:
     """CUDA trunk tail on stacked stages: context [S*C, N], h1 [S*N, W], packed weights from pack_tail_weights.
 
-    Returns the 28 branch weights [28, S*N].
+    Returns the branch weights [branches, S*N].
     """
     _register_trunk()
-    return jax.ffi.ffi_call("dno_trunk_tail", jax.ShapeDtypeStruct((28, h1.shape[0]), jnp.float32))(
+    return jax.ffi.ffi_call("dno_trunk_tail", jax.ShapeDtypeStruct((branches, h1.shape[0]), jnp.float32))(
         context, h1, w_expand, mix16, head16, mix_scale=np.float32(inverse_scales[0]),
         head_scale=np.float32(inverse_scales[1]), m_tiles=np.int64(m_tiles))
 
@@ -319,9 +319,9 @@ def _batched_tail(kernel: Callable[..., jax.Array]) -> Callable[..., jax.Array]:
 tail_weights = _batched_tail(fused_tail)
 
 
-def cuda_tail_weights(inverse_scales: tuple[float, float]) -> Callable[..., jax.Array]:
+def cuda_tail_weights(inverse_scales: tuple[float, float], branches: int) -> Callable[..., jax.Array]:
     """Batched CUDA tail for the pack_tail_weights buffers with their inverse scales."""
-    return _batched_tail(partial(cuda_tail, inverse_scales=inverse_scales))
+    return _batched_tail(partial(cuda_tail, inverse_scales=inverse_scales, branches=branches))
 
 
 def context_filter(
