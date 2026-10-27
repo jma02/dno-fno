@@ -225,10 +225,11 @@ __global__ void __launch_bounds__(32 * Width / (8 * TilesPerWarp)) trunk_head_ke
         int n_features, int points, int n_fields, int nested_from, float nested_reciprocal) {
     static_assert(Channels == 8 && Width % (8 * TilesPerWarp) == 0, "one n-tile of context channels");
     constexpr int kWarps = Width / (8 * TilesPerWarp);
-    __shared__ float h[kRows][Width + 4];
+    __shared__ __align__(16) float h[kRows][Width + 4];
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, t = lane % 4;
     const int row0 = blockIdx.x * kRows, stage = row0 / points, x0 = row0 % points;
     const int out_channels = Channels + n_fields - nested_from;
+    const int lr = lane % 8 + 8 * (lane / 8 % 2), lc = 4 * (lane / 16);
 
     // A fragment: rows g and g+8, columns t and t+4 of the scaled features.
     uint32_t a[4];
@@ -252,7 +253,9 @@ __global__ void __launch_bounds__(32 * Width / (8 * TilesPerWarp)) trunk_head_ke
     if (warp == 0) {
         float context[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         for (int k = 0; k < Width; k += 8) {
-            uint32_t ah[4] = {tf32(h[g][k + t]), tf32(h[g + 8][k + t]), tf32(h[g][k + t + 4]), tf32(h[g + 8][k + t + 4])};
+            uint32_t ah[4];
+            ldmatrix_x4(ah, reinterpret_cast<const uint32_t*>(&h[lr][k + lc]));
+            for (int i = 0; i < 4; ++i) ah[i] = tf32(__uint_as_float(ah[i]));
             mma_tf32(context, ah, tf32(w_context[(k + t) * Channels + g]), tf32(w_context[(k + t + 4) * Channels + g]));
         }
         for (int i = 0; i < 4; ++i) {
