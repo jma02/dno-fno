@@ -685,6 +685,35 @@ accuracy win from the original single-case plot.
 UV_CACHE_DIR=/tmp/dno-uv-cache uv run --no-sync paper-plots/plot_neural_advantage.py --recent-one-epoch
 ```
 
+### 12d-hero-optimized
+
+[PNG](figures/12d-hero-optimized.png) / [PDF](figures/12d-hero-optimized.pdf).
+The same epoch-37 weight-EMA hero (`best_weight_ema` from `rollout_best_epoch37_ckpt`) with its published
+inference path (hollow star) and the optimized one (filled star), against classical M1-M5 on Ada. Errors are
+32-case median terminal surface errors against the cached M6 panel reference; runtimes are batch-one full
+rollouts timed in one process per family with M1-M6 (`outputs/hero37_fig12d_timing_20261027`). The classical
+errors come from `scripts/eval_classical_panel.py` (FP64, GL2, padding 8, as `scripts/eval_cs_orders.py`)
+and reproduce the published 12d points. The dashed line marks the M2/M3 runtime midpoint.
+
+| Family | Published (s) | Optimized (s) | Change | vs M2/M3 midpoint |
+| --- | ---: | ---: | ---: | ---: |
+| Stokes | 0.9631 | 0.6561 | -31.9% | -25.4% |
+| Tanaka | 9.4196 | 6.3183 | -32.9% | -27.4% |
+| Benjamin–Feir | 9.4651 | 6.3376 | -33.0% | -27.3% |
+| JONSWAP/TMA | 0.9645 | 0.6528 | -32.3% | -25.9% |
+
+The optimized path adds, to the published evaluation flags, `--exact-solver-g0 --cuda-head --cuda-context
+--fuse-tail cuda --cuda-g1 exact --cuda-input fields` (build the kernels with
+`uv run --no-sync python scripts/benchmark_dno_dense.py --build-trunk`). It evaluates G0 and G1 from the FP64
+state, so it is not bit-identical; its paired 128-case terminal error ratio against the published path is
+.9798 (71/128 wins). See `experiments/experiments-2026-10-26.md` and `experiments/experiments-2026-10-27.md`.
+
+```sh
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync scripts/eval_classical_panel.py \
+    --families stokes jonswap_tma tanaka benjamin_feir --output outputs/hero37_classical_panel_20261027
+uv run --no-sync python paper-plots/plot_hero_speedup.py
+```
+
 ### 13-model-roofline
 
 [PNG](figures/13-model-roofline.png) / [PDF](figures/13-model-roofline.pdf).
