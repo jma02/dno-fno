@@ -77,7 +77,8 @@ def main() -> None:
     parser.add_argument("--cuda-head", action="store_true", help="CUDA kernel for the first projection, GELU, context projection and nested FFT inputs.")
     parser.add_argument("--cuda-context", action="store_true", help="cuFFTDx kernel for the context filter and nested sandwich; requires --cuda-head.")
     parser.add_argument("--fuse-tail", action="store_true", help="One kernel for context expansion, mix MLP, lift and head; requires --real-context-endpoints.")
-    parser.add_argument("--cuda-g1", action="store_true", help="One bit-identical FP64 cuFFTDx kernel for the stream-1 M1 G1 region.")
+    parser.add_argument("--cuda-input", action="store_true", help="One FP32 cuFFTDx kernel for the normalized trunk inputs and their spectra.")
+    parser.add_argument("--cuda-g1", choices=("rounded", "exact"), help="One FP64 cuFFTDx kernel for the stream-1 M1 G1 region, bit-identical (rounded) or from the exact FP64 state.")
     parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
     parser.add_argument("--pack-saved-inputs", action="store_true", help="Pack eta/xi input FFTs for saved DNO diagnostics.")
@@ -130,7 +131,8 @@ def main() -> None:
         + ("_cudacontext" if args.cuda_context else "")
         + ("_cudahead" if args.cuda_head else "")
         + ("_fusedtail" if args.fuse_tail else "")
-        + ("_cudag1" if args.cuda_g1 else "")
+        + {None: "", "rounded": "_cudag1", "exact": "_cudaexactg1"}[args.cuda_g1]
+        + ("_cudainput" if args.cuda_input else "")
         + ("_bernoullifused" if args.bernoulli_fft == "cufftdx_fused" else "_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
         + ("_savedpacked" if args.pack_saved_inputs else "")
@@ -155,7 +157,8 @@ def main() -> None:
                + ("_cudacontext" if args.cuda_context else "")
                + ("_cudahead" if args.cuda_head else "")
                + ("_fusedtail" if args.fuse_tail else "")
-               + ("_cudag1" if args.cuda_g1 else ""))
+               + {None: "", "rounded": "_cudag1", "exact": "_cudaexactg1"}[args.cuda_g1]
+               + ("_cudainput" if args.cuda_input else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:
         parser.error("--cs-terms-variant requires a CS-field decoder")

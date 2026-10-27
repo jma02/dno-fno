@@ -31,7 +31,8 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import (  # noqa: E402
-    analytic_g1, context_filter, cuda_tail_weights, dense, pack_tail_weights, tail_weights, trunk_head,
+    analytic_g1, context_filter, cuda_tail_weights, dense, exact_analytic_g1, pack_tail_weights, tail_weights,
+    trunk_head, trunk_inputs,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
@@ -209,8 +210,11 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
-    cuda_g1 = variant.endswith("_cudag1")
-    variant = variant.removesuffix("_cudag1")
+    cuda_input = variant.endswith("_cudainput")
+    variant = variant.removesuffix("_cudainput")
+    exact_g1 = variant.endswith("_cudaexactg1")
+    cuda_g1 = exact_g1 or variant.endswith("_cudag1")
+    variant = variant.removesuffix("_cudag1").removesuffix("_cudaexactg1")
     cuda_tail = variant.endswith("_cudatail")
     fuse_tail = cuda_tail or variant.endswith("_fusedtail")
     variant = variant.removesuffix("_cudatail").removesuffix("_fusedtail")
@@ -330,6 +334,8 @@ def build_variant(
         raise ValueError("The CUDA trunk head implements only the hero's fixed-feature, batched-context trunk.")
     if cuda_context and not (cuda_head and context_real and nested_fused) or cuda_context and context_add:
         raise ValueError("The CUDA context filter follows the CUDA head on the real-context fused nested path.")
+    if cuda_input and (nx != 1024 or not spectral_io or trial == "fourier"):
+        raise ValueError("The CUDA trunk-input transform supports 1024-point Fourier-I/O inference only.")
     if cuda_g1 and (not overlap_g1 or fused_g1 or split_g1 or g1_fp32 or model.baseline_order != 1
                     or g1_input_ept != 8 or sandwich_ept != 8):
         raise ValueError("The CUDA G1 kernel replaces the accepted EPT8 FP64 stream-1 M1 G1 region only.")
@@ -430,6 +436,8 @@ def build_variant(
                 )
                 jax.block_until_ready(nested_symbols)
         scales = jnp.asarray(loaded.stats["feature_absmax"], dtype=jnp.float32)
+        g1_factors = (model.eta_scale / float(scales[0]) / nx, model.xi_scale / float(scales[1]))
+        input_multipliers = (1 / (nx * float(scales[0])), model.xi_scale / (nx * float(scales[1])))
         output_scale = float(loaded.stats["target_absmax"]) / model.target_scale
         log_depth = depth.astype(jnp.float32).reshape(-1, 1)
         phase_multiplier = None
@@ -498,21 +506,25 @@ def build_variant(
                 xi_phys = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32) / scales[1]) * model.xi_scale
                 normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
             if trial != "fourier":
-                inputs = jnp.stack((eta_hat, xi_hat), axis=1)
-                if input_fp32:
-                    inputs = inputs.astype(jnp.complex64)
-                if fused_inputs:
-                    normalized_inputs = fft(inputs, nx, inverse=True, ept=input_ept,
-                                            normalization=jnp.array([1 / scales[0], 1 / scales[1], model.xi_scale], dtype=jnp.float32))
+                if cuda_input:
+                    normalized_inputs, normalized_hat = trunk_inputs(eta_hat, xi_hat, *input_multipliers)
                     eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
                 else:
-                    physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
-                                else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
-                    normalized = physical / scales[None, :, None]
-                    eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
-                    normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
-                normalized_hat = (fft(normalized_inputs, nx, ept=fft_ept)
-                                  if trial in ("fourier_features", "fourier_allfft") else jnp.fft.rfft(normalized_inputs))
+                    inputs = jnp.stack((eta_hat, xi_hat), axis=1)
+                    if input_fp32:
+                        inputs = inputs.astype(jnp.complex64)
+                    if fused_inputs:
+                        normalized_inputs = fft(inputs, nx, inverse=True, ept=input_ept,
+                                                normalization=jnp.array([1 / scales[0], 1 / scales[1], model.xi_scale], dtype=jnp.float32))
+                        eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
+                    else:
+                        physical = (fft(inputs, nx, inverse=True, ept=input_ept) if trial not in ("fourier_round", "fourier_reuse")
+                                    else jnp.fft.irfft(inputs, n=nx)).astype(jnp.float32)
+                        normalized = physical / scales[None, :, None]
+                        eta_norm, xi_phys = normalized[:, 0], normalized[:, 1] * model.xi_scale
+                        normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
+                    normalized_hat = (fft(normalized_inputs, nx, ept=fft_ept)
+                                      if trial in ("fourier_features", "fourier_allfft") else jnp.fft.rfft(normalized_inputs))
                 eta_norm_hat, xi_phys_hat = jnp.moveaxis(normalized_hat, 1, 0)
                 g1_xi_hat = (xi_phys_hat.astype(jnp.complex128) if trial == "fourier_reuse"
                              else jnp.fft.rfft(xi_phys.astype(jnp.float64)))
@@ -523,6 +535,9 @@ def build_variant(
                     with (nullcontext() if serial_g1 else compute_on("gpu_stream:1")):
                         if model.baseline_order == 2:
                             analytic_hat = m2_hat(normalized_inputs)
+                        elif exact_g1:
+                            analytic_hat = jax.jit(lambda eta, xi: exact_analytic_g1(eta, xi, operators, *g1_factors))(
+                                eta_hat, xi_hat)
                         elif cuda_g1:
                             analytic_hat = jax.jit(lambda values: analytic_g1(values, operators, model.eta_scale))(
                                 normalized_inputs)

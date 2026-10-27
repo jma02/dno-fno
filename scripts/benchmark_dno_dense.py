@@ -219,6 +219,8 @@ def _register_context() -> ctypes.CDLL:
     library = ctypes.CDLL(str(CONTEXT_LIBRARY))
     jax.ffi.register_ffi_target("dno_context_filter", jax.ffi.pycapsule(library.dno_context_filter), platform="CUDA")
     jax.ffi.register_ffi_target("dno_g1", jax.ffi.pycapsule(library.dno_g1), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_exact_g1", jax.ffi.pycapsule(library.dno_exact_g1), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_trunk_input", jax.ffi.pycapsule(library.dno_trunk_input), platform="CUDA")
     return library
 
 
@@ -352,6 +354,34 @@ def analytic_g1(normalized: jax.Array, operators: jax.Array, eta_scale: float) -
         jax.ShapeDtypeStruct((*leading, 2, points // 2 + 1), jnp.complex128),
     ), vmap_method="expand_dims")(normalized, operators, eta_scale=np.float32(eta_scale))
     return out
+
+
+def exact_analytic_g1(eta_hat: jax.Array, xi_hat: jax.Array, operators: jax.Array, eta_factor: float,
+                      xi_factor: float) -> jax.Array:
+    """analytic_g1 from the FP64 state spectra [..., F]: eta = eta_factor * unnormalized irfft(eta_hat), xi_factor * xi_hat."""
+    _register_context()
+    out, _ = jax.ffi.ffi_call("dno_exact_g1", (
+        jax.ShapeDtypeStruct(eta_hat.shape, jnp.complex128),
+        jax.ShapeDtypeStruct((*eta_hat.shape[:-1], 2, eta_hat.shape[-1]), jnp.complex128),
+    ), vmap_method="expand_dims")(eta_hat, xi_hat, operators,
+                                  eta_factor=np.float64(eta_factor), xi_factor=np.float64(xi_factor))
+    return out
+
+
+def trunk_inputs(eta_hat: jax.Array, xi_hat: jax.Array, eta_multiplier: float,
+                 xi_multiplier: float) -> tuple[jax.Array, jax.Array]:
+    """FP32 normalized trunk inputs [..., 2, N] and their spectra [..., 2, F] from the FP64 state spectra [..., F].
+
+    Each channel is the FP32 unnormalized inverse FFT times its multiplier (1/N over the feature scale, and
+    xi_scale for xi).
+    """
+    _register_context()
+    *leading, frequencies = eta_hat.shape
+    return tuple(jax.ffi.ffi_call("dno_trunk_input", (
+        jax.ShapeDtypeStruct((*leading, 2, 2 * (frequencies - 1)), jnp.float32),
+        jax.ShapeDtypeStruct((*leading, 2, frequencies), jnp.complex64),
+    ), vmap_method="expand_dims")(eta_hat, xi_hat, eta_multiplier=np.float32(eta_multiplier),
+                                  xi_multiplier=np.float32(xi_multiplier)))  # pyright: ignore[reportReturnType]
 
 
 if __name__ == "__main__":
