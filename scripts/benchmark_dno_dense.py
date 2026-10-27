@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
-from functools import partial
+import ctypes
+from functools import cache, partial
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import time
 from typing import Literal, cast
 
@@ -20,6 +23,8 @@ from jax.ref import Ref  # noqa: E402
 import numpy as np  # noqa: E402
 
 Activation = Literal["none", "gelu", "gelu_lift"]
+TRUNK_SOURCE = Path(__file__).resolve().parent / "dno_trunk_head.cu"
+TRUNK_LIBRARY = Path(__file__).resolve().parents[1] / "outputs/dno_trunk_20261026/dno_trunk_head.so"
 
 
 def dense(
@@ -214,12 +219,55 @@ def _tail_weights_vmap(axis_size: int, batched: list[bool], context: jax.Array, 
     return _stacked_tail(context, features, w_expand, w_mix, w_head), True
 
 
+def build_trunk(sm: int = 89) -> None:
+    """Compile the CUDA trunk-head FFI library."""
+    TRUNK_LIBRARY.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([
+        shutil.which("nvcc") or "/usr/local/cuda-12.9/bin/nvcc", "-std=c++17", "-O3", f"-arch=sm_{sm}",
+        "--shared", "-Xcompiler", "-fPIC", f"-I{jax.ffi.include_dir()}", str(TRUNK_SOURCE), "-o", str(TRUNK_LIBRARY),
+    ], check=True)
+
+
+@cache
+def _register_trunk() -> ctypes.CDLL:
+    library = ctypes.CDLL(str(TRUNK_LIBRARY))
+    jax.ffi.register_ffi_target("dno_trunk_head", jax.ffi.pycapsule(library.dno_trunk_head), platform="CUDA")
+    return library
+
+
+def trunk_head(
+    features: jax.Array, normalized: jax.Array, fields: jax.Array, feature_scales: jax.Array, w_first: jax.Array,
+    w_context: jax.Array, nested_scale: float, nested_from: int, tiles_per_warp: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """CUDA trunk head: first activation [..., N, W] and batched context-FFT input [..., C', N].
+
+    features [..., F, N] are unscaled; normalized [..., 2, N] supplies eta_norm; fields [..., R, N].
+    Divisions by constants are XLA reciprocal multiplies, so the reciprocals are rounded the same way.
+    """
+    _register_trunk()
+    *leading, _, points = features.shape
+    out_channels = w_context.shape[-1] + fields.shape[-2] - nested_from
+    h1, spectrum_input = jax.ffi.ffi_call("dno_trunk_head", (
+        jax.ShapeDtypeStruct((*leading, points, w_first.shape[-1]), jnp.float32),
+        jax.ShapeDtypeStruct((*leading, out_channels, points), jnp.float32),
+    ), vmap_method="expand_dims")(
+        features, 1 / feature_scales.astype(jnp.float32), w_first, w_context, normalized, fields,
+        nested_reciprocal=np.float32(1) / np.float32(nested_scale), nested_from=np.int64(nested_from),
+        tiles_per_warp=np.int64(tiles_per_warp),
+    )
+    return h1, spectrum_input
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interpret", action="store_true", help="CPU correctness only; no meaningful timings.")
+    parser.add_argument("--build-trunk", action="store_true", help="Compile the CUDA trunk-head library and exit.")
     parser.add_argument("--repeats", type=int, default=300)
     parser.add_argument("--output", type=Path, default=Path("outputs/cufftdx_20260925/dense_screen.json"))
     args = parser.parse_args()
+    if args.build_trunk:
+        build_trunk()
+        raise SystemExit(0)
     rng = np.random.default_rng(42)
     records = {}
     cases: tuple[tuple[int, int, Activation], ...] = ((7, 160, "gelu"), (160, 160, "gelu_lift"), (160, 32, "none"))

@@ -74,6 +74,7 @@ def main() -> None:
     parser.add_argument("--branch-major", action="store_true", help="Consume the head projection without a paired-stage layout copy.")
     parser.add_argument("--real-context-endpoints", action="store_true", help="Skip clearing the already-real context FFT endpoints.")
     parser.add_argument("--fuse-context-add", action="store_true", help="Fuse the context projection and residual addition; requires --real-context-endpoints.")
+    parser.add_argument("--cuda-head", action="store_true", help="CUDA kernel for the first projection, GELU, context projection and nested FFT inputs.")
     parser.add_argument("--fuse-tail", action="store_true", help="One kernel for context expansion, mix MLP, lift and head; requires --real-context-endpoints.")
     parser.add_argument("--bernoulli-fft", choices=("cufft", "cufftdx_forward", "cufftdx_both", "cufftdx_fused"), default="cufft")
     parser.add_argument("--batch-saved-dno", action="store_true", help="Compute all saved-frame DNO diagnostics after integration.")
@@ -124,6 +125,7 @@ def main() -> None:
         + ("_branchmajor" if args.branch_major else "")
         + ("_contextreal" if args.real_context_endpoints else "")
         + ("_contextadd" if args.fuse_context_add else "")
+        + ("_cudahead" if args.cuda_head else "")
         + ("_fusedtail" if args.fuse_tail else "")
         + ("_bernoullifused" if args.bernoulli_fft == "cufftdx_fused" else "_bernoullidxboth" if args.bernoulli_fft == "cufftdx_both" else "_bernoullidx" if args.bernoulli_fft == "cufftdx_forward" else "")
         + ("_savedbatch" if args.batch_saved_dno else "")
@@ -146,6 +148,7 @@ def main() -> None:
                + ("_branchmajor" if args.branch_major else "")
                + ("_contextreal" if args.real_context_endpoints else "")
                + ("_contextadd" if args.fuse_context_add else "")
+               + ("_cudahead" if args.cuda_head else "")
                + ("_fusedtail" if args.fuse_tail else ""))
     terms_decoder = bool(loaded.config.get("cs_terms_residual", False))
     if args.cs_terms_variant and not terms_decoder:

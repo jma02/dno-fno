@@ -30,7 +30,7 @@ from jax.stages import Wrapped  # noqa: E402
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
-from scripts.benchmark_dno_dense import dense, tail_weights  # noqa: E402
+from scripts.benchmark_dno_dense import dense, tail_weights, trunk_head  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
@@ -209,6 +209,8 @@ def build_variant(
         raise ValueError("CS-field inference variants require a CS-field decoder.")
     fuse_tail = variant.endswith("_fusedtail")
     variant = variant.removesuffix("_fusedtail")
+    cuda_head = variant.endswith("_cudahead")
+    variant = variant.removesuffix("_cudahead")
     fuse_second_gelu = variant.endswith("_mixgelu")
     variant = variant.removesuffix("_mixgelu")
     context_add = variant.endswith("_contextadd")
@@ -314,6 +316,11 @@ def build_variant(
                       or model.surface_polynomial_skip or model.surface_parity_products or model.pair_coupling
                       or model.surface_amplitude_reference > 0):
         raise ValueError("The fused tail implements only the hero's real-context M1 trunk.")
+    if cuda_head and (not (fused_features and context_batch and nested_fused) or nested_overlap or reflection_encoder
+                      or model.surface_feature_scales is None or model.nested_blocks != 1 or model.nested_surface_features
+                      or model.nested_surface_modulation or model.surface_parity_products or model.surface_polynomial_skip
+                      or model.use_relative_elevation or model.surface_amplitude_reference > 0):
+        raise ValueError("The CUDA trunk head implements only the hero's fixed-feature, batched-context trunk.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
@@ -570,7 +577,7 @@ def build_variant(
                     [*range(1, model.n_polys + 1), *([1] * surface_ops.shape[0])], dtype=features.dtype,
                 )
                 features = features / amplitude[..., None] ** degrees
-            if model.surface_feature_scales is not None:
+            if model.surface_feature_scales is not None and not cuda_head:
                 features = features / jnp.asarray(model.surface_feature_scales, dtype=features.dtype)
             nested_eta = nested_eta[:, None, :]
             if model.nested_surface_features:
@@ -594,7 +601,7 @@ def build_variant(
                 features = jnp.stack((features, features * parity), axis=-2)
             context_channels = model.surface_context_width * (2 if reflection_encoder else 1)
             context = None
-            tail = None
+            tail = head_input = None
             nested_inner_hat = None
             nested_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
@@ -609,7 +616,12 @@ def build_variant(
                         log_amplitude = log_amplitude[..., None]
                     features = features * (1.0 + log_amplitude
                                            * loaded.params["eta_amplitude_gain"])
-                if model.surface_parity_streams:
+                if cuda_head and name == "eta_feat_proj":
+                    features, head_input = trunk_head(
+                        jnp.moveaxis(features, -1, 1), cast(jax.Array, normalized_inputs), branch_fields,
+                        jnp.asarray(model.surface_feature_scales, dtype=jnp.float32), cast(jax.Array, first_projection_kernel),
+                        loaded.params["eta_context_in"]["kernel"], cast(tuple, model.surface_feature_scales)[0], ordinary_branches)
+                elif model.surface_parity_streams:
                     layer = loaded.params[name]
                     features = parity_gelu(parity_dense(features, layer["even_kernel"], layer["odd_kernel"]))
                 else:
@@ -621,10 +633,12 @@ def build_variant(
                     else:
                         features = nn.gelu(transposed_matmul(features, kernel)
                                            if transpose_mix and name == "eta_feat_mix" else features @ kernel)
-                if reuse_first_gelu and name == "eta_feat_proj":
+                if reuse_first_gelu and name == "eta_feat_proj" and not cuda_head:
                     features = jax.lax.optimization_barrier(features)
                 if name == "eta_feat_proj" and context_multiplier is not None:
-                    if context_fold:
+                    if cuda_head:
+                        context = cast(jax.Array, head_input)
+                    elif context_fold:
                         joint = features @ cast(jax.Array, context_joint_kernel)
                         features, context = joint[..., :-model.surface_context_width], joint[..., -model.surface_context_width:]
                     elif model.surface_parity_streams:
@@ -637,7 +651,7 @@ def build_variant(
                         context = context.reshape(context.shape[0], correction_nx, context_channels)
                     if context_batch:
                         # Independent fields share one FFT batch, not Fourier modes.
-                        combined_hat = jnp.fft.rfft(jnp.concatenate((
+                        combined_hat = jnp.fft.rfft(cast(jax.Array, head_input) if cuda_head else jnp.concatenate((
                             jnp.moveaxis(context, -1, 1),
                             nested_eta * branch_fields[:, ordinary_branches:],
                         ), axis=1))
