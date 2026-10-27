@@ -2,8 +2,8 @@
 // real context multiplier and an unnormalized inverse FFT, or the nested inner filter and the existing
 // unit-symbol spectral sandwich with surface gamma * eta / s0. Replaces cuFFT forward/inverse calls,
 // their multiplies and copies; FFT rounding differs from cuFFT, so this is not bit-identical.
-// Also hosts the hero's fused FP64 M1 G1 kernel (g1_kernel), bit-identical to the accepted G1 or from the
-// exact FP64 state spectra, and the FP32 trunk-input transform (trunk_input_kernel).
+// Also hosts the hero's fused FP64 M1 G1 kernels (g1_kernel, bit-identical to the accepted G1, and
+// exact_g1_kernel from the FP64 state spectra) and the FP32 trunk-input transform (trunk_input_kernel).
 #include <cuda_runtime.h>
 #include <cufftdx.hpp>
 #include "xla/ffi/api/ffi.h"
@@ -90,76 +90,21 @@ using Base64 = decltype(Block() + Size<N>() + Precision<double>() + SM<DNO_SM>()
 constexpr int kMaxG1Rows = 4096;
 __device__ unsigned g1_arrivals[kMaxG1Rows];
 
-// Hero M1 analytic term -sum_j L_j[eta L_j xi]: block (row, j) applies operator j and the later of a row's two
-// blocks adds both. By default from the FP32 trunk input rows (eta_norm, xi_phys), transforming FP64-promoted
-// xi; this reproduces the accepted convert, EPT8 cuFFTDx FFT, spectral sandwich and XLA reduce exactly. Exact
-// instead reads the FP64 state spectra: eta = eta_factor * c2r(eta_hat) and xi_factor * xi_hat, without the
-// FP32 rounding of the trunk inputs.
-template <class Forward, class Inverse, bool Exact>
-__global__ void g1_kernel(const void* __restrict__ first, const double2* __restrict__ xi_spectra,
-                          const double2* __restrict__ operators, double2* __restrict__ out,
-                          double2* __restrict__ partial, int n_depth, float eta_scale, double eta_factor,
-                          double xi_factor) {
-    using C = typename Forward::value_type;
+__device__ unsigned g1_ready[kMaxG1Rows];
+
+template <class Forward, class Inverse>
+constexpr int g1_shared() {
+    return Forward::shared_memory_size > Inverse::shared_memory_size ? Forward::shared_memory_size
+                                                                     : Inverse::shared_memory_size;
+}
+
+// Shared G1 epilogue: forward transform of the product, operator, and the later of a row's two operator blocks
+// writes -(L_0 term + L_1 term).
+template <class Forward, class C>
+__device__ __forceinline__ void g1_finish(C (&data)[Forward::storage_size], unsigned char* scratch,
+                                          const double2* symbol, double2* partial, double2* out, int row, int op) {
     constexpr int N = size_of<Forward>::value, F = N / 2 + 1;
-    static_assert(Forward::output_ept == Inverse::input_ept && Forward::stride == Inverse::stride, "shared register layout");
-    extern __shared__ __align__(16) unsigned char scratch[];
     __shared__ bool last;
-    const int row = blockIdx.x / 2;
-    const double2* symbol = operators + (row % n_depth * 2 + blockIdx.x % 2) * F;
-    const float2* eta = static_cast<const float2*>(first) + row * N;
-    C surface[Inverse::output_ept];
-    C data[Forward::storage_size] = {};
-    if constexpr (Exact) {
-        const double2* eta_hat = static_cast<const double2*>(first) + row * F;
-        for (int i = 0; i < Inverse::input_ept; ++i) {
-            int k = threadIdx.x + i * Inverse::stride;
-            if (k < Inverse::input_length) data[i] = C(eta_hat[k].x, k == 0 || k == N / 2 ? 0.0 : eta_hat[k].y);
-        }
-        Inverse().execute(data, scratch);
-        for (int i = 0; i < Inverse::output_ept; ++i) surface[i] = C(data[i].x * eta_factor, data[i].y * eta_factor);
-        __syncthreads();
-        for (int i = 0; i < Forward::storage_size; ++i) {
-            int k = threadIdx.x + i * Inverse::stride;
-            data[i] = C(0, 0);
-            if (i < Inverse::input_ept && k < Inverse::input_length) {
-                double2 xi = xi_spectra[row * F + k];
-                data[i] = C(xi.x * xi_factor, xi.y * xi_factor) * C(symbol[k].x, symbol[k].y);
-                if (k == 0 || k == N / 2) data[i].y = 0;
-            }
-        }
-    } else {
-        for (int i = 0; i < Forward::input_ept; ++i) {
-            int k = threadIdx.x + i * Forward::stride;
-            if (k < Forward::input_length) {
-                float2 xi = eta[N / 2 + k];
-                data[i] = C(xi.x, xi.y);
-            }
-        }
-        Forward().execute(data, scratch);
-        for (int i = 0; i < Forward::storage_size; ++i) {
-            int k = threadIdx.x + i * Inverse::stride;
-            if (i < Inverse::input_ept && k < Inverse::input_length) {
-                data[i] = data[i] * C(symbol[k].x, symbol[k].y);
-                if (k == 0 || k == N / 2) data[i].y = 0;
-            } else {
-                data[i] = C(0, 0);
-            }
-        }
-    }
-    __syncthreads();
-    Inverse().execute(data, scratch);
-    for (int i = 0; i < Inverse::output_ept; ++i) {
-        int k = threadIdx.x + i * Inverse::stride;
-        if (k < Inverse::output_length) {
-            C weight;
-            if constexpr (Exact) weight = surface[i];
-            else weight = C(__fmul_rn(eta[k].x, eta_scale), __fmul_rn(eta[k].y, eta_scale));
-            data[i] *= double(1.0 / N);
-            data[i].x *= weight.x;
-            data[i].y *= weight.y;
-        }
-    }
     __syncthreads();
     Forward().execute(data, scratch);
     for (int i = 0; i < Forward::output_ept; ++i) {
@@ -167,18 +112,18 @@ __global__ void g1_kernel(const void* __restrict__ first, const double2* __restr
         if (k < Forward::output_length) {
             data[i] *= C(symbol[k].x, symbol[k].y);
             if (k == 0 || k == N / 2) data[i].y = 0;
-            partial[blockIdx.x * F + k] = make_double2(data[i].x, data[i].y);
+            partial[op * F + k] = make_double2(data[i].x, data[i].y);
         }
     }
     __threadfence();
     __syncthreads();
     if (threadIdx.x == 0) {
         last = atomicAdd(&g1_arrivals[row], 1u) == 1u;
-        if (last) g1_arrivals[row] = 0;
+        if (last) g1_arrivals[row] = g1_ready[row] = 0;
     }
     __syncthreads();
     if (!last) return;
-    const double2* other = partial + (blockIdx.x ^ 1) * F;
+    const double2* other = partial + (op ^ 1) * F;
     for (int i = 0; i < Forward::output_ept; ++i) {
         int k = threadIdx.x + i * Forward::stride;
         if (k < Forward::output_length) {
@@ -188,41 +133,141 @@ __global__ void g1_kernel(const void* __restrict__ first, const double2* __restr
     }
 }
 
-template <bool Exact>
-ffi::Error launch_g1(cudaStream_t stream, const void* first, const void* xi_hat, ffi::AnyBuffer operators,
-                     ffi::Result<ffi::AnyBuffer> out, ffi::Result<ffi::AnyBuffer> partial, int64_t rows,
-                     float eta_scale, double eta_factor, double xi_factor) {
-    using Forward = decltype(Base64<1024>() + Type<fft_type::r2c>() + Folded());
-    using Inverse = decltype(Base64<1024>() + Type<fft_type::c2r>() + Folded());
-    constexpr int shared = Forward::shared_memory_size > Inverse::shared_memory_size
-                           ? Forward::shared_memory_size : Inverse::shared_memory_size;
-    const int n_depth = static_cast<int>(operators.element_count() / (2 * 513));
-    if (n_depth < 1 || rows % n_depth != 0 || rows > kMaxG1Rows)
-        return ffi::Error::InvalidArgument("G1 supports 1024-point rows and [D, 2, 513] operators.");
-    g1_kernel<Forward, Inverse, Exact><<<rows * 2, Forward::block_dim, shared, stream>>>(
-        first, static_cast<const double2*>(xi_hat), static_cast<const double2*>(operators.untyped_data()),
-        static_cast<double2*>(out->untyped_data()), static_cast<double2*>(partial->untyped_data()), n_depth,
-        eta_scale, eta_factor, xi_factor);
-    auto error = cudaGetLastError();
-    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
+// Hero M1 analytic term -sum_j L_j[eta L_j xi] from the FP32 trunk input rows (eta_norm, xi_phys): block
+// (row, j) transforms FP64-promoted xi and applies operator j. Reproduces the accepted convert, EPT8 cuFFTDx
+// FFT, spectral sandwich and XLA reduce exactly. partial is [rows, 2, F].
+template <class Forward, class Inverse>
+__global__ void g1_kernel(const float* __restrict__ normalized, const double2* __restrict__ operators,
+                          double2* __restrict__ out, double2* __restrict__ partial, int n_depth, float eta_scale) {
+    using C = typename Forward::value_type;
+    constexpr int N = size_of<Forward>::value;
+    static_assert(Forward::output_ept == Inverse::input_ept && Forward::stride == Inverse::stride, "shared register layout");
+    extern __shared__ __align__(16) unsigned char scratch[];
+    const int row = blockIdx.x / 2, op = blockIdx.x % 2;
+    const double2* symbol = operators + (row % n_depth * 2 + op) * (N / 2 + 1);
+    const float2* eta = reinterpret_cast<const float2*>(normalized) + row * N;
+    C data[Forward::storage_size] = {};
+    for (int i = 0; i < Forward::input_ept; ++i) {
+        int k = threadIdx.x + i * Forward::stride;
+        if (k < Forward::input_length) {
+            float2 xi = eta[N / 2 + k];
+            data[i] = C(xi.x, xi.y);
+        }
+    }
+    Forward().execute(data, scratch);
+    for (int i = 0; i < Forward::storage_size; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (i < Inverse::input_ept && k < Inverse::input_length) {
+            data[i] = data[i] * C(symbol[k].x, symbol[k].y);
+            if (k == 0 || k == N / 2) data[i].y = 0;
+        } else {
+            data[i] = C(0, 0);
+        }
+    }
+    __syncthreads();
+    Inverse().execute(data, scratch);
+    for (int i = 0; i < Inverse::output_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::output_length) {
+            float2 surface = eta[k];
+            C weight(__fmul_rn(surface.x, eta_scale), __fmul_rn(surface.y, eta_scale));
+            data[i] *= double(1.0 / N);
+            data[i].x *= weight.x;
+            data[i].y *= weight.y;
+        }
+    }
+    g1_finish<Forward>(data, scratch, symbol, partial + row * 2 * (N / 2 + 1), out, row, op);
 }
+
+// The same term from the FP64 state spectra, eta = eta_factor * c2r(eta_hat) and xi_factor * xi_hat, with two
+// FFTs on the critical path: blocks [0, rows) inverse transform eta and publish it in scratch slot 2, while
+// block rows + 2 * row + j inverse transforms L_j xi, then waits for its row's eta. scratch is [rows, 3, F].
+template <class Forward, class Inverse>
+__global__ void exact_g1_kernel(const double2* __restrict__ eta_spectra, const double2* __restrict__ xi_spectra,
+                                const double2* __restrict__ operators, double2* __restrict__ out,
+                                double2* __restrict__ scratch_out, int rows, int n_depth, double eta_factor,
+                                double xi_factor) {
+    using C = typename Forward::value_type;
+    constexpr int N = size_of<Forward>::value, F = N / 2 + 1;
+    static_assert(Forward::output_ept == Inverse::input_ept && Forward::stride == Inverse::stride, "shared register layout");
+    extern __shared__ __align__(16) unsigned char scratch[];
+    C data[Forward::storage_size] = {};
+    if (blockIdx.x < rows) {
+        const double2* eta_hat = eta_spectra + blockIdx.x * F;
+        for (int i = 0; i < Inverse::input_ept; ++i) {
+            int k = threadIdx.x + i * Inverse::stride;
+            if (k < Inverse::input_length) data[i] = C(eta_hat[k].x, k == 0 || k == N / 2 ? 0.0 : eta_hat[k].y);
+        }
+        Inverse().execute(data, scratch);
+        double2* eta = scratch_out + (blockIdx.x * 3 + 2) * F;
+        for (int i = 0; i < Inverse::output_ept; ++i) {
+            int k = threadIdx.x + i * Inverse::stride;
+            if (k < Inverse::output_length) eta[k] = make_double2(data[i].x * eta_factor, data[i].y * eta_factor);
+        }
+        __threadfence();
+        __syncthreads();
+        if (threadIdx.x == 0) atomicExch(&g1_ready[blockIdx.x], 1u);
+        return;
+    }
+    const int row = (blockIdx.x - rows) / 2, op = (blockIdx.x - rows) % 2;
+    const double2* symbol = operators + (row % n_depth * 2 + op) * F;
+    for (int i = 0; i < Inverse::input_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::input_length) {
+            double2 xi = xi_spectra[row * F + k];
+            data[i] = C(xi.x * xi_factor, xi.y * xi_factor) * C(symbol[k].x, symbol[k].y);
+            if (k == 0 || k == N / 2) data[i].y = 0;
+        }
+    }
+    Inverse().execute(data, scratch);
+    if (threadIdx.x == 0)
+        while (*reinterpret_cast<volatile unsigned*>(&g1_ready[row]) == 0) {}
+    __threadfence();
+    __syncthreads();
+    const double2* eta = scratch_out + (row * 3 + 2) * F;
+    for (int i = 0; i < Inverse::output_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::output_length) {
+            double2 weight = __ldcg(eta + k);
+            data[i] *= double(1.0 / N);
+            data[i].x *= weight.x;
+            data[i].y *= weight.y;
+        }
+    }
+    g1_finish<Forward>(data, scratch, symbol, scratch_out + row * 3 * F, out, row, op);
+}
+
+using G1Forward = decltype(Base64<1024>() + Type<fft_type::r2c>() + Folded());
+using G1Inverse = decltype(Base64<1024>() + Type<fft_type::c2r>() + Folded());
 
 ffi::Error g1(cudaStream_t stream, ffi::AnyBuffer normalized, ffi::AnyBuffer operators,
               ffi::Result<ffi::AnyBuffer> out, ffi::Result<ffi::AnyBuffer> partial, float eta_scale) {
     const auto dims = normalized.dimensions();
-    if (dims.back() != 1024 || dims[dims.size() - 2] != 2)
-        return ffi::Error::InvalidArgument("G1 supports [..., 2, 1024] trunk inputs.");
-    return launch_g1<false>(stream, normalized.untyped_data(), nullptr, operators, out, partial,
-                            normalized.element_count() / (2 * 1024), eta_scale, 0.0, 0.0);
+    const int64_t rows = normalized.element_count() / (2 * 1024);
+    const int n_depth = static_cast<int>(operators.element_count() / (2 * 513));
+    if (dims.back() != 1024 || dims[dims.size() - 2] != 2 || n_depth < 1 || rows % n_depth != 0 || rows > kMaxG1Rows)
+        return ffi::Error::InvalidArgument("G1 supports [..., 2, 1024] inputs and [D, 2, 513] operators.");
+    g1_kernel<G1Forward, G1Inverse><<<rows * 2, G1Forward::block_dim, g1_shared<G1Forward, G1Inverse>(), stream>>>(
+        static_cast<const float*>(normalized.untyped_data()), static_cast<const double2*>(operators.untyped_data()),
+        static_cast<double2*>(out->untyped_data()), static_cast<double2*>(partial->untyped_data()), n_depth, eta_scale);
+    auto error = cudaGetLastError();
+    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
 ffi::Error exact_g1(cudaStream_t stream, ffi::AnyBuffer eta_hat, ffi::AnyBuffer xi_hat, ffi::AnyBuffer operators,
-                    ffi::Result<ffi::AnyBuffer> out, ffi::Result<ffi::AnyBuffer> partial, double eta_factor,
+                    ffi::Result<ffi::AnyBuffer> out, ffi::Result<ffi::AnyBuffer> scratch_out, double eta_factor,
                     double xi_factor) {
-    if (eta_hat.dimensions().back() != 513 || xi_hat.element_count() != eta_hat.element_count())
-        return ffi::Error::InvalidArgument("Exact G1 supports matching [..., 513] state spectra.");
-    return launch_g1<true>(stream, eta_hat.untyped_data(), xi_hat.untyped_data(), operators, out, partial,
-                           eta_hat.element_count() / 513, 0.0f, eta_factor, xi_factor);
+    const int rows = static_cast<int>(eta_hat.element_count() / 513);
+    const int n_depth = static_cast<int>(operators.element_count() / (2 * 513));
+    if (eta_hat.dimensions().back() != 513 || xi_hat.element_count() != eta_hat.element_count() || n_depth < 1
+            || rows % n_depth != 0 || rows > kMaxG1Rows)
+        return ffi::Error::InvalidArgument("Exact G1 supports matching [..., 513] spectra and [D, 2, 513] operators.");
+    exact_g1_kernel<G1Forward, G1Inverse><<<rows * 3, G1Forward::block_dim, g1_shared<G1Forward, G1Inverse>(), stream>>>(
+        static_cast<const double2*>(eta_hat.untyped_data()), static_cast<const double2*>(xi_hat.untyped_data()),
+        static_cast<const double2*>(operators.untyped_data()), static_cast<double2*>(out->untyped_data()),
+        static_cast<double2*>(scratch_out->untyped_data()), rows, n_depth, eta_factor, xi_factor);
+    auto error = cudaGetLastError();
+    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
 // Hero trunk inputs from the FP64 state spectra: block (row, channel) rounds the spectrum to FP32, inverse

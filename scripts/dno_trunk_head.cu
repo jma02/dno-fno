@@ -115,7 +115,7 @@ __device__ __forceinline__ uint32_t tf32_from_half(__half x, float inverse_scale
 template <int Width, int Channels, int Branches, int MTiles>
 __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
         const float* __restrict__ context, const float* __restrict__ h1, const float* __restrict__ w_expand,
-        const uint4* __restrict__ mix16, const uint4* __restrict__ head16, const float* __restrict__ inverse_scales,
+        const uint4* __restrict__ mix16, const uint4* __restrict__ head16, float mix_scale, float head_scale,
         float* __restrict__ weights, int points, int64_t total_rows) {
     static_assert(Channels == 8 && Width % 16 == 0 && Branches <= 32, "hero tail shapes");
     constexpr int kSteps = Width / 8, kHalfSteps = kSteps / 2, kChunks = kSteps / 4;
@@ -142,7 +142,6 @@ __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
         for (int i = 0; i < 4; ++i) h2[m][gi + 8 * (i / 2)][c0 + i % 2] = tf32(__fadd_rn(skip[i], d[i]));
     }
     const __half* mix_h = reinterpret_cast<const __half*>(mix_raw);
-    const float mix_scale = inverse_scales[0];
     __syncthreads();
 
     float mix[MTiles][4] = {};
@@ -166,7 +165,6 @@ __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
 
     if (!head) return;
     const __half* head_h = reinterpret_cast<const __half*>(head_raw);
-    const float head_scale = inverse_scales[1];
     float first[4] = {0.0f, 0.0f, 0.0f, 0.0f}, second[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (int s = 0; s < kHalfSteps; ++s) {
         const int s1 = s + kHalfSteps;
@@ -184,18 +182,18 @@ __global__ void __launch_bounds__(4 * Width) trunk_tail_kernel(
 }
 
 ffi::Error trunk_tail(cudaStream_t stream, ffi::AnyBuffer context, ffi::AnyBuffer h1, ffi::AnyBuffer w_expand,
-                      ffi::AnyBuffer mix16, ffi::AnyBuffer head16, ffi::AnyBuffer inverse_scales,
-                      ffi::Result<ffi::AnyBuffer> weights, int64_t m_tiles) {
+                      ffi::AnyBuffer mix16, ffi::AnyBuffer head16, ffi::Result<ffi::AnyBuffer> weights,
+                      float mix_scale, float head_scale, int64_t m_tiles) {
     const int points = static_cast<int>(context.dimensions().back());
     const int64_t rows = h1.element_count() / 160;
     if (mix16.element_count() != 160 * 160 || w_expand.element_count() != 8 * 160 || head16.element_count() != 160 * 32
-            || inverse_scales.element_count() != 2 || points % (kRows * m_tiles) != 0)
+            || points % (kRows * m_tiles) != 0)
         return ffi::Error::InvalidArgument("Trunk tail supports width 160, 8 context channels and 28 branches.");
     auto run = m_tiles == 2 ? trunk_tail_kernel<160, 8, 28, 2> : trunk_tail_kernel<160, 8, 28, 1>;
     run<<<rows / (m_tiles * kRows), 4 * 160, 0, stream>>>(
         static_cast<const float*>(context.untyped_data()), static_cast<const float*>(h1.untyped_data()),
         static_cast<const float*>(w_expand.untyped_data()), static_cast<const uint4*>(mix16.untyped_data()),
-        static_cast<const uint4*>(head16.untyped_data()), static_cast<const float*>(inverse_scales.untyped_data()),
+        static_cast<const uint4*>(head16.untyped_data()), mix_scale, head_scale,
         static_cast<float*>(weights->untyped_data()), points, rows);
     auto error = cudaGetLastError();
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
@@ -308,5 +306,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_head, trunk_head,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_tail, trunk_tail,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
-        .Arg<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Attr<int64_t>("m_tiles"),
+        .Ret<ffi::AnyBuffer>().Attr<float>("mix_scale").Attr<float>("head_scale").Attr<int64_t>("m_tiles"),
     {ffi::Traits::kCmdBufferCompatible});
