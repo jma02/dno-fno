@@ -221,6 +221,7 @@ def _register_context() -> ctypes.CDLL:
     jax.ffi.register_ffi_target("dno_g1", jax.ffi.pycapsule(library.dno_g1), platform="CUDA")
     jax.ffi.register_ffi_target("dno_exact_g1", jax.ffi.pycapsule(library.dno_exact_g1), platform="CUDA")
     jax.ffi.register_ffi_target("dno_trunk_input", jax.ffi.pycapsule(library.dno_trunk_input), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_trunk_fields", jax.ffi.pycapsule(library.dno_trunk_fields), platform="CUDA")
     return library
 
 
@@ -386,6 +387,25 @@ def trunk_inputs(eta_hat: jax.Array, xi_hat: jax.Array, eta_multiplier: float,
         jax.ShapeDtypeStruct((*leading, 2, 2 * (frequencies - 1)), jnp.float32),
         jax.ShapeDtypeStruct((*leading, 2, frequencies), jnp.complex64),
     ), vmap_method="expand_dims")(eta_hat, xi_hat, eta_multiplier=np.float32(eta_multiplier),
+                                  xi_multiplier=np.float32(xi_multiplier)))  # pyright: ignore[reportReturnType]
+
+
+def trunk_fields(eta_hat: jax.Array, xi_hat: jax.Array, surface_ops: jax.Array, filters: jax.Array,
+                 eta_multiplier: float, xi_multiplier: float) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """trunk_inputs plus the surface features [..., S+3, N] and branch fields [..., R, N] from the state spectra.
+
+    surface_ops [S, F] (complex) act on eta and the per-trajectory real filters [D, R, F] on xi, indexed by the
+    trailing batch axis like context_filter; features 0-2 are eta, eta^2 and eta^3.
+    """
+    _register_context()
+    *leading, frequencies = eta_hat.shape
+    points = 2 * (frequencies - 1)
+    return tuple(jax.ffi.ffi_call("dno_trunk_fields", (
+        jax.ShapeDtypeStruct((*leading, 2, points), jnp.float32),
+        jax.ShapeDtypeStruct((*leading, surface_ops.shape[0] + 3, points), jnp.float32),
+        jax.ShapeDtypeStruct((*leading, filters.shape[-2], points), jnp.float32),
+    ), vmap_method="expand_dims")(eta_hat, xi_hat, surface_ops.astype(jnp.complex64), filters.astype(jnp.float32),
+                                  eta_multiplier=np.float32(eta_multiplier),
                                   xi_multiplier=np.float32(xi_multiplier)))  # pyright: ignore[reportReturnType]
 
 

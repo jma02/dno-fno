@@ -32,7 +32,7 @@ from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import (  # noqa: E402
     analytic_g1, context_filter, cuda_tail_weights, dense, exact_analytic_g1, pack_tail_weights, tail_weights,
-    trunk_head, trunk_inputs,
+    trunk_fields, trunk_head, trunk_inputs,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
@@ -210,8 +210,9 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
-    cuda_input = variant.endswith("_cudainput")
-    variant = variant.removesuffix("_cudainput")
+    cuda_fields = variant.endswith("_cudafields")
+    cuda_input = cuda_fields or variant.endswith("_cudainput")
+    variant = variant.removesuffix("_cudainput").removesuffix("_cudafields")
     exact_g1 = variant.endswith("_cudaexactg1")
     cuda_g1 = exact_g1 or variant.endswith("_cudag1")
     variant = variant.removesuffix("_cudag1").removesuffix("_cudaexactg1")
@@ -336,6 +337,8 @@ def build_variant(
         raise ValueError("The CUDA context filter follows the CUDA head on the real-context fused nested path.")
     if cuda_input and (nx != 1024 or not spectral_io or trial == "fourier"):
         raise ValueError("The CUDA trunk-input transform supports 1024-point Fourier-I/O inference only.")
+    if cuda_fields and not (fused_features and not balanced_features and not coarse_correction):
+        raise ValueError("The CUDA trunk-fields kernel replaces the fixed fused surface features and branch fields.")
     if cuda_g1 and (not overlap_g1 or fused_g1 or split_g1 or g1_fp32 or model.baseline_order != 1
                     or g1_input_ept != 8 or sandwich_ept != 8):
         raise ValueError("The CUDA G1 kernel replaces the accepted EPT8 FP64 stream-1 M1 G1 region only.")
@@ -504,11 +507,19 @@ def build_variant(
             xi_phys_hat = (xi_hat.astype(jnp.complex64) / scales[1]) * model.xi_scale
             g1_xi_hat = xi_hat * (model.xi_scale / scales[1]).astype(jnp.float64)
             normalized_hat = normalized_inputs = None
+            field_outputs: list[jax.Array] | None = None
             if trial == "fourier" and model.baseline_order == 2:
                 xi_phys = (jnp.fft.irfft(xi_hat, n=nx).astype(jnp.float32) / scales[1]) * model.xi_scale
                 normalized_inputs = jnp.stack((eta_norm, xi_phys), axis=1)
             if trial != "fourier":
-                if cuda_input:
+                if cuda_fields:
+                    normalized_inputs, *field_outputs = trunk_fields(eta_hat, xi_hat, surface_ops, filters,
+                                                                     *input_multipliers)
+                    # Spectra of the normalized inputs, for consumers other than the fused fields.
+                    normalized_hat = (jnp.stack((eta_hat, xi_hat), axis=1)
+                                      * (nx * jnp.asarray(input_multipliers))[:, None]).astype(jnp.complex64)
+                    eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
+                elif cuda_input:
                     normalized_inputs, normalized_hat = trunk_inputs(eta_hat, xi_hat, *input_multipliers)
                     eta_norm, xi_phys = normalized_inputs[:, 0], normalized_inputs[:, 1]
                 else:
@@ -573,9 +584,9 @@ def build_variant(
                 eta_norm, xi_phys = jnp.moveaxis(normalized_inputs, 1, 0)
                 eta_norm_hat, xi_phys_hat = jnp.moveaxis(normalized_hat, 1, 0)
             if fused_features:
-                features, branch_fields = field_irfft(cast(jax.Array, normalized_hat), surface_ops, filters,
-                                                       n=correction_nx, ept=field_ept, normalized_inputs=normalized_inputs,
-                                                       balanced=balanced_features)
+                features, branch_fields = (field_outputs if field_outputs is not None else field_irfft(
+                    cast(jax.Array, normalized_hat), surface_ops, filters, n=correction_nx, ept=field_ept,
+                    normalized_inputs=normalized_inputs, balanced=balanced_features))
                 features = jnp.moveaxis(features, 1, -1)
             else:
                 if fused_fields:

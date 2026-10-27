@@ -3,7 +3,8 @@
 // unit-symbol spectral sandwich with surface gamma * eta / s0. Replaces cuFFT forward/inverse calls,
 // their multiplies and copies; FFT rounding differs from cuFFT, so this is not bit-identical.
 // Also hosts the hero's fused FP64 M1 G1 kernels (g1_kernel, bit-identical to the accepted G1, and
-// exact_g1_kernel from the FP64 state spectra) and the FP32 trunk-input transform (trunk_input_kernel).
+// exact_g1_kernel from the FP64 state spectra) and the FP32 trunk-input transforms (trunk_input_kernel,
+// trunk_fields_kernel).
 #include <cuda_runtime.h>
 #include <cufftdx.hpp>
 #include "xla/ffi/api/ffi.h"
@@ -326,6 +327,83 @@ ffi::Error trunk_input(cudaStream_t stream, ffi::AnyBuffer eta_hat, ffi::AnyBuff
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
+// Trunk inputs, surface features and branch fields straight from the FP64 state spectra, one FP32 inverse FFT
+// per block. Per row: blocks 0-1 write the normalized eta/xi rows (multiplier = 1/N over the feature scale, xi
+// also times xi_scale; eta also writes eta, eta^2, eta^3 as features 0-2), blocks 2..2+S-1 the surface-operator
+// features of eta (features 3..), and the rest the filtered branch fields of xi. The operators [S, F] and the
+// per-trajectory filters [D, R, F] are indexed in place. Replaces trunk_input_kernel and the field inverse.
+template <class Inverse>
+__global__ void trunk_fields_kernel(const double2* __restrict__ eta_hat, const double2* __restrict__ xi_hat,
+                                    const float2* __restrict__ surface_ops, const float* __restrict__ filters,
+                                    float* __restrict__ normalized, float* __restrict__ features,
+                                    float* __restrict__ fields, int surfaces, int branches, int n_depth,
+                                    float eta_multiplier, float xi_multiplier) {
+    using C = typename Inverse::value_type;
+    constexpr int N = size_of<Inverse>::value, F = N / 2 + 1;
+    extern __shared__ __align__(16) unsigned char scratch[];
+    const int per_row = 2 + surfaces + branches, row = blockIdx.x / per_row, field = blockIdx.x % per_row;
+    const bool from_xi = field == 1 || field >= 2 + surfaces;
+    const double2* spectrum = (from_xi ? xi_hat : eta_hat) + row * F;
+    C data[Inverse::storage_size] = {};
+    for (int i = 0; i < Inverse::input_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::input_length) {
+            double2 value = spectrum[k];
+            data[i] = C(float(value.x), float(value.y));
+            if (field >= 2 + surfaces) {
+                float filter = filters[((row % n_depth) * branches + field - 2 - surfaces) * F + k];
+                data[i] = C(__fmul_rn(data[i].x, filter), __fmul_rn(data[i].y, filter));
+            } else if (field >= 2) {
+                float2 op = surface_ops[(field - 2) * F + k];
+                data[i] = data[i] * C(op.x, op.y);
+            }
+            if (k == 0 || k == N / 2) data[i].y = 0;
+        }
+    }
+    Inverse().execute(data, scratch);
+    const float multiplier = from_xi ? xi_multiplier : eta_multiplier;
+    float2* out = reinterpret_cast<float2*>(
+        field < 2 ? normalized + (row * 2 + field) * N
+        : field < 2 + surfaces ? features + (row * (surfaces + 3) + field + 1) * N
+        : fields + (row * branches + field - 2 - surfaces) * N);
+    float2* powers = reinterpret_cast<float2*>(features + row * (surfaces + 3) * N);
+    for (int i = 0; i < Inverse::output_ept; ++i) {
+        int k = threadIdx.x + i * Inverse::stride;
+        if (k < Inverse::output_length) {
+            float2 value = make_float2(__fmul_rn(data[i].x, multiplier), __fmul_rn(data[i].y, multiplier));
+            out[k] = value;
+            if (field == 0) {
+                float2 square = make_float2(__fmul_rn(value.x, value.x), __fmul_rn(value.y, value.y));
+                powers[k] = value;
+                powers[N / 2 + k] = square;
+                powers[N + k] = make_float2(__fmul_rn(square.x, value.x), __fmul_rn(square.y, value.y));
+            }
+        }
+    }
+}
+
+ffi::Error trunk_fields(cudaStream_t stream, ffi::AnyBuffer eta_hat, ffi::AnyBuffer xi_hat, ffi::AnyBuffer surface_ops,
+                        ffi::AnyBuffer filters, ffi::Result<ffi::AnyBuffer> normalized,
+                        ffi::Result<ffi::AnyBuffer> features, ffi::Result<ffi::AnyBuffer> fields,
+                        float eta_multiplier, float xi_multiplier) {
+    using Inverse = decltype(Base<1024, 8>() + Type<fft_type::c2r>() + Folded());
+    const int64_t rows = eta_hat.element_count() / 513;
+    const int surfaces = static_cast<int>(surface_ops.element_count() / 513);
+    const auto filter_dims = filters.dimensions();
+    const int branches = static_cast<int>(filter_dims[filter_dims.size() - 2]);
+    const int n_depth = static_cast<int>(filters.element_count() / (int64_t(branches) * 513));
+    if (eta_hat.dimensions().back() != 513 || xi_hat.element_count() != eta_hat.element_count()
+            || filter_dims.back() != 513 || n_depth < 1 || rows % n_depth != 0)
+        return ffi::Error::InvalidArgument("Trunk fields support [..., 513] spectra and [D, R, 513] filters.");
+    trunk_fields_kernel<Inverse><<<rows * (2 + surfaces + branches), Inverse::block_dim, Inverse::shared_memory_size, stream>>>(
+        static_cast<const double2*>(eta_hat.untyped_data()), static_cast<const double2*>(xi_hat.untyped_data()),
+        static_cast<const float2*>(surface_ops.untyped_data()), static_cast<const float*>(filters.untyped_data()),
+        static_cast<float*>(normalized->untyped_data()), static_cast<float*>(features->untyped_data()),
+        static_cast<float*>(fields->untyped_data()), surfaces, branches, n_depth, eta_multiplier, xi_multiplier);
+    auto error = cudaGetLastError();
+    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
+}
+
 template <int EPT>
 ffi::Error launch(cudaStream_t stream, const float* spectrum_input, const float* context_symbol,
                   const float* inner_filters, const float* gamma, const float* normalized, float* context,
@@ -386,5 +464,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_exact_g1, exact_g1,
 XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_input, trunk_input,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>()
+        .Attr<float>("eta_multiplier").Attr<float>("xi_multiplier"),
+    {ffi::Traits::kCmdBufferCompatible});
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_fields, trunk_fields,
+    ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>()
         .Attr<float>("eta_multiplier").Attr<float>("xi_multiplier"),
     {ffi::Traits::kCmdBufferCompatible});
