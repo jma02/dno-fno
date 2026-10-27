@@ -222,8 +222,6 @@ def _register_context() -> ctypes.CDLL:
     jax.ffi.register_ffi_target("dno_exact_g1", jax.ffi.pycapsule(library.dno_exact_g1), platform="CUDA")
     jax.ffi.register_ffi_target("dno_trunk_input", jax.ffi.pycapsule(library.dno_trunk_input), platform="CUDA")
     jax.ffi.register_ffi_target("dno_trunk_fields", jax.ffi.pycapsule(library.dno_trunk_fields), platform="CUDA")
-    jax.ffi.register_ffi_target("dno_branch_correction", jax.ffi.pycapsule(library.dno_branch_correction),
-                                platform="CUDA")
     return library
 
 
@@ -409,41 +407,6 @@ def trunk_fields(eta_hat: jax.Array, xi_hat: jax.Array, surface_ops: jax.Array, 
     ), vmap_method="expand_dims")(eta_hat, xi_hat, surface_ops.astype(jnp.complex64), filters.astype(jnp.float32),
                                   eta_multiplier=np.float32(eta_multiplier),
                                   xi_multiplier=np.float32(xi_multiplier)))  # pyright: ignore[reportReturnType]
-
-
-def branch_correction(weights: jax.Array, fields: jax.Array, filters: jax.Array, nested: jax.Array,
-                      scale: float) -> jax.Array:
-    """Learned correction spectrum [..., F] (complex64) in one kernel.
-
-    weights [..., N, B] from the CUDA tail (branch-major storage), fields [..., R, N], nested spectra
-    [..., R - B, F] and the per-trajectory real outer filters [D, R, F], indexed by the trailing batch axis.
-    Returns scale * (sum_b filter_b rfft(weights_b fields_b) + sum_j filter_{B+j} nested_j).
-    """
-    _register_context()
-    frequencies = filters.shape[-1]
-
-    def correction(w: jax.Array, f: jax.Array, n: jax.Array) -> jax.Array:
-        stacked = w.reshape((-1, *w.shape[-2:]))
-        out, _ = jax.ffi.ffi_call("dno_branch_correction", (
-            jax.ShapeDtypeStruct((stacked.shape[0], frequencies), jnp.complex64),
-            jax.ShapeDtypeStruct((stacked.shape[0], w.shape[-1], frequencies), jnp.complex64),
-        ), input_layouts=((2, 0, 1), None, None, None))(
-            stacked, f.reshape((-1, *f.shape[-2:])), filters.astype(jnp.float32),
-            n.reshape((-1, *n.shape[-2:])), scale=np.float32(scale),
-        )
-        return out.reshape((*w.shape[:-2], frequencies))
-
-    @custom_vmap
-    def batched(w: jax.Array, f: jax.Array, n: jax.Array) -> jax.Array:
-        return correction(w, f, n)
-
-    @batched.def_vmap
-    def batched_vmap(axis_size: int, mapped: list[bool], w: jax.Array, f: jax.Array,
-                     n: jax.Array) -> tuple[jax.Array, bool]:
-        return correction(*(value if axis else jnp.broadcast_to(value, (axis_size, *value.shape))
-                            for value, axis in zip((w, f, n), mapped))), True
-
-    return batched(weights, fields, nested)
 
 
 if __name__ == "__main__":

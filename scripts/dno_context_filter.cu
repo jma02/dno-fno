@@ -3,8 +3,8 @@
 // unit-symbol spectral sandwich with surface gamma * eta / s0. Replaces cuFFT forward/inverse calls,
 // their multiplies and copies; FFT rounding differs from cuFFT, so this is not bit-identical.
 // Also hosts the hero's fused FP64 M1 G1 kernels (g1_kernel, bit-identical to the accepted G1, and
-// exact_g1_kernel from the FP64 state spectra), the FP32 trunk-input transforms (trunk_input_kernel,
-// trunk_fields_kernel) and the learned correction reduction (branch_correction_kernel).
+// exact_g1_kernel from the FP64 state spectra) and the FP32 trunk-input transforms (trunk_input_kernel,
+// trunk_fields_kernel).
 #include <cuda_runtime.h>
 #include <cufftdx.hpp>
 #include "xla/ffi/api/ffi.h"
@@ -404,89 +404,6 @@ ffi::Error trunk_fields(cudaStream_t stream, ffi::AnyBuffer eta_hat, ffi::AnyBuf
     return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
 }
 
-constexpr int kMaxCorrectionRows = 4096;
-__device__ unsigned correction_arrivals[kMaxCorrectionRows];
-
-// Learned correction spectrum. Block (row, b) forms the r2c of weights_b * field_b times branch b's real outer
-// filter, as the branch-major product FFT does, and stores it; the last block of each row adds the row's
-// ordinary spectra in branch order and the nested spectra times their outer filters, then applies scale.
-// weights are branch-major [B, rows, N], fields [rows, R, N], filters [D, R, F] and nested [rows, R - B, F].
-template <class Forward>
-__global__ void branch_correction_kernel(const float* __restrict__ weights, const float* __restrict__ fields,
-                                         const float* __restrict__ filters, const float2* __restrict__ nested,
-                                         float2* __restrict__ out, float2* __restrict__ partial, int branches,
-                                         int source_branches, int n_depth, float scale) {
-    using C = typename Forward::value_type;
-    constexpr int N = size_of<Forward>::value, F = N / 2 + 1;
-    extern __shared__ __align__(16) unsigned char scratch[];
-    __shared__ bool last;
-    const int rows = gridDim.x / branches, row = blockIdx.x / branches, b = blockIdx.x % branches;
-    const float* filter_rows = filters + (row % n_depth) * source_branches * F;
-    const float2* w = reinterpret_cast<const float2*>(weights) + (int64_t(b) * rows + row) * (N / 2);
-    const float2* f = reinterpret_cast<const float2*>(fields) + (int64_t(row) * source_branches + b) * (N / 2);
-    C data[Forward::storage_size] = {};
-    for (int i = 0; i < Forward::input_ept; ++i) {
-        int k = threadIdx.x + i * Forward::stride;
-        if (k < Forward::input_length) {
-            float2 x = w[k], y = f[k];
-            data[i] = C(__fmul_rn(x.x, y.x), __fmul_rn(x.y, y.y));
-        }
-    }
-    Forward().execute(data, scratch);
-    float2* row_partial = partial + int64_t(row) * branches * F;
-    for (int i = 0; i < Forward::output_ept; ++i) {
-        int k = threadIdx.x + i * Forward::stride;
-        if (k < Forward::output_length) {
-            float s = filter_rows[b * F + k];
-            row_partial[b * F + k] = make_float2(__fmul_rn(data[i].x, s), __fmul_rn(data[i].y, s));
-        }
-    }
-    __threadfence();
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        last = atomicAdd(&correction_arrivals[row], 1u) == unsigned(branches - 1);
-        if (last) correction_arrivals[row] = 0;
-    }
-    __syncthreads();
-    if (!last) return;
-    const int n_nested = source_branches - branches;
-    for (int k = threadIdx.x; k < F; k += blockDim.x) {
-        float2 sum = make_float2(0.0f, 0.0f);
-        for (int j = 0; j < branches; ++j) {
-            float2 term = __ldcg(row_partial + j * F + k);
-            sum = make_float2(__fadd_rn(sum.x, term.x), __fadd_rn(sum.y, term.y));
-        }
-        for (int j = 0; j < n_nested; ++j) {
-            float s = filter_rows[(branches + j) * F + k];
-            float2 term = nested[(int64_t(row) * n_nested + j) * F + k];
-            sum = make_float2(__fadd_rn(sum.x, __fmul_rn(term.x, s)), __fadd_rn(sum.y, __fmul_rn(term.y, s)));
-        }
-        out[int64_t(row) * F + k] = make_float2(__fmul_rn(sum.x, scale), __fmul_rn(sum.y, scale));
-    }
-}
-
-ffi::Error branch_correction(cudaStream_t stream, ffi::AnyBuffer weights, ffi::AnyBuffer fields,
-                             ffi::AnyBuffer filters, ffi::AnyBuffer nested, ffi::Result<ffi::AnyBuffer> out,
-                             ffi::Result<ffi::AnyBuffer> partial, float scale) {
-    using Forward = decltype(Base<1024, 8>() + Type<fft_type::r2c>() + Folded());
-    const auto weight_dims = weights.dimensions(), field_dims = fields.dimensions();
-    const int branches = static_cast<int>(weight_dims.back());
-    const int source_branches = static_cast<int>(field_dims[field_dims.size() - 2]);
-    const int64_t rows = fields.element_count() / (int64_t(source_branches) * 1024);
-    const int n_depth = static_cast<int>(filters.element_count() / (int64_t(source_branches) * 513));
-    if (field_dims.back() != 1024 || weights.element_count() != rows * branches * 1024 || branches > source_branches
-            || n_depth < 1 || rows % n_depth != 0 || rows > kMaxCorrectionRows
-            || nested.element_count() != rows * (source_branches - branches) * 513)
-        return ffi::Error::InvalidArgument("Branch correction supports 1024-point fields with per-trajectory filters.");
-    branch_correction_kernel<Forward><<<rows * branches, Forward::block_dim, Forward::shared_memory_size, stream>>>(
-        static_cast<const float*>(weights.untyped_data()), static_cast<const float*>(fields.untyped_data()),
-        static_cast<const float*>(filters.untyped_data()), static_cast<const float2*>(nested.untyped_data()),
-        static_cast<float2*>(out->untyped_data()), static_cast<float2*>(partial->untyped_data()), branches,
-        source_branches, n_depth, scale);
-    auto error = cudaGetLastError();
-    return error == cudaSuccess ? ffi::Error::Success() : ffi::Error::Internal(cudaGetErrorString(error));
-}
-
 template <int EPT>
 ffi::Error launch(cudaStream_t stream, const float* spectrum_input, const float* context_symbol,
                   const float* inner_filters, const float* gamma, const float* normalized, float* context,
@@ -555,10 +472,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_trunk_fields, trunk_fields,
         .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
         .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>()
         .Attr<float>("eta_multiplier").Attr<float>("xi_multiplier"),
-    {ffi::Traits::kCmdBufferCompatible});
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(dno_branch_correction, branch_correction,
-    ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>().Arg<ffi::AnyBuffer>()
-        .Ret<ffi::AnyBuffer>().Ret<ffi::AnyBuffer>().Attr<float>("scale"),
     {ffi::Traits::kCmdBufferCompatible});

@@ -31,8 +31,8 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import (  # noqa: E402
-    analytic_g1, branch_correction, context_filter, cuda_tail_weights, dense, exact_analytic_g1, pack_tail_weights,
-    tail_weights, trunk_fields, trunk_head, trunk_inputs,
+    analytic_g1, context_filter, cuda_tail_weights, dense, exact_analytic_g1, pack_tail_weights, tail_weights,
+    trunk_fields, trunk_head, trunk_inputs,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
@@ -210,8 +210,6 @@ def build_variant(
         return forward_terms
     if variant.startswith("terms_"):
         raise ValueError("CS-field inference variants require a CS-field decoder.")
-    cuda_product = variant.endswith("_cudaproduct")
-    variant = variant.removesuffix("_cudaproduct")
     cuda_fields = variant.endswith("_cudafields")
     cuda_input = cuda_fields or variant.endswith("_cudainput")
     variant = variant.removesuffix("_cudainput").removesuffix("_cudafields")
@@ -341,9 +339,6 @@ def build_variant(
         raise ValueError("The CUDA trunk-input transform supports 1024-point Fourier-I/O inference only.")
     if cuda_fields and not (fused_features and not balanced_features and not coarse_correction):
         raise ValueError("The CUDA trunk-fields kernel replaces the fixed fused surface features and branch fields.")
-    if cuda_product and not (cuda_tail and cuda_context and fused_product and field_stride and branch_major
-                             and not model.pair_coupling and not pad_head):
-        raise ValueError("The CUDA branch correction follows the CUDA tail and context filter on the branch-major path.")
     if cuda_g1 and (not overlap_g1 or fused_g1 or split_g1 or g1_fp32 or model.baseline_order != 1
                     or g1_input_ept != 8 or sandwich_ept != 8):
         raise ValueError("The CUDA G1 kernel replaces the accepted EPT8 FP64 stream-1 M1 G1 region only.")
@@ -784,7 +779,7 @@ def build_variant(
             if amplitude is not None:
                 features = features * amplitude[..., None] ** 2
             correction_hat = jnp.zeros_like(xi_phys_hat)
-            if ordinary_blocks and not cuda_product:
+            if ordinary_blocks:
                 weights = (cast(jax.Array, tail) if fuse_tail else transposed_matmul(features, cast(jax.Array, head_kernel))
                            if transpose_head else features @ cast(jax.Array, head_kernel))
                 ordinary_fields = branch_fields if field_stride else branch_fields[:, :ordinary_branches]
@@ -811,7 +806,7 @@ def build_variant(
                 else:
                     weighted_hat = ordinary_filters * jnp.fft.rfft(jnp.moveaxis(weights, -1, 1) * ordinary_fields)
                 correction_hat = jnp.sum(weighted_hat[:, :ordinary_branches], axis=1)
-            if model.nested_blocks and not cuda_product:
+            if model.nested_blocks:
                 inner_hat = (cast(jax.Array, nested_inner_hat) if context_batch else
                              jnp.fft.rfft(nested_eta * branch_fields[:, ordinary_branches:]))
                 if cuda_context:
@@ -829,9 +824,7 @@ def build_variant(
                     nested_hat = filters[:, ordinary_branches:] * jnp.fft.rfft(
                         cast(jax.Array, gamma)[None, :, None] * nested_eta * middle)
                 correction_hat = correction_hat + jnp.sum(cast(jax.Array, nested_hat), axis=1)
-            correction_hat = (branch_correction(cast(jax.Array, tail), branch_fields, filters, cast(jax.Array, nested_pre),
-                                                (model.n_blocks * model.latent) ** -0.5) if cuda_product
-                              else correction_hat / (model.n_blocks * model.latent) ** 0.5)
+            correction_hat = correction_hat / (model.n_blocks * model.latent) ** 0.5
             if coarse_correction:
                 correction_hat = resample_rfft(correction_hat, nx)
             if phase_hat is not None:
