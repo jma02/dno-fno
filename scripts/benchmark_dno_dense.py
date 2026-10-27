@@ -25,6 +25,8 @@ import numpy as np  # noqa: E402
 Activation = Literal["none", "gelu", "gelu_lift"]
 TRUNK_SOURCE = Path(__file__).resolve().parent / "dno_trunk_head.cu"
 TRUNK_LIBRARY = Path(__file__).resolve().parents[1] / "outputs/dno_trunk_20261026/dno_trunk_head.so"
+CONTEXT_SOURCE = Path(__file__).resolve().parent / "dno_context_filter.cu"
+CONTEXT_LIBRARY = TRUNK_LIBRARY.with_name("dno_context_filter.so")
 
 
 def dense(
@@ -220,19 +222,22 @@ def _tail_weights_vmap(axis_size: int, batched: list[bool], context: jax.Array, 
 
 
 def build_trunk(sm: int = 89) -> None:
-    """Compile the CUDA trunk-head FFI library."""
+    """Compile the CUDA trunk-head and context-filter FFI libraries; the latter needs MathDx cuFFTDx."""
     TRUNK_LIBRARY.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([
-        shutil.which("nvcc") or "/usr/local/cuda-12.9/bin/nvcc", "-std=c++17", "-O3", f"-arch=sm_{sm}",
-        "--shared", "-Xcompiler", "-fPIC", f"-I{jax.ffi.include_dir()}", str(TRUNK_SOURCE), "-o", str(TRUNK_LIBRARY),
-    ], check=True)
+    mathdx = next((TRUNK_LIBRARY.parents[1] / "cufftdx_20260925").glob("nvidia-mathdx-*/nvidia/mathdx/*/include"))
+    nvcc = [shutil.which("nvcc") or "/usr/local/cuda-12.9/bin/nvcc", "-std=c++17", "-O3", f"-arch=sm_{sm}",
+            "--shared", "-Xcompiler", "-fPIC", f"-I{jax.ffi.include_dir()}"]
+    subprocess.run([*nvcc, str(TRUNK_SOURCE), "-o", str(TRUNK_LIBRARY)], check=True)
+    subprocess.run([*nvcc, f"-DDNO_SM={sm * 10}", "-DCUFFTDX_DISABLE_CUTLASS_DEPENDENCY", f"-I{mathdx}",
+                    str(CONTEXT_SOURCE), "-o", str(CONTEXT_LIBRARY)], check=True)
 
 
 @cache
-def _register_trunk() -> ctypes.CDLL:
-    library = ctypes.CDLL(str(TRUNK_LIBRARY))
-    jax.ffi.register_ffi_target("dno_trunk_head", jax.ffi.pycapsule(library.dno_trunk_head), platform="CUDA")
-    return library
+def _register_trunk() -> tuple[ctypes.CDLL, ctypes.CDLL]:
+    head, context = ctypes.CDLL(str(TRUNK_LIBRARY)), ctypes.CDLL(str(CONTEXT_LIBRARY))
+    jax.ffi.register_ffi_target("dno_trunk_head", jax.ffi.pycapsule(head.dno_trunk_head), platform="CUDA")
+    jax.ffi.register_ffi_target("dno_context_filter", jax.ffi.pycapsule(context.dno_context_filter), platform="CUDA")
+    return head, context
 
 
 def trunk_head(
@@ -256,6 +261,28 @@ def trunk_head(
         tiles_per_warp=np.int64(tiles_per_warp),
     )
     return h1, spectrum_input
+
+
+def context_filter(
+    spectrum_input: jax.Array, context_symbol: jax.Array, inner_filters: jax.Array, gamma: jax.Array,
+    normalized: jax.Array, nested_scale: float, ept: int = 8,
+) -> tuple[jax.Array, jax.Array]:
+    """cuFFTDx context filter on the trunk-head FFT input [..., C+R, N].
+
+    Returns the unnormalized inverse-filtered context [..., C, N] and the nested sandwich spectra
+    [..., R, F] before the outer filters. context_symbol [F, C] and inner_filters [R, F] are real.
+    """
+    _register_trunk()
+    *leading, _, points = spectrum_input.shape
+    channels, n_nested = context_symbol.shape[-1], gamma.shape[-1]
+    return tuple(jax.ffi.ffi_call("dno_context_filter", (
+        jax.ShapeDtypeStruct((*leading, channels, points), jnp.float32),
+        jax.ShapeDtypeStruct((*leading, n_nested, points // 2 + 1), jnp.complex64),
+    ), vmap_method="expand_dims")(
+        spectrum_input, context_symbol.astype(jnp.float32), inner_filters.astype(jnp.float32),
+        gamma.astype(jnp.float32), normalized,
+        nested_reciprocal=np.float32(1) / np.float32(nested_scale), ept=np.int64(ept),
+    ))  # pyright: ignore[reportReturnType]
 
 
 if __name__ == "__main__":

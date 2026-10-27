@@ -30,7 +30,7 @@ from jax.stages import Wrapped  # noqa: E402
 from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
-from scripts.benchmark_dno_dense import dense, tail_weights, trunk_head  # noqa: E402
+from scripts.benchmark_dno_dense import context_filter, dense, tail_weights, trunk_head  # noqa: E402
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
     CraigSulemBlock, CraigSulemDNO, CraigSulemTermsResidual, DepthAwareMultiplier,
@@ -211,6 +211,8 @@ def build_variant(
     variant = variant.removesuffix("_fusedtail")
     cuda_head = variant.endswith("_cudahead")
     variant = variant.removesuffix("_cudahead")
+    cuda_context = variant.endswith("_cudacontext")
+    variant = variant.removesuffix("_cudacontext")
     fuse_second_gelu = variant.endswith("_mixgelu")
     variant = variant.removesuffix("_mixgelu")
     context_add = variant.endswith("_contextadd")
@@ -321,6 +323,8 @@ def build_variant(
                       or model.nested_surface_modulation or model.surface_parity_products or model.surface_polynomial_skip
                       or model.use_relative_elevation or model.surface_amplitude_reference > 0):
         raise ValueError("The CUDA trunk head implements only the hero's fixed-feature, batched-context trunk.")
+    if cuda_context and not (cuda_head and context_real and nested_fused) or cuda_context and context_add:
+        raise ValueError("The CUDA context filter follows the CUDA head on the real-context fused nested path.")
     if nested_overlap and not (nested_fused and context_batch):
         raise ValueError("Nested overlap requires the fused nested path and batched context FFT.")
     if context_fold and (not spectral_io or not model.surface_context_width
@@ -601,7 +605,7 @@ def build_variant(
                 features = jnp.stack((features, features * parity), axis=-2)
             context_channels = model.surface_context_width * (2 if reflection_encoder else 1)
             context = None
-            tail = head_input = None
+            tail = head_input = cuda_context_field = nested_pre = None
             nested_inner_hat = None
             nested_hat = None
             for name in ("eta_feat_proj", "eta_feat_mix"):
@@ -649,7 +653,13 @@ def build_variant(
                                    if transpose_context else features @ loaded.params["eta_context_in"]["kernel"])
                     if reflection_encoder:
                         context = context.reshape(context.shape[0], correction_nx, context_channels)
-                    if context_batch:
+                    if cuda_context:
+                        cuda_context_field, nested_pre = context_filter(
+                            cast(jax.Array, head_input), cast(jax.Array, context_multiplier)[0], cast(jax.Array, inner_filters)[0],
+                            cast(jax.Array, gamma), cast(jax.Array, normalized_inputs),
+                            cast(tuple, model.surface_feature_scales)[0], ept=fft_ept)
+                        context_hat = cast(jax.Array, None)  # the filter consumes the spectra internally
+                    elif context_batch:
                         # Independent fields share one FFT batch, not Fourier modes.
                         combined_hat = jnp.fft.rfft(cast(jax.Array, head_input) if cuda_head else jnp.concatenate((
                             jnp.moveaxis(context, -1, 1),
@@ -669,7 +679,9 @@ def build_variant(
                         context_hat = jnp.fft.rfft(context, axis=1)
                     context_symbol = (jnp.tile(context_multiplier, (1, 1, 2))
                                       if reflection_encoder else context_multiplier)
-                    if context_real:
+                    if cuda_context:
+                        context = jnp.moveaxis(cast(jax.Array, cuda_context_field), -2, -1)
+                    elif context_real:
                         # A real multiplier preserves the RFFT's real DC/Nyquist coefficients.
                         context = graph_fft(
                             context_symbol * context_hat, n=correction_nx, axis=1,
@@ -752,7 +764,9 @@ def build_variant(
             if model.nested_blocks:
                 inner_hat = (cast(jax.Array, nested_inner_hat) if context_batch else
                              jnp.fft.rfft(nested_eta * branch_fields[:, ordinary_branches:]))
-                if nested_fused and not nested_overlap:
+                if cuda_context:
+                    nested_hat = filters[:, ordinary_branches:] * cast(jax.Array, nested_pre)
+                elif nested_fused and not nested_overlap:
                     inner_hat = cast(jax.Array, inner_filters) * inner_hat
                     # Preserve the first FFT; unit symbols fuse IFFT/product/FFT with unnormalized output.
                     surface = cast(jax.Array, gamma)[None, :, None] * nested_eta
