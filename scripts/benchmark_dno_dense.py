@@ -245,12 +245,44 @@ def trunk_head(
     return h1, spectrum_input
 
 
-def cuda_tail(context: jax.Array, h1: jax.Array, w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array, *,
-              m_tiles: int = 2) -> jax.Array:
-    """CUDA trunk tail on stacked stages: context [S*C, N], h1 [S*N, W]; returns weights [B, S*N]."""
+def pack_tail_weights(w_mix: jax.Array, w_head: jax.Array) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Exact FP16 copies of the TF32-rounded mix [W, W] and head [W, B<=32] weights for the CUDA tail.
+
+    Each 8-column tile's B fragments (k = 8s + t and 8s + t + 4 for lane 4 gi + t) are stored lane-contiguous in
+    16-byte chunks [tile, chunk, lane, 8]; a power-of-two scale per matrix keeps every value an FP16 number.
+    Returns the uint16 mix and head buffers and their float32 inverse scales.
+    """
+    def pack(weights: np.ndarray, tiles: int) -> tuple[np.ndarray, np.float32]:
+        bits = np.asarray(weights, np.float32).view(np.uint32)
+        rounded = ((bits + np.uint32(0x1000)) & np.uint32(0xFFFFE000)).view(np.float32)
+        rounded = np.pad(rounded, ((0, 0), (0, 8 * tiles - rounded.shape[1])))
+        shift = next((shift for shift in range(-24, 25) if np.array_equal(
+            (rounded * np.float32(2.0 ** shift)).astype(np.float16).astype(np.float32), rounded * np.float32(2.0 ** shift),
+        )), None)
+        if shift is None:
+            raise ValueError("Tail weights are not exactly representable as scaled FP16.")
+        steps = rounded.shape[0] // 8
+        lane = np.arange(32)
+        k = 8 * np.arange(steps)[:, None, None] + lane[None, :, None] % 4 + 4 * np.arange(2)[None, None, :]
+        columns = 8 * np.arange(tiles)[:, None] + lane // 4
+        fragments = rounded[k[None], columns[:, None, :, None]]  # [tile, step, lane, 2]
+        packed = np.moveaxis(fragments, 2, 1).reshape(tiles, 32, steps // 4, 8).swapaxes(1, 2)
+        return (packed * np.float32(2.0 ** shift)).astype(np.float16).view(np.uint16).ravel(), np.float32(2.0 ** -shift)
+
+    mix, mix_scale = pack(np.asarray(w_mix), w_mix.shape[1] // 8)
+    head, head_scale = pack(np.asarray(w_head), 4)
+    return mix, head, np.array([mix_scale, head_scale], np.float32)
+
+
+def cuda_tail(context: jax.Array, h1: jax.Array, w_expand: jax.Array, mix16: jax.Array, head16: jax.Array,
+              inverse_scales: jax.Array, *, m_tiles: int = 1) -> jax.Array:
+    """CUDA trunk tail on stacked stages: context [S*C, N], h1 [S*N, W], packed weights from pack_tail_weights.
+
+    Returns the 28 branch weights [28, S*N].
+    """
     _register_trunk()
-    return jax.ffi.ffi_call("dno_trunk_tail", jax.ShapeDtypeStruct((w_head.shape[-1], h1.shape[0]), jnp.float32))(
-        context, h1, w_expand, w_mix, w_head, m_tiles=np.int64(m_tiles))
+    return jax.ffi.ffi_call("dno_trunk_tail", jax.ShapeDtypeStruct((28, h1.shape[0]), jnp.float32))(
+        context, h1, w_expand, mix16, head16, inverse_scales, m_tiles=np.int64(m_tiles))
 
 
 def _batched_tail(kernel: Callable[..., jax.Array]) -> Callable[..., jax.Array]:
@@ -258,26 +290,24 @@ def _batched_tail(kernel: Callable[..., jax.Array]) -> Callable[..., jax.Array]:
 
     Paired stages and other leading axes share one launch with branch-major output.
     """
-    def stacked(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
-                w_head: jax.Array) -> jax.Array:
+    def stacked(context: jax.Array, features: jax.Array, *parameters: jax.Array) -> jax.Array:
         leading, points = context.shape[:-2], context.shape[-2]
         weights = kernel(jnp.moveaxis(context, -1, -2).reshape(-1, points),
-                         features.reshape(-1, features.shape[-1]), w_expand, w_mix, w_head)
+                         features.reshape(-1, features.shape[-1]), *parameters)
         return jnp.moveaxis(weights.reshape(-1, *leading, points), 0, -1)
 
     @custom_vmap
-    def batched(context: jax.Array, features: jax.Array, w_expand: jax.Array, w_mix: jax.Array,
-                w_head: jax.Array) -> jax.Array:
-        return stacked(context, features, w_expand, w_mix, w_head)
+    def batched(context: jax.Array, features: jax.Array, *parameters: jax.Array) -> jax.Array:
+        return stacked(context, features, *parameters)
 
     @batched.def_vmap
     def batched_vmap(axis_size: int, mapped: list[bool], context: jax.Array, features: jax.Array,
-                     w_expand: jax.Array, w_mix: jax.Array, w_head: jax.Array) -> tuple[jax.Array, bool]:
+                     *parameters: jax.Array) -> tuple[jax.Array, bool]:
         if any(mapped[2:]):
             raise ValueError("Fused tail weights must be shared across the mapped axis.")
         context, features = (value if axis else jnp.broadcast_to(value, (axis_size, *value.shape))
                              for value, axis in zip((context, features), mapped))
-        return stacked(context, features, w_expand, w_mix, w_head), True
+        return stacked(context, features, *parameters), True
 
     return batched
 

@@ -31,7 +31,7 @@ from scripts.benchmark_cufftdx import fft, field_irfft, sandwich  # noqa: E402
 from scripts.benchmark_cufft_library import FFI_LIBRARY, graph_fft  # noqa: E402
 from scripts.benchmark_classical import classical_hat  # noqa: E402
 from scripts.benchmark_dno_dense import (  # noqa: E402
-    analytic_g1, context_filter, cuda_tail_weights, dense, tail_weights, trunk_head,
+    analytic_g1, context_filter, cuda_tail_weights, dense, pack_tail_weights, tail_weights, trunk_head,
 )
 from solver.evals.model_rollout import LoadedRun, build_predict_gxi_batched, load_run  # noqa: E402
 from dno_net_v2 import (  # noqa: E402
@@ -398,6 +398,9 @@ def build_variant(
             head_kernel = jnp.pad(cast(jax.Array, head_kernel),
                                  ((0, 0),) * (cast(jax.Array, head_kernel).ndim - 1)
                                  + ((0, model.nested_blocks * model.latent),))
+        tail_packed = (tuple(map(jnp.asarray, pack_tail_weights(loaded.params["eta_feat_mix"]["kernel"],
+                                                                cast(jax.Array, head_kernel))))
+                       if cuda_tail else ())
         first_projection_kernel = None
         if not model.surface_parity_streams:
             first_projection_kernel = loaded.params["eta_feat_proj"]["kernel"]
@@ -714,8 +717,10 @@ def build_variant(
                     if reflection_encoder:
                         context = context.reshape(context.shape[0], correction_nx, 2, model.surface_context_width)
                     if fuse_tail:
-                        tail = (cuda_tail_weights if cuda_tail else tail_weights)(context, features, loaded.params["eta_context_expand"]["kernel"],
-                                            loaded.params["eta_feat_mix"]["kernel"], cast(jax.Array, head_kernel))
+                        tail = (cuda_tail_weights(context, features, loaded.params["eta_context_expand"]["kernel"],
+                                                  *tail_packed) if cuda_tail
+                                else tail_weights(context, features, loaded.params["eta_context_expand"]["kernel"],
+                                                  loaded.params["eta_feat_mix"]["kernel"], cast(jax.Array, head_kernel)))
                     elif context_add:
                         features = dense(context, loaded.params["eta_context_expand"]["kernel"],
                                          residual=features, input_scale=1 / correction_nx,
