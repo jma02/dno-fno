@@ -12,7 +12,7 @@ shared=/home/johnma/dno-fno/outputs/shared_samzheng_20261026
 run_date=$(date +%Y%m%d)
 
 if (( $# == 0 )); then
-    printf 'Usage: %s control|width512|blocks16 [...]\n' "$0" >&2
+    printf 'Usage: %s control|width512|blocks16|control_seed1|blocks16_seed1|blocks16_width512 [...]\n' "$0" >&2
     exit 2
 fi
 for arm in "$@"; do
@@ -20,12 +20,16 @@ for arm in "$@"; do
         control) arm_args=() ;;
         width512) arm_args=(--width 512) ;;
         blocks16) arm_args=(--n_blocks 16) ;;
+        control_seed1) arm_args=(--seed 1) ;;
+        blocks16_seed1) arm_args=(--n_blocks 16 --seed 1) ;;
+        blocks16_width512) arm_args=(--n_blocks 16 --width 512) ;;
         *) printf 'Unknown experiment: %s\n' "$arm" >&2; exit 2 ;;
     esac
     run_name=c27_capacity_${arm}_scratch1_${run_date}
     run_dir=outputs/$run_name
     mkdir "$run_dir"
-    while :; do
+    # SHARE_GPU=1 starts alongside other jobs on the selected GPU instead of waiting for it to be idle.
+    while [[ "${SHARE_GPU:-0}" != 1 ]]; do
         gpu_pids=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid --format=csv,noheader)
         [[ -z "$gpu_pids" ]] && break
         sleep 30
