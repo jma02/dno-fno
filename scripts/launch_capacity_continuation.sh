@@ -3,7 +3,8 @@
 # (launch_nested_candidate_continuation.sh): resume its epoch-1 state, train one epoch per call at the held
 # continuation LR, evaluate the weight EMA on all 128 rollouts after each epoch, keep the checkpoint with the
 # lowest pooled terminal error as rollout_best_epoch<N>_ckpt, and stop after five epochs without
-# EMA-validation improvement.
+# EMA-validation improvement. Rerunning it with an existing run directory resumes after the last finished
+# epoch, first completing that epoch's rollouts if they are missing.
 set -euo pipefail
 cd /home/samzheng/dno-fno
 
@@ -11,19 +12,82 @@ run_name=c27_capacity_blocks16_low_lr_ep60_20261027
 run_dir=outputs/$run_name
 source_dir=outputs/c27_capacity_blocks16_scratch1_20261027
 shared=/home/johnma/dno-fno/outputs/shared_samzheng_20261026
+families=(stokes tanaka benjamin_feir jonswap_tma)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-GPU-c44b86bf-148d-aa7e-32ec-77d4f2f7ce71}
 gpu_processes=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid --format=csv,noheader)
 [[ -z "$gpu_processes" ]] || { printf 'GPU is occupied; continuation not started\n' >&2; exit 1; }
-mkdir "$run_dir"
+resume=0
+[[ -d "$run_dir" ]] && resume=1
+mkdir -p "$run_dir"
 exec >> "$run_dir/console.log" 2>&1
 # Keep the epoch-1 raw parameters, optimizer, gradient EMA and weight EMA together.
-cp -a "$source_dir/latest_ckpt" "$run_dir/latest_ckpt"
+(( resume )) || cp -a "$source_dir/latest_ckpt" "$run_dir/latest_ckpt"
 export JAX_PLATFORMS=cuda PYTHONUNBUFFERED=1
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.40
 
+pooled_terminal_gm() {
+  uv run --no-sync python -c '
+import sys
+import numpy as np
+errors = []
+for family in ("stokes", "tanaka", "benjamin_feir", "jonswap_tma"):
+    with np.load(f"{sys.argv[1]}/{family}_trajs.npz") as data:
+        errors.append(data["rel_l2_eta"][-1])
+print(float(np.exp(np.log(np.concatenate(errors)).mean())))' "$1"
+}
+
+# Weight-EMA rollouts of the latest epoch, one family per process (the known cross-family CUDA graph/FFT
+# lifecycle failure), one retry each; then keep the checkpoint if it has the lowest pooled terminal error.
+evaluate() {
+  local epoch=$1 eval_dir=$run_dir/eval_epoch$1_weight_ema family attempt rollout
+  printf '%s evaluating epoch %s weight EMA on all 128 rollouts\n' "$(date +%H:%M)" "$epoch"
+  for family in "${families[@]}"; do
+    [[ -f "$eval_dir/${family}_trajs.npz" ]] && continue
+    for attempt in 1 2; do
+      XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+        uv run --no-sync python scripts/eval_fast_rollouts.py \
+          --run-dir "$run_dir" --checkpoint weight_ema --fuse-nested-fft --batch-context-fft --families "$family" \
+          --reference-dir "$shared/reference" --output-dir "$eval_dir" && break
+    done
+  done
+  rollout=$(pooled_terminal_gm "$eval_dir")
+  printf '%s epoch %s pooled terminal GM %s (best so far %s)\n' "$(date +%H:%M)" "$epoch" "$rollout" "$best_rollout"
+  if python3 -c 'import sys; sys.exit(not float(sys.argv[1]) < float(sys.argv[2]))' "$rollout" "$best_rollout"; then
+    rm -rf "$run_dir"/rollout_best_epoch*_ckpt
+    cp -a "$run_dir/latest_ckpt" "$run_dir/rollout_best_epoch${epoch}_ckpt"
+    best_rollout=$rollout
+    printf '%s kept epoch %s as the rollout-best checkpoint\n' "$(date +%H:%M)" "$epoch"
+  fi
+}
+
+read_progress() {
+  read -r completed best_epoch < <(uv run --no-sync python -c \
+    'import json, sys; m=json.load(open(sys.argv[1])); print(m["epoch"], m["best_epoch"])' \
+    "$run_dir/latest_ckpt/metadata.json")
+}
+
 best_rollout=inf
-for ((epoch=2; epoch<=60; epoch++)); do
+read_progress
+if (( resume )); then
+  for best_dir in "$run_dir"/rollout_best_epoch*_ckpt; do
+    [[ -d "$best_dir" ]] || continue
+    best_epoch_dir=${best_dir##*rollout_best_epoch}
+    best_rollout=$(pooled_terminal_gm "$run_dir/eval_epoch${best_epoch_dir%_ckpt}_weight_ema")
+  done
+  printf '%s resuming after epoch %s; rollout-best GM %s\n' "$(date +%H:%M)" "$completed" "$best_rollout"
+  for family in "${families[@]}"; do
+    if [[ ! -f "$run_dir/eval_epoch${completed}_weight_ema/${family}_trajs.npz" ]]; then
+      evaluate "$completed"
+      break
+    fi
+  done
+fi
+for ((epoch=completed + 1; epoch<=60; epoch++)); do
+  if (( completed - best_epoch >= 5 )); then
+    printf '%s early stopping: five epochs without EMA-validation improvement\n' "$(date +%H:%M)"
+    break
+  fi
   printf '%s continuing blocks16 through epoch %s at LR 8e-6\n' "$(date +%H:%M)" "$epoch"
   uv run --no-sync python train-jax-10m/1d_dno_fno_jax_ema_grad.py \
     --model cs_dno --norm scale --dataset "$shared/data" \
@@ -45,35 +109,9 @@ for ((epoch=2; epoch<=60; epoch++)); do
     --rollout_training_start_epoch 1 --rollout_training_ramp_epochs 1 \
     --rollout_training_interval 16 --rollout_training_microbatch 8 --rollout_training_steps 10 \
     --run_name "$run_name"
-  read -r completed best_epoch < <(uv run --no-sync python -c \
-    'import json, sys; m=json.load(open(sys.argv[1])); print(m["epoch"], m["best_epoch"])' \
-    "$run_dir/latest_ckpt/metadata.json")
+  read_progress
   (( completed == epoch )) || break
-  printf '%s evaluating epoch %s weight EMA on all 128 rollouts\n' "$(date +%H:%M)" "$epoch"
-  eval_dir=$run_dir/eval_epoch${epoch}_weight_ema
-  XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
-    uv run --no-sync python scripts/eval_fast_rollouts.py \
-      --run-dir "$run_dir" --checkpoint weight_ema --fuse-nested-fft --batch-context-fft \
-      --reference-dir "$shared/reference" --output-dir "$eval_dir"
-  rollout=$(uv run --no-sync python -c '
-import sys
-import numpy as np
-errors = []
-for family in ("stokes", "tanaka", "benjamin_feir", "jonswap_tma"):
-    with np.load(f"{sys.argv[1]}/{family}_trajs.npz") as data:
-        errors.append(data["rel_l2_eta"][-1])
-print(float(np.exp(np.log(np.concatenate(errors)).mean())))' "$eval_dir")
-  printf '%s epoch %s pooled terminal GM %s (best so far %s)\n' "$(date +%H:%M)" "$epoch" "$rollout" "$best_rollout"
-  if python3 -c 'import sys; sys.exit(not float(sys.argv[1]) < float(sys.argv[2]))' "$rollout" "$best_rollout"; then
-    rm -rf "$run_dir"/rollout_best_epoch*_ckpt
-    cp -a "$run_dir/latest_ckpt" "$run_dir/rollout_best_epoch${epoch}_ckpt"
-    best_rollout=$rollout
-    printf '%s kept epoch %s as the rollout-best checkpoint\n' "$(date +%H:%M)" "$epoch"
-  fi
-  if (( completed - best_epoch >= 5 )); then
-    printf '%s early stopping: five epochs without EMA-validation improvement\n' "$(date +%H:%M)"
-    break
-  fi
+  evaluate "$epoch"
 done
 printf '%s continuation complete at epoch %s; best EMA-validation epoch %s; rollout-best GM %s\n' \
   "$(date +%H:%M)" "$completed" "$best_epoch" "$best_rollout"

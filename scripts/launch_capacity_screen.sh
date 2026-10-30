@@ -54,10 +54,15 @@ for arm in "$@"; do
         --rollout_training_start_epoch 1 --rollout_training_ramp_epochs 1 \
         --rollout_training_interval 16 --rollout_training_microbatch 8 --rollout_training_steps 10 \
         --run_name "$run_name" "${arm_args[@]}" > "$run_dir/console.log" 2>&1
-    XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
-        uv run --no-sync python scripts/eval_fast_rollouts.py \
-        --run-dir "$run_dir" --checkpoint weight_ema --fuse-nested-fft --batch-context-fft \
-        --reference-dir "$shared/reference" --output-dir "$run_dir/eval_weight_ema_standard" \
-        > "$run_dir/eval_weight_ema_standard.log" 2>&1
+    # One family per process (the known cross-family CUDA graph/FFT lifecycle failure); one retry each.
+    for family in stokes tanaka benjamin_feir jonswap_tma; do
+        for attempt in 1 2; do
+            XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_experimental_stream_annotation=true \
+                uv run --no-sync python scripts/eval_fast_rollouts.py \
+                --run-dir "$run_dir" --checkpoint weight_ema --fuse-nested-fft --batch-context-fft --families "$family" \
+                --reference-dir "$shared/reference" --output-dir "$run_dir/eval_weight_ema_standard" \
+                > "$run_dir/eval_weight_ema_standard_$family.log" 2>&1 && break
+        done
+    done
     printf '%s finished %s and weight-EMA rollouts\n' "$(date +%H:%M)" "$arm"
 done
